@@ -2,9 +2,11 @@ package com.floci.test;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.core.document.Document;
 import software.amazon.awssdk.services.ssoadmin.SsoAdminClient;
 import software.amazon.awssdk.services.ssoadmin.model.AddRegionResponse;
 import software.amazon.awssdk.services.ssoadmin.model.AttachCustomerManagedPolicyReferenceToPermissionSetResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ConflictException;
 import software.amazon.awssdk.services.ssoadmin.model.CreateAccountAssignmentResponse;
 import software.amazon.awssdk.services.ssoadmin.model.CreateApplicationAssignmentResponse;
 import software.amazon.awssdk.services.ssoadmin.model.CreateApplicationResponse;
@@ -64,6 +66,8 @@ import software.amazon.awssdk.services.ssoadmin.model.PutApplicationGrantRespons
 import software.amazon.awssdk.services.ssoadmin.model.PutApplicationSessionConfigurationResponse;
 import software.amazon.awssdk.services.ssoadmin.model.PutPermissionsBoundaryToPermissionSetResponse;
 import software.amazon.awssdk.services.ssoadmin.model.RemoveRegionResponse;
+import software.amazon.awssdk.services.ssoadmin.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.ssoadmin.model.ServiceQuotaExceededException;
 import software.amazon.awssdk.services.ssoadmin.model.TagResourceResponse;
 import software.amazon.awssdk.services.ssoadmin.model.TargetType;
 import software.amazon.awssdk.services.ssoadmin.model.UntagResourceResponse;
@@ -119,13 +123,13 @@ class SsoAdminAccountAssignmentTest {
             assertThatThrownBy(() -> sso.describeRegion(request -> request
                     .instanceArn(instanceArn)
                     .regionName("ap-southeast-3")))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ResourceNotFoundException.class);
+                    .isInstanceOf(ResourceNotFoundException.class);
 
             sso.addRegion(request -> request.instanceArn(instanceArn).regionName("ap-southeast-3"));
             assertThatThrownBy(() -> sso.addRegion(request -> request
                     .instanceArn(instanceArn)
                     .regionName("ap-southeast-3")))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ConflictException.class);
+                    .isInstanceOf(ConflictException.class);
         }
     }
 
@@ -164,7 +168,7 @@ class SsoAdminAccountAssignmentTest {
                     .customerManagedPolicyReference(reference -> reference
                             .name("platformpolicy")
                             .path("/platform/"))))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ConflictException.class);
+                    .isInstanceOf(ConflictException.class);
 
             DetachCustomerManagedPolicyReferenceFromPermissionSetResponse detached = sso.detachCustomerManagedPolicyReferenceFromPermissionSet(request -> request
                     .instanceArn(instanceArn)
@@ -179,7 +183,7 @@ class SsoAdminAccountAssignmentTest {
                     .customerManagedPolicyReference(reference -> reference
                             .name("PlatformPolicy")
                             .path("/platform/"))))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ResourceNotFoundException.class);
+                    .isInstanceOf(ResourceNotFoundException.class);
         }
     }
 
@@ -384,7 +388,7 @@ class SsoAdminAccountAssignmentTest {
                     .applicationArn(applicationArn)
                     .principalId("11111111-2222-3333-4444-555555555555")
                     .principalType("USER")))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ConflictException.class);
+                    .isInstanceOf(ConflictException.class);
 
             String groupId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
             sso.createApplicationAssignment(request -> request
@@ -430,7 +434,7 @@ class SsoAdminAccountAssignmentTest {
                     .applicationArn(applicationArn)
                     .principalId(principalId)
                     .principalType("GROUP")))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ResourceNotFoundException.class);
+                    .isInstanceOf(ResourceNotFoundException.class);
         }
     }
 
@@ -451,10 +455,10 @@ class SsoAdminAccountAssignmentTest {
                     .applicationArn(applicationArn)
                     .authenticationMethodType("IAM")
                     .authenticationMethod(method -> method.iam(iam -> iam.actorPolicy(
-                            software.amazon.awssdk.core.document.Document.mapBuilder()
+                            Document.mapBuilder()
                                     .putString("Version", "2012-10-17")
-                                    .putDocument("Statement", software.amazon.awssdk.core.document.Document.fromList(
-                                            java.util.List.of()))
+                                    .putDocument("Statement", Document.fromList(
+                                            List.of()))
                                     .build()))));
             assertThat(putMethod.sdkHttpResponse().isSuccessful()).isTrue();
             GetApplicationAuthenticationMethodResponse fetchedMethod = sso.getApplicationAuthenticationMethod(request -> request
@@ -476,20 +480,20 @@ class SsoAdminAccountAssignmentTest {
             assertThatThrownBy(() -> sso.getApplicationAuthenticationMethod(request -> request
                     .applicationArn(applicationArn)
                     .authenticationMethodType("IAM")))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ResourceNotFoundException.class);
+                    .isInstanceOf(ResourceNotFoundException.class);
             assertThatThrownBy(() -> sso.getApplicationAuthenticationMethod(request -> request
                     .applicationArn(applicationArn)
                     .authenticationMethodType("SAML")))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ValidationException.class);
+                    .isInstanceOf(ValidationException.class);
 
             assertThatThrownBy(() -> sso.deleteApplicationAuthenticationMethod(request -> request
                     .applicationArn(applicationArn)
                     .authenticationMethodType("IAM")))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ResourceNotFoundException.class);
+                    .isInstanceOf(ResourceNotFoundException.class);
             assertThatThrownBy(() -> sso.deleteApplicationAuthenticationMethod(request -> request
                     .applicationArn(applicationArn)
                     .authenticationMethodType("SAML")))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ValidationException.class);
+                    .isInstanceOf(ValidationException.class);
         }
     }
 
@@ -539,20 +543,20 @@ class SsoAdminAccountAssignmentTest {
             assertThatThrownBy(() -> sso.getApplicationGrant(request -> request
                     .applicationArn(applicationArn)
                     .grantType("authorization_code")))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ResourceNotFoundException.class);
+                    .isInstanceOf(ResourceNotFoundException.class);
             assertThatThrownBy(() -> sso.getApplicationGrant(request -> request
                     .applicationArn(applicationArn)
                     .grantType("client_credentials")))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ValidationException.class);
+                    .isInstanceOf(ValidationException.class);
 
             assertThatThrownBy(() -> sso.deleteApplicationGrant(request -> request
                     .applicationArn(applicationArn)
                     .grantType("authorization_code")))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ResourceNotFoundException.class);
+                    .isInstanceOf(ResourceNotFoundException.class);
             assertThatThrownBy(() -> sso.deleteApplicationGrant(request -> request
                     .applicationArn(applicationArn)
                     .grantType("client_credentials")))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ValidationException.class);
+                    .isInstanceOf(ValidationException.class);
         }
     }
 
@@ -618,7 +622,7 @@ class SsoAdminAccountAssignmentTest {
             assertThat(deleteResponse.sdkHttpResponse().isSuccessful()).isTrue();
             assertThatThrownBy(() -> sso.deleteTrustedTokenIssuer(request -> request
                     .trustedTokenIssuerArn(created.trustedTokenIssuerArn())))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ResourceNotFoundException.class);
+                    .isInstanceOf(ResourceNotFoundException.class);
         }
     }
 
@@ -652,7 +656,7 @@ class SsoAdminAccountAssignmentTest {
                             .accessControlAttributes(attribute -> attribute
                                     .key("Department")
                                     .value(value -> value.source("${path:enterprise.department}"))))))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ConflictException.class);
+                    .isInstanceOf(ConflictException.class);
 
             UpdateInstanceAccessControlAttributeConfigurationResponse updateResponse = sso.updateInstanceAccessControlAttributeConfiguration(request -> request
                     .instanceArn(instanceArn)
@@ -729,7 +733,7 @@ class SsoAdminAccountAssignmentTest {
             assertThatThrownBy(() -> sso.createInstance(request -> request
                     .name("SecondInstance")
                     .clientToken("sdk-create-instance-quota")))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ServiceQuotaExceededException.class);
+                    .isInstanceOf(ServiceQuotaExceededException.class);
         }
     }
 
@@ -770,11 +774,11 @@ class SsoAdminAccountAssignmentTest {
             assertThatThrownBy(() -> sso.deleteApplicationAccessScope(request -> request
                     .applicationArn(applicationArn)
                     .scope("api:read")))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ResourceNotFoundException.class);
+                    .isInstanceOf(ResourceNotFoundException.class);
             assertThatThrownBy(() -> sso.deleteApplicationAccessScope(request -> request
                     .applicationArn(applicationArn)
                     .scope("bad scope")))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ValidationException.class);
+                    .isInstanceOf(ValidationException.class);
         }
     }
 
@@ -794,7 +798,7 @@ class SsoAdminAccountAssignmentTest {
             DeleteApplicationResponse response = sso.deleteApplication(request -> request.applicationArn(applicationArn));
             assertThat(response.sdkHttpResponse().isSuccessful()).isTrue();
             assertThatThrownBy(() -> sso.deleteApplication(request -> request.applicationArn(applicationArn)))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ResourceNotFoundException.class);
+                    .isInstanceOf(ResourceNotFoundException.class);
         }
     }
 
@@ -806,7 +810,7 @@ class SsoAdminAccountAssignmentTest {
         try (SsoAdminClient sso = TestFixtures.ssoAdminClient()) {
             String instanceArn = sso.listInstances(request -> {}).instances().get(0).instanceArn();
             String principalId = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
-            for (String name : java.util.List.of("PrincipalListSdkOne", "PrincipalListSdkTwo")) {
+            for (String name : List.of("PrincipalListSdkOne", "PrincipalListSdkTwo")) {
                 String permissionSetArn = sso.createPermissionSet(request -> request
                                 .instanceArn(instanceArn)
                                 .name(name))
@@ -981,7 +985,7 @@ class SsoAdminAccountAssignmentTest {
             assertThatThrownBy(() -> sso.getPermissionsBoundaryForPermissionSet(request -> request
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn)))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ResourceNotFoundException.class);
+                    .isInstanceOf(ResourceNotFoundException.class);
         }
     }
 
@@ -1003,7 +1007,7 @@ class SsoAdminAccountAssignmentTest {
             assertThatThrownBy(() -> sso.describePermissionSet(request -> request
                     .instanceArn(instanceArn)
                     .permissionSetArn(permissionSetArn)))
-                    .isInstanceOf(software.amazon.awssdk.services.ssoadmin.model.ResourceNotFoundException.class);
+                    .isInstanceOf(ResourceNotFoundException.class);
         }
     }
 

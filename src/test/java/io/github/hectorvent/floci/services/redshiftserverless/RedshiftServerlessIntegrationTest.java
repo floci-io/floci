@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -656,7 +657,7 @@ class RedshiftServerlessIntegrationTest {
                 .body("resourcePolicy.policy", equalTo(policyJson));
     }
 
-    private static io.restassured.response.ValidatableResponse callAs(String accountId, String action, String body) {
+    private static ValidatableResponse callAs(String accountId, String action, String body) {
         return given()
                 .header("X-Amz-Target", TARGET_PREFIX + action)
                 .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + accountId
@@ -784,7 +785,7 @@ class RedshiftServerlessIntegrationTest {
         call("DeleteScheduledAction", "{\"scheduledActionName\":\"admin-sched\"}").statusCode(200);
     }
 
-    private static io.restassured.response.ValidatableResponse call(String action, String body) {
+    private static ValidatableResponse call(String action, String body) {
         return given()
                 .header("X-Amz-Target", TARGET_PREFIX + action)
                 .header("Authorization", AUTH)

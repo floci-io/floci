@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
@@ -11,7 +10,7 @@ import static io.restassured.RestAssured.given;
 
 /**
  * What the AWS::ApiGatewayV2 stack integration tests share: driving a stack through the query API,
- * waiting for its status, and reading back the stack and its {@code Integration} resource.
+ * and reading back the stack and its {@code Integration} resource.
  */
 final class ApiGatewayV2StackTestSupport {
 
@@ -44,28 +43,5 @@ final class ApiGatewayV2StackTestSupport {
             request.formParam("TemplateBody", template);
         }
         request.when().post("/").then().statusCode(200);
-    }
-
-    static void waitForStackStatus(CloudFormationService cloudFormationService, String stackName,
-                                   String expected) {
-        String status = null;
-        for (int attempt = 0; attempt < 200; attempt++) {
-            try {
-                status = cloudFormationService.describeStacks(stackName, REGION).getFirst().getStatus();
-            } catch (AwsException e) {
-                // A deleted stack can no longer be described by name.
-                status = "DELETE_COMPLETE";
-            }
-            if (expected.equals(status)) {
-                return;
-            }
-            try {
-                Thread.sleep(25);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new AssertionError("Interrupted while waiting for stack status", e);
-            }
-        }
-        throw new AssertionError("Stack did not reach " + expected + ", last status " + status);
     }
 }

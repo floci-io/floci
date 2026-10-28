@@ -193,7 +193,7 @@ cross-resource references.
 | Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
 | Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup`, `LifecycleHook`, `ScalingPolicy` |
 | Application Auto Scaling | `ScalableTarget` (`ScheduledActions` are accepted and not run; Floci has no scheduled scaling), `ScalingPolicy` |
-| Route 53 | `HostedZone`, `RecordSet`, `HealthCheck` |
+| Route 53 | `HostedZone`, `RecordSet`, `RecordSetGroup` (written in one change batch, so a record set that cannot be written leaves the zone unchanged; every record set must be in the group's hosted zone), `HealthCheck` |
 | Cloud Map | `HttpNamespace`, `PrivateDnsNamespace`, `PublicDnsNamespace`, `Service` |
 | API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage`, `Account`, `DomainName`, `BasePathMapping`, `GatewayResponse`, `ApiKey`, `UsagePlan`, `UsagePlanKey` |
 | API Gateway v2 | `Api`, `Authorizer`, `Route`, `Integration`, `Stage`, `Deployment`, `DomainName`, `ApiMapping`, `VpcLink` |
@@ -458,15 +458,16 @@ references are resolved first, one that is another intrinsic function is joined 
 parameter holding an empty value still appends it: a description then ends in a space, and a
 function without one gets an empty `Description`. `Globals` can set
 `AutoPublishAliasAllProperties` and `VersionDeletionPolicy`, but as in SAM not
-`AutoPublishCodeSha256`, which fails the transform there. floci does not honour a resource's
-`IgnoreGlobals`, so no function can opt out of a `VersionDeletionPolicy` in `Globals` with it: one
-without `AutoPublishAlias` fails the transform with
+`AutoPublishCodeSha256` or `VersionDescription`, which fail the transform there. floci does not
+honour a resource's `IgnoreGlobals`, so no function can opt out of a `VersionDeletionPolicy` in
+`Globals` with it: one without `AutoPublishAlias` fails the transform with
 `'VersionDeletionPolicy' requires 'AutoPublishAlias'.`, as it does in SAM when it does not ignore
 that global.
 
 A new id publishes a version, and moves the alias to it, only when the function's code or
-configuration changed since its last version. Otherwise the new version resource takes the last
-version and the alias stays where it is, as when an update changes only one of these:
+configuration changed since its last version, or, in floci, also when its `VersionDescription`
+differs from that version's description (see below). Otherwise the new version resource takes the
+last version and the alias stays where it is, as when an update changes only one of these:
 
 - A change to `SnapStart`: floci does not give the function `SnapStart`.
 - Under `AutoPublishAliasAllProperties`, a change to `Tags` or `ReservedConcurrentExecutions`
@@ -486,6 +487,19 @@ intrinsic functions only in resource properties, outputs, metadata attributes an
 attributes, unless a transform such as `AWS::LanguageExtensions` resolves them first, and floci
 implements no such transform: it reads any `DeletionPolicy` that is not a plain string as `Delete`
 (see [Deletion Policies](#deletion-policies)).
+
+As in SAM, a function's `VersionDescription` becomes its version's `Description`, copied as
+written, so an intrinsic function in it is resolved when the version is published. It is not part
+of the hash, so a new `VersionDescription` alone keeps the version's id, and CloudFormation can
+change a version's `Description` only by replacing the version. AWS fails that update: in 2021,
+[SAM issue #2786](https://github.com/aws/serverless-application-model/issues/2786) showed a change
+set that modified the version in place, then `Internal Failure` and a rollback. floci completes it
+and keeps the version, with the description it was published with, although its change set
+reports the version replaced when the description is changed or removed. The next new id then
+publishes, with the new description, even if the function has not changed since. On AWS that
+update is expected to fail like the `Tags` change above, since
+[PublishVersion](https://docs.aws.amazon.com/lambda/latest/api/API_PublishVersion.html) publishes
+nothing for a function whose code and configuration have not changed; this is not measured.
 
 Changes made to `$LATEST` outside the stack, including Lambda's reactive S3 sync, do not reach the
 alias until an update publishes a new version. Event sources and API integrations still invoke the
@@ -648,7 +662,8 @@ a list is `Template format error: unsupported structure.`
 
 ## Attribute types
 
-`AWS::EC2::PrefixList` `Version` remains numeric when used as another resource's property.
+`AWS::EC2::PrefixList` `Version` and `AWS::Lambda::NetworkConnector` `LatestVersion` remain numeric when used as
+another resource's property.
 Numeric attributes are rejected in string outputs and `Fn::Join`, `Fn::Sub`,
 `Fn::Split`, and `Fn::Base64`, including selected `Fn::If` and `Fn::Select` values.
 Literal numbers and Number-parameter references retain their existing string coercion.
@@ -772,16 +787,22 @@ always lists both stages, matching AWS.
 adds the corresponding security schemes and operation requirements. API Gateway imports
 these as `authorizationType: AWS_IAM` and `apiKeyRequired: true`: invocation requires both
 a valid SigV4 signature and an enabled API key associated with the invoked stage when both
-controls are selected. Existing operation requirements and their scheme definitions are
-preserved. Defaults are selected by the SAM names `AWS_IAM` and `api_key`; an existing
-scheme with another name does not suppress either default.
+controls are selected. Existing operation requirements are preserved. When a default applies
+to OpenAPI 3, SAM replaces the entire `components.securitySchemes` map with its
+`securityDefinitions` plus generated defaults, then removes `securityDefinitions`. Inline
+schemes absent from that map are dropped, including schemes without an authorizer. Other
+components are preserved. Swagger 2 keeps its custom schemes. Defaults are selected by the SAM names
+`AWS_IAM` and `api_key`; an existing scheme with another name does not suppress either default.
 As in SAM, the defaults are added to each operation's own `security`, inside each branch of
 an `Fn::If` written around a path or an operation, skipping an `AWS::NoValue` branch. A
 nested `Fn::If` around an operation is left as written, without the defaults, as SAM leaves
 it.
 Root-level `security` stays in the document as written and is not copied into operations,
 and an `Auth` that selects no default, such as `ApiKeyRequired: false` alone, leaves the
-document unchanged. floci's REST importer still applies root-level `security` to an
+operation requirements unchanged. For inline OpenAPI 3 documents, non-empty
+`securityDefinitions` replace `components.securitySchemes` and are removed even when
+`Auth` is absent, empty, or selects no default. Empty or absent definitions do not replace
+existing schemes. Swagger documents retain their definitions. floci's REST importer still applies root-level `security` to an
 operation that has none of its own, which API Gateway does not. As in SAM, any non-empty
 `Auth`, even one that selects no default, needs a Swagger or OpenAPI 3 `DefinitionBody`
 whose `paths` entries, and the branches of an `Fn::If` around one, are objects, so a body or
@@ -792,9 +813,9 @@ When a default applies, so are unresolved or malformed security requirements, me
 override markers, a nested `Fn::If` around a path item, a body or security
 scheme map written as an intrinsic function, an `AWS_IAM` or `api_key` scheme that contains
 one, and a body that declares both `swagger` and `openapi`. Existing
-custom schemes remain subject to API Gateway's importer and invocation support; preserving
-them does not implement another authentication protocol. The importer rejects multiple
-authorizer or IAM requirements, including a defined custom authorizer alongside the
+custom schemes retained by the transform remain subject to API Gateway's importer and
+invocation support; preserving them does not implement another authentication protocol. The
+importer rejects multiple authorizer or IAM requirements, including a defined custom authorizer alongside the
 generated IAM default, with `BadRequestException`. API-key requirements can accompany
 one authorizer or IAM requirement. The transform
 preserves integration credentials, Lambda permissions and inline resource policies.
@@ -895,10 +916,17 @@ UPDATE_ROLLBACK_FAILED state and can not be updated.`). Two ways out remain:
   delete failed; a resource whose restore cannot be redone fails again, leaving the stack in
   `UPDATE_ROLLBACK_FAILED`, and can be passed in `ResourcesToSkip`. `ResourcesToSkip` names
   `UPDATE_FAILED` resources to report as `UPDATE_COMPLETE` with the reason `Resource skipped
-  during UpdateRollback`, without rolling them back; a skipped resource keeps the state the failed
-  update left it in. Once every other resource rolled back, the stack reaches
+  during UpdateRollback`, without rolling them back; a skipped resource keeps the state its failed
+  update and rollback left it in. Once every other resource rolled back, the stack reaches
   `UPDATE_ROLLBACK_COMPLETE` with the template, parameters and outputs from before the failed
   update, and takes updates again.
+
+An `AWS::Route53::RecordSetGroup` whose zone-change rollback cannot delete the records it wrote into
+the new zone first points back at its old records, so the group already matches the template the
+stack rolls back to. `ContinueUpdateRollback` retries that delete, and `DeleteStack` deletes those
+records while the group is still `UPDATE_FAILED`, giving up after three attempts as for any replaced
+resource. Nothing else deletes them, since nothing tells them apart from an identical record written
+there later: once the group is skipped, or a later update commits, they stay in their zone.
 
 `ForceRollback=true` skips every `UPDATE_FAILED` resource of the stack, each reported as a
 `ResourcesToSkip` skip is. When a forced rollback skipped a resource and completes, the stack's

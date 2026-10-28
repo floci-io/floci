@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -152,7 +153,7 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
         given().header("Authorization", SES_AUTH)
         .when().get("/v2/email/identities/" + IDENTITY)
         .then().statusCode(200)
-                .body("$", org.hamcrest.Matchers.not(org.hamcrest.Matchers.hasKey("ConfigurationSetName")));
+                .body("$", Matchers.not(Matchers.hasKey("ConfigurationSetName")));
     }
 
     @Test
@@ -381,7 +382,7 @@ class SesEmailIdentityConfigurationSetV2IntegrationTest {
         .when().post("/v2/email/identities").then().statusCode(200);
         given().header("Authorization", SES_AUTH)
         .when().get("/v2/email/identities/" + id).then().statusCode(200)
-                .body("$", org.hamcrest.Matchers.not(org.hamcrest.Matchers.hasKey("ConfigurationSetName")));
+                .body("$", Matchers.not(Matchers.hasKey("ConfigurationSetName")));
     }
 
     @Test

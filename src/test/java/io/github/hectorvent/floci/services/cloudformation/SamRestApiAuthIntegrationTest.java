@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testutil.ExecuteApiRequestSigner;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
@@ -13,7 +14,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.apigateway.ApiGatewayClient;
+import software.amazon.awssdk.services.apigateway.model.GetMethodResponse;
 
+import java.net.URI;
 import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
@@ -22,6 +30,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /** Exercises transformed auth through the REST importer and the real execute-api HTTP verifier. */
@@ -30,8 +39,11 @@ class SamRestApiAuthIntegrationTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
 
+    @TestHTTPResource("/")
+    URI endpoint;
+
     @ParameterizedTest
-    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    @CsvSource({"false,true", "true,false", "true,true"})
     void conflictingAuthorizersCannotSilentlyReplaceTheSamIamDefault(boolean swagger, boolean repeated)
             throws Exception {
         ObjectNode template = template(swagger);
@@ -55,6 +67,92 @@ class SamRestApiAuthIntegrationTest {
                 .body("message", containsString("Only one Authorizer or IAM authorization"));
         given().get("/restapis").then().statusCode(200)
                 .body("item.find { it.name == '" + title + "' }", equalTo(null));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void undeclaredOpenApiCustomAuthorizerDoesNotConflictWithIam(boolean conditional) throws Exception {
+        ObjectNode template = template(false);
+        ObjectNode body = (ObjectNode) template.at("/Resources/Api/Properties/DefinitionBody");
+        body.set("components", mapper.createObjectNode().set("securitySchemes",
+                mapper.createObjectNode().set("custom", customAuthorizer())));
+        ObjectNode operation = (ObjectNode) body.at("/paths/~1items/post");
+        operation.set("security", mapper.readTree("[{\"custom\":[\"read\"]}]"));
+        if (conditional) {
+            template.set("Conditions", mapper.readTree("{\"Enabled\":{\"Fn::Equals\":[\"on\",\"on\"]}}"));
+            ObjectNode choice = mapper.createObjectNode();
+            choice.putArray("Fn::If").add("Enabled").add(operation)
+                    .add(mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+            ((ObjectNode) body.at("/paths/~1items")).set("post", choice);
+        }
+        withDeployedApi(template, "sam-pruned-authorizer-", apiId -> {
+            String resourceId = given().get("/restapis/" + apiId + "/resources")
+                    .then().statusCode(200).extract().path("item.find { it.path == '/items' }.id");
+            given().get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/POST")
+                    .then().statusCode(200)
+                    .body("authorizationType", equalTo("AWS_IAM"))
+                    .body("apiKeyRequired", equalTo(true));
+            given().get("/restapis/" + apiId + "/authorizers").then().statusCode(200)
+                    .body("item.size()", equalTo(0));
+        });
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "{}", "{\"ApiKeyRequired\":false}"})
+    void importedApiUsesRelocatedSchemesWithoutDefaults(String auth) throws Exception {
+        ObjectNode template = template(false);
+        ObjectNode properties = (ObjectNode) template.at("/Resources/Api/Properties");
+        if ("missing".equals(auth)) {
+            properties.remove("Auth");
+        } else {
+            properties.set("Auth", mapper.readTree(auth));
+        }
+        ObjectNode body = (ObjectNode) properties.get("DefinitionBody");
+        body.set("components", mapper.readTree("{\"securitySchemes\":{}}"));
+        body.set("securityDefinitions", mapper.readTree("""
+                {"declaredKey":{"type":"apiKey","name":"x-api-key","in":"header"}}
+                """));
+        ((ObjectNode) body.at("/paths/~1items/post")).set("security",
+                mapper.readTree("[{\"declaredKey\":[]}]"));
+        try (ApiGatewayClient client = ApiGatewayClient.builder().endpointOverride(endpoint)
+                .region(Region.US_EAST_1).httpClientBuilder(UrlConnectionHttpClient.builder())
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
+                .build()) {
+            withDeployedApi(template, "sam-relocated-key-", apiId -> {
+                String resourceId = client.getResources(request -> request.restApiId(apiId)).items().stream()
+                        .filter(resource -> "/items".equals(resource.path())).findFirst().orElseThrow().id();
+                GetMethodResponse method = client.getMethod(request -> request.restApiId(apiId)
+                        .resourceId(resourceId).httpMethod("POST"));
+                assertEquals("NONE", method.authorizationType());
+                assertEquals(true, method.apiKeyRequired());
+            });
+        }
+    }
+
+    @Test
+    void undeclaredInlineApiKeyDoesNotSurviveSamOpenApiPostProcessing() throws Exception {
+        ObjectNode template = template(false);
+        ObjectNode properties = (ObjectNode) template.at("/Resources/Api/Properties");
+        properties.set("Auth", mapper.readTree("{\"DefaultAuthorizer\":\"AWS_IAM\"}"));
+        ObjectNode body = (ObjectNode) properties.get("DefinitionBody");
+        body.set("components", mapper.readTree("""
+                {"securitySchemes":{"inlineKey":{"type":"apiKey","name":"x-api-key","in":"header"}}}
+                """));
+        ((ObjectNode) body.at("/paths/~1items/post")).set("security",
+                mapper.readTree("[{\"inlineKey\":[]}]"));
+        try (ApiGatewayClient client = ApiGatewayClient.builder().endpointOverride(endpoint)
+                .region(Region.US_EAST_1).httpClientBuilder(UrlConnectionHttpClient.builder())
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
+                .build()) {
+            withDeployedApi(template, "sam-inline-key-", apiId -> {
+                String resourceId = client.getResources(request -> request.restApiId(apiId)).items().stream()
+                        .filter(resource -> "/items".equals(resource.path())).findFirst().orElseThrow().id();
+                GetMethodResponse method = client.getMethod(request -> request.restApiId(apiId)
+                        .resourceId(resourceId).httpMethod("POST"));
+                assertEquals("AWS_IAM", method.authorizationType());
+                assertFalse(method.apiKeyRequired());
+            });
+        }
     }
 
     @ParameterizedTest

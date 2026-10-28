@@ -5,6 +5,7 @@ import jakarta.ws.rs.container.ContainerRequestContext;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -33,6 +34,16 @@ public final class RequestResources {
 
     private static final Pattern VARIABLE = Pattern.compile("\\$\\{(\\w+)}");
     private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
+
+    /** Values for a type's variables, and the ARN whose account and Region the resource they name is in, if any. */
+    private record Filling(Map<String, String> variables, AwsArnUtils.Arn from) {
+
+        Filling with(String variable, String value, AwsArnUtils.Arn arn) {
+            Map<String, String> more = new HashMap<>(variables);
+            more.put(variable, value);
+            return new Filling(more, from == null ? arn : from);
+        }
+    }
 
     private RequestResources() {
     }
@@ -151,21 +162,32 @@ public final class RequestResources {
     }
 
     /**
-     * The values a request gives a member as the resource reads them: the one it reads for the member absent or
-     * given a JSON null, as a handler reading it with {@code asText(null)} does (EventBridge's {@code EventBusName}),
-     * and, for a member that may give an ARN of a type instead of its name, that type's one variable of such an ARN.
+     * The values a request gives a member as the resource reads them, as {@link #read} gives them, and, for a member
+     * that may give an ARN of a type instead of its name, that type's one variable of such an ARN.
      */
     private static List<String> given(RequestResourceMembers.Resource resource, Map<String, String> form,
                                       JsonNode body, RequestResourceMembers.Member member,
                                       Map<String, RequestResourceMembers.ArnFormat> formats) {
-        String absent = resource.absent().get(member.name());
-        List<String> values = absent != null && isNull(body, member) ? List.of() : values(form, body, member);
-        if (values.isEmpty() && absent != null) {
-            return List.of(absent);
-        }
-        RequestResourceMembers.ArnFormat named = arnOf(resource, member.name(), formats);
+        RequestResourceMembers.ArnFormat named = arnOf(resource, member.path(), formats);
+        List<String> values = read(resource, form, body, member);
         return named == null ? values : values.stream()
                 .map(value -> named.pattern().matcher(value).matches() ? named.variable(value) : value).toList();
+    }
+
+    /**
+     * The values a request gives a member: the one the resource reads for the member absent or given a JSON null,
+     * as a handler reading it with {@code asText(null)} does (EventBridge's {@code EventBusName}), and, for a field
+     * of each of a list's structures, one for each structure, that one for a structure lacking it (a
+     * {@code PutEvents} entry naming no event bus is published to the default one), none for no structures.
+     */
+    private static List<String> read(RequestResourceMembers.Resource resource, Map<String, String> form,
+                                     JsonNode body, RequestResourceMembers.Member member) {
+        String absent = resource.absent().get(member.path());
+        if (absent != null && member.eachElement()) {
+            return eachElement(form, body, member, absent);
+        }
+        List<String> values = absent != null && isNull(body, member) ? List.of() : values(form, body, member);
+        return values.isEmpty() && absent != null ? List.of(absent) : values;
     }
 
     /** The format of the type whose ARN a member of the resource may give instead of its name; null for none. */
@@ -176,12 +198,19 @@ public final class RequestResources {
     }
 
     /**
-     * The ARN a request gives for a name in a member of the resource that may give one, which puts the resource in
-     * that ARN's account and Region (a rule on the event bus it names, the default one included); null for none.
+     * The ARN a request gives for a name in a member of the resource that may give one and fills none of its
+     * variables, which puts the resource in that ARN's account and Region (a rule on the default event bus of the
+     * account the bus's ARN names); null for none. A member filling a variable puts each resource it names in the
+     * account and Region of the ARN it gives for it, as {@link #fill} reads it.
      */
     private static AwsArnUtils.Arn arnGiven(RequestResourceMembers.Resource resource, Map<String, String> form,
                                             JsonNode body, Map<String, RequestResourceMembers.ArnFormat> formats) {
+        Set<String> filled = new HashSet<>();
+        resource.fill().values().forEach(member -> filled.add(member.path()));
         for (String member : resource.arnOf().keySet()) {
+            if (filled.contains(member)) {
+                continue;
+            }
             RequestResourceMembers.ArnFormat named = arnOf(resource, member, formats);
             for (String value : values(form, body, new RequestResourceMembers.Member(member, false))) {
                 if (named.pattern().matcher(value).matches()) {
@@ -204,7 +233,9 @@ public final class RequestResources {
      * the account the resource's account member gives, which its handler acts in, and none when that member holds
      * no account id; in the request's without one, or with a JSON null for it. An ARN given for a name puts the
      * resource in that ARN's account and Region, the caller's and the request's where it leaves them empty, as its
-     * handler then acts on the caller's resource of that name, and it is named as an ARN the request gives is. A type
+     * handler then acts on the caller's resource of that name, and it is named as an ARN the request gives is; for
+     * a member naming one resource for each of a list's structures, each in the account and Region of the ARN its
+     * structure gives, the request's for a name (a {@code PutEvents} entry, on the bus it names). A type
      * whose service mints an id after its name is the caller's resource {@code stored} finds under that name, or
      * else has that id open.
      */
@@ -221,42 +252,50 @@ public final class RequestResources {
             }
             account = given.isEmpty() ? accountId : given.getFirst();
         }
-        AwsArnUtils.Arn from = arnGiven(resource, form, body, formats);
-        List<Map<String, String>> fillings = new ArrayList<>(List.of(Map.of()));
+        AwsArnUtils.Arn fromRequest = arnGiven(resource, form, body, formats);
+        List<Filling> fillings = new ArrayList<>(List.of(new Filling(Map.of(), fromRequest)));
         for (Map.Entry<String, RequestResourceMembers.Member> variable : resource.fill().entrySet()) {
-            List<String> values = given(resource, form, body, variable.getValue(), formats);
+            List<String> values = read(resource, form, body, variable.getValue());
             if (values.isEmpty()) {
                 continue;
             }
-            if (resource.fill().size() == 1 && from == null
-                    && values.stream().allMatch(value -> format.pattern().matcher(value).matches())) {
+            RequestResourceMembers.ArnFormat named = arnOf(resource, variable.getValue().path(), formats);
+            if (resource.fill().size() == 1 && fromRequest == null && values.stream().allMatch(value ->
+                    !isArnOf(named, value) && format.pattern().matcher(value).matches())) {
                 values.forEach(value -> addNamed(arns, format.checked(value), partition, region, accountId));
                 return;
             }
-            List<Map<String, String>> next = new ArrayList<>();
-            for (Map<String, String> filling : fillings) {
+            List<Filling> next = new ArrayList<>();
+            for (Filling filling : fillings) {
                 for (String value : values) {
-                    Map<String, String> more = new HashMap<>(filling);
-                    more.put(variable.getKey(), value);
-                    next.add(more);
+                    next.add(isArnOf(named, value)
+                            ? filling.with(variable.getKey(), named.variable(value), AwsArnUtils.parse(value))
+                            : filling.with(variable.getKey(), value, null));
                 }
             }
             fillings = next;
         }
-        if (!resource.fill().isEmpty() && fillings.getFirst().isEmpty()) {
+        if (!resource.fill().isEmpty() && fillings.getFirst().variables().isEmpty()) {
             return;
         }
-        for (Map<String, String> filling : fillings) {
+        for (Filling filling : fillings) {
+            AwsArnUtils.Arn from = filling.from();
             if (from == null) {
-                arns.add(withId(render(format.format(), filling, partition, region, account), format,
-                        resource.types().getFirst(), filling, account.equals(accountId) ? stored : null, region));
+                arns.add(withId(render(format.format(), filling.variables(), partition, region, account), format,
+                        resource.types().getFirst(), filling.variables(), account.equals(accountId) ? stored : null,
+                        region));
             } else {
-                addNamed(arns, withId(render(format.format(), filling, from.partition(),
+                addNamed(arns, withId(render(format.format(), filling.variables(), from.partition(),
                         from.region().isEmpty() ? region : from.region(),
                         from.accountId().isEmpty() ? accountId : from.accountId()), format,
-                        resource.types().getFirst(), filling, null, region), partition, region, accountId);
+                        resource.types().getFirst(), filling.variables(), null, region), partition, region, accountId);
             }
         }
+    }
+
+    /** Whether a member that may give an ARN of a type instead of its name gives one. */
+    private static boolean isArnOf(RequestResourceMembers.ArnFormat named, String value) {
+        return named != null && named.pattern().matcher(value).matches();
     }
 
     /**
@@ -337,6 +376,39 @@ public final class RequestResources {
             addBodyValues(values, body, member);
         }
         return values;
+    }
+
+    /**
+     * The value of a field of each of a list's structures, {@code absent} for one that gives none or a JSON null, as
+     * a handler reading it with {@code asText(null)} does: a body's list, or a form's list numbered from 1 to the
+     * first structure it gives nothing of; none for no list.
+     */
+    private static List<String> eachElement(Map<String, String> form, JsonNode body,
+                                            RequestResourceMembers.Member member, String absent) {
+        List<String> values = new ArrayList<>();
+        if (!form.isEmpty()) {
+            String key = member.name() + ".member.";
+            for (int i = 1; hasElement(form, key + i + "."); i++) {
+                List<String> found = new ArrayList<>();
+                add(found, form.get(key + i + "." + member.field().name()));
+                values.add(found.isEmpty() ? absent : found.getFirst());
+            }
+        } else if (body != null && body.isObject() && body.path(member.name()).isArray()) {
+            for (JsonNode element : body.path(member.name())) {
+                List<String> found = new ArrayList<>();
+                JsonNode value = element.path(member.field().name());
+                if (!value.isNull()) {
+                    addValue(found, value);
+                }
+                values.add(found.isEmpty() ? absent : found.getFirst());
+            }
+        }
+        return values;
+    }
+
+    /** Whether a form gives anything of a list's structure under {@code prefix}. */
+    private static boolean hasElement(Map<String, String> form, String prefix) {
+        return form.keySet().stream().anyMatch(key -> key.startsWith(prefix));
     }
 
     /**

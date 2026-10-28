@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaUrlConfig;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -241,7 +242,7 @@ class LambdaAddressingCfnProvisionerTest {
         CloudFormationTemplateEngine engine = ctx().engine();
         when(engine.resolveStringList(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
-            List<String> values = new java.util.ArrayList<>();
+            List<String> values = new ArrayList<>();
             if (node != null && node.isArray()) {
                 node.forEach(element -> values.add(element.asText()));
             }

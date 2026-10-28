@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -33,7 +35,7 @@ public class ServiceCatalogJsonHandler {
                 case "CreatePortfolio" -> portfolioResponse(service.createPortfolio(request, region, accountId));
                 case "UpdatePortfolio" -> portfolioResponse(service.updatePortfolio(text(request, "Id"), request));
                 case "DescribePortfolio" -> portfolioResponse(service.describePortfolio(text(request, "Id")));
-                case "ListPortfolios" -> listPortfolios(region, accountId);
+                case "ListPortfolios" -> listPortfolios(request, region, accountId);
                 case "DeletePortfolio" -> empty(() -> service.deletePortfolio(text(request, "Id")));
                 case "CreateProduct" -> productResponse(service.createProduct(request, region, accountId));
                 case "UpdateProduct" -> productResponse(service.updateProduct(text(request, "Id"), request));
@@ -142,6 +144,24 @@ public class ServiceCatalogJsonHandler {
             LOG.errorf(e, "Service Catalog error processing %s", action);
             return Response.status(500).entity(new AwsErrorResponse("InternalFailure", e.getMessage())).build();
         }
+    }
+
+    private Response listPortfolios(JsonNode request, String region, String accountId) {
+        Integer pageSize = Pagination.parseMaxResults(request, "PageSize", "InvalidParametersException");
+        if (pageSize != null && pageSize == 0) {
+            pageSize = null;
+        }
+        String pageToken = Pagination.parseNextToken(request, "PageToken", "InvalidParametersException");
+        PaginatedResult<ObjectNode> page = Pagination.paginate(service.listPortfolios(region, accountId),
+                item -> text(item, "Id"), pageSize, pageToken, 100, 100, 2024, "InvalidParametersException",
+                "ListPortfolios:" + accountId + ":" + region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode details = response.putArray("PortfolioDetails");
+        page.items().forEach(details::add);
+        if (page.nextToken() != null) {
+            response.put("NextPageToken", page.nextToken());
+        }
+        return Response.ok(response).build();
     }
 
     private Response listPortfolios(String region, String accountId) {

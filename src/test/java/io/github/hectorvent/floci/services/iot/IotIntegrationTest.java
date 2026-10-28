@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.iot;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.quarkus.test.junit.QuarkusTest;
+import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
 import org.junit.jupiter.api.MethodOrderer;
@@ -11,6 +13,9 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.io.StringWriter;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.util.List;
 import java.util.Map;
 
@@ -574,7 +579,7 @@ class IotIntegrationTest {
         String csrArn = given()
             .contentType("application/json")
             .queryParam("setAsActive", false)
-            .body(java.util.Map.of("certificateSigningRequest", csrPem()))
+            .body(Map.of("certificateSigningRequest", csrPem()))
         .when()
             .post("/certificates")
         .then()
@@ -965,6 +970,109 @@ class IotIntegrationTest {
             .body("__type", equalTo("InvalidRequestException"));
     }
 
+    @Test
+    @Order(23)
+    void updateThingMergesAttributesAndSetsAndRemovesTheThingType() {
+        given()
+            .contentType("application/json")
+            .body("{\"thingTypeProperties\":{\"thingTypeDescription\":\"update semantics\"}}")
+        .when()
+            .post("/thing-types/update-semantics-type")
+        .then()
+            .statusCode(200);
+        given()
+            .contentType("application/json")
+            .body("{\"attributePayload\":{\"attributes\":{\"a\":\"1\",\"b\":\"2\"}}}")
+        .when()
+            .post("/things/update-semantics-thing")
+        .then()
+            .statusCode(200);
+
+        patchThing("update-semantics-thing", "{\"attributePayload\":{\"attributes\":{\"b\":\"\",\"c\":\"3\"},\"merge\":true}}", 2);
+        patchThing("update-semantics-thing", "{\"attributePayload\":{\"merge\":true}}", 3);
+
+        given()
+        .when()
+            .get("/things/update-semantics-thing")
+        .then()
+            .statusCode(200)
+            .body("attributes.size()", equalTo(2))
+            .body("attributes.a", equalTo("1"))
+            .body("attributes.c", equalTo("3"))
+            .body("attributes.b", nullValue())
+            .body("attributes.merge", nullValue());
+
+        patchThing("update-semantics-thing", "{\"thingTypeName\":\"update-semantics-type\"}", 4);
+
+        given()
+        .when()
+            .get("/things/update-semantics-thing")
+        .then()
+            .statusCode(200)
+            .body("thingTypeName", equalTo("update-semantics-type"))
+            .body("attributes.size()", equalTo(2));
+
+        patchThing("update-semantics-thing", "{\"removeThingType\":true}", 5);
+
+        given()
+        .when()
+            .get("/things/update-semantics-thing")
+        .then()
+            .statusCode(200)
+            .body("thingTypeName", nullValue())
+            .body("attributes.a", equalTo("1"))
+            .body("version", equalTo(5));
+
+        given().when().delete("/things/update-semantics-thing").then().statusCode(200);
+        given().when().post("/thing-types/update-semantics-type/deprecate").then().statusCode(200);
+        given().when().delete("/thing-types/update-semantics-type").then().statusCode(200);
+    }
+
+    @Test
+    @Order(24)
+    void deleteThingWithAStaleExpectedVersionIsAVersionConflict() {
+        createThingAndReturnArn("stale-delete-thing");
+
+        given()
+            .queryParam("expectedVersion", 7)
+        .when()
+            .delete("/things/stale-delete-thing")
+        .then()
+            .statusCode(409)
+            .body("__type", equalTo("VersionConflictException"))
+            .body("message", equalTo("The version for thing stale-delete-thing does not match the expected version."));
+
+        given()
+        .when()
+            .get("/things/stale-delete-thing")
+        .then()
+            .statusCode(200);
+
+        given()
+            .queryParam("expectedVersion", 1)
+        .when()
+            .delete("/things/stale-delete-thing")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/things/stale-delete-thing")
+        .then()
+            .statusCode(404);
+    }
+
+    private static void patchThing(String thingName, String body, int expectedVersionAfter) {
+        given()
+            .contentType("application/json")
+            .body(body)
+        .when()
+            .patch("/things/" + thingName)
+        .then()
+            .statusCode(200)
+            .body("version", equalTo(expectedVersionAfter));
+    }
+
     private String createThingAndReturnArn(String thingName) {
         return given()
             .contentType("application/json")
@@ -979,13 +1087,13 @@ class IotIntegrationTest {
 
 
     private static String csrPem() throws Exception {
-        java.security.KeyPairGenerator kpg = java.security.KeyPairGenerator.getInstance("RSA");
+        KeyPairGenerator kpg = KeyPairGenerator.getInstance("RSA");
         kpg.initialize(2048);
-        java.security.KeyPair kp = kpg.generateKeyPair();
+        KeyPair kp = kpg.generateKeyPair();
         PKCS10CertificationRequest csr = new JcaPKCS10CertificationRequestBuilder(
-                new org.bouncycastle.asn1.x500.X500Name("CN=round-trip"), kp.getPublic())
-                .build(new org.bouncycastle.operator.jcajce.JcaContentSignerBuilder("SHA256withRSA").build(kp.getPrivate()));
-        java.io.StringWriter out = new java.io.StringWriter();
+                new X500Name("CN=round-trip"), kp.getPublic())
+                .build(new JcaContentSignerBuilder("SHA256withRSA").build(kp.getPrivate()));
+        StringWriter out = new StringWriter();
         try (JcaPEMWriter w = new JcaPEMWriter(out)) {
             w.writeObject(csr);
         }

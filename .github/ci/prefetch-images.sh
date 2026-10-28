@@ -50,8 +50,10 @@ starts() {
     grep -qE "$(IFS='|'; echo "$*")" "$SHARD_FILE"
 }
 # The image a test constant pins, or empty (and a log line) when the constant cannot be read.
+# TestImages is found by name rather than by its package path, which a package rename changes.
+TEST_IMAGES="$(find src/test/java -path '*/testing/TestImages.java' -print -quit)"
 test_image() {
-    image="$(grep -oE "$1 *= *\"[^\"]+\"" src/test/java/io/github/hectorvent/floci/testing/TestImages.java | grep -oE '"[^"]+"' | tr -d '"')"
+    image="$(grep -oE "$1 *= *\"[^\"]+\"" "${TEST_IMAGES:-/dev/null}" | grep -oE '"[^"]+"' | tr -d '"')"
     [ -n "$image" ] || echo "$(date -u +%H:%M:%S) prefetch skipped: TestImages.$1 not readable" >> "$PREFETCH_LOG"
     echo "$image"
 }

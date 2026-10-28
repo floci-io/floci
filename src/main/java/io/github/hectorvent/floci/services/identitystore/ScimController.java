@@ -34,9 +34,12 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 @Path("/{tenantId}/scim/v2")
@@ -470,7 +473,7 @@ public class ScimController {
         if (request.has("groups")) {
             throw validation("groups cannot be specified when creating a user.");
         }
-        for (String unsupported : java.util.List.of("ims", "photos", "x509Certificates", "entitlements", "password")) {
+        for (String unsupported : List.of("ims", "photos", "x509Certificates", "entitlements", "password")) {
             if (request.has(unsupported)) {
                 throw validation(unsupported + " is not supported.");
             }
@@ -682,9 +685,9 @@ public class ScimController {
         String identityStoreId;
         Matcher prefixed = PREFIXED_TENANT.matcher(tenantId);
         if (prefixed.matches()) {
-            identityStoreId = "d-" + prefixed.group(1).toLowerCase(java.util.Locale.ROOT);
+            identityStoreId = "d-" + prefixed.group(1).toLowerCase(Locale.ROOT);
         } else if (LEGACY_TENANT.matcher(tenantId).matches()) {
-            identityStoreId = tenantId.toLowerCase(java.util.Locale.ROOT);
+            identityStoreId = tenantId.toLowerCase(Locale.ROOT);
         } else {
             throw unauthorized("Authorization header is invalid or tenant ID is incorrect.");
         }
@@ -1270,10 +1273,10 @@ public class ScimController {
     }
 
     private List<User> usersForGroup(String identityStoreId, List<User> users, String groupId) {
-        java.util.Set<String> userIds = identityStoreService.listMembershipsForScim(identityStoreId).stream()
+        Set<String> userIds = identityStoreService.listMembershipsForScim(identityStoreId).stream()
                 .filter(membership -> groupId.equals(membership.groupId()))
                 .map(Membership::userId)
-                .collect(java.util.stream.Collectors.toSet());
+                .collect(Collectors.toSet());
         return users.stream().filter(user -> userIds.contains(user.userId())).toList();
     }
 
@@ -1332,10 +1335,10 @@ public class ScimController {
 
     private List<Group> groupsForMember(String identityStoreId, List<Group> groups, String memberId) {
         requireScimUser(identityStoreId, memberId);
-        java.util.Set<String> groupIds = identityStoreService.listMembershipsForScim(identityStoreId).stream()
+        Set<String> groupIds = identityStoreService.listMembershipsForScim(identityStoreId).stream()
                 .filter(membership -> memberId.equals(membership.userId()))
                 .map(Membership::groupId)
-                .collect(java.util.stream.Collectors.toSet());
+                .collect(Collectors.toSet());
         return groups.stream().filter(group -> groupIds.contains(group.groupId())).toList();
     }
 

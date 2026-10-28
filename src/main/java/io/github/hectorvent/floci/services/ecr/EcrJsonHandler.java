@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
 import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
 import io.github.hectorvent.floci.services.ecr.model.RegistrySettings;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
+import io.github.hectorvent.floci.services.ecr.model.RepositoryCreationTemplate;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -49,7 +50,9 @@ public class EcrJsonHandler {
             "PutRegistryPolicy", "GetRegistryPolicy", "DeleteRegistryPolicy",
             "PutReplicationConfiguration", "DescribeRegistry",
             "PutRegistryScanningConfiguration", "GetRegistryScanningConfiguration",
-            "BatchGetRepositoryScanningConfiguration");
+            "BatchGetRepositoryScanningConfiguration",
+            "CreateRepositoryCreationTemplate", "UpdateRepositoryCreationTemplate",
+            "DescribeRepositoryCreationTemplates", "DeleteRepositoryCreationTemplate");
 
     public Response handle(String action, JsonNode request, String region) {
         if (MODEL_CHECKED.contains(action)) {
@@ -62,6 +65,10 @@ public class EcrJsonHandler {
             case "UpdatePullThroughCacheRule" -> handleUpdatePullThroughCacheRule(request, region);
             case "ValidatePullThroughCacheRule" -> handleValidatePullThroughCacheRule(request, region);
             case "DeletePullThroughCacheRule" -> handleDeletePullThroughCacheRule(request, region);
+            case "CreateRepositoryCreationTemplate" -> handleCreateRepositoryCreationTemplate(request, region);
+            case "DescribeRepositoryCreationTemplates" -> handleDescribeRepositoryCreationTemplates(request, region);
+            case "UpdateRepositoryCreationTemplate" -> handleUpdateRepositoryCreationTemplate(request, region);
+            case "DeleteRepositoryCreationTemplate" -> handleDeleteRepositoryCreationTemplate(request, region);
             case "DescribeRepositories" -> handleDescribeRepositories(request, region);
             case "PutImageScanningConfiguration" -> handlePutImageScanningConfiguration(request, region);
             case "BatchGetRepositoryScanningConfiguration" ->
@@ -847,6 +854,121 @@ public class EcrJsonHandler {
             enc.put("kmsKey", repo.getKmsKey());
         }
         n.set("encryptionConfiguration", enc);
+        return n;
+    }
+
+    // ──────────────────────────── Repository creation templates ────────────────────────────
+
+    private Response handleCreateRepositoryCreationTemplate(JsonNode request, String region) {
+        return templateResponse(service.createRepositoryCreationTemplate(parseTemplate(request), region));
+    }
+
+    private Response handleUpdateRepositoryCreationTemplate(JsonNode request, String region) {
+        return templateResponse(service.updateRepositoryCreationTemplate(parseTemplate(request), region));
+    }
+
+    private Response handleDeleteRepositoryCreationTemplate(JsonNode request, String region) {
+        return templateResponse(service.deleteRepositoryCreationTemplate(
+                request.path("prefix").asText(null), region));
+    }
+
+    private Response handleDescribeRepositoryCreationTemplates(JsonNode request, String region) {
+        JsonNode prefixesNode = request.path("prefixes");
+        List<String> prefixes = prefixesNode.isMissingNode() || prefixesNode.isNull()
+                ? null
+                : parseStringList(prefixesNode);
+        PaginatedResult<RepositoryCreationTemplate> result = service.describeRepositoryCreationTemplates(
+                prefixes, parseMaxResults(request.path("maxResults")), request.path("nextToken").asText(null), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("registryId", service.templateRegistryId());
+        ArrayNode templates = response.putArray("repositoryCreationTemplates");
+        result.items().forEach(t -> templates.add(buildTemplate(t)));
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response templateResponse(RepositoryCreationTemplate template) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("registryId", service.templateRegistryId());
+        response.set("repositoryCreationTemplate", buildTemplate(template));
+        return Response.ok(response).build();
+    }
+
+    /** The template fields a request sets; each one it leaves out stays null. */
+    private static RepositoryCreationTemplate parseTemplate(JsonNode request) {
+        RepositoryCreationTemplate t = new RepositoryCreationTemplate();
+        t.setPrefix(request.path("prefix").asText(null));
+        t.setDescription(request.path("description").asText(null));
+        JsonNode encryption = request.path("encryptionConfiguration");
+        if (encryption.isObject()) {
+            t.setEncryptionConfiguration(new RepositoryCreationTemplate.EncryptionConfiguration(
+                    encryption.path("encryptionType").asText(null), encryption.path("kmsKey").asText(null)));
+        }
+        if (request.path("resourceTags").isArray()) {
+            List<RepositoryCreationTemplate.ResourceTag> tags = new ArrayList<>();
+            request.path("resourceTags").forEach(tag -> tags.add(new RepositoryCreationTemplate.ResourceTag(
+                    tag.path("Key").asText(null), tag.path("Value").asText(null))));
+            t.setResourceTags(tags);
+        }
+        t.setImageTagMutability(request.path("imageTagMutability").asText(null));
+        if (request.path("imageTagMutabilityExclusionFilters").isArray()) {
+            List<RepositoryCreationTemplate.ExclusionFilter> filters = new ArrayList<>();
+            request.path("imageTagMutabilityExclusionFilters").forEach(f -> filters.add(
+                    new RepositoryCreationTemplate.ExclusionFilter(
+                            f.path("filterType").asText(null), f.path("filter").asText(null))));
+            t.setImageTagMutabilityExclusionFilters(filters);
+        }
+        t.setRepositoryPolicy(request.path("repositoryPolicy").asText(null));
+        t.setLifecyclePolicy(request.path("lifecyclePolicy").asText(null));
+        if (request.path("appliedFor").isArray()) {
+            t.setAppliedFor(parseStringList(request.path("appliedFor")));
+        }
+        t.setCustomRoleArn(request.path("customRoleArn").asText(null));
+        return t;
+    }
+
+    private ObjectNode buildTemplate(RepositoryCreationTemplate t) {
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("prefix", t.getPrefix());
+        if (t.getDescription() != null) {
+            n.put("description", t.getDescription());
+        }
+        if (t.getEncryptionConfiguration() != null) {
+            ObjectNode enc = n.putObject("encryptionConfiguration");
+            enc.put("encryptionType", t.getEncryptionConfiguration().encryptionType());
+            if (t.getEncryptionConfiguration().kmsKey() != null) {
+                enc.put("kmsKey", t.getEncryptionConfiguration().kmsKey());
+            }
+        }
+        ArrayNode tags = n.putArray("resourceTags");
+        if (t.getResourceTags() != null) {
+            t.getResourceTags().forEach(tag -> tags.addObject().put("Key", tag.key()).put("Value", tag.value()));
+        }
+        if (t.getImageTagMutability() != null) {
+            n.put("imageTagMutability", t.getImageTagMutability());
+        }
+        if (t.getImageTagMutabilityExclusionFilters() != null && !t.getImageTagMutabilityExclusionFilters().isEmpty()) {
+            ArrayNode filters = n.putArray("imageTagMutabilityExclusionFilters");
+            t.getImageTagMutabilityExclusionFilters().forEach(f -> filters.addObject()
+                    .put("filterType", f.filterType()).put("filter", f.filter()));
+        }
+        if (t.getRepositoryPolicy() != null) {
+            n.put("repositoryPolicy", t.getRepositoryPolicy());
+        }
+        if (t.getLifecyclePolicy() != null) {
+            n.put("lifecyclePolicy", t.getLifecyclePolicy());
+        }
+        ArrayNode appliedFor = n.putArray("appliedFor");
+        if (t.getAppliedFor() != null) {
+            t.getAppliedFor().forEach(appliedFor::add);
+        }
+        if (t.getCustomRoleArn() != null) {
+            n.put("customRoleArn", t.getCustomRoleArn());
+        }
+        n.put("createdAt", t.getCreatedAt().getEpochSecond());
+        n.put("updatedAt", t.getUpdatedAt().getEpochSecond());
         return n;
     }
 

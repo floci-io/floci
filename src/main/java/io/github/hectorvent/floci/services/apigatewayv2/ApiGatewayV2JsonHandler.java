@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigatewayv2;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -11,6 +12,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -483,14 +485,14 @@ public class ApiGatewayV2JsonHandler {
     private Response handleTagResource(JsonNode request, String region) {
         String resourceArn = request.path("ResourceArn").asText();
         Map<String, String> tags = objectMapper.convertValue(
-                request.path("Tags"), new com.fasterxml.jackson.core.type.TypeReference<Map<String, String>>() {});
+                request.path("Tags"), new TypeReference<Map<String, String>>() {});
         service.tagResource(resourceArn, tags);
         return Response.ok("{}").build();
     }
 
     private Response handleUntagResource(JsonNode request, String region) {
         String resourceArn = request.path("ResourceArn").asText();
-        List<String> tagKeys = new java.util.ArrayList<>();
+        List<String> tagKeys = new ArrayList<>();
         request.path("TagKeys").forEach(n -> tagKeys.add(n.asText()));
         service.untagResource(resourceArn, tagKeys);
         return Response.noContent().build();

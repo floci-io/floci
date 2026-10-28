@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.codedeploy;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.codedeploy.model.Application;
 import io.github.hectorvent.floci.services.codedeploy.model.Deployment;
 import io.github.hectorvent.floci.services.codedeploy.model.DeploymentConfig;
@@ -35,7 +37,7 @@ public class CodeDeployJsonHandler {
             case "GetApplication" -> getApplication(request, region);
             case "UpdateApplication" -> updateApplication(request, region);
             case "DeleteApplication" -> deleteApplication(request, region);
-            case "ListApplications" -> listApplications(region);
+            case "ListApplications" -> listApplications(request, region);
             case "BatchGetApplications" -> batchGetApplications(request, region);
             case "CreateDeploymentGroup" -> createDeploymentGroup(request, region);
             case "GetDeploymentGroup" -> getDeploymentGroup(request, region);
@@ -97,8 +99,15 @@ public class CodeDeployJsonHandler {
         return Response.ok(Map.of()).build();
     }
 
-    private Response listApplications(String region) {
-        return Response.ok(Map.of("applications", service.listApplications(region))).build();
+    private Response listApplications(JsonNode request, String region) {
+        String token = Pagination.parseNextToken(request, "nextToken", "InvalidNextTokenException");
+        PaginatedResult<String> page = service.listApplications(region, token);
+        Map<String, Object> response = new HashMap<>();
+        response.put("applications", page.items());
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
     }
 
     private Response batchGetApplications(JsonNode req, String region) {

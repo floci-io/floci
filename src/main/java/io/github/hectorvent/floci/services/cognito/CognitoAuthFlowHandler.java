@@ -17,8 +17,12 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import org.jboss.logging.Logger;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -771,9 +775,9 @@ final class CognitoAuthFlowHandler {
         }
         String expected;
         try {
-            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
-            mac.init(new javax.crypto.spec.SecretKeySpec(secret.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] sig = mac.doFinal((username + client.getClientId()).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            byte[] sig = mac.doFinal((username + client.getClientId()).getBytes(StandardCharsets.UTF_8));
             expected = Base64.getEncoder().encodeToString(sig);
         } catch (Exception e) {
             throw new AwsException("InternalErrorException", "SECRET_HASH computation failed", 500);
@@ -821,7 +825,7 @@ final class CognitoAuthFlowHandler {
         String sessionToken = buildSessionToken(pool.getId(), user.getUsername(), client.getClientId());
 
         byte[] secretBlock = new byte[16];
-        new java.security.SecureRandom().nextBytes(secretBlock);
+        new SecureRandom().nextBytes(secretBlock);
         String secretBlockBase64 = Base64.getEncoder().encodeToString(secretBlock);
 
         purgeExpired(srpSessions, SrpSession::expiresAt);

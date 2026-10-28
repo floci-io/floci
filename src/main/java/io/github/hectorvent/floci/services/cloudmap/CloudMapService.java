@@ -9,6 +9,9 @@ import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
 import io.github.hectorvent.floci.core.common.dns.DnsRecord;
@@ -35,11 +38,13 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /**
  * Cloud Map (AWS service discovery) business logic. Mirrors the EventBridge service
@@ -166,6 +171,11 @@ public class CloudMapService {
         return result;
     }
 
+    public PaginatedResult<Namespace> listNamespaces(String region, Integer maxResults, String nextToken) {
+        return paginate(listNamespaces(region), Namespace::getId, maxResults, nextToken,
+                "ListNamespaces", region, null);
+    }
+
     public void updateNamespace(String id, String description) {
         Namespace ns = requireNamespace(id);
         ns.setDescription(description);
@@ -254,6 +264,16 @@ public class CloudMapService {
             result.add(s);
         }
         return result;
+    }
+
+    public PaginatedResult<Service> listServices(String region, String namespaceIdFilter,
+                                                  Integer maxResults, String nextToken) {
+        PaginatedResult<Service> page = paginate(listServices(region, null), Service::getId,
+                maxResults, nextToken, "ListServices", region, namespaceIdFilter);
+        // AWS applies filters after selecting the page, so an empty page can still have a token.
+        List<Service> items = page.items().stream()
+                .filter(s -> namespaceIdFilter == null || namespaceIdFilter.equals(s.getNamespaceId())).toList();
+        return new PaginatedResult<>(items, page.nextToken());
     }
 
     /**
@@ -374,18 +394,27 @@ public class CloudMapService {
                                             String healthFilter, Map<String, String> queryParameters,
                                             Integer maxResults, String region) {
         Service service = resolveService(namespaceName, serviceName, region);
-        List<Instance> all = scanInstances(service.getId());
-        List<Instance> filtered = applyHealthFilter(all, healthFilter);
-        if (queryParameters != null && !queryParameters.isEmpty()) {
-            filtered = filtered.stream()
-                    .filter(i -> queryParameters.entrySet().stream()
-                            .allMatch(e -> e.getValue().equals(i.getAttributes().get(e.getKey()))))
-                    .toList();
-        }
+        List<Instance> filtered = filterInstances(service.getId(), healthFilter, queryParameters);
         if (maxResults != null && maxResults > 0 && filtered.size() > maxResults) {
             filtered = filtered.subList(0, maxResults);
         }
         return new DiscoverResult(filtered, service.getRevision());
+    }
+
+    public List<Instance> filterInstances(String serviceId, String healthFilter,
+                                          Map<String, String> queryParameters) {
+        List<Instance> filtered = applyHealthFilter(listInstances(serviceId), healthFilter);
+        if (queryParameters != null && !queryParameters.isEmpty()) {
+            filtered = filtered.stream()
+                    .filter(i -> queryParameters.entrySet().stream()
+                            .allMatch(e -> e.getValue().equals(attributesOf(i).get(e.getKey()))))
+                    .toList();
+        }
+        return filtered;
+    }
+
+    private static Map<String, String> attributesOf(Instance instance) {
+        return instance.getAttributes() != null ? instance.getAttributes() : Map.of();
     }
 
     public long discoverInstancesRevision(String namespaceName, String serviceName, String region) {
@@ -726,6 +755,26 @@ public class CloudMapService {
             }
         }
         return result;
+    }
+
+    public PaginatedResult<Operation> listOperations(String region, Map<String, List<String>> filters,
+                                                     Integer maxResults, String nextToken) {
+        Map<String, List<String>> normalized = new TreeMap<>();
+        if (filters != null) {
+            filters.forEach((name, values) -> normalized.put(name, values.stream().distinct().sorted().toList()));
+        }
+        PaginatedResult<Operation> page = paginate(listOperations(region, null), Operation::getId,
+                maxResults, nextToken, "ListOperations", region, normalized);
+        List<Operation> items = page.items().stream().filter(op -> matchesOperationFilters(op, filters)).toList();
+        return new PaginatedResult<>(items, page.nextToken());
+    }
+
+    private <T> PaginatedResult<T> paginate(List<T> items, Function<T, String> cursorOf,
+                                           Integer maxResults, String nextToken,
+                                           String action, String region, Object query) {
+        String namespace = action + ":" + regionResolver.getAccountId() + ":" + region + ":"
+                + Digests.sha256Hex(objectMapper.valueToTree(query).toString());
+        return Pagination.paginate(items, cursorOf, maxResults, nextToken, 100, 100, 4096, "InvalidInput", namespace);
     }
 
     private boolean matchesOperationFilters(Operation op, Map<String, List<String>> filters) {

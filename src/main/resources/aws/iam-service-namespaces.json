@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_service_namespaces.py",
     "index": "https://servicereference.us-east-1.amazonaws.com/",
-    "retrieved": "2026-10-10",
+    "retrieved": "2026-10-27",
     "note": "make iam-namespaces-verify checks every entry still exists upstream."
   },
   "serviceNamespaces": [
@@ -48,6 +48,7 @@
     "arc-zonal-shift",
     "arsenal",
     "artifact",
+    "assurance",
     "athena",
     "auditmanager",
     "autoscaling",
@@ -106,7 +107,6 @@
     "codeguru-reviewer",
     "codeguru-security",
     "codepipeline",
-    "codestar",
     "codestar-connections",
     "codestar-notifications",
     "codewhisperer",
@@ -121,6 +121,7 @@
     "connect-campaigns",
     "consoleapp",
     "consolidatedbilling",
+    "continuum",
     "controlcatalog",
     "controltower",
     "cost-optimization-hub",

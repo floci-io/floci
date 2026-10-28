@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecr.registry;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ecr.EcrService;
+import io.github.hectorvent.floci.testutil.FreePorts;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -21,6 +22,9 @@ import io.vertx.ext.web.Router;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
@@ -551,6 +555,67 @@ class EcrRegistryDataPlaneTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({"true,GET,/v2/", "false,GET,/v2/",
+            "true,PUT,/v2/platform/api/manifests/latest", "false,PUT,/v2/platform/api/manifests/latest"})
+    void unavailableRegistryExplainsTheNetworkRequirement(boolean startupFailure, String method, String path)
+            throws Exception {
+        EcrRegistryManager manager = Mockito.mock(EcrRegistryManager.class);
+        HttpServer dataPlane = dataPlane(manager, false, null);
+        when(manager.httpClient()).thenReturn(new RegistryHttpClient(
+                "http://127.0.0.1:" + FreePorts.loopbackIpv4Port()));
+        if (startupFailure) {
+            Mockito.doThrow(new IllegalStateException("internal-startup-detail")).when(manager).ensureStarted();
+        }
+        RegistryResponse response = request(dataPlane.actualPort(), HttpMethod.valueOf(method), path);
+        assertEquals(503, response.status());
+        assertEquals("application/json", response.contentType());
+        assertEquals("registry/2.0", response.apiVersion());
+        assertFalse(response.body().isBlank());
+        JsonArray errors = new JsonObject(response.body()).getJsonArray("errors");
+        assertNotNull(errors);
+        assertEquals(1, errors.size());
+        JsonObject error = errors.getJsonObject(0);
+        assertEquals("UNAVAILABLE", error.getString("code"));
+        String message = error.getString("message");
+        assertTrue(message.contains("registry"));
+        assertTrue(message.contains("user-defined network"));
+        assertTrue(message.contains("FLOCI_SERVICES_ECR_DOCKER_NETWORK"));
+        assertFalse(response.body().contains("internal-startup-detail"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void headFailuresKeepRegistryHeadersWithoutSendingABody(boolean startupFailure) throws Exception {
+        EcrRegistryManager manager = Mockito.mock(EcrRegistryManager.class);
+        HttpServer dataPlane = dataPlane(manager, false, null);
+        when(manager.httpClient()).thenReturn(new RegistryHttpClient(
+                "http://127.0.0.1:" + FreePorts.loopbackIpv4Port()));
+        if (startupFailure) {
+            Mockito.doThrow(new IllegalStateException("internal-startup-detail")).when(manager).ensureStarted();
+        }
+        RegistryResponse response = request(dataPlane.actualPort(), HttpMethod.HEAD, "/v2/platform/api/manifests/latest");
+        assertEquals(503, response.status());
+        assertEquals("application/json", response.contentType());
+        assertEquals("registry/2.0", response.apiVersion());
+        assertTrue(response.body().isEmpty());
+    }
+
+    @Test
+    void upstreamErrorResponsesPassThroughUnchanged() throws Exception {
+        HttpServer registry = vertx.createHttpServer().requestHandler(request -> request.response()
+                        .setStatusCode(503).putHeader("Content-Type", "text/plain").end("registry temporarily busy"))
+                .listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        EcrRegistryManager manager = Mockito.mock(EcrRegistryManager.class);
+        when(manager.httpClient()).thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
+        HttpServer dataPlane = dataPlane(manager, false, null);
+        RegistryResponse response = request(dataPlane.actualPort(), HttpMethod.GET, "/v2/");
+        assertEquals(503, response.status());
+        assertEquals("text/plain", response.contentType());
+        assertEquals("registry temporarily busy", response.body());
+        assertNull(response.apiVersion());
+    }
+
     /**
      * A data plane in front of {@code registry}, on plain HTTP that a client can speak HTTP/1.1 or,
      * with prior knowledge, HTTP/2 to. Repository {@code platform/api} of account 000000000000 in
@@ -562,12 +627,17 @@ class EcrRegistryDataPlaneTest {
 
     private HttpServer dataPlane(HttpServer registry, boolean immutableTags, CountDownLatch tagReleased) throws Exception {
         EcrRegistryManager registryManager = Mockito.mock(EcrRegistryManager.class);
+        when(registryManager.httpClient())
+                .thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
+        return dataPlane(registryManager, immutableTags, tagReleased);
+    }
+
+    private HttpServer dataPlane(EcrRegistryManager registryManager, boolean immutableTags,
+                                 CountDownLatch tagReleased) throws Exception {
         EcrService ecrService = Mockito.mock(EcrService.class);
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
         when(config.services().ecr().enabled()).thenReturn(true);
         when(config.services().ecr().uriStyle()).thenReturn("hostname");
-        when(registryManager.httpClient())
-                .thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
         when(ecrService.isImageTagImmutable("platform/api", "000000000000", "us-east-1"))
                 .thenReturn(immutableTags);
         // The tag lock lives in EcrService, so the mock holds a real one.
@@ -617,4 +687,16 @@ class EcrRegistryDataPlaneTest {
                         .map(body -> new ManifestResponse(response.statusCode(), body.toString())))
                 .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
     }
+
+    private RegistryResponse request(int port, HttpMethod method, String path) throws Exception {
+        return vertx.createHttpClient().request(new RequestOptions().setHost("127.0.0.1").setPort(port)
+                        .setMethod(method).setURI(path))
+                .compose(request -> request.putHeader("Host", "000000000000.dkr.ecr.us-east-1.localhost:4566").send())
+                .compose(response -> response.body().map(body -> new RegistryResponse(response.statusCode(),
+                        response.getHeader("Content-Type"), response.getHeader("Docker-Distribution-API-Version"),
+                        body.toString())))
+                .toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+    }
+
+    private record RegistryResponse(int status, String contentType, String apiVersion, String body) {}
 }

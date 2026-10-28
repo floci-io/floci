@@ -10,11 +10,12 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 
 /**
- * The declared constraints the managed-policy family is now read against, from the model rather
- * than from a hand-written check. What they change is the status: a value that breaks a declared
- * constraint used to reach the store and answer {@code NoSuchEntity}, where AWS's validation layer
- * runs ahead of the operation and answers {@code ValidationError}, which is the ordering #6402
- * settled for this package.
+ * The declared constraints the managed-policy family and {@code GetAccountAuthorizationDetails} are
+ * now read against, from the model rather than from a hand-written check. What they change is the
+ * status: a value that breaks a declared constraint used to reach the store and answer
+ * {@code NoSuchEntity}, or on the second of those to be answered with a 200, where AWS's validation
+ * layer runs ahead of the operation and answers {@code ValidationError}, which is the ordering
+ * #6402 settled for this package.
  *
  * <p>{@code AttachRolePolicy}'s {@code RoleName} is the parity case rather than a change:
  * {@code IamService.validateRoleName} already answered it in this form, from the same bounds and
@@ -229,5 +230,80 @@ class IamRequestConstraintsIntegrationTest {
             .formParam("SetAsDefault", "maybe")
         .when().post("/").then().statusCode(404)
             .body(CODE, equalTo("NoSuchEntity"));
+    }
+
+    /**
+     * {@code GetAccountAuthorizationDetails} is the first operation read through the list walk, and
+     * none of its three members was read at all before: a {@code Filter} outside the model's enum,
+     * a {@code MaxItems} outside its range and a {@code Marker} breaking its length all reached the
+     * operation and were answered with a 200.
+     */
+    @Test
+    void aFilterMemberOutsideItsEnumIsRefusedWhereItUsedToBeIgnored() {
+        iam("GetAccountAuthorizationDetails")
+            .formParam("Filter.member.1", "Users")
+        .when().post("/").then().statusCode(400)
+            .body(CODE, equalTo("ValidationError"))
+            .body(MESSAGE, equalTo("1 validation error detected: Value 'Users' at"
+                    + " 'filter.1.member' failed to satisfy constraint: Member must satisfy enum"
+                    + " value set: [User, Role, Group, LocalManagedPolicy, AWSManagedPolicy]"));
+
+        iam("GetAccountAuthorizationDetails")
+            .formParam("Filter.member.1", "User")
+        .when().post("/").then().statusCode(200)
+            .body(containsString("GetAccountAuthorizationDetailsResult"));
+    }
+
+    /**
+     * Each member of a list is named under the index the request spelled rather than the position
+     * it sits at, and the two are reported together in one message.
+     */
+    @Test
+    void twoBrokenListMembersAreReportedTogetherUnderTheIndexesTheRequestSpelled() {
+        iam("GetAccountAuthorizationDetails")
+            .formParam("Filter.member.2", "Users")
+            .formParam("Filter.member.9", "Policies")
+        .when().post("/").then().statusCode(400)
+            .body(CODE, equalTo("ValidationError"))
+            .body(MESSAGE, containsString("2 validation errors detected: Value 'Users' at"
+                    + " 'filter.2.member'"))
+            .body(MESSAGE, containsString("Value 'Policies' at 'filter.9.member'"));
+    }
+
+    /** {@code maxItemsType} is 1 to 1000, which this operation reads nothing of today. */
+    @Test
+    void aMaxItemsOutsideItsRangeIsRefused() {
+        iam("GetAccountAuthorizationDetails")
+            .formParam("MaxItems", "1001")
+        .when().post("/").then().statusCode(400)
+            .body(CODE, equalTo("ValidationError"))
+            .body(MESSAGE, equalTo("1 validation error detected: Value '1001' at 'maxItems' failed"
+                    + " to satisfy constraint: Member must have value less than or equal to 1000"));
+
+        iam("GetAccountAuthorizationDetails")
+            .formParam("MaxItems", "1000")
+        .when().post("/").then().statusCode(200);
+
+        // A number too large for a long is a number all the same, and 1000 is still the bound.
+        iam("GetAccountAuthorizationDetails")
+            .formParam("MaxItems", "9223372036854775808")
+        .when().post("/").then().statusCode(400)
+            .body(CODE, equalTo("ValidationError"))
+            .body(MESSAGE, equalTo("1 validation error detected: Value '9223372036854775808' at"
+                    + " 'maxItems' failed to satisfy constraint: Member must have value less than"
+                    + " or equal to 1000"));
+    }
+
+    /** A marker sent empty breaks its minimum and its pattern, and both are reported. */
+    @Test
+    void anEmptyMarkerBreaksItsLengthAndItsPattern() {
+        iam("GetAccountAuthorizationDetails")
+            .formParam("Marker", "")
+        .when().post("/").then().statusCode(400)
+            .body(CODE, equalTo("ValidationError"))
+            .body(MESSAGE, containsString("2 validation errors detected: Value '' at 'marker'"
+                    + " failed to satisfy constraint: Member must have length greater than or"
+                    + " equal to 1"))
+            .body(MESSAGE, containsString("Member must satisfy regular expression pattern:"));
     }
 }

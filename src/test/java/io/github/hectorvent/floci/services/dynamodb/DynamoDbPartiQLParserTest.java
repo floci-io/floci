@@ -192,6 +192,46 @@ class DynamoDbPartiQLParserTest {
     }
 
     @Test
+    void parsesAFromFirstUpdateAsAnUpdate() {
+        Stmt stmt = DynamoDbPartiQLParser.parse(
+                "FROM \"t\" WHERE pk = 'p' AND a = 1 SET c = 1, d = 2 REMOVE b RETURNING ALL NEW *", List.of());
+
+        Stmt.Update update = assertInstanceOf(Stmt.Update.class, stmt);
+        assertEquals("t", update.table());
+        assertEquals(2, update.where().size());
+        assertEquals(2, update.sets().size());
+        assertEquals("b", update.removes().getFirst().root());
+        assertEquals(DynamoDbPartiQLParser.Returning.ALL_NEW, update.returning());
+        assertEquals("dynamodb:PartiQLUpdate", DynamoDbPartiQLParser.iamAction("FROM \"t\" WHERE pk = 'p' SET c = 1"));
+    }
+
+    @Test
+    void parsesAFromFirstUpdateWithoutAWhere() {
+        Stmt stmt = DynamoDbPartiQLParser.parse("FROM \"t\" SET c = 1", List.of());
+
+        assertTrue(assertInstanceOf(Stmt.Update.class, stmt).where().isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"FROM \"t\"", "FROM \"t\" WHERE pk = 'p'", "FROM \"t\" WHERE pk = 'p' RETURNING ALL OLD *",
+            "UPDATE \"t\" WHERE pk = 'p'", "UPDATE \"t\" WHERE pk = 'p' SET c = 1"})
+    void refusesAnUpdateWhoseSetOrRemoveDoesNotFollowTheTable(String statement) {
+        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, List.of()));
+
+        assertEquals("ValidationException", e.getErrorCode());
+        assertEquals("Statement wasn't well formed, can't be processed: Expected data manipulation", e.getMessage());
+    }
+
+    @Test
+    void readsAWhereAfterTheSetOfAFromFirstUpdateAsALeftoverToken() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> DynamoDbPartiQLParser.parse("FROM \"t\" SET c = 1 WHERE pk = 'p'", List.of()));
+
+        assertEquals("Statement wasn't well formed, can't be processed: Unexpected token after expression",
+                e.getMessage());
+    }
+
+    @Test
     void keepsABareAttributeNameAsARootOnlyPath() {
         Path path = assertInstanceOf(Cond.Eq.class, firstCond(SELECT + "= 'x'")).path();
 

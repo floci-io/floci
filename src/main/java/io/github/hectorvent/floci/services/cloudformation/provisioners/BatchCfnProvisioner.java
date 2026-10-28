@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -472,7 +473,7 @@ public class BatchCfnProvisioner implements CfnResourceProvisioner {
             return recorded;
         }
         String priorId = ctx.priorPhysicalId();
-        if (priorId == null || !priorId.startsWith("arn:")) {
+        if (!AwsArnUtils.isArn(priorId)) {
             return null;
         }
         int slash = priorId.lastIndexOf('/');

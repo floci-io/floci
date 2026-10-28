@@ -28,6 +28,10 @@ final class ProjectionEvaluator {
 
     private ProjectionEvaluator() {}
 
+    static boolean hasProjection(String expression) {
+        return expression != null && !expression.isBlank();
+    }
+
     /**
      * Returns a new ObjectNode containing only the paths named in the expression.
      * Resolves #alias references via exprAttrNames. Handles dot-path and [n] list index segments.
@@ -35,7 +39,7 @@ final class ProjectionEvaluator {
      * compact to ascending source order, the way DynamoDB reconstructs projected items.
      */
     static ObjectNode project(JsonNode item, String projectionExpression, JsonNode exprAttrNames) {
-        if (item == null || projectionExpression == null || projectionExpression.isBlank()) {
+        if (item == null || !hasProjection(projectionExpression)) {
             return (ObjectNode) item;
         }
         validateExpression(projectionExpression, exprAttrNames);

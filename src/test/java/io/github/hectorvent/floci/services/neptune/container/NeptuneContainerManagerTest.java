@@ -17,6 +17,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.Optional;
 
@@ -96,7 +97,7 @@ class NeptuneContainerManagerTest {
                 try (Socket socket = serverSocket.accept()) {
                     socket.getInputStream().read(new byte[64]);
                     OutputStream out = socket.getOutputStream();
-                    out.write("HTTP/1.1 400 Bad Request\r\n\r\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    out.write("HTTP/1.1 400 Bad Request\r\n\r\n".getBytes(StandardCharsets.UTF_8));
                     out.flush();
                 } catch (IOException e) {
                     // Test teardown races the socket close; nothing left to assert on.
@@ -130,7 +131,7 @@ class NeptuneContainerManagerTest {
                 try (Socket socket = serverSocket.accept()) {
                     socket.getInputStream().read(new byte[64]);
                     OutputStream out = socket.getOutputStream();
-                    out.write("HTTP/1.1 400 Bad Request\r\n\r\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    out.write("HTTP/1.1 400 Bad Request\r\n\r\n".getBytes(StandardCharsets.UTF_8));
                     out.flush();
                 } catch (IOException e) {
                     LOG.debugv(e, "Acceptor socket closed during test teardown");

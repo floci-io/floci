@@ -9,6 +9,9 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.bedrock.model.Guardrail;
@@ -25,6 +28,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -39,7 +43,7 @@ import java.util.regex.Pattern;
  * this signing name but serves the {@code /model/...} routes.
  */
 @ApplicationScoped
-public class BedrockService {
+public class BedrockService implements ResourceProvider {
 
     public static final String DRAFT_VERSION = "DRAFT";
     public static final String READY = "READY";
@@ -272,6 +276,30 @@ public class BedrockService {
             tagKeys.forEach(guardrail.getTags()::remove);
         }
         guardrails.put(storageKey(region, guardrail.getGuardrailId(), DRAFT_VERSION), guardrail);
+    }
+
+    // Resource discovery (Resource Groups Tagging API, Resource Explorer)
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (String key : guardrails.keys()) {
+            // Versions share the draft's ARN, and tags live on the draft, so only the draft is listed.
+            if (!key.endsWith("::" + DRAFT_VERSION)) {
+                continue;
+            }
+            guardrails.get(key).ifPresent(guardrail -> resources.add(new ExplorerResource(
+                    guardrail.getGuardrailArn(), "bedrock:guardrail", "bedrock",
+                    key.substring(0, key.indexOf("::")), guardrail.getAccountId(),
+                    guardrail.getCreatedAt() != null ? guardrail.getCreatedAt() : Instant.now(),
+                    guardrail.getTags() != null ? guardrail.getTags() : Map.of())));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("bedrock:guardrail", "bedrock", true));
     }
 
     // Helpers

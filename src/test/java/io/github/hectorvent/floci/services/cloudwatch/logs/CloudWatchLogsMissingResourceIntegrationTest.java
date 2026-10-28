@@ -9,6 +9,7 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
+import software.amazon.awssdk.services.cloudwatchlogs.model.InvalidParameterException;
 import software.amazon.awssdk.services.cloudwatchlogs.model.ResourceNotFoundException;
 
 import java.net.URI;
@@ -68,6 +69,33 @@ class CloudWatchLogsMissingResourceIntegrationTest {
         }
     }
 
+    @Test
+    void filterLogEventsNamingNoGroupIsAnInvalidParameter() {
+        try (CloudWatchLogsClient logs = client()) {
+            assertNoGroupNamed(() -> logs.filterLogEvents(request -> request.filterPattern("x")));
+        }
+    }
+
+    @Test
+    void filterLogEventsNamingNoGroupIsAnInvalidParameterBesideAGroupNamedNull() {
+        // "null" is a valid log group name, and the one a missing name is keyed under. A region of
+        // its own keeps that group out of the other tests sharing this server.
+        try (CloudWatchLogsClient logs = client(Region.EU_WEST_3)) {
+            logs.createLogGroup(request -> request.logGroupName("null"));
+            try {
+                assertNoGroupNamed(() -> logs.filterLogEvents(request -> request.filterPattern("x")));
+            } finally {
+                logs.deleteLogGroup(request -> request.logGroupName("null"));
+            }
+        }
+    }
+
+    private static void assertNoGroupNamed(Executable call) {
+        InvalidParameterException error = assertThrows(InvalidParameterException.class, call);
+        assertEquals(400, error.statusCode());
+        assertEquals("logGroupName or logGroupIdentifier is required.", error.awsErrorDetails().errorMessage());
+    }
+
     private static void put(CloudWatchLogsClient logs, String group) {
         logs.putLogEvents(request -> request.logGroupName(group).logStreamName(STREAM)
                 .logEvents(event -> event.timestamp(Instant.now().toEpochMilli()).message("x")));
@@ -80,10 +108,14 @@ class CloudWatchLogsMissingResourceIntegrationTest {
     }
 
     private static CloudWatchLogsClient client() {
+        return client(Region.US_EAST_1);
+    }
+
+    private static CloudWatchLogsClient client(Region region) {
         return CloudWatchLogsClient.builder()
                 .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
                 .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .region(Region.US_EAST_1)
+                .region(region)
                 .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
                 .build();
     }

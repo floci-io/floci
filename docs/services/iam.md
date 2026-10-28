@@ -171,6 +171,27 @@ hand-written check the rest of the service still uses stops at the first and rep
 alone. A boolean member publishes no constraint to hold it to, so a `SetAsDefault` that is neither
 `true` nor `false` reaches the operation, which reads anything but `true` as false.
 
+A list is read the same way, from the parameters the protocol numbers under its name:
+`Audience.member.1` or the bare `Audience.1`, with a member of a list of structures carrying its
+fields under that prefix as `Tags.member.1.Key` does. Each is named in a message the way this
+service already names one, `filter.1.member` and `tags.1.member.key`, under the index the request
+spelled rather than the position the member sits at, and the count is held to the list's own
+bounds with the value left out of the message. A member outside its enum is reported under its own
+index for the same reason, which is a reading: two other services here answer one against the
+whole list instead, and nothing recorded says which form AWS answers on this protocol. A list of
+no members is how an absent list arrives, so a required one reads as null rather than as a list
+breaking a minimum of 1. A structure member arrives as `TaskPolicyArn.Arn` and is named
+`taskPolicyArn.arn`. A map is not read yet, nor is anything nested deeper than a list of
+structures. The request form is published, `AcquireRole`'s own sample numbering a map as
+`ReplacementValues.entry.1.key` and `.entry.1.value`, but the message this service answers for one
+names the whole map rather than the entry that broke a constraint, and nothing here says which AWS
+names, so reading a map would move a merged answer on a guess. `GetAccountAuthorizationDetails` is
+the first operation read through the walk, and nothing of it was read before: a `Filter` member
+outside the model's enum, a `MaxItems` outside 1 to 1000 and a `Marker` breaking its length or its
+pattern were all answered with a 200. A number too large for a 64-bit integer is a number all the
+same, so a `MaxItems` of `9223372036854775808` breaks the maximum rather than reading as no number
+at all.
+
 ### Permission Boundaries
 
 | Action | Description |
@@ -1435,8 +1456,9 @@ Policy evaluation follows the standard AWS precedence:
 
 IAM authorization denials return HTTP 400 `AccessDeniedException` for AWS JSON 1.0/1.1
 requests. REST-JSON requests return HTTP 403 `AccessDeniedException`; AWS Query and S3
-requests retain HTTP 403 XML `AccessDenied` responses. The routed protocol determines
-the status, not just the request's content type.
+requests retain HTTP 403 XML `AccessDenied` responses, except SNS's, which return HTTP 403
+`AuthorizationError`, the error every SNS operation lists for a caller denied access, whichever
+action is denied. The routed protocol determines the status, not just the request's content type.
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3, Lambda,
 SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge Scheduler, EventBridge
@@ -1468,7 +1490,10 @@ its request's `EventBusName` names, by name or by ARN, and on the default bus wh
 or gives a null, whose rules are `rule/<name>`, with no bus; a bus ARN of another account, the
 default bus's included, names that account's rule, checked as given and as the caller's own, which
 Floci acts on, and one leaving its account and Region empty names the caller's. `DescribeEventBus`
-naming no bus is checked on `event-bus/default`. A connection or an API destination, whose ARN
+naming no bus is checked on `event-bus/default`. `PutEvents` is checked on the bus of every entry,
+the one its `EventBusName` names, by name or by ARN, or the default bus for an entry naming none,
+so one entry for a bus the caller may not publish to refuses the whole request, as the EventBridge
+User Guide gives it for every entry. A connection or an API destination, whose ARN
 EventBridge follows with an id it mints after the name, `connection/<name>/<id>`, is checked on
 the ARN it is stored under when the request names it, and on `connection/<name>/*` when there is
 none yet, as for its create. EventBridge V2's API, which Floci does not serve, is not read. A
@@ -1777,6 +1802,26 @@ when the caller may not pass the role.
   `RequestSpotFleet` names its roles in EC2's own protocol, one of them as an instance profile. The
   REST services whose routes no rule maps yet, and API Gateway, which is authorized by HTTP method,
   are not read either.
+
+A request that names a Lambda network connector also needs `lambda:PassNetworkConnector` on it. The
+Lambda developer guide has "The caller must have `lambda:PassNetworkConnector` on the referenced
+connector whenever a `create-web-function` or `create-web-function-revision` call sets
+`egressNetworkConnectorArn`." Every operation the Service Reference lists with the action is checked
+from a table generated the same way, `src/main/resources/aws/iam-passed-network-connectors.json`: a
+Web Function's `egressNetworkConnectorArn`, and the `egressNetworkConnectors` of a MicroVM image and a
+MicroVM and the `ingressNetworkConnectors` of a MicroVM. Each connector is checked as the request
+names it, the egress ones before the ingress ones, after `iam:PassRole`, as on AWS. A MicroVM request
+that names no egress connector, or an empty list, is checked on the Lambda-managed connector
+`arn:aws:lambda:<Region>:aws:network-connector:aws-network-connector:INTERNET_EGRESS`, and a
+`RunMicrovm` with no ingress connector on `aws-network-connector:HTTP_INGRESS`, as on AWS. A refusal
+is Lambda's `403 AccessDeniedException` with `{"Message":"User: <caller> is not authorized to
+perform: lambda:PassNetworkConnector on resource: <connector> <reason>"}`. The reason names the first
+policy type that refuses, in the order service control policies, identity policies, permissions
+boundary, session policy, by its explicit deny or by the allow it lacks, and an explicit deny in a
+managed policy or a boundary also names that policy's ARN. The check runs before the request reaches
+Lambda, so it comes before Lambda's own checks of the connector ARN, which AWS runs first. AppSync's
+`CreateDataSource` and `UpdateDataSource` are listed too, but botocore's model has no member for their
+connector, so they are not read.
 
 A request that tags the resource it creates also needs the service's tagging action. The SNS API
 reference has "To be able to tag a topic on creation, you must have the sns:CreateTopic and
@@ -2309,6 +2354,9 @@ and requested attributes. `dynamodb:EnclosingOperation` identifies `TransactWrit
 `TransactGetItems`; write items expose `ReturnValuesOnConditionCheckFailure` as
 `dynamodb:ReturnValues` only when the request supplies a non-null value. An omitted value leaves
 the condition key absent. Transaction API names alone do not grant item access.
+Transaction reads derive selection and requested attributes from the transaction `Get` shape:
+`ProjectionExpression`, its attribute-name aliases, and the key. Ignored `GetItem` fields such as
+`AttributesToGet` cannot satisfy a projected-read policy on `TransactGetItems`.
 Transaction item authorization uses the effective local table ARN, matching execution.
 A permission on a foreign account table cannot grant access to a same-named local table.
 

@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.iot;
 
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
 
@@ -175,6 +177,29 @@ class IotDataIntegrationTest {
         .then()
             .statusCode(404)
             .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    /** Measured on AWS IoT: a QoS other than 0 or 1 is refused before the message is retained. */
+    @ParameterizedTest
+    @CsvSource({"2,QoS 2 is currently not supported", "-1,Invalid QoS value: -1", "7,Invalid QoS value: 7"})
+    void publishRefusesAQosOtherThanZeroOrOne(int qos, String message) {
+        given()
+            .contentType("text/plain")
+            .queryParam("retain", true)
+            .queryParam("qos", qos)
+            .body("refused")
+        .when()
+            .post("/topics/devices/qos/refused")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", equalTo(message));
+
+        given()
+        .when()
+            .get("/retainedMessage/devices/qos/refused")
+        .then()
+            .statusCode(404);
     }
 
     @Test

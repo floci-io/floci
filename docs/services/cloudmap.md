@@ -17,6 +17,19 @@ hosted zones are created: public and private DNS namespaces are assigned a
 synthetic `HostedZoneId` so SDK and CLI clients can exercise the full Cloud Map
 control flow locally.
 
+`ListNamespaces`, `ListServices`, and `ListOperations` accept `MaxResults` from
+1 to 100 (default 100) and an opaque `NextToken`. Final and empty collections
+omit the token. Tokens are scoped to the action, account, region, and effective
+filters; changing the page size while continuing is supported. Invalid or
+oversized tokens (over 4096 characters) return `InvalidInput`.
+
+As in AWS, filters apply after selecting each page, so a filtered page can be
+empty and still include `NextToken`. Continue until the token is absent.
+Namespace filters remain unsupported. Service filtering uses the first
+`NAMESPACE_ID` value. Operation filters match values for `STATUS`, `TYPE`,
+`NAMESPACE_ID`, and `SERVICE_ID`; filter conditions and unknown names are
+ignored. These existing filter limitations are unchanged.
+
 ### DNS resolution
 
 A DNS namespace is answerable, not just storable. Floci's embedded DNS server

@@ -65,6 +65,18 @@ public class PypiserverSidecarManager implements ContainerTeardown {
         pool.stopContainer(pypiRepositoryId);
     }
 
+    /**
+     * Whether this pypi repository's own pypiserver container is already running, without starting
+     * one for a repository that has never used pypi at all. Every CodeArtifact repository gets a
+     * pypi sidecar id at creation regardless of whether it is ever actually used through pypi (see
+     * {@code CodeArtifactService#ensureFormatContainerId}'s own callers), so a caller that only
+     * wants to ask an already-running container what it holds must check this first rather than
+     * provision a brand-new container just to find it has nothing.
+     */
+    public boolean isRunning(String pypiRepositoryId) {
+        return pool.isTracked(pypiRepositoryId);
+    }
+
     private PerKeyContainerPool.StartedContainer startContainer(String pypiRepositoryId) {
         String image = config.services().codeartifact().pypiImage();
         String containerName = ContainerStorageHelper.dockerName(config, "floci-pypiserver-" + pypiRepositoryId);

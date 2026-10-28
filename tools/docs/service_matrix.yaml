@@ -67,21 +67,22 @@ deferred: []
 # Non-tabular pages with one Query/JSON action dispatcher per numeric base row.
 # These counts are checked against the handler switch, without flattening the
 # grouped documentation. Anchored and mixed-dispatch rows need separate rules.
+# Paths are relative to the Java package root, PACKAGE_DIR in tools/java_sources.py.
 action_count_sources:
-  autoscaling: src/main/java/io/github/hectorvent/floci/services/autoscaling/AutoScalingQueryHandler.java
-  cloudmap: src/main/java/io/github/hectorvent/floci/services/cloudmap/CloudMapHandler.java
-  codebuild: src/main/java/io/github/hectorvent/floci/services/codebuild/CodeBuildJsonHandler.java
-  codedeploy: src/main/java/io/github/hectorvent/floci/services/codedeploy/CodeDeployJsonHandler.java
-  cognito: src/main/java/io/github/hectorvent/floci/services/cognito/CognitoJsonHandler.java
-  config: src/main/java/io/github/hectorvent/floci/services/configservice/ConfigServiceJsonHandler.java
-  ec2: src/main/java/io/github/hectorvent/floci/services/ec2/Ec2QueryHandler.java
-  ecs: src/main/java/io/github/hectorvent/floci/services/ecs/EcsJsonHandler.java
-  elastic-beanstalk: src/main/java/io/github/hectorvent/floci/services/elasticbeanstalk/ElasticBeanstalkQueryHandler.java
-  elb: src/main/java/io/github/hectorvent/floci/services/elbv2/ElbV2QueryHandler.java
-  elb-classic: src/main/java/io/github/hectorvent/floci/services/elb/ElbClassicQueryHandler.java
-  glue: src/main/java/io/github/hectorvent/floci/services/glue/GlueJsonHandler.java
-  iam: src/main/java/io/github/hectorvent/floci/services/iam/IamQueryHandler.java
-  resource-groups-tagging: src/main/java/io/github/hectorvent/floci/services/resourcegroupstagging/ResourceGroupsTaggingJsonHandler.java
+  autoscaling: services/autoscaling/AutoScalingQueryHandler.java
+  cloudmap: services/cloudmap/CloudMapHandler.java
+  codebuild: services/codebuild/CodeBuildJsonHandler.java
+  codedeploy: services/codedeploy/CodeDeployJsonHandler.java
+  cognito: services/cognito/CognitoJsonHandler.java
+  config: services/configservice/ConfigServiceJsonHandler.java
+  ec2: services/ec2/Ec2QueryHandler.java
+  ecs: services/ecs/EcsJsonHandler.java
+  elastic-beanstalk: services/elasticbeanstalk/ElasticBeanstalkQueryHandler.java
+  elb: services/elbv2/ElbV2QueryHandler.java
+  elb-classic: services/elb/ElbClassicQueryHandler.java
+  glue: services/glue/GlueJsonHandler.java
+  iam: services/iam/IamQueryHandler.java
+  resource-groups-tagging: services/resourcegroupstagging/ResourceGroupsTaggingJsonHandler.java
 
 # docs/services pages that intentionally have no Service Matrix row of their own.
 facet_pages:

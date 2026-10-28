@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -293,6 +295,94 @@ class ProvisionedConcurrencyPoolTest {
 
     private void ready() {
         await().atMost(Duration.ofSeconds(5)).until(() -> "READY".equals(get().status()));
+    }
+
+    @Test
+    void listingReportsCurrentCapacityAndRemovesDeletedConfigurations() throws Exception {
+        put(1);
+        Environment environment = launched();
+        assertEquals(get(), pool.list(REGION, "example", ACCOUNT, null, null).items().getFirst().status());
+        environment.initialized.complete(null);
+        ready();
+        ContainerHandle leased = pool.acquire(version, "live");
+        assertNotNull(leased);
+        ProvisionedConcurrencyPool.ListedConfiguration entry =
+                pool.list(REGION, "example", ACCOUNT, null, null).items().getFirst();
+        assertEquals(AwsArnUtils.Arn.of("lambda", REGION, ACCOUNT, "function:example:live").toString(),
+                entry.functionArn());
+        assertEquals(get(), entry.status());
+        assertEquals(1, entry.status().allocated());
+        assertEquals(0, entry.status().available());
+        assertTrue(pool.release(leased, false));
+        pool.delete(REGION, "example", "live", ACCOUNT);
+        assertTrue(pool.list(REGION, "example", ACCOUNT, null, null).items().isEmpty());
+    }
+
+    @Test
+    void listingKeepsFailedInitializationVisible() throws Exception {
+        put(1);
+        launched().initialized.completeExceptionally(new IllegalStateException("initialization failed"));
+        await().atMost(Duration.ofSeconds(5)).until(() -> "FAILED".equals(get().status()));
+        assertEquals(get(), pool.list(REGION, "example", ACCOUNT, null, null).items().getFirst().status());
+    }
+
+    @Test
+    void listingSeparatesAccountsRegionsAndPartitions() throws Exception {
+        for (String region : List.of(REGION, "cn-north-1")) {
+            for (String account : List.of(ACCOUNT, "222222222222")) {
+                function(account, region, "$LATEST");
+                function(account, region, "1");
+                alias(account, region, "live", "1", Map.of());
+                pool.put(region, "example", "live", 1, account);
+                launched().initialized.complete(null);
+            }
+        }
+        for (String region : List.of(REGION, "cn-north-1")) {
+            for (String account : List.of(ACCOUNT, "222222222222")) {
+                List<ProvisionedConcurrencyPool.ListedConfiguration> entries =
+                        pool.list(region, "example", account, null, null).items();
+                assertEquals(1, entries.size());
+                assertEquals(AwsArnUtils.Arn.of("lambda", region, account, "function:example:live").toString(),
+                        entries.getFirst().functionArn());
+            }
+        }
+    }
+
+    @Test
+    void listingPagesByQualifierAndRefusesForeignMarkers() throws Exception {
+        put(1);
+        launched().initialized.complete(null);
+        function(ACCOUNT, REGION, "2");
+        pool.put(REGION, "example", "2", 1, ACCOUNT);
+        launched().initialized.complete(null);
+        PaginatedResult<ProvisionedConcurrencyPool.ListedConfiguration> first =
+                pool.list(REGION, "example", ACCOUNT, "1", null);
+        assertEquals(1, first.items().size());
+        assertTrue(first.items().getFirst().functionArn().endsWith(":2"));
+        assertNotNull(first.nextToken());
+        pool.delete(REGION, "example", "2", ACCOUNT);
+        PaginatedResult<ProvisionedConcurrencyPool.ListedConfiguration> last =
+                pool.list(REGION, "example", ACCOUNT, "1", first.nextToken());
+        assertEquals(1, last.items().size());
+        assertTrue(last.items().getFirst().functionArn().endsWith(":live"));
+        assertNull(last.nextToken());
+        assertThrows(AwsException.class, () -> pool.list(REGION, "example", ACCOUNT, "1", "fabricated"));
+        function("222222222222", REGION, "$LATEST");
+        function(ACCOUNT, "us-west-2", "$LATEST");
+        functions.save(REGION, LambdaFunctionTestFixtures.function(ACCOUNT, REGION, "other", "$LATEST"));
+        assertThrows(AwsException.class,
+                () -> pool.list(REGION, "example", "222222222222", "1", first.nextToken()));
+        assertThrows(AwsException.class,
+                () -> pool.list("us-west-2", "example", ACCOUNT, "1", first.nextToken()));
+        assertThrows(AwsException.class,
+                () -> pool.list(REGION, "other", ACCOUNT, "1", first.nextToken()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"0", "51", "-1", "one"})
+    void listingRejectsInvalidPageSizes(String maxItems) {
+        assertThrows(AwsException.class, () -> pool.list(REGION, "example", ACCOUNT, maxItems, null));
+        assertEquals(0, launcher.starts.get());
     }
 
     @Test
@@ -1362,16 +1452,19 @@ class ProvisionedConcurrencyPoolTest {
                     launched().initialized.complete(null);
                     launched().initialized.complete(null);
                     ready();
+                    assertEquals(get(), pool.list(REGION, "example", ACCOUNT, null, null).items().getFirst().status());
                 } else if (restart == 1) {
                     assertEquals(2, get().requested());
                     assertEquals("IN_PROGRESS", get().status());
                     assertEquals(0, get().allocated());
+                    assertEquals(get(), pool.list(REGION, "example", ACCOUNT, null, null).items().getFirst().status());
                     launched().initialized.complete(null);
                     launched().initialized.complete(null);
                     ready();
                     pool.delete(REGION, "example", "live", ACCOUNT);
                 } else {
                     assertThrows(AwsException.class, this::get);
+                    assertTrue(pool.list(REGION, "example", ACCOUNT, null, null).items().isEmpty());
                 }
             } finally {
                 pool.shutdown();

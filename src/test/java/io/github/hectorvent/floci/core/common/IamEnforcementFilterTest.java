@@ -2024,6 +2024,27 @@ class IamEnforcementFilterTest {
         assertTrue(body.contains("<RequestId>"), body);
     }
 
+    /**
+     * SNS refuses with its own {@code AuthorizationError}, the 403 every SNS operation lists, whichever action is
+     * denied (a role it is passed as well as its own); another Query service still answers {@code AccessDenied}.
+     */
+    @Test
+    void snsRefusesWithItsAuthorizationError() {
+        for (String action : List.of("sns:Publish", "iam:PassRole")) {
+            Response r = IamEnforcementFilter.accessDeniedResponse(
+                    action, "sns", MediaType.APPLICATION_FORM_URLENCODED_TYPE);
+
+            assertEquals(403, r.getStatus());
+            String body = entityString(r);
+            assertTrue(body.contains("<Code>AuthorizationError</Code>"), body);
+            assertTrue(body.contains("<Type>Sender</Type>"), body);
+            assertTrue(body.contains("User is not authorized to perform: " + action), body);
+        }
+        String sqs = entityString(IamEnforcementFilter.accessDeniedResponse(
+                "sqs:SendMessage", "sqs", MediaType.APPLICATION_FORM_URLENCODED_TYPE));
+        assertTrue(sqs.contains("<Code>AccessDenied</Code>"), sqs);
+    }
+
     @Test
     void s3GetsS3FlavoredXmlError() {
         // S3 — credential-scope is "s3"; S3 errors are <Error>... at the root, no <ErrorResponse> wrapper.

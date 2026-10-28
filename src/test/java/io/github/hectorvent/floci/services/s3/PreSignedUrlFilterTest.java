@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.lang.reflect.Method;
+import java.time.Instant;
 import java.util.List;
 import java.util.Set;
 
@@ -60,7 +61,7 @@ class PreSignedUrlFilterTest {
     @Test
     void temporaryCredentialRequiresMatchingSessionToken() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(
-                "ASIAS3EXAMPLE", "temporary-secret", "issued-token", java.time.Instant.now().plusSeconds(3600));
+                "ASIAS3EXAMPLE", "temporary-secret", "issued-token", Instant.now().plusSeconds(3600));
         PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService, null);
 
         assertEquals("temporary-secret", resolveSecretKey(filter, "ASIAS3EXAMPLE", "issued-token"));
@@ -71,7 +72,7 @@ class PreSignedUrlFilterTest {
     @Test
     void temporaryCredentialIsRejectedAfterExpiration() throws Exception {
         IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(
-                "ASIAS3EXPIRED", "temporary-secret", "issued-token", java.time.Instant.now().minusSeconds(1));
+                "ASIAS3EXPIRED", "temporary-secret", "issued-token", Instant.now().minusSeconds(1));
         PreSignedUrlFilter filter = new PreSignedUrlFilter(null, null, iamService, null);
 
         assertNull(resolveSecretKey(filter, "ASIAS3EXPIRED", "issued-token"));

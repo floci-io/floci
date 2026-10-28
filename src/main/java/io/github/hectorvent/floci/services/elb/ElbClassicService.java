@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.acm.AcmService;
@@ -57,14 +58,16 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
 
     private final Ec2Service ec2Service;
     private final ElbClassicHealthChecker healthChecker;
-    private final StorageFactory storageFactory;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final IamService iamService;
     private final CertificateReferenceResolver certificates;
 
-    // region → load balancer name → record
-    private Map<String, Map<String, ClassicLoadBalancer>> loadBalancers = new ConcurrentHashMap<>();
+    // region → load balancer name → record, in the calling account
+    private final Map<String, Map<String, ClassicLoadBalancer>> loadBalancers;
+    // The store behind loadBalancers, for the startup passes that must reach every account; null
+    // without a StorageFactory, when loadBalancers is a plain in-memory map
+    private final AccountAwareStorageBackend<Map<String, ClassicLoadBalancer>> loadBalancerStore;
 
     /** Serializes listener writes against each other; see {@link #createLoadBalancerListeners}. */
     private final Object listenerLock = new Object();
@@ -94,51 +97,90 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
                              AcmService acmService) {
         this.ec2Service = ec2Service;
         this.healthChecker = healthChecker;
-        this.storageFactory = storageFactory;
         this.config = config;
         this.regionResolver = regionResolver;
         this.iamService = iamService;
         this.certificates = new CertificateReferenceResolver(iamService, acmService);
+        this.loadBalancerStore = storageFactory != null
+                ? storageFactory.create("elb", "elb-load-balancers.json",
+                        new TypeReference<Map<String, Map<String, ClassicLoadBalancer>>>() {})
+                : null;
+        this.loadBalancers = loadBalancerStore != null
+                ? new StorageBackedMap<>(loadBalancerStore)
+                : new ConcurrentHashMap<>();
     }
 
     @PostConstruct
     void initializeStorage() {
-        if (storageFactory == null) {
+        if (loadBalancerStore == null) {
             return;
         }
-        this.loadBalancers = new StorageBackedMap<>(storageFactory.create("elb", "elb-load-balancers.json",
-                new TypeReference<Map<String, Map<String, ClassicLoadBalancer>>>() {}));
-        for (Map.Entry<String, Map<String, ClassicLoadBalancer>> entry
-                : new ArrayList<>(loadBalancers.entrySet())) {
-            if (!(entry.getValue() instanceof ConcurrentHashMap)) {
-                loadBalancers.put(entry.getKey(), new ConcurrentHashMap<>(entry.getValue()));
+        // Region maps read back from disk are plain maps; the name check in createLoadBalancer and
+        // the certificate scan rely on concurrent ones, in every account.
+        for (StoredRegion stored : storedRegions()) {
+            if (!(stored.regionLbs() instanceof ConcurrentHashMap)) {
+                storeRegion(stored.accountId(), stored.region(), new ConcurrentHashMap<>(stored.regionLbs()));
             }
         }
     }
 
     /**
-     * Restarts health checking for load balancers restored from disk. Called from
-     * {@code EmulatorLifecycle} once the bean is constructed, like {@code ElbV2Service} does —
-     * nothing reachable from {@link #initializeStorage()} may touch an injected collaborator.
+     * Restarts health checking for the load balancers of every account restored from disk.
+     * Called from {@code EmulatorLifecycle} once the bean is constructed, because nothing
+     * reachable from {@link #initializeStorage()} may touch an injected collaborator.
      */
     public void restorePersistedRuntime() {
-        // A balancer stored before the zone was looked up per region still carries the one fixed
-        // zone every balancer used to report; take the region's zone again and store it back.
-        for (String region : List.copyOf(loadBalancers.keySet())) {
-            Map<String, ClassicLoadBalancer> regionLbs = loadBalancers.get(region);
-            if (regionLbs == null) {
-                continue;
-            }
-            for (ClassicLoadBalancer lb : regionLbs.values()) {
-                lb.setCanonicalHostedZoneNameId(AwsRegionFacts.classicElbHostedZoneId(region).orElse(null));
-            }
-            loadBalancers.put(region, regionLbs);
-        }
-        for (Map<String, ClassicLoadBalancer> regionLbs : loadBalancers.values()) {
-            for (ClassicLoadBalancer lb : regionLbs.values()) {
+        for (StoredRegion stored : storedRegions()) {
+            for (ClassicLoadBalancer lb : stored.regionLbs().values()) {
+                // A balancer stored before balancers recorded their account belongs to the account
+                // it is stored under, which its health state and instance lookups go by.
+                if (lb.getAccountId() == null) {
+                    lb.setAccountId(stored.accountId());
+                }
+                // A balancer stored before the zone was looked up per region still carries the one
+                // fixed zone every balancer used to report; take the region's zone again.
+                lb.setCanonicalHostedZoneNameId(
+                        AwsRegionFacts.classicElbHostedZoneId(stored.region()).orElse(null));
                 healthChecker.startMonitoring(lb);
                 healthChecker.registerInstances(lb, lb.getInstanceIds());
             }
+            // Stores back the account and zone set above.
+            storeRegion(stored.accountId(), stored.region(), stored.regionLbs());
+        }
+    }
+
+    /** One account's load balancers in one region, as stored. */
+    private record StoredRegion(String accountId, String region, Map<String, ClassicLoadBalancer> regionLbs) {}
+
+    /**
+     * Every stored region map with the account that owns it, taken from its raw key,
+     * {@code <account>/<region>}. {@code loadBalancers} shows only the account of the current
+     * request, or the default one outside a request, and the service can first be created inside
+     * any account's request. The account-aware scans recognize only 12-digit account prefixes, but
+     * the default account id is configurable and AssumeRole takes the account from the role ARN.
+     * A region never contains a slash, so the account is everything before the last one; every
+     * key here has an account, since this store is younger than account-aware storage.
+     */
+    private List<StoredRegion> storedRegions() {
+        List<StoredRegion> regions = new ArrayList<>();
+        if (loadBalancerStore == null) {
+            loadBalancers.forEach((region, regionLbs) -> regions.add(new StoredRegion(null, region, regionLbs)));
+            return regions;
+        }
+        loadBalancerStore.scanAllAccountsWithRawKeys().forEach((rawKey, regionLbs) -> {
+            int slash = rawKey.lastIndexOf('/');
+            if (slash > 0) {
+                regions.add(new StoredRegion(rawKey.substring(0, slash), rawKey.substring(slash + 1), regionLbs));
+            }
+        });
+        return regions;
+    }
+
+    private void storeRegion(String accountId, String region, Map<String, ClassicLoadBalancer> regionLbs) {
+        if (loadBalancerStore != null) {
+            loadBalancerStore.putForAccount(accountId, region, regionLbs);
+        } else {
+            loadBalancers.put(region, regionLbs);
         }
     }
 
@@ -264,8 +306,9 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
         if (regionLbs == null) {
             return;
         }
-        if (regionLbs.remove(name) != null) {
-            healthChecker.stopMonitoring(region, name);
+        ClassicLoadBalancer removed = regionLbs.remove(name);
+        if (removed != null) {
+            healthChecker.stopMonitoring(removed);
             loadBalancers.put(region, regionLbs);
         }
     }
@@ -360,7 +403,7 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
         ClassicLoadBalancer lb = requireLoadBalancer(region, name);
         lb.getInstanceIds().removeAll(instanceIds);
         persist(region);
-        healthChecker.deregisterInstances(region, name, instanceIds);
+        healthChecker.deregisterInstances(lb, instanceIds);
         return List.copyOf(lb.getInstanceIds());
     }
 
@@ -377,7 +420,7 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
                 throw new AwsException("InvalidInstance",
                         "Could not find EC2 instance " + id + ".", 400);
             }
-            result.put(id, healthChecker.getHealth(region, name, id));
+            result.put(id, healthChecker.getHealth(lb, id));
         }
         return result;
     }

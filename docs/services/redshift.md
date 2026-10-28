@@ -14,6 +14,61 @@ Snapshot-dump and catalog-seed uploads retry transient Docker I/O failures for u
 
 For running SQL without a PostgreSQL wire connection (the way Lambda and Step Functions do), see the [Redshift Data API](redshift-data.md).
 
+## Events and notifications
+
+`DescribeEvents` returns the last hour by default, accepts `StartTime`, `EndTime`,
+`Duration`, and a paired `SourceType`/`SourceIdentifier` filter, and retains the last
+14 days. `MaxRecords` accepts 20 through 100; continue with the returned `Marker`.
+These bounds follow the [AWS DescribeEvents API](https://docs.aws.amazon.com/redshift/latest/APIReference/API_DescribeEvents.html).
+History and event subscriptions are isolated by account and region and use the
+configured Redshift storage mode, including persistent, hybrid and WAL storage.
+
+Floci records cluster creation, deletion, reboot, restore, password changes,
+parameter-group association and security-group changes. Snapshot operations record
+start, completion and failure, including final snapshots. Parameter-group creation,
+update, reset and deletion also produce events. The IDs, categories and severities
+come from the [AWS event catalog](https://docs.aws.amazon.com/redshift/latest/mgmt/working-with-event-notifications.html).
+`DescribeEventCategories` lists the event IDs implemented by Floci, grouped by source
+type. It does not advertise hardware failures, maintenance or other conditions Floci
+does not simulate. Security-group and scheduled-action source types are accepted as
+filters, but Floci does not model resources or generate events for those source types.
+
+Use `CreateEventSubscription`, `ModifyEventSubscription`, `DescribeEventSubscriptions`
+and `DeleteEventSubscription` to manage SNS delivery. A subscription can filter source
+type, source IDs, categories and severity. Omitted severity receives both INFO and
+ERROR; explicit severity selects only that severity. All specified filters must match.
+Only standard SNS topics are accepted, as required by
+[AWS subscription rules](https://docs.aws.amazon.com/redshift/latest/mgmt/working-with-event-notifications-subscribe.html).
+Subscriptions default to enabled; set `Enabled=false` to stop delivery without deleting
+the subscription. The limit is 20 subscriptions per account and region.
+
+Matching events are published to SNS with subject `Amazon Redshift Notification`.
+The JSON message includes `Event Source`, `Event Time`, `Source ID`, `Event ID`,
+`Event Categories`, `Severity` and `Event Message`. AWS does not specify a stable
+notification-body schema in the API reference; this message format is Floci's
+representation of the event details, not a claim of byte-for-byte AWS parity.
+With IAM enforcement on, the topic's policy must allow the `redshift.amazonaws.com`
+principal to `sns:Publish` (conditions on `aws:SourceArn`, the subscription's ARN, and
+`aws:SourceAccount` apply); otherwise nothing is published and the subscription becomes
+`no-permission`. A deleted topic changes subscription status to `topic-not-exist`;
+other authorization failures also change it to `no-permission`. Notification delivery failures are logged
+and do not roll back the Redshift operation.
+
+For example, parameter-group events work without a database container:
+
+```bash
+TOPIC=$(aws --endpoint-url http://localhost:4566 sns create-topic \
+  --name redshift-events --query TopicArn --output text)
+aws --endpoint-url http://localhost:4566 redshift create-event-subscription \
+  --subscription-name parameter-events --sns-topic-arn "$TOPIC" \
+  --source-type cluster-parameter-group --event-categories configuration
+aws --endpoint-url http://localhost:4566 redshift create-cluster-parameter-group \
+  --parameter-group-name event-demo --parameter-group-family redshift-1.0 \
+  --description 'Event example'
+aws --endpoint-url http://localhost:4566 redshift describe-events \
+  --source-type cluster-parameter-group --source-identifier event-demo
+```
+
 ## Supported Actions
 
 <!-- floci:actions:start -->
@@ -23,7 +78,7 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `DescribeClusters` | List clusters and their connection details |
 | `DeleteCluster` | Create the requested final snapshot, then remove the cluster; accepts `SkipFinalClusterSnapshot` to delete without a backup |
 | `CreateClusterSnapshot` | Back up a cluster to a SQL dump via `pg_dump` |
-| `DescribeClusterSnapshots` | List snapshots, optionally filtered by snapshot or cluster identifier |
+| `DescribeClusterSnapshots` | List snapshots, optionally filtered by snapshot or cluster identifier and SnapshotType (manual or automated) |
 | `DeleteClusterSnapshot` | Remove a snapshot and its stored dump |
 | `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql`; accepts `SnapshotIdentifier` or a same-account, same-region `SnapshotArn` |
 | `CreateClusterParameterGroup` | Register a parameter group (metadata only) |
@@ -45,10 +100,16 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `CreateSnapshotCopyGrant` | Register a snapshot copy grant, defaulting `KmsKeyId` to the AWS-managed Redshift key. `SnapshotCopyGrantName` must be 1-63 characters, start with a lowercase letter, and contain only lowercase letters, digits and non-consecutive hyphens |
 | `DescribeSnapshotCopyGrants` | List snapshot copy grants, optionally filtered by name, paged with `MaxRecords` and `Marker` |
 | `DeleteSnapshotCopyGrant` | Remove a snapshot copy grant |
+| `DescribeEvents` | Return retained events filtered by source and time, with marker pagination |
+| `DescribeEventCategories` | List implemented event IDs, categories and severities by source type |
+| `CreateEventSubscription` | Create an enabled or disabled subscription delivering matching events to a standard SNS topic |
+| `ModifyEventSubscription` | Update the specified subscription filters, topic or enabled state |
+| `DeleteEventSubscription` | Delete an event notification subscription |
+| `DescribeEventSubscriptions` | List event subscriptions filtered by name or tags |
 | `EnableSnapshotCopy` | Record cross-region snapshot copy on a cluster (`RetentionPeriod` defaults to 7, `ManualSnapshotRetentionPeriod` to -1); `DescribeClusters` then reports `ClusterSnapshotCopyStatus`. A `DestinationRegion` that is not an AWS region is refused with `UnknownSnapshotCopyRegionFault`. No snapshot is copied |
 | `DisableSnapshotCopy` | Clear a cluster's snapshot copy configuration |
 | `ModifySnapshotCopyRetentionPeriod` | Change the automated (or, with `Manual`, the manual) snapshot copy retention period |
-| `CreateSnapshotSchedule` | Store a snapshot schedule of `rate(...)` / `cron(...)` definitions with optional tags; a `ScheduleIdentifier` other than letters, digits and hyphens is refused with `InvalidParameterValue`. No snapshots are taken on it |
+| `CreateSnapshotSchedule` | Create a UTC rate or cron schedule that takes automated snapshots on associated clusters, with optional tags |
 | `ModifySnapshotSchedule` | Replace a schedule's definitions |
 | `DescribeSnapshotSchedules` | List schedules filtered by `ScheduleIdentifier`, `ClusterIdentifier`, `TagKeys` and `TagValues`, paged with `MaxRecords` and `Marker`, with their associated clusters |
 | `DeleteSnapshotSchedule` | Remove a schedule; refused with `InvalidClusterSnapshotScheduleState` while a cluster uses it |
@@ -194,6 +255,37 @@ and [COPY authorization parameters](https://docs.aws.amazon.com/redshift/latest/
   `CreateTags`/`DeleteTags`/`DescribeTags` do not list that fault at all and return
   `ResourceNotFoundFault` (HTTP 404) for any missing resource, grants included.
 
+## Automated snapshots
+
+Clusters take automated SQL-dump snapshots using their associated snapshot schedule. Use
+`CreateSnapshotSchedule` followed by `ModifyClusterSnapshotSchedule` to attach a schedule.
+Without an attached schedule, a cluster uses `rate(8 hours)`. Schedules run in UTC and accept
+`rate(1 hour)` through `rate(24 hours)`, `rate(1 day)`, Redshift's three-field shorthand such
+as `cron(0 9,17 MON-FRI)`, and full six-field cron expressions. Field ranges and near-term
+execution spacing are validated; overlapping executions less than one hour apart are rejected
+within a 400-day lookahead. The worker also enforces at least one hour between actual backups.
+
+`CreateCluster` and `ModifyCluster` accept `AutomatedSnapshotRetentionPeriod` from 0 to 35 days,
+with a default of 1. Zero disables automation and removes automated snapshots; RA3 and RG node
+families require 1 to 35 days. Decreasing retention cleans up expired automated snapshots.
+The newest automated snapshot is kept even after its retention period, until automation is
+disabled or the cluster is deleted. Manual snapshots are unaffected. `DescribeClusterSnapshots`
+returns `SnapshotType` and accepts `SnapshotType=automated` or `manual`. Automated snapshots
+can be restored with `RestoreFromClusterSnapshot`; `DeleteClusterSnapshot` refuses their
+manual deletion with `InvalidClusterSnapshotState`.
+
+The background sweep checks all owning accounts, takes dumps only for available clusters, and
+removes automated backups left by deleted clusters. Checkpoints use the Redshift storage mode
+and survive restart. A failed dump leaves its occurrence retryable and removes partial output.
+A committed dump is reused if saving its checkpoint failed. Cluster operations and concurrent
+sweeps share resource locks. Changing or reattaching a schedule starts a new scheduling anchor.
+
+These backups are full PostgreSQL dumps using the existing Docker backend. Floci does not
+implement AWS's data-change-based trigger or incremental snapshot storage. Missed occurrences
+are coalesced to one current backup, which contains the data at dump time, rather than replayed
+as historical backups. Older persisted clusters acquire their initial scheduling anchor on the
+first sweep. Cleanup after deleting a cluster runs on the next sweep.
+
 ## DynamoDB zero-ETL
 
 The supported zero-ETL path is DynamoDB Streams to a provisioned Redshift cluster. The source ARN
@@ -273,7 +365,9 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 - `ManageMasterPassword` creates a Redshift-owned Secrets Manager secret. The secret contains the
   managed username, password, endpoint, port, and database name. `MasterPasswordSecretKmsKeyId`
   selects the KMS key used for the secret metadata and is validated through KMS. Switching managed
-  password mode or its KMS key in place is not implemented.
+  password mode or its KMS key in place is not implemented. `RotateSecret` and scheduled rotation
+  update both the cluster's master password and its secret value; rotation requires an available
+  cluster and does not use a Lambda function.
 - Snapshot restoration has the same limitations as `RestoreFromClusterSnapshot`: snapshots are
   local SQL dumps, not cross-account backups or a full Redshift engine image.
 - `AWS::Redshift::ClusterSecurityGroup` is accepted as metadata: Floci does not emulate the legacy EC2-Classic security group model.
@@ -283,6 +377,8 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `FLOCI_SERVICES_REDSHIFT_ENABLED` | `true` | Enable or disable Redshift |
+| `FLOCI_SERVICES_REDSHIFT_AUTOMATED_SNAPSHOTS_ENABLED` | `true` | Run background automated snapshot and retention sweeps |
+| `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_SWEEP_INTERVAL_SECONDS` | `60` | Delay between background snapshot sweeps |
 | `FLOCI_SERVICES_REDSHIFT_IMAGE_VERSION` | `postgres:15-alpine` | PostgreSQL Docker image backing each cluster |
 | `FLOCI_SERVICES_REDSHIFT_DEFAULT_PORT` | `5439` | Reported Redshift port hint (the real host port is dynamic and comes from `DescribeClusters`) |
 | `FLOCI_SERVICES_REDSHIFT_PROXY_BASE_PORT` | `7100` | Lowest host port the per-cluster auth proxies bind |
@@ -694,10 +790,11 @@ These views expose the documented Redshift column names, types, and ordering map
 - Multi-node clusters: `NodeType` and `NumberOfNodes` are stored as metadata; every cluster is a single PostgreSQL container.
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
 - Subnet groups, VPC routing, and security groups are metadata only.
-- Resize, pause/resume, and IAM authentication. Snapshot schedules and cross-region snapshot copy are stored and reported, but no snapshot is taken on a schedule or copied to another region.
+- Resize, pause/resume, and IAM authentication. Cross-region snapshot copy is stored and reported, but no snapshot is copied to another region.
 - Cross-account role ARNs are not supported for COPY or UNLOAD.
 - The auth proxy validates the master user's password and any live `GetClusterCredentials` credential. Other non-master users pass straight through to PostgreSQL, which remains the authority for their credentials.
 - A cluster using `ManageMasterPassword` keeps its generated password in sync with the
   Redshift-owned Secrets Manager secret. Updating `MasterUserPassword` through `ModifyCluster`
-  updates the current secret version as well.
+  updates the current secret version as well. Service-managed `RotateSecret` and scheduled rotation
+  change the backend password and publish the matching secret version without invoking Lambda.
 - IAM database authentication over the wire, and `sslmode=verify-full` against the self-signed proxy certificate.

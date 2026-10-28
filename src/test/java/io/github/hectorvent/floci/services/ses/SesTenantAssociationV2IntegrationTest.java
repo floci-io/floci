@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -37,7 +38,7 @@ class SesTenantAssociationV2IntegrationTest {
     private static final String CONFIG_SET_ARN = ARN_PREFIX + "configuration-set/" + CONFIG_SET;
     private static final String TEMPLATE_ARN = ARN_PREFIX + "template/" + TEMPLATE;
 
-    private static io.restassured.specification.RequestSpecification v2() {
+    private static RequestSpecification v2() {
         return given().contentType("application/json").header("Authorization", AUTH);
     }
 

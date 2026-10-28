@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ec2;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
@@ -296,7 +297,7 @@ class Ec2LaunchTemplateFieldsIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId", org.hamcrest.Matchers.notNullValue());
+            .body("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId", Matchers.notNullValue());
 
         given()
             .formParam("Action", "CreateLaunchTemplateVersion")

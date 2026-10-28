@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cognito;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -109,7 +110,7 @@ class CognitoDeleteUserPoolCascadeIntegrationTest {
             }
             """.formatted(poolId, clientId))
             .then().statusCode(400)
-            .body("__type", org.hamcrest.Matchers.equalTo("ResourceNotFoundException"));
+            .body("__type", Matchers.equalTo("ResourceNotFoundException"));
 
         cognitoAction("DeleteUserPool", """
             { "UserPoolId": "%s" }

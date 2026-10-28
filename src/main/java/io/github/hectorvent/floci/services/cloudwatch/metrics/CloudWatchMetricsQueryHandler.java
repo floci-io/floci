@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.model.Dashboard;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Alarm;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.AlarmHistoryItem;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.AlarmMetricDataQuery;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.CompositeAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
@@ -66,6 +67,7 @@ public class CloudWatchMetricsQueryHandler {
             case "DescribeAlarms" -> handleDescribeAlarms(params, region);
             case "DeleteAlarms" -> handleDeleteAlarms(params, region);
             case "SetAlarmState" -> handleSetAlarmState(params, region);
+            case "DescribeAlarmHistory" -> handleDescribeAlarmHistory(params, region);
             case "ListTagsForResource" -> handleListTagsForResource(params, region);
             case "TagResource" -> handleTagResource(params, region);
             case "UntagResource" -> handleUntagResource(params, region);
@@ -317,6 +319,30 @@ public class CloudWatchMetricsQueryHandler {
         String reasonData = params.getFirst("StateReasonData");
         metricsService.setAlarmState(name, state, reason, reasonData, region);
         return Response.ok(AwsQueryResponse.envelopeNoResult("SetAlarmState", null)).build();
+    }
+
+    private Response handleDescribeAlarmHistory(MultivaluedMap<String, String> params, String region) {
+        PaginatedResult<AlarmHistoryItem> page = metricsService.describeAlarmHistory(params.getFirst("AlarmName"),
+                alarmMembers(params, "AlarmTypes"), params.getFirst("HistoryItemType"),
+                parseInstant(params.getFirst("StartDate")), parseInstant(params.getFirst("EndDate")),
+                Pagination.parseMaxResults(params.getFirst("MaxRecords"), "MalformedInput"),
+                params.getFirst("NextToken"), params.getFirst("ScanBy"), region);
+        XmlBuilder xml = new XmlBuilder().start("AlarmHistoryItems");
+        for (AlarmHistoryItem item : page.items()) {
+            xml.start("member")
+                    .elem("AlarmName", item.alarmName())
+                    .elem("AlarmType", item.alarmType())
+                    .elem("HistoryData", item.historyData())
+                    .elem("HistoryItemType", item.historyItemType())
+                    .elem("HistorySummary", item.historySummary())
+                    .elem("Timestamp", Instant.ofEpochMilli(item.timestamp()).toString())
+                    .end("member");
+        }
+        xml.end("AlarmHistoryItems");
+        if (page.nextToken() != null) {
+            xml.elem("NextToken", page.nextToken());
+        }
+        return Response.ok(AwsQueryResponse.envelope("DescribeAlarmHistory", AwsNamespaces.CW, xml.build())).build();
     }
 
     private Response handleListTagsForResource(MultivaluedMap<String, String> params, String region) {
@@ -853,7 +879,8 @@ public class CloudWatchMetricsQueryHandler {
         xml.elem("StateValue", a.getStateValue())
                 .elem("StateReason", a.getStateReason())
                 .elem("StateReasonData", a.getStateReasonData())
-                .elem("StateUpdatedTimestamp", Instant.ofEpochSecond(a.getStateUpdatedTimestamp()).toString());
+                .elem("StateUpdatedTimestamp", Instant.ofEpochSecond(a.getStateUpdatedTimestamp()).toString())
+                .elem("StateTransitionedTimestamp", Instant.ofEpochSecond(a.lastTransitionTimestamp()).toString());
     }
 
     private void toAlarmMetricsXml(XmlBuilder xml, List<AlarmMetricDataQuery> metrics) {

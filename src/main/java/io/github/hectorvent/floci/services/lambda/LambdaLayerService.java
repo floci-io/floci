@@ -27,7 +27,6 @@ import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.function.Function;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -52,7 +51,7 @@ public class LambdaLayerService {
     private static final int MAX_LAYER_VERSION_ARN_LENGTH = 140;
     private static final int MAX_ITEMS_LIMIT = 50;
 
-    /** Signs pagination markers; see {@link #decodeMarker}. */
+    /** Signs pagination markers for both layer listing operations. */
     private final SignedMarkers markers = new SignedMarkers();
 
     private static final List<String> COMPATIBLE_ARCHITECTURES = List.of("x86_64", "arm64");
@@ -232,7 +231,8 @@ public class LambdaLayerService {
                 .filter(lv -> matchesFilters(lv, compatibleRuntime, compatibleArchitecture))
                 .toList();
         // Zero-padded so the cursor's string ordering matches the numeric version ordering.
-        return page(versions, lv -> String.format("%019d", lv.getVersion()), limit, marker);
+        return LambdaPagination.paginate(versions, lv -> String.format("%019d", lv.getVersion()),
+                limit, MAX_ITEMS_LIMIT, marker, markers, "");
     }
 
     /**
@@ -253,7 +253,8 @@ public class LambdaLayerService {
                         .orElseThrow())
                 .sorted(Comparator.comparing(LambdaLayerVersion::getLayerName))
                 .toList();
-        return page(latestMatching, LambdaLayerVersion::getLayerName, limit, marker);
+        return LambdaPagination.paginate(latestMatching, LambdaLayerVersion::getLayerName,
+                limit, MAX_ITEMS_LIMIT, marker, markers, "");
     }
 
     /**
@@ -278,20 +279,6 @@ public class LambdaLayerService {
         return true;
     }
 
-    private <T> PaginatedResult<T> page(List<T> items, Function<T, String> cursorOf,
-                                               Integer maxItems, String marker) {
-        String after = decodeMarker(marker);
-        List<T> remaining = after == null ? items
-                : items.stream().filter(i -> cursorOf.apply(i).compareTo(after) > 0).toList();
-        List<T> pageItems = remaining.stream()
-                .limit(maxItems != null ? maxItems : MAX_ITEMS_LIMIT)
-                .toList();
-        String nextMarker = pageItems.size() < remaining.size()
-                ? markers.issue(cursorOf.apply(pageItems.get(pageItems.size() - 1)))
-                : null;
-        return new PaginatedResult<>(pageItems, nextMarker);
-    }
-
     /**
      * Validates the three parseable list parameters and returns the effective MaxItems.
      *
@@ -303,15 +290,8 @@ public class LambdaLayerService {
      */
     private static Integer validateListParameters(String maxItems, String compatibleRuntime,
                                                   String compatibleArchitecture) {
-        Integer parsed = parseMaxItems(maxItems);
         List<String> errors = new ArrayList<>();
-        if (parsed != null && parsed < 1) {
-            errors.add(constraintFailure(maxItems, "maxItems",
-                    "Member must have value greater than or equal to 1"));
-        } else if (parsed != null && parsed > MAX_ITEMS_LIMIT) {
-            errors.add(constraintFailure(maxItems, "maxItems",
-                    "Member must have value less than or equal to " + MAX_ITEMS_LIMIT));
-        }
+        Integer parsed = LambdaPagination.parseMaxItems(maxItems, MAX_ITEMS_LIMIT, errors);
         if (compatibleRuntime != null && !COMPATIBLE_RUNTIMES.contains(compatibleRuntime)) {
             errors.add(constraintFailure(compatibleRuntime, "compatibleRuntime",
                     "Member must satisfy enum value set: " + COMPATIBLE_RUNTIMES));
@@ -327,43 +307,9 @@ public class LambdaLayerService {
         return parsed;
     }
 
-    private static Integer parseMaxItems(String maxItems) {
-        if (maxItems == null || maxItems.isEmpty()) {
-            return null;
-        }
-        try {
-            return Integer.valueOf(maxItems);
-        } catch (NumberFormatException e) {
-            throw new AwsException("SerializationException",
-                    "'" + maxItems + "' can not be converted to Integer", 400);
-        }
-    }
-
     private static String constraintFailure(String value, String member, String requirement) {
         return "Value '" + value + "' at '" + member + "' failed to satisfy constraint: "
                 + requirement;
-    }
-
-    /**
-     * The live service's Marker is an encrypted token it rejects when it did not issue it.
-     * Floci signs the cursor instead, with a key generated at startup: a fabricated or edited
-     * marker fails the check, which is what makes an arbitrary string a 400 rather than a
-     * silently skipped or empty page. A marker from an earlier run is stale for the same
-     * reason, matching a client that replays an expired token against AWS.
-     */
-    private String decodeMarker(String marker) {
-        if (marker == null) {
-            return null;
-        }
-        String cursor = markers.cursorOf(marker);
-        if (cursor == null) {
-            throw invalidPaginationKey();
-        }
-        return cursor;
-    }
-
-    private static AwsException invalidPaginationKey() {
-        return new AwsException("InvalidParameterValueException", "Invalid pagination key.", 400);
     }
 
     /**

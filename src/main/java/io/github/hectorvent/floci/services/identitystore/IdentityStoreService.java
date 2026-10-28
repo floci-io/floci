@@ -23,6 +23,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
 @ApplicationScoped
 public class IdentityStoreService implements Resettable {
@@ -331,14 +333,14 @@ public class IdentityStoreService implements Resettable {
         return listMembershipsAll(storeId).stream()
                 .filter(membership -> finalUserId.equals(membership.userId()))
                 .map(Membership::groupId)
-                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+                .collect(Collectors.toUnmodifiableSet());
     }
 
     public List<String> validateGroupIds(JsonNode groupIds) {
         if (groupIds == null || !groupIds.isArray() || groupIds.size() < 1 || groupIds.size() > 100) {
             throw validation("GroupIds must contain between 1 and 100 identifiers.");
         }
-        return java.util.stream.StreamSupport.stream(groupIds.spliterator(), false)
+        return StreamSupport.stream(groupIds.spliterator(), false)
                 .map(node -> {
                     if (!node.isTextual()) {
                         throw validation("GroupIds must contain strings.");

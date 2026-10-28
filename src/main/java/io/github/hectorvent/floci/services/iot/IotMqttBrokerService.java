@@ -50,6 +50,7 @@ import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collection;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -374,7 +375,11 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     void publish(String topic, byte[] payload) {
-        fanOut(topic, payload, false);
+        publish(topic, payload, 0);
+    }
+
+    void publish(String topic, byte[] payload, int qos) {
+        fanOut(topic, payload, qos);
     }
 
     boolean disconnectClient(String clientId, boolean cleanSession) {
@@ -544,7 +549,8 @@ public class IotMqttBrokerService implements Resettable {
                     device == null ? config.defaultAccountId() : device.accountId(),
                     device == null ? config.defaultRegion() : device.region(),
                     System.currentTimeMillis(),
-                    endpoint.keepAliveTimeSeconds());
+                    endpoint.keepAliveTimeSeconds(),
+                    new AtomicInteger());
             ClientSession previous = sessionsByClient.put(clientId, session);
             if (previous != null && previous.endpoint() != endpoint) {
                 endSession(previous, DUPLICATE_CLIENTID);
@@ -729,7 +735,7 @@ public class IotMqttBrokerService implements Resettable {
 
         iotService.get().publish(topic, payload, message.isRetain(), message.qosLevel().value(), null,
                 session.clientId(), rules -> evaluateRulesOnWorker(topic, rules));
-        fanOut(topic, payload, false);
+        fanOut(topic, payload, message.qosLevel().value());
     }
 
     /**
@@ -787,26 +793,34 @@ public class IotMqttBrokerService implements Resettable {
         }
     }
 
-    private void fanOut(String topic, byte[] payload, boolean retained) {
+    /**
+     * Delivers a live copy, RETAIN 0 as on AWS, to each subscriber with a matching subscription, at the
+     * lower of {@code qos} and the highest QoS among its matching subscriptions.
+     */
+    private void fanOut(String topic, byte[] payload, int qos) {
         byte[] safePayload = payload == null ? new byte[0] : payload.clone();
         for (ClientSession session : sessionsByClient.values()) {
-            if (!session.endpoint().isConnected() || !hasMatchingSubscription(session.clientId(), topic)) {
+            Map<String, Subscription> subscriptions = subscriptionsByClient.get(session.clientId());
+            int granted = subscriptions == null ? -1 : grantedQos(subscriptions.values(), topic);
+            if (!session.endpoint().isConnected() || granted < 0) {
                 continue;
             }
+            MqttQoS delivered = MqttQoS.valueOf(Math.min(qos, granted));
             try {
-                session.endpoint().publish(topic, Buffer.buffer(safePayload), MqttQoS.AT_MOST_ONCE, false, retained);
+                session.endpoint().publish(topic, Buffer.buffer(safePayload), delivered, false, false, session.packetId(delivered));
             } catch (IllegalStateException e) {
                 LOG.debugv("IoT MQTT client {0} closed before the publish on {1} reached it", session.clientId(), topic);
             }
         }
     }
 
-    private boolean hasMatchingSubscription(String clientId, String topic) {
-        Map<String, Subscription> subscriptions = subscriptionsByClient.get(clientId);
-        if (subscriptions == null) {
-            return false;
-        }
-        return subscriptions.values().stream().anyMatch(subscription -> topicMatches(subscription.topicFilter(), topic));
+    /** The highest QoS among the subscriptions matching {@code topic}, or -1 when none does. */
+    private int grantedQos(Collection<Subscription> subscriptions, String topic) {
+        return subscriptions.stream()
+                .filter(subscription -> topicMatches(subscription.topicFilter(), topic))
+                .mapToInt(Subscription::qos)
+                .max()
+                .orElse(-1);
     }
 
     private void deliverRetained(ClientSession session, List<Subscription> subscriptions) {
@@ -818,13 +832,14 @@ public class IotMqttBrokerService implements Resettable {
             if (!deliveredTopics.add(retained.getTopic())) {
                 continue;
             }
-            boolean matches = subscriptions.stream()
-                    .anyMatch(subscription -> topicMatches(subscription.topicFilter(), retained.getTopic()));
-            if (!matches) {
+            int granted = grantedQos(subscriptions, retained.getTopic());
+            if (granted < 0) {
                 continue;
             }
             byte[] payload = Base64.getDecoder().decode(retained.getPayload());
-            session.endpoint().publish(retained.getTopic(), Buffer.buffer(payload), MqttQoS.AT_MOST_ONCE, false, true);
+            // Publish kept a qos outside 0 and 1 as sent before it refused one, so a stored message may carry one.
+            MqttQoS delivered = MqttQoS.valueOf(Math.clamp(retained.getQos(), 0, granted));
+            session.endpoint().publish(retained.getTopic(), Buffer.buffer(payload), delivered, false, true, session.packetId(delivered));
         }
     }
 
@@ -886,7 +901,7 @@ public class IotMqttBrokerService implements Resettable {
         vertx.runOnContext(ignored -> {
             iotService.get().publish(topic, payload, false, 0, null, session.clientId(),
                     rules -> evaluateRulesOnWorker(topic, rules, admitted));
-            fanOut(topic, payload, false);
+            fanOut(topic, payload, 0);
         });
     }
 
@@ -958,7 +973,18 @@ public class IotMqttBrokerService implements Resettable {
             String accountId,
             String region,
             long connectedAt,
-            int keepAliveDuration) {
+            int keepAliveDuration,
+            AtomicInteger packetIds) {
+
+        /**
+         * The packet identifier of a copy sent at {@code qos}: none at QoS 0, otherwise the session's
+         * next, from 1 to 65535. Vert.x draws its own from an unsynchronized counter, which two threads
+         * fanning out to the same client race on.
+         */
+        int packetId(MqttQoS qos) {
+            // ponytail: no in-flight tracking, so an identifier repeats after 65535 QoS 1 copies to one client; track until PUBACK if Floci ever redelivers.
+            return qos == MqttQoS.AT_MOST_ONCE ? 0 : packetIds.updateAndGet(id -> id % 65535 + 1);
+        }
 
         HistoryKey historyKey() {
             return new HistoryKey(accountId, region, clientId);

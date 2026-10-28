@@ -1864,7 +1864,8 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         String legacyRawKey = REGION + "::dom::repo::generic::a\\cb::x";
-        packageOriginConfigStore.putForAccount(ACCOUNT_ID, legacyRawKey, new PackageOriginConfig("BLOCK", "BLOCK"));
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, legacyRawKey,
+                new PackageOriginConfig("BLOCK", "BLOCK", null, null, null));
 
         service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "a:b", "x", "ALLOW", "ALLOW");
 
@@ -5001,6 +5002,283 @@ class CodeArtifactServiceTest {
                 "my-pkg", "1.0.0", "my-pkg.1.0.0.nupkg", fromPadded.packageVersionRevision());
 
         assertEquals(content.length, pinned.asset().getSize());
+    }
+
+    // ----------------------------------------------------------------- ListPackages
+
+    @Test
+    void listPackagesReturnsEmptyForARepositoryWithNothingPublished() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        CodeArtifactService.ListPackagesResult result = service.listPackages(REGION, "dom", null, "repo", null,
+                null, null, null, null, null, null);
+
+        assertTrue(result.packages().isEmpty());
+        assertNull(result.nextToken());
+    }
+
+    @Test
+    void listPackagesReturnsEveryGenericPackageInTheRepositoryWithDefaultOriginRestrictions() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        publishGeneric("repo", "my-pkg", "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+        publishGeneric("repo", "other-pkg", "1.0.0", "b".getBytes(StandardCharsets.UTF_8));
+
+        CodeArtifactService.ListPackagesResult result = service.listPackages(REGION, "dom", null, "repo", null,
+                null, null, null, null, null, null);
+
+        Set<String> names = result.packages().stream().map(CodeArtifactService.PackageSummaryEntry::packageName)
+                .collect(Collectors.toSet());
+        assertEquals(Set.of("my-pkg", "other-pkg"), names);
+        result.packages().forEach(p -> {
+            assertEquals("generic", p.format());
+            assertEquals("ns", p.namespace());
+            assertEquals("ALLOW", p.publishRestriction());
+            assertEquals("BLOCK", p.upstreamRestriction());
+        });
+    }
+
+    @Test
+    void listPackagesIncludesAnOriginConfigOnlyPackageWithNoRealVersion() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "never-published",
+                "BLOCK", "ALLOW");
+
+        CodeArtifactService.ListPackagesResult result = service.listPackages(REGION, "dom", null, "repo", null,
+                null, null, null, null, null, null);
+
+        assertEquals(1, result.packages().size());
+        CodeArtifactService.PackageSummaryEntry entry = result.packages().get(0);
+        assertEquals("never-published", entry.packageName());
+        assertEquals("BLOCK", entry.publishRestriction());
+        assertEquals("ALLOW", entry.upstreamRestriction());
+    }
+
+    @Test
+    void listPackagesRoutesEveryContainerBackedFormatToTheSidecarBridge() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(reposiliteClient.listPackages(eq(created.getSidecarContainerIds().get("maven")), eq("dom"),
+                eq("repo"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageIdentifier("com.example", "a")));
+        when(verdaccioClient.listPackages(eq(created.getSidecarContainerIds().get("npm")), eq("dom"), eq("repo")))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageIdentifier(null, "my-pkg")));
+        when(pypiserverClient.listPackages(eq(created.getSidecarContainerIds().get("pypi")), eq("dom"), eq("repo")))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageIdentifier(null, "my-pkg")));
+        when(bagetterClient.listPackages(eq(created.getSidecarContainerIds().get("nuget")), eq("dom"), eq("repo")))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageIdentifier(null, "my-pkg")));
+
+        CodeArtifactService.ListPackagesResult result = service.listPackages(REGION, "dom", null, "repo", null,
+                null, null, null, null, null, null);
+
+        assertEquals(4, result.packages().size());
+        assertTrue(result.packages().stream().anyMatch(p -> "maven".equals(p.format()) && "a".equals(p.packageName())
+                && "com.example".equals(p.namespace())));
+        assertEquals(3, result.packages().stream().filter(p -> "my-pkg".equals(p.packageName())).count());
+    }
+
+    @Test
+    void listPackagesFormatFilterOnlyTouchesThatOneFormatsSidecar() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(pypiserverClient.listPackages(eq(created.getSidecarContainerIds().get("pypi")), eq("dom"), eq("repo")))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageIdentifier(null, "my-pkg")));
+
+        CodeArtifactService.ListPackagesResult result = service.listPackages(REGION, "dom", null, "repo", "pypi",
+                null, null, null, null, null, null);
+
+        assertEquals(1, result.packages().size());
+        assertEquals("pypi", result.packages().get(0).format());
+        verify(verdaccioClient, never()).listPackages(anyString(), anyString(), anyString());
+        verify(bagetterClient, never()).listPackages(anyString(), anyString(), anyString());
+        verify(reposiliteClient, never()).listPackages(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void listPackagesNamespacePrefixFiltersAndRequiresFormat() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        publishGeneric("repo", "my-pkg", "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listPackages(REGION, "dom", null, "repo",
+                null, "n", null, null, null, null, null));
+        assertEquals("ValidationException", e.getErrorCode());
+
+        CodeArtifactService.ListPackagesResult matches = service.listPackages(REGION, "dom", null, "repo", "generic",
+                "n", null, null, null, null, null);
+        assertEquals(1, matches.packages().size());
+
+        CodeArtifactService.ListPackagesResult noMatches = service.listPackages(REGION, "dom", null, "repo",
+                "generic", "other", null, null, null, null, null);
+        assertTrue(noMatches.packages().isEmpty());
+    }
+
+    @Test
+    void listPackagesPackagePrefixFiltersByName() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        publishGeneric("repo", "pat-test", "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+        publishGeneric("repo", "other", "1.0.0", "b".getBytes(StandardCharsets.UTF_8));
+
+        CodeArtifactService.ListPackagesResult result = service.listPackages(REGION, "dom", null, "repo", null, null,
+                "pat", null, null, null, null);
+
+        assertEquals(1, result.packages().size());
+        assertEquals("pat-test", result.packages().get(0).packageName());
+    }
+
+    @Test
+    void listPackagesPublishAndUpstreamFilterByResolvedRestriction() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        publishGeneric("repo", "default-pkg", "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+        publishGeneric("repo", "blocked-pkg", "1.0.0", "b".getBytes(StandardCharsets.UTF_8));
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "ns", "blocked-pkg", "BLOCK",
+                "ALLOW");
+
+        CodeArtifactService.ListPackagesResult allowPublish = service.listPackages(REGION, "dom", null, "repo", null,
+                null, null, null, null, "ALLOW", null);
+        assertEquals(1, allowPublish.packages().size());
+        assertEquals("default-pkg", allowPublish.packages().get(0).packageName());
+
+        CodeArtifactService.ListPackagesResult allowUpstream = service.listPackages(REGION, "dom", null, "repo",
+                null, null, null, null, null, null, "ALLOW");
+        assertEquals(1, allowUpstream.packages().size());
+        assertEquals("blocked-pkg", allowUpstream.packages().get(0).packageName());
+    }
+
+    /**
+     * Raised by Greptile's review: a pypi package's origin configuration is stored under whatever
+     * spelling the caller set it with, but the real sidecar always lists the package under its own
+     * PEP 503-normalized spelling. Without normalizing both sides to the same form before union-ing
+     * them, the two would appear as two distinct packages, and the normalized one's own
+     * restrictions would never resolve to what was actually configured.
+     */
+    @Test
+    void listPackagesNormalizesAPypiPackageSoAnOriginConfigSetUnderADifferentSpellingIsNotDuplicatedOrLost() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        when(pypiserverClient.listPackages(eq(created.getSidecarContainerIds().get("pypi")), eq("dom"), eq("repo")))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageIdentifier(null, "my-proj")));
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "pypi", null, "My_Proj", "BLOCK", "ALLOW");
+
+        CodeArtifactService.ListPackagesResult result = service.listPackages(REGION, "dom", null, "repo", "pypi",
+                null, null, null, null, null, null);
+
+        assertEquals(1, result.packages().size());
+        assertEquals("my-proj", result.packages().get(0).packageName());
+        assertEquals("BLOCK", result.packages().get(0).publishRestriction());
+        assertEquals("ALLOW", result.packages().get(0).upstreamRestriction());
+    }
+
+    /**
+     * Raised by Greptile's review: {@code packageSortCursor} used to join its three fields with a
+     * plain {@code ::}, which namespace/package names are allowed to contain themselves, so two
+     * different coordinates could collide on the exact same cursor and {@code Pagination}'s
+     * strictly-greater-cursor resume would then skip whichever one sorted second.
+     */
+    @Test
+    void listPackagesPagesPastACursorCollisionWithoutSkippingEitherPackage() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "a::b", "c", "ALLOW", "BLOCK");
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "generic", "a", "b::c", "ALLOW", "BLOCK");
+
+        CodeArtifactService.ListPackagesResult firstPage = service.listPackages(REGION, "dom", null, "repo", null,
+                null, null, 1, null, null, null);
+        assertEquals(1, firstPage.packages().size());
+        assertNotNull(firstPage.nextToken());
+
+        CodeArtifactService.ListPackagesResult secondPage = service.listPackages(REGION, "dom", null, "repo", null,
+                null, null, 1, firstPage.nextToken(), null, null);
+        assertEquals(1, secondPage.packages().size());
+
+        assertNotEquals(firstPage.packages().get(0).namespace() + "/" + firstPage.packages().get(0).packageName(),
+                secondPage.packages().get(0).namespace() + "/" + secondPage.packages().get(0).packageName());
+    }
+
+    /**
+     * Raised by Greptile's review: a {@link PackageOriginConfig} persisted before {@code format}/
+     * {@code namespace}/{@code packageName} existed on it has none of the three, so {@code
+     * allPackagesInRepository}'s own normalized map can never resolve it. The package it configures
+     * is still found here through its real {@code generic} version record, so its restriction must
+     * still resolve to what was actually saved, not silently fall back to the ALLOW/BLOCK default.
+     */
+    @Test
+    void listPackagesFallsBackToTheRawKeyLookupForAnOriginConfigPersistedBeforeItCarriedItsOwnCoordinate() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        publishGeneric("repo", "legacy-pkg", "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+        String legacyRawKey = REGION + "::dom::repo::generic::ns::legacy-pkg";
+        packageOriginConfigStore.putForAccount(ACCOUNT_ID, legacyRawKey,
+                new PackageOriginConfig("BLOCK", "ALLOW", null, null, null));
+
+        CodeArtifactService.ListPackagesResult result = service.listPackages(REGION, "dom", null, "repo", null,
+                null, null, null, null, null, null);
+
+        assertEquals(1, result.packages().size());
+        assertEquals("BLOCK", result.packages().get(0).publishRestriction());
+        assertEquals("ALLOW", result.packages().get(0).upstreamRestriction());
+
+        CodeArtifactService.ListPackagesResult blockedOnly = service.listPackages(REGION, "dom", null, "repo", null,
+                null, null, null, null, "BLOCK", null);
+        assertEquals(1, blockedOnly.packages().size());
+    }
+
+    /**
+     * Raised by Greptile's review: disposing a pypi package's only version deletes its real
+     * sidecar content, so the sidecar's own listing no longer names it, but {@code
+     * disposePackageVersions} leaves a status override behind precisely so {@code
+     * ListPackageVersions} can keep reporting it as {@code Disposed}. With no origin configuration
+     * either, nothing else in the union would otherwise keep this package in {@code ListPackages}.
+     */
+    @Test
+    void listPackagesIncludesAPypiPackageWhoseOnlyVersionWasDisposed() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("pypi");
+        when(pypiserverClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0.0", Instant.ofEpochSecond(1000))));
+        when(pypiserverClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.0.0"))).thenReturn(List.of("my_pkg-1.0.0.tar.gz"));
+        service.disposePackageVersions(REGION, "dom", null, "repo", "pypi", null, "my-pkg", List.of("1.0.0"), null,
+                null);
+        when(pypiserverClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(List.of());
+
+        CodeArtifactService.ListPackagesResult result = service.listPackages(REGION, "dom", null, "repo", "pypi",
+                null, null, null, null, null, null);
+
+        assertEquals(1, result.packages().size());
+        assertEquals("my-pkg", result.packages().get(0).packageName());
+    }
+
+    @Test
+    void listPackagesDefaultPageSizeIsOneHundredNotFifty() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        for (int i = 0; i < 120; i++) {
+            publishGeneric("repo", String.format("pkg-%03d", i), "1.0.0", "a".getBytes(StandardCharsets.UTF_8));
+        }
+
+        CodeArtifactService.ListPackagesResult result = service.listPackages(REGION, "dom", null, "repo", null, null,
+                null, null, null, null, null);
+
+        assertEquals(100, result.packages().size());
+        assertNotNull(result.nextToken());
+    }
+
+    @Test
+    void listPackagesRejectsAnInvalidFormat() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.listPackages(REGION, "dom", null, "repo",
+                "not-a-format", null, null, null, null, null, null));
+        assertEquals("ValidationException", e.getErrorCode());
     }
 
     // ---------------------------------------------------------- GetPackageVersionReadme

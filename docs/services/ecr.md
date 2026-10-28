@@ -14,6 +14,10 @@
 | `UpdatePullThroughCacheRule` | Update a rule's credential or custom role |
 | `ValidatePullThroughCacheRule` | Validate that a configured rule exists and report it as usable |
 | `DeletePullThroughCacheRule` | Delete a pull-through cache rule by repository prefix |
+| `CreateRepositoryCreationTemplate` | Store a repository creation template under its prefix (recorded, not applied) |
+| `DescribeRepositoryCreationTemplates` | List templates, or those for given prefixes, with pagination |
+| `UpdateRepositoryCreationTemplate` | Replace the fields a request sets on a template |
+| `DeleteRepositoryCreationTemplate` | Delete a template by prefix |
 | `DescribeRepositories` | List repositories or fetch by name |
 | `DeleteRepository` | Delete a repository (with `force=true` semantics for non-empty repos) |
 | `GetAuthorizationToken` | Returns a docker-login token + proxy endpoint |
@@ -70,6 +74,7 @@ the optional `filter` fields.
   - `GetRegistryPolicy` and `DeleteRegistryPolicy` answer `RegistryPolicyNotFoundException` when no policy is set. `PutRegistryPolicy` refuses text that is not a JSON object.
   - An empty `rules` list in `PutReplicationConfiguration` clears the configuration. `DescribeRegistry` returns `{"rules": []}` until rules are set.
   - The scanning configuration is `BASIC` with no rules until one is put. `CONTINUOUS_SCAN` is refused with `BASIC`, since AWS offers it only with enhanced scanning. `BatchGetRepositoryScanningConfiguration` still reports each repository's own `scanOnPush`. Missing repository names appear in `failures` with `REPOSITORY_NOT_FOUND`, alongside configurations for the names that exist.
+- **Repository creation templates.** Templates are kept per account and Region, keyed by `prefix` (`ROOT` included). A new template defaults to `AES256` encryption and `MUTABLE` tags. `UpdateRepositoryCreationTemplate` replaces each field the request sets, an empty string or list clears it, and fields left out are kept. The exclusion filters are the exception: the model requires at least one, so `[]` is refused. Instead, an update that leaves the template in a mode without exclusions (`MUTABLE` or `IMMUTABLE`) drops the filters, which is what Terraform relies on, since it leaves the member out when the filters are removed. `DescribeRepositoryCreationTemplates` leaves out a requested prefix with no template rather than failing. Requests are checked against the vendored ECR model constraints, as the registry settings are, with `InvalidParameterException`. On top of the model, `appliedFor` must name at least one value, and policy text must be a JSON object. Nothing in Floci creates repositories through replication, pull through cache or create-on-push, so templates are never applied.
 - **Manifest format negotiation.** `BatchGetImage` forwards the caller's `acceptedMediaTypes` as the upstream `Accept` header. Modern OCI manifests (`application/vnd.oci.image.manifest.v1+json`) and Docker v2 schema 2 are both supported.
 - **Cross-account / cross-region isolation.** Internally the registry namespaces repositories as `<account>/<region>/<repoName>`, so the same repository name in different accounts or regions cannot collide.
 - **Reconcile on first start.** When the registry container starts, Floci queries `GET /v2/_catalog` and recreates `Repository` metadata entries for any namespaces present in the registry but missing from local storage. This means image bytes are never orphaned across restarts.
@@ -88,6 +93,7 @@ the optional `filter` fields.
 | `FLOCI_SERVICES_ECR_REGISTRY_MAX_PORT` | `5199` | Last private loopback port for the backing registry |
 | `FLOCI_SERVICES_ECR_DATA_PATH` | `./data/ecr` | Bind-mount root for the registry data directory |
 | `FLOCI_SERVICES_ECR_KEEP_RUNNING_ON_SHUTDOWN` | `true` | Leave the registry container running so the next Floci start adopts it |
+| `FLOCI_SERVICES_ECR_DOCKER_NETWORK` | Inherit Floci's container network | Docker network shared by Floci and the backing registry when running in Docker |
 | `FLOCI_SERVICES_ECR_URI_STYLE` | `hostname` | `hostname` = `*.dkr.ecr.<region>.localhost`; `path` = `localhost:<port>/<account>/<region>/<repo>` |
 | `FLOCI_SERVICES_ECR_TLS_URI` | `false` | Report `localhost.floci.io` registry addresses and an HTTPS login endpoint when global `FLOCI_TLS_ENABLED` is also `true` |
 | `FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES` | `true` | Use an AWS-shaped ECR image URI as-is when the Docker daemon already has that image, instead of rewriting it to the loopback registry |
@@ -270,6 +276,7 @@ The following ECR features are **not** implemented. Stored values for policies a
 - Image scanning (`StartImageScan`, `DescribeImageScanFindings`)
 - Image signing and notary attachments
 - Lifecycle policy enforcement (the policy text is stored but not applied)
+- Applying repository creation templates (they are stored, but Floci never creates repositories through replication, pull through cache or create-on-push)
 - Repository policy enforcement (no IAM evaluation against repository-level policies)
 - TLS via emulated ACM
 
@@ -278,6 +285,15 @@ The following ECR features are **not** implemented. Stored values for policies a
 **`Function.TimedOut` when invoking image-backed Lambdas on native Linux Docker.** Lambda containers reach Floci's Runtime API server via the docker bridge gateway. On Ubuntu / Pop!_OS / Debian with UFW enabled, the default `INPUT DROP` policy blocks this path. See [Quick Start → Lambda on native Linux Docker](../getting-started/quick-start.md#lambda-on-native-linux-docker-ufw) for the one-line `ufw allow in on docker0` fix.
 
 **`docker login` fails with TLS errors.** When TLS URI advertising is enabled, Docker must trust the Floci CA independently of the AWS CLI, and the server certificate must cover the returned registry hostname. Follow the trust steps above; setting only `AWS_CA_BUNDLE` is insufficient. Default loopback URIs remain usable over HTTP without additional Docker trust configuration.
+
+**Registry requests return `503 Service Unavailable`.** Floci could not start or connect to its
+backing registry. Errors detected by Floci include a Distribution `errors` array with a network configuration
+hint. Check Docker availability and the registry container's health. When Floci itself runs in
+Docker, attach Floci and its registry to the same user-defined network. Docker's default `bridge`
+does not resolve container names, which Floci uses to reach the registry. Create a network with
+`docker network create floci-net`, start Floci with `--network floci-net`, and set
+`FLOCI_SERVICES_ECR_DOCKER_NETWORK=floci-net` if selecting the registry network explicitly.
+See [Docker's bridge network documentation](https://docs.docker.com/engine/network/drivers/bridge/).
 
 **Disk not reclaimed after deleting images.** `BatchDeleteImage` removes manifests but blobs remain on disk until garbage collection runs. Trigger it with `curl -X POST http://localhost:4566/_floci/ecr/gc`. The endpoint runs `registry garbage-collect` inside the backing container and returns the reclaimed blob list. The operation is serialized — ECR API calls block for its duration (typically a few seconds).
 

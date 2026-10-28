@@ -12,6 +12,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -117,7 +118,7 @@ public class BcmPricingCalculatorJsonHandler {
         return out;
     }
 
-    private static double epochSeconds(java.time.Instant instant) {
+    private static double epochSeconds(Instant instant) {
         return instant.getEpochSecond() + instant.getNano() / 1_000_000_000.0;
     }
 

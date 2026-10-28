@@ -8,6 +8,14 @@ resource associations, provisioned products, and organization/account portfolio 
 Portfolio-share operations complete immediately while preserving the AWS status-token
 workflow.
 
+`ListPortfolios` supports `PageSize` from 0 to 100 and opaque `PageToken` /
+`NextPageToken` cursors. Floci uses 100 items when the size is omitted or zero;
+this is an emulator default, since AWS does not document those cases. Tokens
+are scoped to the action, account, and request region and may be resumed with a
+different page size. Final pages omit `NextPageToken`. Invalid sizes, malformed
+tokens, and tokens longer than 2024 characters return `InvalidParametersException`.
+The existing seeded Control Tower portfolio participates in pagination.
+
 ## Supported Actions
 
 <!-- floci:actions:start -->

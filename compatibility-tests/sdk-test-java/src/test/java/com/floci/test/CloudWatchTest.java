@@ -6,6 +6,7 @@ import software.amazon.awssdk.services.cloudwatch.model.*;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.*;
@@ -248,5 +249,51 @@ class CloudWatchTest {
                         .isEqualTo("MissingParameter"));
 
         assertThat(cloudWatchClient.listMetrics(request -> request.namespace(namespace)).metrics()).isEmpty();
+    }
+
+    @Test
+    @DisplayName("DescribeAlarmHistory lists state transitions newest first and pages")
+    void testDescribeAlarmHistory() {
+        String alarmName = "java-history-" + System.currentTimeMillis();
+        cloudWatchClient.putMetricAlarm(request -> request
+                .alarmName(alarmName)
+                .metricName("Depth")
+                .namespace("JavaTestHistory")
+                .statistic(Statistic.MAXIMUM)
+                .period(60)
+                .evaluationPeriods(1)
+                .threshold(1.0)
+                .comparisonOperator(ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD)
+                .treatMissingData("ignore"));
+        try {
+            for (StateValue state : List.of(StateValue.OK, StateValue.ALARM, StateValue.OK)) {
+                cloudWatchClient.setAlarmState(request -> request
+                        .alarmName(alarmName).stateValue(state).stateReason("manual"));
+            }
+
+            DescribeAlarmHistoryResponse history = cloudWatchClient.describeAlarmHistory(request -> request
+                    .alarmName(alarmName)
+                    .historyItemType(HistoryItemType.STATE_UPDATE));
+            assertThat(history.alarmHistoryItems())
+                    .extracting(AlarmHistoryItem::historySummary)
+                    .containsExactly("Alarm updated from ALARM to OK", "Alarm updated from OK to ALARM",
+                            "Alarm updated from INSUFFICIENT_DATA to OK");
+            assertThat(history.alarmHistoryItems().get(0).alarmType()).isEqualTo(AlarmType.METRIC_ALARM);
+            assertThat(history.alarmHistoryItems().get(0).timestamp())
+                    .isAfter(Instant.now().minus(5, ChronoUnit.MINUTES));
+
+            DescribeAlarmHistoryResponse page = cloudWatchClient.describeAlarmHistory(request -> request
+                    .alarmName(alarmName).maxRecords(1));
+            assertThat(page.alarmHistoryItems()).hasSize(1);
+            assertThat(page.nextToken()).isNotBlank();
+
+            assertThatThrownBy(() -> cloudWatchClient.describeAlarmHistory(request -> request
+                    .startDate(Instant.parse("2026-10-26T16:21:49.900Z"))
+                    .endDate(Instant.parse("2026-10-26T16:21:49.500Z"))))
+                    .isInstanceOf(InvalidParameterValueException.class)
+                    .hasMessageContaining("must be before end date");
+        } finally {
+            cloudWatchClient.deleteAlarms(request -> request.alarmNames(alarmName));
+        }
     }
 }

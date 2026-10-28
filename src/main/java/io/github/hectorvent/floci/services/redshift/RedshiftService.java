@@ -14,18 +14,23 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
+import io.github.hectorvent.floci.services.redshift.RedshiftEventCatalog.EventInfo;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerManager;
+import io.github.hectorvent.floci.services.redshift.model.AutomatedSnapshotState;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.ClusterParameterGroup;
 import io.github.hectorvent.floci.services.redshift.model.ClusterSubnetGroup;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshift.model.EventSubscription;
 import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshift.model.Parameter;
+import io.github.hectorvent.floci.services.redshift.model.RedshiftEvent;
 import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import io.github.hectorvent.floci.services.redshift.model.SnapshotCopyGrant;
 import io.github.hectorvent.floci.services.redshift.model.SnapshotSchedule;
 import io.github.hectorvent.floci.services.redshift.proxy.RedshiftProxyManager;
+import io.github.hectorvent.floci.services.secretsmanager.ManagedSecretRotator;
 import io.github.hectorvent.floci.services.secretsmanager.RandomPasswordGenerator;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
@@ -36,10 +41,13 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -48,6 +56,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -55,11 +64,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
-import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class RedshiftService {
+public class RedshiftService implements ManagedSecretRotator {
     private static final Logger LOG = Logger.getLogger(RedshiftService.class);
 
     // The group every cluster starts on until one is named.
@@ -82,6 +90,7 @@ public class RedshiftService {
     private final AccountAwareStorageBackend<Integration> integrations;
     private final AccountAwareStorageBackend<SnapshotCopyGrant> snapshotCopyGrants;
     private final AccountAwareStorageBackend<SnapshotSchedule> snapshotSchedules;
+    private final AccountAwareStorageBackend<AutomatedSnapshotState> automatedSnapshotStates;
     private final RedshiftContainerManager containerManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -92,9 +101,11 @@ public class RedshiftService {
     private final ObjectMapper objectMapper;
     private final DynamoDbStreamReader streamReader;
     private final RedshiftAuditLogPublisher auditLogPublisher;
+    private final RedshiftEventService events;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<ResourceKey, ResourceLock> resourceLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, ResourceKey> managedRotationReservations = new ConcurrentHashMap<>();
 
     private record ResourceKey(String accountId, String kind, String identifier) { }
 
@@ -104,7 +115,11 @@ public class RedshiftService {
     }
 
     private <T> T withResourceLock(String kind, String identifier, Supplier<T> work) {
-        ResourceKey key = new ResourceKey(clusters.accountId(), kind, identifier);
+        return withResourceLock(clusters.accountId(), kind, identifier, work);
+    }
+
+    private <T> T withResourceLock(String accountId, String kind, String identifier, Supplier<T> work) {
+        ResourceKey key = new ResourceKey(accountId, kind, identifier);
         ResourceLock scoped = resourceLocks.compute(key, (ignored, existing) -> {
             ResourceLock selected = existing == null ? new ResourceLock() : existing;
             selected.users++;
@@ -121,11 +136,41 @@ public class RedshiftService {
 
     // Acquire resource locks before the service monitor; snapshot I/O never takes the monitor.
     private <T> T mutateCluster(String identifier, Supplier<T> mutation) {
-        return withResourceLock("cluster", identifier, () -> mutate(mutation));
+        return withResourceLock("cluster", identifier, () -> {
+            ensureNoManagedRotation(clusters.accountId(), identifier);
+            return mutate(mutation);
+        });
+    }
+
+    private void ensureNoManagedRotation(String accountId, String identifier) {
+        ResourceKey key = new ResourceKey(accountId, "cluster", identifier);
+        if (managedRotationReservations.containsValue(key)) {
+            throw new AwsException("InvalidRequestException",
+                    "The cluster's managed master password is being rotated. Try again after rotation completes.", 400);
+        }
     }
 
     private synchronized <T> T mutate(Supplier<T> mutation) {
         return mutation.get();
+    }
+
+    private static final DateTimeFormatter EVENT_MESSAGE_TIME =
+            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneOffset.UTC);
+
+    private static String eventTime() {
+        return EVENT_MESSAGE_TIME.format(Instant.now()) + " UTC";
+    }
+
+    private void emitEvent(EventInfo info, String sourceIdentifier, String message) {
+        if (events != null) {
+            events.record(info, sourceIdentifier, message);
+        }
+    }
+
+    private void emitSnapshotEvent(String accountId, String region, EventInfo info, String sourceIdentifier, String message) {
+        if (events != null) {
+            events.recordForAccount(accountId, region, info, sourceIdentifier, message);
+        }
     }
 
     @Inject
@@ -134,7 +179,8 @@ public class RedshiftService {
                             RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
                             RedshiftCredentialBroker credentialBroker,
                             SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
-                            DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher) {
+                            DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher,
+                            RedshiftEventService events) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
@@ -142,6 +188,8 @@ public class RedshiftService {
         this.integrations = storageFactory.create("redshift", "redshift-integrations.json", new TypeReference<Map<String, Integration>>() {});
         this.snapshotCopyGrants = storageFactory.create("redshift", "redshift-snapshot-copy-grants.json", new TypeReference<Map<String, SnapshotCopyGrant>>() {});
         this.snapshotSchedules = storageFactory.create("redshift", "redshift-snapshot-schedules.json", new TypeReference<Map<String, SnapshotSchedule>>() {});
+        this.automatedSnapshotStates = storageFactory.create("redshift", "redshift-automated-snapshot-state.json",
+                new TypeReference<Map<String, AutomatedSnapshotState>>() {});
         this.containerManager = containerManager;
         this.config = config;
         this.regionResolver = regionResolver;
@@ -152,6 +200,16 @@ public class RedshiftService {
         this.objectMapper = objectMapper;
         this.streamReader = streamReader;
         this.auditLogPublisher = auditLogPublisher;
+        this.events = events;
+    }
+
+    RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
+                    EmulatorConfig config, RegionResolver regionResolver, RedshiftProxyManager proxyManager,
+                    DockerHostResolver dockerHostResolver, RedshiftCredentialBroker credentialBroker,
+                    SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
+                    DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher) {
+        this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
+                credentialBroker, secretsManagerService, objectMapper, streamReader, auditLogPublisher, null);
     }
 
     RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
@@ -248,13 +306,32 @@ public class RedshiftService {
     public Cluster createCluster(String identifier, String nodeType, String username, String password,
                                                String clusterSubnetGroupName, List<String> vpcSecurityGroupIds,
                                                List<String> iamRoleArns, String defaultIamRoleArn) {
-        return mutateCluster(identifier, () -> createClusterLocked(identifier, nodeType, username, password,
-                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn));
+        return createCluster(identifier, nodeType, username, password, clusterSubnetGroupName,
+                vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn, null);
+    }
+
+    public Cluster createCluster(String identifier, String nodeType, String username, String password,
+                                 String clusterSubnetGroupName, List<String> vpcSecurityGroupIds,
+                                 List<String> iamRoleArns, String defaultIamRoleArn, Integer automatedRetention) {
+        validateAutomatedRetention(nodeType, automatedRetention == null ? 1 : automatedRetention);
+        // The event is recorded under the cluster lock so a queued delete or reboot cannot log first.
+        return mutateCluster(identifier, () -> {
+            Cluster cluster = createClusterLocked(identifier, nodeType, username, password,
+                    clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn, automatedRetention);
+            emitClusterCreated(identifier);
+            return cluster;
+        });
+    }
+
+    private void emitClusterCreated(String identifier) {
+        emitEvent(RedshiftEventCatalog.CLUSTER_CREATED, identifier, "Amazon Redshift cluster '" + identifier
+                + "' has been created at " + eventTime() + " and is ready for use.");
     }
 
     private Cluster createClusterLocked(String identifier, String nodeType, String username, String password,
                                                String clusterSubnetGroupName, List<String> vpcSecurityGroupIds,
-                                               List<String> iamRoleArns, String defaultIamRoleArn) {
+                                               List<String> iamRoleArns, String defaultIamRoleArn,
+                                               Integer automatedRetention) {
         if (clusters.get(identifier).isPresent()) {
             throw new AwsException("ClusterAlreadyExists", "Cluster " + identifier + " already exists", 400);
         }
@@ -267,6 +344,10 @@ public class RedshiftService {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier(identifier);
         cluster.setNodeType(nodeType);
+        cluster.setAutomatedSnapshotRetentionPeriod(automatedRetention);
+        cluster.setAutomatedSnapshotAnchor(Instant.now());
+        cluster.setSnapshotGeneration(UUID.randomUUID().toString());
+        cluster.setSnapshotRegion(regionResolver.getRegion());
         cluster.setMasterUsername(username);
         cluster.setMasterPassword(password);
         cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
@@ -342,20 +423,36 @@ public class RedshiftService {
             String identifier, String nodeType, String username, String clusterSubnetGroupName,
             List<String> vpcSecurityGroupIds, List<String> iamRoleArns,
             String kmsKeyId, String region, String defaultIamRoleArn) {
+        return createClusterWithManagedMasterPassword(identifier, nodeType, username, clusterSubnetGroupName,
+                vpcSecurityGroupIds, iamRoleArns, kmsKeyId, region, defaultIamRoleArn, null);
+    }
+
+    public Cluster createClusterWithManagedMasterPassword(
+            String identifier, String nodeType, String username, String clusterSubnetGroupName,
+            List<String> vpcSecurityGroupIds, List<String> iamRoleArns,
+            String kmsKeyId, String region, String defaultIamRoleArn, Integer automatedRetention) {
+        validateAutomatedRetention(nodeType, automatedRetention == null ? 1 : automatedRetention);
         return mutateCluster(identifier, () -> createClusterWithManagedMasterPasswordLocked(identifier,
-                nodeType, username, clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, kmsKeyId, region, defaultIamRoleArn));
+                nodeType, username, clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, kmsKeyId, region,
+                defaultIamRoleArn, automatedRetention));
     }
 
     private Cluster createClusterWithManagedMasterPasswordLocked(
             String identifier, String nodeType, String username, String clusterSubnetGroupName,
             List<String> vpcSecurityGroupIds, List<String> iamRoleArns,
-            String kmsKeyId, String region, String defaultIamRoleArn) {
+            String kmsKeyId, String region, String defaultIamRoleArn, Integer automatedRetention) {
         requireSecretsManager();
         String password = RandomPasswordGenerator.generate(objectMapper.createObjectNode());
-        Cluster cluster = createCluster(identifier, nodeType, username, password,
-                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn);
+        // Runs under the cluster lock taken by the caller, which also covers the event recorded below.
+        Cluster cluster = createClusterLocked(identifier, nodeType, username, password,
+                clusterSubnetGroupName, vpcSecurityGroupIds, iamRoleArns, defaultIamRoleArn, automatedRetention);
+        if (region != null) {
+            cluster.setSnapshotRegion(region);
+        }
         try {
-            return createManagedMasterSecret(cluster, kmsKeyId, region);
+            Cluster created = createManagedMasterSecret(cluster, kmsKeyId, region);
+            emitClusterCreated(identifier);
+            return created;
         } catch (RuntimeException e) {
             rollbackManagedMasterPasswordCluster(cluster);
             throw e;
@@ -699,6 +796,7 @@ public class RedshiftService {
     public Cluster deleteCluster(String identifier, Boolean skipFinalClusterSnapshot,
                                                String finalSnapshotIdentifier, Integer finalSnapshotRetentionPeriod) {
         return withResourceLock("cluster", identifier, () -> {
+            ensureNoManagedRotation(clusters.accountId(), identifier);
             Supplier<Cluster> deletion = () -> deleteClusterWithFinalSnapshot(identifier, skipFinalClusterSnapshot,
                     finalSnapshotIdentifier, finalSnapshotRetentionPeriod);
             return Boolean.TRUE.equals(skipFinalClusterSnapshot) ? deletion.get()
@@ -735,7 +833,11 @@ public class RedshiftService {
             createSnapshot(finalSnapshotIdentifier, identifier, retentionPeriod);
         }
 
-        return mutate(() -> removeCluster(identifier, cluster));
+        Cluster removed = mutate(() -> removeCluster(identifier, cluster));
+        emitEvent(RedshiftEventCatalog.CLUSTER_DELETED, identifier, "Amazon Redshift cluster '" + identifier
+                + "' has been deleted at " + eventTime() + ". A final snapshot was "
+                + (skipSnapshot ? "not " : "") + "saved.");
+        return removed;
     }
 
     private Cluster removeCluster(String identifier, Cluster cluster) {
@@ -780,19 +882,39 @@ public class RedshiftService {
     public Cluster modifyCluster(String clusterIdentifier, String nodeType, Integer numberOfNodes,
                                                String masterUserPassword, String clusterParameterGroupName,
                                                List<String> vpcSecurityGroupIds, Boolean multiAZ) {
-        return mutateCluster(clusterIdentifier, () -> modifyClusterLocked(clusterIdentifier, nodeType,
-                numberOfNodes, masterUserPassword, clusterParameterGroupName, vpcSecurityGroupIds, multiAZ));
+        return modifyCluster(clusterIdentifier, nodeType, numberOfNodes, masterUserPassword, clusterParameterGroupName,
+                vpcSecurityGroupIds, multiAZ, null);
+    }
+
+    public Cluster modifyCluster(String clusterIdentifier, String nodeType, Integer numberOfNodes,
+                                 String masterUserPassword, String clusterParameterGroupName,
+                                 List<String> vpcSecurityGroupIds, Boolean multiAZ, Integer automatedRetention) {
+        return withResourceLock("cluster", clusterIdentifier, () -> {
+            Cluster cluster = mutate(() -> modifyClusterLocked(clusterIdentifier, nodeType,
+                    numberOfNodes, masterUserPassword, clusterParameterGroupName, vpcSecurityGroupIds, multiAZ,
+                    automatedRetention));
+            if (automatedRetention != null) {
+                expireAutomatedSnapshots(clusters.accountId(), clusterIdentifier, cluster, Instant.now());
+            }
+            return cluster;
+        });
     }
 
     private Cluster modifyClusterLocked(String clusterIdentifier, String nodeType, Integer numberOfNodes,
                                                String masterUserPassword, String clusterParameterGroupName,
-                                               List<String> vpcSecurityGroupIds, Boolean multiAZ) {
+                                               List<String> vpcSecurityGroupIds, Boolean multiAZ,
+                                               Integer automatedRetention) {
         Cluster cluster = clusters.get(clusterIdentifier)
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+        validateAutomatedRetention(nodeType == null ? cluster.getNodeType() : nodeType,
+                automatedRetention == null ? cluster.getAutomatedSnapshotRetentionPeriod() : automatedRetention);
 
+        boolean passwordChanged = masterUserPassword != null && !masterUserPassword.isBlank();
+        boolean parameterGroupChanged = clusterParameterGroupName != null && !clusterParameterGroupName.isBlank();
+        boolean securityGroupsChanged = vpcSecurityGroupIds != null && !vpcSecurityGroupIds.isEmpty();
         // alterUserPassword runs before any mutation of the cluster object (a live reference
         // from HybridStorage, not a copy); if it throws, no metadata has been changed yet.
-        if (masterUserPassword != null && !masterUserPassword.isBlank()) {
+        if (passwordChanged) {
             containerManager.alterUserPassword(clusters.accountId(), clusterIdentifier,
                     cluster.getMasterUsername(), masterUserPassword);
             cluster.setMasterPassword(masterUserPassword);
@@ -818,10 +940,30 @@ public class RedshiftService {
         if (multiAZ != null) {
             cluster.setMultiAZ(multiAZ);
         }
+        if (automatedRetention != null) {
+            if (cluster.getAutomatedSnapshotRetentionPeriod() == 0 && automatedRetention > 0) {
+                cluster.setAutomatedSnapshotAnchor(Instant.now());
+            }
+            cluster.setAutomatedSnapshotRetentionPeriod(automatedRetention);
+        }
 
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
         registerAuditLogging(clusters.accountId(), cluster);
+        if (passwordChanged) {
+            emitEvent(RedshiftEventCatalog.ADMIN_CREDENTIALS_UPDATED, clusterIdentifier,
+                    "Your admin credentials for your Amazon Redshift cluster: " + clusterIdentifier
+                            + " were updated at " + eventTime() + ".");
+        }
+        if (parameterGroupChanged) {
+            emitEvent(RedshiftEventCatalog.CLUSTER_PARAMETER_GROUP_CHANGED, clusterIdentifier,
+                    "Your Amazon Redshift cluster " + clusterIdentifier + " was modified to use parameter group "
+                            + clusterParameterGroupName + " at " + eventTime() + ".");
+        }
+        if (securityGroupsChanged) {
+            emitEvent(RedshiftEventCatalog.CLUSTER_SECURITY_GROUPS_UPDATED, clusterIdentifier,
+                    "VPC security groups for cluster " + clusterIdentifier + " updated at " + eventTime() + ".");
+        }
         return cluster;
     }
 
@@ -908,6 +1050,98 @@ public class RedshiftService {
                     .toString();
         } catch (RuntimeException e) {
             throw new AwsException("InternalFailure", "Failed to encode managed master secret", 500);
+        }
+    }
+
+    @Override
+    public boolean supports(String secretArn, String region) {
+        if (!AwsArnUtils.isArn(secretArn) || !region.equals(AwsArnUtils.parse(secretArn).region())) {
+            return false;
+        }
+        return clusters.scanAllAccountEntries(key -> true).stream()
+                .anyMatch(entry -> secretArn.equals(entry.value().getMasterPasswordSecretArn()));
+    }
+
+    @Override
+    public void rotate(String secretArn, String region, ManagedSecretRotator.Rotation rotation) {
+        AccountAwareStorageBackend.AccountEntry<Cluster> entry = clusters.scanAllAccountEntries(key -> true).stream()
+                .filter(candidate -> secretArn.equals(candidate.value().getMasterPasswordSecretArn()))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The Redshift cluster for this managed secret no longer exists.", 400));
+        withResourceLock(entry.accountId(), "cluster", entry.key(), () -> mutate(() -> {
+            Cluster cluster = clusters.getForAccount(entry.accountId(), entry.key())
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "The Redshift cluster for this managed secret no longer exists.", 400));
+            if (!secretArn.equals(cluster.getMasterPasswordSecretArn())) {
+                throw new AwsException("ResourceNotFoundException",
+                        "The Redshift cluster for this managed secret no longer exists.", 400);
+            }
+            if (!"available".equals(cluster.getClusterStatus())) {
+                throw new AwsException("InvalidRequestException",
+                        "The Redshift cluster must be available to rotate its master password.", 400);
+            }
+            String oldPassword = cluster.getMasterPassword();
+            String newPassword = RandomPasswordGenerator.generate(objectMapper.createObjectNode()
+                    .put("ExcludeCharacters", "'\"/@\\"));
+            rotation.commit(() -> {
+                containerManager.alterUserPassword(entry.accountId(), cluster.getClusterIdentifier(),
+                        cluster.getMasterUsername(), newPassword);
+                proxyManager.updateMasterPassword(
+                        relayKey(entry.accountId(), cluster.getClusterIdentifier()), newPassword);
+                cluster.setMasterPassword(newPassword);
+                clusters.putForAccount(entry.accountId(), cluster.getClusterIdentifier(), cluster);
+                clusters.flush();
+                return managedMasterSecret(cluster, newPassword);
+            }, () -> {
+                containerManager.alterUserPassword(entry.accountId(), cluster.getClusterIdentifier(),
+                        cluster.getMasterUsername(), oldPassword);
+                proxyManager.updateMasterPassword(
+                        relayKey(entry.accountId(), cluster.getClusterIdentifier()), oldPassword);
+                cluster.setMasterPassword(oldPassword);
+                clusters.putForAccount(entry.accountId(), cluster.getClusterIdentifier(), cluster);
+                clusters.flush();
+            });
+            return null;
+        }));
+    }
+
+    @Override
+    public void reserve(String secretArn, String region) {
+        AccountAwareStorageBackend.AccountEntry<Cluster> entry = clusters.scanAllAccountEntries(key -> true).stream()
+                .filter(candidate -> secretArn.equals(candidate.value().getMasterPasswordSecretArn()))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The Redshift cluster for this managed secret no longer exists.", 400));
+        ResourceKey key = new ResourceKey(entry.accountId(), "cluster", entry.key());
+        withResourceLock(entry.accountId(), "cluster", entry.key(), () -> {
+            Cluster cluster = clusters.getForAccount(entry.accountId(), entry.key())
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "The Redshift cluster for this managed secret no longer exists.", 400));
+            if (!secretArn.equals(cluster.getMasterPasswordSecretArn())) {
+                throw new AwsException("ResourceNotFoundException",
+                        "The Redshift cluster for this managed secret no longer exists.", 400);
+            }
+            if (!"available".equals(cluster.getClusterStatus())) {
+                throw new AwsException("InvalidRequestException",
+                        "The Redshift cluster must be available to rotate its master password.", 400);
+            }
+            if (managedRotationReservations.putIfAbsent(secretArn, key) != null) {
+                throw new AwsException("InvalidRequestException",
+                        "The cluster's managed master password is already being rotated.", 400);
+            }
+            return null;
+        });
+    }
+
+    @Override
+    public void release(String secretArn, String region) {
+        ResourceKey key = managedRotationReservations.get(secretArn);
+        if (key != null) {
+            withResourceLock(key.accountId(), key.kind(), key.identifier(), () -> {
+                managedRotationReservations.remove(secretArn, key);
+                return null;
+            });
         }
     }
 
@@ -1078,6 +1312,8 @@ public class RedshiftService {
 
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
+        emitEvent(RedshiftEventCatalog.CLUSTER_REBOOTED, clusterIdentifier, "Your Amazon Redshift cluster "
+                + clusterIdentifier + " was rebooted at " + eventTime() + ".");
         return cluster;
     }
 
@@ -1098,9 +1334,13 @@ public class RedshiftService {
 
     /** Absolute, normalised {@code <persistentPath>/redshift-dumps/<accountId>} for this request's account. */
     private Path accountDumpDir() {
+        return accountDumpDir(clusters.accountId());
+    }
+
+    private Path accountDumpDir(String accountId) {
         return Paths.get(config.storage().persistentPath())
                 .resolve("redshift-dumps")
-                .resolve(clusters.accountId())
+                .resolve(accountId)
                 .toAbsolutePath()
                 .normalize();
     }
@@ -1129,39 +1369,65 @@ public class RedshiftService {
         if (clusterOpt.isEmpty()) {
             throw new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404);
         }
-        if (snapshots.get(snapshotIdentifier).isPresent()) {
+        return createSnapshot(clusters.accountId(), snapshotIdentifier, clusterOpt.get(), retentionPeriod,
+                Instant.now(), null);
+    }
+
+    private Snapshot createSnapshot(String accountId, String snapshotIdentifier, Cluster cluster,
+                                     Integer retentionPeriod, Instant now, Instant scheduledTime) {
+        validateSnapshotIdentifier(snapshotIdentifier);
+        String clusterIdentifier = cluster.getClusterIdentifier();
+        if ((scheduledTime == null ? snapshots.get(snapshotIdentifier)
+                : snapshots.getForAccount(accountId, snapshotIdentifier)).isPresent()) {
             throw new AwsException("ClusterSnapshotAlreadyExists", "Snapshot " + snapshotIdentifier + " already exists", 400);
         }
 
-        Cluster cluster = clusterOpt.get();
         Snapshot snapshot = new Snapshot();
         snapshot.setSnapshotIdentifier(snapshotIdentifier);
         snapshot.setClusterIdentifier(clusterIdentifier);
         snapshot.setStatus("available");
         snapshot.setMasterUsername(cluster.getMasterUsername());
         snapshot.setMasterPassword(cluster.getMasterPassword());
-        snapshot.setSnapshotArn(snapshotArn(clusterIdentifier, snapshotIdentifier));
-        snapshot.setSnapshotCreateTime(Instant.now());
+        snapshot.setSnapshotArn(scheduledTime == null ? snapshotArn(clusterIdentifier, snapshotIdentifier)
+                : AwsArnUtils.Arn.of("redshift", snapshotRegion(cluster), accountId,
+                        "snapshot:" + clusterIdentifier + "/" + snapshotIdentifier).toString());
+        snapshot.setSnapshotCreateTime(now);
         snapshot.setManualSnapshotRetentionPeriod(retentionPeriod);
+        snapshot.setSnapshotType(scheduledTime == null ? "manual" : "automated");
+        snapshot.setScheduledTime(scheduledTime);
+        snapshot.setClusterGeneration(cluster.getSnapshotGeneration());
+        if (scheduledTime != null) {
+            snapshot.setAutomatedSnapshotRetentionPeriod(cluster.getAutomatedSnapshotRetentionPeriod());
+        }
         if (cluster.getEndpoint() != null) {
             snapshot.setPort(cluster.getEndpoint().getPort());
         } else {
             snapshot.setPort(5439);
         }
 
-        Path dumpDir = accountDumpDir();
+        Path dumpDir = accountDumpDir(accountId);
         // Defence in depth: validateSnapshotIdentifier already rejects path separators,
         // but keep the containment check so the dump can never land outside the account dir.
         Path dumpFile = dumpDir.resolve(snapshotIdentifier + ".sql").normalize();
         if (!dumpFile.startsWith(dumpDir)) {
             throw new AwsException("InvalidParameterValue", "Invalid snapshot identifier", 400);
         }
+        boolean finalSnapshot = retentionPeriod != null;
+        String eventRegion = scheduledTime == null ? regionResolver.getRegion() : snapshotRegion(cluster);
+        emitSnapshotEvent(accountId, eventRegion,
+                finalSnapshot ? RedshiftEventCatalog.FINAL_SNAPSHOT_STARTED : RedshiftEventCatalog.SNAPSHOT_STARTED,
+                snapshotIdentifier, (finalSnapshot ? "The final snapshot '" : "A user snapshot '") + snapshotIdentifier
+                        + "' for Amazon Redshift cluster '" + clusterIdentifier + "' started at " + eventTime() + ".");
         boolean committed = false;
         try {
             Files.createDirectories(dumpDir);
-            containerManager.takeSnapshot(clusters.accountId(), clusterIdentifier, cluster.getMasterUsername(), dumpFile);
+            containerManager.takeSnapshot(accountId, clusterIdentifier, cluster.getMasterUsername(), dumpFile);
             snapshot.setSqlDump(dumpFile.toString());
-            snapshots.putAllAtomically(Map.of(snapshotIdentifier, snapshot));
+            if (scheduledTime == null) {
+                snapshots.putAllAtomically(Map.of(snapshotIdentifier, snapshot));
+            } else {
+                snapshots.putAllAtomicallyForAccount(accountId, Map.of(snapshotIdentifier, snapshot));
+            }
             committed = true;
             snapshots.flush();
         } catch (Exception e) {
@@ -1172,6 +1438,11 @@ public class RedshiftService {
                     e.addSuppressed(cleanupFailure);
                 }
             }
+            emitSnapshotEvent(accountId, eventRegion,
+                    finalSnapshot ? RedshiftEventCatalog.FINAL_SNAPSHOT_FAILED : RedshiftEventCatalog.SNAPSHOT_FAILED,
+                    snapshotIdentifier, (finalSnapshot ? "The final snapshot '" : "The user snapshot '")
+                            + snapshotIdentifier + "' for your Amazon Redshift cluster '" + clusterIdentifier
+                            + "' failed at " + eventTime() + ".");
             if (e instanceof AwsException awsFailure) {
                 throw awsFailure;
             }
@@ -1181,6 +1452,11 @@ public class RedshiftService {
             throw failure;
         }
 
+        emitSnapshotEvent(accountId, eventRegion,
+                finalSnapshot ? RedshiftEventCatalog.FINAL_SNAPSHOT_COMPLETED : RedshiftEventCatalog.SNAPSHOT_COMPLETED,
+                snapshotIdentifier, (finalSnapshot ? "The final snapshot '" : "The user snapshot '")
+                        + snapshotIdentifier + "' for your Amazon Redshift cluster '" + clusterIdentifier
+                        + "' completed successfully at " + eventTime() + ".");
         return snapshot;
     }
 
@@ -1218,6 +1494,9 @@ public class RedshiftService {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotIdentifier + " not found", 404);
         }
         Snapshot snapshot = snapshotOpt.get();
+        if ("automated".equals(snapshot.getSnapshotType())) {
+            throw new AwsException("InvalidClusterSnapshotState", "Automated snapshots cannot be deleted manually", 400);
+        }
         snapshots.delete(snapshotIdentifier);
         snapshots.flush();
         if (isTrustedDumpPath(snapshot.getSqlDump())) {
@@ -1228,6 +1507,9 @@ public class RedshiftService {
             }
         }
         snapshot.setStatus("deleted");
+        emitEvent(RedshiftEventCatalog.SNAPSHOT_DELETED, snapshotIdentifier, "The cluster snapshot '"
+                + snapshotIdentifier + "' for Amazon Redshift cluster '" + snapshot.getClusterIdentifier()
+                + "' was deleted at " + eventTime() + ".");
         return snapshot;
     }
 
@@ -1236,8 +1518,11 @@ public class RedshiftService {
     }
 
     public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType) {
-        return withResourceLock("cluster", clusterIdentifier, () -> withResourceLock("snapshot", snapshotIdentifier,
-                () -> mutate(() -> restoreSnapshot(clusterIdentifier, snapshotIdentifier, nodeType))));
+        return withResourceLock("cluster", clusterIdentifier, () -> {
+            ensureNoManagedRotation(clusters.accountId(), clusterIdentifier);
+            return withResourceLock("snapshot", snapshotIdentifier,
+                    () -> mutate(() -> restoreSnapshot(clusterIdentifier, snapshotIdentifier, nodeType)));
+        });
     }
 
     public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType,
@@ -1248,6 +1533,7 @@ public class RedshiftService {
         }
         return withResourceLock("cluster", clusterIdentifier, () -> withResourceLock("snapshot", snapshotIdentifier,
                 () -> {
+                    ensureNoManagedRotation(clusters.accountId(), clusterIdentifier);
                     Cluster cluster = restoreSnapshot(clusterIdentifier, snapshotIdentifier, nodeType);
                     try {
                         cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
@@ -1325,12 +1611,18 @@ public class RedshiftService {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier(clusterIdentifier);
         cluster.setNodeType(effectiveNodeType);
+        cluster.setAutomatedSnapshotAnchor(Instant.now());
+        cluster.setSnapshotGeneration(UUID.randomUUID().toString());
+        cluster.setSnapshotRegion(regionResolver.getRegion());
         cluster.setMasterUsername(username);
         cluster.setMasterPassword(password);
         cluster.setClusterParameterGroupName(DEFAULT_PARAMETER_GROUP_NAME);
         cluster.setUserActivityLoggingEnabled(userActivityLoggingEnabled(DEFAULT_PARAMETER_GROUP_NAME));
         cluster.setClusterStatus("creating");
         storeCluster(cluster);
+        emitEvent(RedshiftEventCatalog.CLUSTER_RESTORE_STARTED, clusterIdentifier,
+                "Your restore operation to create a new Amazon Redshift cluster '" + clusterIdentifier
+                        + "' snapshot '" + snapshotIdentifier + "' was started at " + eventTime() + ".");
 
         // Hoisted out of the try so a failure after allocateProxyPort() still returns the port.
         int proxyPort = -1;
@@ -1356,13 +1648,18 @@ public class RedshiftService {
             cluster.setClusterStatus("available");
         } catch (AwsException e) {
             rollbackSnapshotRestore(cluster, proxyPort);
+            emitClusterRestoreFailure(clusterIdentifier, snapshotIdentifier);
             throw e;
         } catch (Exception e) {
             rollbackSnapshotRestore(cluster, proxyPort);
+            emitClusterRestoreFailure(clusterIdentifier, snapshotIdentifier);
             throw new AwsException("InternalFailure", "Failed to restore cluster from snapshot: " + e.getMessage(), 500);
         }
 
         storeCluster(cluster);
+        emitEvent(RedshiftEventCatalog.CLUSTER_RESTORED, clusterIdentifier, "Amazon Redshift cluster '"
+                + clusterIdentifier + "' was successfully created from snapshot '" + snapshotIdentifier
+                + "' and is available for use.");
         return cluster;
     }
 
@@ -1379,6 +1676,8 @@ public class RedshiftService {
         ClusterParameterGroup group = new ClusterParameterGroup(parameterGroupName, parameterGroupFamily, description);
         parameterGroups.put(parameterGroupName, group);
         parameterGroups.flush();
+        emitEvent(RedshiftEventCatalog.PARAMETER_GROUP_CREATED, parameterGroupName,
+                "Cluster parameter group '" + parameterGroupName + "' was created.");
         return group;
     }
 
@@ -1456,7 +1755,13 @@ public class RedshiftService {
         parameterGroups.put(parameterGroupName, group);
         parameterGroups.flush();
         refreshClustersForActivityParameter(parameterGroupName, group);
+        emitParameterGroupUpdated(parameterGroupName);
         return group;
+    }
+
+    private void emitParameterGroupUpdated(String parameterGroupName) {
+        emitEvent(RedshiftEventCatalog.PARAMETER_GROUP_UPDATED, parameterGroupName, "Cluster parameter group '"
+                + parameterGroupName + "' was updated at " + eventTime() + ".");
     }
 
     private boolean userActivityLoggingEnabled(String parameterGroupName) {
@@ -1516,6 +1821,7 @@ public class RedshiftService {
         parameterGroups.put(parameterGroupName, group);
         parameterGroups.flush();
         refreshClustersForActivityParameter(parameterGroupName, group);
+        emitParameterGroupUpdated(parameterGroupName);
     }
 
     private void refreshClustersForActivityParameter(String parameterGroupName, ClusterParameterGroup group) {
@@ -1570,7 +1876,70 @@ public class RedshiftService {
         ClusterParameterGroup group = groupOpt.get();
         parameterGroups.delete(parameterGroupName);
         parameterGroups.flush();
+        emitEvent(RedshiftEventCatalog.PARAMETER_GROUP_DELETED, parameterGroupName,
+                "Cluster parameter group '" + parameterGroupName + "' was deleted at " + eventTime() + ".");
         return group;
+    }
+
+    // ── Event Operations ─────────────────────────────────────────────────────
+
+    private RedshiftEventService eventService() {
+        if (events == null) {
+            throw new IllegalStateException("Redshift events are not available in this service instance");
+        }
+        return events;
+    }
+
+    private void emitClusterRestoreFailure(String clusterIdentifier, String snapshotIdentifier) {
+        emitEvent(RedshiftEventCatalog.CLUSTER_RESTORE_FAILED, clusterIdentifier,
+                "The restore operation to create Amazon Redshift cluster '" + clusterIdentifier
+                        + "' from snapshot '" + snapshotIdentifier + "' failed at " + eventTime() + ".");
+    }
+
+    /** Whether the named source exists; Floci does not model cluster security groups or scheduled actions. */
+    private boolean eventSourceExists(String sourceType, String sourceIdentifier) {
+        return switch (sourceType) {
+            case RedshiftEventCatalog.CLUSTER -> clusters.get(sourceIdentifier).isPresent();
+            case RedshiftEventCatalog.PARAMETER_GROUP -> DEFAULT_PARAMETER_GROUP_NAME.equals(sourceIdentifier)
+                    || parameterGroups.get(sourceIdentifier).isPresent();
+            case RedshiftEventCatalog.SNAPSHOT -> snapshots.get(sourceIdentifier).isPresent();
+            default -> false;
+        };
+    }
+
+    public PaginatedResult<RedshiftEvent> describeEvents(String sourceIdentifier, String sourceType,
+                                                         Instant startTime, Instant endTime, Integer duration,
+                                                         Integer maxRecords, String marker) {
+        return eventService().describeEvents(sourceIdentifier, sourceType, startTime, endTime, duration,
+                maxRecords, marker);
+    }
+
+    public Map<String, List<EventInfo>> describeEventCategories(String sourceType) {
+        return eventService().describeEventCategories(sourceType);
+    }
+
+    public EventSubscription createEventSubscription(String name, String snsTopicArn, String sourceType,
+                                                     List<String> sourceIds, List<String> categories,
+                                                     String severity, Boolean enabled, Map<String, String> tags) {
+        return eventService().createSubscription(name, snsTopicArn, sourceType, sourceIds, categories, severity,
+                enabled, tags, this::eventSourceExists);
+    }
+
+    public EventSubscription modifyEventSubscription(String name, String snsTopicArn, String sourceType,
+                                                     List<String> sourceIds, List<String> categories,
+                                                     String severity, Boolean enabled) {
+        return eventService().modifySubscription(name, snsTopicArn, sourceType, sourceIds, categories, severity,
+                enabled, this::eventSourceExists);
+    }
+
+    public void deleteEventSubscription(String name) {
+        eventService().deleteSubscription(name);
+    }
+
+    public PaginatedResult<EventSubscription> describeEventSubscriptions(String name, List<String> tagKeys,
+                                                                         List<String> tagValues, Integer maxRecords,
+                                                                         String marker) {
+        return eventService().describeSubscriptions(name, tagKeys, tagValues, maxRecords, marker);
     }
 
     // ── Cluster Subnet Group Operations ──────────────────────────────────────
@@ -1827,39 +2196,180 @@ public class RedshiftService {
 
     private static final int SNAPSHOT_SCHEDULE_PAGE_MAX = 100;
 
-    private static final Pattern RATE_DEFINITION =
-            Pattern.compile("rate\\(\\s*(\\d+)\\s+(hours?|days?)\\s*\\)");
-    private static final Pattern CRON_DEFINITION =
-            Pattern.compile("cron\\(\\s*([A-Za-z0-9,\\-*/?#]+(?:\\s+[A-Za-z0-9,\\-*/?#]+){2,5})\\s*\\)");
+    private static void validateAutomatedRetention(String nodeType, int retention) {
+        boolean required = nodeType != null && (nodeType.startsWith("ra3.") || nodeType.startsWith("rg."));
+        if (retention < 0 || retention > 35 || required && retention == 0) {
+            throw new AwsException("InvalidParameterValue", "AutomatedSnapshotRetentionPeriod must be "
+                    + (required ? "1" : "0") + " to 35 days", 400);
+        }
+    }
+
+    /** A deterministic sweep; the lifecycle scheduler supplies now, tests supply a fixed instant. */
+    void runSnapshotSchedules(Instant now) {
+        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : clusters.scanAllAccountEntries(key -> true)) {
+            if (Thread.currentThread().isInterrupted()) {
+                return;
+            }
+            try {
+                withResourceLock(entry.accountId(), "cluster", entry.key(), () -> {
+                    Cluster cluster = clusters.getForAccount(entry.accountId(), entry.key()).orElse(null);
+                    if (cluster != null) {
+                        try {
+                            runSnapshotSchedule(entry.accountId(), cluster, now);
+                        } finally {
+                            // Retention must not depend on the next dump succeeding.
+                            expireAutomatedSnapshots(entry.accountId(), cluster.getClusterIdentifier(), cluster, now);
+                        }
+                    }
+                    return null;
+                });
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not process automated snapshots for account {0}, cluster {1}",
+                        entry.accountId(), entry.key());
+            }
+        }
+        for (AccountAwareStorageBackend.AccountEntry<Snapshot> entry : snapshots.scanAllAccountEntries(key -> true)) {
+            if (!"automated".equals(entry.value().getSnapshotType())) {
+                continue;
+            }
+            String clusterId = entry.value().getClusterIdentifier();
+            try {
+                withResourceLock(entry.accountId(), "cluster", clusterId, () -> {
+                    if (clusters.getForAccount(entry.accountId(), clusterId).isEmpty()) {
+                        removeAutomatedSnapshot(entry.accountId(), entry.key());
+                    }
+                    return null;
+                });
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not clean up automated snapshot {0} in account {1}", entry.key(), entry.accountId());
+            }
+        }
+        for (AccountAwareStorageBackend.AccountEntry<AutomatedSnapshotState> entry
+                : automatedSnapshotStates.scanAllAccountEntries(key -> true)) {
+            try {
+                withResourceLock(entry.accountId(), "cluster", entry.key(), () -> {
+                    if (clusters.getForAccount(entry.accountId(), entry.key()).isEmpty()) {
+                        automatedSnapshotStates.deleteForAccount(entry.accountId(), entry.key());
+                    }
+                    return null;
+                });
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not remove the automated snapshot checkpoint of cluster {0} in account {1}",
+                        entry.key(), entry.accountId());
+            }
+        }
+    }
+
+    private void runSnapshotSchedule(String accountId, Cluster cluster, Instant now) {
+        if (!"available".equals(cluster.getClusterStatus()) || cluster.getAutomatedSnapshotRetentionPeriod() == 0) {
+            return;
+        }
+        SnapshotSchedule schedule = cluster.getSnapshotScheduleIdentifier() == null ? null
+                : snapshotSchedules.getForAccount(accountId, cluster.getSnapshotScheduleIdentifier()).orElseThrow(
+                        () -> new AwsException("SnapshotScheduleNotFound", "The cluster's snapshot schedule is missing", 400));
+        List<String> definitions = schedule == null ? List.of("rate(8 hours)")
+                : List.copyOf(schedule.getScheduleDefinitions());
+        Instant activation = cluster.getAutomatedSnapshotAnchor();
+        if (schedule != null && schedule.getUpdatedAt() != null
+                && (activation == null || schedule.getUpdatedAt().isAfter(activation))) {
+            activation = schedule.getUpdatedAt();
+        }
+        String scheduleKey = cluster.getSnapshotGeneration() + "|" + cluster.getSnapshotScheduleIdentifier()
+                + "|" + definitions + "|" + activation;
+        String clusterId = cluster.getClusterIdentifier();
+        AutomatedSnapshotState state = automatedSnapshotStates.getForAccount(accountId, clusterId).orElse(null);
+        if (state == null || !scheduleKey.equals(state.scheduleKey())) {
+            state = new AutomatedSnapshotState(scheduleKey, activation == null ? now : activation, null);
+            automatedSnapshotStates.putAllAtomicallyForAccount(accountId, Map.of(clusterId, state));
+        }
+        Optional<Instant> due = RedshiftSnapshotSchedule.latestDue(definitions, state.anchor(), now);
+        if (due.isEmpty()) {
+            return;
+        }
+        Instant scheduled = due.get();
+        String identity = clusterId + "|" + state.anchor() + "|" + scheduled;
+        String snapshotId = "rs-auto-" + UUID.nameUUIDFromBytes(identity.getBytes(StandardCharsets.UTF_8));
+        Instant last = state.lastScheduledTime();
+        // The checkpoint lives in a separate store, so it can outlive a snapshot whose metadata never reached disk.
+        if (last != null && (scheduled.isBefore(last)
+                || scheduled.equals(last) && snapshots.getForAccount(accountId, snapshotId).isPresent())) {
+            return;
+        }
+        boolean tooSoon = snapshots.scanForAccount(accountId, key -> true).stream()
+                .filter(snapshot -> "automated".equals(snapshot.getSnapshotType()))
+                .filter(snapshot -> clusterId.equals(snapshot.getClusterIdentifier()))
+                .map(Snapshot::getSnapshotCreateTime).filter(time -> time != null)
+                .anyMatch(time -> time.plus(Duration.ofHours(1)).isAfter(now));
+        boolean completed = withResourceLock(accountId, "snapshot", snapshotId, () -> {
+            Snapshot existing = snapshots.getForAccount(accountId, snapshotId).orElse(null);
+            if (existing == null) {
+                if (tooSoon) {
+                    return false;
+                }
+                createSnapshot(accountId, snapshotId, cluster, null, now, scheduled);
+            } else if (!"automated".equals(existing.getSnapshotType())
+                    || !clusterId.equals(existing.getClusterIdentifier()) || !scheduled.equals(existing.getScheduledTime())) {
+                throw new AwsException("ClusterSnapshotAlreadyExists", "Snapshot identifier is already in use", 400);
+            }
+            return true;
+        });
+        if (!completed) {
+            return;
+        }
+        automatedSnapshotStates.putAllAtomicallyForAccount(accountId, Map.of(clusterId,
+                new AutomatedSnapshotState(scheduleKey, state.anchor(), scheduled)));
+    }
+
+    private String snapshotRegion(Cluster cluster) {
+        return cluster.getSnapshotRegion() == null ? regionResolver.getDefaultRegion() : cluster.getSnapshotRegion();
+    }
+
+    private void expireAutomatedSnapshots(String accountId, String clusterId, Cluster cluster, Instant now) {
+        List<Snapshot> automated = snapshots.scanForAccount(accountId, key -> true).stream()
+                .filter(snapshot -> "automated".equals(snapshot.getSnapshotType()))
+                .filter(snapshot -> clusterId.equals(snapshot.getClusterIdentifier()))
+                .filter(snapshot -> snapshot.getSnapshotCreateTime() != null).toList();
+        Snapshot latest = automated.stream().max(Comparator.comparing(Snapshot::getSnapshotCreateTime)
+                .thenComparing(Snapshot::getSnapshotIdentifier)).orElse(null);
+        for (Snapshot snapshot : automated) {
+            boolean replacedCluster = cluster.getSnapshotGeneration() != null
+                    && !Objects.equals(cluster.getSnapshotGeneration(), snapshot.getClusterGeneration());
+            if (replacedCluster || cluster.getAutomatedSnapshotRetentionPeriod() == 0 || snapshot != latest
+                    && !snapshot.getSnapshotCreateTime().plus(Duration.ofDays(cluster.getAutomatedSnapshotRetentionPeriod()))
+                            .isAfter(now)) {
+                removeAutomatedSnapshot(accountId, snapshot.getSnapshotIdentifier());
+            }
+        }
+    }
+
+    private void removeAutomatedSnapshot(String accountId, String snapshotId) {
+        withResourceLock(accountId, "snapshot", snapshotId, () -> mutate(() -> {
+            Snapshot current = snapshots.getForAccount(accountId, snapshotId).orElse(null);
+            if (current == null || !"automated".equals(current.getSnapshotType())) {
+                return null;
+            }
+            snapshots.deleteAllAtomicallyForAccounts(Map.of(accountId, Set.of(snapshotId)));
+            // Hybrid storage flushes lazily; a crash after the dump is gone would resurrect a dump-less snapshot.
+            snapshots.flush();
+            if (current.getSqlDump() != null) {
+                Path file = Paths.get(current.getSqlDump()).toAbsolutePath().normalize();
+                if (file.startsWith(accountDumpDir(accountId))) {
+                    try {
+                        Files.deleteIfExists(file);
+                    } catch (IOException e) {
+                        LOG.warnv(e, "Could not delete the dump of automated snapshot {0}", snapshotId);
+                    }
+                }
+            }
+            return null;
+        }));
+    }
+
     // The API reference allows only alphanumerics; the management guide's own example uses a hyphen.
     private static final Pattern SCHEDULE_IDENTIFIER = Pattern.compile("[A-Za-z0-9-]+");
 
-    /**
-     * Shape check against the Redshift snapshot-schedule documentation: {@code rate(<n> hours|days)}
-     * with a frequency between once an hour and once a day, or {@code cron(...)} with three to six
-     * whitespace-separated fields drawn from the documented cron alphabet. Per-field value ranges
-     * are not checked.
-     */
-    private static boolean isValidScheduleDefinition(String definition) {
-        if (definition == null) {
-            return false;
-        }
-        Matcher rate = RATE_DEFINITION.matcher(definition);
-        if (rate.matches()) {
-            long n = Long.parseLong(rate.group(1).length() > 9 ? "0" : rate.group(1));
-            return rate.group(2).startsWith("hour") ? n >= 1 && n <= 24 : n == 1;
-        }
-        return CRON_DEFINITION.matcher(definition).matches();
-    }
     private static void validateScheduleDefinitions(List<String> definitions) {
-        if (definitions == null || definitions.isEmpty()) {
-            throw new AwsException("InvalidSchedule", "ScheduleDefinitions must contain at least one definition.", 400);
-        }
-        for (String definition : definitions) {
-            if (!isValidScheduleDefinition(definition)) {
-                throw new AwsException("InvalidSchedule", "Invalid schedule definition: " + definition, 400);
-            }
-        }
+        RedshiftSnapshotSchedule.validate(definitions);
     }
 
     private SnapshotSchedule requireSnapshotSchedule(String scheduleIdentifier) {
@@ -1882,6 +2392,7 @@ public class RedshiftService {
         }
         validateScheduleDefinitions(definitions);
         SnapshotSchedule schedule = new SnapshotSchedule(id, description, definitions);
+        schedule.setUpdatedAt(Instant.now());
         if (tags != null && !tags.isEmpty()) {
             schedule.setTags(new LinkedHashMap<>(tags));
         }
@@ -1929,9 +2440,11 @@ public class RedshiftService {
     }
 
     public synchronized SnapshotSchedule modifySnapshotSchedule(String scheduleIdentifier, List<String> definitions) {
-        SnapshotSchedule schedule = requireSnapshotSchedule(scheduleIdentifier);
+        SnapshotSchedule current = requireSnapshotSchedule(scheduleIdentifier);
         validateScheduleDefinitions(definitions);
-        schedule.setScheduleDefinitions(new ArrayList<>(definitions));
+        SnapshotSchedule schedule = new SnapshotSchedule(scheduleIdentifier, current.getScheduleDescription(), definitions);
+        schedule.setTags(new LinkedHashMap<>(current.getTags()));
+        schedule.setUpdatedAt(Instant.now());
         snapshotSchedules.put(scheduleIdentifier, schedule);
         snapshotSchedules.flush();
         return schedule;
@@ -1966,6 +2479,7 @@ public class RedshiftService {
             requireSnapshotSchedule(scheduleIdentifier);
             cluster.setSnapshotScheduleIdentifier(scheduleIdentifier);
         }
+        cluster.setAutomatedSnapshotAnchor(Instant.now());
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
         return cluster;
@@ -1983,6 +2497,11 @@ public class RedshiftService {
     }
 
     public synchronized void createTags(String resourceName, Map<String, String> tags) {
+        String subscriptionName = eventSubscriptionTagName(resourceName);
+        if (subscriptionName != null) {
+            eventService().addSubscriptionTags(subscriptionName, tags);
+            return;
+        }
         TagHandle handle = resolveTagHandle(resourceName);
         Map<String, String> updated = new LinkedHashMap<>(handle.tags());
         updated.putAll(tags);
@@ -1990,6 +2509,11 @@ public class RedshiftService {
     }
 
     public synchronized void deleteTags(String resourceName, Collection<String> tagKeys) {
+        String subscriptionName = eventSubscriptionTagName(resourceName);
+        if (subscriptionName != null) {
+            eventService().deleteSubscriptionTags(subscriptionName, tagKeys);
+            return;
+        }
         TagHandle handle = resolveTagHandle(resourceName);
         Map<String, String> updated = new LinkedHashMap<>(handle.tags());
         tagKeys.forEach(updated::remove);
@@ -2037,6 +2561,13 @@ public class RedshiftService {
             for (SnapshotSchedule s : snapshotSchedules.scan(k -> true)) {
                 addTaggedResources(result, snapshotScheduleArn(s.getScheduleIdentifier()),
                         "snapshotschedule", s.getTags(), tagKeysFilter);
+            }
+        }
+        if (events != null && (resourceType == null || "eventsubscription".equalsIgnoreCase(resourceType))) {
+            for (EventSubscription subscription : events.describeSubscriptions(null, null, null, null, null).items()) {
+                addTaggedResources(result, regionResolver.buildArn("redshift", regionResolver.getRegion(),
+                                "eventsubscription:" + subscription.getCustSubscriptionId()),
+                        "eventsubscription", subscription.getTags(), tagKeysFilter);
             }
         }
         return result;
@@ -2094,7 +2625,7 @@ public class RedshiftService {
      * resolution, there is no bare-name fallback: Redshift tagging is new, so there is no
      * existing caller to stay backward compatible with.
      */
-    private TagHandle resolveTagHandle(String resourceName) {
+    private AwsArnUtils.Arn requireTagArn(String resourceName) {
         if (resourceName == null || resourceName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "ResourceName is required.", 400);
         }
@@ -2120,6 +2651,17 @@ public class RedshiftService {
                 || !regionResolver.getRegion().equals(arn.region())) {
             throw new AwsException("ResourceNotFoundFault", "Resource " + resourceName + " not found", 404);
         }
+        return arn;
+    }
+
+    private String eventSubscriptionTagName(String resourceName) {
+        String resource = requireTagArn(resourceName).resource();
+        String prefix = "eventsubscription:";
+        return resource.startsWith(prefix) ? resource.substring(prefix.length()) : null;
+    }
+
+    private TagHandle resolveTagHandle(String resourceName) {
+        AwsArnUtils.Arn arn = requireTagArn(resourceName);
         String resource = arn.resource();
         int sep = resource.indexOf(':');
         if (sep < 0) {
@@ -2129,6 +2671,14 @@ public class RedshiftService {
         String id = resource.substring(sep + 1);
 
         return switch (type) {
+            case "eventsubscription" -> {
+                if (id.isBlank()) {
+                    throw new AwsException("InvalidParameterValue", "Invalid resource name: " + resourceName, 400);
+                }
+                EventSubscription subscription = eventService().describeSubscriptions(id, null, null, null, null)
+                        .items().getFirst();
+                yield new TagHandle(subscription.getTags(), updated -> eventService().replaceSubscriptionTags(id, updated));
+            }
             case "cluster" -> {
                 Cluster cluster = clusters.get(id)
                         .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + id + " not found", 404));

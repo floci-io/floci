@@ -163,6 +163,22 @@ public class CodeArtifactService implements Resettable {
     public record PackageVersionSummary(String version, String revision, String status) {}
     public record ListPackageVersionsResult(String format, String namespace, String packageName,
             String defaultDisplayVersion, List<PackageVersionSummary> versions, String nextToken) {}
+    public record PackageSummaryEntry(String format, String namespace, String packageName,
+            String publishRestriction, String upstreamRestriction) {}
+    public record ListPackagesResult(List<PackageSummaryEntry> packages, String nextToken) {}
+    /** Every package a repository holds, regardless of format, before origin-restriction filtering
+     * and pagination are applied in {@link #listPackages}. */
+    private record PackageCoordinate(String format, String namespace, String packageName) {}
+
+    /**
+     * {@link #allPackagesInRepository}'s own two outputs, kept together so {@link #listPackages}
+     * never has to re-derive one from the other: {@code coordinates} is already deduplicated and
+     * normalized, and {@code originConfigsByCoordinate} is keyed by that exact same normalized
+     * coordinate, resolved from the one scan of {@code packageOriginConfigs} that method already
+     * does for its own union.
+     */
+    private record PackagesWithOriginConfigs(List<PackageCoordinate> coordinates,
+            Map<PackageCoordinate, PackageOriginConfig> originConfigsByCoordinate) {}
     /** Internal working shape shared by the generic and container-backed branches of {@link
      * #listPackageVersions} before status/origin filtering and pagination are applied.
      * {@code publishedEpochSeconds} is {@code null} when nothing is known to order by. */
@@ -615,9 +631,9 @@ public class CodeArtifactService implements Resettable {
      * {@link #ensureFormatContainerId} plus {@link RepositorySidecarManager#beginUse}, both under
      * this same {@code synchronized} monitor {@link #deleteRepository} also holds for its own
      * sidecar cleanup, so a delete can never run its cleanup in the gap between resolving
-     * {@code repoId} and registering use of it. Only {@link #listPackageVersions} needs this: it
-     * is the one caller of {@link #ensureFormatContainerId} whose sidecar call is bracketed by
-     * {@code beginUse}/{@code endUse} at all.
+     * {@code repoId} and registering use of it. Used by every caller of {@link
+     * #ensureFormatContainerId} whose sidecar call is bracketed by {@code beginUse}/{@code
+     * endUse} at all: {@link #listPackageVersions} and {@link #listPackages}.
      */
     private synchronized String resolveContainerIdAndBeginUse(String format, String region, String domain,
             String domainOwner, String repository, RepositorySidecarManager manager) {
@@ -2354,6 +2370,211 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
+     * Every package a repository holds, for {@code ListPackages}: every format unless
+     * {@code requestedFormat} narrows it to one, in which case only that one format's own source
+     * is ever touched, container-backed sidecar included: without this, an unfiltered-by-format
+     * caller's own lazily-provisioned sidecar containers would stay the real cost of answering
+     * "all formats", but a caller who already named one format would otherwise still pay to start
+     * every other format's container for nothing, just to filter its packages back out a moment
+     * later.
+     *
+     * <p>{@code generic} is read straight from the stored {@link CodeArtifactPackageVersion}
+     * records' own {@code format}/{@code namespace}/{@code packageName} fields (the same technique
+     * {@link #genericPackageVersions} already uses for one known package, here scanned
+     * repository-wide instead of by one package's own prefix), plus any origin-config-only
+     * package's own matching fields on {@link PackageOriginConfig}, never by parsing a scanned key
+     * back into parts, which {@link #escapeKeySegment}'s own javadoc explains is lossy. Every
+     * container-backed format's own new {@link RepositorySidecarManager#listPackages} answers the
+     * same for real sidecar content, plus the same origin-config-only union. {@code domainOwner}
+     * is threaded through (rather than just the already-resolved {@code owner}) only because
+     * {@link #resolveContainerIdAndBeginUse} re-resolves it itself, the same double-resolution
+     * {@link #listPackageVersions} already does at its own call site.
+     *
+     * <p>Raised by Greptile's review: every coordinate here, from every source, is now normalized
+     * through {@link #accountingPackageName} before it is ever added to the result set or used as
+     * an origin-config lookup key. Without it, a pypi/nuget package whose {@link
+     * PackageOriginConfig} was set under its as-typed spelling (case, or pypi's {@code -}/{@code _}/
+     * {@code .} variants) would union into a second, spelling-distinct entry alongside the same
+     * package's real, sidecar-normalized one, and the config lookup keyed by the normalized
+     * spelling would never find a config stored under the raw one, silently falling back to the
+     * ALLOW/BLOCK defaults instead of what was actually configured. Resolving every origin config
+     * once here, into a map keyed by this same normalized coordinate, is what lets {@link
+     * #listPackages} read it correctly regardless of which spelling the config was originally set
+     * under.
+     */
+    private PackagesWithOriginConfigs allPackagesInRepository(String region, String domain, String domainOwner,
+            String owner, String repository, String requestedFormat) {
+        Set<PackageCoordinate> coordinates = new LinkedHashSet<>();
+        Map<PackageCoordinate, PackageOriginConfig> originConfigsByCoordinate = new LinkedHashMap<>();
+        String originPrefix = region + "::" + domain + "::" + repository + "::";
+        if (requestedFormat == null || "generic".equals(requestedFormat)) {
+            for (CodeArtifactPackageVersion pv : packageVersions.scanForAccount(owner,
+                    k -> k.startsWith(originPrefix))) {
+                coordinates.add(new PackageCoordinate(pv.getFormat(), pv.getNamespace(),
+                        accountingPackageName(pv.getFormat(), pv.getPackageName())));
+            }
+        }
+        for (PackageOriginConfig config : packageOriginConfigs.scanForAccount(owner,
+                k -> k.startsWith(originPrefix))) {
+            if (config.getFormat() != null
+                    && (requestedFormat == null || requestedFormat.equals(config.getFormat()))) {
+                PackageCoordinate coordinate = new PackageCoordinate(config.getFormat(), config.getNamespace(),
+                        accountingPackageName(config.getFormat(), config.getPackageName()));
+                coordinates.add(coordinate);
+                originConfigsByCoordinate.put(coordinate, config);
+            }
+        }
+        for (String format : CONTAINER_BACKED_FORMATS) {
+            if (requestedFormat != null && !requestedFormat.equals(format)) {
+                continue;
+            }
+            RepositorySidecarManager manager = sidecarRegistry.forFormat(format).orElse(null);
+            if (manager == null) {
+                continue;
+            }
+            String repoId = resolveContainerIdAndBeginUse(format, region, domain, domainOwner, repository, manager);
+            try {
+                for (RepositorySidecarManager.PackageIdentifier id : manager.listPackages(repoId, domain,
+                        repository)) {
+                    coordinates.add(new PackageCoordinate(format, id.namespace(),
+                            accountingPackageName(format, id.packageName())));
+                }
+            } catch (UnsupportedOperationException e) {
+                throw new AwsException("InternalServerException", "Listing " + format + " packages is not yet "
+                        + "supported by this emulator.", 500);
+            } finally {
+                manager.endUse(repoId);
+            }
+            // Raised by Greptile's review: disposing a container-backed package's last version
+            // deletes its real sidecar content, so the sidecar's own listing above no longer names
+            // it at all, but updatePackageVersionsStatus/disposePackageVersions leave a status
+            // override behind specifically so ListPackageVersions/DescribePackageVersion can keep
+            // answering Disposed/Archived for it. Without this, a package with no origin
+            // configuration either (nothing else to keep it in the union) would silently disappear
+            // from ListPackages the moment its last version was disposed. Only ever adds something
+            // for npm/pypi/nuget (see containerBackedOverriddenVersionStatusesByRepository's own
+            // javadoc for why its index is namespace-less only); the same gap for maven or a scoped
+            // npm package, both of which always carry a namespace, is not closed here.
+            for (String packageName : containerBackedOverriddenVersionStatusesByRepository(region, domain,
+                    domainOwner, repository, format).keySet()) {
+                coordinates.add(new PackageCoordinate(format, null, packageName));
+            }
+        }
+        return new PackagesWithOriginConfigs(new ArrayList<>(coordinates), originConfigsByCoordinate);
+    }
+
+    /**
+     * Sorts the same way {@link #packageVersionSortCursor} does for its own action, as an opaque
+     * cursor: {@code ListPackages} has no {@code sortBy} parameter at all in the wire model (unlike
+     * {@code ListPackageVersions}' {@code PUBLISHED_TIME}), so alphabetical by format, then
+     * namespace, then package name is the best-justified deterministic order available, not an
+     * AWS-confirmed one.
+     *
+     * <p>Raised by Greptile's review: joining the three fields with a plain {@code ::} the way an
+     * earlier version of this method did collides for two different coordinates whose namespace
+     * and package name happen to straddle that same separator differently, e.g. namespace
+     * {@code a::b} with package {@code c} against namespace {@code a} with package {@code b::c};
+     * {@code Pagination}'s own resume logic (strictly-greater-cursor) would then skip whichever of
+     * the two sorts second. Each field is now escaped through {@link #escapeKeySegment}, the same
+     * helper this service's own storage keys already use for exactly this collision, before being
+     * joined.
+     */
+    private static String packageSortCursor(PackageSummaryEntry entry) {
+        return escapeKeySegment(entry.format()) + "::" + escapeKeySegment(entry.namespace()) + "::"
+                + escapeKeySegment(entry.packageName());
+    }
+
+    /**
+     * Lists every package a repository holds, across every format at once unless {@code format}
+     * filters to one. {@code namespace} is a prefix filter exactly like {@code packagePrefix} (its
+     * own doc: "although this option is called --namespace and not --namespace-prefix, it has
+     * prefix-matching behavior"), and real AWS rejects it when {@code format} is omitted ("Using
+     * --namespace by itself results in an error," the User Guide's own documented search-option
+     * combination rule): {@code format} combined with a namespace-less format (pypi, nuget) is
+     * still accepted, since nothing in that same rule singles it out, it just can never match
+     * anything, the same way a {@code packagePrefix} nothing matches returns empty rather than an
+     * error.
+     *
+     * <p>{@code publish}/{@code upstream} filter against each package's own resolved restriction
+     * (its {@link PackageOriginConfig} if one was ever set, else CodeArtifact's documented default
+     * of publish {@code ALLOW}, upstream {@code BLOCK}), the same resolution {@link
+     * #describePackage} already does for one known package.
+     *
+     * <p>Default page size is 100 (the User Guide's own stated default), not the 50 {@code
+     * ListPackageVersions} uses: a real, AWS-documented difference between the two actions, not
+     * an oversight copying one convention over the other.
+     */
+    public ListPackagesResult listPackages(String region, String domain, String domainOwner, String repository,
+            String format, String namespace, String packagePrefix, Integer maxResults, String nextToken,
+            String publish, String upstream) {
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        if (format != null && !PACKAGE_FORMATS.contains(format)) {
+            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
+        }
+        if (namespace != null) {
+            if (format == null) {
+                throw validation("format must be specified when namespace is provided.");
+            }
+            validatePackageToken("namespace", namespace);
+        }
+        if (packagePrefix != null) {
+            validatePackageToken("packagePrefix", packagePrefix);
+        }
+        if (publish != null && !ORIGIN_RESTRICTION_VALUES.contains(publish)) {
+            throw validation("publish must be one of " + ORIGIN_RESTRICTION_VALUES + ".");
+        }
+        if (upstream != null && !ORIGIN_RESTRICTION_VALUES.contains(upstream)) {
+            throw validation("upstream must be one of " + ORIGIN_RESTRICTION_VALUES + ".");
+        }
+        String owner = effectiveOwner(domainOwner);
+        requireRepository(owner, repositoryKey(region, domain, repository), repository);
+
+        List<PackageSummaryEntry> entries = new ArrayList<>();
+        PackagesWithOriginConfigs packages = allPackagesInRepository(region, domain, domainOwner, owner, repository,
+                format);
+        for (PackageCoordinate coordinate : packages.coordinates()) {
+            if (namespace != null
+                    && (coordinate.namespace() == null || !coordinate.namespace().startsWith(namespace))) {
+                continue;
+            }
+            if (packagePrefix != null && !coordinate.packageName().startsWith(packagePrefix)) {
+                continue;
+            }
+            // Resolved from the same normalized map allPackagesInRepository already built, rather
+            // than a fresh key lookup here: see that method's own javadoc for why a direct lookup
+            // keyed by this (already normalized) coordinate could otherwise miss a config stored
+            // under its caller's original, un-normalized spelling.
+            Optional<PackageOriginConfig> config = Optional.ofNullable(
+                    packages.originConfigsByCoordinate().get(coordinate));
+            // Raised by Greptile's review: a PackageOriginConfig persisted before format/namespace/
+            // packageName existed on it (see that model's own javadoc) has none of the three, so
+            // allPackagesInRepository's own scan can never resolve it into this map at all, even
+            // though the package it configures is still found here through its real version record
+            // or sidecar listing. Falling back to the original key-based lookup, exactly like
+            // describePackage's own, is what keeps that package's real restriction (not the ALLOW/
+            // BLOCK default) resolving for it too.
+            if (config.isEmpty()) {
+                config = packageOriginConfigs.getForAccount(owner, packageKey(region, domain, repository,
+                        coordinate.format(), coordinate.namespace(), coordinate.packageName()));
+            }
+            String publishRestriction = config.map(PackageOriginConfig::getPublishRestriction).orElse("ALLOW");
+            String upstreamRestriction = config.map(PackageOriginConfig::getUpstreamRestriction).orElse("BLOCK");
+            if (publish != null && !publish.equals(publishRestriction)) {
+                continue;
+            }
+            if (upstream != null && !upstream.equals(upstreamRestriction)) {
+                continue;
+            }
+            entries.add(new PackageSummaryEntry(coordinate.format(), coordinate.namespace(),
+                    coordinate.packageName(), publishRestriction, upstreamRestriction));
+        }
+        PaginatedResult<PackageSummaryEntry> page = Pagination.paginate(entries,
+                CodeArtifactService::packageSortCursor, maxResults, nextToken, 100, 1000, "ValidationException");
+        return new ListPackagesResult(page.items(), page.nextToken());
+    }
+
+    /**
      * Floci never ingests packages from an upstream source, so every package it holds was first
      * published directly. That is the one case where CodeArtifact's default origin controls are
      * publish ALLOW and upstream BLOCK; a package a caller has configured via
@@ -2421,7 +2642,7 @@ public class CodeArtifactService implements Resettable {
         requireRepository(owner, repositoryKey(region, domain, repository), repository);
         String key = packageKey(region, domain, repository, format, namespace, packageName);
         packageOriginConfigs.putForAccount(owner, key, new PackageOriginConfig(publishRestriction,
-                upstreamRestriction));
+                upstreamRestriction, format, namespace, packageName));
         return new PackageDescription(format, namespace, packageName, publishRestriction, upstreamRestriction);
     }
 

@@ -1358,6 +1358,12 @@ class ElastiCacheServiceTest {
         // The proxy authenticates on its own thread, where the store falls back to the default account.
         account.set("000000000000");
         assertTrue(validator.getValue().validatePassword("app", "app-pass"));
+        assertEquals("on ~* +@all", validator.getValue().accessString("app"));
+        assertNull(validator.getValue().accessString("unknown"));
+        account.set("111111111111");
+        svc.modifyUser("app-user-id", null, null, "on ~allowed:* -@all +get", null, null);
+        account.set("000000000000");
+        assertEquals("on ~allowed:* -@all +get", validator.getValue().accessString("app"));
     }
 
     @Test

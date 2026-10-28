@@ -46,11 +46,17 @@ def _path_form(package: str) -> str:
     return package.replace(".", "/")
 
 
+def _env_form(package: str) -> str:
+    """How Quarkus spells a log category in an environment variable: QUARKUS_LOG_CATEGORY__IO_..."""
+    return package.upper().replace(".", "_")
+
+
 # Text rewrites, applied in order to every tracked text file outside EXCLUDED. The package forms
 # go first so the groupId rule below only ever sees what is left of the old group.
 REWRITES: list[tuple[str, str]] = [
     (OLD_PACKAGE, NEW_PACKAGE),
     (_path_form(OLD_PACKAGE), _path_form(NEW_PACKAGE)),
+    (_env_form(OLD_PACKAGE), _env_form(NEW_PACKAGE)),
     # META-INF/native-image/<groupId>/<artifactId>: the artifactId stays floci.
     (f"native-image/{OLD_GROUP}/floci", f"native-image/{NEW_GROUP}/floci"),
     (f"<groupId>{OLD_GROUP}</groupId>", f"<groupId>{NEW_GROUP}</groupId>"),
@@ -80,7 +86,9 @@ CATEGORY_HELP = {
 # Longest form first: an alternation takes the first alternative that matches at a position, so a
 # package reference is one hit, never also a group hit.
 OCCURRENCE = re.compile(
-    "|".join(re.escape(form) for form in (OLD_PACKAGE, _path_form(OLD_PACKAGE), OLD_GROUP, _path_form(OLD_GROUP))))
+    "|".join(re.escape(form) for form in (
+        OLD_PACKAGE, _path_form(OLD_PACKAGE), _env_form(OLD_PACKAGE),
+        OLD_GROUP, _path_form(OLD_GROUP), _env_form(OLD_GROUP))))
 
 
 @dataclass(frozen=True)

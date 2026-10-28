@@ -171,10 +171,10 @@ stores its own copy of the key value, so without that sweep a deleted key would 
 exists and has `enabled` set to `true`, so disabling a key through `UpdateApiKey` takes effect
 immediately.
 
-> [!NOTE]
-> Floci does not implement the `apiKeyRequired` gate on methods, so a request carrying an unknown,
-> disabled, or deleted key is still executed — it simply arrives with a null `identity.apiKey` rather
-> than being rejected with `403`.
+A method with `apiKeyRequired` rejects a request whose `x-api-key` is missing, unknown, disabled,
+deleted, or not bound to the stage by a usage plan, with `403` `{"message":"Forbidden"}` and
+`x-amzn-ErrorType: ForbiddenException`, as AWS does. The header stays when the API customises its
+`INVALID_API_KEY` gateway response.
 
 ### REST Lambda Authorizers
 
@@ -341,22 +341,27 @@ then for `DEFAULT_4XX` / `DEFAULT_5XX`, and applies the configured `statusCode`,
 This is what lets a browser read a `401`/`403`/`400` as such instead of as a CORS failure once
 `DEFAULT_4XX` maps `Access-Control-Allow-Origin`, exactly as the console's "Enable CORS" does.
 
-| Gateway-generated answer | `responseType` |
-|---|---|
-| No resource matches the path, or none declares the method (`403 Missing Authentication Token`) | `MISSING_AUTHENTICATION_TOKEN` |
-| `AWS_IAM` method without a signature | `MISSING_AUTHENTICATION_TOKEN` |
-| `AWS_IAM` signature malformed or mismatching | `INVALID_SIGNATURE` |
-| `AWS_IAM` signature outside the 5-minute window, or a presigned URL past its expiry | `EXPIRED_TOKEN` |
-| `AWS_IAM` access key the emulator never issued | `ACCESS_DENIED` |
-| Lambda authorizer returns `Deny` | `ACCESS_DENIED` |
-| Lambda authorizer fails or throws | `AUTHORIZER_FAILURE` |
-| Method with `apiKeyRequired` and no usable `x-api-key` (`403 Forbidden`) | `INVALID_API_KEY` |
-| Request validator rejects a parameter / the body | `BAD_REQUEST_PARAMETERS` / `BAD_REQUEST_BODY` |
-| `passthroughBehavior` rejects the request `Content-Type` (`415`) | `UNSUPPORTED_MEDIA_TYPE` |
-| Missing or unresolvable integration or URI, MOCK template that does not render | `API_CONFIGURATION_ERROR` |
-| Lambda proxy function error, malformed proxy payload, or missing function | `INTEGRATION_FAILURE` |
+| Gateway-generated answer | `responseType` | `x-amzn-ErrorType` |
+|---|---|---|
+| No resource matches the path, or none declares the method (`403 Missing Authentication Token`) | `MISSING_AUTHENTICATION_TOKEN` | `MissingAuthenticationTokenException` |
+| `AWS_IAM` method without a signature | `MISSING_AUTHENTICATION_TOKEN` | `MissingAuthenticationTokenException` |
+| `AWS_IAM` signature malformed or mismatching | `INVALID_SIGNATURE` | `IncompleteSignatureException` / `InvalidSignatureException` |
+| `AWS_IAM` signature outside the 5-minute window, or a presigned URL past its expiry | `EXPIRED_TOKEN` | `InvalidSignatureException` |
+| `AWS_IAM` access key the emulator never issued | `ACCESS_DENIED` | `UnrecognizedClientException` |
+| Lambda authorizer returns `Deny` | `ACCESS_DENIED` | `AccessDeniedException` |
+| Lambda authorizer fails or throws | `AUTHORIZER_FAILURE` | `AuthorizerConfigurationException` |
+| Cognito authorizer gets no token, an invalid one, one from another pool, or one claiming none of the method's authorization scopes (`401 Unauthorized`) | `UNAUTHORIZED` | `UnauthorizedException` |
+| Method with `apiKeyRequired` and no usable `x-api-key` (`403 Forbidden`) | `INVALID_API_KEY` | `ForbiddenException` |
+| Request validator rejects a parameter / the body | `BAD_REQUEST_PARAMETERS` / `BAD_REQUEST_BODY` | `BadRequestException` |
+| `passthroughBehavior` rejects the request `Content-Type` (`415`) | `UNSUPPORTED_MEDIA_TYPE` | `BadRequestException` |
+| Missing or unresolvable integration or URI, MOCK template that does not render | `API_CONFIGURATION_ERROR` | `InternalServerErrorException` |
+| Lambda proxy function error, malformed proxy payload, or missing function | `INTEGRATION_FAILURE` | `InternalServerErrorException` |
 
-A customised `statusCode` overrides the status Floci would otherwise send. Throttling, quota, request size and WAF answers are not produced on the execute plane, so
+A customised `statusCode` overrides the status Floci would otherwise send; the `x-amzn-ErrorType` stays, as on AWS.
+A gateway response that maps its own `gatewayresponse.header.x-amzn-ErrorType` (that exact key) replaces it for
+`BAD_REQUEST_PARAMETERS`, `BAD_REQUEST_BODY`, `UNSUPPORTED_MEDIA_TYPE`, `API_CONFIGURATION_ERROR` and
+`INTEGRATION_FAILURE`, and is sent ahead of it for the other types, as AWS does. Throttling, quota, request
+size and WAF answers are not produced on the execute plane, so
 `THROTTLED`, `QUOTA_EXCEEDED`, `REQUEST_TOO_LARGE` and `WAF_FILTERED` can be configured but never
 fire, and an `HTTP`/`HTTP_PROXY` backend's own status is relayed rather than treated as a gateway
 response.
@@ -395,6 +400,12 @@ A greedy resource captures only the path segments after its parent. For example,
 `/api/v1/auth/signup/checkpoint/status`, so an integration URI ending in
 `/api/v1/auth/signup/{proxy}` forwards the prefix once. Greedy parameter names other
 than `proxy` are supported, including in `integration.request.path.*` mappings.
+
+A greedy resource may sit below ordinary path parameters: `/catalog/{kind}/{name+}` serves
+`/catalog/scopes/a/b` with `kind` set to `scopes` and `name` to `a/b`. When several resources
+match a request, they are ranked as on AWS: more literal segments first, then more segments
+before the greedy parameter, then the resource whose literal comes first at the first position
+where they differ. A resource that does not declare the request's method yields to the next one.
 
 REST `HTTP_PROXY` and `HTTP` integrations also accept `context.*` sources in header, query
 and path parameter mappings. Supported request fields are `accountId`, `apiId`, `deploymentId`,
@@ -727,6 +738,15 @@ curl http://{apiId}.execute-api.{region}.localhost.floci.io:4566/{stageName}/{pa
 APIs created or updated with `disableExecuteApiEndpoint` reject requests to
 this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
 
+HTTP API Lambda REQUEST authorizers resolve header, query string, context, and
+stage variable sources once, in configured order. Format `2.0` carries the values
+in an `identitySource` array; format `1.0` carries them as comma-separated
+`identitySource` and `authorizationToken` strings. Headers are case-insensitive;
+query names are case-sensitive. No configured sources produces an empty array
+or string. A missing or empty configured value returns `401` without invoking
+Lambda in either format. Repeated request values use each event's delivered
+representation: last value in format `1.0`, comma-joined values in format `2.0`.
+
 A Lambda proxy integration's response is read as AWS reads it (measured): a function that raises, a
 format 1.0 result that is not an object with a `statusCode`, and a `statusCode` that is not a whole
 number from 100 to 599 (text that spells one, such as `"201"`, is taken) are answered `500` with
@@ -775,6 +795,34 @@ Conditions can test `aws:SourceIp` (IPv4 and IPv6 CIDR ranges), `aws:SecureTrans
 `aws:CurrentTime`. The source IP is the connection's transport address, so a
 caller-supplied `X-Forwarded-For` header does not override it. An empty `Condition`
 object places no condition on its statement, as in IAM.
+
+### HTTP API private integrations
+
+An `HTTP_PROXY` integration with `connectionType: VPC_LINK` reaches a private backend through a v2
+VPC link. Floci has no real VPC, so the link only has to exist and be `AVAILABLE`. An unknown link
+answers `502` with `Invalid VPC link identifier specified: <id>`, a link that is not `AVAILABLE`
+answers `502`, and a missing `connectionId` answers `500`, the same as a REST (v1) VPC link
+integration.
+
+API Gateway includes the stage in the path it sends to the backend, so a request to the `prod`
+stage arrives as `/prod/<route-path>`. The `$default` stage has no stage segment, so its requests
+arrive as `/<route-path>`.
+
+The `integrationUri` names the backend:
+
+- An ALB or NLB listener ARN forwards through that listener.
+- An AWS Cloud Map service ARN (`arn:aws:servicediscovery:<region>:<account>:service/srv-...`)
+  forwards to one registered instance of the service. The instance must have the
+  `AWS_INSTANCE_IPV4` and `AWS_INSTANCE_PORT` attributes, which ECS service discovery sets for each
+  task. Floci picks one at random for each request, because `DiscoverInstances` returns a randomized
+  list and API Gateway distributes requests across it. A service with a health check (`HealthCheckConfig`
+  or `HealthCheckCustomConfig`) offers only `HEALTHY` instances. A service without one offers all
+  instances. A query string on the ARN, such as `?stage=prod`, keeps only the instances that have
+  those attribute values. A service with no usable instance answers `503` with
+  `{"message":"Service Unavailable"}`, and a Cloud Map service that does not exist answers `502`.
+
+The request path is forwarded as received. The stage name is not added to it, and `tlsConfig` is not
+applied: the call to a Cloud Map instance uses plain HTTP.
 
 ### Supported Operations
 

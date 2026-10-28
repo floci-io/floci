@@ -7,6 +7,38 @@ import pytest
 from botocore.exceptions import ClientError
 
 
+def terminate_and_wait(ec2_client, instance_ids):
+    ec2_client.terminate_instances(InstanceIds=instance_ids)
+    ec2_client.get_waiter("instance_terminated").wait(
+        InstanceIds=instance_ids, WaiterConfig={"Delay": 1, "MaxAttempts": 120})
+
+
+@pytest.mark.parametrize("filter_name", ["default-for-az", "defaultForAz"])
+def test_default_subnet_filter_excludes_custom_subnets(ec2_client, filter_name):
+    with ExitStack() as cleanup:
+        vpc = ec2_client.create_vpc(CidrBlock="10.237.0.0/24")["Vpc"]["VpcId"]
+        cleanup.callback(ec2_client.delete_vpc, VpcId=vpc)
+        custom = ec2_client.create_subnet(
+            VpcId=vpc, CidrBlock="10.237.0.0/26")["Subnet"]["SubnetId"]
+        cleanup.callback(ec2_client.delete_subnet, SubnetId=custom)
+
+        def selected(values, **kwargs):
+            return ec2_client.describe_subnets(
+                Filters=[{"Name": filter_name, "Values": values}], **kwargs)["Subnets"]
+
+        defaults = selected(["true"])
+        assert defaults and all(subnet["DefaultForAz"] for subnet in defaults)
+        assert custom not in {subnet["SubnetId"] for subnet in defaults}
+        nondefaults = selected(["false"])
+        assert custom in {subnet["SubnetId"] for subnet in nondefaults}
+        assert all(not subnet["DefaultForAz"] for subnet in nondefaults)
+        assert selected(["true"], SubnetIds=[custom]) == []
+        assert selected(["false"], SubnetIds=[defaults[0]["SubnetId"]]) == []
+        assert {subnet["SubnetId"] for subnet in selected(
+            ["true", "false"], SubnetIds=[custom, defaults[0]["SubnetId"]]
+        )} == {custom, defaults[0]["SubnetId"]}
+
+
 @pytest.mark.parametrize("supplied_interface", [False, True])
 @pytest.mark.parametrize("default_vpc", [False, True])
 def test_network_interface_association_filters(ec2_client, supplied_interface, default_vpc):
@@ -35,8 +67,8 @@ def test_network_interface_association_filters(ec2_client, supplied_interface, d
         instances += ec2_client.run_instances(
             ImageId=image, InstanceType="t3.nano", MinCount=1, MaxCount=1,
             SubnetId=subnet)["Instances"]
-        cleanup.callback(ec2_client.terminate_instances,
-                         InstanceIds=[instance["InstanceId"] for instance in instances])
+        cleanup.callback(terminate_and_wait, ec2_client,
+                         [instance["InstanceId"] for instance in instances])
         eni_ids = [instance["NetworkInterfaces"][0]["NetworkInterfaceId"]
                    for instance in instances]
         allocation = ec2_client.allocate_address(Domain="vpc")["AllocationId"]
@@ -111,7 +143,8 @@ def test_termination_preserves_only_retained_interface_associations(
             placement = {"NetworkInterfaces": [{"NetworkInterfaceId": eni, "DeviceIndex": 0}]}
         instance = ec2_client.run_instances(
             ImageId=image, InstanceType="t3.nano", MinCount=1, MaxCount=1, **placement)["Instances"][0]
-        cleanup.callback(ec2_client.terminate_instances, InstanceIds=[instance["InstanceId"]])
+        termination_cleanup = cleanup.enter_context(ExitStack())
+        termination_cleanup.callback(terminate_and_wait, ec2_client, [instance["InstanceId"]])
         allocation = ec2_client.allocate_address(Domain="vpc")["AllocationId"]
         allocation_cleanup = cleanup.enter_context(ExitStack())
         allocation_cleanup.callback(ec2_client.release_address, AllocationId=allocation)
@@ -119,7 +152,7 @@ def test_termination_preserves_only_retained_interface_associations(
             AllocationId=allocation, InstanceId=instance["InstanceId"])["AssociationId"]
         association_cleanup = cleanup.enter_context(ExitStack())
         association_cleanup.callback(ec2_client.disassociate_address, AssociationId=association)
-        ec2_client.terminate_instances(InstanceIds=[instance["InstanceId"]])
+        termination_cleanup.close()
         address = ec2_client.describe_addresses(AllocationIds=[allocation])["Addresses"][0]
         assert not address.get("InstanceId")
         if supplied_interface:

@@ -6,6 +6,8 @@ import io.restassured.path.json.config.JsonPathConfig;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -352,7 +354,7 @@ class KinesisAnalyticsV2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("SnapshotSummaries", equalTo(java.util.List.of()));
+            .body("SnapshotSummaries", equalTo(List.of()));
     }
 
     @Test

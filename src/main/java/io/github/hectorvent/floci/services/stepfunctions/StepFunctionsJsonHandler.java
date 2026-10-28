@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.SignedMarkers;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.stepfunctions.model.Activity;
@@ -26,7 +27,6 @@ import jakarta.ws.rs.core.Response;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -37,11 +37,13 @@ import java.util.Set;
 public class StepFunctionsJsonHandler {
 
     private static final Duration HISTORY_TOKEN_LIFETIME = Duration.ofHours(24);
+    private static final Duration LIST_TOKEN_LIFETIME = Duration.ofHours(24);
 
     private final StepFunctionsService service;
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final SignedMarkers historyTokens = new SignedMarkers();
+    private final SignedMarkers listTokens = new SignedMarkers();
 
     @Inject
     public StepFunctionsJsonHandler(StepFunctionsService service, ObjectMapper objectMapper, Clock clock) {
@@ -289,17 +291,45 @@ public class StepFunctionsJsonHandler {
     }
 
     private Response handleListStateMachines(JsonNode request, String region) {
-        List<StateMachine> list = service.listStateMachines(region);
+        Integer maxResults = parseOptionalInt(request, "maxResults");
+        String nextToken = optionalText(request, "nextToken");
+        StepFunctionsPaging.pageSize(maxResults, nextToken);
+        PaginatedResult<StateMachine> page = service.listStateMachines(region, maxResults,
+                nextToken == null ? null : listTokenPosition(nextToken, region));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("stateMachines");
-        for (StateMachine sm : list) {
+        for (StateMachine sm : page.items()) {
             ObjectNode item = array.addObject();
             item.put("stateMachineArn", sm.getStateMachineArn());
             item.put("name", sm.getName());
             item.put("type", sm.getType());
             item.put("creationDate", sm.getCreationDate());
         }
+        if (page.nextToken() != null) {
+            response.put("nextToken", listTokens.issue(
+                    clock.millis() + ":" + Digests.sha256Hex(region) + ":" + page.nextToken()));
+        }
         return Response.ok(response).build();
+    }
+
+    private String listTokenPosition(String nextToken, String region) {
+        String issued = listTokens.cursorOf(nextToken);
+        if (issued == null) {
+            throw new AwsException("InvalidToken", "The provided token is not valid.", 400);
+        }
+        String[] fields = issued.split(":", 3);
+        long now = clock.millis();
+        long issuedAt;
+        try {
+            issuedAt = Long.parseLong(fields[0]);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidToken", "The provided token is not valid.", 400);
+        }
+        if (fields.length != 3 || !fields[1].equals(Digests.sha256Hex(region))
+                || issuedAt > now || now - issuedAt > LIST_TOKEN_LIFETIME.toMillis()) {
+            throw new AwsException("InvalidToken", "The provided token is not valid.", 400);
+        }
+        return fields[2];
     }
 
     private Response handleDeleteStateMachine(JsonNode request) {
@@ -452,14 +482,15 @@ public class StepFunctionsJsonHandler {
             throw new AwsException("ValidationException",
                     "PENDING_REDRIVE execution listing is not supported.", 400);
         }
-        List<Execution> list = service.listExecutions(request.path("stateMachineArn").asText());
+        String stateMachineArn = request.path("stateMachineArn").asText();
+        Integer maxResults = parseOptionalInt(request, "maxResults");
+        String nextToken = optionalText(request, "nextToken");
+        PaginatedResult<StepFunctionsService.ExecutionSnapshot> page = service.listExecutions(
+                stateMachineArn, statusFilter, maxResults, nextToken);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("executions");
-        for (Execution e : list) {
-            String status = e.getStatus();
-            if (statusFilter != null && !statusFilter.equals(status)) {
-                continue;
-            }
+        for (StepFunctionsService.ExecutionSnapshot snapshot : page.items()) {
+            Execution e = snapshot.execution();
             ObjectNode item = array.addObject();
             item.put("executionArn", e.getExecutionArn());
             item.put("stateMachineArn", e.getStateMachineArn());
@@ -470,9 +501,12 @@ public class StepFunctionsJsonHandler {
                 item.put("stateMachineAliasArn", e.getStateMachineAliasArn());
             }
             item.put("name", e.getName());
-            item.put("status", status);
+            item.put("status", snapshot.status());
             item.put("startDate", e.getStartDate());
             if (e.getStopDate() != null) item.put("stopDate", e.getStopDate());
+        }
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }
@@ -495,28 +529,20 @@ public class StepFunctionsJsonHandler {
         Integer maxResults = parseOptionalInt(request, "maxResults");
         String nextToken = optionalText(request, "nextToken");
         int pageSize = StepFunctionsPaging.pageSize(maxResults, nextToken);
-        Long lastReturnedId = nextToken == null ? null : historyTokenPosition(nextToken, arn, reverseOrder);
 
-        List<HistoryEvent> live = service.getExecutionHistory(arn);
-        List<HistoryEvent> events;
-        // Branch and iteration threads append under the history's own monitor while a client reads.
-        synchronized (live) {
-            events = new ArrayList<>(live);
-        }
-        if (reverseOrder) {
-            Collections.reverse(events);
-        }
-        // Ids rise in the order events were recorded, so a page starts at the first event listed
-        // after the last one the previous page returned, however many were recorded in between.
-        int start = 0;
-        while (lastReturnedId != null && start < events.size()
-                && !listedAfter(events.get(start), lastReturnedId, reverseOrder)) {
-            start++;
-        }
-        int end = Math.min(events.size(), start + pageSize);
+        PaginatedResult<HistoryEvent> page = Pagination.paginateExpiring(() -> {
+            List<HistoryEvent> live = service.getExecutionHistory(arn);
+            // Branch and iteration threads append under the history's own monitor while a client reads.
+            synchronized (live) {
+                return new ArrayList<>(live);
+            }
+        },
+                event -> historyEventCursor(event, reverseOrder), pageSize, nextToken,
+                historyTokenScope(arn, reverseOrder), clock, HISTORY_TOKEN_LIFETIME, historyTokens,
+                token -> invalidHistoryToken());
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("events");
-        for (HistoryEvent e : events.subList(start, end)) {
+        for (HistoryEvent e : page.items()) {
             ObjectNode item = array.addObject();
             item.put("id", e.getId());
             item.put("timestamp", e.getTimestamp());
@@ -532,39 +558,15 @@ public class StepFunctionsJsonHandler {
                 item.set(historyEventDetailsField(e.getType()), objectMapper.valueToTree(details));
             }
         }
-        if (end < events.size()) {
-            response.put("nextToken", issueHistoryToken(arn, reverseOrder, events.get(end - 1).getId()));
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }
 
-    private static boolean listedAfter(HistoryEvent event, long id, boolean reverseOrder) {
-        return reverseOrder ? event.getId() < id : event.getId() > id;
-    }
-
-    /**
-     * A history token names its execution, its order and the last event its page returned, and
-     * may be used with any page size and includeExecutionData. The execution is named by the
-     * SHA-256 of its ARN, so the token stays far below the 1,024 characters AWS allows however long
-     * the ARN is. Tokens are signed, so an edited one, or one issued before a restart, is refused,
-     * and each expires 24 hours after it was issued, as on AWS.
-     */
-    private String issueHistoryToken(String arn, boolean reverseOrder, long lastReturnedId) {
-        return historyTokens.issue(
-                clock.millis() + ":" + historyTokenScope(arn, reverseOrder) + ":" + lastReturnedId);
-    }
-
-    private long historyTokenPosition(String nextToken, String arn, boolean reverseOrder) {
-        String issued = historyTokens.cursorOf(nextToken);
-        if (issued == null) {
-            throw invalidHistoryToken();
-        }
-        String[] fields = issued.split(":");
-        if (!fields[1].equals(historyTokenScope(arn, reverseOrder))
-                || clock.millis() - Long.parseLong(fields[0]) > HISTORY_TOKEN_LIFETIME.toMillis()) {
-            throw invalidHistoryToken();
-        }
-        return Long.parseLong(fields[2]);
+    private static String historyEventCursor(HistoryEvent event, boolean reverseOrder) {
+        long position = reverseOrder ? Long.MAX_VALUE - event.getId() : event.getId();
+        return String.format("%019d", position);
     }
 
     private static String historyTokenScope(String arn, boolean reverseOrder) {

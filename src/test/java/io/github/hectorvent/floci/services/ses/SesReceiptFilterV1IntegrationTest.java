@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -25,14 +26,14 @@ class SesReceiptFilterV1IntegrationTest {
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-west-2/email/aws4_request";
 
-    private static io.restassured.specification.RequestSpecification req(String action) {
+    private static RequestSpecification req(String action) {
         return given()
                 .contentType("application/x-www-form-urlencoded")
                 .header("Authorization", AUTH)
                 .formParam("Action", action);
     }
 
-    private static io.restassured.specification.RequestSpecification create(
+    private static RequestSpecification create(
             String name, String policy, String cidr) {
         return req("CreateReceiptFilter")
                 .formParam("Filter.Name", name)

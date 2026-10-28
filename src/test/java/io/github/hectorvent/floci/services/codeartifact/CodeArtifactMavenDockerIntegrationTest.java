@@ -670,6 +670,32 @@ class CodeArtifactMavenDockerIntegrationTest {
     }
 
     /**
+     * A throwaway groupId/artifactId, not {@link #GAV}: {@code ListPackages} walks Reposilite's
+     * whole directory tree repository-wide, so publishing its own package here (rather than
+     * reusing one another test already created) keeps this test's own expected set independent of
+     * whatever else this class's shared repository happens to hold by the time it runs.
+     */
+    @Test
+    @Order(24)
+    void listPackagesWalksTheRealReposiliteDirectoryTreeToFindTheGroupAndArtifact() {
+        byte[] content = "list-packages-bytes".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken).body(content)
+                .put("/codeartifact/maven/" + DOMAIN + "/" + REPO
+                        + "/com/example/nested/listpkgsprobe/1.0.0/listpkgsprobe-1.0.0.jar")
+                .then().statusCode(200);
+
+        JsonPath body = given().header("Authorization", AUTH)
+                .post("/v1/packages?domain=" + DOMAIN + "&repository=" + REPO + "&format=maven"
+                        + "&namespace=com.example.nested")
+                .then().statusCode(200)
+                .extract().jsonPath();
+        List<String> names = body.getList("packages.package", String.class);
+        List<String> namespaces = body.getList("packages.namespace", String.class);
+        assertTrue(names.contains("listpkgsprobe"), "expected listpkgsprobe among " + names);
+        assertEquals("com.example.nested", namespaces.get(names.indexOf("listpkgsprobe")));
+    }
+
+    /**
      * A throwaway groupId/artifactId, not {@link #GAV}: deleting it exercises Reposilite's real
      * directory delete (confirmed live before this was built: a single {@code DELETE} on the
      * group/artifact path removes everything beneath it), and must not disturb the artifact every

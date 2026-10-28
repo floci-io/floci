@@ -8,9 +8,11 @@ import io.github.hectorvent.floci.services.ssoadmin.SsoAdminService;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -185,7 +187,7 @@ class SsoOidcIntegrationTest {
         String verifier = "01234567890123456789012345678901234567890123456789";
         String challenge = Base64Url.encode(Digests.sha256(verifier.getBytes(StandardCharsets.US_ASCII)));
         String code = ssoOidcService.createIamAuthorizationCode(applicationArn, redirectUri, challenge,
-                java.util.List.of(redirectUri)).code();
+                List.of(redirectUri)).code();
         String body = "{\"clientId\":\"" + applicationArn + "\",\"grantType\":\"authorization_code\","
                 + "\"code\":\"" + code + "\",\"codeVerifier\":\"" + verifier + "\","
                 + "\"redirectUri\":\"" + redirectUri + "\",\"scope\":[\"openid\"]}";
@@ -200,8 +202,8 @@ class SsoOidcIntegrationTest {
                 .body("tokenType", equalTo("Bearer"))
                 .body("scope[0]", equalTo("openid"))
                 .body("accessToken", matchesPattern("[0-9a-f]{64}"))
-                .body("idToken", org.hamcrest.Matchers.not(org.hamcrest.Matchers.blankOrNullString()))
-                .body("awsAdditionalDetails.identityContext", org.hamcrest.Matchers.not(org.hamcrest.Matchers.blankOrNullString()));
+                .body("idToken", Matchers.not(Matchers.blankOrNullString()))
+                .body("awsAdditionalDetails.identityContext", Matchers.not(Matchers.blankOrNullString()));
     }
 
     @Test

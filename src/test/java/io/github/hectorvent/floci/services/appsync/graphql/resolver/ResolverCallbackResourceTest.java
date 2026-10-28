@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.appsync.model.Resolver;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
@@ -89,8 +90,8 @@ class ResolverCallbackResourceTest {
 
         resource.resolve("Bearer " + session.token(), body(invocation("0", "Query", "getMessages")));
 
-        org.mockito.ArgumentCaptor<ResolverInvocation> captor =
-                org.mockito.ArgumentCaptor.forClass(ResolverInvocation.class);
+        ArgumentCaptor<ResolverInvocation> captor =
+                ArgumentCaptor.forClass(ResolverInvocation.class);
         verify(executor).execute(eq(resolver), captor.capture());
         ResolverInvocation invocation = captor.getValue();
         assertEquals(API_ID, invocation.apiId());
@@ -120,8 +121,8 @@ class ResolverCallbackResourceTest {
         // an absent argument to a resolver reading ctx.args. Copying the map with Map.copyOf threw
         // on the null, which answered 500 and failed every field in the batch, not just this one.
         assertEquals("ok", results.get(0).get("data"));
-        org.mockito.ArgumentCaptor<ResolverInvocation> captor =
-                org.mockito.ArgumentCaptor.forClass(ResolverInvocation.class);
+        ArgumentCaptor<ResolverInvocation> captor =
+                ArgumentCaptor.forClass(ResolverInvocation.class);
         verify(executor).execute(eq(resolver), captor.capture());
         assertTrue(captor.getValue().arguments().containsKey("nextToken"));
         assertNull(captor.getValue().arguments().get("nextToken"));

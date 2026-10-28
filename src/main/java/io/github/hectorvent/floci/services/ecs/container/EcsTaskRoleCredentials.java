@@ -10,8 +10,11 @@ import jakarta.inject.Inject;
 
 import java.security.SecureRandom;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -55,19 +58,35 @@ public class EcsTaskRoleCredentials {
      * created the task by the time containers are started.
      */
     public synchronized Optional<String> issue(String taskArn, String roleArn, String accountId, Instant now) {
+        Issued current = taskArn == null ? null : byTaskArn.get(taskArn);
+        if (current != null && (!current.session.getRoleArn().equals(roleArn)
+                || !current.session.getOriginAccountId().equals(accountId))) {
+            revoke(current);
+            current = null;
+        }
         if (taskArn == null || taskArn.isBlank() || roleArn == null || roleArn.isBlank()
                 || accountId == null || accountId.isBlank()) {
             return Optional.empty();
         }
-        Issued current = byTaskArn.get(taskArn);
-        if (current != null && current.session.getRoleArn().equals(roleArn)
-                && current.session.getExpiration().isAfter(now.plusSeconds(ROTATE_WITHIN_SECONDS))) {
-            return Optional.of(current.path);
-        }
-
         Optional<IamRole> role = resolveRole(roleArn, accountId);
-        if (role.isEmpty()) {
+        if (role.isEmpty() || (current != null && !Objects.equals(current.roleId, role.get().getRoleId()))) {
+            if (current != null) {
+                revoke(current);
+            }
             return Optional.empty();
+        }
+        if (current != null) {
+            current.previous.removeIf(session -> {
+                if (!session.getExpiration().isAfter(now)) {
+                    iamService.unregisterSession(accountId, session.getAccessKeyId());
+                    return true;
+                }
+                return false;
+            });
+            long rotationWindow = Math.min(ROTATE_WITHIN_SECONDS, ttlSeconds / 10);
+            if (current.session.getExpiration().isAfter(now.plusSeconds(rotationWindow))) {
+                return Optional.of(current.path);
+            }
         }
 
         SessionCredential session = new SessionCredential(
@@ -81,14 +100,18 @@ public class EcsTaskRoleCredentials {
         }
         iamService.registerEcsTaskRoleSession(session);
 
-        String path = "/v2/credentials/" + UUID.randomUUID();
-        Issued issued = new Issued(session, path);
+        String path = current == null ? "/v2/credentials/" + UUID.randomUUID() : current.path;
+        List<SessionCredential> previous = current == null ? new ArrayList<>() : current.previous;
+        if (current != null) {
+            if (current.session.getExpiration().isAfter(now)) {
+                previous.add(current.session);
+            } else {
+                iamService.unregisterSession(accountId, current.session.getAccessKeyId());
+            }
+        }
+        Issued issued = new Issued(session, path, role.get().getRoleId(), previous);
         byPath.put(path, issued);
         byTaskArn.put(taskArn, issued);
-        if (current != null) {
-            byPath.remove(current.path, current);
-            iamService.unregisterSession(accountId, current.session.getAccessKeyId());
-        }
         return Optional.of(path);
     }
 
@@ -98,11 +121,8 @@ public class EcsTaskRoleCredentials {
         if (issued == null) {
             return Optional.empty();
         }
-        if (!issued.session.getExpiration().isAfter(now)) {
-            revoke(issued);
-            return Optional.empty();
-        }
-        return Optional.of(issued.session);
+        return issue(issued.session.getEcsTaskArn(), issued.session.getRoleArn(),
+                issued.session.getOriginAccountId(), now).map(renewedPath -> byPath.get(renewedPath).session);
     }
 
     /** Revokes the task's credentials on task stop, exit, or a launch that failed part way through. */
@@ -117,6 +137,9 @@ public class EcsTaskRoleCredentials {
         byTaskArn.remove(issued.session.getEcsTaskArn(), issued);
         byPath.remove(issued.path, issued);
         iamService.unregisterSession(issued.session.getOriginAccountId(), issued.session.getAccessKeyId());
+        for (SessionCredential previous : issued.previous) {
+            iamService.unregisterSession(previous.getOriginAccountId(), previous.getAccessKeyId());
+        }
     }
 
     private Optional<IamRole> resolveRole(String roleArn, String accountId) {
@@ -126,7 +149,8 @@ public class EcsTaskRoleCredentials {
         } catch (IllegalArgumentException e) {
             return Optional.empty();
         }
-        if (!"iam".equals(parsed.service()) || !parsed.resource().startsWith("role/")) {
+        if (!"iam".equals(parsed.service()) || !parsed.accountId().equals(accountId)
+                || !parsed.resource().startsWith("role/")) {
             return Optional.empty();
         }
         String roleName = parsed.resource().substring(parsed.resource().lastIndexOf('/') + 1);
@@ -150,5 +174,5 @@ public class EcsTaskRoleCredentials {
         return Base64.getEncoder().encodeToString(bytes);
     }
 
-    private record Issued(SessionCredential session, String path) {}
+    private record Issued(SessionCredential session, String path, String roleId, List<SessionCredential> previous) {}
 }

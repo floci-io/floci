@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.budgets;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -47,11 +48,11 @@ class BudgetsIntegrationTest {
                 .statusCode(400).body("__type", equalTo("NotFoundException"));
     }
 
-    private static io.restassured.response.ValidatableResponse json(String target, String body) {
+    private static ValidatableResponse json(String target, String body) {
         return given().contentType(TYPE).header("Authorization", AUTH).header("X-Amz-Target", target).body(body).post("/").then();
     }
 
-    private static io.restassured.response.ValidatableResponse jsonAs(String accountId, String target, String body) {
+    private static ValidatableResponse jsonAs(String accountId, String target, String body) {
         String auth = "AWS4-HMAC-SHA256 Credential=" + accountId + "/20260904/us-east-1/budgets/aws4_request";
         return given().contentType(TYPE).header("Authorization", auth).header("X-Amz-Target", target).body(body).post("/").then();
     }

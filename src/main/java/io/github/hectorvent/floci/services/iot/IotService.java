@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.common.CertificateMaterialException;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -60,6 +61,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -69,9 +71,11 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
@@ -86,6 +90,7 @@ public class IotService {
     static final String DEFAULT_ENDPOINT_TYPE = "iot:Data-ATS";
 
     private static final Pattern THING_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9:_-]{1,128}");
+    private static final Pattern THING_TYPE_NAME_PATTERN = Pattern.compile("[a-zA-Z0-9:_-]+");
     private static final Pattern SHADOW_NAME_PATTERN = Pattern.compile("[$a-zA-Z0-9:_-]{1,64}");
     /** The {@code FirehoseSeparator} shape of the IoT API model. */
     private static final Pattern FIREHOSE_SEPARATOR = Pattern.compile("([\\n\\t])|(\\r\\n)|(,)");
@@ -98,6 +103,8 @@ public class IotService {
 
     /** One lock for every shadow update and delete, so a shadow's previous, current and version stay consistent. */
     private final Object shadowWriteLock = new Object();
+    /** One lock for every UpdateThing and DeleteThing, so a merge, a version check and the write are one step. */
+    private final Object thingWriteLock = new Object();
 
     /** certificateId to the partition and key it was last found under; see {@link #findRegisteredCertificate}. */
     private final Map<String, CertificateLocation> certificateLocations = new ConcurrentHashMap<>();
@@ -249,7 +256,7 @@ public class IotService {
         Thing existing = thingStore.get(key).orElse(null);
         if (existing != null) {
             if (existing.getAttributes().equals(attributes)
-                    && java.util.Objects.equals(existing.getThingTypeName(), blankToNull(thingTypeName))) {
+                    && Objects.equals(existing.getThingTypeName(), blankToNull(thingTypeName))) {
                 return existing;
             }
             throw new AwsException("ResourceAlreadyExistsException", "Thing already exists: " + thingName, 409);
@@ -287,25 +294,55 @@ public class IotService {
     }
 
     public Thing updateThing(String thingName, Map<String, String> attributes, Long expectedVersion, String region) {
-        Thing thing = describeThing(thingName, region);
-        if (expectedVersion != null && thing.getVersion() != expectedVersion) {
-            throw new AwsException("VersionConflictException", "Thing version does not match expectedVersion", 409);
+        return updateThing(thingName, attributes, false, null, false, expectedVersion, region);
+    }
+
+    /** {@code attributes} is null when the request carries none, which leaves the stored ones as they are. */
+    public Thing updateThing(String thingName, Map<String, String> attributes, boolean merge, String thingTypeName,
+                             boolean removeThingType, Long expectedVersion, String region) {
+        if (thingTypeName != null) {
+            validateThingTypeName(thingTypeName);
         }
-        thing.setAttributes(attributes);
-        thing.setVersion(thing.getVersion() + 1);
-        thing.setLastModifiedDate(Instant.now());
-        thingStore.put(thingKey(region, thingName), thing);
-        return thing;
+        if (removeThingType && thingTypeName != null) {
+            throw new AwsException("InvalidRequestException", "Cannot remove thing type when thing type is not null", 400);
+        }
+        synchronized (thingWriteLock) {
+            Thing thing = describeThing(thingName, region);
+            if (thingTypeName != null && describeThingType(thingTypeName, region).isDeprecated()) {
+                throw new AwsException("InvalidRequestException",
+                        "Can not update a thing to use deprecated thing type: " + thingTypeName, 400);
+            }
+            requireThingVersion(thing, expectedVersion);
+            if (attributes != null) {
+                Map<String, String> updated = merge ? new HashMap<>(thing.getAttributes()) : new HashMap<>();
+                updated.putAll(attributes);
+                updated.values().removeIf(String::isEmpty);
+                thing.setAttributes(updated);
+            }
+            if (thingTypeName != null || removeThingType) {
+                thing.setThingTypeName(thingTypeName);
+            }
+            thing.setVersion(thing.getVersion() + 1);
+            thing.setLastModifiedDate(Instant.now());
+            thingStore.put(thingKey(region, thingName), thing);
+            return thing;
+        }
     }
 
     public void deleteThing(String thingName, String region) {
-        describeThing(thingName, region);
-        thingStore.delete(thingKey(region, thingName));
-        for (String key : thingGroupMembershipStore.keys()) {
-            if (key.startsWith("thing-group-membership:" + region + ":")) {
-                Set<String> members = new HashSet<>(thingGroupMembershipStore.get(key).orElse(Set.of()));
-                if (members.remove(thingName)) {
-                    thingGroupMembershipStore.put(key, members);
+        deleteThing(thingName, null, region);
+    }
+
+    public void deleteThing(String thingName, Long expectedVersion, String region) {
+        synchronized (thingWriteLock) {
+            requireThingVersion(describeThing(thingName, region), expectedVersion);
+            thingStore.delete(thingKey(region, thingName));
+            for (String key : thingGroupMembershipStore.keys()) {
+                if (key.startsWith("thing-group-membership:" + region + ":")) {
+                    Set<String> members = new HashSet<>(thingGroupMembershipStore.get(key).orElse(Set.of()));
+                    if (members.remove(thingName)) {
+                        thingGroupMembershipStore.put(key, members);
+                    }
                 }
             }
         }
@@ -825,12 +862,12 @@ public class IotService {
 
     public Set<String> listThingPrincipals(String thingName, String region) {
         describeThing(thingName, region);
-        return new java.util.TreeSet<>(thingPrincipalStore.get(thingPrincipalKey(region, thingName)).orElse(Set.of()));
+        return new TreeSet<>(thingPrincipalStore.get(thingPrincipalKey(region, thingName)).orElse(Set.of()));
     }
 
     public Set<String> listPrincipalThings(String principal, String region) {
         String prefix = "thing-principal:" + region + ":";
-        Set<String> things = new java.util.TreeSet<>();
+        Set<String> things = new TreeSet<>();
         for (String key : thingPrincipalStore.keys()) {
             if (key.startsWith(prefix) && thingPrincipalStore.get(key).orElse(Set.of()).contains(principal)) {
                 things.add(key.substring(prefix.length()));
@@ -885,7 +922,7 @@ public class IotService {
 
     public Set<String> listTargetsForPolicy(String policyName, String region) {
         getPolicy(policyName, region);
-        return new java.util.TreeSet<>(policyAttachmentStore.get(policyAttachmentKey(region, policyName)).orElse(Set.of()));
+        return new TreeSet<>(policyAttachmentStore.get(policyAttachmentKey(region, policyName)).orElse(Set.of()));
     }
 
     /**
@@ -1135,9 +1172,20 @@ public class IotService {
         publish(topic, payload, false, 0, null, null);
     }
 
-    /** {@code clientId} is the MQTT client that published, or null for a message that did not come over MQTT. */
+    /**
+     * A publish from outside the broker, such as the data plane Publish API: retained, recorded and
+     * run through the topic rules before it returns, then delivered to the broker's matching
+     * subscribers. {@code clientId} is what a rule's clientid() reports, null for the data plane.
+     */
     public void publish(String topic, byte[] payload, boolean retain, int qos, String region, String clientId) {
+        if (qos == 2) {
+            throw new AwsException("InvalidRequestException", "QoS 2 is currently not supported", 400);
+        }
+        if (qos != 0 && qos != 1) {
+            throw new AwsException("InvalidRequestException", "Invalid QoS value: " + qos, 400);
+        }
         publish(topic, payload, retain, qos, region, clientId, Runnable::run);
+        mqttBrokerService.publish(topic, payload, qos);
     }
 
     /**
@@ -1205,7 +1253,7 @@ public class IotService {
         String key = thingTypeKey(region, thingTypeName);
         IotThingType existing = thingTypeStore.get(key).orElse(null);
         if (existing != null) {
-            if (java.util.Objects.equals(existing.getDescription(), properties.path("thingTypeDescription").asText(null))
+            if (Objects.equals(existing.getDescription(), properties.path("thingTypeDescription").asText(null))
                     && existing.getSearchableAttributes().equals(stringList(properties.path("searchableAttributes")))) {
                 return existing;
             }
@@ -1259,7 +1307,7 @@ public class IotService {
         String key = thingGroupKey(region, thingGroupName);
         IotThingGroup existing = thingGroupStore.get(key).orElse(null);
         if (existing != null) {
-            if (java.util.Objects.equals(existing.getDescription(), properties.path("thingGroupDescription").asText(null))
+            if (Objects.equals(existing.getDescription(), properties.path("thingGroupDescription").asText(null))
                     && existing.getAttributes().equals(parseAttributePayload(properties.path("attributePayload")))) {
                 return existing;
             }
@@ -1320,7 +1368,7 @@ public class IotService {
 
     public Set<String> listThingsInThingGroup(String thingGroupName, String region) {
         describeThingGroup(thingGroupName, region);
-        return new java.util.TreeSet<>(thingGroupMembershipStore.get(thingGroupMembershipKey(region, thingGroupName)).orElse(Set.of()));
+        return new TreeSet<>(thingGroupMembershipStore.get(thingGroupMembershipKey(region, thingGroupName)).orElse(Set.of()));
     }
 
     public List<IotThingGroup> listThingGroupsForThing(String thingName, String region) {
@@ -1356,8 +1404,8 @@ public class IotService {
         job.setCreatedAt(now);
         job.setLastUpdatedAt(now);
 
-        List<String> targets = new java.util.ArrayList<>();
-        Set<String> thingNames = new java.util.TreeSet<>();
+        List<String> targets = new ArrayList<>();
+        Set<String> thingNames = new TreeSet<>();
         targetsNode.forEach(target -> {
             String value = target.asText();
             if (value != null && !value.isBlank()) {
@@ -1653,6 +1701,28 @@ public class IotService {
     private void validateThingName(String thingName) {
         if (thingName == null || !THING_NAME_PATTERN.matcher(thingName).matches()) {
             throw new AwsException("InvalidRequestException", "Invalid thing name: " + thingName, 400);
+        }
+    }
+
+    private static void validateThingTypeName(String thingTypeName) {
+        List<String> violations = new ArrayList<>();
+        String length = SmithyValidationErrors.lengthOutOfRange("thingTypeName", thingTypeName, 1, 128);
+        if (length != null) {
+            violations.add(length);
+        }
+        if (!THING_TYPE_NAME_PATTERN.matcher(thingTypeName).matches()) {
+            violations.add(SmithyValidationErrors.pattern("thingTypeName", thingTypeName,
+                    THING_TYPE_NAME_PATTERN.pattern()));
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.exception("InvalidRequestException", violations);
+        }
+    }
+
+    private static void requireThingVersion(Thing thing, Long expectedVersion) {
+        if (expectedVersion != null && thing.getVersion() != expectedVersion) {
+            throw new AwsException("VersionConflictException",
+                    "The version for thing " + thing.getThingName() + " does not match the expected version.", 409);
         }
     }
 
@@ -2216,7 +2286,7 @@ public class IotService {
     }
 
     private List<String> stringList(JsonNode node) {
-        List<String> values = new java.util.ArrayList<>();
+        List<String> values = new ArrayList<>();
         if (node != null && node.isArray()) {
             node.forEach(item -> values.add(item.asText()));
         }
@@ -2301,6 +2371,6 @@ public class IotService {
     private record ShadowUpdate(ObjectNode accepted, ObjectNode documents, ObjectNode delta) {
     }
 
-    private record TaggableResource(Map<String, String> tags, java.util.function.Consumer<Map<String, String>> updateTags) {
+    private record TaggableResource(Map<String, String> tags, Consumer<Map<String, String>> updateTags) {
     }
 }

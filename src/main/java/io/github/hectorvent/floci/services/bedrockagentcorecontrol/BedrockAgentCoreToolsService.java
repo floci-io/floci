@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.bedrockagentcorecontrol;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -81,7 +82,7 @@ public class BedrockAgentCoreToolsService {
 
     public ObjectNode getBrowser(String browserId, String region) {
         if ("aws.browser.v1".equals(browserId)) {
-            ObjectNode browser = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+            ObjectNode browser = JsonNodeFactory.instance.objectNode();
             browser.put("browserId", browserId);
             browser.put("browserArn", regionResolver.buildArn("bedrock-agentcore", region, "browser/" + browserId));
             browser.put("name", browserId);
@@ -175,7 +176,7 @@ public class BedrockAgentCoreToolsService {
 
     public ObjectNode getCodeInterpreter(String codeInterpreterId, String region) {
         if ("aws.codeinterpreter.v1".equals(codeInterpreterId)) {
-            ObjectNode interpreter = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+            ObjectNode interpreter = JsonNodeFactory.instance.objectNode();
             interpreter.put("codeInterpreterId", codeInterpreterId);
             interpreter.put("codeInterpreterArn", AwsArnUtils.Arn.of("bedrock-agentcore", region, "aws",
                     "code-interpreter/aws.codeinterpreter.v1").toString());

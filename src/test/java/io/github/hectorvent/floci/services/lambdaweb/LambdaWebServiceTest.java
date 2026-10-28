@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
+import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionRevision;
@@ -31,6 +32,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -60,6 +62,7 @@ class LambdaWebServiceTest {
 
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
     private final ServiceCallAuthorizer serviceCalls = mock(ServiceCallAuthorizer.class);
+    private final LambdaMicrovmsService microvms = new LambdaMicrovmsService(new RegionResolver(REGION, ACCOUNT_ID), null);
 
     @TempDir
     Path storageDir;
@@ -85,7 +88,8 @@ class LambdaWebServiceTest {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.effectiveBaseUrl()).thenReturn(baseUrl);
         LambdaWebService service = new LambdaWebService(new RegionResolver(REGION, ACCOUNT_ID), storage, config,
-                s3Service, new LambdaWebCode(storageDir.resolve("code")), mapper, null, executionRole, serviceCalls);
+                s3Service, new LambdaWebCode(storageDir.resolve("code")), mapper, null, executionRole, serviceCalls,
+                microvms);
         service.initializeStorage();
         return service;
     }
@@ -103,6 +107,18 @@ class LambdaWebServiceTest {
         ObjectNode config = revisionConfig(30);
         ((ObjectNode) config.get("serviceConfig")).put("executionRoleArn", executionRoleArn);
         return config;
+    }
+
+    private ObjectNode revisionConfig(String executionRoleArn, String connectorArn) {
+        ObjectNode config = revisionConfig(executionRoleArn);
+        ((ObjectNode) config.get("serviceConfig")).put("egressNetworkConnectorArn", connectorArn);
+        return config;
+    }
+
+    private LambdaMicrovmsService.NetworkConnector connector(String name, String computeResourceType) {
+        return microvms.createConnector(REGION, ACCOUNT_ID, name, List.of("subnet-00000000000000001"),
+                List.of("sg-00000000000000001"), "arn:aws:iam::000000000000:role/operator", "token",
+                List.of(computeResourceType), "IPv4");
     }
 
     private ObjectNode endpointConfig(String name) {
@@ -329,6 +345,141 @@ class LambdaWebServiceTest {
         multiRegion.set("revisionConfig", revisionConfig(missingRole));
         ((ObjectNode) multiRegion.get("endpointConfig")).put("endpointType", "MultiRegion");
         assertEquals("cannot be assumed", message(() -> service.createFunction(REGION, multiRegion)));
+    }
+
+    @Test
+    void egressConnectorArnIsCheckedInTheOrderAwsChecksIt() {
+        String missingRole = "arn:aws:iam::000000000000:role/missing";
+        LambdaWebExecutionRole executionRole = mock(LambdaWebExecutionRole.class);
+        doThrow(new AwsException("ValidationException", "cannot be assumed", 400))
+                .when(executionRole).requireAssumable(REGION, missingRole);
+        LambdaWebService service = service(new MemoryStorageFactory(), "http://localhost:4566", null, executionRole);
+        String connector = ":000000000000:network-connector:nc-1:";
+
+        String unversioned = "arn:aws:lambda:us-east-1:000000000000:network-connector:nc-1";
+        assertEquals("1 validation error detected: Value '" + unversioned + "' at 'serviceConfig.egressNetworkConnectorArn'"
+                + " failed to satisfy constraint: Member must satisfy regular expression pattern:"
+                + " arn:(aws[a-z-]*):lambda:[a-z0-9-]+:[0-9]{12}:network-connector:[a-zA-Z0-9_-]+:[0-9]+",
+                message(() -> service.createRevision(REGION, "missing", revisionConfig(missingRole, unversioned))));
+        Map<String, String> invalid = new LinkedHashMap<>();
+        invalid.put("arn:aws:lambda:moon-1" + connector + "0", "Invalid region.: moon-1");
+        invalid.put("arn:aws:lambda:us-east-1a" + connector + "1", "Invalid region.: us-east-1a");
+        invalid.put("arn:aws-cn:lambda:us-east-1" + connector + "0", "Invalid arn partition.: aws-cn");
+        invalid.put("arn:aws:lambda:cn-north-1" + connector + "1", "Invalid arn partition.: aws");
+        invalid.put("arn:awsx:lambda:us-east-1" + connector + "1", "Invalid arn partition.: awsx");
+        invalid.put("arn:aws:lambda:us-east-1" + connector + "0",
+                "Invalid network connector version format - must be numeric: 0");
+        invalid.put("arn:aws:lambda:us-east-1" + connector + "01",
+                "Invalid network connector version format - must be numeric: 01");
+        invalid.put("arn:aws:lambda:moon-1:111111111111:network-connector:nc-1:1", "Invalid region.: moon-1");
+        invalid.put("arn:aws:lambda:us-east-1:111111111111:network-connector:nc-1:0",
+                "Invalid network connector version format - must be numeric: 0");
+        invalid.forEach((arn, reason) -> {
+            AwsException e = error(() -> service.createRevision(REGION, "missing", revisionConfig(missingRole, arn)));
+            assertEquals(400, e.getHttpStatus());
+            assertEquals("The egress network connector ARN: '" + arn + "' is not valid. " + reason, e.getMessage());
+        });
+
+        String otherAccount = "arn:aws:lambda:us-east-1:111111111111:network-connector:nc-1:1";
+        assertEquals("Cross-account pass role is not allowed.", message(() -> service.createRevision(REGION, "missing",
+                revisionConfig("arn:aws:iam::111122223333:role/web", "arn:aws:lambda:us-east-1" + connector + "0"))));
+        ObjectNode reserved = revisionConfig(missingRole, otherAccount);
+        ((ObjectNode) reserved.get("serviceConfig")).putObject("environmentVariables").put("AWS_REGION", "x");
+        AwsException denied = error(() -> service.createRevision(REGION, "missing", reserved));
+        assertEquals("AccessDeniedException", denied.getErrorCode());
+        assertEquals(403, denied.getHttpStatus());
+        assertEquals("Cross-account pass lambda-network-connector is not allowed.", denied.getMessage());
+
+        String pastLong = "arn:aws:lambda:us-east-1" + connector + "9223372036854775808";
+        assertEquals("cannot be assumed",
+                message(() -> service.createRevision(REGION, "missing", revisionConfig(missingRole, pastLong))));
+        assertEquals("ResourceNotFoundException",
+                error(() -> service.createRevision(REGION, "missing", revisionConfig(ROLE, pastLong))).getErrorCode());
+    }
+
+    @Test
+    void aRevisionNamesAWebFunctionConnectorVersionByItsId() {
+        LambdaWebService service = service();
+        service.createFunction(REGION, createRequest("app"));
+        LambdaMicrovmsService.NetworkConnector web = connector("web", "WebFunction");
+        LambdaMicrovmsService.NetworkConnector vm = connector("vm", "MicroVm");
+
+        WebFunctionRevision first = service.createRevision(REGION, "app", revisionConfig(ROLE, web.arn + ":1"));
+        assertEquals(web.arn + ":1", first.serviceConfig.egressNetworkConnectorArn);
+        assertEquals("The egress network connector " + web.arn + ":2 does not exist.",
+                message(() -> service.createRevision(REGION, "app", revisionConfig(ROLE, web.arn + ":2"))));
+        microvms.updateConnector(REGION, web.id, List.of("subnet-00000000000000002"), null, null, null, null);
+        service.createRevision(REGION, "app", revisionConfig(ROLE, web.arn + ":2"));
+        microvms.deleteConnector(REGION, web.arn + ":1");
+        for (String gone : List.of(web.arn + ":1", web.arn.replace(web.id, "web") + ":2",
+                web.arn.replace(REGION, "us-west-2") + ":2", web.arn + ":9223372036854775807")) {
+            AwsException e = error(() -> service.createRevision(REGION, "app", revisionConfig(ROLE, gone)));
+            assertEquals(404, e.getHttpStatus());
+            assertEquals("The egress network connector " + gone + " does not exist.", e.getMessage());
+        }
+        assertEquals("The egress network connector " + vm.arn + ":1 cannot be used because its"
+                + " associatedComputeResourceTypes do not include WebFunction.",
+                message(() -> service.createRevision(REGION, "app", revisionConfig(ROLE, vm.arn + ":1"))));
+        AwsException internal = error(() -> service.createRevision(REGION, "app",
+                revisionConfig(ROLE, web.arn + ":9223372036854775808")));
+        assertEquals(500, internal.getHttpStatus());
+        assertEquals("InternalServerException", internal.getErrorCode());
+    }
+
+    @Test
+    void onlyHomeRegionEndpointsServeARevisionWithAConnector() {
+        LambdaWebService service = service();
+        String connectorArn = connector("web", "WebFunction").arn + ":1";
+        ObjectNode perRegion = createRequest("app");
+        perRegion.set("revisionConfig", revisionConfig(ROLE, connectorArn));
+        perRegion.set("endpointConfig", mapper.createObjectNode().put("endpointName", "dev")
+                .put("endpointType", "PerRegion").put("authType", "ApplicationManaged"));
+        ((ObjectNode) perRegion.get("endpointConfig")).putArray("regions").add("us-west-2");
+        String refused = "The endpointType PerRegion cannot be used with a revision that has an"
+                + " egressNetworkConnectorArn specified. Only the endpointType HomeRegion supports such revisions.";
+        assertEquals(refused, message(() -> service.createFunction(REGION, perRegion)));
+        ((ObjectNode) perRegion.get("endpointConfig")).put("endpointType", "MultiRegion");
+        assertEquals(refused.replace("PerRegion", "MultiRegion"), message(() -> service.createFunction(REGION, perRegion)));
+
+        service.createFunction(REGION, createRequest("app"));
+        ((ObjectNode) perRegion.get("endpointConfig")).put("endpointType", "PerRegion");
+        assertEquals(refused, message(() -> service.createFunction(REGION, perRegion)));
+        ObjectNode missingConnector = createRequest("app");
+        missingConnector.set("revisionConfig", revisionConfig(ROLE, connectorArn.substring(0, connectorArn.length() - 1) + "2"));
+        assertEquals("ConflictException", error(() -> service.createFunction(REGION, missingConnector)).getErrorCode());
+
+        String plain = service.getEndpoint(REGION, "app", "dev").revisionWeights.get(0).revisionId;
+        String connected = service.createRevision(REGION, "app", revisionConfig(ROLE, connectorArn)).revisionId;
+        String notServed = "The revision " + connected + " has an egressNetworkConnectorArn configured and cannot be used"
+                + " by a PerRegion endpoint. Only HomeRegion endpoints support revisions with an"
+                + " egressNetworkConnectorArn configured.";
+        assertEquals(notServed, message(() -> service.createEndpoint(REGION, "app",
+                weighted("pr", "PerRegion", plain, connected))));
+        assertEquals("The revision rev-zzzzz does not exist.", message(() -> service.createEndpoint(REGION, "app",
+                weighted("pr", "PerRegion", connected, "rev-zzzzz"))));
+        service.createEndpoint(REGION, "app", weighted("pr", "PerRegion", plain));
+        service.createEndpoint(REGION, "app", weighted("mr", "MultiRegion", plain));
+        service.createEndpoint(REGION, "app", weighted("home", "HomeRegion", connected));
+
+        ObjectNode update = mapper.createObjectNode();
+        update.putArray("revisionWeights").addObject().put("revisionId", connected).put("weight", 100);
+        assertEquals(notServed, message(() -> service.updateEndpoint(REGION, "app", "pr", update)));
+        assertEquals(notServed.replace("PerRegion", "MultiRegion"),
+                message(() -> service.updateEndpoint(REGION, "app", "mr", update)));
+        assertEquals(plain, service.getEndpoint(REGION, "app", "pr").revisionWeights.get(0).revisionId);
+    }
+
+    private ObjectNode weighted(String name, String endpointType, String... revisionIds) {
+        ObjectNode request = mapper.createObjectNode().put("endpointName", name).put("endpointType", endpointType)
+                .put("authType", "ApplicationManaged");
+        if (!"HomeRegion".equals(endpointType)) {
+            request.putArray("regions").add("us-west-2");
+        }
+        ArrayNode weights = request.putArray("revisionWeights");
+        for (String revisionId : revisionIds) {
+            weights.addObject().put("revisionId", revisionId).put("weight", 100 / revisionIds.length);
+        }
+        return request;
     }
 
     @Test

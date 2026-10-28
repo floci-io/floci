@@ -533,6 +533,8 @@ floci:
       default-image: "valkey/valkey:8"
     redshift:
       enabled: true
+      automated-snapshots-enabled: true
+      snapshot-sweep-interval-seconds: 60
       default-port: 5439
       image-version: postgres:15-alpine
       poll-interval-ms: 1000
@@ -752,6 +754,7 @@ floci:
       host-port-bind-address: "127.0.0.1"
       host-volume-roots: []
       allow-unsafe-host-volumes: false
+      allow-privileged-containers: false
       # Remove the ECS containers a previous run of this deployment left on the daemon before
       # the service scheduler starts replacements. Scoped to this deployment's own containers.
       reconcile-containers-on-startup: true

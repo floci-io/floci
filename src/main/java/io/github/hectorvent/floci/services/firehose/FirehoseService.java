@@ -49,6 +49,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class FirehoseService implements ResourceProvider {
@@ -65,7 +66,7 @@ public class FirehoseService implements ResourceProvider {
      * not a bare key id. Accepting anything else would let DescribeDeliveryStream report an
      * encryption key that could never exist, where real AWS rejects the call outright.
      */
-    private static final java.util.regex.Pattern SSE_KEY_ARN_PATTERN = java.util.regex.Pattern.compile(
+    private static final Pattern SSE_KEY_ARN_PATTERN = Pattern.compile(
             "arn:.*:kms:[a-zA-Z0-9\\-]+:\\d{12}:key/[a-zA-Z_0-9+=,.@\\-_/]+");
     private static final int SSE_KEY_ARN_MAX_LENGTH = 512;
 
@@ -514,7 +515,7 @@ public class FirehoseService implements ResourceProvider {
             current.canonicalizeProcessors();
         }
         stream.setVersionId(String.valueOf(parseVersionId(stream.getVersionId()) + 1));
-        stream.setLastUpdateTimestamp(java.time.Instant.now());
+        stream.setLastUpdateTimestamp(Instant.now());
         streamPut(streamKey, stream);
         LOG.infov("Updated destination {0} of Firehose delivery stream {1}", destinationId, name);
     }
@@ -987,12 +988,18 @@ public class FirehoseService implements ResourceProvider {
             @SuppressWarnings("unchecked")
             List<KinesisRecord> records = (List<KinesisRecord>) page.get("Records");
             String next = (String) page.get("NextShardIterator");
-            String advanced = next != null ? next : iterator;
+            String advanced = next != null || records == null || records.isEmpty() ? next :
+                    kinesisService.getShardIteratorForAccount(sourceAccountId, sourceName, shard.getShardId(),
+                            "AFTER_SEQUENCE_NUMBER", records.getLast().getSequenceNumber(), region);
+            if (advanced == null) {
+                advanced = iterator;
+            }
+            String checkpoint = advanced;
             String shardId = shard.getShardId();
             if (records == null || records.isEmpty()) {
                 // Nothing was buffered, so this advance owes S3 nothing and is safe to
                 // park as pending on its own.
-                advanceSourceIterator(streamKey, shardId, advanced);
+                advanceSourceIterator(streamKey, shardId, checkpoint);
                 continue;
             }
             // Through putRecordBatch so source records buffer, and trigger a flush, on
@@ -1002,7 +1009,7 @@ public class FirehoseService implements ResourceProvider {
             putRecordBatch(streamKey, deliveryStreamName, records.stream()
                             .map(record -> new Record(record.getData()))
                             .toList(),
-                    () -> advanceSourceIterator(streamKey, shardId, advanced));
+                    () -> advanceSourceIterator(streamKey, shardId, checkpoint));
         }
     }
 

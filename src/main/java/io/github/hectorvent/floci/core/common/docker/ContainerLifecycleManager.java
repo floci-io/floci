@@ -516,22 +516,7 @@ public class ContainerLifecycleManager {
     }
 
     private void stopAndRemoveAdmitted(String containerId, Closeable logStream, int stopTimeoutSeconds) {
-        LOG.infov("Stopping container {0}", containerId);
-
-        boolean stoppedOrMissing = false;
-        try {
-            dockerClient.stopContainerCmd(containerId).withTimeout(stopTimeoutSeconds).exec();
-            stoppedOrMissing = true;
-        } catch (NotFoundException e) {
-            LOG.debugv("Container {0} not found (already removed)", containerId);
-            stoppedOrMissing = true;
-        } catch (NotModifiedException e) {
-            // HTTP 304: the container had already exited, which is the outcome the stop wanted.
-            LOG.debugv("Container {0} had already stopped", containerId);
-            stoppedOrMissing = true;
-        } catch (Exception e) {
-            LOG.warnv("Error stopping container {0}: {1}", containerId, e.getMessage());
-        }
+        boolean stoppedOrMissing = stopAdmitted(containerId, stopTimeoutSeconds);
 
         // Force removal is the recovery path when Docker could not stop the container cleanly. It also
         // terminates the follow-log transport, allowing its terminal callback to drain the final tail.
@@ -549,6 +534,35 @@ public class ContainerLifecycleManager {
 
         if (logStream != null && (stoppedOrMissing || removedOrMissing)) {
             closeLogStreamAfterContainerStop(logStream);
+        }
+    }
+
+    /**
+     * Stops a container and leaves it in place, for its output to be read before it is removed: one that
+     * had already exited, or is gone, counts as stopped.
+     *
+     * @param stopTimeoutSeconds seconds to wait for the container to stop cleanly after
+     *        SIGTERM before Docker sends SIGKILL. Must be a non-negative integer.
+     */
+    public void stop(String containerId, int stopTimeoutSeconds) {
+        withTeardownSlot(() -> stopAdmitted(containerId, stopTimeoutSeconds));
+    }
+
+    private boolean stopAdmitted(String containerId, int stopTimeoutSeconds) {
+        LOG.infov("Stopping container {0}", containerId);
+        try {
+            dockerClient.stopContainerCmd(containerId).withTimeout(stopTimeoutSeconds).exec();
+            return true;
+        } catch (NotFoundException e) {
+            LOG.debugv("Container {0} not found (already removed)", containerId);
+            return true;
+        } catch (NotModifiedException e) {
+            // HTTP 304: the container had already exited, which is the outcome the stop wanted.
+            LOG.debugv("Container {0} had already stopped", containerId);
+            return true;
+        } catch (Exception e) {
+            LOG.warnv("Error stopping container {0}: {1}", containerId, e.getMessage());
+            return false;
         }
     }
 

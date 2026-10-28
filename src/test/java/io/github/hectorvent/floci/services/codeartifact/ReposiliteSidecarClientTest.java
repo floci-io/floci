@@ -1221,6 +1221,125 @@ class ReposiliteSidecarClientTest {
                 new String(md5Body.get(), StandardCharsets.UTF_8));
     }
 
+    /**
+     * Raised by hectorvent's review: every CodeArtifact repository gets a maven sidecar id at
+     * creation regardless of whether it is ever actually used through maven, so {@code
+     * ListPackages} with no format filter must not start the one shared Reposilite container just
+     * to walk a repository that has never used maven. No context is registered for {@code
+     * /api/maven/details/dom--repo/} at all here: a real walk would have nothing to connect to and
+     * throw.
+     */
+    @Test
+    void listPackagesReturnsEmptyWithoutStartingTheSharedContainerThatWasNeverStarted() {
+        when(manager.isStarted()).thenReturn(false);
+
+        List<RepositorySidecarManager.PackageIdentifier> packages = client.listPackages("dom--repo", "dom", "repo");
+
+        assertThat(packages, hasSize(0));
+    }
+
+    /**
+     * Raised by Greptile's review: {@code com/foo} is both {@code com:foo}'s own version directory
+     * ({@code 1.0.0}) and a further groupId segment for {@code com.foo:bar}'s own package
+     * ({@code bar}). {@code bar} is listed before {@code 1.0.0} here deliberately, since an earlier
+     * version of {@link ReposiliteSidecarClient#listPackages} peeked only the first child, so with
+     * {@code bar} first it fell through to treating every child (including the real version
+     * directory {@code 1.0.0}) as a further groupId segment, recursed into {@code 1.0.0} where it
+     * found no subdirectories and silently returned, and never recorded {@code com:foo} at all.
+     */
+    @Test
+    void listPackagesFindsBothAPackageAndASiblingGroupSharingItsDirectory() {
+        server.createContext("/api/maven/details/dom--repo/",
+                exchange -> respond(exchange, 200, "{\"name\":\"dom--repo\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"com\",\"type\":\"DIRECTORY\"}]}"));
+        server.createContext("/api/maven/details/dom--repo/com/",
+                exchange -> respond(exchange, 200, "{\"name\":\"com\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"foo\",\"type\":\"DIRECTORY\"}]}"));
+        server.createContext("/api/maven/details/dom--repo/com/foo/",
+                exchange -> respond(exchange, 200, "{\"name\":\"foo\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"bar\",\"type\":\"DIRECTORY\"},"
+                        + "{\"name\":\"1.0.0\",\"type\":\"DIRECTORY\"}]}"));
+        server.createContext("/api/maven/details/dom--repo/com/foo/1.0.0/",
+                exchange -> respond(exchange, 200, "{\"name\":\"1.0.0\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"foo-1.0.0.jar\",\"type\":\"FILE\"}]}"));
+        server.createContext("/api/maven/details/dom--repo/com/foo/bar/",
+                exchange -> respond(exchange, 200, "{\"name\":\"bar\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"1.0.0\",\"type\":\"DIRECTORY\"}]}"));
+        server.createContext("/api/maven/details/dom--repo/com/foo/bar/1.0.0/",
+                exchange -> respond(exchange, 200, "{\"name\":\"1.0.0\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"bar-1.0.0.jar\",\"type\":\"FILE\"}]}"));
+
+        List<RepositorySidecarManager.PackageIdentifier> packages = client.listPackages("dom--repo", "dom", "repo");
+
+        assertThat(packages, containsInAnyOrder(
+                new RepositorySidecarManager.PackageIdentifier("com", "foo"),
+                new RepositorySidecarManager.PackageIdentifier("com.foo", "bar")));
+    }
+
+    /**
+     * Raised by Greptile's review: {@code com/example/tool} has zero version directories of its
+     * own (a native PUT straight to its {@code maven-metadata.xml}, with no real version content
+     * ever written under it, the same artifact-level-only shape {@code recordVersionAvailable}'s
+     * own javadoc already describes), so peeking it from its parent sees no subdirectories at all
+     * and, before this fix, treated that as proof the parent ({@code com:example}) was the real
+     * package, recording a package that does not exist and skipping the real one,
+     * {@code com.example:tool}, entirely.
+     */
+    @Test
+    void listPackagesRecognizesAnArtifactDirectoryWithNoVersionsOfItsOwnThroughItsOwnMetadata() {
+        server.createContext("/api/maven/details/dom--repo/",
+                exchange -> respond(exchange, 200, "{\"name\":\"dom--repo\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"com\",\"type\":\"DIRECTORY\"}]}"));
+        server.createContext("/api/maven/details/dom--repo/com/",
+                exchange -> respond(exchange, 200, "{\"name\":\"com\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"example\",\"type\":\"DIRECTORY\"}]}"));
+        server.createContext("/api/maven/details/dom--repo/com/example/",
+                exchange -> respond(exchange, 200, "{\"name\":\"example\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"tool\",\"type\":\"DIRECTORY\"}]}"));
+        server.createContext("/api/maven/details/dom--repo/com/example/tool/",
+                exchange -> respond(exchange, 200, "{\"name\":\"tool\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"maven-metadata.xml\",\"type\":\"FILE\"}]}"));
+
+        List<RepositorySidecarManager.PackageIdentifier> packages = client.listPackages("dom--repo", "dom", "repo");
+
+        assertThat(packages, containsInAnyOrder(new RepositorySidecarManager.PackageIdentifier("com.example",
+                "tool")));
+    }
+
+    /**
+     * Raised by Greptile's review of the fix above: a real Maven snapshot version directory also
+     * holds its own {@code maven-metadata.xml} (listing that version's timestamped builds),
+     * alongside its real artifact files, so excluding every {@code maven-metadata.xml}-holding
+     * child from being version-shaped, as that fix did, wrongly recursed into {@code
+     * 1.0-SNAPSHOT} as though it were a further groupId segment, adding the nonexistent package
+     * {@code com.example.tool:1.0-SNAPSHOT} instead of the real one, {@code com.example:tool}.
+     */
+    @Test
+    void listPackagesTreatsASnapshotVersionDirectoryAsVersionShapedDespiteItsOwnMetadata() {
+        server.createContext("/api/maven/details/dom--repo/",
+                exchange -> respond(exchange, 200, "{\"name\":\"dom--repo\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"com\",\"type\":\"DIRECTORY\"}]}"));
+        server.createContext("/api/maven/details/dom--repo/com/",
+                exchange -> respond(exchange, 200, "{\"name\":\"com\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"example\",\"type\":\"DIRECTORY\"}]}"));
+        server.createContext("/api/maven/details/dom--repo/com/example/",
+                exchange -> respond(exchange, 200, "{\"name\":\"example\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"tool\",\"type\":\"DIRECTORY\"}]}"));
+        server.createContext("/api/maven/details/dom--repo/com/example/tool/",
+                exchange -> respond(exchange, 200, "{\"name\":\"tool\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"1.0-SNAPSHOT\",\"type\":\"DIRECTORY\"}]}"));
+        server.createContext("/api/maven/details/dom--repo/com/example/tool/1.0-SNAPSHOT/",
+                exchange -> respond(exchange, 200, "{\"name\":\"1.0-SNAPSHOT\",\"type\":\"DIRECTORY\",\"files\":["
+                        + "{\"name\":\"maven-metadata.xml\",\"type\":\"FILE\"},"
+                        + "{\"name\":\"maven-metadata.xml.sha1\",\"type\":\"FILE\"},"
+                        + "{\"name\":\"tool-1.0-SNAPSHOT.jar\",\"type\":\"FILE\"}]}"));
+
+        List<RepositorySidecarManager.PackageIdentifier> packages = client.listPackages("dom--repo", "dom", "repo");
+
+        assertThat(packages, containsInAnyOrder(new RepositorySidecarManager.PackageIdentifier("com.example",
+                "tool")));
+    }
+
     private static void respond(HttpExchange exchange, int status, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(status, bytes.length);

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -426,7 +427,7 @@ class DynamoDbImportIntegrationTest {
 
     // --- Helpers ---
 
-    private io.restassured.response.Response dynamo(String action, String body) {
+    private Response dynamo(String action, String body) {
         return given()
             .header("X-Amz-Target", "DynamoDB_20120810." + action)
             .contentType(DYNAMODB_CONTENT_TYPE)
@@ -476,7 +477,7 @@ class DynamoDbImportIntegrationTest {
                 """.formatted(bucket, prefix, format, compression, tableName);
     }
 
-    private io.restassured.response.Response describeImport(String importArn) {
+    private Response describeImport(String importArn) {
         return dynamo("DescribeImport", "{\"ImportArn\": \"" + importArn + "\"}");
     }
 
@@ -489,7 +490,7 @@ class DynamoDbImportIntegrationTest {
                 "ExportDescription.ExportStatus");
     }
 
-    private String pollStatus(Supplier<io.restassured.response.Response> call, String statusPath) {
+    private String pollStatus(Supplier<Response> call, String statusPath) {
         long deadline = System.currentTimeMillis() + 10_000;
         while (System.currentTimeMillis() < deadline) {
             String status = call.get().then().statusCode(200).extract().jsonPath().getString(statusPath);

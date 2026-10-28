@@ -137,6 +137,9 @@ aws secretsmanager validate-resource-policy \
 
 - **Rotation schedules fire.** A background sweep (see the config table) rotates any secret whose
   `NextRotationDate` has passed. `AutomaticallyAfterDays`, `rate()` and `cron()` are all honoured.
+- **Redshift-owned master secrets rotate with their cluster.** `RotateSecret` and scheduled
+  rotation change the provisioned Redshift cluster password, then publish the matching secret
+  version. The cluster must be available, and a rotation Lambda is not used.
 - **`RotateSecret` also needs `lambda:InvokeFunction` under IAM enforcement.** As on AWS, the caller
   must be allowed to invoke the rotation function as well as to call `RotateSecret`. A caller that
   is not gets `AccessDeniedException` with HTTP 400, as Secrets Manager reports it, and the secret is

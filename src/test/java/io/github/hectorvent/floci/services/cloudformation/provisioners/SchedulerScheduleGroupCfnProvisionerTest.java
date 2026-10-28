@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleGroup;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.time.Instant;
 import java.util.HashMap;
@@ -312,7 +313,7 @@ class SchedulerScheduleGroupCfnProvisionerTest {
     }
 
     private void doThrowNotFoundOnDelete(String name) {
-        org.mockito.Mockito.doThrow(new AwsException("ResourceNotFoundException", "not found", 404))
+        Mockito.doThrow(new AwsException("ResourceNotFoundException", "not found", 404))
                 .when(schedulerService).deleteScheduleGroup(name, "us-east-1");
     }
 }

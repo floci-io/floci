@@ -31,7 +31,7 @@ AWS::RDS::DBCluster	ReadEndpoint	ReadEndpoint.Address is set instead, the form A
 AWS::RDS::DBCluster	StorageEncryptionType	cluster storage encryption is not emulated
 AWS::RDS::DBCluster	StorageThroughput	provisioned storage throughput is not emulated
 AWS::RDS::DBInstance	AutomaticRestartTime	instance restart scheduling is not emulated
-AWS::RDS::DBInstance	CertificateDetails	per-instance CA certificate metadata is not emulated
+AWS::RDS::DBInstance	CertificateDetails	the dotted CertificateDetails.CAIdentifier and CertificateDetails.ValidTill are set instead, the form AWS's GetAtt exposes for the nested object
 AWS::RDS::DBInstance	DBInstanceStatus	the model carries no lifecycle status; instances reach available synchronously
 AWS::RDS::DBInstance	InstanceCreateTime	creation timestamps are not recorded on the instance
 AWS::RDS::DBInstance	IsStorageConfigUpgradeAvailable	storage configuration upgrades are not emulated

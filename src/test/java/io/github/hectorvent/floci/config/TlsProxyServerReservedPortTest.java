@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -53,7 +54,7 @@ class TlsProxyServerReservedPortTest {
      */
     private static TlsProxyServer proxyWith(int flociPort, boolean tlsEnabled, int awsHttpsPort,
                                             Future<NetServer> outcome,
-                                            java.util.function.Consumer<TlsProxyServer> beforeStart) {
+                                            Consumer<TlsProxyServer> beforeStart) {
         return proxyWith(flociPort, tlsEnabled, awsHttpsPort,
                 Future.succeededFuture(mock(NetServer.class)), outcome, beforeStart);
     }
@@ -61,7 +62,7 @@ class TlsProxyServerReservedPortTest {
     private static TlsProxyServer proxyWith(int flociPort, boolean tlsEnabled, int awsHttpsPort,
                                             Future<NetServer> publicOutcome,
                                             Future<NetServer> awsHttpsOutcome,
-                                            java.util.function.Consumer<TlsProxyServer> beforeStart) {
+                                            Consumer<TlsProxyServer> beforeStart) {
         EmulatorConfig.TlsConfig tls = mock(EmulatorConfig.TlsConfig.class);
         when(tls.enabled()).thenReturn(tlsEnabled);
         when(tls.awsHttpsPort()).thenReturn(awsHttpsPort);

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -25,7 +26,7 @@ class SesReceiptRuleSetReorderCloneV1IntegrationTest {
     private static final String RS = "floci-v1-reorder";
     private static final String CLONE = "floci-v1-reorder-copy";
 
-    private static io.restassured.specification.RequestSpecification req(String action) {
+    private static RequestSpecification req(String action) {
         return given()
                 .contentType("application/x-www-form-urlencoded")
                 .header("Authorization", AUTH)

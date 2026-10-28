@@ -27,7 +27,31 @@ public record ReadReplicaRequest(String dbInstanceIdentifier,
                                  Integer allocatedStorage,
                                  String replicaMode,
                                  Map<String, String> tags,
-                                 String storageType) {
+                                 String storageType,
+                                 String caCertificateIdentifier) {
+
+    public ReadReplicaRequest(String dbInstanceIdentifier,
+            String sourceDbInstanceIdentifier,
+            String dbInstanceClass,
+            String availabilityZone,
+            Boolean multiAz,
+            Boolean autoMinorVersionUpgrade,
+            String optionGroupName,
+            String dbParameterGroupName,
+            Boolean publiclyAccessible,
+            String dbSubnetGroupName,
+            List<String> vpcSecurityGroupIds,
+            Boolean copyTagsToSnapshot,
+            Boolean iamDatabaseAuthenticationEnabled,
+            Integer allocatedStorage,
+            String replicaMode,
+            Map<String, String> tags,
+            String storageType) {
+        this(dbInstanceIdentifier, sourceDbInstanceIdentifier, dbInstanceClass, availabilityZone, multiAz,
+                autoMinorVersionUpgrade, optionGroupName, dbParameterGroupName, publiclyAccessible,
+                dbSubnetGroupName, vpcSecurityGroupIds, copyTagsToSnapshot, iamDatabaseAuthenticationEnabled,
+                allocatedStorage, replicaMode, tags, storageType, null);
+    }
 
     public ReadReplicaRequest(String dbInstanceIdentifier,
             String sourceDbInstanceIdentifier,
@@ -48,6 +72,6 @@ public record ReadReplicaRequest(String dbInstanceIdentifier,
         this(dbInstanceIdentifier, sourceDbInstanceIdentifier, dbInstanceClass, availabilityZone, multiAz,
                 autoMinorVersionUpgrade, optionGroupName, dbParameterGroupName, publiclyAccessible,
                 dbSubnetGroupName, vpcSecurityGroupIds, copyTagsToSnapshot, iamDatabaseAuthenticationEnabled,
-                allocatedStorage, replicaMode, tags, null);
+                allocatedStorage, replicaMode, tags, null, null);
     }
 }

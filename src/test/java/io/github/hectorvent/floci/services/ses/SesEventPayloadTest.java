@@ -144,7 +144,7 @@ class SesEventPayloadTest {
         ArrayNode headers = (ArrayNode) node.get("mail").get("headers");
         // Only the auto headers (From/To/Subject) and the single valid X-Real.
         boolean hasXReal = false;
-        for (com.fasterxml.jackson.databind.JsonNode h : headers) {
+        for (JsonNode h : headers) {
             String name = h.path("name").asText();
             assertFalse(name.isBlank(), "no blank-named header should be emitted");
             if ("X-Real".equals(name)) {

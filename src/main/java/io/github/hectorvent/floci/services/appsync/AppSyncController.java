@@ -14,6 +14,8 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
@@ -106,7 +108,7 @@ public class AppSyncController {
         String definition = (String) request.get("definition");
         if (definition != null) {
             try {
-                definition = new String(java.util.Base64.getDecoder().decode(definition), java.nio.charset.StandardCharsets.UTF_8);
+                definition = new String(Base64.getDecoder().decode(definition), StandardCharsets.UTF_8);
             } catch (IllegalArgumentException e) {
                 // Not base64, use as-is
             }

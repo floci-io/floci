@@ -293,6 +293,38 @@ class RequestResourcesTest {
     }
 
     /**
+     * Each {@code PutEvents} entry is published to the event bus it names, by name or ARN, in the account and Region
+     * that ARN gives, or to the default one when it names none, gives a null or a blank; a request publishing nothing
+     * names no bus.
+     */
+    @Test
+    void eachEntryIsOnTheEventBusItNames() {
+        String events = "arn:aws:events:us-east-1:000000000000:";
+        assertEquals(List.of(events + "event-bus/orders", events + "event-bus/default", events + "event-bus/audit"),
+                of("events:PutEvents", json("{\"Entries\":[{\"EventBusName\":\"orders\"},{\"Source\":\"s\"},"
+                        + "{\"EventBusName\":\"audit\"},{\"EventBusName\":\"orders\"}]}")));
+        assertEquals(List.of(events + "event-bus/default"), of("events:PutEvents",
+                json("{\"Entries\":[{\"EventBusName\":null},{\"EventBusName\":\"\"},{\"EventBusName\":\" \"}]}")));
+        // Each ARN puts its entry's bus in its own account and Region, checked as the caller's too.
+        assertEquals(List.of("arn:aws:events:eu-west-1:111122223333:event-bus/orders",
+                "arn:aws:events:us-east-1:111122223333:event-bus/orders",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/orders", events + "event-bus/orders",
+                events + "event-bus/audit", "arn:aws:events:us-east-1:444455556666:event-bus/billing",
+                events + "event-bus/billing"), of("events:PutEvents", json("{\"Entries\":["
+                + "{\"EventBusName\":\"arn:aws:events:eu-west-1:111122223333:event-bus/orders\"},"
+                + "{\"EventBusName\":\"audit\"},"
+                + "{\"EventBusName\":\"arn:aws:events:us-east-1:444455556666:event-bus/billing\"}]}")));
+        assertEquals(List.of(events + "event-bus/orders"), of("events:PutEvents",
+                json("{\"Entries\":[{\"EventBusName\":\"arn:aws:events:::event-bus/orders\"}]}")));
+        assertEquals(List.of(), of("events:PutEvents", json("{\"Entries\":[]}")));
+        assertEquals(List.of(), of("events:PutEvents", json("{}")));
+        // A form's entries run from 1 to the first it gives nothing of.
+        assertEquals(List.of(events + "event-bus/orders", events + "event-bus/default"), of("events:PutEvents",
+                form("Action=PutEvents&Entries.member.1.EventBusName=orders&Entries.member.2.Source=s"
+                        + "&Entries.member.4.EventBusName=late")));
+    }
+
+    /**
      * A connection or an API destination, whose ARN EventBridge follows with an id it mints after the name, is the
      * one stored under the name the request gives, and has that id open when none is or nothing looks it up.
      */

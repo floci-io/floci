@@ -280,8 +280,7 @@ public class SesConfigurationSetService implements SesTaggable {
         Objects.requireNonNull(verifiedDomainIdentity, "verifiedDomainIdentity probe is required");
         if (domain == null) {
             throw SmithyValidationErrors.validationError(
-                    "Value at 'trackingOptions' failed to satisfy constraint: "
-                            + "Member must not be null");
+                    SmithyValidationErrors.notNullWithoutValue("trackingOptions"));
         }
         if (domain.isBlank()) {
             throw new AwsException("InvalidTrackingOptions",

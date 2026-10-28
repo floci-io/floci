@@ -15,6 +15,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -198,8 +199,8 @@ class SmtpRelayTest {
         SmtpRelay relay = enabledRelay();
 
         String rawMime = "From: s@example.com\r\nTo: t@example.com\r\nSubject: B64\r\n\r\nDecoded body";
-        String encoded = java.util.Base64.getEncoder().encodeToString(
-                rawMime.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String encoded = Base64.getEncoder().encodeToString(
+                rawMime.getBytes(StandardCharsets.UTF_8));
         relay.relayRaw(raw("from@example.com", List.of("to@example.com"), encoded));
 
         ArgumentCaptor<MailMessage> captor = ArgumentCaptor.forClass(MailMessage.class);
@@ -338,8 +339,8 @@ class SmtpRelayTest {
     @Test
     void parseRawRecipients_acceptsBase64Encoded() {
         String raw = "From: a@example.com\r\nTo: only@example.com\r\nSubject: x\r\n\r\nbody";
-        String b64 = java.util.Base64.getEncoder().encodeToString(
-                raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String b64 = Base64.getEncoder().encodeToString(
+                raw.getBytes(StandardCharsets.UTF_8));
         assertEquals(List.of("only@example.com"), SmtpRelay.parseRawRecipients(b64));
     }
 
@@ -350,16 +351,16 @@ class SmtpRelayTest {
         // into garbage.
         String raw = "From: s@example.com\r\nMessage-ID: <caller@example.com>\r\nSubject: x\r\n\r\nbody";
         assertEquals(raw, new String(SmtpRelay.tryBase64Decode(raw),
-                java.nio.charset.StandardCharsets.UTF_8));
+                StandardCharsets.UTF_8));
     }
 
     @Test
     void tryBase64Decode_base64Payload_isDecoded() {
         String raw = "From: s@example.com\r\nSubject: x\r\n\r\nbody";
-        String encoded = java.util.Base64.getEncoder().encodeToString(
-                raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String encoded = Base64.getEncoder().encodeToString(
+                raw.getBytes(StandardCharsets.UTF_8));
         assertEquals(raw, new String(SmtpRelay.tryBase64Decode(encoded),
-                java.nio.charset.StandardCharsets.UTF_8));
+                StandardCharsets.UTF_8));
     }
 
     @Test
@@ -382,8 +383,8 @@ class SmtpRelayTest {
                 + "Cc: cc@example.com\r\n"
                 + "Bcc: bcc@example.com\r\n"
                 + "Subject: Hello world\r\n\r\nbody";
-        String b64 = java.util.Base64.getEncoder().encodeToString(
-                raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String b64 = Base64.getEncoder().encodeToString(
+                raw.getBytes(StandardCharsets.UTF_8));
         SmtpRelay.RawMessageHeaders h = SmtpRelay.parseRawHeaders(b64);
         assertEquals("Hello world", h.subject());
         assertEquals(List.of("to1@example.com", "to2@example.com"), h.to());
@@ -678,8 +679,8 @@ class SmtpRelayTest {
                 + "Content-Description: Quarterly report\r\n"
                 + "Content-Transfer-Encoding: base64\r\n"
                 + "\r\n"
-                + java.util.Base64.getEncoder().encodeToString("PDF-BYTES".getBytes(
-                        java.nio.charset.StandardCharsets.UTF_8)) + "\r\n"
+                + Base64.getEncoder().encodeToString("PDF-BYTES".getBytes(
+                        StandardCharsets.UTF_8)) + "\r\n"
                 + "--outer--";
         relay.relayRaw(raw("from@example.com", List.of("to@example.com"), rawMime));
 
@@ -756,8 +757,8 @@ class SmtpRelayTest {
                 + "Content-ID: <logo>\r\n"
                 + "Content-Transfer-Encoding: base64\r\n"
                 + "\r\n"
-                + java.util.Base64.getEncoder().encodeToString("PNG".getBytes(
-                        java.nio.charset.StandardCharsets.UTF_8)) + "\r\n"
+                + Base64.getEncoder().encodeToString("PNG".getBytes(
+                        StandardCharsets.UTF_8)) + "\r\n"
                 + "--rel--";
         relay.relayRaw(raw("from@example.com", List.of("to@example.com"), rawMime));
 

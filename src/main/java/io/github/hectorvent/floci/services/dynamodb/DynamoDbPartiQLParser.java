@@ -128,7 +128,7 @@ public class DynamoDbPartiQLParser {
         return switch (tokens.getFirst().type()) {
             case SELECT -> "dynamodb:PartiQLSelect";
             case INSERT -> "dynamodb:PartiQLInsert";
-            case UPDATE -> "dynamodb:PartiQLUpdate";
+            case UPDATE, FROM -> "dynamodb:PartiQLUpdate";
             case DELETE -> "dynamodb:PartiQLDelete";
             default -> null;
         };
@@ -471,9 +471,9 @@ public class DynamoDbPartiQLParser {
             case SELECT -> parseSelect();
             case INSERT -> parseInsert();
             case UPDATE -> parseUpdate();
+            case FROM -> parseFromFirstUpdate();
             case DELETE -> parseDelete();
-            default -> throw validationEx(
-                    "Statement wasn't well formed, can't be processed: Expected data manipulation");
+            default -> throw validationEx(NOT_WELL_FORMED + "Expected data manipulation");
         };
     }
 
@@ -548,6 +548,29 @@ public class DynamoDbPartiQLParser {
         consume(TType.UPDATE);
         String table = expectTableName();
         String index = parseIndexQualifier();
+        Edits edits = parseEdits();
+        consume(TType.WHERE);
+        List<Cond> where = parseConditions();
+        return new Stmt.Update(table, index, edits.sets(), edits.removes(), where, parseReturning());
+    }
+
+    // FROM "Table" [WHERE …] SET attr=val [, …] [REMOVE attr [, …]], an UPDATE with the clauses in PartiQL's order
+    private Stmt.Update parseFromFirstUpdate() {
+        consume(TType.FROM);
+        String table = expectTableName();
+        String index = parseIndexQualifier();
+        List<Cond> where = List.of();
+        if (peek().type() == TType.WHERE) { advance(); where = parseConditions(); }
+        Edits edits = parseEdits();
+        return new Stmt.Update(table, index, edits.sets(), edits.removes(), where, parseReturning());
+    }
+
+    private record Edits(List<SetClause> sets, List<Path> removes) {}
+
+    private Edits parseEdits() {
+        if (peek().type() != TType.SET && peek().type() != TType.REMOVE) {
+            throw validationEx(NOT_WELL_FORMED + "Expected data manipulation");
+        }
         List<SetClause> sets = new ArrayList<>();
         List<Path> removes = new ArrayList<>();
         while (peek().type() == TType.SET || peek().type() == TType.REMOVE) {
@@ -561,9 +584,7 @@ public class DynamoDbPartiQLParser {
                 while (peek().type() == TType.COMMA) { advance(); removes.add(parsePath()); }
             }
         }
-        consume(TType.WHERE);
-        List<Cond> where = parseConditions();
-        return new Stmt.Update(table, index, sets, removes, where, parseReturning());
+        return new Edits(sets, removes);
     }
 
     private Stmt.Delete parseDelete() {

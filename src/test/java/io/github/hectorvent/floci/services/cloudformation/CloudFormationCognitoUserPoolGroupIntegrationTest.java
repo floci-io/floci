@@ -7,6 +7,7 @@ import io.restassured.RestAssured;
 import io.restassured.config.EncoderConfig;
 import io.restassured.http.ContentType;
 import io.restassured.parsing.Parser;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -425,7 +426,7 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
         return XmlParser.extractPairs(describeXml, "Outputs", "OutputKey", "OutputValue").get(key);
     }
 
-    private io.restassured.response.ValidatableResponse cognito(String target, String body) {
+    private ValidatableResponse cognito(String target, String body) {
         return given()
             .config(RestAssured.config().encoderConfig(EncoderConfig.encoderConfig()
                     .encodeContentTypeAs(COGNITO_CONTENT_TYPE, ContentType.TEXT)))

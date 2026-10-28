@@ -81,6 +81,21 @@ class EmrServiceContainerStepsTest {
         assertEquals(List.of(REPORT, "s3://bucket/out/"), job.application());
         assertEquals(Map.of("spark.executor.cores", "2"), job.sparkDefaults());
         assertEquals(Duration.ZERO, job.timeout());
+        assertNull(job.logFolder());
+        assertNull(job.cloudWatchLogs());
+    }
+
+    @Test
+    void aStepsLogsGoUnderItsClustersLogUri() {
+        EmrCluster requested = cluster("logged", true, sparkStep("report", "CONTINUE"));
+        // The DescribeCluster example in the Management Guide has a LogUri in the s3n:// scheme.
+        requested.setLogUri("s3n://aws-logs-" + ACCOUNT + "-" + REGION + "/elasticmapreduce/");
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        assertEquals("s3n://aws-logs-" + ACCOUNT + "-" + REGION + "/elasticmapreduce/" + cluster.getId() + "/steps/"
+                + cluster.getSteps().get(0).getId() + "/", runner.jobs.get(0).logFolder());
     }
 
     @Test

@@ -787,4 +787,77 @@ class LambdaWebIntegrationTest {
 
         given().when().delete(BASE + "/web-functions/" + fn).then().statusCode(204);
     }
+
+    @Test
+    @Order(14)
+    void anEgressConnectorIsAWebFunctionVersionOnAHomeRegionEndpoint() {
+        String fn = FN + "-connector";
+        String connectorArn = given().contentType("application/json")
+                .body("""
+                        {"Name": "web-it-connector", "OperatorRole": "arn:aws:iam::000000000000:role/web-it-operator",
+                         "ClientToken": "web-it-connector",
+                         "Configuration": {"VpcEgressConfiguration": {"SubnetIds": ["subnet-0web0000000000001"],
+                             "SecurityGroupIds": ["sg-0web0000000000001"], "NetworkProtocol": "IPv4",
+                             "AssociatedComputeResourceTypes": ["WebFunction"]}}}
+                        """)
+                .when().post("/2026-04-04/network-connectors")
+                .then().statusCode(202)
+                .extract().path("Arn");
+        String revision = given().contentType("application/json")
+                .body("""
+                        {"functionName": "%s",
+                         "revisionConfig": {"buildConfig": %s,
+                                            "serviceConfig": {"executionRoleArn": "%s", "egressNetworkConnectorArn": "%s:1"}},
+                         "endpointConfig": {"endpointName": "dev", "endpointType": "HomeRegion",
+                                            "authType": "ApplicationManaged"}}
+                        """.formatted(fn, BUILD, ROLE, connectorArn))
+                .when().put(BASE + "/web-functions")
+                .then().statusCode(202)
+                .extract().path("revision.revisionId");
+        given().when().get(BASE + "/web-functions/" + fn + "/revisions/" + revision)
+                .then().statusCode(200)
+                .body("serviceConfig.egressNetworkConnectorArn", equalTo(connectorArn + ":1"));
+
+        String revisions = BASE + "/web-functions/" + fn + "/revisions";
+        given().contentType("application/json")
+                .body("""
+                        {"buildConfig": %s, "serviceConfig": {"executionRoleArn": "%s", "egressNetworkConnectorArn": "%s:2"}}
+                        """.formatted(BUILD, ROLE, connectorArn))
+                .when().post(revisions)
+                .then().statusCode(404)
+                .header("X-Amzn-Errortype", "ResourceNotFoundException")
+                .body("message", equalTo("The egress network connector " + connectorArn + ":2 does not exist."));
+        given().contentType("application/json")
+                .body("""
+                        {"buildConfig": %s,
+                         "serviceConfig": {"executionRoleArn": "%s", "egressNetworkConnectorArn": "%s:9223372036854775808"}}
+                        """.formatted(BUILD, ROLE, connectorArn))
+                .when().post(revisions)
+                .then().statusCode(500)
+                .header("X-Amzn-Errortype", "InternalServerException")
+                .body(equalTo("{}"));
+        given().contentType("application/json")
+                .body("""
+                        {"buildConfig": %s, "serviceConfig": {"executionRoleArn": "%s", "egressNetworkConnectorArn": "%s:1"}}
+                        """.formatted(BUILD, ROLE, connectorArn.replace("000000000000", "111122223333")))
+                .when().post(revisions)
+                .then().statusCode(403)
+                .header("X-Amzn-Errortype", "AccessDeniedException")
+                .body("Message", equalTo("Cross-account pass lambda-network-connector is not allowed."));
+
+        given().contentType("application/json")
+                .body("""
+                        {"endpointName": "pr", "endpointType": "PerRegion", "authType": "ApplicationManaged",
+                         "regions": ["us-west-2"], "revisionWeights": [{"revisionId": "%s", "weight": 100}]}
+                        """.formatted(revision))
+                .when().put(BASE + "/web-functions/" + fn + "/endpoints")
+                .then().statusCode(400)
+                .header("X-Amzn-Errortype", "ValidationException")
+                .body("message", equalTo("The revision " + revision + " has an egressNetworkConnectorArn configured"
+                        + " and cannot be used by a PerRegion endpoint. Only HomeRegion endpoints support revisions"
+                        + " with an egressNetworkConnectorArn configured."));
+
+        given().when().delete(BASE + "/web-functions/" + fn).then().statusCode(204);
+        given().when().delete("/2026-04-04/network-connectors/" + connectorArn).then().statusCode(202);
+    }
 }

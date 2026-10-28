@@ -129,7 +129,7 @@ public class EcrRegistryDataPlane {
             if (result.failed()) {
                 context.request().resume();
                 exchange.end();
-                context.response().setStatusCode(503).end();
+                registryUnavailable(context);
             } else if (result.result()) {
                 context.request().resume();
                 exchange.end();
@@ -158,7 +158,7 @@ public class EcrRegistryDataPlane {
             if (upstreamRequest.failed()) {
                 context.request().resume();
                 exchange.end();
-                failUnlessGone(context, 503);
+                registryUnavailable(context);
                 return;
             }
             HttpClientRequest clientReq = upstreamRequest.result();
@@ -178,6 +178,16 @@ public class EcrRegistryDataPlane {
             });
             context.request().resume();
         });
+    }
+
+    private static void registryUnavailable(RoutingContext context) {
+        if (!context.response().ended() && !context.response().closed()) {
+            String message = "ECR registry is unavailable. Check Docker and registry connectivity. "
+                    + "When running Floci in Docker, use a user-defined network shared with the registry "
+                    + "(FLOCI_SERVICES_ECR_DOCKER_NETWORK).";
+            context.response().putHeader("Docker-Distribution-API-Version", "registry/2.0");
+            registryError(context, 503, "UNAVAILABLE", message);
+        }
     }
 
     /** Answers {@code status} unless the response is already written or its client went away. */
@@ -228,14 +238,14 @@ public class EcrRegistryDataPlane {
         String message = String.format(
                 "The image tag %s already exists in the %s repository and cannot be overwritten because the tag is immutable.",
                 tag, repository);
-        String body = new JsonObject()
-                .put("errors", new JsonArray().add(new JsonObject()
-                        .put("code", "TAG_INVALID")
-                        .put("message", message)))
-                .encode();
-        context.response().setStatusCode(400)
+        registryError(context, 400, "TAG_INVALID", message);
+    }
+
+    private static void registryError(RoutingContext context, int status, String code, String message) {
+        context.response().setStatusCode(status)
                 .putHeader("Content-Type", "application/json")
-                .end(body);
+                .end(new JsonObject().put("errors", new JsonArray().add(new JsonObject()
+                        .put("code", code).put("message", message))).encode());
     }
 
     private void release(String immutableTag) {

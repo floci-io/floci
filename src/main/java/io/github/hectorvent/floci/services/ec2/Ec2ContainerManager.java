@@ -1232,7 +1232,7 @@ public class Ec2ContainerManager {
      *                          attachment unknown rather than known to be absent
      */
     private String bridgeNetworkIp(String containerId) {
-        var inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
         if (inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null) {
             return null;
         }
@@ -1735,9 +1735,9 @@ public class Ec2ContainerManager {
 
     private String getContainerBridgeIp(String containerId) {
         try {
-            var inspect = dockerClient.inspectContainerCmd(containerId).exec();
+            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
             if (inspect.getNetworkSettings() != null) {
-                var networks = inspect.getNetworkSettings().getNetworks();
+                Map<String, ContainerNetwork> networks = inspect.getNetworkSettings().getNetworks();
                 if (networks != null) {
                     Optional<String> preferredIp = preferredMetadataSourceIp(networks);
                     if (preferredIp.isPresent()) {

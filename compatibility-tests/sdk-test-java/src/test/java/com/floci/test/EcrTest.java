@@ -374,4 +374,50 @@ class EcrTest {
             ecr.putRegistryScanningConfiguration(b -> b.scanType(ScanType.BASIC).rules(List.of()));
         }
     }
+
+    @Test
+    @Order(15)
+    @DisplayName("Repository creation templates create, update, describe and delete")
+    void repositoryCreationTemplateLifecycle() {
+        String prefix = "floci-sdk-" + System.currentTimeMillis();
+        try {
+            CreateRepositoryCreationTemplateResponse created = ecr.createRepositoryCreationTemplate(b -> b
+                    .prefix(prefix)
+                    .description("sdk template")
+                    .appliedFor(RCTAppliedFor.PULL_THROUGH_CACHE, RCTAppliedFor.REPLICATION)
+                    .resourceTags(Tag.builder().key("team").value("platform").build())
+                    .imageTagMutability(ImageTagMutability.IMMUTABLE));
+            assertThat(created.registryId()).isEqualTo("000000000000");
+            assertThat(created.repositoryCreationTemplate().prefix()).isEqualTo(prefix);
+            assertThat(created.repositoryCreationTemplate().encryptionConfiguration().encryptionType())
+                    .isEqualTo(EncryptionType.AES256);
+            assertThat(created.repositoryCreationTemplate().createdAt()).isNotNull();
+            assertThatThrownBy(() -> ecr.createRepositoryCreationTemplate(b -> b
+                    .prefix(prefix).appliedFor(RCTAppliedFor.REPLICATION)))
+                    .isInstanceOf(TemplateAlreadyExistsException.class);
+
+            UpdateRepositoryCreationTemplateResponse updated = ecr.updateRepositoryCreationTemplate(b -> b
+                    .prefix(prefix)
+                    .appliedFor(RCTAppliedFor.CREATE_ON_PUSH));
+            assertThat(updated.repositoryCreationTemplate().appliedFor()).containsExactly(RCTAppliedFor.CREATE_ON_PUSH);
+            assertThat(updated.repositoryCreationTemplate().description()).isEqualTo("sdk template");
+
+            DescribeRepositoryCreationTemplatesResponse described =
+                    ecr.describeRepositoryCreationTemplates(b -> b.prefixes(prefix));
+            assertThat(described.repositoryCreationTemplates()).hasSize(1);
+            assertThat(described.repositoryCreationTemplates().get(0).resourceTags())
+                    .containsExactly(Tag.builder().key("team").value("platform").build());
+
+            assertThat(ecr.deleteRepositoryCreationTemplate(b -> b.prefix(prefix))
+                    .repositoryCreationTemplate().prefix()).isEqualTo(prefix);
+            assertThatThrownBy(() -> ecr.deleteRepositoryCreationTemplate(b -> b.prefix(prefix)))
+                    .isInstanceOf(TemplateNotFoundException.class);
+        } finally {
+            try {
+                ecr.deleteRepositoryCreationTemplate(b -> b.prefix(prefix));
+            } catch (TemplateNotFoundException expected) {
+                // Already deleted by the lifecycle assertion.
+            }
+        }
+    }
 }

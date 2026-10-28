@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.ws.rs.core.MultivaluedMap;
 
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
@@ -35,10 +36,19 @@ import java.util.regex.Pattern;
  * member present and empty is a value: the protocol carries it, so it breaks its minimum length
  * rather than reading as absent.
  *
- * <p>Scalars only for now. An operation whose input shape carries a list or a map is refused when
- * the file loads rather than passed over quietly, since reading one means reading
- * {@code Name.member.N} and {@code Name.entry.N.key} and naming each index as the request spelled
- * it.
+ * <p>A list arrives numbered under its own name, {@code Audience.member.1} or the bare
+ * {@code Audience.1}, and a member of a list of structures carries its fields under that prefix,
+ * {@code Tags.member.1.Key}. Each is named in a message the way this package already names it:
+ * {@code audience.1.member} and {@code tags.1.member.key}, with the index the request spelled
+ * rather than the position the member sits at. A list of no members is how an absent list arrives
+ * on this protocol, so a required one reads as null rather than as a list breaking its minimum, and
+ * the count is held to the list's own bounds with the value left out of the message. A structure
+ * member arrives as {@code TaskPolicyArn.Arn} and is named {@code taskPolicyArn.arn}.
+ *
+ * <p>A map is refused when the file loads rather than passed over quietly: this package answers one
+ * today in a form of its own, {@code Map keys must satisfy constraint: [...]} against the whole map,
+ * and which of the two forms AWS answers for a Query map is a question no source here settles. So is
+ * anything nested deeper than a list of structures or a structure of scalars.
  */
 public final class QueryConstraintCheck {
 
@@ -46,6 +56,9 @@ public final class QueryConstraintCheck {
 
     /** The shape types a Query parameter can carry on its own, without an index or an entry. */
     private static final Set<String> SCALAR_TYPES = Set.of("string", "integer", "long", "boolean");
+
+    /** A number as the protocol writes one, of any width: the model's bounds are what hold it. */
+    private static final Pattern INTEGER = Pattern.compile("[+-]?\\d+");
 
     private final JsonNode operations;
     private final JsonNode shapes;
@@ -60,7 +73,7 @@ public final class QueryConstraintCheck {
             }
         }
         for (Map.Entry<String, JsonNode> operation : operations.properties()) {
-            requireScalarMembers(operation.getKey(), operation.getValue().asText());
+            requireReadableMembers(operation.getKey(), operation.getValue().asText());
         }
     }
 
@@ -74,14 +87,48 @@ public final class QueryConstraintCheck {
         return new QueryConstraintCheck(model);
     }
 
-    private void requireScalarMembers(String operation, String inputShape) {
+    private void requireReadableMembers(String operation, String inputShape) {
         for (Map.Entry<String, JsonNode> member : shapes.path(inputShape).path("members").properties()) {
-            String type = shapes.path(member.getValue().asText()).path("type").asText();
+            requireReadableMember(operation, member.getKey(), member.getValue().asText());
+        }
+    }
+
+    private void requireReadableMember(String operation, String member, String shapeName) {
+        String type = shapes.path(shapeName).path("type").asText();
+        if (SCALAR_TYPES.contains(type)) {
+            return;
+        }
+        switch (type) {
+            case "list" -> requireReadableElement(operation, member, shapes.path(shapeName).path("member").asText());
+            case "structure" -> requireScalarFields(operation, member, shapeName);
+            default -> throw refusal(operation, member, type);
+        }
+    }
+
+    private void requireReadableElement(String operation, String member, String elementShape) {
+        String type = shapes.path(elementShape).path("type").asText();
+        if (SCALAR_TYPES.contains(type)) {
+            return;
+        }
+        if ("structure".equals(type)) {
+            requireScalarFields(operation, member, elementShape);
+            return;
+        }
+        throw refusal(operation, member, "list of " + type);
+    }
+
+    private void requireScalarFields(String operation, String member, String structure) {
+        for (Map.Entry<String, JsonNode> field : shapes.path(structure).path("members").properties()) {
+            String type = shapes.path(field.getValue().asText()).path("type").asText();
             if (!SCALAR_TYPES.contains(type)) {
-                throw new IllegalStateException(operation + "'s " + member.getKey() + " is a " + type
-                        + ", which this check does not read yet");
+                throw refusal(operation, member + "." + field.getKey(), type);
             }
         }
+    }
+
+    private static IllegalStateException refusal(String operation, String member, String type) {
+        return new IllegalStateException(operation + "'s " + member + " is a " + type
+                + ", which this check does not read yet");
     }
 
     /**
@@ -102,22 +149,88 @@ public final class QueryConstraintCheck {
         if (!shape.hasNonNull("members")) {
             return List.of();
         }
+        return structureViolations(shape, "", "", params);
+    }
+
+    /**
+     * The violations the members of {@code structure} carry, in the order the model lists them.
+     * {@code prefix} is what the request names them under and {@code path} what a message calls
+     * them: both are empty at the top level, and name the member above inside a structure or inside
+     * a list's member.
+     */
+    private List<String> structureViolations(JsonNode structure, String prefix, String path,
+                                             MultivaluedMap<String, String> params) {
         Set<String> required = new LinkedHashSet<>();
-        shape.path("required").forEach(name -> required.add(name.asText()));
+        structure.path("required").forEach(name -> required.add(name.asText()));
         List<String> violations = new ArrayList<>();
-        for (Map.Entry<String, JsonNode> member : shape.path("members").properties()) {
+        for (Map.Entry<String, JsonNode> member : structure.path("members").properties()) {
             String name = member.getKey();
-            String value = params == null ? null : params.getFirst(name);
-            String path = memberPath(name);
-            if (value == null) {
-                if (required.contains(name)) {
-                    violations.add(SmithyValidationErrors.notNull(path));
+            String shapeName = member.getValue().asText();
+            String memberPath = path + memberPath(name);
+            String param = prefix + name;
+            boolean mandatory = required.contains(name);
+            JsonNode shape = shapes.path(shapeName);
+            switch (shape.path("type").asText()) {
+                case "list" -> violations.addAll(listViolations(shape, param, memberPath, mandatory, params));
+                case "structure" -> violations.addAll(nestedViolations(shape, param, memberPath, mandatory, params));
+                default -> {
+                    String value = params == null ? null : params.getFirst(param);
+                    if (value == null) {
+                        if (mandatory) {
+                            violations.add(SmithyValidationErrors.notNull(memberPath));
+                        }
+                    } else {
+                        violations.addAll(violations(shapeName, value, memberPath));
+                    }
                 }
-                continue;
             }
-            violations.addAll(violations(member.getValue().asText(), value, path));
         }
         return violations;
+    }
+
+    /**
+     * A list's members, held to the list's own bounds and then each to its element's. A list of no
+     * members is how an absent list arrives, which is what makes a minimum of 1 unreachable: only a
+     * list asking for two or more members can report one.
+     */
+    private List<String> listViolations(JsonNode shape, String param, String path, boolean required,
+                                        MultivaluedMap<String, String> params) {
+        List<AwsQueryLists.IndexedMember> members = params == null
+                ? List.of()
+                : AwsQueryLists.members(params, param, null);
+        if (members.isEmpty()) {
+            return required ? List.of(SmithyValidationErrors.notNull(path)) : List.of();
+        }
+        List<String> violations = new ArrayList<>();
+        violations.addAll(single(SmithyValidationErrors.sizeOutOfRange(path, members.size(),
+                shape.path("min").asInt(0), shape.path("max").asInt(Integer.MAX_VALUE))));
+        String elementShape = shape.path("member").asText();
+        boolean structure = "structure".equals(shapes.path(elementShape).path("type").asText());
+        for (AwsQueryLists.IndexedMember member : members) {
+            String memberPath = path + "." + member.index() + ".member";
+            if (structure) {
+                violations.addAll(structureViolations(shapes.path(elementShape),
+                        member.prefix() + ".", memberPath + ".", params));
+            } else {
+                String value = params.getFirst(member.prefix());
+                violations.addAll(violations(elementShape, value == null ? "" : value, memberPath));
+            }
+        }
+        return violations;
+    }
+
+    /**
+     * A structure member, whose fields arrive under its own name. A request naming none of them is
+     * a request without the member at all, so a required one reads as null.
+     */
+    private List<String> nestedViolations(JsonNode shape, String param, String path, boolean required,
+                                          MultivaluedMap<String, String> params) {
+        boolean present = params != null
+                && params.keySet().stream().anyMatch(key -> key.startsWith(param + "."));
+        if (!present) {
+            return required ? List.of(SmithyValidationErrors.notNull(path)) : List.of();
+        }
+        return structureViolations(shape, param + ".", path + ".", params);
     }
 
     /** The member's name as a validation message spells it, which is the request's with a lower
@@ -158,17 +271,28 @@ public final class QueryConstraintCheck {
      * A value that is no number is left to the operation: this package answers one with
      * {@code InvalidParameterValue} rather than with a constraint violation, and which member
      * reports it that way is the operation's own reading.
+     *
+     * <p>A number too large for a {@code long} is a number all the same, and the bound it breaks is
+     * one that fits in one, so the range is compared without a width of its own. The value is
+     * written as the number reads rather than as the request spelled it, a leading zero or plus
+     * gone, which is what a parsed value already answered.
      */
     private static String numberViolation(JsonNode shape, String value, String path) {
-        long number;
-        try {
-            number = Long.parseLong(value.trim());
-        } catch (NumberFormatException expected) {
+        String text = value.trim();
+        if (!INTEGER.matcher(text).matches()) {
             // Not a number at all, so no range of the model's is what it breaks.
             return null;
         }
-        return SmithyValidationErrors.outOfRange(path, number,
-                shape.path("min").asLong(Long.MIN_VALUE), shape.path("max").asLong(Long.MAX_VALUE));
+        BigInteger number = new BigInteger(text);
+        long min = shape.path("min").asLong(Long.MIN_VALUE);
+        long max = shape.path("max").asLong(Long.MAX_VALUE);
+        if (number.compareTo(BigInteger.valueOf(min)) < 0) {
+            return SmithyValidationErrors.valueTooSmall(path, number.toString(), min);
+        }
+        if (number.compareTo(BigInteger.valueOf(max)) > 0) {
+            return SmithyValidationErrors.valueTooLarge(path, number.toString(), max);
+        }
+        return null;
     }
 
     private static String enumViolation(JsonNode shape, String value, String path) {

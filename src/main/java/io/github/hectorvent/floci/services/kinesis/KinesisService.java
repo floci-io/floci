@@ -36,6 +36,7 @@ import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class KinesisService implements ResourceProvider {
@@ -464,12 +465,12 @@ public class KinesisService implements ResourceProvider {
             shard2.setSequenceNumberRange(new KinesisShard.SequenceNumberRange(shard2.getSequenceNumberRange().startingSequenceNumber(), seq));
 
             // Combine hash ranges (assuming they are adjacent)
-            java.math.BigInteger s1Start = new java.math.BigInteger(shard1.getHashKeyRange().startingHashKey());
-            java.math.BigInteger s2Start = new java.math.BigInteger(shard2.getHashKeyRange().startingHashKey());
+            BigInteger s1Start = new BigInteger(shard1.getHashKeyRange().startingHashKey());
+            BigInteger s2Start = new BigInteger(shard2.getHashKeyRange().startingHashKey());
 
             String start = s1Start.min(s2Start).toString();
-            java.math.BigInteger s1End = new java.math.BigInteger(shard1.getHashKeyRange().endingHashKey());
-            java.math.BigInteger s2End = new java.math.BigInteger(shard2.getHashKeyRange().endingHashKey());
+            BigInteger s1End = new BigInteger(shard1.getHashKeyRange().endingHashKey());
+            BigInteger s2End = new BigInteger(shard2.getHashKeyRange().endingHashKey());
             String end = s1End.max(s2End).toString();
 
             KinesisShard child = new KinesisShard(nextShardId(stream), start, end, seq);
@@ -836,7 +837,7 @@ public class KinesisService implements ResourceProvider {
             throw new AwsException("InvalidArgumentException", "Invalid shard iterator", 400);
         }
         // Use limit=-1 so trailing empty slots round-trip and old 5-part iterators still work.
-        String[] parts = new String(decoded, StandardCharsets.UTF_8).split(java.util.regex.Pattern.quote("|"), -1);
+        String[] parts = new String(decoded, StandardCharsets.UTF_8).split(Pattern.quote("|"), -1);
         if (parts.length < 5) {
             throw new AwsException("InvalidArgumentException", "Invalid shard iterator", 400);
         }
@@ -893,14 +894,8 @@ public class KinesisService implements ResourceProvider {
             }
         }
 
-        KinesisStream stream = resolveStream(streamName, region);
-        KinesisShard shard = stream.getShards().stream()
-                .filter(s -> s.getShardId().equals(shardId))
-                .findFirst()
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard not found", 400));
-        pruneExpiredRecords(stream, shard);
-
-        KinesisShard.RecordsSnapshot snapshot = shard.snapshotRecords();
+        ShardReadSnapshot read = snapshotShard(null, streamName, shardId, region);
+        KinesisShard.RecordsSnapshot snapshot = read.records();
         List<KinesisRecord> allRecords = snapshot.records();
         int startIndex = 0;
 
@@ -946,6 +941,45 @@ public class KinesisService implements ResourceProvider {
             }
         }
 
+        return recordsPage(streamName, shardId, read, startIndex, limit);
+    }
+
+    public record ChildShard(String shardId, List<String> parentShards, KinesisShard.HashKeyRange hashKeyRange) {}
+
+    private record ShardReadSnapshot(KinesisShard.RecordsSnapshot records, boolean closed,
+                                     List<ChildShard> children) {}
+
+    private ShardReadSnapshot snapshotShard(String accountId, String streamName, String shardId, String region) {
+        // Share the append/reshard monitor so a terminal snapshot includes the final append and topology.
+        synchronized (lockFor(regionKey(region, streamName))) {
+            KinesisStream stream = resolveStreamForAccount(accountId, streamName, region);
+            KinesisShard shard = stream.getShards().stream()
+                    .filter(candidate -> candidate.getShardId().equals(shardId))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard not found", 400));
+            pruneExpiredRecords(stream, shard);
+            List<ChildShard> children = new ArrayList<>();
+            if (shard.isClosed()) {
+                for (KinesisShard child : stream.getShards()) {
+                    if (shardId.equals(child.getParentShardId()) || shardId.equals(child.getAdjacentParentShardId())) {
+                        List<String> parents = new ArrayList<>();
+                        if (child.getParentShardId() != null) {
+                            parents.add(child.getParentShardId());
+                        }
+                        if (child.getAdjacentParentShardId() != null) {
+                            parents.add(child.getAdjacentParentShardId());
+                        }
+                        children.add(new ChildShard(child.getShardId(), List.copyOf(parents), child.getHashKeyRange()));
+                    }
+                }
+            }
+            return new ShardReadSnapshot(shard.snapshotRecords(), shard.isClosed(), List.copyOf(children));
+        }
+    }
+
+    private Map<String, Object> recordsPage(String streamName, String shardId, ShardReadSnapshot read,
+                                             int startIndex, Integer limit) {
+        List<KinesisRecord> allRecords = read.records().records();
         int max = limit != null ? Math.min(limit, 1000) : 1000;
         List<KinesisRecord> result = new ArrayList<>();
         int nextIndex = startIndex;
@@ -953,13 +987,15 @@ public class KinesisService implements ResourceProvider {
             result.add(allRecords.get(i));
             nextIndex = i + 1;
         }
-
-        String nextIterator = buildContinuationIterator(streamName, shardId, allRecords, nextIndex);
-
+        boolean terminal = read.closed() && nextIndex >= allRecords.size();
         Map<String, Object> response = new HashMap<>();
         response.put("Records", result);
-        response.put("NextShardIterator", nextIterator);
+        response.put("NextShardIterator", terminal ? null
+                : buildContinuationIterator(streamName, shardId, allRecords, nextIndex));
         response.put("MillisBehindLatest", computeMillisBehindLatest(allRecords, nextIndex));
+        if (terminal) {
+            response.put("ChildShards", read.children());
+        }
         return response;
     }
 
@@ -1149,14 +1185,8 @@ public class KinesisService implements ResourceProvider {
             }
         }
 
-        KinesisStream stream = resolveStreamForAccount(accountId, streamName, region);
-        KinesisShard shard = stream.getShards().stream()
-                .filter(s -> s.getShardId().equals(shardId))
-                .findFirst()
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Shard not found", 400));
-        pruneExpiredRecords(stream, shard);
-
-        KinesisShard.RecordsSnapshot snapshot = shard.snapshotRecords();
+        ShardReadSnapshot read = snapshotShard(accountId, streamName, shardId, region);
+        KinesisShard.RecordsSnapshot snapshot = read.records();
         List<KinesisRecord> allRecords = snapshot.records();
         int startIndex = 0;
         // LATEST resolves the same way as AFTER_SEQUENCE_NUMBER (see the longer explanation in
@@ -1186,20 +1216,7 @@ public class KinesisService implements ResourceProvider {
             }
         }
 
-        int max = limit != null ? Math.min(limit, 1000) : 1000;
-        List<KinesisRecord> result = new ArrayList<>();
-        int nextIndex = startIndex;
-        for (int i = startIndex; i < allRecords.size() && result.size() < max; i++) {
-            result.add(allRecords.get(i));
-            nextIndex = i + 1;
-        }
-
-        String nextIterator = buildContinuationIterator(streamName, shardId, allRecords, nextIndex);
-        Map<String, Object> response = new HashMap<>();
-        response.put("Records", result);
-        response.put("NextShardIterator", nextIterator);
-        response.put("MillisBehindLatest", computeMillisBehindLatest(allRecords, nextIndex));
-        return response;
+        return recordsPage(streamName, shardId, read, startIndex, limit);
     }
 
     private KinesisShard selectShard(KinesisStream stream, String partitionKey, String explicitHashKey) {

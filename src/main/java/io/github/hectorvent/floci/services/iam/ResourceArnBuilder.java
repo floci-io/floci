@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.durable.DurableTokens;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
+import io.github.hectorvent.floci.services.s3.S3ControlArnUtils;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
@@ -65,6 +66,9 @@ public class ResourceArnBuilder {
      * {@code ?} matches the one character a {@code secret:<name>-??????} policy expects there.
      */
     private static final String UNASSIGNED_SECRET_SUFFIX = "-??????";
+
+    /** Where an S3 Control tagging route carries the ARN of the resource it acts on. */
+    private static final String S3_CONTROL_TAGS_PREFIX = "/v20180820/tags/";
 
     private final ObjectMapper objectMapper;
     /**
@@ -173,7 +177,7 @@ public class ResourceArnBuilder {
         }
         String path = ctx.getUriInfo().getPath();
         return switch (credentialScope) {
-            case "s3"             -> List.of(buildS3Arn(path, region));
+            case "s3"             -> buildS3Resources(operation, path, region);
             case "lambda"         -> List.of(buildLambdaArn(path, ctx, region, accountId));
             case "sqs"            -> List.of(buildSqsArn(ctx, region, accountId));
             case "sns"            -> List.of(buildSnsArn(ctx, region, accountId));
@@ -801,6 +805,52 @@ public class ResourceArnBuilder {
             stripped = stripped.substring(0, firstSlash);
         }
         return AwsArnUtils.Arn.global(partition, "s3", "", stripped).toString();
+    }
+
+    /**
+     * The resources an s3-scope request names, which an S3 Control operation reads differently
+     * from an S3 data-plane path. S3 Control clients sign with the s3 scope and its operations
+     * are {@code s3:} actions (the Service Authorization Reference lists them under Amazon S3),
+     * so the operation, not the path, tells the two apart: a tagging route carries the ARN of the
+     * bucket or access point it acts on in its path, and the request is checked against that ARN
+     * as written, the way every ARN-carrying request is; the Service Authorization Reference
+     * gives ListAccessPoints and the account-level Block Public Access no resource type, so
+     * those are checked against the wildcard alone, as the no-resource actions of other
+     * namespaces are (the KMS list operations), and a bucket-scoped statement grants them
+     * nothing. Any other operation is the data plane, checked against the bucket or object its
+     * path names.
+     */
+    private List<String> buildS3Resources(String operation, String path, String region) {
+        if (operation == null) {
+            return List.of(buildS3Arn(path, region));
+        }
+        return switch (operation) {
+            case "s3:ListTagsForResource", "s3:TagResource", "s3:UntagResource" ->
+                    List.of(taggedS3ControlArn(path));
+            case "s3:ListAccessPoints", "s3:PutAccountPublicAccessBlock",
+                    "s3:GetAccountPublicAccessBlock" -> List.of("*");
+            default -> List.of(buildS3Arn(path, region));
+        };
+    }
+
+    /**
+     * The ARN an S3 Control tagging route names in its path, read with the one parse the handler
+     * and the policy lookup share: the Go SDK, and so Terraform's provider, percent-encodes the
+     * ARN's colons and slashes, so the path may still carry them. A path naming no ARN leaves
+     * the wildcard, which the handler answers {@code InvalidRequest} under, and nothing is
+     * rebuilt from the bucket it names: the ARN as the caller wrote it is the resource.
+     */
+    private static String taggedS3ControlArn(String path) {
+        String tagged = path.startsWith(S3_CONTROL_TAGS_PREFIX)
+                ? path.substring(S3_CONTROL_TAGS_PREFIX.length()) : null;
+        if (tagged == null) {
+            return "*";
+        }
+        try {
+            return S3ControlArnUtils.parse(tagged).map(AwsArnUtils.Arn::toString).orElse("*");
+        } catch (IllegalArgumentException malformedEncoding) {
+            return "*";
+        }
     }
 
     // ── Lambda ──────────────────────────────────────────────────────────────────

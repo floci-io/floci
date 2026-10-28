@@ -27,6 +27,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 import java.time.Instant;
+import java.util.Map;
 
 @Path("/")
 @Produces(MediaType.APPLICATION_JSON)
@@ -183,7 +184,7 @@ public class SecurityHubController {
                                               @QueryParam("NextToken") String nextToken) {
         String region = region(headers);
         Integer maxResults = Pagination.parseMaxResults(maxResultsValue, "InvalidInputException");
-        PaginatedResult<java.util.Map.Entry<String, JsonNode>> page =
+        PaginatedResult<Map.Entry<String, JsonNode>> page =
                 securityHubService.policyPage(region, maxResults, nextToken);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("ConfigurationPolicySummaries");

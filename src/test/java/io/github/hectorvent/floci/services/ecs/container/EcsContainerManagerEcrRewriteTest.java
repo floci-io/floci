@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.ssm.SsmService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Map;
@@ -108,7 +109,7 @@ class EcsContainerManagerEcrRewriteTest {
 
         // newContainer(...) is called once per container definition, in definition order.
         ArgumentCaptor<String> imageCaptor = ArgumentCaptor.forClass(String.class);
-        verify(containerBuilder, org.mockito.Mockito.times(2)).newContainer(imageCaptor.capture());
+        verify(containerBuilder, Mockito.times(2)).newContainer(imageCaptor.capture());
         List<String> images = imageCaptor.getAllValues();
         assertEquals(REWRITTEN_IMAGE, images.get(0), "ECR-shaped image should be rewritten for the docker pull");
         assertEquals("sidecar:latest", images.get(1), "non-ECR image should pass through unchanged");

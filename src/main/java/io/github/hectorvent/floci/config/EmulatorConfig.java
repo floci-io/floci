@@ -1724,6 +1724,10 @@ public interface EmulatorConfig {
 
     interface RedshiftServiceConfig {
         @WithDefault("true")
+        boolean automatedSnapshotsEnabled();
+        @WithDefault("60")
+        long snapshotSweepIntervalSeconds();
+        @WithDefault("true")
         boolean enabled();
         @WithDefault("5439")
         int defaultPort();
@@ -2409,6 +2413,10 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean allowUnsafeHostVolumes();
+
+        /** Allow ECS task definitions to launch Docker containers with host-level privilege. */
+        @WithDefault("false")
+        boolean allowPrivilegedContainers();
 
         /**
          * When true, Floci removes on startup, in Docker mode, every ECS container a previous run

@@ -1,5 +1,5 @@
 {
-  "_source": {"generator": "tools/aws/regen_iam_request_resources.py", "reference": "https://servicereference.us-east-1.amazonaws.com/", "botocore": "botocore 1.43.113 (installed package)", "retrieved": "2026-10-25", "note": "make iam-request-resources-check re-derives every operation's resources from botocore; make iam-request-resources-verify checks every action, type and format against AWS."},
+  "_source": {"generator": "tools/aws/regen_iam_request_resources.py", "reference": "https://servicereference.us-east-1.amazonaws.com/", "botocore": "botocore 1.43.113 (installed package)", "retrieved": "2026-10-26", "note": "make iam-request-resources-check re-derives every operation's resources from botocore; make iam-request-resources-verify checks every action, type and format against AWS."},
   "namespaces": {"cognito-idp": ["cognito-idp"], "ecr": ["ecr"], "elasticloadbalancing": ["elb", "elbv2"], "events": ["events"], "states": ["stepfunctions"]},
   "clientsNotRead": {"eventbridgev2": "EventBridge V2, the AWSEventsV2 target over Smithy RPC v2 CBOR on the eventsv2 endpoint, which Floci does not serve; its operations share EventBridge's names and name their resources by other members"},
   "handBuilt": ["dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes", "resource-groups", "s3", "scheduler", "secretsmanager", "sns", "sqs", "ssm", "sts"],
@@ -320,7 +320,7 @@
     "events:ListSubscribers": {"action": "events:ListSubscribers", "types": [], "resources": []},
     "events:ListTagsForResource": {"action": "events:ListTagsForResource", "types": ["event-bus", "event-busv2", "event-sourcev2", "rule-on-custom-event-bus", "rule-on-default-event-bus", "subscriber"], "resources": [{"types": ["event-bus", "event-busv2", "event-sourcev2", "rule-on-custom-event-bus", "rule-on-default-event-bus", "subscriber"], "arn": "ResourceARN"}]},
     "events:ListTargetsByRule": {"action": "events:ListTargetsByRule", "types": ["rule-on-custom-event-bus", "rule-on-default-event-bus"], "resources": [{"type": "rule-on-default-event-bus", "fill": {"RuleName": "Rule"}, "when": {"EventBusName": ["default"]}, "absent": {"EventBusName": "default"}, "arnOf": {"EventBusName": "event-bus"}}, {"type": "rule-on-custom-event-bus", "fill": {"EventBusName": "EventBusName", "RuleName": "Rule"}, "unless": {"EventBusName": ["default"]}, "absent": {"EventBusName": "default"}, "arnOf": {"EventBusName": "event-bus"}}]},
-    "events:PutEvents": {"action": "events:PutEvents", "types": ["event-bus", "event-busv2"], "resources": []},
+    "events:PutEvents": {"action": "events:PutEvents", "types": ["event-bus", "event-busv2"], "resources": [{"type": "event-bus", "fill": {"EventBusName": "Entries[].EventBusName"}, "absent": {"Entries[].EventBusName": "default"}, "arnOf": {"Entries[].EventBusName": "event-bus"}}]},
     "events:PutPartnerEvents": {"action": "events:PutPartnerEvents", "types": [], "resources": []},
     "events:PutPermission": {"action": "events:PutPermission", "types": [], "resources": []},
     "events:PutRawEvents": {"action": "events:PutRawEvents", "types": ["event-busv2"], "resources": []},

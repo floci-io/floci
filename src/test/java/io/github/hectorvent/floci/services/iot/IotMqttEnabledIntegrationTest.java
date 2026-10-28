@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iot;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.testing.IotDataRequests;
 import io.github.hectorvent.floci.testing.IotMqttTlsProfile;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
@@ -16,9 +17,17 @@ import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
+import org.eclipse.paho.mqttv5.client.IMqttToken;
+import org.eclipse.paho.mqttv5.client.MqttClientException;
+import org.eclipse.paho.mqttv5.client.MqttConnectionOptions;
+import org.eclipse.paho.mqttv5.client.MqttDisconnectResponse;
+import org.eclipse.paho.mqttv5.common.packet.MqttProperties;
+import org.eclipse.paho.mqttv5.common.packet.UserProperty;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import software.amazon.awssdk.core.SdkBytes;
+import software.amazon.awssdk.services.iotdataplane.IotDataPlaneClient;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -194,9 +203,69 @@ class IotMqttEnabledIntegrationTest {
             MqttPublish received = subscriber.takePublish();
             assertEquals(topic, received.topic());
             assertArrayEquals(payload, received.payload());
+            assertEquals(1, received.qos(), "measured on AWS IoT: the lower of the publish and subscription QoS");
         }
 
         awaitPublishedEvent(topic, payload);
+    }
+
+    /** Measured on AWS IoT: a data plane Publish reaches every matching subscriber and runs the matching rule once. */
+    @Test
+    void dataPlanePublishReachesAWildcardSubscriberAndFiresItsRuleOnce() throws Exception {
+        String prefix = "dataplane/" + System.nanoTime();
+        String queueUrl = createQueue("dataplane-rule-" + System.nanoTime());
+        String rule = "dataPlaneRule" + System.nanoTime();
+        createSqsRule(rule, "SELECT * FROM '" + prefix + "/b'", queueUrl);
+        try (MqttTestClient subscriber = connectMqtt("dataplane-sub");
+             IotDataPlaneClient iotData = IotDataRequests.iotDataClient("test")) {
+            subscriber.subscribe(prefix + "/#", 1);
+
+            iotData.publish(request -> request.topic(prefix + "/b").qos(1).payload(SdkBytes.fromUtf8String("{\"cmd\":\"on\"}")));
+
+            MqttPublish received = subscriber.takePublish();
+            assertEquals(prefix + "/b", received.topic());
+            assertEquals("{\"cmd\":\"on\"}", new String(received.payload(), StandardCharsets.UTF_8));
+            assertEquals(1, received.qos());
+            assertFalse(received.retained(), "a live copy carries RETAIN 0");
+            List<JsonNode> fired = awaitMessages(queueUrl, 1);
+            assertEquals(1, fired.size(), "the rule fired once: " + fired);
+            assertEquals("on", fired.get(0).path("cmd").asText());
+        } finally {
+            deleteRule(rule);
+        }
+    }
+
+    /**
+     * Measured on AWS IoT: a retained data plane Publish reaches a current subscriber as a live copy, and a later
+     * subscriber of its exact topic as the retained message, each at the lower of the publish and subscription QoS.
+     */
+    @Test
+    void retainedDataPlanePublishReachesACurrentAndALaterSubscriber() throws Exception {
+        String prefix = "dataplane/" + System.nanoTime();
+        String topic = prefix + "/config";
+        try (MqttTestClient current = connectMqtt("dataplane-current");
+             IotDataPlaneClient iotData = IotDataRequests.iotDataClient("test")) {
+            current.subscribe(prefix + "/#", 0);
+
+            iotData.publish(request -> request.topic(topic).qos(1).retain(true).payload(SdkBytes.fromUtf8String("config-v1")));
+            cleanup.register(() -> given().contentType("application/octet-stream").queryParam("retain", true)
+                    .body(new byte[0]).when().post("/topics/" + topic).then().statusCode(200));
+
+            MqttPublish live = current.takePublish();
+            assertEquals("config-v1", new String(live.payload(), StandardCharsets.UTF_8));
+            assertEquals(0, live.qos());
+            assertFalse(live.retained(), "a live copy carries RETAIN 0");
+
+            try (MqttTestClient later = connectMqtt("dataplane-later")) {
+                later.subscribe(topic, 1);
+
+                MqttPublish retained = later.takePublish();
+                assertEquals(topic, retained.topic());
+                assertEquals("config-v1", new String(retained.payload(), StandardCharsets.UTF_8));
+                assertEquals(1, retained.qos());
+                assertTrue(retained.retained());
+            }
+        }
     }
 
     @Test
@@ -259,16 +328,16 @@ class IotMqttEnabledIntegrationTest {
             org.eclipse.paho.mqttv5.common.MqttException thrown = assertThrows(
                     org.eclipse.paho.mqttv5.common.MqttException.class,
                     () -> publisher.publish(topic, randomPayload(AWS_MAX_PAYLOAD), 1, awsMaximumProperties(16 * 1024)));
-            assertEquals(org.eclipse.paho.mqttv5.client.MqttClientException.REASON_CODE_CONNECTION_LOST, thrown.getReasonCode());
+            assertEquals(MqttClientException.REASON_CODE_CONNECTION_LOST, thrown.getReasonCode());
         }
     }
 
     /** 8 KB correlation data plus user properties of the given key and value size, as AWS counts them. */
-    private static org.eclipse.paho.mqttv5.common.packet.MqttProperties awsMaximumProperties(int userPropertiesSize) {
-        org.eclipse.paho.mqttv5.common.packet.MqttProperties properties = new org.eclipse.paho.mqttv5.common.packet.MqttProperties();
+    private static MqttProperties awsMaximumProperties(int userPropertiesSize) {
+        MqttProperties properties = new MqttProperties();
         properties.setCorrelationData(randomPayload(8 * 1024));
-        properties.setUserProperties(java.util.List.of(
-                new org.eclipse.paho.mqttv5.common.packet.UserProperty("k", "v".repeat(userPropertiesSize - 1))));
+        properties.setUserProperties(List.of(
+                new UserProperty("k", "v".repeat(userPropertiesSize - 1))));
         return properties;
     }
 
@@ -891,7 +960,7 @@ class IotMqttEnabledIntegrationTest {
         out.writeBytes(bytes);
     }
 
-    private record MqttPublish(String topic, byte[] payload) {
+    private record MqttPublish(String topic, byte[] payload, int qos, boolean retained) {
     }
 
     private static final class MqttTestClient implements AutoCloseable {
@@ -913,7 +982,7 @@ class IotMqttEnabledIntegrationTest {
 
                 @Override
                 public void messageArrived(String topic, MqttMessage message) {
-                    testClient.publishes.add(new MqttPublish(topic, message.getPayload()));
+                    testClient.publishes.add(new MqttPublish(topic, message.getPayload(), message.getQos(), message.isRetained()));
                 }
 
                 @Override
@@ -998,7 +1067,7 @@ class IotMqttEnabledIntegrationTest {
             Mqtt5TestClient testClient = new Mqtt5TestClient(client);
             client.setCallback(new org.eclipse.paho.mqttv5.client.MqttCallback() {
                 @Override
-                public void disconnected(org.eclipse.paho.mqttv5.client.MqttDisconnectResponse disconnectResponse) {
+                public void disconnected(MqttDisconnectResponse disconnectResponse) {
                 }
 
                 @Override
@@ -1007,11 +1076,11 @@ class IotMqttEnabledIntegrationTest {
 
                 @Override
                 public void messageArrived(String topic, org.eclipse.paho.mqttv5.common.MqttMessage message) {
-                    testClient.publishes.add(new MqttPublish(topic, message.getPayload()));
+                    testClient.publishes.add(new MqttPublish(topic, message.getPayload(), message.getQos(), message.isRetained()));
                 }
 
                 @Override
-                public void deliveryComplete(org.eclipse.paho.mqttv5.client.IMqttToken token) {
+                public void deliveryComplete(IMqttToken token) {
                 }
 
                 @Override
@@ -1019,7 +1088,7 @@ class IotMqttEnabledIntegrationTest {
                 }
 
                 @Override
-                public void authPacketArrived(int reasonCode, org.eclipse.paho.mqttv5.common.packet.MqttProperties properties) {
+                public void authPacketArrived(int reasonCode, MqttProperties properties) {
                 }
             });
             client.setTimeToWait(10_000);
@@ -1036,10 +1105,10 @@ class IotMqttEnabledIntegrationTest {
         }
 
         void publish(String topic, byte[] payload) throws org.eclipse.paho.mqttv5.common.MqttException {
-            publish(topic, payload, 0, new org.eclipse.paho.mqttv5.common.packet.MqttProperties());
+            publish(topic, payload, 0, new MqttProperties());
         }
 
-        void publish(String topic, byte[] payload, int qos, org.eclipse.paho.mqttv5.common.packet.MqttProperties properties)
+        void publish(String topic, byte[] payload, int qos, MqttProperties properties)
                 throws org.eclipse.paho.mqttv5.common.MqttException {
             org.eclipse.paho.mqttv5.common.MqttMessage message = new org.eclipse.paho.mqttv5.common.MqttMessage(payload);
             message.setQos(qos);
@@ -1060,9 +1129,9 @@ class IotMqttEnabledIntegrationTest {
             client.close();
         }
 
-        private static org.eclipse.paho.mqttv5.client.MqttConnectionOptions connectOptions() {
-            org.eclipse.paho.mqttv5.client.MqttConnectionOptions options =
-                    new org.eclipse.paho.mqttv5.client.MqttConnectionOptions();
+        private static MqttConnectionOptions connectOptions() {
+            MqttConnectionOptions options =
+                    new MqttConnectionOptions();
             options.setCleanStart(true);
             options.setConnectionTimeout(2);
             options.setKeepAliveInterval(60);

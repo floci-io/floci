@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentMatchers;
 
 import java.util.Arrays;
 import java.util.List;
@@ -243,7 +244,7 @@ class CfnResourceDispatcherTest {
         dispatcher.deleteStandalone(TYPE, "thing-1", "us-east-1", Map.of("Role", "r"));
 
         verify(owner).delete(any(StackResource.class), anyString());
-        verify(owner).delete(org.mockito.ArgumentMatchers.argThat((StackResource r) ->
+        verify(owner).delete(ArgumentMatchers.argThat((StackResource r) ->
                 "thing-1".equals(r.getPhysicalId()) && "r".equals(r.getAttributes().get("Role"))), any());
     }
 

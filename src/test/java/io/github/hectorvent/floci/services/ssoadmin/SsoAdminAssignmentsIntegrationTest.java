@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.ssoadmin;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -29,7 +31,7 @@ class SsoAdminAssignmentsIntegrationTest {
                 .then().statusCode(200).body("PermissionSet.PermissionSetArn", notNullValue())
                 .extract().path("PermissionSet.PermissionSetArn");
         json("SWBExternalService.ListPermissionSets", "{\"InstanceArn\":\"" + instanceArn + "\"}")
-                .then().statusCode(200).body("PermissionSets", org.hamcrest.Matchers.hasItem(permissionSetArn));
+                .then().statusCode(200).body("PermissionSets", Matchers.hasItem(permissionSetArn));
 
         String assignment = "{\"InstanceArn\":\"" + instanceArn
                 + "\",\"TargetId\":\"123456789012\",\"TargetType\":\"AWS_ACCOUNT\",\"PermissionSetArn\":\""
@@ -44,7 +46,7 @@ class SsoAdminAssignmentsIntegrationTest {
         json("SWBExternalService.ListAccountAssignmentCreationStatus",
                 "{\"InstanceArn\":\"" + instanceArn + "\",\"Filter\":{\"Status\":\"SUCCEEDED\"}}")
                 .then().statusCode(200)
-                .body("AccountAssignmentsCreationStatus.RequestId", org.hamcrest.Matchers.hasItem(requestId));
+                .body("AccountAssignmentsCreationStatus.RequestId", Matchers.hasItem(requestId));
         json("SWBExternalService.ListAccountAssignments",
                 "{\"InstanceArn\":\"" + instanceArn + "\",\"AccountId\":\"123456789012\",\"PermissionSetArn\":\""
                         + permissionSetArn + "\"}")
@@ -117,7 +119,7 @@ class SsoAdminAssignmentsIntegrationTest {
                 .then().statusCode(400).body("__type", equalTo("ResourceNotFoundException"));
     }
 
-    private static io.restassured.response.Response json(String target, String body) {
+    private static Response json(String target, String body) {
         return given().contentType(CONTENT_TYPE).header("Authorization", AUTH).header("X-Amz-Target", target)
                 .body(body).post("/");
     }

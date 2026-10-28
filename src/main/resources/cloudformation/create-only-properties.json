@@ -711,6 +711,10 @@
     "HostedZoneName",
     "HostedZoneId"
   ],
+  "AWS::Route53::RecordSetGroup": [
+    "HostedZoneName",
+    "HostedZoneId"
+  ],
   "AWS::S3::Bucket": [
     "BucketName",
     "BucketNamePrefix",

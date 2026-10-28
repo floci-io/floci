@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -270,7 +271,7 @@ class CloudTrailLogWriterBoundedRetryIntegrationTest {
         return new ObjectMapper().readTree(body);
     }
 
-    private static io.restassured.response.Response invokeCloudTrail(String action, String body) {
+    private static Response invokeCloudTrail(String action, String body) {
         return given()
                 .header("X-Amz-Target", CT_TARGET + action)
                 .contentType(JSON11)

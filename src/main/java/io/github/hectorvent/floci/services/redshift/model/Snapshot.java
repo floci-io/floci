@@ -18,6 +18,20 @@ public class Snapshot {
     private String snapshotArn;
     private Instant snapshotCreateTime;
     private Integer manualSnapshotRetentionPeriod;
+    private String snapshotType;
+    private Integer automatedSnapshotRetentionPeriod;
+    private Instant scheduledTime;
+    private String clusterGeneration;
+
+    public String getClusterGeneration() { return clusterGeneration; }
+    public void setClusterGeneration(String value) { clusterGeneration = value; }
+
+    public String getSnapshotType() { return snapshotType == null ? "manual" : snapshotType; }
+    public void setSnapshotType(String value) { snapshotType = value; }
+    public Integer getAutomatedSnapshotRetentionPeriod() { return automatedSnapshotRetentionPeriod; }
+    public void setAutomatedSnapshotRetentionPeriod(Integer value) { automatedSnapshotRetentionPeriod = value; }
+    public Instant getScheduledTime() { return scheduledTime; }
+    public void setScheduledTime(Instant value) { scheduledTime = value; }
 
     public Snapshot() {}
 

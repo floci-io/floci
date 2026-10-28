@@ -56,6 +56,11 @@ public final class LambdaArnUtils {
         return arn.resource().substring(EVENT_SOURCE_MAPPING_PREFIX.length());
     }
 
+    /** {@code arn:<partition>:lambda:<region>:<account>:network-connector:<id>:<version>}. */
+    public static String networkConnectorVersionArn(String connectorArn, long version) {
+        return connectorArn + ":" + version;
+    }
+
     /**
      * The full function ARN a {@code FunctionName} reference names, the way an IAM policy's
      * {@code Resource} names it. The reference is read as {@link #resolve} reads it, so a malformed
@@ -128,6 +133,19 @@ public final class LambdaArnUtils {
             throw invalid("Invalid qualifier: " + effective);
         }
         return new ResolvedFunctionRef(ref.name(), effective, ref.region(), ref.account());
+    }
+
+    /** Resolves the qualifier and requires a full ARN to name the request region. */
+    public static ResolvedFunctionRef resolveWithRegion(String region, String input, String queryQualifier) {
+        ResolvedFunctionRef ref = resolveWithQualifier(input, queryQualifier);
+        enforceRegion(region, ref);
+        return ref;
+    }
+
+    static void enforceRegion(String region, ResolvedFunctionRef ref) {
+        if (ref.region() != null && !ref.region().equals(region)) {
+            throw invalid("Region '" + ref.region() + "' in ARN does not match request region '" + region + "'");
+        }
     }
 
     private static ResolvedFunctionRef parseFullArn(String input) {

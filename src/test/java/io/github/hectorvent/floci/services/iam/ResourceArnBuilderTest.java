@@ -1526,6 +1526,74 @@ class ResourceArnBuilderTest {
         assertEquals("arn:aws:s3:::my-bucket/folder/", arn);
     }
 
+    // ── S3 Control ─────────────────────────────────────────────────────────────
+
+    /**
+     * An S3 Control tagging route names the resource it acts on by its ARN, and that ARN as
+     * written is what the request is checked against. The data-plane reading of the path, which
+     * issue #6537 reports, checked s3:GetObject on a bucket named v20180820, so a policy
+     * allowing the tagging action on the real bucket never matched. The ARN is the caller's own
+     * naming of the resource, kept as the ARN-carrying requests of other services are: the plain
+     * general-purpose form and the directory-bucket form the Go SDK and Terraform send alike.
+     */
+    @Test
+    void s3ControlTaggingIsCheckedAgainstTheArnTheRouteNames() {
+        for (String action : List.of("s3:ListTagsForResource", "s3:TagResource", "s3:UntagResource")) {
+            when(uriInfo.getPath()).thenReturn("/v20180820/tags/arn:aws:s3:::repro-bucket");
+            assertEquals(List.of("arn:aws:s3:::repro-bucket"),
+                    builder.buildResources("s3", action, ctx, "us-east-1", ACCOUNT, "aws"), action);
+            when(uriInfo.getPath())
+                    .thenReturn("/v20180820/tags/arn:aws:s3:us-east-1:000000000000:bucket/repro-bucket");
+            assertEquals(List.of("arn:aws:s3:us-east-1:000000000000:bucket/repro-bucket"),
+                    builder.buildResources("s3", action, ctx, "us-east-1", ACCOUNT, "aws"), action);
+        }
+    }
+
+    /** A tagging route naming no ARN stays on the wildcard, under which the handler refuses it. */
+    @Test
+    void s3ControlTaggingNamingNoArnLeavesTheWildcard() {
+        when(uriInfo.getPath()).thenReturn("/v20180820/tags/not-an-arn");
+        assertEquals(List.of("*"),
+                builder.buildResources("s3", "s3:ListTagsForResource", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /**
+     * AWS gives s3:ListAccessPoints and the account-level Block Public Access actions no
+     * resource type, so the request is checked against the wildcard alone, as the no-resource
+     * actions of other namespaces are (the KMS list operations): a bucket-scoped statement,
+     * {@code arn:<partition>:s3:::*} or any other ARN, grants them nothing, and a NotResource
+     * naming any bucket denies the call.
+     */
+    @Test
+    void s3ControlAccountRoutesAreCheckedAgainstTheWildcardAlone() {
+        when(uriInfo.getPath()).thenReturn("/v20180820/accesspoint");
+        assertEquals(List.of("*"),
+                builder.buildResources("s3", "s3:ListAccessPoints", ctx, "us-east-1", ACCOUNT, "aws"));
+        when(uriInfo.getPath()).thenReturn("/v20180820/configuration/publicAccessBlock");
+        assertEquals(List.of("*"),
+                builder.buildResources("s3", "s3:PutAccountPublicAccessBlock", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of("*"),
+                builder.buildResources("s3", "s3:GetAccountPublicAccessBlock", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(List.of("*"),
+                builder.buildResources("s3", "s3:PutAccountPublicAccessBlock", ctx, "us-gov-west-1", ACCOUNT,
+                        "aws-us-gov"));
+    }
+
+    /**
+     * The operation tells S3 Control's requests from the data plane, not the path: a request a
+     * data-plane action claims under the same prefix, a bucket actually named v20180820, keeps
+     * the bucket and object ARN of its own path.
+     */
+    @Test
+    void aDataPlaneOperationUnderTheS3ControlPrefixKeepsItsOwnArn() {
+        when(uriInfo.getPath()).thenReturn("/v20180820/tags/key.txt");
+        assertEquals(List.of("arn:aws:s3:::v20180820/tags/key.txt"),
+                builder.buildResources("s3", "s3:PutObject", ctx, "us-east-1", ACCOUNT, "aws"));
+        when(uriInfo.getPath()).thenReturn("/v20180820");
+        assertEquals(List.of("arn:aws:s3:::v20180820"),
+                builder.buildResources("s3", "s3:ListBucket", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
     // ── The vendored table of request resources ─────────────────────────────────
 
     /**

@@ -43,6 +43,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 @ApplicationScoped
 @Startup
@@ -283,13 +284,18 @@ public class BackupService {
 
     public PaginatedResult<BackupVault> listBackupVaults(String region, String byVaultType,
                                                         Integer maxResults, String nextToken) {
+        String namespace = "backup:ListBackupVaults:" + regionResolver.getAccountId() + ":" + region + ":"
+                + (byVaultType == null ? "all" : "type:" + byVaultType);
+        return paginate(listBackupVaults(region, byVaultType), BackupVault::getBackupVaultName,
+                maxResults, nextToken, namespace);
+    }
+
+    private static <T> PaginatedResult<T> paginate(List<T> items, Function<T, String> cursorOf,
+                                                   Integer maxResults, String nextToken, String namespace) {
         if (maxResults != null && (maxResults < 1 || maxResults > 1000)) {
             throw new AwsException("InvalidParameterValueException", "maxResults must be between 1 and 1000", 400);
         }
-        String namespace = "backup:ListBackupVaults:" + regionResolver.getAccountId() + ":" + region + ":"
-                + (byVaultType == null ? "all" : "type:" + byVaultType);
-        return Pagination.paginate(listBackupVaults(region, byVaultType), BackupVault::getBackupVaultName,
-                maxResults == null ? 1000 : maxResults, nextToken, namespace,
+        return Pagination.paginate(items, cursorOf, maxResults == null ? 1000 : maxResults, nextToken, namespace,
                 token -> new AwsException("InvalidParameterValueException", "Invalid nextToken.", 400));
     }
 
@@ -674,6 +680,17 @@ public class BackupService {
 
     public List<BackupPlan> listBackupPlans() {
         return planStore.scan(k -> true);
+    }
+
+    public PaginatedResult<BackupPlan> listBackupPlans(String region, boolean includeDeleted,
+                                                       Integer maxResults, String nextToken) {
+        List<BackupPlan> plans = listBackupPlans().stream()
+                .filter(plan -> region.equals(AwsArnUtils.regionOrDefault(plan.getBackupPlanArn(),
+                        regionResolver.getDefaultRegion())))
+                .filter(plan -> includeDeleted || plan.getDeletionDate() == null)
+                .toList();
+        String namespace = "backup:ListBackupPlans:" + regionResolver.getAccountId() + ":" + region + ":" + includeDeleted;
+        return paginate(plans, BackupPlan::getBackupPlanId, maxResults, nextToken, namespace);
     }
 
     // ── Selection ──────────────────────────────────────────────────────────────

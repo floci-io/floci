@@ -11,6 +11,29 @@ import static org.junit.jupiter.api.Assertions.*;
 class LambdaArnUtilsTest {
 
     @ParameterizedTest
+    @ValueSource(strings = {"my-fn", "111111111111:function:my-fn",
+            "arn:aws:lambda:us-east-1:111111111111:function:my-fn"})
+    void resolveWithRegionKeepsAccountAndQualifier(String input) {
+        LambdaArnUtils.ResolvedFunctionRef original = LambdaArnUtils.resolveWithQualifier(input, "live");
+        assertEquals(original, LambdaArnUtils.resolveWithRegion("us-east-1", input, "live"));
+    }
+
+    @Test
+    void resolveWithRegionRejectsMismatchAfterQualifierValidation() {
+        String arn = "arn:aws-cn:lambda:cn-north-1:111111111111:function:my-fn:live";
+        AwsException mismatch = assertThrows(AwsException.class,
+                () -> LambdaArnUtils.resolveWithRegion("cn-northwest-1", arn, "live"));
+        assertEquals("InvalidParameterValueException", mismatch.getErrorCode());
+        assertEquals(400, mismatch.getHttpStatus());
+        assertEquals("Region 'cn-north-1' in ARN does not match request region 'cn-northwest-1'",
+                mismatch.getMessage());
+        AwsException qualifier = assertThrows(AwsException.class,
+                () -> LambdaArnUtils.resolveWithRegion("cn-northwest-1", arn, "other"));
+        assertEquals("The derived qualifier from the function name does not match the specified qualifier.",
+                qualifier.getMessage());
+    }
+
+    @ParameterizedTest
     @CsvSource({
             // input, expectedName, expectedQualifier, expectedRegion, expectedAccount
             "my-fn, my-fn, , , ",

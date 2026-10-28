@@ -8,7 +8,7 @@ Status: complete for the local emulator slice.
 
 Supported MVP 1 behavior:
 
-- Thing CRUD with idempotent identical `CreateThing`, duplicate-conflict semantics, `UpdateThing.expectedVersion`, and list pagination.
+- Thing CRUD with idempotent identical `CreateThing`, duplicate-conflict semantics, `UpdateThing.expectedVersion`, and list pagination. `UpdateThing` honours `attributePayload.merge` (an empty value removes an attribute), `thingTypeName` and `removeThingType`, and `DeleteThing` honours `expectedVersion`.
 - Certificate basics: `CreateKeysAndCertificate`, `CreateCertificateFromCsr`, `DescribeCertificate`, `ListCertificates`, `UpdateCertificate`, and `DeleteCertificate` with active/attached delete constraints. `CreateKeysAndCertificate` returns a real X.509 client certificate issued by Floci's local CA (`GET /_floci/ca.pem`) with a fresh RSA 2048 key pair, valid until 2049-12-31T23:59:59Z as on AWS, and `certificateId` is the SHA-256 of the certificate's DER encoding as on AWS. `DescribeCertificate` reports `validity` and `certificateMode`. `CreateCertificateFromCsr` signs the request's public key (RSA of at least 2048 bits, or EC on P-256, P-384 or P-521) with the same CA and, as on AWS, returns no private key. `RegisterCertificateWithoutCA` registers a certificate from any issuer, as on AWS: no CA is checked, the status defaults to `INACTIVE`, `DescribeCertificate` reports `certificateMode` `SNI_ONLY`, a certificate already registered is `ResourceAlreadyExistsException`, and a PEM that does not parse is `CertificateValidationException`.
 - Policy basics: `CreatePolicy`, `GetPolicy`, `ListPolicies`, `DeletePolicy`, policy version lifecycle, `AttachPolicy`, `DetachPolicy`, `ListAttachedPolicies`, and `ListTargetsForPolicy`.
 - Thing principal basics: `AttachThingPrincipal`, `DetachThingPrincipal`, `ListThingPrincipals`, `ListPrincipalThings`, and the paginated `ListThingPrincipalsV2` and `ListPrincipalThingsV2`. Exclusive attachment is not modelled, so the V2 lists report every attachment as `NON_EXCLUSIVE_THING`, and a `thingPrincipalType` filter of `EXCLUSIVE_THING` returns none.
@@ -41,7 +41,9 @@ Supported MVP 2 behavior:
 Current MVP 2 limitations:
 
 - `DeleteConnection.preventWillMessage` is accepted for SDK request compatibility, but the embedded broker does not expose selective Last Will suppression.
-- HTTP IoT Data `Publish` still treats QoS and MQTT5 metadata as compatibility inputs only; those properties are not fully forwarded or persisted yet.
+- HTTP IoT Data `Publish` reaches MQTT subscribers as an MQTT publish does, whatever account and region they connected in: the broker has neither, where AWS runs one per account and region. It refuses a `qos` other than 0 or 1 with AWS's `InvalidRequestException`. Its MQTT 5 metadata (`contentType`, `correlationData`, `messageExpiry`, `payloadFormatIndicator`, `responseTopic`, `userProperties`) is accepted but not forwarded.
+- A retained message is also sent on a subscription to a wildcard filter that matches its topic. AWS sends it only to a subscription naming its exact topic.
+- A QoS 1 copy sent to a subscriber is never retried, and no limit applies to how many stay unacknowledged. AWS holds further copies once a client has 100 unacknowledged and retries them for up to an hour (16 minutes for MQTT 5).
 - `SendDirectMessage` publishes to the requested MQTT topic through the embedded broker. Unlike AWS IoT Core, it does not yet bypass subscription matching to deliver to a client that is not subscribed to that topic.
 - `GetConnection` and `ListSubscriptions` report live in-memory broker state only; offline persistent session subscription reporting is not modeled yet.
 - Jobs reserved MQTT topics remain follow-up scope; Jobs Data HTTP APIs are implemented first.
@@ -180,7 +182,7 @@ Broker scope:
 
 - Target real AWS IoT/device SDK style MQTT clients, not only handcrafted packet tests.
 - Support MQTT v3 and MQTT 5 CONNECT handling used by local compatibility tests.
-- Support QoS 0 and QoS 1 publish/subscribe behavior for the local AWS IoT slice.
+- Support QoS 0 and QoS 1 publish/subscribe behavior for the local AWS IoT slice. A publish, over MQTT or through IoT Data `Publish`, reaches each matching subscriber at the lower of its own and the subscription's QoS, with RETAIN 0, as on AWS. A retained message sent on subscribe carries RETAIN 1 at the lower of its stored and the subscription's QoS.
 - Accept PUBLISH payloads up to 128 KB on 1883, 8883 and `/mqtt`, the AWS IoT Core quota (packets up to 146 KB including the variable header). A larger publish disconnects the client without acknowledgement, delivery or rule evaluation, as on AWS.
 - Serve MQTT over TLS on 8883 next to plaintext 1883 when TLS is enabled, and verify the device certificate and its `iot:Connect` permission there.
 - Keep the plaintext listener permissive except for a `CONNECT` that names a [custom authorizer](#authorizers); topic-level authorization (`Publish`, `Subscribe`, `Receive`) is follow-up scope.

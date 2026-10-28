@@ -74,7 +74,8 @@ One action is currently simplified:
 `FilterLogEvents` reads `filterPattern` with the filter pattern syntax described below, the one
 metric filters and subscription filters use: terms, quoted phrases, `?` alternatives, `-`
 exclusions, JSON and space-delimited patterns. An invalid pattern is refused with
-`InvalidParameterException`.
+`InvalidParameterException`, and so is a request that names no log group by `logGroupName` or
+`logGroupIdentifier`.
 
 ### Subscription filters {#subscription-filters}
 
@@ -403,6 +404,7 @@ returns HTTP 404.
 | `DescribeAlarms` | List alarms |
 | `DeleteAlarms` | Delete alarms |
 | `SetAlarmState` | Manually set alarm state |
+| `DescribeAlarmHistory` | List alarm state transitions and configuration changes (see [Alarm history](#alarm-history)) |
 | `PutMetricStream` | Create or update a metric stream definition |
 | `GetMetricStream` | Read a metric stream definition |
 | `ListMetricStreams` | List metric streams |
@@ -430,10 +432,14 @@ rejected with `ValidationError`.
 
 ### Metric alarm updates
 
-Updating a metric alarm preserves its current state, state reason, state timestamp and tags.
+Updating a metric alarm preserves its current state, state reason, state timestamps and tags.
 Tags supplied to `PutMetricAlarm` apply only when creating an alarm; use `TagResource` and
 `UntagResource` to change existing tags. `SetAlarmState` requires `StateReason` and rejects
 missing or unknown state values before changing the alarm.
+
+`StateTransitionedTimestamp` records when an alarm's `StateValue` last changed, while
+`StateUpdatedTimestamp` moves on every state update, including one that keeps the value.
+Alarms stored before Floci recorded it report their last state update.
 
 `SetAlarmState` enforces the modeled maximum lengths of 1023 characters for
 `StateReason` and 4000 characters for `StateReasonData` before changing alarm state.
@@ -458,6 +464,27 @@ metric does not retain the previous definition.
 
 This is management-plane support: the alarm evaluator currently evaluates only single-metric
 alarms, not metric-math expressions. `SetAlarmState` remains available for manual transitions.
+
+### Alarm history {#alarm-history}
+
+`DescribeAlarmHistory` lists two kinds of items, newest first unless `ScanBy` is
+`TimestampAscending`:
+
+- `StateUpdate` for every real state transition, whether it comes from `SetAlarmState`, the alarm
+  evaluator or a composite alarm's rule. Setting an alarm to the state it already has records
+  nothing. `HistoryData` carries the old and new state with their reasons and reason data.
+- `ConfigurationUpdate` when `PutMetricAlarm` or `PutCompositeAlarm` creates or updates an alarm,
+  and when `DeleteAlarms` deletes one. An update lists the previous value of each changed field
+  under `originalUpdatedFields`.
+
+History survives the deletion of its alarm and is kept for 30 days. Without `AlarmTypes` only
+metric alarm history is listed; request `CompositeAlarm` to include composite alarms. `Action`,
+`AlarmContributorStateUpdate` and `AlarmContributorAction` are accepted filters, but Floci never
+records those items, so they match nothing. `MaxRecords` defaults to 50, and a `NextToken` issued
+for the other `ScanBy` direction returns an empty page, as on AWS.
+
+The alarm snapshots in `ConfigurationUpdate` items use Floci's field names, such as `okActions`
+and `statistic`, where AWS uses its internal ones, such as `okactions` and `extendedStatistic`.
 
 ### Examples
 

@@ -9,7 +9,9 @@ import java.util.Objects;
  * default content is a stored {@link EmailContent.Template}, which the send resolves only after its
  * sender checks, or an {@link EmailContent.InlineTemplate}; its data and headers are the defaults
  * each entry's replacements merge over. {@code sourceArn} and {@code returnPathArn} are the
- * sending-authorization identity ARNs of the sender and the return path.
+ * sending-authorization identity ARNs of the sender and the return path. With
+ * {@code recipientLimitPerEntry} an entry over the recipient limit fails on its own, as on v1
+ * (probe-confirmed); without it the whole call is rejected.
  */
 public record SendBulkEmailRequest(
         String source,
@@ -21,6 +23,7 @@ public record SendBulkEmailRequest(
         List<MessageTag> defaultEmailTags,
         String tenantName,
         String region,
+        boolean recipientLimitPerEntry,
         EmailContent.TemplateContent defaultContent,
         List<BulkEmailEntry> entries) {
 
@@ -49,6 +52,7 @@ public record SendBulkEmailRequest(
         private List<MessageTag> defaultEmailTags = List.of();
         private String tenantName;
         private String region;
+        private boolean recipientLimitPerEntry;
         private EmailContent.TemplateContent defaultContent;
         private List<BulkEmailEntry> entries = List.of();
 
@@ -64,12 +68,14 @@ public record SendBulkEmailRequest(
         public Builder defaultEmailTags(List<MessageTag> defaultEmailTags) { this.defaultEmailTags = defaultEmailTags; return this; }
         public Builder tenantName(String tenantName) { this.tenantName = tenantName; return this; }
         public Builder region(String region) { this.region = region; return this; }
+        public Builder recipientLimitPerEntry(boolean recipientLimitPerEntry) { this.recipientLimitPerEntry = recipientLimitPerEntry; return this; }
         public Builder defaultContent(EmailContent.TemplateContent defaultContent) { this.defaultContent = defaultContent; return this; }
         public Builder entries(List<BulkEmailEntry> entries) { this.entries = entries; return this; }
 
         public SendBulkEmailRequest build() {
             return new SendBulkEmailRequest(source, sourceArn, replyToAddresses, returnPath, returnPathArn,
-                    configurationSetName, defaultEmailTags, tenantName, region, defaultContent, entries);
+                    configurationSetName, defaultEmailTags, tenantName, region, recipientLimitPerEntry, defaultContent,
+                    entries);
         }
     }
 }

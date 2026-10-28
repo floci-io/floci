@@ -36,6 +36,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -172,7 +173,7 @@ class ApiGatewayV2ExecuteTest {
             JsonNode warmupBody = JSON.readTree(warmup.body());
             lambdaDispatchAvailable = warmup.statusCode() == 200
                     && warmupBody.path("statusCode").asInt() == 200;
-        } catch (java.net.http.HttpTimeoutException | ConnectException e) {
+        } catch (HttpTimeoutException | ConnectException e) {
             // Transport-level failure: endpoint unreachable or timed out
             lambdaDispatchAvailable = false;
         }

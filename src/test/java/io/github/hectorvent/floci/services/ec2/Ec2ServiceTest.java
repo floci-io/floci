@@ -61,7 +61,9 @@ import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpointSubnetConfiguration;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.testing.ParkingStore;
 import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.Response;
 import org.awaitility.Awaitility;
 import org.bouncycastle.openssl.PEMKeyPair;
 import org.bouncycastle.openssl.PEMParser;
@@ -78,6 +80,8 @@ import org.mockito.MockedStatic;
 
 import java.io.IOException;
 import java.io.StringReader;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadInfo;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
@@ -89,6 +93,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -98,6 +103,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -120,6 +126,7 @@ import static io.github.hectorvent.floci.services.ec2.Ec2KeyPairFixtures.TRUNCAT
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -127,6 +134,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -135,9 +143,11 @@ import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.mockingDetails;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
@@ -298,6 +308,91 @@ class Ec2ServiceTest {
         assertEquals("InvalidGroup.NotFound", error.getErrorCode());
         assertTrue(service.describeInstances(region, List.of(), Map.of()).isEmpty());
         assertTrue(service.describeVolumes(region, List.of(), Map.of()).isEmpty());
+    }
+
+    @Test
+    void aRollbackDeletesALaunchVolumeWhoseAttachmentEndedFirst() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Reservation launch = launchKeepingADataVolume(service);
+        String instanceId = launch.getInstances().getFirst().getInstanceId();
+        String dataVolume = service.describeVolumes("us-east-1", List.of(), Map.of()).stream()
+                .filter(volume -> "/dev/sdf".equals(volume.getAttachments().getFirst().getDevice()))
+                .findFirst().orElseThrow().getVolumeId();
+        // A failed container's launch volumes are settled by whichever call reads them first, which
+        // can end this attachment before a later launch of the same fleet fails.
+        service.detachVolume("us-east-1", dataVolume, instanceId, null, false);
+
+        service.rollBackLaunch("us-east-1", launch);
+
+        assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).isEmpty());
+    }
+
+    @Test
+    void describeInstancesReadsTheVolumeAttachmentsOnceWhateverTheInstanceCount() {
+        Ec2Service service = spy(new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory()));
+        service.runInstances("us-east-1", "ami-test", "t3.micro", 3, 3, null, List.of(), null, null,
+                List.of(), null, null);
+        Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
+                mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
+                mock(Ec2SnapshotBlockPublicAccessService.class), mock(Ec2IpamService.class),
+                new RegionResolver("us-east-1", "000000000000"));
+
+        Response response = handler.handle("DescribeInstances", new MultivaluedHashMap<>(), "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        assertEquals(3, response.getEntity().toString().split("<volumeId>", -1).length - 1);
+        assertEquals(1, mockingDetails(service).getInvocations().stream()
+                .filter(invocation -> invocation.getMethod().getName().equals("instanceVolumeAttachments"))
+                .count());
+    }
+
+    @Test
+    void aLaunchRefusedWhenItTakesCapacityLeavesNoVolumeBehind() {
+        Ec2Service service = spy(new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory()));
+        // Another launch took the capacity between this launch's check and its claim on it.
+        doThrow(new AwsException("InsufficientInstanceCapacity", "taken in the meantime", 400))
+                .when(service).acquireCapacity(anyString(), anyList());
+
+        assertThrows(AwsException.class, () -> launchKeepingADataVolume(service));
+
+        assertTrue(service.describeVolumes("us-east-1", List.of(), Map.of()).isEmpty());
+    }
+
+    @Test
+    void aRollbackWhoseTerminationFailsKeepsEachVolumesDeleteOnTermination() {
+        Ec2Service service = spy(new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory()));
+        Reservation launch = launchKeepingADataVolume(service);
+        doThrow(new AwsException("InternalError", "termination failed", 500))
+                .when(service).terminateInstances(anyString(), anyList());
+
+        assertThrows(AwsException.class, () -> service.rollBackLaunch("us-east-1", launch));
+
+        // The instance is still there, so a later TerminateInstances must keep what the launch asked to keep.
+        assertEquals(Set.of("/dev/xvda=true", "/dev/sdf=false"),
+                service.describeVolumes("us-east-1", List.of(), Map.of()).stream()
+                        .map(volume -> volume.getAttachments().getFirst())
+                        .map(a -> a.getDevice() + "=" + a.isDeleteOnTermination())
+                        .collect(Collectors.toSet()));
+    }
+
+    private static Reservation launchKeepingADataVolume(Ec2Service service) {
+        LaunchTemplateData.Ebs ebs = new LaunchTemplateData.Ebs();
+        ebs.setVolumeSize(5);
+        ebs.setDeleteOnTermination(false);
+        LaunchTemplateData.BlockDeviceMapping data = new LaunchTemplateData.BlockDeviceMapping();
+        data.setDeviceName("/dev/sdf");
+        data.setEbs(ebs);
+        return service.runInstances("us-east-1", "ami-test", "t3.micro", 1, 1, null, List.of(), null, null,
+                List.of(), null, null, null, null, 0, null, null, null, null, false, null, null,
+                List.of(data), false, null, null);
     }
 
     @Test
@@ -4810,6 +4905,127 @@ class Ec2ServiceTest {
         assertEquals("InvalidKeyPair.Duplicate", error.getErrorCode());
     }
 
+    /**
+     * A second CreateKeyPair or ImportKeyPair for a name, arriving after the first has found the name
+     * free but before its key pair is stored, is refused as a duplicate. The store parks the first
+     * request's write until the second has finished or waits on a lock the first holds, which forces
+     * that interleaving on every run.
+     */
+    @ParameterizedTest
+    @CsvSource({"create, create", "import, import", "create, import", "import, create"})
+    void secondRequestForAKeyPairNameBeingStoredIsRefused(String first, String second) throws Exception {
+        ParkingStore<KeyPair> parking = new ParkingStore<>();
+        AccountAwareStorageBackend<KeyPair> keyPairStore = new AccountAwareStorageBackend<>(parking, null, "000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-key-pairs.json", keyPairStore)));
+        String publicKey = Ec2KeyMaterial.generateRsa().openSshPublicKey();
+        Function<String, KeyPair> request = action -> "create".equals(action)
+                ? service.createKeyPair("us-east-1", "contested", "ed25519", null)
+                : service.importKeyPair("us-east-1", "contested", publicKey);
+        AtomicReference<Thread> firstWorker = new AtomicReference<>();
+        AtomicReference<Thread> secondWorker = new AtomicReference<>();
+        parking.parkNextWrite();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<KeyPair> firstResult = workers.submit(() -> {
+                firstWorker.set(Thread.currentThread());
+                return request.apply(first);
+            });
+            assertTrue(parking.awaitParked(), "the first request never stored its key pair");
+            Future<KeyPair> secondResult = workers.submit(() -> {
+                secondWorker.set(Thread.currentThread());
+                return request.apply(second);
+            });
+            Awaitility.await("the second request to finish or to wait in storeNewKeyPair")
+                    .atMost(Duration.ofSeconds(30)).until(() -> secondResult.isDone()
+                    || isBlockedIn(secondWorker.get(), "storeNewKeyPair", firstWorker.get()));
+            parking.release();
+
+            KeyPair stored = firstResult.get(30, TimeUnit.SECONDS);
+            ExecutionException refusal = assertThrows(ExecutionException.class,
+                    () -> secondResult.get(30, TimeUnit.SECONDS), "both requests got the name");
+            AwsException duplicate = assertInstanceOf(AwsException.class, refusal.getCause());
+            assertEquals("InvalidKeyPair.Duplicate", duplicate.getErrorCode());
+            assertEquals("The keypair 'contested' already exists", duplicate.getMessage());
+            assertEquals(400, duplicate.getHttpStatus());
+            assertEquals(List.of(stored.getKeyPairId()), service.describeKeyPairs("us-east-1", List.of(), List.of())
+                    .stream().map(KeyPair::getKeyPairId).toList());
+        } finally {
+            parking.release();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    /**
+     * A DeleteKeyPair arriving while a tag write has read the key pair and not yet written it back
+     * waits for that write, so the tag write cannot put back the key pair the delete removes, and the
+     * freed name then goes to one new key pair. Armed once the key pair is created, the store parks the
+     * next write, which is the tag write's, until the delete has finished or waits on a lock the tag
+     * write holds.
+     */
+    @Test
+    void deleteKeyPairWaitsForATagWriteOnTheKeyPair() throws Exception {
+        ParkingStore<KeyPair> parking = new ParkingStore<>();
+        AccountAwareStorageBackend<KeyPair> keyPairStore = new AccountAwareStorageBackend<>(parking, null, "000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-key-pairs.json", keyPairStore)));
+        KeyPair original = service.createKeyPair("us-east-1", "retagged", "ed25519", null);
+        parking.parkNextWrite();
+        AtomicReference<Thread> tagWorker = new AtomicReference<>();
+        AtomicReference<Thread> deleteWorker = new AtomicReference<>();
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> tagging = workers.submit(() -> {
+                tagWorker.set(Thread.currentThread());
+                service.createTags("us-east-1", List.of(original.getKeyPairId()), List.of(new Tag("Team", "blue")));
+            });
+            assertTrue(parking.awaitParked(), "the tag write never stored the key pair");
+            Future<KeyPair> deleting = workers.submit(() -> {
+                deleteWorker.set(Thread.currentThread());
+                return service.deleteKeyPair("us-east-1", "retagged", null);
+            });
+            Awaitility.await("the delete to finish or to wait in deleteKeyPair")
+                    .atMost(Duration.ofSeconds(30)).until(() -> deleting.isDone()
+                    || isBlockedIn(deleteWorker.get(), "deleteKeyPair", tagWorker.get()));
+            parking.release();
+            tagging.get(30, TimeUnit.SECONDS);
+
+            assertEquals(original.getKeyPairId(), deleting.get(30, TimeUnit.SECONDS).getKeyPairId());
+            assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of()).isEmpty(),
+                    "the tag write put the deleted key pair back");
+            KeyPair recreated = service.createKeyPair("us-east-1", "retagged", "ed25519", null);
+            assertEquals(List.of(recreated.getKeyPairId()), service.describeKeyPairs("us-east-1", List.of(), List.of())
+                    .stream().map(KeyPair::getKeyPairId).toList());
+        } finally {
+            parking.release();
+            workers.shutdownNow();
+            assertTrue(workers.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    /**
+     * Whether {@code waiter} waits, in the named Ec2Service method, to enter a monitor {@code owner}
+     * holds. The method is named on purpose: a wait anywhere else may not be at the lock under test, so
+     * the race tests time out rather than pass without exercising it. Moving that lock into another
+     * method means updating the name here.
+     */
+    private static boolean isBlockedIn(Thread waiter, String method, Thread owner) {
+        if (waiter == null) {
+            return false;
+        }
+        ThreadInfo info = ManagementFactory.getThreadMXBean().getThreadInfo(waiter.threadId(), 1);
+        return info != null && info.getThreadState() == Thread.State.BLOCKED
+                && info.getLockOwnerId() == owner.threadId()
+                && info.getStackTrace().length == 1
+                && Ec2Service.class.getName().equals(info.getStackTrace()[0].getClassName())
+                && method.equals(info.getStackTrace()[0].getMethodName());
+    }
+
     @Test
     void describeKeyPairsThrowsNotFoundForMissingName() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
@@ -7322,11 +7538,11 @@ class Ec2ServiceTest {
             Ec2Service service = prefixListService();
             String[] fixture = attachmentFixture(service);
             int threads = 6;
-            java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-            java.util.concurrent.ExecutorService pool =
-                    java.util.concurrent.Executors.newFixedThreadPool(threads);
-            List<String> created = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
-            List<String> errors = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+            CountDownLatch start = new CountDownLatch(1);
+            ExecutorService pool =
+                    Executors.newFixedThreadPool(threads);
+            List<String> created = Collections.synchronizedList(new ArrayList<>());
+            List<String> errors = Collections.synchronizedList(new ArrayList<>());
 
             for (int i = 0; i < threads; i++) {
                 pool.submit(() -> {
@@ -7344,7 +7560,7 @@ class Ec2ServiceTest {
             }
             start.countDown();
             pool.shutdown();
-            assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+            assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
 
             assertEquals(1, created.size(), "trial " + trial + ": exactly one create may win");
             assertEquals(threads - 1, errors.size(), "every loser is told the VPC is already attached");
@@ -7366,9 +7582,9 @@ class Ec2ServiceTest {
             for (int trial = 0; trial < 10; trial++) {
                 Ec2Service service = prefixListService();
                 String[] fixture = attachmentFixture(service);
-                java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-                java.util.concurrent.ExecutorService pool =
-                        java.util.concurrent.Executors.newFixedThreadPool(2);
+                CountDownLatch start = new CountDownLatch(1);
+                ExecutorService pool =
+                        Executors.newFixedThreadPool(2);
 
                 pool.submit(() -> {
                     try {
@@ -7394,7 +7610,7 @@ class Ec2ServiceTest {
                 });
                 start.countDown();
                 pool.shutdown();
-                assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+                assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
 
                 List<TransitGatewayVpcAttachment> attachments =
                         service.describeTransitGatewayVpcAttachments("us-east-1", List.of(), Map.of());
@@ -7431,9 +7647,9 @@ class Ec2ServiceTest {
                 if (!attachment) {
                     service.deleteTransitGatewayVpcAttachment("us-east-1", attachmentId);
                 }
-                java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-                java.util.concurrent.ExecutorService pool =
-                        java.util.concurrent.Executors.newFixedThreadPool(2);
+                CountDownLatch start = new CountDownLatch(1);
+                ExecutorService pool =
+                        Executors.newFixedThreadPool(2);
 
                 pool.submit(() -> {
                     try {
@@ -7457,7 +7673,7 @@ class Ec2ServiceTest {
                 });
                 start.countDown();
                 pool.shutdown();
-                assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+                assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
 
                 String what = attachment ? "attachment" : "gateway";
                 if (attachment) {
@@ -7925,9 +8141,9 @@ class Ec2ServiceTest {
             String[] fixture = attachmentFixture(service);
             String spare = service.createTransitGatewayRouteTable("us-east-1", fixture[0], List.of())
                     .getTransitGatewayRouteTableId();
-            java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-            java.util.concurrent.ExecutorService pool =
-                    java.util.concurrent.Executors.newFixedThreadPool(2);
+            CountDownLatch start = new CountDownLatch(1);
+            ExecutorService pool =
+                    Executors.newFixedThreadPool(2);
 
             pool.submit(() -> {
                 try {
@@ -7950,7 +8166,7 @@ class Ec2ServiceTest {
             });
             start.countDown();
             pool.shutdown();
-            assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+            assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
 
             boolean tableExists = service.describeTransitGatewayRouteTables("us-east-1", List.of(), Map.of())
                     .stream().anyMatch(rt -> rt.getTransitGatewayRouteTableId().equals(spare));
@@ -8346,7 +8562,7 @@ class Ec2ServiceTest {
                 return (AccountAwareStorageBackend<V>) override;
             }
             AccountAwareStorageBackend<V> backend = requestContextInstance != null
-                    ? new AccountAwareStorageBackend<>(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>(),
+                    ? new AccountAwareStorageBackend<>(new InMemoryStorage<>(),
                             requestContextInstance, "000000000000")
                     : AccountAwareStorageBackend.inMemory("000000000000");
             created.add(backend);
@@ -8365,7 +8581,7 @@ class Ec2ServiceTest {
         private int putCount;
 
         private DetachedImageStorage() {
-            super(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>(), null, "000000000000");
+            super(new InMemoryStorage<>(), null, "000000000000");
         }
 
         @Override
@@ -8419,8 +8635,8 @@ class Ec2ServiceTest {
             copy.setCreationSourceInstanceId(source.getCreationSourceInstanceId());
             copy.setDockerImage(source.getDockerImage());
             copy.setBlockDeviceMappings(source.getBlockDeviceMappings() == null
-                    ? List.of() : new java.util.ArrayList<>(source.getBlockDeviceMappings()));
-            copy.setTags(source.getTags() == null ? List.of() : new java.util.ArrayList<>(source.getTags()));
+                    ? List.of() : new ArrayList<>(source.getBlockDeviceMappings()));
+            copy.setTags(source.getTags() == null ? List.of() : new ArrayList<>(source.getTags()));
             return copy;
         }
     }

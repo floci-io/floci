@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.transcribe;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -8,6 +9,7 @@ import io.github.hectorvent.floci.services.transcribe.model.VocabularyInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -37,7 +39,7 @@ class TranscribeServiceTest {
         StorageFactory storageFactory = new StorageFactory(null, null) {
             @Override
             public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
-                                                            com.fasterxml.jackson.core.type.TypeReference<java.util.Map<String, V>> typeReference) {
+                                                            TypeReference<Map<String, V>> typeReference) {
                 @SuppressWarnings("unchecked")
                 AccountAwareStorageBackend<V> result =
                         (AccountAwareStorageBackend<V>) (AccountAwareStorageBackend<?>) TranscribeServiceTest.this.vocabularyStore;

@@ -7,11 +7,13 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.bcmdataexports.model.DataQuery;
 import io.github.hectorvent.floci.services.bcmdataexports.model.DestinationConfiguration;
 import io.github.hectorvent.floci.services.bcmdataexports.model.Export;
 import io.github.hectorvent.floci.services.bcmdataexports.model.ExportExecution;
 import io.github.hectorvent.floci.services.bcmdataexports.model.RefreshCadence;
+import io.github.hectorvent.floci.services.cur.CurEmissionScheduler;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -35,12 +37,12 @@ public class BcmDataExportsJsonHandler {
 
     private final BcmDataExportsService service;
     private final ObjectMapper objectMapper;
-    private final io.github.hectorvent.floci.services.cur.CurEmissionScheduler scheduler;
+    private final CurEmissionScheduler scheduler;
 
     @Inject
     public BcmDataExportsJsonHandler(BcmDataExportsService service,
                                      ObjectMapper objectMapper,
-                                     io.github.hectorvent.floci.services.cur.CurEmissionScheduler scheduler) {
+                                     CurEmissionScheduler scheduler) {
         this.service = service;
         this.objectMapper = objectMapper;
         this.scheduler = scheduler;
@@ -86,7 +88,9 @@ public class BcmDataExportsJsonHandler {
     }
 
     private Response handleList(JsonNode request) {
-        PaginatedResult<Export> page = service.listExports(maxResults(request), nextToken(request));
+        PaginatedResult<Export> page = service.listExports(
+                Pagination.parseMaxResults(request, "MaxResults", "ValidationException"),
+                Pagination.parseNextToken(request, "NextToken", "ValidationException"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Exports");
         for (Export export : page.items()) {
@@ -122,7 +126,9 @@ public class BcmDataExportsJsonHandler {
 
     private Response handleListExecutions(JsonNode request) {
         String arn = stringOrNull(request, "ExportArn");
-        PaginatedResult<ExportExecution> page = service.listExecutions(arn, maxResults(request), nextToken(request));
+        PaginatedResult<ExportExecution> page = service.listExecutions(arn,
+                Pagination.parseMaxResults(request, "MaxResults", "ValidationException"),
+                Pagination.parseNextToken(request, "NextToken", "ValidationException"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Executions");
         for (ExportExecution exec : page.items()) {
@@ -132,28 +138,6 @@ public class BcmDataExportsJsonHandler {
             response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
-    }
-
-    private static Integer maxResults(JsonNode request) {
-        JsonNode value = request.get("MaxResults");
-        if (value == null || value.isNull()) {
-            return null;
-        }
-        if (!value.isIntegralNumber() || !value.canConvertToInt()) {
-            throw new AwsException("ValidationException", "MaxResults must be an integer between 1 and 300.", 400);
-        }
-        return value.intValue();
-    }
-
-    private static String nextToken(JsonNode request) {
-        JsonNode value = request.get("NextToken");
-        if (value == null || value.isNull()) {
-            return null;
-        }
-        if (!value.isTextual()) {
-            throw new AwsException("ValidationException", "NextToken must be a string.", 400);
-        }
-        return value.textValue();
     }
 
     private Response handleGetExecution(JsonNode request) {

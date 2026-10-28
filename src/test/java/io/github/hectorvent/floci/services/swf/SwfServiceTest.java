@@ -41,6 +41,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -1045,7 +1046,7 @@ class SwfServiceTest {
                 }
 
                 @Override
-                public List<V> scan(java.util.function.Predicate<String> keyFilter) {
+                public List<V> scan(Predicate<String> keyFilter) {
                     return inner.scan(keyFilter);
                 }
 

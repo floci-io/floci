@@ -128,7 +128,7 @@ class CognitoJsonHandlerTest {
         JsonNode described = (JsonNode) handler.handle("DescribeUserPool", describeReq, "us-east-1").getEntity();
         JsonNode describedPool = described.get("UserPool");
 
-        for (JsonNode pool : java.util.List.of(createdPool, describedPool)) {
+        for (JsonNode pool : List.of(createdPool, describedPool)) {
             // AWS's JSON protocol serializes only members with a value provided - an
             // unconfigured pool omits these keys entirely, it doesn't write a JSON null
             // (confirmed against moto's DescribeUserPool, which never emits either key unset).

@@ -7,8 +7,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -415,5 +417,143 @@ class LambdaMicrovmsIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("name", equalTo(name));
+    }
+
+    @Test
+    @Order(16)
+    void anUpdateThatChangesTheConnectorMakesTheNextVersion() {
+        String create = """
+                {
+                  "Name": "microvm-it-versions",
+                  "ClientToken": "microvm-it-token-versions",
+                  "OperatorRole": "arn:aws:iam::000000000000:role/microvm-connector-operator",
+                  "Configuration": { "VpcEgressConfiguration": {
+                    "AssociatedComputeResourceTypes": ["WebFunction"],
+                    "NetworkProtocol": "IPv4",
+                    "SubnetIds": ["subnet-0000000000000ver1"],
+                    "SecurityGroupIds": ["sg-0000000000000ver1"]
+                  } }
+                }
+                """;
+        String arn = given().contentType("application/json").body(create)
+                .when().post(CORE + "/network-connectors")
+                .then().statusCode(202)
+                .body("Version", equalTo(1))
+                .body("State", equalTo("PENDING"))
+                .extract().path("Arn");
+        String id = arn.substring(arn.lastIndexOf(':') + 1);
+        given().when().get(CORE + "/network-connectors/microvm-it-versions")
+                .then().statusCode(200)
+                .body("Id", equalTo(id))
+                .body("LatestVersion", equalTo(1))
+                .body("LatestVersionArn", equalTo(arn + ":1"))
+                .body("$", not(hasKey("Version")));
+
+        String same = """
+                { "Configuration": { "VpcEgressConfiguration": {
+                    "SubnetIds": ["subnet-0000000000000ver1"], "SecurityGroupIds": ["sg-0000000000000ver1"] } } }
+                """;
+        given().contentType("application/json").body(same)
+                .when().put(CORE + "/network-connectors/" + id)
+                .then().statusCode(202)
+                .body("Version", equalTo(1))
+                .body("LastUpdateStatus", equalTo("Successful"))
+                .body("LastUpdateStatusReason", equalTo("No configuration changes detected"));
+        String moreSubnets = """
+                { "Configuration": { "VpcEgressConfiguration": {
+                    "SubnetIds": ["subnet-0000000000000ver1", "subnet-0000000000000ver2"] } } }
+                """;
+        given().contentType("application/json").body(moreSubnets)
+                .when().put(CORE + "/network-connectors/" + id)
+                .then().statusCode(202)
+                .body("Version", equalTo(2))
+                .body("VersionArn", equalTo(arn + ":2"))
+                .body("LastUpdateStatus", equalTo("InProgress"))
+                .body("LastUpdateStatusReason", equalTo("Update in progress"));
+        String reordered = """
+                { "Configuration": { "VpcEgressConfiguration": {
+                    "SubnetIds": ["subnet-0000000000000ver2", "subnet-0000000000000ver1"] } } }
+                """;
+        given().contentType("application/json").body(reordered)
+                .when().put(CORE + "/network-connectors/" + id)
+                .then().statusCode(202)
+                .body("Version", equalTo(2))
+                .body("LastUpdateStatusReason", equalTo("No configuration changes detected"))
+                .body("Configuration.VpcEgressConfiguration.SubnetIds",
+                        contains("subnet-0000000000000ver1", "subnet-0000000000000ver2"));
+        given().contentType("application/json")
+                .body("""
+                        { "OperatorRole": "arn:aws:iam::000000000000:role/microvm-connector-operator-v2" }
+                        """)
+                .when().put(CORE + "/network-connectors/" + id)
+                .then().statusCode(202)
+                .body("Version", equalTo(3));
+
+        given().when().get(CORE + "/network-connectors/" + arn)
+                .then().statusCode(200)
+                .body("LatestVersion", equalTo(3))
+                .body("StateReason", equalTo("Update initiated"))
+                .body("LastUpdateStatus", equalTo("Successful"))
+                .body("LastUpdateStatusReason", equalTo("Update was successful"));
+        given().when().get(CORE + "/network-connectors/" + id + ":1")
+                .then().statusCode(200)
+                .body("Version", equalTo(1))
+                .body("VersionArn", equalTo(arn + ":1"))
+                .body("StateReason", equalTo("Initial creation"))
+                .body("OperatorRole", equalTo("arn:aws:iam::000000000000:role/microvm-connector-operator"))
+                .body("Configuration.VpcEgressConfiguration.SubnetIds", contains("subnet-0000000000000ver1"))
+                .body("$", not(hasKey("LatestVersion")))
+                .body("$", not(hasKey("LastUpdateStatus")));
+        given().when().get(CORE + "/network-connectors/" + arn + ":2")
+                .then().statusCode(200)
+                .body("Version", equalTo(2))
+                .body("Configuration.VpcEgressConfiguration.SubnetIds",
+                        contains("subnet-0000000000000ver1", "subnet-0000000000000ver2"));
+        given().when().get(CORE + "/network-connectors/" + arn + ":4")
+                .then().statusCode(404)
+                .body("message", equalTo("Network connector not found: " + arn + ":4"));
+        given().when().get(CORE + "/network-connectors/" + id + "/versions")
+                .then().statusCode(200)
+                .body("NetworkConnectorVersions.Version", contains(1, 2, 3))
+                .body("NetworkConnectorVersions[1].VersionArn", equalTo(arn + ":2"))
+                .body("NetworkConnectorVersions[1].StateReason", equalTo("Update initiated"));
+        given().when().get(CORE + "/network-connectors/" + id + ":9/versions")
+                .then().statusCode(400)
+                .body("message", equalTo("Identifier must not include a version qualifier"));
+        given().when().get(CORE + "/network-connectors")
+                .then().statusCode(200)
+                .body("NetworkConnectors.find { it.Id == '%s' }.LatestVersion".formatted(id), equalTo(3));
+
+        given().contentType("application/json")
+                .body("""
+                        { "Configuration": { "VpcEgressConfiguration": { "AssociatedComputeResourceTypes": ["MicroVm"] } } }
+                        """)
+                .when().put(CORE + "/network-connectors/" + id)
+                .then().statusCode(400)
+                .body("message", equalTo("AssociatedComputeResourceTypes cannot be changed on an existing network"
+                        + " connector. Current: [WebFunction], requested: [MicroVm]."));
+
+        given().when().delete(CORE + "/network-connectors/" + id + ":3")
+                .then().statusCode(400)
+                .body("message", equalTo("Cannot delete the latest version of a network connector."));
+        given().when().delete(CORE + "/network-connectors/" + id + ":1")
+                .then().statusCode(202)
+                .body("Version", equalTo(1))
+                .body("State", equalTo("DELETING"))
+                .body("Configuration.VpcEgressConfiguration.SubnetIds", contains("subnet-0000000000000ver1"));
+        given().when().get(CORE + "/network-connectors/" + id + ":1")
+                .then().statusCode(404)
+                .body("message", equalTo("Network connector not found: " + arn + ":1"));
+        given().when().get(CORE + "/network-connectors/" + id + "/versions")
+                .then().statusCode(200)
+                .body("NetworkConnectorVersions.Version", contains(2, 3));
+
+        given().when().delete(CORE + "/network-connectors/" + id)
+                .then().statusCode(202)
+                .body("State", equalTo("DELETING"))
+                .body("$", not(hasKey("Version")));
+        given().when().get(CORE + "/network-connectors/" + id)
+                .then().statusCode(404)
+                .body("message", equalTo("Network connector not found: " + arn));
     }
 }

@@ -1,15 +1,14 @@
 package io.github.hectorvent.floci.services.lambda.launcher;
 
+import io.github.hectorvent.floci.services.lambda.launcher.BootstrapProcess.Result;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -95,19 +94,6 @@ class ProvidedRuntimeBootstrapTest {
     private Result run(String... arguments) throws Exception {
         List<String> command = new ArrayList<>(List.of("/bin/sh", entrypoint.toString()));
         command.addAll(List.of(arguments));
-        Process process = new ProcessBuilder(command).redirectErrorStream(true).start();
-        try {
-            assertTrue(process.waitFor(5, TimeUnit.SECONDS), "bootstrap must terminate");
-            return new Result(process.exitValue(),
-                    new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8));
-        } finally {
-            if (process.isAlive()) {
-                process.destroyForcibly();
-                assertTrue(process.waitFor(5, TimeUnit.SECONDS), "test process must be reaped");
-            }
-        }
-    }
-
-    private record Result(int exit, String output) {
+        return BootstrapProcess.run(new ProcessBuilder(command));
     }
 }

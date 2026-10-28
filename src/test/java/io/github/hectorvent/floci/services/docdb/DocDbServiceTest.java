@@ -25,6 +25,7 @@ import org.mockito.Mockito;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -164,7 +165,7 @@ class DocDbServiceTest {
         when(servicesConfig.docdb()).thenReturn(docdbConfig);
         when(docdbConfig.mock()).thenReturn(false);
         when(docdbConfig.defaultImage()).thenReturn("mongo:7.0");
-        when(config.hostname()).thenReturn(java.util.Optional.of("localhost"));
+        when(config.hostname()).thenReturn(Optional.of("localhost"));
 
         DocDbContainerManager noDaemonContainerManager = Mockito.mock(DocDbContainerManager.class);
         when(noDaemonContainerManager.tryStart(anyString(), anyString(), anyString(), anyString(), any()))
@@ -196,8 +197,8 @@ class DocDbServiceTest {
         // is the one a live account gives, which is the same for both cases.
         docDbService.createDbCluster("scoped-cluster", null, "admin", "secret", false);
         String arn = docDbService.getDbCluster("scoped-cluster").getDbClusterArn();
-        docDbService.addTagsToResource(arn, java.util.Map.of("env", "test"));
-        assertEquals(java.util.Map.of("env", "test"), docDbService.listTagsForResource(arn));
+        docDbService.addTagsToResource(arn, Map.of("env", "test"));
+        assertEquals(Map.of("env", "test"), docDbService.listTagsForResource(arn));
 
         for (String foreign : new String[]{
                 "arn:aws:rds:eu-west-1:000000000000:cluster:scoped-cluster",

@@ -1,9 +1,14 @@
 package io.github.hectorvent.floci.services.emrserverless;
 
+import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.S3Uri;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
@@ -12,11 +17,14 @@ import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
+import java.io.IOException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -26,7 +34,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
+import java.util.zip.GZIPOutputStream;
 
 /**
  * Runs a Spark application's {@code spark-submit} in a container of an EMR Serverless image, for an EMR
@@ -34,7 +45,9 @@ import java.util.concurrent.atomic.AtomicReference;
  * supplies at run time, which the public image lacks, so the runner starts {@code spark-submit} itself,
  * in local mode: the container holds the driver and its executors. The container reaches Floci as the
  * other containers Floci launches do, with the run's execution role as its credentials, and S3A, which
- * takes {@code s3://} on every release, is pointed at Floci's S3.
+ * takes {@code s3://} on every release, is pointed at Floci's S3. The driver's output goes to Floci's log and,
+ * while it runs, to the run's CloudWatch log streams, when it has some; once it ends, its standard output
+ * and error go, gzipped, to the run's log folder in Floci's S3, when it has one.
  */
 @ApplicationScoped
 public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardown {
@@ -52,6 +65,11 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private static final String DOUBLE_QUOTE_ESCAPES = "\"\\$`\n";
     // How often a running driver is looked at, as Batch's runner looks at its jobs.
     private static final Duration POLL_INTERVAL = Duration.ofMillis(250);
+    // A log folder may be given in a Hadoop scheme, as an EMR cluster's LogUri often is (s3n://).
+    private static final Pattern HADOOP_S3_SCHEME = Pattern.compile("^s3[an]://");
+    private static final String GZIP = "application/x-gzip";
+    // How long reading an ended driver's output may take; Docker's log rotation bounds its size.
+    private static final Duration LOG_READ_TIMEOUT = Duration.ofSeconds(60);
 
     // The runs inside run(); a stop for a run not here comes after its driver has gone, and is dropped.
     private final ConcurrentHashMap<String, Launch> launches = new ConcurrentHashMap<>();
@@ -61,6 +79,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private final ContainerLogStreamer logStreamer;
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials roleCredentials;
+    private final S3Service s3Service;
     private final EmulatorConfig config;
     private final Clock clock;
     private final Duration pollInterval;
@@ -68,20 +87,22 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     @Inject
     public EmrServerlessSparkRunner(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
                                     ContainerLogStreamer logStreamer, LaunchedContainerAwsEnv awsEnv,
-                                    LambdaExecutionRoleCredentials roleCredentials, EmulatorConfig config,
-                                    Clock clock) {
-        this(containerBuilder, lifecycleManager, logStreamer, awsEnv, roleCredentials, config, clock, POLL_INTERVAL);
+                                    LambdaExecutionRoleCredentials roleCredentials, S3Service s3Service,
+                                    EmulatorConfig config, Clock clock) {
+        this(containerBuilder, lifecycleManager, logStreamer, awsEnv, roleCredentials, s3Service, config, clock,
+                POLL_INTERVAL);
     }
 
     EmrServerlessSparkRunner(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
                              ContainerLogStreamer logStreamer, LaunchedContainerAwsEnv awsEnv,
-                             LambdaExecutionRoleCredentials roleCredentials, EmulatorConfig config, Clock clock,
-                             Duration pollInterval) {
+                             LambdaExecutionRoleCredentials roleCredentials, S3Service s3Service,
+                             EmulatorConfig config, Clock clock, Duration pollInterval) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
         this.awsEnv = awsEnv;
         this.roleCredentials = roleCredentials;
+        this.s3Service = s3Service;
         this.config = config;
         this.clock = clock;
         this.pollInterval = pollInterval;
@@ -121,9 +142,11 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             if (launch.stopRequested || progress.cancelled()) {
                 return Outcome.halted();
             }
-            logHandle = logStreamer.attachConsoleOnly(containerId, job.service() + ":" + job.runId());
+            logHandle = attachLog(containerId, job);
             progress.started();
-            return awaitEnd(containerId, job, launch, progress);
+            Outcome outcome = awaitEnd(containerId, job, launch, progress);
+            writeLogs(job, launch);
+            return outcome;
         } catch (InterruptedException e) {
             // Floci is shutting down: its teardown stops the driver.
             Thread.currentThread().interrupt();
@@ -204,6 +227,33 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             LOG.warnv("Could not remove the {0} Spark drivers an earlier Floci process left: {1}", service,
                     e.getMessage());
         }
+    }
+
+    // Floci's log always gets the driver's output, and the job's CloudWatch log streams too when it has some.
+    private Closeable attachLog(String containerId, Job job) {
+        String prefix = job.service() + ":" + job.runId();
+        CloudWatchLogs cloudWatch = job.cloudWatchLogs();
+        if (cloudWatch == null) {
+            return logStreamer.attachConsoleOnly(containerId, prefix);
+        }
+        return logStreamer.attachByStreamForAccount(job.accountId(), containerId, cloudWatch.logGroup(),
+                cloudWatch.stdoutStream(), cloudWatch.stderrStream(), job.region(), prefix);
+    }
+
+    /**
+     * The folder {@code path} names under {@code logUri}, the S3 location a service writes its logs to, or
+     * null when there is none: {@code path} follows {@code logUri} after one slash, whether or not
+     * {@code logUri} ends in one.
+     */
+    public static String logFolder(String logUri, String path) {
+        if (logUri == null || logUri.isBlank()) {
+            return null;
+        }
+        int end = logUri.length();
+        while (end > 0 && logUri.charAt(end - 1) == '/') {
+            end--;
+        }
+        return logUri.substring(0, end) + "/" + path;
     }
 
     /**
@@ -330,6 +380,105 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             Thread.sleep(pollInterval.toMillis());
         }
         return Outcome.halted();
+    }
+
+    /**
+     * Writes the ended driver's standard output and error, each gzipped, to {@code stdout.gz} and
+     * {@code stderr.gz} in the job's log folder, while its container is still the run's. A driver a cancel or
+     * its timeout ended is still running, so it is stopped first, and then changes nothing more and leaves
+     * all it wrote; run() removes it after. One Floci's teardown took leaves nothing. Logs that cannot be
+     * written, to a bucket that does not exist say, leave the run as it ended.
+     */
+    private void writeLogs(Job job, Launch launch) {
+        String containerId = launch.container.get();
+        if (job.logFolder() == null || containerId == null) {
+            return;
+        }
+        // Closed however the read ends, which ends Docker's stream and the compressors.
+        try (DriverOutput output = new DriverOutput()) {
+            S3Uri folder = S3Uri.parse(HADOOP_S3_SCHEME.matcher(job.logFolder()).replaceFirst("s3://"));
+            lifecycleManager.stop(containerId, STOP_TIMEOUT_SECONDS);
+            lifecycleManager.getDockerClient().logContainerCmd(containerId)
+                    .withStdOut(true)
+                    .withStdErr(true)
+                    .withFollowStream(false)
+                    .withTimestamps(false)
+                    .exec(output);
+            if (!output.awaitCompletion(LOG_READ_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS)) {
+                throw new IOException("reading the driver's output took longer than " + LOG_READ_TIMEOUT);
+            }
+            byte[] stdout = output.gzipped(StreamType.STDOUT);
+            byte[] stderr = output.gzipped(StreamType.STDERR);
+            RequestScopes.runAs(job.accountId(), job.region(), () -> {
+                s3Service.putObject(folder.bucket(), folder.key() + "stdout.gz", stdout, GZIP, Map.of());
+                s3Service.putObject(folder.bucket(), folder.key() + "stderr.gz", stderr, GZIP, Map.of());
+            });
+        } catch (InterruptedException e) {
+            // Floci is shutting down: the run ends as its driver did, without its logs.
+            Thread.currentThread().interrupt();
+        } catch (IOException | RuntimeException e) {
+            LOG.warnv("Could not write the logs of Spark run {0} of {1} to {2}: {3}", job.runId(), job.service(),
+                    job.logFolder(), e.getMessage());
+        }
+    }
+
+    /**
+     * An ended driver's output as Docker gives it, each stream gzipped as it arrives: what is not
+     * standard error, as a container with a terminal gives, is standard output. Closing it, as Docker does
+     * once it has sent everything, or the reader does whichever way the read ends, ends Docker's stream and
+     * the compressors, and a frame that still comes after is dropped.
+     */
+    private static final class DriverOutput extends ResultCallback.Adapter<Frame> {
+        private final ByteArrayOutputStream stdout = new ByteArrayOutputStream();
+        private final ByteArrayOutputStream stderr = new ByteArrayOutputStream();
+        private final GZIPOutputStream stdoutGzip;
+        private final GZIPOutputStream stderrGzip;
+        // Guarded by this.
+        private boolean compressorsClosed;
+
+        DriverOutput() throws IOException {
+            stdoutGzip = new GZIPOutputStream(stdout);
+            stderrGzip = new GZIPOutputStream(stderr);
+        }
+
+        @Override
+        public synchronized void onNext(Frame frame) {
+            if (compressorsClosed) {
+                return;
+            }
+            try {
+                (frame.getStreamType() == StreamType.STDERR ? stderrGzip : stdoutGzip).write(frame.getPayload());
+            } catch (IOException e) {
+                onError(e);
+            }
+        }
+
+        // A stream's whole gzipped output, once Docker has sent everything.
+        synchronized byte[] gzipped(StreamType stream) throws IOException {
+            closeCompressors();
+            return (stream == StreamType.STDERR ? stderr : stdout).toByteArray();
+        }
+
+        @Override
+        public void close() throws IOException {
+            try {
+                super.close();
+            } finally {
+                synchronized (this) {
+                    closeCompressors();
+                }
+            }
+        }
+
+        // Guarded by this. Closing a compressor writes its trailer and frees its deflater, once only.
+        private void closeCompressors() throws IOException {
+            compressorsClosed = true;
+            try {
+                stdoutGzip.close();
+            } finally {
+                stderrGzip.close();
+            }
+        }
     }
 
     /**

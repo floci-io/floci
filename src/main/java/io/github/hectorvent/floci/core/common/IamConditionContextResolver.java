@@ -821,8 +821,10 @@ public class IamConditionContextResolver {
                 // Execution resolves ARN inputs within the request account; authorize that same table.
                 String executionTable = DynamoDbTableNames.resolveWithRegion(tableName, region).name();
                 String itemAction = "dynamodb:" + operation + "Item";
-                DynamoDbConditionKeys.Result keys = DynamoDbConditionKeys.extract(
-                        itemAction, request, describeTargetTable(executionTable));
+                TableDefinition table = describeTargetTable(executionTable);
+                DynamoDbConditionKeys.Result keys = read
+                        ? DynamoDbConditionKeys.extractTransactionGet(request, table)
+                        : DynamoDbConditionKeys.extract(itemAction, request, table);
                 Map<String, List<String>> context = new LinkedHashMap<>();
                 context.put("dynamodb:EnclosingOperation", List.of(read ? "TransactGetItems" : "TransactWriteItems"));
                 if (!keys.leadingKeys().isEmpty()) {
@@ -830,6 +832,9 @@ public class IamConditionContextResolver {
                 }
                 if (!keys.attributes().isEmpty()) {
                     context.put("dynamodb:Attributes", keys.attributes());
+                }
+                if (keys.select() != null) {
+                    context.put("dynamodb:Select", List.of(keys.select()));
                 }
                 if (!read && request.hasNonNull("ReturnValuesOnConditionCheckFailure")) {
                     context.put("dynamodb:ReturnValues",
@@ -842,20 +847,32 @@ public class IamConditionContextResolver {
         return checks;
     }
 
-    /** Resolves each batch entry with its own schema, optionally restricted to one resource. */
+    /** Request-wide context for callers that do not yet have a resolved resource. */
     Map<String, List<String>> dynamoDbBatchConditionContext(String action, ContainerRequestContext ctx,
                                                             String resourceArn) {
+        List<Map<String, List<String>>> entries = dynamoDbBatchConditionContexts(action, ctx, resourceArn);
+        if (entries == null) {
+            return null;
+        }
+        Map<String, List<String>> combined = new LinkedHashMap<>();
+        for (Map<String, List<String>> entry : entries) {
+            entry.forEach((key, values) -> combined.computeIfAbsent(key, ignored -> new ArrayList<>()).addAll(values));
+        }
+        return combined;
+    }
+
+    /** Each table reference retains its own scalar selection, even when name and ARN resolve alike. */
+    List<Map<String, List<String>>> dynamoDbBatchConditionContexts(String action, ContainerRequestContext ctx,
+                                                                  String resourceArn) {
         if (!isDynamoDbBatch(action)) {
             return null;
         }
-        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        List<Map<String, List<String>>> contexts = new ArrayList<>();
         JsonNode body = bufferedJsonBody(ctx);
         JsonNode items = body == null ? null : body.get("RequestItems");
         if (items == null || !items.isObject()) {
-            return conditions;
+            return List.of(Map.of());
         }
-        List<String> leadingKeys = new ArrayList<>();
-        Set<String> attributes = new LinkedHashSet<>();
         items.properties().forEach(entry -> {
             String reference = entry.getKey().trim();
             if (resourceArn != null && !matchesTableResource(reference, resourceArn)) {
@@ -866,16 +883,19 @@ public class IamConditionContextResolver {
             single.putObject("RequestItems").set(entry.getKey(), entry.getValue());
             DynamoDbConditionKeys.Result keys = dynamoDbKeys(
                     action, single, describeTargetTable(reference), ctx);
-            leadingKeys.addAll(keys.leadingKeys());
-            attributes.addAll(keys.attributes());
+            Map<String, List<String>> conditions = new LinkedHashMap<>();
+            if (!keys.leadingKeys().isEmpty()) {
+                conditions.put("dynamodb:LeadingKeys", keys.leadingKeys());
+            }
+            if (!keys.attributes().isEmpty()) {
+                conditions.put("dynamodb:Attributes", keys.attributes());
+            }
+            if (keys.select() != null) {
+                conditions.put("dynamodb:Select", List.of(keys.select()));
+            }
+            contexts.add(conditions);
         });
-        if (!leadingKeys.isEmpty()) {
-            conditions.put("dynamodb:LeadingKeys", List.copyOf(leadingKeys));
-        }
-        if (!attributes.isEmpty()) {
-            conditions.put("dynamodb:Attributes", List.copyOf(attributes));
-        }
-        return conditions;
+        return contexts.isEmpty() ? List.of(Map.of()) : contexts;
     }
 
     private static boolean isDynamoDbBatch(String action) {

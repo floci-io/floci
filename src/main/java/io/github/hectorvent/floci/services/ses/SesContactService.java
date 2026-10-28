@@ -30,6 +30,8 @@ import java.util.Set;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 
+import static io.github.hectorvent.floci.core.common.SmithyValidationErrors.notNullWithoutValue;
+
 /**
  * Contact lists and contacts (the {@code contactListStore} + {@code contactStore}), extracted from
  * {@link SesService} as the fifth step of the store-based domain split.
@@ -224,7 +226,7 @@ public class SesContactService implements SesTaggable {
 
     private static void validateContactListName(String name) {
         if (name == null) {
-            throw validationError("contactListName", "Member must not be null");
+            throw SmithyValidationErrors.badRequest(notNullWithoutValue("contactListName"));
         }
         if (name.isBlank()) {
             throw new AwsException("BadRequestException", "ContactListName can't be blank.", 400);
@@ -250,20 +252,20 @@ public class SesContactService implements SesTaggable {
         // Phase 1 — protocol-layer (Smithy) validation: null members and the subscription-status
         // enum. AWS reports these before any service-level constraint.
         if (name == null) {
-            throw validationError("contactListName", "Member must not be null");
+            throw SmithyValidationErrors.badRequest(notNullWithoutValue("contactListName"));
         }
         if (topics != null) {
             for (int i = 0; i < topics.size(); i++) {
                 Topic t = topics.get(i);
                 String member = "topics." + (i + 1) + ".member.";
                 if (t.getTopicName() == null) {
-                    throw validationError(member + "topicName", "Member must not be null");
+                    throw SmithyValidationErrors.badRequest(notNullWithoutValue(member + "topicName"));
                 }
                 if (t.getDisplayName() == null) {
-                    throw validationError(member + "displayName", "Member must not be null");
+                    throw SmithyValidationErrors.badRequest(notNullWithoutValue(member + "displayName"));
                 }
                 if (t.getDefaultSubscriptionStatus() == null) {
-                    throw validationError(member + "defaultSubscriptionStatus", "Member must not be null");
+                    throw SmithyValidationErrors.badRequest(notNullWithoutValue(member + "defaultSubscriptionStatus"));
                 }
                 if (!SUBSCRIPTION_STATUSES.contains(t.getDefaultSubscriptionStatus())) {
                     throw validationError(member + "defaultSubscriptionStatus",
@@ -545,10 +547,10 @@ public class SesContactService implements SesTaggable {
                 TopicPreference p = prefs.get(i);
                 String member = "topicPreferences." + (i + 1) + ".member.";
                 if (p.getTopicName() == null) {
-                    throw validationError(member + "topicName", "Member must not be null");
+                    throw SmithyValidationErrors.badRequest(notNullWithoutValue(member + "topicName"));
                 }
                 if (p.getSubscriptionStatus() == null) {
-                    throw validationError(member + "subscriptionStatus", "Member must not be null");
+                    throw SmithyValidationErrors.badRequest(notNullWithoutValue(member + "subscriptionStatus"));
                 }
                 if (!SUBSCRIPTION_STATUSES.contains(p.getSubscriptionStatus())) {
                     throw validationError(member + "subscriptionStatus",
@@ -592,7 +594,7 @@ public class SesContactService implements SesTaggable {
         // Verified against real AWS: a missing/null required member is a Smithy validation error,
         // an empty/blank value is "can't be blank", and only a non-blank malformed value is "invalid".
         if (emailAddress == null) {
-            throw validationError("emailAddress", "Member must not be null");
+            throw SmithyValidationErrors.badRequest(notNullWithoutValue("emailAddress"));
         }
         if (emailAddress.isBlank()) {
             throw new AwsException("BadRequestException", "EmailAddress can't be blank.", 400);

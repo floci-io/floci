@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbTtlIdentity;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import io.github.hectorvent.floci.services.sqs.SqsService;
@@ -245,7 +246,7 @@ public class PipesPoller implements Resettable {
         }
     }
 
-    private void pollKinesis(Pipe pipe, String region) {
+    void pollKinesis(Pipe pipe, String region) {
         String pipeKey = pipeKey(pipe);
         String streamName = extractResourceName(pipe.getSource());
         String pipeAccountId = pipe.getAccountId();
@@ -262,10 +263,17 @@ public class PipesPoller implements Resettable {
                     ? kinesisService.getRecordsForAccount(pipeAccountId, iterator, batchSize, region)
                     : kinesisService.getRecords(iterator, batchSize, region);
             String nextIterator = (String) result.get("NextShardIterator");
-            if (nextIterator != null) {
-                kinesisIterators.put(pipeKey, nextIterator);
-            }
             List<?> records = (List<?>) result.get("Records");
+            if (nextIterator == null && records != null && !records.isEmpty()) {
+                KinesisRecord last = (KinesisRecord) records.getLast();
+                nextIterator = pipeAccountId != null
+                        ? kinesisService.getShardIteratorForAccount(pipeAccountId, streamName,
+                                "shardId-000000000000", "AFTER_SEQUENCE_NUMBER", last.getSequenceNumber(), region)
+                        : kinesisService.getShardIterator(streamName, "shardId-000000000000",
+                                "AFTER_SEQUENCE_NUMBER", last.getSequenceNumber(), null, region);
+            }
+            // Remember even the initial exhausted cursor, before filtering or delivery.
+            kinesisIterators.put(pipeKey, nextIterator != null ? nextIterator : iterator);
             if (records == null || records.isEmpty()) {
                 return;
             }

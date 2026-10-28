@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplate
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.util.HashMap;
 import java.util.List;
@@ -259,7 +260,7 @@ class AppSyncCfnProvisionerTest {
         verify(appSync).startSchemaCreation(API_ID, "type Query { ping: String }");
         // Every AppSync call for the API is refused with a 409 while the schema is PROCESSING, so a
         // provision that returned early would fail the data sources and resolvers behind it.
-        verify(appSync, org.mockito.Mockito.times(3)).getSchemaCreationStatus(API_ID);
+        verify(appSync, Mockito.times(3)).getSchemaCreationStatus(API_ID);
         assertEquals(API_ID + "GraphQLSchema", r.getPhysicalId());
         assertEquals(API_ID, r.getAttributes().get("ApiId"));
     }

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.servicecatalog;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -155,7 +156,7 @@ class ServiceCatalogRecordAndResourceQueryConsumerTest {
                 + provisionedId + "\"}")
         .then()
             .statusCode(200)
-            .body("StackInstances.size()", org.hamcrest.Matchers.greaterThan(0));
+            .body("StackInstances.size()", Matchers.greaterThan(0));
     }
 
     @Test

@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.quarkus.arc.ClientProxy;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.specification.RequestSpecification;
@@ -11,11 +13,13 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
+import java.util.Arrays;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 
@@ -55,7 +59,7 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
 
     @SuppressWarnings("unchecked")
     private void forgetPolicyId(String stackName, String logicalId) throws ReflectiveOperationException {
-        Object target = cloudFormationService instanceof io.quarkus.arc.ClientProxy proxy
+        Object target = cloudFormationService instanceof ClientProxy proxy
                 ? proxy.arc_contextualInstance()
                 : cloudFormationService;
         Field stacksField = CloudFormationService.class.getDeclaredField("stacks");
@@ -70,15 +74,13 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
 
     @SuppressWarnings("unchecked")
     private void markServiceLinked(String roleName) throws ReflectiveOperationException {
-        Object target = iamService instanceof io.quarkus.arc.ClientProxy proxy
+        Object target = iamService instanceof ClientProxy proxy
                 ? proxy.arc_contextualInstance()
                 : iamService;
         Field rolesField = IamService.class.getDeclaredField("roles");
         rolesField.setAccessible(true);
-        io.github.hectorvent.floci.core.storage.StorageBackend<String,
-                io.github.hectorvent.floci.services.iam.model.IamRole> roles =
-                (io.github.hectorvent.floci.core.storage.StorageBackend<String,
-                        io.github.hectorvent.floci.services.iam.model.IamRole>) rolesField.get(target);
+        StorageBackend<String, IamRole> roles =
+                (StorageBackend<String, IamRole>) rolesField.get(target);
         IamRole role = roles.get(roleName).orElseThrow();
         // isServiceLinkedRole() alone triggers the guard; the path must also look like a real
         // service-linked path since the guard's error message parses the principal back out of it.
@@ -362,7 +364,7 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
     }
 
     private static String literalRoleManagedPolicyTemplate(String policyName, String action, String... roleNames) {
-        String roleList = String.join(",", java.util.Arrays.stream(roleNames)
+        String roleList = String.join(",", Arrays.stream(roleNames)
                 .map(name -> "\"" + name + "\"").toList());
         return """
                 {
@@ -547,7 +549,7 @@ class CloudFormationManagedPolicyUpdateIntegrationTest {
         // that state is gone.
         boolean prunedContentSurvives = iamService.listPolicyVersions(policyArn(policyName)).stream()
                 .anyMatch(v -> v.getDocument().contains("s3:GetObject"));
-        org.junit.jupiter.api.Assertions.assertTrue(prunedContentSurvives,
+        assertTrue(prunedContentSurvives,
                 "pruned v1 content (s3:GetObject) was permanently lost despite UPDATE_ROLLBACK_COMPLETE");
     }
 }

@@ -6,6 +6,9 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -504,8 +507,8 @@ class SesIntegrationTest {
                 + "To: recipient@example.com\r\n"
                 + "Return-Path: <inspection-mime-bounces@floci.test>\r\n"
                 + "Subject: raw-return-path\r\n\r\nbody";
-        String rawB64 = java.util.Base64.getEncoder().encodeToString(
-                raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        String rawB64 = Base64.getEncoder().encodeToString(
+                raw.getBytes(StandardCharsets.UTF_8));
 
         given()
             .contentType("application/x-www-form-urlencoded")

@@ -226,6 +226,38 @@ class ApiGatewayVpcLinkAndCachingTest {
     }
 
     @Test
+    void v1VpcLinkIntegrationResolvesStageVariable() {
+        String linkId = createVpcLink("stage-variable-v1-link");
+        String apiId = createApi("vpclink-stage-variable-v1",
+                ",\"connectionType\":\"VPC_LINK\",\"connectionId\":\"${stageVariables.vpcLinkId}\"",
+                ",\"variables\":{\"vpcLinkId\":\"" + linkId + "\"}");
+
+        given().when().get("/restapis/" + apiId + "/stages/test")
+                .then().statusCode(200).body("variables.vpcLinkId", equalTo(linkId));
+        given().when().get("/execute-api/" + apiId + "/test/widget").then().statusCode(200);
+    }
+
+    @Test
+    void v2VpcLinkIntegrationResolvesStageVariable() {
+        String linkId = given().contentType(ContentType.JSON)
+                .body("{\"name\":\"stage-variable-v2-link\",\"subnetIds\":[\"subnet-test\"],"
+                        + "\"securityGroupIds\":[\"sg-test\"]}")
+                .when().post("/v2/vpclinks").then().statusCode(201)
+                .extract().path("vpcLinkId");
+        try {
+            String apiId = createApi("vpclink-stage-variable-v2",
+                    ",\"connectionType\":\"VPC_LINK\",\"connectionId\":\"${stageVariables.vpcLinkId}\"",
+                    ",\"variables\":{\"vpcLinkId\":\"" + linkId + "\"}");
+
+            given().when().get("/restapis/" + apiId + "/stages/test")
+                    .then().statusCode(200).body("variables.vpcLinkId", equalTo(linkId));
+            given().when().get("/execute-api/" + apiId + "/test/widget").then().statusCode(200);
+        } finally {
+            given().when().delete("/v2/vpclinks/" + linkId).then().statusCode(202);
+        }
+    }
+
+    @Test
     void vpcLinkIntegrationIsRejectedWhenTheLinkIsUnknown() {
         String apiId = createApi("vpclink-missing",
                 ",\"connectionType\":\"VPC_LINK\",\"connectionId\":\"does-not-exist\"", "");

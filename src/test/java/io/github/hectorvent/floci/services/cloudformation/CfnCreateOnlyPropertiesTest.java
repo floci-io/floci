@@ -86,6 +86,15 @@ class CfnCreateOnlyPropertiesTest {
     }
 
     @Test
+    void isCreateOnly_recordSetGroupReplacesOnlyForItsHostedZone() {
+        String type = "AWS::Route53::RecordSetGroup";
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "HostedZoneId"));
+        assertTrue(CfnCreateOnlyProperties.isCreateOnly(type, "HostedZoneName"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "RecordSets"));
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly(type, "Comment"));
+    }
+
+    @Test
     void isCreateOnly_treatsEmptySchemaListAsAuthoritative() {
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::ApiGateway::RestApi", "Name"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::Cognito::UserPool", "UserPoolName"));

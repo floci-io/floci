@@ -9,6 +9,7 @@ import io.restassured.config.RestAssuredConfig;
 import io.restassured.path.json.config.JsonPathConfig;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -127,7 +128,7 @@ public class EmrServerlessIntegrationTest {
             .statusCode(200)
             .extract().path("applicationId");
             
-        org.junit.jupiter.api.Assertions.assertEquals(applicationId, retryApplicationId, "Idempotent create should return the same application ID");
+        Assertions.assertEquals(applicationId, retryApplicationId, "Idempotent create should return the same application ID");
     }
 
     @Test

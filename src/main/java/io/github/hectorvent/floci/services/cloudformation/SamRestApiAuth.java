@@ -29,6 +29,27 @@ final class SamRestApiAuth {
     }
 
     void apply(JsonNode auth, JsonNode body) {
+        applyDefaults(auth, body);
+        relocateOpenApiSchemes(body);
+    }
+
+    private void relocateOpenApiSchemes(JsonNode body) {
+        if (!(body instanceof ObjectNode document) || document.hasNonNull("swagger")) {
+            return;
+        }
+        JsonNode version = document.path("openapi");
+        JsonNode definitions = document.path("securityDefinitions");
+        if (version.isTextual() && OPENAPI_3.matcher(version.asText()).matches()
+                && SamTransformProcessor.isTruthy(definitions)) {
+            if (!SamTransformProcessor.isTruthy(document.path("components"))) {
+                document.set("components", mapper.createObjectNode());
+            }
+            object(document, "components").set("securitySchemes", definitions);
+            document.remove("securityDefinitions");
+        }
+    }
+
+    private void applyDefaults(JsonNode auth, JsonNode body) {
         if (auth.isMissingNode() || auth.isNull()) {
             return;
         }
@@ -57,7 +78,7 @@ final class SamRestApiAuth {
         }
         if (!iam && !keyRequired) {
             // Like SAM, an Auth that selects no default, such as ApiKeyRequired: false alone,
-            // leaves the document as written once it has checked what SAM checks for any Auth.
+            // leaves operation security as written after checking what SAM checks for any Auth.
             requireSamDocument(document);
             return;
         }
@@ -106,6 +127,19 @@ final class SamRestApiAuth {
                     }
                 }
             }
+        }
+        if (!swagger) {
+            addOpenApiDefaultSchemes(document, iam, keyRequired);
+        }
+    }
+
+    private void addOpenApiDefaultSchemes(ObjectNode document, boolean iam, boolean keyRequired) {
+        ObjectNode definitions = object(document, "securityDefinitions");
+        if (iam) {
+            addScheme(definitions, "AWS_IAM", true);
+        }
+        if (keyRequired) {
+            addScheme(definitions, "api_key", false);
         }
     }
 

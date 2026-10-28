@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
 
@@ -20,6 +22,89 @@ class DynamoDbConditionKeysTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private TableDefinition table;
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "SELECT payload FROM FgacTable | payload",
+            "SELECT PK FROM FgacTable WHERE payload = 'secret' | PK,payload",
+            "SELECT document.child FROM FgacTable WHERE NOT (hidden[0] = 1 OR PK = 'x') | document,hidden,PK",
+            "SELECT PK FROM FgacTable WHERE size(payload) > 1 | PK,payload",
+            "SELECT PK FROM FgacTable ORDER BY sortKey | PK,sortKey",
+            "SELECT PK FROM FgacTable WHERE PK = ? | PK"
+    })
+    void partiqlAttributesIncludeSelectedAndPredicatePaths(String statement, String expected) {
+        JsonNode body = mapper.createObjectNode().put("Statement", statement)
+                .set("Parameters", statement.contains("?") ? json("[{\"S\":\"one\"}]") : json("[]"));
+        DynamoDbConditionKeys.Result result = DynamoDbConditionKeys.extract("dynamodb:PartiQLSelect", body, table);
+        assertEquals(List.of(expected.split(",")), result.attributes());
+        assertEquals("SPECIFIC_ATTRIBUTES", result.select());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "GetItem | {} | ALL_ATTRIBUTES",
+            "GetItem | {\"ProjectionExpression\":\"PK\"} | SPECIFIC_ATTRIBUTES",
+            "BatchGetItem | {\"RequestItems\":{\"FgacTable\":{\"Keys\":[]}}} | ALL_ATTRIBUTES",
+            "BatchGetItem | {\"RequestItems\":{\"FgacTable\":{\"Keys\":[],\"AttributesToGet\":[\"PK\"]}}} | SPECIFIC_ATTRIBUTES",
+            "PartiQLSelect | {\"Statement\":\"SELECT * FROM FgacTable\"} | ALL_ATTRIBUTES",
+            "PartiQLSelect | {\"Statement\":\"SELECT PK FROM FgacTable\"} | SPECIFIC_ATTRIBUTES",
+            "Query | {} | ALL_ATTRIBUTES",
+            "Scan | {} | ALL_ATTRIBUTES",
+            "Query | {\"IndexName\":\"by-value\"} | ALL_PROJECTED_ATTRIBUTES",
+            "Scan | {\"IndexName\":\"by-value\"} | ALL_PROJECTED_ATTRIBUTES",
+            "Query | {\"ProjectionExpression\":\"PK\"} | SPECIFIC_ATTRIBUTES",
+            "Scan | {\"ProjectionExpression\":\"PK\"} | SPECIFIC_ATTRIBUTES",
+            "Query | {\"AttributesToGet\":[\"PK\"]} | SPECIFIC_ATTRIBUTES",
+            "Scan | {\"AttributesToGet\":[\"PK\"]} | SPECIFIC_ATTRIBUTES",
+            "Query | {\"Select\":\"COUNT\",\"ProjectionExpression\":\"PK\"} | COUNT",
+            "Scan | {\"Select\":\"ALL_ATTRIBUTES\",\"IndexName\":\"by-value\"} | ALL_ATTRIBUTES",
+            "Query | {\"Select\":\"invalid\"} | invalid"
+    })
+    void selectionDefaultsMatchTheReadShape(String action, String body, String expected) {
+        assertEquals(expected, DynamoDbConditionKeys.extract("dynamodb:" + action, json(body), table).select());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "{} | ALL_ATTRIBUTES",
+            "{\"Count\":false} | ALL_ATTRIBUTES",
+            "{\"AttributesToGet\":[\"PK\"]} | SPECIFIC_ATTRIBUTES",
+            "{\"Count\":true} | COUNT",
+            "{\"Count\":true,\"AttributesToGet\":[\"PK\"]} | COUNT",
+            "{\"Select\":\"COUNT\",\"ProjectionExpression\":\"PK\",\"IndexName\":\"ignored\"} | ALL_ATTRIBUTES"
+    })
+    void legacySelectionUsesOnlyMembersForwardedByTheAdapter(String body, String expected) {
+        assertEquals(expected, DynamoDbConditionKeys.extractLegacy("dynamodb:Query", json(body), table).select());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "Query | {\"ProjectionExpression\":\"\"} | ALL_ATTRIBUTES",
+            "Scan | {\"ProjectionExpression\":\"   \"} | ALL_ATTRIBUTES",
+            "Query | {\"AttributesToGet\":[]} | ALL_ATTRIBUTES",
+            "Scan | {\"AttributesToGet\":[]} | ALL_ATTRIBUTES",
+            "Query | {\"ProjectionExpression\":null} | ALL_ATTRIBUTES",
+            "Scan | {\"AttributesToGet\":null} | ALL_ATTRIBUTES",
+            "Query | {\"IndexName\":\"by-value\",\"ProjectionExpression\":\"\"} | ALL_PROJECTED_ATTRIBUTES",
+            "Scan | {\"IndexName\":\"by-value\",\"AttributesToGet\":[]} | ALL_PROJECTED_ATTRIBUTES",
+            "Query | {\"ProjectionExpression\":\"PK\"} | SPECIFIC_ATTRIBUTES",
+            "Scan | {\"AttributesToGet\":[\"PK\"]} | SPECIFIC_ATTRIBUTES",
+            "Query | {\"Select\":\"COUNT\",\"AttributesToGet\":[]} | COUNT"
+    })
+    void emptyProjectionMembersRetainTheDefaultSelection(String action, String body, String expected) {
+        assertEquals(expected, DynamoDbConditionKeys.extract("dynamodb:" + action, json(body), table).select());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "{\"AttributesToGet\":[]} | ALL_ATTRIBUTES",
+            "{\"AttributesToGet\":null} | ALL_ATTRIBUTES",
+            "{\"AttributesToGet\":[\"PK\"]} | SPECIFIC_ATTRIBUTES",
+            "{\"Count\":true,\"AttributesToGet\":[]} | COUNT"
+    })
+    void legacyEmptyProjectionDoesNotClaimSpecificAttributes(String body, String expected) {
+        assertEquals(expected, DynamoDbConditionKeys.extractLegacy("dynamodb:Query", json(body), table).select());
+    }
 
     @BeforeEach
     void setUp() {
@@ -64,7 +149,7 @@ class DynamoDbConditionKeysTest {
 
         assertEquals(List.of("USER_alice"), result.leadingKeys());
         assertEquals(List.of("PK", "SK"), result.attributes());
-        assertNull(result.select());
+        assertEquals("ALL_ATTRIBUTES", result.select());
     }
 
     @Test

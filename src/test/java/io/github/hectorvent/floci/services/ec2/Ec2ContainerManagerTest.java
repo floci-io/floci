@@ -39,12 +39,14 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -53,6 +55,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -71,6 +74,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -141,7 +145,7 @@ class Ec2ContainerManagerTest {
     private static final String TEST_LOG_STREAM_NAME = "yyyy/MM/dd/user-data";
     private static final String TEST_SSH_PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@floci";
 
-    @org.junit.jupiter.api.AfterEach
+    @AfterEach
     void resetBridgeIpPolling() {
         Ec2ContainerManager.containerBridgeIpAttempts = 30;
         Ec2ContainerManager.containerBridgeIpPollMillis = 500;
@@ -716,11 +720,11 @@ class Ec2ContainerManagerTest {
     }
 
     private static String gzipBase64(String plain) throws Exception {
-        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
-        try (java.util.zip.GZIPOutputStream gzip = new java.util.zip.GZIPOutputStream(bytes)) {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(bytes)) {
             gzip.write(plain.getBytes(StandardCharsets.UTF_8));
         }
-        return java.util.Base64.getEncoder().encodeToString(bytes.toByteArray());
+        return Base64.getEncoder().encodeToString(bytes.toByteArray());
     }
 
     private static final String CLOUDINIT_MULTIPART = """
@@ -816,7 +820,7 @@ class Ec2ContainerManagerTest {
     @Test
     void userDataShellScriptsDecodesPlainBase64ShellScript() {
         String script = "#!/bin/bash\necho ready\n";
-        String encoded = java.util.Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
+        String encoded = Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
 
         assertEquals(List.of(script), Ec2ContainerManager.userDataShellScripts(encoded));
     }
@@ -1128,7 +1132,7 @@ class Ec2ContainerManagerTest {
     @Test
     void localAwsEnvironmentProvidesCliCredentialsAndFlociEndpoint() {
         assertEquals(
-                java.util.List.of(
+                List.of(
                         "AWS_EC2_METADATA_SERVICE_ENDPOINT=http://floci:9169",
                         "AWS_ENDPOINT_URL=http://floci:4566",
                         "AWS_DEFAULT_REGION=us-west-2",

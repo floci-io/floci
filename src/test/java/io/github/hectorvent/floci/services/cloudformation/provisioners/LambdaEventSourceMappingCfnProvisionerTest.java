@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -98,7 +99,7 @@ class LambdaEventSourceMappingCfnProvisionerTest {
             if (props == null || !props.has(propName) || !props.get(propName).isArray()) {
                 return List.of();
             }
-            java.util.List<String> list = new java.util.ArrayList<>();
+            List<String> list = new ArrayList<>();
             for (JsonNode elem : props.get(propName)) {
                 list.add(elem.isTextual() ? elem.asText() : engine.resolve(elem));
             }

@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ses.model.MessageAttachment;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
+import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.ext.mail.MailAttachment;
 import io.vertx.ext.mail.MailClient;
@@ -45,6 +46,9 @@ import java.util.Set;
 import java.util.concurrent.AbstractExecutorService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Optional SMTP relay for SES. When {@code floci.services.ses.smtp-host}
@@ -96,7 +100,7 @@ public class SmtpRelay {
     private final boolean enabled;
 
     @Inject
-    public SmtpRelay(io.vertx.core.Vertx vertx, EmulatorConfig config) {
+    public SmtpRelay(Vertx vertx, EmulatorConfig config) {
         this.enabled = config.services().ses().enabled()
                 && config.services().ses().smtpHost()
                         .filter(h -> !h.isBlank())
@@ -152,10 +156,10 @@ public class SmtpRelay {
             private volatile boolean shutdown = false;
             @Override public void execute(Runnable r) { r.run(); }
             @Override public void shutdown() { shutdown = true; }
-            @Override public java.util.List<Runnable> shutdownNow() { shutdown = true; return java.util.List.of(); }
+            @Override public List<Runnable> shutdownNow() { shutdown = true; return List.of(); }
             @Override public boolean isShutdown() { return shutdown; }
             @Override public boolean isTerminated() { return shutdown; }
-            @Override public boolean awaitTermination(long t, java.util.concurrent.TimeUnit u) { return true; }
+            @Override public boolean awaitTermination(long t, TimeUnit u) { return true; }
         };
         this.enabled = enabled;
     }
@@ -247,7 +251,7 @@ public class SmtpRelay {
         }
         try {
             relayExecutor.execute(() -> doRelay(message));
-        } catch (java.util.concurrent.RejectedExecutionException e) {
+        } catch (RejectedExecutionException e) {
             LOG.warnv("SMTP relay skipped (executor shutting down) for from={0}", message.from());
         }
     }
@@ -260,7 +264,7 @@ public class SmtpRelay {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             LOG.warnv(e, "SMTP relay interrupted for from={0}, to={1}", message.from(), message.to());
-        } catch (java.util.concurrent.TimeoutException e) {
+        } catch (TimeoutException e) {
             LOG.warnv("SMTP relay timed out after {0}s for from={1}, to={2}",
                     RELAY_TIMEOUT_SECONDS, message.from(), message.to());
         } catch (Exception e) {
@@ -401,7 +405,7 @@ public class SmtpRelay {
         }
         try {
             relayExecutor.execute(() -> doRelayRaw(message));
-        } catch (java.util.concurrent.RejectedExecutionException e) {
+        } catch (RejectedExecutionException e) {
             LOG.warnv("SMTP raw relay skipped (executor shutting down) for from={0}", message.from());
         }
     }
@@ -457,7 +461,7 @@ public class SmtpRelay {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             LOG.warnv(e, "SMTP raw relay interrupted for from={0}", relayMessage.from());
-        } catch (java.util.concurrent.TimeoutException e) {
+        } catch (TimeoutException e) {
             LOG.warnv("SMTP raw relay timed out after {0}s for from={1}",
                     RELAY_TIMEOUT_SECONDS, relayMessage.from());
         } catch (Exception e) {
@@ -467,7 +471,7 @@ public class SmtpRelay {
 
     private void send(MailMessage mail) throws Exception {
         mailClient.sendMail(mail).toCompletionStage().toCompletableFuture()
-                .get(RELAY_TIMEOUT_SECONDS, java.util.concurrent.TimeUnit.SECONDS);
+                .get(RELAY_TIMEOUT_SECONDS, TimeUnit.SECONDS);
     }
 
     private static void applyBounceAddress(MailMessage mail, String returnPath, String fallback) {

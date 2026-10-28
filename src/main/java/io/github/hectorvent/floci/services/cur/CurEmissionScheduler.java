@@ -17,10 +17,12 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /**
  * CUR / BCM Data Exports emission orchestrator.
@@ -125,7 +127,7 @@ public class CurEmissionScheduler {
     private void runDaily() {
         try {
             if ("daily".equals(config.services().cur().emitMode())) {
-                for (Map.Entry<String, java.util.List<ReportDefinition>> perAccount
+                for (Map.Entry<String, List<ReportDefinition>> perAccount
                         : curService.listAllReportsByAccount().entrySet()) {
                     String accountId = perAccount.getKey();
                     for (ReportDefinition def : perAccount.getValue()) {
@@ -140,7 +142,7 @@ public class CurEmissionScheduler {
                 }
             }
             if ("daily".equals(config.services().bcmDataExports().emitMode())) {
-                for (Map.Entry<String, java.util.List<Export>> perAccount
+                for (Map.Entry<String, List<Export>> perAccount
                         : bcmService.listAllExportsByAccount().entrySet()) {
                     String accountId = perAccount.getKey();
                     for (Export export : perAccount.getValue()) {
@@ -175,7 +177,7 @@ public class CurEmissionScheduler {
      * two sides would mismatch and DuckDB would 404 on the staging object.
      * Activating a request scope here keeps both sides on the same account.
      */
-    private void runUnderAccount(String accountId, java.util.function.Supplier<Void> body) {
+    private void runUnderAccount(String accountId, Supplier<Void> body) {
         ManagedContext requestContext = Arc.container().requestContext();
         boolean alreadyActive = requestContext.isActive();
         if (!alreadyActive) {

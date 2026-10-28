@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -19,8 +20,11 @@ import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages.PolicyType;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.PublicAccessConditions;
+import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionRevision;
@@ -113,8 +117,10 @@ public class LambdaWebService implements Resettable {
             "arn:(" + AwsArnUtils.PARTITION_REGEX + "):iam::[0-9]{12}:role/[a-zA-Z0-9+=,.@_/-]+");
     static final Pattern KMS_KEY_ARN = Pattern.compile(
             "arn:(" + AwsArnUtils.PARTITION_REGEX + "):kms:[a-z0-9-]+:[0-9]{12}:key/[a-z0-9-]+");
+    /** The model's pattern, which AWS quotes. An unknown partition passes it and fails a later check. */
     static final Pattern NETWORK_CONNECTOR_ARN = Pattern.compile(
-            "arn:(" + AwsArnUtils.PARTITION_REGEX + "):lambda:[a-z0-9-]+:[0-9]{12}:network-connector:[a-zA-Z0-9_-]+:[0-9]+");
+            "arn:(aws[a-z-]*):lambda:[a-z0-9-]+:[0-9]{12}:network-connector:[a-zA-Z0-9_-]+:[0-9]+");
+    private static final Pattern CONNECTOR_VERSION = Pattern.compile("[1-9][0-9]*");
     static final Pattern S3_BUCKET = Pattern.compile("([a-z0-9][a-z0-9\\.\\-]{1,61}[a-z0-9])");
     static final Pattern RUNTIME = Pattern.compile("[a-z][a-z0-9]*(\\.[a-z0-9]+)*");
     static final Pattern ENVIRONMENT_KEY = Pattern.compile("[a-zA-Z]([a-zA-Z0-9_])*");
@@ -146,6 +152,7 @@ public class LambdaWebService implements Resettable {
     private final Instance<RequestContext> requestContext;
     private final LambdaWebExecutionRole executionRole;
     private final ServiceCallAuthorizer serviceCalls;
+    private final LambdaMicrovmsService microvmsService;
 
     /** Keyed {@code region/functionName}. The backend adds the caller's account to every key. */
     private StorageBackend<String, WebFunction> functions;
@@ -159,7 +166,7 @@ public class LambdaWebService implements Resettable {
     public LambdaWebService(RegionResolver regionResolver, StorageFactory storageFactory, EmulatorConfig config,
                             S3Service s3Service, LambdaWebCode code, ObjectMapper objectMapper,
                             Instance<RequestContext> requestContext, LambdaWebExecutionRole executionRole,
-                            ServiceCallAuthorizer serviceCalls) {
+                            ServiceCallAuthorizer serviceCalls, LambdaMicrovmsService microvmsService) {
         this.regionResolver = regionResolver;
         this.storageFactory = storageFactory;
         this.config = config;
@@ -169,6 +176,7 @@ public class LambdaWebService implements Resettable {
         this.requestContext = requestContext;
         this.executionRole = executionRole;
         this.serviceCalls = serviceCalls;
+        this.microvmsService = microvmsService;
     }
 
     @PostConstruct
@@ -326,7 +334,13 @@ public class LambdaWebService implements Resettable {
         validateRevisionRules(region, revisionConfig);
         String accountId = regionResolver.getAccountId();
         WebFunctionEndpoint endpoint = draftEndpoint(region, accountId, functionName, endpointConfig, false);
+        if (connectorArn(revisionConfig) != null && !"HomeRegion".equals(endpoint.endpointType)) {
+            throw new AwsException("ValidationException", "The endpointType " + endpoint.endpointType
+                    + " cannot be used with a revision that has an egressNetworkConnectorArn specified."
+                    + " Only the endpointType HomeRegion supports such revisions.", 400);
+        }
         return storeNewFunction(region, functionName, tags, fn -> {
+            requireUsableConnector(region, revisionConfig);
             WebFunctionRevision revision = buildRevision(fn, revisionConfig);
             keepCode(region, fn, revision);
             attachEndpoint(region, fn, endpoint, revision);
@@ -437,6 +451,7 @@ public class LambdaWebService implements Resettable {
         validateRevisionRules(region, request);
         synchronized (lockFor(region, functionName)) {
             WebFunction fn = function(region, functionName);
+            requireUsableConnector(region, request);
             WebFunctionRevision revision = buildRevision(fn, request);
             keepCode(region, fn, revision);
             fn.revisions.put(revision.revisionId, revision);
@@ -573,6 +588,13 @@ public class LambdaWebService implements Resettable {
         if (!AwsArnUtils.parse(role).accountId().equals(regionResolver.getAccountId())) {
             throw new LambdaWebAccessDeniedException("Cross-account pass role is not allowed.");
         }
+        String connectorArn = connectorArn(request);
+        if (connectorArn != null) {
+            requireValidConnectorArn(connectorArn);
+            if (!AwsArnUtils.parse(connectorArn).accountId().equals(regionResolver.getAccountId())) {
+                throw new LambdaWebAccessDeniedException("Cross-account pass lambda-network-connector is not allowed.");
+            }
+        }
         Map<String, String> environment = LambdaWebJson.stringMap(service, "environmentVariables", false);
         if (environment != null) {
             List<String> reserved = environment.keySet().stream().filter(RESERVED_ENVIRONMENT_KEYS::contains).toList();
@@ -587,6 +609,55 @@ public class LambdaWebService implements Resettable {
                     + " is invalid. Log group names starting with aws/ (case-insensitive) are reserved for AWS.", 400);
         }
         executionRole.requireAssumable(region, role);
+    }
+
+    private static String connectorArn(JsonNode revisionRequest) {
+        return LambdaWebJson.text(LambdaWebJson.structure(revisionRequest, "serviceConfig"), "egressNetworkConnectorArn");
+    }
+
+    /** AWS checks the region, then the partition, then the version. */
+    private static void requireValidConnectorArn(String connectorArn) {
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(connectorArn);
+        String version = connectorArn.substring(connectorArn.lastIndexOf(':') + 1);
+        if (!AwsRegions.isRegionId(arn.region())) {
+            throw invalidConnectorArn(connectorArn, "Invalid region.: " + arn.region());
+        }
+        if (!AwsRegions.partitionFor(arn.region()).equals(arn.partition())) {
+            throw invalidConnectorArn(connectorArn, "Invalid arn partition.: " + arn.partition());
+        }
+        if (!CONNECTOR_VERSION.matcher(version).matches()) {
+            throw invalidConnectorArn(connectorArn, "Invalid network connector version format - must be numeric: "
+                    + version);
+        }
+    }
+
+    private static AwsException invalidConnectorArn(String connectorArn, String reason) {
+        return new AwsException("ValidationException",
+                "The egress network connector ARN: '" + connectorArn + "' is not valid. " + reason, 400);
+    }
+
+    /** AWS looks the connector up once it knows the function, by its id in the function's region. */
+    private void requireUsableConnector(String region, JsonNode revisionRequest) {
+        String connectorArn = connectorArn(revisionRequest);
+        if (connectorArn == null) {
+            return;
+        }
+        int colon = connectorArn.lastIndexOf(':');
+        long version;
+        try {
+            version = Long.parseLong(connectorArn.substring(colon + 1));
+        } catch (NumberFormatException e) {
+            // AWS fails internally on a version past the 64-bit range.
+            throw new LambdaWebInternalServerException();
+        }
+        LambdaMicrovmsService.NetworkConnectorVersion named = microvmsService
+                .connectorVersion(region, connectorArn.substring(0, colon), version)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The egress network connector " + connectorArn + " does not exist.", 404));
+        if (!named.associatedComputeResourceTypes.contains("WebFunction")) {
+            throw new AwsException("ValidationException", "The egress network connector " + connectorArn
+                    + " cannot be used because its associatedComputeResourceTypes do not include WebFunction.", 400);
+        }
     }
 
     private WebFunctionRevision buildRevision(WebFunction fn, JsonNode request) {
@@ -871,7 +942,7 @@ public class LambdaWebService implements Resettable {
                 }
             }
             if (weights != null) {
-                newWeights = resolveWeights(fn, requestedWeights(weights));
+                newWeights = resolveWeights(fn, endpoint.endpointType, requestedWeights(weights));
             }
             WebFunctionEndpoint.ScalingConfig newScaling = scaling != null ? scalingConfigOf(scaling) : null;
             WebFunctionEndpoint.ThrottleConfig newThrottle = throttle != null ? throttleConfigOf(throttle) : null;
@@ -984,7 +1055,7 @@ public class LambdaWebService implements Resettable {
         if (initialRevision != null) {
             endpoint.revisionWeights = List.of(weight(initialRevision.revisionId, 100));
         } else if (!endpoint.revisionWeights.isEmpty()) {
-            endpoint.revisionWeights = resolveWeights(fn, endpoint.revisionWeights);
+            endpoint.revisionWeights = resolveWeights(fn, endpoint.endpointType, endpoint.revisionWeights);
         } else {
             endpoint.revisionWeights = latestRevision(fn).map(id -> List.of(weight(id, 100))).orElse(List.of());
         }
@@ -1060,7 +1131,7 @@ public class LambdaWebService implements Resettable {
         return out;
     }
 
-    private static List<WebFunctionEndpoint.RevisionWeight> resolveWeights(WebFunction fn,
+    private static List<WebFunctionEndpoint.RevisionWeight> resolveWeights(WebFunction fn, String endpointType,
                                                                            List<WebFunctionEndpoint.RevisionWeight> weights) {
         for (WebFunctionEndpoint.RevisionWeight weight : weights) {
             WebFunctionRevision revision = fn.revisions.get(weight.revisionId);
@@ -1071,6 +1142,17 @@ public class LambdaWebService implements Resettable {
             if (revision.failureReason != null) {
                 throw new AwsException("ConflictException", "The revision " + weight.revisionId
                         + " is in Failed state and cannot be deployed. Only revisions in Active state can be deployed.", 409);
+            }
+        }
+        // AWS finds every revision before it refuses one for its connector.
+        if (!"HomeRegion".equals(endpointType)) {
+            for (WebFunctionEndpoint.RevisionWeight weight : weights) {
+                if (fn.revisions.get(weight.revisionId).serviceConfig.egressNetworkConnectorArn != null) {
+                    throw new AwsException("ValidationException", "The revision " + weight.revisionId
+                            + " has an egressNetworkConnectorArn configured and cannot be used by a " + endpointType
+                            + " endpoint. Only HomeRegion endpoints support revisions with an egressNetworkConnectorArn"
+                            + " configured.", 400);
+                }
             }
         }
         return List.copyOf(weights);
@@ -1550,9 +1632,8 @@ public class LambdaWebService implements Resettable {
         String callerAccount = regionResolver.getAccountId();
         if (!callerAccount.equals(arn.group(2))) {
             String user = regionResolver.buildGlobalArn("iam", callerAccount, "user/" + accessKeyId());
-            throw new AwsException("AccessDeniedException", "User: " + user + " is not authorized to perform: lambda:"
-                    + action + " on resource: " + givenArn + " because no resource-based policy allows the lambda:"
-                    + action + " action", 403);
+            throw new AwsException("AccessDeniedException", AccessDeniedMessages.notAuthorized(user, "lambda:" + action,
+                    givenArn, PolicyType.RESOURCE_BASED_POLICY.noAllow("lambda:" + action)), 403);
         }
     }
 

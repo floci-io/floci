@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.LongNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 
@@ -22,8 +24,16 @@ public interface CfnResourceProvisioner {
 
     Set<String> resourceTypes();
 
+    /** GetAtt attributes the registry schema types as integers, by resource type. */
+    default Map<String, Set<String>> integerAttributes() {
+        return Map.of();
+    }
+
     /** The JSON type of a stored GetAtt value; most resource attributes are strings. */
     default JsonNode attributeValue(String resourceType, String attributeName, String value) {
+        if (integerAttributes().getOrDefault(resourceType, Set.of()).contains(attributeName)) {
+            return LongNode.valueOf(Long.parseLong(value));
+        }
         return TextNode.valueOf(value);
     }
 

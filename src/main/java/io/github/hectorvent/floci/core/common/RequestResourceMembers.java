@@ -34,6 +34,8 @@ final class RequestResourceMembers {
     private static final Pattern MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\[])?");
     /** A member holding an ARN may also be one level inside a structure or each of a list's structures. */
     private static final Pattern ARN_MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\[])?(\\.[A-Za-z][A-Za-z0-9_]*(\\[])?)?");
+    /** A member filling a variable may also be a field of each of a list's structures, one value for each. */
+    private static final Pattern FILL_MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\[]|\\[]\\.[A-Za-z][A-Za-z0-9_]*)?");
     /** An ARN format's leading resource type word, and the rest of its resource. */
     private static final Pattern RESOURCE_PART = Pattern.compile(
             "^arn:\\$\\{Partition}:[^:]*:[^:]*:[^:]*:([A-Za-z][A-Za-z0-9-]*)(.*)$");
@@ -50,6 +52,16 @@ final class RequestResourceMembers {
 
         Member(String name, boolean list) {
             this(name, list, null);
+        }
+
+        /** As the file writes it: {@code Name}, {@code Name[]}, {@code Name.Field} or {@code Name[].Field}. */
+        String path() {
+            return name + (list ? "[]" : "") + (field == null ? "" : "." + field.path());
+        }
+
+        /** Whether it is a field of each of a list's structures, which gives one value for each of them. */
+        boolean eachElement() {
+            return list && field != null && !field.list();
         }
     }
 
@@ -98,8 +110,12 @@ final class RequestResourceMembers {
      * the request's. A member {@code absent} from the request, or given a JSON null, is read as the value given for
      * it (an EventBridge request naming no event bus names {@code default}), and one in {@code arnOf} may give an
      * ARN of the type named for it instead of its name, read as that type's one variable, the resource then in the
-     * ARN's account and Region, or the caller's and the request's where the ARN leaves them empty. An ARN
-     * member's value is read up to the character {@code before}, when there is one, as its handler drops the rest.
+     * ARN's account and Region, or the caller's and the request's where the ARN leaves them empty. A member filling
+     * a variable may be a field of each of a list's structures ({@code Entries[].EventBusName}), which names one
+     * resource for each structure, read as {@code absent} gives for one that lacks it and in the account and Region
+     * of the ARN that structure gives, if any. Such a member is in {@code absent} or {@code arnOf} only when it
+     * fills a variable. An ARN member's value is read up to the character {@code before}, when there is one, as its
+     * handler drops the rest.
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
@@ -233,7 +249,7 @@ final class RequestResourceMembers {
                 throw new IllegalStateException(RESOURCE_NAME + " fills " + variable.getKey() + " for " + operation
                         + ", no variable of " + type + "'s format");
             }
-            fill.put(variable.getKey(), member(operation, variable.getValue().asText("")));
+            fill.put(variable.getKey(), fillMember(operation, variable.getValue().asText("")));
         });
         if (fill.values().stream().filter(Member::list).count() > 1) {
             throw new IllegalStateException(RESOURCE_NAME + " fills " + type + " for " + operation
@@ -241,9 +257,10 @@ final class RequestResourceMembers {
         }
         Map<String, List<String>> when = values(operation, type, resource.path("when"));
         Map<String, List<String>> unless = values(operation, type, resource.path("unless"));
+        Set<String> filled = Set.copyOf(fill.values().stream().map(Member::path).toList());
         Map<String, String> absent = new LinkedHashMap<>();
         resource.path("absent").properties().forEach(member -> {
-            if (member(operation, member.getKey()).list() || !member.getValue().isTextual()
+            if (!readAsOne(operation, member.getKey(), filled) || !member.getValue().isTextual()
                     || member.getValue().asText().isEmpty()) {
                 throw new IllegalStateException(RESOURCE_NAME + " reads " + member.getKey() + " for " + operation
                         + " when absent as no value");
@@ -253,7 +270,7 @@ final class RequestResourceMembers {
         Map<String, String> arnOf = new LinkedHashMap<>();
         resource.path("arnOf").properties().forEach(member -> {
             ArnFormat named = formats.get(member.getValue().asText(""));
-            if (member(operation, member.getKey()).list() || named == null
+            if (!readAsOne(operation, member.getKey(), filled) || named == null
                     || !ONE_VARIABLE.matcher(named.format().split(":", 6)[5]).matches()) {
                 throw new IllegalStateException(RESOURCE_NAME + " reads " + member.getKey() + " for " + operation
                         + " as an ARN of " + member.getValue() + ", no type named by one variable");
@@ -304,6 +321,26 @@ final class RequestResourceMembers {
             throw new IllegalStateException(RESOURCE_NAME + " reads " + operation + " at " + path + ", which is no member");
         }
         return path.endsWith("[]") ? new Member(path.substring(0, path.length() - 2), true) : new Member(path, false);
+    }
+
+    /**
+     * A member filling a variable: {@code Name}, {@code Name[]}, or a field of each of a list's structures,
+     * {@code Name[].Field}.
+     */
+    private static Member fillMember(String operation, String path) {
+        if (!FILL_MEMBER.matcher(path).matches()) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads " + operation + " at " + path + ", which is no member");
+        }
+        return arnMember(operation, path);
+    }
+
+    /**
+     * Whether a member gives one value as it is read: a top-level one that is no list, or a field of each of a
+     * list's structures that fills a variable, one value for each structure.
+     */
+    private static boolean readAsOne(String operation, String path, Set<String> filled) {
+        return FILL_MEMBER.matcher(path).matches() && path.contains("[].") ? filled.contains(path)
+                : !member(operation, path).list();
     }
 
     /** A member holding an ARN: {@code Name}, {@code Name[]}, or a field of it, {@code Name.Field} or {@code Name[].Field}. */

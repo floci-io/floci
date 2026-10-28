@@ -1,0 +1,616 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_rds_ca_certificates.py",
+    "bundles": "https://truststore.pki.rds.amazonaws.com/{region}/{region}-bundle.pem"
+  },
+  "regions": {
+    "af-south-1": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "eb17498b6fee02d0f20f8f92587bf71db0cd7a47",
+        "validFrom": "2021-05-19T19:35:16Z",
+        "validTill": "2121-05-19T20:35:16Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "c8e8da8690e8f88f13c57d9703a3a688c66e482d",
+        "validFrom": "2021-05-19T19:24:16Z",
+        "validTill": "2061-05-19T20:24:16Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "046cd72b52f65afabfd6f81b63b73388133563f0",
+        "validFrom": "2021-05-19T19:28:43Z",
+        "validTill": "2121-05-19T20:28:43Z"
+      }
+    ],
+    "ap-east-1": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "7fade462f2ed6b7ae39b9245ba7d6355d9c021a7",
+        "validFrom": "2021-05-25T21:45:11Z",
+        "validTill": "2121-05-25T22:45:11Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "a368611145864bff0436b8287ed1e5b32c0eadf7",
+        "validFrom": "2021-05-25T21:30:33Z",
+        "validTill": "2061-05-25T22:30:33Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "7ae043cbc8ed40fef7ccfc7d04803a6fb1952d40",
+        "validFrom": "2021-05-25T21:34:51Z",
+        "validTill": "2121-05-25T22:34:51Z"
+      }
+    ],
+    "ap-east-2": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "0f9f26bb42ab0de393135ebe965f0fd92f9fb621",
+        "validFrom": "2025-02-01T00:10:31Z",
+        "validTill": "2125-02-01T01:10:31Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "a69cffad295b98a84d587e7ba6eac08ec8992a9c",
+        "validFrom": "2025-02-01T00:10:21Z",
+        "validTill": "2065-02-01T01:10:21Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "a5a8551f61e5bcda4337711c94382f7a21665724",
+        "validFrom": "2025-02-01T00:10:26Z",
+        "validTill": "2125-02-01T01:10:26Z"
+      }
+    ],
+    "ap-northeast-1": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "aef371e2014ce6064513cac92c0c550ab7ccf288",
+        "validFrom": "2021-05-25T22:03:16Z",
+        "validTill": "2121-05-25T23:03:16Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "d790bbb661bafa4101829f103d639befa300f9a4",
+        "validFrom": "2021-05-25T21:54:58Z",
+        "validTill": "2061-05-25T22:54:58Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "47104f39034f4722a41ec96c1e9f9ad2342d63db",
+        "validFrom": "2021-05-25T21:59:10Z",
+        "validTill": "2121-05-25T22:59:10Z"
+      }
+    ],
+    "ap-northeast-2": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "1942e0edf16cf7e83001b2bbd642f19563b0eb74",
+        "validFrom": "2021-05-20T16:38:26Z",
+        "validTill": "2121-05-20T17:38:26Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "58fe7e8c3b1f561be7e51f69dcfc8acfbb546e02",
+        "validFrom": "2021-05-20T16:28:41Z",
+        "validTill": "2061-05-20T17:28:41Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "58f4fd12f736da59fbd0d2bf63e54b24c7f4e0d8",
+        "validFrom": "2021-05-20T16:33:23Z",
+        "validTill": "2121-05-20T17:33:23Z"
+      }
+    ],
+    "ap-northeast-3": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "1af13f3fb0b14e7a6fc6c7b18b1bb6699b7a914d",
+        "validFrom": "2021-05-24T20:32:17Z",
+        "validTill": "2121-05-24T21:32:17Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "85a2f639e393c815e3a3a50f061003d20186afed",
+        "validFrom": "2021-05-24T20:23:16Z",
+        "validTill": "2061-05-24T21:23:16Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "9fee20b96a49a5d71eb09b298f45a9f12dff2339",
+        "validFrom": "2021-05-24T20:28:03Z",
+        "validTill": "2121-05-24T21:28:03Z"
+      }
+    ],
+    "ap-south-1": [
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "cd4bec28c1b9b43688a7e9d5d24cc99ae506957f",
+        "validFrom": "2021-05-19T17:40:34Z",
+        "validTill": "2061-05-19T18:40:34Z"
+      }
+    ],
+    "ap-south-2": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "901a29a5512afe9b2198db383208ab0533fdc0da",
+        "validFrom": "2022-06-06T21:54:42Z",
+        "validTill": "2122-06-06T22:54:42Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "247098fa168936a3ae65df5310cfa56711c1c5ac",
+        "validFrom": "2022-06-06T21:42:22Z",
+        "validTill": "2062-06-06T22:42:22Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "7050c86e7ee972e94085e7ab8b48688ce15bf9b9",
+        "validFrom": "2022-06-06T21:48:18Z",
+        "validTill": "2122-06-06T22:48:18Z"
+      }
+    ],
+    "ap-southeast-1": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "5fa447d7be948b1325b6ba736987d658362e0e21",
+        "validFrom": "2021-05-21T21:50:01Z",
+        "validTill": "2121-05-21T22:50:01Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "aa6b73726c21176cc714815278d6ebc932f293b3",
+        "validFrom": "2021-05-21T21:39:39Z",
+        "validTill": "2061-05-21T22:39:39Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "f4f6e4163a0de677e5976c0cc1f7d361f95bd487",
+        "validFrom": "2021-05-21T21:45:05Z",
+        "validTill": "2121-05-21T22:45:05Z"
+      }
+    ],
+    "ap-southeast-2": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "e9583afdfda93978f50e9dff5e622ecca0d03b04",
+        "validFrom": "2021-05-24T20:50:15Z",
+        "validTill": "2121-05-24T21:50:15Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "6946d79e4c5b015ebc5fbd4c2b9e24d0e07ec528",
+        "validFrom": "2021-05-24T20:42:33Z",
+        "validTill": "2061-05-24T21:42:33Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "19dcede6eda2209044b28335b12dd2442e12ac2a",
+        "validFrom": "2021-05-24T20:46:18Z",
+        "validTill": "2121-05-24T21:46:18Z"
+      }
+    ],
+    "ap-southeast-3": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "a7e235c9eee3b4fe64e9e761c25f19b5a9d2ba1e",
+        "validFrom": "2021-06-11T00:12:43Z",
+        "validTill": "2121-06-11T01:12:43Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "86c110e10967a0589346178806a9ffa605031dfa",
+        "validFrom": "2021-06-10T18:19:07Z",
+        "validTill": "2061-06-10T19:19:07Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "3cd1a556c570b4b2b8714da8fb5868dfb1edd565",
+        "validFrom": "2021-06-11T00:08:36Z",
+        "validTill": "2121-06-11T01:08:36Z"
+      }
+    ],
+    "ap-southeast-4": [
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "1e79d7542516385da20dad542bbc52863c3d7b3c",
+        "validFrom": "2022-05-25T16:49:16Z",
+        "validTill": "2062-05-25T17:49:16Z"
+      }
+    ],
+    "ap-southeast-5": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "09cc63ba354cdd0053ab634a7cf351c97d093d2c",
+        "validFrom": "2024-05-15T21:50:46Z",
+        "validTill": "2124-05-15T22:50:46Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "140d859becfb353bbcaa65ac629eed64b505d6d6",
+        "validFrom": "2024-05-15T21:50:37Z",
+        "validTill": "2064-05-15T22:50:37Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "d4f4a00efe08a1004ee2d647e37f7fdaa3b98e92",
+        "validFrom": "2024-05-15T21:50:41Z",
+        "validTill": "2124-05-15T22:50:41Z"
+      }
+    ],
+    "ap-southeast-6": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "21b984c9086855eaef6f8958ecf132ea218a09d1",
+        "validFrom": "2025-05-20T01:44:07Z",
+        "validTill": "2125-05-20T02:44:07Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "9c9ceac35a80741fe9c8c4dcaf3af6c26c9ccccb",
+        "validFrom": "2025-05-20T01:43:57Z",
+        "validTill": "2065-05-20T02:43:57Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "38b385fb5d6a03820a36c51169b7c255ea27a912",
+        "validFrom": "2025-05-20T01:44:02Z",
+        "validTill": "2125-05-20T02:44:02Z"
+      }
+    ],
+    "ap-southeast-7": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "c76fd91493bc103f623249f946cf35fc2b7a6146",
+        "validFrom": "2024-09-12T15:54:40Z",
+        "validTill": "2124-09-12T16:54:40Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "de207c6602ead605616041129f4b6e03d0c3b6f7",
+        "validFrom": "2024-09-12T15:54:31Z",
+        "validTill": "2064-09-12T16:54:31Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "dbf90da3be8a5b3cf4162e5de3bf19ad9efa91fa",
+        "validFrom": "2024-09-12T15:54:36Z",
+        "validTill": "2124-09-12T16:54:36Z"
+      }
+    ],
+    "ca-central-1": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "acf799b55df74dc0831b3f452072bcfed0b3abb5",
+        "validFrom": "2021-05-21T22:13:09Z",
+        "validTill": "2121-05-21T23:13:09Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "b2b2dc2cd60938ffbd260ac587483437dc69ee8c",
+        "validFrom": "2021-05-21T22:02:35Z",
+        "validTill": "2061-05-21T23:02:35Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "d0192ad2dd437dad5e3e3a5a4822d125c6f0a96c",
+        "validFrom": "2021-05-21T22:08:53Z",
+        "validTill": "2121-05-21T23:08:53Z"
+      }
+    ],
+    "ca-west-1": [
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "c3890f3c7a024e0195ff7477ead5318a7ce546a3",
+        "validFrom": "2023-09-13T20:21:34Z",
+        "validTill": "2063-09-13T21:21:33Z"
+      }
+    ],
+    "eu-central-1": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "d2eb0ba87c0b459c89baa462c15cbf58e26798dc",
+        "validFrom": "2021-05-21T22:33:24Z",
+        "validTill": "2121-05-21T23:33:24Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "94e6f1a27cf230f869ec32b4611ca10a8280ad05",
+        "validFrom": "2021-05-21T22:23:47Z",
+        "validTill": "2061-05-21T23:23:47Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "d6878cce33c963c3d25bfd75bedee0461587a8df",
+        "validFrom": "2021-05-21T22:28:26Z",
+        "validTill": "2121-05-21T23:28:26Z"
+      }
+    ],
+    "eu-central-2": [
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "bb78d17650755aa3777fc89ab59aa0249fc6ffb3",
+        "validFrom": "2022-06-06T21:17:05Z",
+        "validTill": "2062-06-06T22:17:05Z"
+      }
+    ],
+    "eu-north-1": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "9b1dc638d42cf64e574a0d5d688855325932931f",
+        "validFrom": "2021-05-24T21:06:38Z",
+        "validTill": "2121-05-24T22:06:38Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "f6b6ce88387b94cbae7bffc5c1ab2bf5700126f6",
+        "validFrom": "2021-05-24T20:59:21Z",
+        "validTill": "2061-05-24T21:59:21Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "a32adde2b66d15b43058b0d761aa21f6c83925cd",
+        "validFrom": "2021-05-24T21:03:20Z",
+        "validTill": "2121-05-24T22:03:20Z"
+      }
+    ],
+    "eu-south-1": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "85206e1e431071800e90a825255ba4f92dc4f4b6",
+        "validFrom": "2021-05-19T18:38:11Z",
+        "validTill": "2121-05-19T19:38:11Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "8f00fb08bf5f0c9cc9178e837a8a1490362c2006",
+        "validFrom": "2021-05-19T18:27:18Z",
+        "validTill": "2061-05-19T19:27:18Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "06722cd56a7ed942f8bed1d50425f0f12f856431",
+        "validFrom": "2021-05-19T18:33:21Z",
+        "validTill": "2121-05-19T19:33:21Z"
+      }
+    ],
+    "eu-south-2": [
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "2c288b6a49cc18046ac82a58a8494ccaee48b49d",
+        "validFrom": "2022-05-23T18:16:32Z",
+        "validTill": "2062-05-23T19:16:32Z"
+      }
+    ],
+    "eu-west-1": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "5ea6fe9d6773c8f072f30b6e16c11fa5d25f7fdd",
+        "validFrom": "2021-05-20T16:58:07Z",
+        "validTill": "2121-05-20T17:58:07Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "6063e7c0472f519526110dbf86a273b5c51953f3",
+        "validFrom": "2021-05-20T16:49:12Z",
+        "validTill": "2061-05-20T17:49:12Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "bd8624f023a2cd6f9c5965ab32a630a03560f1a1",
+        "validFrom": "2021-05-20T16:53:54Z",
+        "validTill": "2121-05-20T17:53:54Z"
+      }
+    ],
+    "eu-west-2": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "ca0e522940d23c70de18678d7a83213f9acd5a70",
+        "validFrom": "2021-05-21T22:55:21Z",
+        "validTill": "2121-05-21T23:55:21Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "30d2b9d972a11f331cc76b2c4013eb0129eedcf0",
+        "validFrom": "2021-05-21T22:46:24Z",
+        "validTill": "2061-05-21T23:46:24Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "eb1680bd740240dcea1303c212dcfda397d809c5",
+        "validFrom": "2021-05-21T22:51:22Z",
+        "validTill": "2121-05-21T23:51:22Z"
+      }
+    ],
+    "eu-west-3": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "c77dd20770981e8f135fe071a44fe9dd19d11a5c",
+        "validFrom": "2021-05-25T22:26:12Z",
+        "validTill": "2121-05-25T23:26:12Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "dabef00db9022b46c2ab1747a6421252872b058e",
+        "validFrom": "2021-05-25T22:18:33Z",
+        "validTill": "2061-05-25T23:18:33Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "20ad9a591cb5174b57960da9714844e595ef3250",
+        "validFrom": "2021-05-25T22:22:33Z",
+        "validTill": "2121-05-25T23:22:33Z"
+      }
+    ],
+    "il-central-1": [
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "b9e33b6381a161cb875f36761cbe499296b6edca",
+        "validFrom": "2022-12-02T20:14:08Z",
+        "validTill": "2062-12-02T21:14:08Z"
+      }
+    ],
+    "me-central-1": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "6cb23d56510932d28946d0858ce48c90c9824b26",
+        "validFrom": "2022-05-07T00:44:37Z",
+        "validTill": "2122-05-07T01:44:37Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "2f0c13891565299af97b930bc722da849504c028",
+        "validFrom": "2022-05-06T23:20:09Z",
+        "validTill": "2062-05-07T00:20:09Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "2bff95bb0a23e110856800c37de14abc208fec39",
+        "validFrom": "2022-05-07T00:40:23Z",
+        "validTill": "2122-05-07T01:40:23Z"
+      }
+    ],
+    "me-south-1": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "674d3be6cc4fb231e7e06ef6fad27773ebe177cc",
+        "validFrom": "2021-05-20T17:19:55Z",
+        "validTill": "2121-05-20T18:19:55Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "71d170c07914224f64b2aeefd19fe01c6b5f9cea",
+        "validFrom": "2021-05-20T17:09:16Z",
+        "validTill": "2061-05-20T18:09:16Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "71df58555e079f4ca139303e2c9ab3462421bca4",
+        "validFrom": "2021-05-20T17:15:33Z",
+        "validTill": "2121-05-20T18:15:33Z"
+      }
+    ],
+    "mx-central-1": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "e4b02140083fadd2315f4453c1fbb5af134b45a9",
+        "validFrom": "2024-09-30T16:14:00Z",
+        "validTill": "2124-09-30T17:13:59Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "f61302c5788a1ae5a6315423f22ad7901f64ac43",
+        "validFrom": "2024-09-30T16:13:50Z",
+        "validTill": "2064-09-30T17:13:50Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "b033d401ef5745b6991baa149084882a9aa02481",
+        "validFrom": "2024-09-30T16:13:55Z",
+        "validTill": "2124-09-30T17:13:55Z"
+      }
+    ],
+    "sa-east-1": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "d2a9d3215a5bbd195d73448a3ae0c54fe48037bf",
+        "validFrom": "2021-05-19T18:16:01Z",
+        "validTill": "2121-05-19T19:16:01Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "cb025abf1b2ac719b680da4ab12fb2d14d797a0f",
+        "validFrom": "2021-05-19T18:06:26Z",
+        "validTill": "2061-05-19T19:06:26Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "7d2fdd76898b78b97e4bc436777a36283ac1b412",
+        "validFrom": "2021-05-19T18:11:20Z",
+        "validTill": "2121-05-19T19:11:20Z"
+      }
+    ],
+    "us-east-1": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "24a97b91cbe86911190576c35c36aab4fa7b25de",
+        "validFrom": "2021-05-25T22:41:55Z",
+        "validTill": "2121-05-25T23:41:55Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "2fa77ef894d983ba9d37ad699c84ab0f657be1c8",
+        "validFrom": "2021-05-25T22:34:57Z",
+        "validTill": "2061-05-25T23:34:57Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "9da6fa7fd2ec09c569a400d876b01b0c12759a96",
+        "validFrom": "2021-05-25T22:38:35Z",
+        "validTill": "2121-05-25T23:38:35Z"
+      }
+    ],
+    "us-east-2": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "46dd6725f28f5b8af1d9344c6ecd8e292abd95dd",
+        "validFrom": "2021-05-21T23:15:56Z",
+        "validTill": "2121-05-22T00:15:56Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "8cf85e3e2bdbcbe2c4a34c1e85828fb29833e87f",
+        "validFrom": "2021-05-21T23:04:44Z",
+        "validTill": "2061-05-22T00:04:44Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "dd8e39e6bdd7ea8e747dce66c76b98b1d42a49a7",
+        "validFrom": "2021-05-21T23:11:06Z",
+        "validTill": "2121-05-22T00:11:06Z"
+      }
+    ],
+    "us-west-1": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "f71225019679757429e4be85f31ee1b6fbc82b81",
+        "validFrom": "2021-05-19T19:13:24Z",
+        "validTill": "2121-05-19T20:13:24Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "0f7fb44cf65fc3b2b9133305fd11bc80973a36d5",
+        "validFrom": "2021-05-19T19:04:06Z",
+        "validTill": "2061-05-19T20:04:06Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "c748cb45e7509e9c2d29b17efe4656989ef94a26",
+        "validFrom": "2021-05-19T19:08:58Z",
+        "validTill": "2121-05-19T20:08:58Z"
+      }
+    ],
+    "us-west-2": [
+      {
+        "certificateIdentifier": "rds-ca-ecc384-g1",
+        "thumbprint": "2ee3dcc06e50192559b13929e73484354f23387d",
+        "validFrom": "2021-05-24T22:06:59Z",
+        "validTill": "2121-05-24T23:06:59Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa2048-g1",
+        "thumbprint": "7c40cb42714b6fdb2b296f9bbd0e8bb364436a76",
+        "validFrom": "2021-05-24T21:59:00Z",
+        "validTill": "2061-05-24T22:59:00Z"
+      },
+      {
+        "certificateIdentifier": "rds-ca-rsa4096-g1",
+        "thumbprint": "19da4f2af579a8ae1f6a0fa77aa5befd874b4cab",
+        "validFrom": "2021-05-24T22:03:20Z",
+        "validTill": "2121-05-24T23:03:20Z"
+      }
+    ]
+  }
+}

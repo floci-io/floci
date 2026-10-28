@@ -558,8 +558,7 @@ public class CloudFrontServingController {
                     && config.get("ParametersInCacheKeyAndForwardedToOrigin") instanceof Map<?, ?> parameters
                     ? parameters : null;
         } catch (AwsException e) {
-            // AWS managed cache policies are not modeled. The common ones (CachingDisabled,
-            // CachingOptimized) forward no viewer values, which is what an unknown id contributes.
+            // Amplify-only managed policies and unknown ids forward no viewer values.
             LOG.debugv("Cache policy {0} is not defined; it forwards no viewer values", cachePolicyId);
             return null;
         }

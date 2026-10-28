@@ -370,7 +370,7 @@ final class PassedRoles {
         return passed;
     }
 
-    private static void collect(JsonNode node, List<PassedRoleMembers.Step> steps, int index, List<String> found) {
+    static void collect(JsonNode node, List<PassedRoleMembers.Step> steps, int index, List<String> found) {
         if (node == null) {
             return;
         }

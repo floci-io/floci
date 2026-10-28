@@ -73,6 +73,18 @@ public class BagetterSidecarManager implements ContainerTeardown {
         pool.stopContainer(nugetRepositoryId);
     }
 
+    /**
+     * Whether this nuget repository's own BaGetter container is already running, without starting
+     * one for a repository that has never used nuget at all. Every CodeArtifact repository gets a
+     * nuget sidecar id at creation regardless of whether it is ever actually used through nuget
+     * (see {@code CodeArtifactService#ensureFormatContainerId}'s own callers), so a caller that
+     * only wants to ask an already-running container what it holds must check this first rather
+     * than provision a brand-new container just to find it has nothing.
+     */
+    public boolean isRunning(String nugetRepositoryId) {
+        return pool.isTracked(nugetRepositoryId);
+    }
+
     private PerKeyContainerPool.StartedContainer startContainer(String nugetRepositoryId) {
         String image = config.services().codeartifact().nugetImage();
         String containerName = ContainerStorageHelper.dockerName(config, "floci-bagetter-" + nugetRepositoryId);

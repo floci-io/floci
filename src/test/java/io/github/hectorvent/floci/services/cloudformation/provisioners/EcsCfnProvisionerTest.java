@@ -23,6 +23,7 @@ import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
+import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 
 import java.util.ArrayList;
@@ -671,7 +672,7 @@ class EcsCfnProvisionerTest {
         assertEquals("busy", third.failureReason());
         UpdateCleanupResult givenUp = provisioner.completeUpdate(failing);
         assertEquals(3, givenUp.attempts(), "no fourth attempt");
-        verify(ecs, org.mockito.Mockito.times(3)).deregisterTaskDefinition(TASK_DEF_ARN, REGION);
+        verify(ecs, Mockito.times(3)).deregisterTaskDefinition(TASK_DEF_ARN, REGION);
     }
 
     @Test
@@ -986,7 +987,7 @@ class EcsCfnProvisionerTest {
         // The replacement the failed update created stays owed a delete; the restored prior does not.
         assertTrue(provisioner.hasReplacementUpdate(r));
         assertEquals(next.getTaskDefinitionArn(), provisioner.updateCleanupPhysicalId(r));
-        org.mockito.Mockito.reset(ecs);
+        Mockito.reset(ecs);
         assertEquals(new UpdateCleanupResult(true, true, next.getTaskDefinitionArn(), 0, null), provisioner.completeUpdate(r));
         verify(ecs).deregisterTaskDefinition(next.getTaskDefinitionArn(), REGION);
         verify(ecs, never()).deregisterTaskDefinition(TASK_DEF_ARN, REGION);
@@ -1018,7 +1019,7 @@ class EcsCfnProvisionerTest {
         when(ecs.registerTaskDefinition(eq("web"), anyList(), isNull(), isNull(), isNull(), isNull(), isNull(), anyList(),
                 eq(REGION))).thenReturn(fifth);
         provisioner.provision(r, mapper.createObjectNode().put("Family", "web"), ctx(TASK_DEF_ARN));
-        org.mockito.Mockito.reset(ecs);
+        Mockito.reset(ecs);
         UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
         assertTrue(cleanup.complete(), cleanup.toString());
         verify(ecs).deregisterTaskDefinition(orphan, REGION);
@@ -1062,7 +1063,7 @@ class EcsCfnProvisionerTest {
 
         // The engine gives up once the lowest count reaches three and clears; only the exhausted
         // entries go, and an entry that succeeded meanwhile is gone already.
-        org.mockito.Mockito.doReturn(new TaskDefinition()).when(ecs).deregisterTaskDefinition(TASK_DEF_ARN, REGION);
+        Mockito.doReturn(new TaskDefinition()).when(ecs).deregisterTaskDefinition(TASK_DEF_ARN, REGION);
         UpdateCleanupResult second = provisioner.completeUpdate(r);
         assertFalse(second.complete(), "the exhausted orphan is still listed");
         assertEquals(3, second.attempts());
@@ -1070,7 +1071,7 @@ class EcsCfnProvisionerTest {
         provisioner.clearUpdate(r);
         assertFalse(provisioner.hasReplacementUpdate(r), "nothing with attempts left remains");
         // One delete during the failed rollback, then the three cleanup attempts, never a fifth.
-        verify(ecs, org.mockito.Mockito.times(4)).deregisterTaskDefinition(orphan, REGION);
+        verify(ecs, Mockito.times(4)).deregisterTaskDefinition(orphan, REGION);
     }
 
     @Test

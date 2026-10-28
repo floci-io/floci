@@ -24,7 +24,7 @@ import java.util.Map;
 public class AlarmSnsNotifier {
 
     private static final Logger LOG = Logger.getLogger(AlarmSnsNotifier.class);
-    private static final DateTimeFormatter TIMESTAMP_FORMAT = DateTimeFormatter
+    static final DateTimeFormatter TIMESTAMP_FORMAT = DateTimeFormatter
             .ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.ROOT).withZone(ZoneOffset.UTC);
     private final SnsService snsService;
     private final ObjectMapper objectMapper;

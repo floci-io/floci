@@ -18,6 +18,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
+import org.mockito.Mockito;
 import org.mockito.stubbing.OngoingStubbing;
 
 import java.util.ArrayList;
@@ -526,8 +528,8 @@ class EventsCfnProvisionerTest {
     }
 
     private void doThrowOnRemovePermission(AwsException e) {
-        org.mockito.Mockito.doThrow(e).when(events)
-                .removePermission(anyString(), anyString(), org.mockito.ArgumentMatchers.anyBoolean(), anyString());
+        Mockito.doThrow(e).when(events)
+                .removePermission(anyString(), anyString(), ArgumentMatchers.anyBoolean(), anyString());
     }
 
     // ── a failed stack update puts the rule's targets back ────────────────────

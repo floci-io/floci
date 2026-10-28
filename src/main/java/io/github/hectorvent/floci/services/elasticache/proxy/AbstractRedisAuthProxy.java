@@ -94,6 +94,10 @@ public abstract class AbstractRedisAuthProxy {
     /** Closes a socket, tolerating errors. Implementations may add their own logging. */
     protected abstract void closeQuietly(Socket socket);
 
+    /** Applies the validated frontend identity to a newly connected backend. */
+    protected void initializeBackend(Socket backend, String username) throws IOException {
+    }
+
     /** Establishes the client transport before reading credentials. */
     protected ClientTransport clientTransport(Socket client) throws IOException {
         return ClientTransport.unencrypted(client);
@@ -205,7 +209,7 @@ public abstract class AbstractRedisAuthProxy {
                         }
                         continue;
                     }
-                    bridgeCommand(client, input, cmd);
+                    bridgeCommand(client, input, cmd, null);
                     return;
                 }
                 if (authRequired()) {
@@ -214,7 +218,7 @@ public abstract class AbstractRedisAuthProxy {
                     return;
                 }
 
-                bridgeCommand(client, input, cmd);
+                bridgeCommand(client, input, cmd, null);
                 return;
             }
         } catch (Exception e) {
@@ -252,8 +256,7 @@ public abstract class AbstractRedisAuthProxy {
             return;
         }
 
-        writeResponse(client, OK_RESPONSE);
-        bridgeCommand(client, input, null);
+        bridgeCommand(client, input, null, username);
     }
 
     private boolean handleHello(Socket client, InputStream input, String[] cmd) throws IOException {
@@ -318,7 +321,7 @@ public abstract class AbstractRedisAuthProxy {
             return false;
         }
 
-        bridgeCommand(client, input, forwarded.toArray(String[]::new));
+        bridgeCommand(client, input, forwarded.toArray(String[]::new), username);
         return true;
     }
 
@@ -339,12 +342,15 @@ public abstract class AbstractRedisAuthProxy {
         return true;
     }
 
-    private void bridgeCommand(Socket client, InputStream input, String[] command) throws IOException {
+    private void bridgeCommand(Socket client, InputStream input, String[] command, String username) throws IOException {
         Socket backend = new Socket(backendHost, backendPort);
         try {
             backend.setTcpNoDelay(true);
+            initializeBackend(backend, username);
             if (command != null) {
                 resendCommand(command, backend.getOutputStream());
+            } else {
+                writeResponse(client, OK_RESPONSE);
             }
             client.setSoTimeout(0);
             handshakingClients.remove(client);

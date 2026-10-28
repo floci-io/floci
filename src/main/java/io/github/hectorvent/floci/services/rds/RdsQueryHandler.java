@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.rds;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorMessages;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
@@ -46,11 +47,13 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.SortedSet;
 import java.util.TreeSet;
 import java.util.function.BiFunction;
@@ -111,6 +114,8 @@ public class RdsQueryHandler {
                 case "DescribeValidDBInstanceModifications" -> handleDescribeValidDbInstanceModifications(params, region);
                 case "DescribeOrderableDBInstanceOptions" -> handleDescribeOrderableDbInstanceOptions(params);
                 case "DescribeEvents" -> handleDescribeEvents(params, region);
+                case "DescribeCertificates" -> handleDescribeCertificates(params, region);
+                case "ModifyCertificates" -> handleModifyCertificates(params, region);
                 case "CreateEventSubscription" -> handleCreateEventSubscription(params, region);
                 case "DescribeEventSubscriptions" -> handleDescribeEventSubscriptions(params, region);
                 case "ModifyEventSubscription" -> handleModifyEventSubscription(params, region);
@@ -624,6 +629,45 @@ public class RdsQueryHandler {
         return xml.end("EventSubscription").build();
     }
 
+    private Response handleDescribeCertificates(MultivaluedMap<String, String> params, String region) {
+        RdsService.CertificatePage page = service.describeCertificates(region, params.getFirst("CertificateIdentifier"),
+                parseOptionalInt(params.getFirst("MaxRecords")), params.getFirst("Marker"));
+        XmlBuilder xml = new XmlBuilder()
+                .elem("DefaultCertificateForNewLaunches", page.defaultForNewLaunches())
+                .start("Certificates");
+        for (RdsService.Certificate certificate : page.certificates()) {
+            certificateXml(xml, certificate);
+        }
+        xml.end("Certificates");
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("DescribeCertificates", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleModifyCertificates(MultivaluedMap<String, String> params, String region) {
+        RdsService.Certificate certificate = service.modifyCertificates(region,
+                params.getFirst("CertificateIdentifier"), parseOptionalBoolean(params, "RemoveCustomerOverride"));
+        XmlBuilder xml = new XmlBuilder();
+        certificateXml(xml, certificate);
+        return Response.ok(AwsQueryResponse.envelope("ModifyCertificates", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private static void certificateXml(XmlBuilder xml, RdsService.Certificate certificate) {
+        xml.start("Certificate")
+                .elem("CertificateIdentifier", certificate.certificateIdentifier())
+                .elem("CertificateType", "CA")
+                .elem("Thumbprint", certificate.thumbprint())
+                .elem("ValidFrom", certificate.validFrom().toString())
+                .elem("ValidTill", certificate.validTill().toString())
+                .elem("CertificateArn", certificate.certificateArn())
+                .elem("CustomerOverride", certificate.customerOverride());
+        if (certificate.customerOverrideValidTill() != null) {
+            xml.elem("CustomerOverrideValidTill", certificate.customerOverrideValidTill().toString());
+        }
+        xml.end("Certificate");
+    }
+
     private Response handleDescribeEvents(MultivaluedMap<String, String> params, String region) {
         String sourceIdentifier = params.getFirst("SourceIdentifier");
         String sourceType = params.getFirst("SourceType");
@@ -644,8 +688,8 @@ public class RdsQueryHandler {
         if (maxRecords != null && (maxRecords < 20 || maxRecords > 100)) {
             throw new AwsException("InvalidParameterValue", "MaxRecords must be between 20 and 100.", 400);
         }
-        java.time.Instant start = parseOptionalInstant(params.getFirst("StartTime"));
-        java.time.Instant end = parseOptionalInstant(params.getFirst("EndTime"));
+        Instant start = parseOptionalInstant(params.getFirst("StartTime"));
+        Instant end = parseOptionalInstant(params.getFirst("EndTime"));
         if (start != null && end != null && start.isAfter(end)) {
             throw new AwsException("InvalidParameterCombination", "StartTime must be before EndTime.", 400);
         }
@@ -695,13 +739,13 @@ public class RdsQueryHandler {
         }
     }
 
-    private static java.time.Instant parseOptionalInstant(String value) {
+    private static Instant parseOptionalInstant(String value) {
         if (value == null || value.isBlank()) {
             return null;
         }
         try {
-            return java.time.Instant.parse(value);
-        } catch (java.time.format.DateTimeParseException e) {
+            return Instant.parse(value);
+        } catch (DateTimeParseException e) {
             throw new AwsException("InvalidParameterValue", "Invalid timestamp.", 400);
         }
     }
@@ -812,7 +856,8 @@ public class RdsQueryHandler {
                 includeEncryption ? cloudwatchLogsExports(params) : null,
                 includeEncryption ? null : cloudwatchLogsExportChanges(params),
                 optionalInt(params.getFirst("MaxAllocatedStorage")),
-                params.getFirst("StorageType"));
+                params.getFirst("StorageType"),
+                params.getFirst("CACertificateIdentifier"));
     }
 
     /**
@@ -1175,7 +1220,7 @@ public class RdsQueryHandler {
                     parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"),
                     optionalInt(params.getFirst("AllocatedStorage")),
                     params.getFirst("ReplicaMode"),
-                    parseTags(params), params.getFirst("StorageType"));
+                    parseTags(params), params.getFirst("StorageType"), params.getFirst("CACertificateIdentifier"));
             DbInstance replica = service.createDbInstanceReadReplica(request, region);
             return Response.ok(AwsQueryResponse.envelope(
                     "CreateDBInstanceReadReplica", AwsNamespaces.RDS, dbInstanceXml(replica))).build();
@@ -1856,7 +1901,7 @@ public class RdsQueryHandler {
      */
     private static List<OptionGroupOption> parseOptionConfigurations(
             MultivaluedMap<String, String> params) {
-        List<OptionGroupOption> options = new java.util.ArrayList<>();
+        List<OptionGroupOption> options = new ArrayList<>();
         for (String prefix : List.of("OptionsToInclude.OptionConfiguration",
                 "OptionsToInclude.member")) {
             for (int n = 1; ; n++) {
@@ -1913,7 +1958,7 @@ public class RdsQueryHandler {
             return AwsQueryResponse.error("InvalidParameterValue", "DBInstanceIdentifier is required.", AwsNamespaces.RDS, 400);
         }
         try {
-            io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+            DbSnapshot snapshot =
                     service.createDbSnapshot(snapshotId, instanceId, parseTags(params), region);
             String result = dbSnapshotXml(snapshot);
             return Response.ok(AwsQueryResponse.envelope("CreateDBSnapshot", AwsNamespaces.RDS, result)).build();
@@ -1991,7 +2036,8 @@ public class RdsQueryHandler {
             DbInstance instance = service.restoreDbInstanceFromDbSnapshot(instanceId, snapshotId,
                     dbInstanceClass, availabilityZone, multiAz, dbSubnetGroupName,
                     vpcSecurityGroupIds, tags, region, requestedPort,
-                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"), params.getFirst("StorageType"));
+                    parseOptionalBoolean(params, "EnableIAMDatabaseAuthentication"), params.getFirst("StorageType"),
+                    params.getFirst("CACertificateIdentifier"));
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("RestoreDBInstanceFromDBSnapshot", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -2091,10 +2137,10 @@ public class RdsQueryHandler {
         String snapshotId = params.getFirst("DBSnapshotIdentifier");
         String instanceId = params.getFirst("DBInstanceIdentifier");
         try {
-            Collection<io.github.hectorvent.floci.services.rds.model.DbSnapshot> result =
+            Collection<DbSnapshot> result =
                     service.describeDbSnapshots(snapshotId, instanceId, region);
             XmlBuilder xml = new XmlBuilder().start("DBSnapshots");
-            for (io.github.hectorvent.floci.services.rds.model.DbSnapshot s : result) {
+            for (DbSnapshot s : result) {
                 xml.raw(dbSnapshotXml(s));
             }
             xml.end("DBSnapshots");
@@ -2107,7 +2153,7 @@ public class RdsQueryHandler {
     private Response handleDescribeDbSnapshotAttributes(MultivaluedMap<String, String> params, String region) {
         String snapshotId = params.getFirst("DBSnapshotIdentifier");
         try {
-            io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot =
+            DbSnapshot snapshot =
                     service.describeDbSnapshotAttributes(snapshotId, region);
             String result = dbSnapshotAttributesResultXml(snapshot);
             return Response.ok(AwsQueryResponse.envelope(
@@ -2121,7 +2167,7 @@ public class RdsQueryHandler {
         String snapshotId = params.getFirst("DBSnapshotIdentifier");
         String attributeName = params.getFirst("AttributeName");
         try {
-            io.github.hectorvent.floci.services.rds.model.DbSnapshot snapshot = service.modifyDbSnapshotAttribute(
+            DbSnapshot snapshot = service.modifyDbSnapshotAttribute(
                     snapshotId, attributeName, memberList(params, "ValuesToAdd"), memberList(params, "ValuesToRemove"), region);
             String result = dbSnapshotAttributesResultXml(snapshot);
             return Response.ok(AwsQueryResponse.envelope(
@@ -2770,7 +2816,7 @@ public class RdsQueryHandler {
                     parseIntegerParam(params, "BackupRetentionPeriod"),
                     params.getFirst("PreferredBackupWindow"),
                     parseOptionalBoolean(params, "DeletionProtection"),
-                    parseTags(params), params.getFirst("StorageType"));
+                    parseTags(params), params.getFirst("StorageType"), params.getFirst("CACertificateIdentifier"));
             DbInstance instance = service.restoreDbInstanceToPointInTime(request, region);
             return Response.ok(AwsQueryResponse.envelope(
                     "RestoreDBInstanceToPointInTime", AwsNamespaces.RDS, dbInstanceXml(instance))).build();
@@ -2929,7 +2975,7 @@ public class RdsQueryHandler {
         return xml.end("DBClusterSnapshotAttributesResult").build();
     }
 
-    private String dbSnapshotAttributesResultXml(io.github.hectorvent.floci.services.rds.model.DbSnapshot s) {
+    private String dbSnapshotAttributesResultXml(DbSnapshot s) {
         XmlBuilder xml = new XmlBuilder().start("DBSnapshotAttributesResult")
                 .elem("DBSnapshotIdentifier", s.getDbSnapshotIdentifier());
         xml.start("DBSnapshotAttributes").start("DBSnapshotAttribute")
@@ -2963,6 +3009,13 @@ public class RdsQueryHandler {
                .elem("Port", ep.port())
                .end("Endpoint");
         }
+        RdsService.InstanceCertificate ca = service.instanceCertificate(i);
+        xml.elem("CACertificateIdentifier", ca.caIdentifier())
+           .start("CertificateDetails").elem("CAIdentifier", ca.caIdentifier());
+        if (ca.validTill() != null) {
+            xml.elem("ValidTill", ca.validTill().toString());
+        }
+        xml.end("CertificateDetails");
         xml.elem("IAMDatabaseAuthenticationEnabled", i.isIamDatabaseAuthenticationEnabled())
            .elem("MultiAZ", i.isMultiAz())
            .elem("AutoMinorVersionUpgrade", i.isAutoMinorVersionUpgrade())
@@ -3306,16 +3359,7 @@ public class RdsQueryHandler {
             return fallbackSubnetGroup(instance, "default", "default subnet group");
         }
         return service.getDbSubnetGroup(
-                groupName, regionFromRdsArn(instance.getDbInstanceArn()));
-    }
-
-    private String regionFromRdsArn(String arn) {
-        if (arn == null || arn.isBlank()) {
-            return config.defaultRegion();
-        }
-        String[] parts = arn.split(":", 6);
-        return parts.length == 6 && !parts[3].isBlank()
-                ? parts[3] : config.defaultRegion();
+                groupName, AwsArnUtils.regionOrDefault(instance.getDbInstanceArn(), config.defaultRegion()));
     }
 
     private DbSubnetGroup fallbackSubnetGroup(DbInstance instance, String name, String description) {
@@ -3338,14 +3382,12 @@ public class RdsQueryHandler {
 
     private static String subnetGroupArnForInstance(DbInstance instance, String name) {
         String arn = instance.getDbInstanceArn();
-        if (arn == null || arn.isBlank()) {
+        if (!AwsArnUtils.isArn(arn)) {
             return null;
         }
-        String[] parts = arn.split(":", 6);
-        if (parts.length < 6) {
-            return null;
-        }
-        return String.join(":", parts[0], parts[1], parts[2], parts[3], parts[4], "subgrp:" + name);
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return new AwsArnUtils.Arn(parsed.partition(), parsed.service(), parsed.region(), parsed.accountId(),
+                "subgrp:" + name).toString();
     }
 
     private String paramGroupInnerXml(DbParameterGroup g) {
@@ -3497,7 +3539,7 @@ public class RdsQueryHandler {
      * answers an empty list for a known engine it holds nothing of — including ones Floci cannot
      * create.
      */
-    private static final java.util.Set<String> KNOWN_ENGINES = java.util.Set.of(
+    private static final Set<String> KNOWN_ENGINES = Set.of(
             "aurora", "aurora-mysql", "aurora-postgresql", "mysql", "mariadb", "postgres",
             "custom-oracle-ee", "custom-oracle-ee-cdb", "custom-oracle-se2", "custom-oracle-se2-cdb",
             "custom-sqlserver-dev", "custom-sqlserver-ee", "custom-sqlserver-se", "custom-sqlserver-web",
@@ -3550,7 +3592,7 @@ public class RdsQueryHandler {
                 break;
             }
             if (filterName.equals(name)) {
-                java.util.ArrayList<String> values = new java.util.ArrayList<>();
+                ArrayList<String> values = new ArrayList<>();
                 for (int valueIndex = 1; ; valueIndex++) {
                     String value = params.getFirst("Filters.Filter." + i + ".Values.Value." + valueIndex);
                     if (value == null) {
@@ -3597,7 +3639,7 @@ public class RdsQueryHandler {
     }
 
     private static List<DbProxyAuth> parseProxyAuth(MultivaluedMap<String, String> params) {
-        List<DbProxyAuth> auth = new java.util.ArrayList<>();
+        List<DbProxyAuth> auth = new ArrayList<>();
         for (int index = 1; ; index++) {
             String prefix = "Auth.member." + index + ".";
             String authScheme = params.getFirst(prefix + "AuthScheme");

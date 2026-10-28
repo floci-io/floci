@@ -2,10 +2,12 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.route53.Route53Service;
+import io.github.hectorvent.floci.services.route53.model.ChangeInfo;
 import io.github.hectorvent.floci.services.route53.model.HealthCheck;
 import io.github.hectorvent.floci.services.route53.model.HealthCheckConfig;
 import io.github.hectorvent.floci.services.route53.model.HostedZone;
@@ -16,11 +18,15 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatcher;
+import org.mockito.Mockito;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -33,6 +39,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -56,9 +63,9 @@ class Route53CfnProvisionerTest {
         JsonNode props = mapper.createObjectNode()
                 .put("Name", "ssm.us-east-1.amazonaws.com")
                 .set("HostedZoneConfig", mapper.createObjectNode().put("Comment", "central endpoint zone"));
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1")));
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
+        ((ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("Key", "Accelerator").put("Value", "AWSAccelerator")));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -78,7 +85,7 @@ class Route53CfnProvisionerTest {
                 eq("central endpoint zone"), argThat(sameVpc(vpc)));
         verify(service, never()).associateVpcWithHostedZone(any(), any(), any());
         verify(service).changeTagsForResource("hostedzone", "Z123456789",
-                List.of(java.util.Map.of("Key", "Accelerator", "Value", "AWSAccelerator")), List.of());
+                List.of(Map.of("Key", "Accelerator", "Value", "AWSAccelerator")), List.of());
     }
 
     @Test
@@ -95,7 +102,7 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1"))
                 .add(mapper.createObjectNode().put("VPCId", "vpc-456").put("VPCRegion", "us-west-2")));
 
@@ -129,7 +136,7 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1"))
                 .add(mapper.createObjectNode().put("VPCId", "vpc-456").put("VPCRegion", "us-west-2")));
 
@@ -150,9 +157,9 @@ class Route53CfnProvisionerTest {
                         + "follow-up VPC association fails, so CREATE_FAILED cleanup still deletes it");
     }
 
-    private static org.mockito.ArgumentMatcher<VpcAssociation> sameVpc(VpcAssociation expected) {
+    private static ArgumentMatcher<VpcAssociation> sameVpc(VpcAssociation expected) {
         if (expected == null) {
-            return java.util.Objects::isNull;
+            return Objects::isNull;
         }
         return actual -> actual != null
                 && expected.getVpcId().equals(actual.getVpcId())
@@ -202,7 +209,7 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1")));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -226,7 +233,7 @@ class Route53CfnProvisionerTest {
         Route53Service service = mock(Route53Service.class);
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123")));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -247,7 +254,7 @@ class Route53CfnProvisionerTest {
         Route53Service service = mock(Route53Service.class);
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "   ")));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -275,9 +282,9 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1")));
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
+        ((ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("Key", "").put("Value", "blank-key-should-be-skipped"))
                 .add(mapper.createObjectNode().put("Key", "Accelerator").put("Value", "AWSAccelerator")));
 
@@ -292,7 +299,7 @@ class Route53CfnProvisionerTest {
         new Route53CfnProvisioner(service).provision(resource, props, context);
 
         verify(service).changeTagsForResource("hostedzone", "Z123456789",
-                List.of(java.util.Map.of("Key", "Accelerator", "Value", "AWSAccelerator")), List.of());
+                List.of(Map.of("Key", "Accelerator", "Value", "AWSAccelerator")), List.of());
     }
 
     @Test
@@ -320,7 +327,7 @@ class Route53CfnProvisionerTest {
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("VPCs", mapper.createArrayNode()
+        ((ObjectNode) props).set("VPCs", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("VPCId", "vpc-123").put("VPCRegion", "us-east-1"))
                 .add(mapper.createObjectNode().put("VPCId", "vpc-456").put("VPCRegion", "us-west-2")));
 
@@ -355,12 +362,12 @@ class Route53CfnProvisionerTest {
                 eq(null), eq(null))).thenReturn(new Route53Service.CreateZoneResult(zone, null));
         when(service.getNameServers()).thenReturn(List.of("ns-1.example", "ns-2.example"));
         RuntimeException tagFailure = new AwsException("ServiceUnavailable", "throttled", 503);
-        org.mockito.Mockito.doThrow(tagFailure).when(service)
+        Mockito.doThrow(tagFailure).when(service)
                 .changeTagsForResource(eq("hostedzone"), eq("Z987654321"), any(), any());
 
         ObjectMapper mapper = new ObjectMapper();
         JsonNode props = mapper.createObjectNode().put("Name", "ssm.us-east-1.amazonaws.com");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
+        ((ObjectNode) props).set("HostedZoneTags", mapper.createArrayNode()
                 .add(mapper.createObjectNode().put("Key", "Accelerator").put("Value", "AWSAccelerator")));
 
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -392,7 +399,7 @@ class Route53CfnProvisionerTest {
                 .put("Name", "www.example.com")
                 .put("Type", "A")
                 .put("TTL", "300");
-        ((com.fasterxml.jackson.databind.node.ObjectNode) props).set("ResourceRecords",
+        ((ObjectNode) props).set("ResourceRecords",
                 mapper.createArrayNode().add("10.0.0.1"));
         CloudFormationTemplateEngine engine = recordEngine();
         ProvisionContext context = new ProvisionContext(engine, "us-east-1", "623666680275", "dns-stack");
@@ -744,6 +751,546 @@ class Route53CfnProvisionerTest {
     }
 
     @Test
+    void recordGroupWritesEveryRecordSetInOneBatchWithItsRoutingPolicy() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        when(service.changeResourceRecordSets(eq("Z1"), any(), any()))
+                .thenReturn(new ChangeInfo("C123", "2026-10-23T00:00:00Z", "web tier"));
+        JsonNode props = new ObjectMapper().readTree("""
+                {"HostedZoneId": "Z1", "Comment": "web tier", "RecordSets": [
+                  {"Name": "www.example.test", "Type": "A", "TTL": "60", "SetIdentifier": "blue", "Weight": 70,
+                   "HealthCheckId": "hc-1", "ResourceRecords": ["10.0.0.7"]},
+                  {"Name": "www.example.test.", "Type": "A", "TTL": "60", "SetIdentifier": "green", "Weight": 30,
+                   "ResourceRecords": ["10.0.0.8"]}
+                ]}
+                """);
+        StackResource resource = recordGroup();
+
+        new Route53CfnProvisioner(service).provision(resource, props, groupContext(null));
+
+        // Ref is the group's name, and Fn::GetAtt Id the change GetChange reads.
+        assertEquals("Group", resource.getPhysicalId());
+        assertEquals(Set.of("Id"), publicAttributes(resource));
+        assertEquals("C123", resource.getAttributes().get("Id"));
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(service).changeResourceRecordSets(eq("Z1"), captor.capture(), eq("web tier"));
+        List<Map<String, Object>> changes = captor.getValue();
+        assertEquals(List.of("CREATE", "CREATE"), changes.stream().map(change -> change.get("action")).toList());
+        ResourceRecordSet blue = (ResourceRecordSet) changes.get(0).get("rrs");
+        assertEquals("www.example.test.", blue.getName());
+        assertEquals(Long.valueOf(60), blue.getTtl());
+        assertEquals("blue", blue.getSetIdentifier());
+        assertEquals(Long.valueOf(70), blue.getWeight());
+        assertEquals("hc-1", blue.getHealthCheckId());
+        assertEquals(List.of("10.0.0.7"), blue.getRecords().stream().map(ResourceRecord::getValue).toList());
+        ResourceRecordSet green = (ResourceRecordSet) changes.get(1).get("rrs");
+        assertEquals("green", green.getSetIdentifier());
+        assertEquals(Long.valueOf(30), green.getWeight());
+    }
+
+    @Test
+    void recordGroupValidatesEveryRecordSetBeforeChangingTheZone() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        JsonNode props = new ObjectMapper().readTree("""
+                {"HostedZoneId": "Z1", "RecordSets": [
+                  {"Name": "valid.example.test", "Type": "A", "TTL": "60", "ResourceRecords": ["192.0.2.1"]},
+                  {"Name": "invalid.example.test"}
+                ]}
+                """);
+        StackResource resource = recordGroup();
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> new Route53CfnProvisioner(service).provision(resource, props, groupContext(null)));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        assertTrue(failure.getMessage().contains("RecordSets[1]"), failure.getMessage());
+        verifyNoInteractions(service);
+        assertNull(resource.getPhysicalId());
+        assertTrue(resource.getAttributes().isEmpty());
+    }
+
+    @Test
+    void recordGroupWithoutRecordSetsIsRejected() throws Exception {
+        assertRecordGroupRejected("{\"HostedZoneId\": \"Z1\", \"RecordSets\": []}");
+        assertRecordGroupRejected("{\"HostedZoneId\": \"Z1\"}");
+    }
+
+    @Test
+    void recordGroupWithoutAZoneIsRejected() throws Exception {
+        assertRecordGroupRejected("""
+                {"RecordSets": [{"Name": "www.example.test", "Type": "A", "ResourceRecords": ["192.0.2.1"]}]}
+                """);
+    }
+
+    @Test
+    void recordGroupRejectsAHostedZoneIdOnBothTheGroupAndARecordSet() throws Exception {
+        // AWS documents that creation fails when HostedZoneId is defined on the group and a record set.
+        assertRecordGroupRejected("""
+                {"HostedZoneId": "Z1", "RecordSets": [
+                  {"HostedZoneId": "Z1", "Name": "www.example.test", "Type": "A", "ResourceRecords": ["192.0.2.1"]}
+                ]}
+                """);
+    }
+
+    @Test
+    void recordGroupRejectsARecordSetInAnotherZone() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        when(service.listHostedZonesByName("other.example.test.", 0)).thenReturn(List.of(
+                new HostedZone("Z2", "other.example.test.", "caller", null, (VpcAssociation) null)));
+        JsonNode props = new ObjectMapper().readTree("""
+                {"HostedZoneId": "Z1", "RecordSets": [
+                  {"HostedZoneName": "other.example.test.", "Name": "www.other.example.test", "Type": "A",
+                   "ResourceRecords": ["192.0.2.1"]}
+                ]}
+                """);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> new Route53CfnProvisioner(service).provision(recordGroup(), props, groupContext(null)));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verify(service, never()).changeResourceRecordSets(any(), any(), any());
+    }
+
+    @Test
+    void recordGroupThatNamesNoZoneWritesIntoTheZoneItsRecordSetsName() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        when(service.changeResourceRecordSets(eq("Z2"), any(), any())).thenReturn(new ChangeInfo("C1", "now", null));
+        JsonNode props = new ObjectMapper().readTree("""
+                {"RecordSets": [
+                  {"HostedZoneId": "Z2", "Name": "a.example.test", "Type": "A", "ResourceRecords": ["192.0.2.1"]},
+                  {"Name": "b.example.test", "Type": "A", "ResourceRecords": ["192.0.2.2"]}
+                ]}
+                """);
+
+        new Route53CfnProvisioner(service).provision(recordGroup(), props, groupContext(null));
+
+        verify(service).changeResourceRecordSets(eq("Z2"), argThat(changes -> changes.size() == 2), any());
+    }
+
+    @Test
+    void recordGroupUpdateInItsZoneSwapsItsRecordsInOneBatchAndARollbackPutsThemBack() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        ResourceRecordSet kept = aRecord("old.example.test.", "192.0.2.1");
+        // Written by the last update, then deleted outside the stack: there is nothing to DELETE.
+        ResourceRecordSet gone = aRecord("gone.example.test.", "192.0.2.5");
+        when(service.listResourceRecordSets("Z1", null, null, 0)).thenReturn(List.of(kept));
+        when(service.changeResourceRecordSets(eq("Z1"), any(), any())).thenReturn(new ChangeInfo("C2", "now", null));
+        StackResource resource = existingGroup("Z1", "C1", kept, gone);
+        Map<String, String> before = Map.copyOf(resource.getAttributes());
+        JsonNode props = new ObjectMapper().readTree("""
+                {"HostedZoneId": "Z1", "RecordSets": [
+                  {"Name": "new.example.test", "Type": "A", "TTL": "300", "ResourceRecords": ["192.0.2.2"]}
+                ]}
+                """);
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+
+        owner.provision(resource, props, groupContext("Group"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(service).changeResourceRecordSets(eq("Z1"), captor.capture(), any());
+        assertEquals(List.of("DELETE old.example.test.", "CREATE new.example.test."), describe(captor.getValue()));
+        assertEquals("C2", resource.getAttributes().get("Id"));
+        assertFalse(owner.hasReplacementUpdate(resource));
+        assertNull(owner.updateCleanupPhysicalId(resource));
+
+        ResourceRecordSet written = (ResourceRecordSet) captor.getValue().get(1).get("rrs");
+        when(service.listResourceRecordSets("Z1", null, null, 0)).thenReturn(List.of(written));
+        assertTrue(owner.rollbackUpdate(resource));
+
+        verify(service, times(2)).changeResourceRecordSets(eq("Z1"), captor.capture(), any());
+        assertEquals(List.of("DELETE new.example.test.", "CREATE old.example.test.", "CREATE gone.example.test."),
+                describe(captor.getValue()));
+        assertEquals(before, resource.getAttributes());
+    }
+
+    @Test
+    void recordGroupZoneChangeDeletesTheOldRecordsOnlyOnceTheUpdateCommits() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        ResourceRecordSet old = aRecord("www.example.test.", "192.0.2.1");
+        when(service.listResourceRecordSets("ZOLD", null, null, 0)).thenReturn(List.of(old));
+        when(service.changeResourceRecordSets(any(), any(), any())).thenReturn(new ChangeInfo("C2", "now", null));
+        StackResource resource = existingGroup("ZOLD", "C1", old);
+        JsonNode props = new ObjectMapper().readTree("""
+                {"HostedZoneId": "ZNEW", "RecordSets": [
+                  {"Name": "www.example.test", "Type": "A", "TTL": "300", "ResourceRecords": ["192.0.2.2"]}
+                ]}
+                """);
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+
+        owner.provision(resource, props, groupContext("Group"));
+
+        verify(service).changeResourceRecordSets(eq("ZNEW"), argThat(changes -> changes.size() == 1
+                && "CREATE".equals(changes.get(0).get("action"))), any());
+        verify(service, never()).changeResourceRecordSets(eq("ZOLD"), any(), any());
+        assertTrue(owner.hasReplacementUpdate(resource));
+        assertEquals("Group", owner.updateCleanupPhysicalId(resource));
+
+        UpdateCleanupResult cleanup = owner.completeUpdate(resource);
+
+        assertTrue(cleanup.applicable());
+        assertTrue(cleanup.complete());
+        verify(service).changeResourceRecordSets(eq("ZOLD"), argThat(changes -> changes.size() == 1
+                && "DELETE".equals(changes.get(0).get("action")) && changes.get(0).get("rrs") != null), any());
+        owner.clearUpdate(resource);
+        assertFalse(owner.hasReplacementUpdate(resource));
+        assertEquals(Set.of("Id"), publicAttributes(resource));
+    }
+
+    @Test
+    void recordGroupCleanupThatGivesUpForgetsTheOldRecords() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        ResourceRecordSet old = aRecord("www.example.test.", "192.0.2.1");
+        when(service.listResourceRecordSets("ZOLD", null, null, 0)).thenReturn(List.of(old));
+        when(service.listResourceRecordSets("ZNEW", null, null, 0)).thenReturn(List.of(movedRecord()));
+        when(service.changeResourceRecordSets(eq("ZOLD"), any(), any()))
+                .thenThrow(new AwsException("InvalidChangeBatch", "values do not match", 400));
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+        StackResource resource = movedGroup(owner, service, old);
+
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            UpdateCleanupResult cleanup = owner.completeUpdate(resource);
+            assertFalse(cleanup.complete());
+            assertEquals(attempt, cleanup.attempts());
+            assertEquals("values do not match", cleanup.failureReason());
+        }
+        owner.clearUpdate(resource);
+
+        assertFalse(owner.hasReplacementUpdate(resource));
+        assertNull(owner.updateCleanupPhysicalId(resource));
+        owner.delete(resource, "us-east-1");
+        verify(service, times(3)).changeResourceRecordSets(eq("ZOLD"), any(), any());
+        // The update's write and the delete.
+        verify(service, times(2)).changeResourceRecordSets(eq("ZNEW"), any(), any());
+    }
+
+    @Test
+    void deletingARecordGroupMidMoveDeletesTheOldRecordsFirstAndKeepsBothUntilTheyAreGone() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        ResourceRecordSet old = aRecord("www.example.test.", "192.0.2.1");
+        when(service.listResourceRecordSets("ZOLD", null, null, 0)).thenReturn(List.of(old));
+        when(service.listResourceRecordSets("ZNEW", null, null, 0)).thenReturn(List.of(movedRecord()));
+        when(service.changeResourceRecordSets(eq("ZOLD"), any(), any()))
+                .thenThrow(new AwsException("InvalidChangeBatch", "values do not match", 400))
+                .thenReturn(null);
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+        StackResource resource = movedGroup(owner, service, old);
+
+        assertThrows(AwsException.class, () -> owner.delete(resource, "us-east-1"));
+        verify(service, never()).listResourceRecordSets(eq("ZNEW"), any(), any(), eq(0));
+        assertTrue(owner.hasReplacementUpdate(resource));
+
+        owner.delete(resource, "us-east-1");
+        verify(service, times(2)).changeResourceRecordSets(eq("ZOLD"), any(), any());
+        verify(service, times(2)).changeResourceRecordSets(eq("ZNEW"), any(), any());
+        assertFalse(owner.hasReplacementUpdate(resource));
+    }
+
+    @Test
+    void zoneChangeRollbackThatCannotDeleteTheNewRecordsPointsBackAtTheOldOnesAndRetries() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+        ResourceRecordSet old = aRecord("www.example.test.", "192.0.2.1");
+        StackResource resource = failedMoveRollback(owner, service, old);
+
+        // The group already names its old records again, so a skip leaves it matching the template the
+        // stack rolls back to; only the new zone's records are owed, and Retain never keeps them.
+        assertEquals("Group", resource.getPhysicalId());
+        Map<String, String> restored = new HashMap<>(resource.getAttributes());
+        assertNotNull(restored.remove("__FlociRoute53GroupOwedDeletes"));
+        assertEquals(existingGroup("ZOLD", "C1", old).getAttributes(), restored);
+        // Owed records do not make the group a replacement, and no cleanup announces them: a commit
+        // never deletes them, and the engine announces before it says whether it commits or deletes.
+        assertFalse(owner.hasReplacementUpdate(resource));
+        assertNull(owner.updateCleanupPhysicalId(resource));
+
+        // ContinueUpdateRollback runs the rollback again, which now only owes that delete.
+        assertTrue(owner.rollbackUpdate(resource));
+
+        assertEquals(existingGroup("ZOLD", "C1", old).getAttributes(), resource.getAttributes());
+        assertFalse(owner.hasReplacementUpdate(resource));
+        verify(service, never()).changeResourceRecordSets(eq("ZOLD"), any(), any());
+        // The update's write, the failed delete and the retried one.
+        verify(service, times(3)).changeResourceRecordSets(eq("ZNEW"), any(), any());
+    }
+
+    @Test
+    void recordsAFailedRollbackCouldNotDeleteGoWithTheStackWhileTheRollbackIsUnfinished() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+        ResourceRecordSet old = aRecord("www.example.test.", "192.0.2.1");
+        StackResource resource = failedMoveRollback(owner, service, old);
+
+        // DeleteStack from UPDATE_ROLLBACK_FAILED: the stack's cleanup runs first, under Retain too.
+        UpdateCleanupResult cleanup = owner.completeDeleteCleanup(resource);
+
+        assertTrue(cleanup.applicable());
+        assertTrue(cleanup.complete());
+        assertEquals("Group", cleanup.previousPhysicalId());
+        owner.clearDeleteCleanup(resource);
+        assertEquals(existingGroup("ZOLD", "C1", old).getAttributes(), resource.getAttributes());
+        // The failed delete and this one.
+        verify(service, times(2)).changeResourceRecordSets(eq("ZNEW"), any(), eq("CloudFormation delete Group"));
+        verify(service, never()).changeResourceRecordSets(eq("ZOLD"), any(), any());
+    }
+
+    @Test
+    void aCommitNeverDeletesWhatAFailedRollbackLeftEvenWhileTheGroupIsUpdateFailed() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+        StackResource resource = failedMoveRollback(owner, service, aRecord("www.example.test.", "192.0.2.1"));
+
+        // A nested stack's child is updated while it is still UPDATE_ROLLBACK_FAILED, so its commit can
+        // meet a group whose rollback is unfinished.
+        assertFalse(owner.completeUpdate(resource).applicable());
+
+        verify(service, times(1)).changeResourceRecordSets(eq("ZNEW"), any(), eq("CloudFormation delete Group"));
+        assertFalse(resource.getAttributes().containsKey("__FlociRoute53GroupOwedDeletes"));
+    }
+
+    @Test
+    void removingAGroupNeverDeletesWhatAFailedRollbackLeft() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+        ResourceRecordSet old = aRecord("www.example.test.", "192.0.2.1");
+        when(service.listResourceRecordSets("ZOLD", null, null, 0)).thenReturn(List.of(old));
+        StackResource resource = failedMoveRollback(owner, service, old);
+
+        owner.delete(resource, "us-east-1");
+
+        verify(service, times(1)).changeResourceRecordSets(eq("ZNEW"), any(), eq("CloudFormation delete Group"));
+        verify(service).changeResourceRecordSets(eq("ZOLD"), any(), eq("CloudFormation delete Group"));
+    }
+
+    @Test
+    void aSkippedRollbackLeavesTheRecordsItCouldNotDeleteInTheirZone() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+        ResourceRecordSet old = aRecord("www.example.test.", "192.0.2.1");
+        when(service.listResourceRecordSets("ZOLD", null, null, 0)).thenReturn(List.of(old));
+        StackResource resource = failedMoveRollback(owner, service, old);
+        // ContinueUpdateRollback skipped the group.
+        resource.setStatus("UPDATE_COMPLETE");
+
+        // Nothing tells the leftover apart from an identical record written there later, so neither the
+        // next commit's cleanup nor a delete removes it.
+        assertNull(owner.updateCleanupPhysicalId(resource));
+        assertFalse(owner.completeUpdate(resource).applicable());
+        assertFalse(resource.getAttributes().containsKey("__FlociRoute53GroupOwedDeletes"));
+        owner.delete(resource, "us-east-1");
+
+        verify(service, times(1)).changeResourceRecordSets(eq("ZNEW"), any(), eq("CloudFormation delete Group"));
+        verify(service).changeResourceRecordSets(eq("ZOLD"), any(), eq("CloudFormation delete Group"));
+    }
+
+    @Test
+    void reApplyingAMoveAfterASkippedRollbackKeepsTheRecordItWrites() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+        ResourceRecordSet old = aRecord("www.example.test.", "192.0.2.1");
+        StackResource resource = failedMoveRollback(owner, service, old);
+        when(service.listResourceRecordSets("ZOLD", null, null, 0)).thenReturn(List.of(old));
+        resource.setUpdateReplacePolicy(null);
+        resource.setStatus("UPDATE_COMPLETE");
+
+        // ContinueUpdateRollback skipped the group, the leftover record was deleted by hand, and the
+        // move is applied again, writing the same record into ZNEW.
+        owner.provision(resource, new ObjectMapper().readTree("""
+                {"HostedZoneId": "ZNEW", "RecordSets": [
+                  {"Name": "www.example.test", "Type": "A", "TTL": "300", "ResourceRecords": ["192.0.2.2"]}
+                ]}
+                """), groupContext("Group"));
+        UpdateCleanupResult cleanup = owner.completeUpdate(resource);
+        owner.clearUpdate(resource);
+
+        assertTrue(cleanup.complete());
+        verify(service).changeResourceRecordSets(eq("ZOLD"), any(), eq("CloudFormation delete Group"));
+        // Only the failed rollback's delete went to ZNEW; the record the move wrote stays.
+        verify(service, times(1)).changeResourceRecordSets(eq("ZNEW"), any(), eq("CloudFormation delete Group"));
+        assertFalse(resource.getAttributes().containsKey("__FlociRoute53GroupOwedDeletes"));
+        assertFalse(owner.hasReplacementUpdate(resource));
+    }
+
+    @Test
+    void aLaterUpdateForgetsWhatASkippedRollbackLeftSoARetryNeedsOnlyItsOwn() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+        StackResource resource = failedMoveRollback(owner, service, aRecord("www.example.test.", "192.0.2.1"));
+        // The ZNEW record stays changed outside the stack, so deleting it keeps failing.
+        doThrow(new AwsException("InvalidChangeBatch", "values do not match", 400))
+                .when(service).changeResourceRecordSets(eq("ZNEW"), any(), eq("CloudFormation delete Group"));
+
+        // After a skip, a second move, to Z3, fails too, and its rollback cannot delete Z3's record once.
+        resource.setStatus("UPDATE_COMPLETE");
+        when(service.changeResourceRecordSets(eq("Z3"), any(), any())).thenReturn(new ChangeInfo("C3", "now", null));
+        when(service.listResourceRecordSets("Z3", null, null, 0))
+                .thenReturn(List.of(aRecord("www.example.test.", "192.0.2.3")));
+        owner.provision(resource, new ObjectMapper().readTree("""
+                {"HostedZoneId": "Z3", "RecordSets": [
+                  {"Name": "www.example.test", "Type": "A", "TTL": "300", "ResourceRecords": ["192.0.2.3"]}
+                ]}
+                """), groupContext("Group"));
+        doThrow(new AwsException("InvalidChangeBatch", "Z3 values do not match", 400)).doReturn(null)
+                .when(service).changeResourceRecordSets(eq("Z3"), any(), eq("CloudFormation delete Group"));
+        assertThrows(AwsException.class, () -> owner.rollbackUpdate(resource));
+        resource.setStatus("UPDATE_FAILED");
+
+        // The skipped rollback's ZNEW record was left behind by the second update, so the retry needs only
+        // Z3's record, which its own rollback could not delete.
+        String owed = resource.getAttributes().get("__FlociRoute53GroupOwedDeletes");
+        assertTrue(owed.contains("Z3") && !owed.contains("ZNEW"), owed);
+        assertTrue(owner.rollbackUpdate(resource));
+
+        verify(service, times(2)).changeResourceRecordSets(eq("Z3"), any(), eq("CloudFormation delete Group"));
+        verify(service, times(1)).changeResourceRecordSets(eq("ZNEW"), any(), eq("CloudFormation delete Group"));
+        assertFalse(resource.getAttributes().containsKey("__FlociRoute53GroupOwedDeletes"));
+        assertFalse(owner.completeUpdate(resource).applicable());
+    }
+
+    @Test
+    void replacingAStubAnOlderFlociLeftIsNotAZoneChangeAndARollbackPutsTheStubBack() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        when(service.changeResourceRecordSets(eq("Z1"), any(), any())).thenReturn(new ChangeInfo("C1", "now", null));
+        StackResource resource = recordGroup();
+        resource.setPhysicalId("Group-0a1b2c3d");
+        resource.getAttributes().put("Arn", "arn:aws:stub:::Group");
+        Map<String, String> stub = Map.copyOf(resource.getAttributes());
+        Route53CfnProvisioner owner = new Route53CfnProvisioner(service);
+
+        owner.provision(resource, new ObjectMapper().readTree("""
+                {"HostedZoneId": "Z1", "RecordSets": [
+                  {"Name": "www.example.test", "Type": "A", "TTL": "300", "ResourceRecords": ["192.0.2.1"]}
+                ]}
+                """), groupContext("Group-0a1b2c3d"));
+
+        assertEquals("Group", resource.getPhysicalId());
+        assertFalse(owner.hasReplacementUpdate(resource));
+        assertNull(owner.updateCleanupPhysicalId(resource));
+
+        when(service.listResourceRecordSets("Z1", null, null, 0))
+                .thenReturn(List.of(aRecord("www.example.test.", "192.0.2.1")));
+        assertTrue(owner.rollbackUpdate(resource));
+
+        assertEquals("Group-0a1b2c3d", resource.getPhysicalId());
+        assertEquals(stub, resource.getAttributes());
+        verify(service).changeResourceRecordSets(eq("Z1"), argThat(changes -> describe(changes)
+                .equals(List.of("DELETE www.example.test."))), any());
+    }
+
+    @Test
+    void recordGroupRejectsTwoRecordSetsWithOneNameTypeAndSetIdentifier() throws Exception {
+        assertRecordGroupRejected("""
+                {"HostedZoneId": "Z1", "RecordSets": [
+                  {"Name": "www.example.test", "Type": "A", "ResourceRecords": ["192.0.2.1"]},
+                  {"Name": "www.example.test.", "Type": "A", "ResourceRecords": ["192.0.2.2"]}
+                ]}
+                """);
+    }
+
+    @Test
+    void deletingARecordGroupToleratesAZoneAlreadyGone() throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        when(service.listResourceRecordSets("Z1", null, null, 0))
+                .thenThrow(new AwsException("NoSuchHostedZone", "No hosted zone found with ID: Z1", 404));
+        StackResource resource = existingGroup("Z1", "C1", aRecord("www.example.test.", "192.0.2.1"));
+
+        new Route53CfnProvisioner(service).delete(resource, "us-east-1");
+
+        verify(service, never()).changeResourceRecordSets(any(), any(), any());
+    }
+
+    private void assertRecordGroupRejected(String json) throws Exception {
+        Route53Service service = mock(Route53Service.class);
+        JsonNode props = new ObjectMapper().readTree(json);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> new Route53CfnProvisioner(service).provision(recordGroup(), props, groupContext(null)));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verify(service, never()).changeResourceRecordSets(any(), any(), any());
+    }
+
+    private static StackResource recordGroup() {
+        StackResource resource = new StackResource();
+        resource.setLogicalId("Group");
+        resource.setResourceType("AWS::Route53::RecordSetGroup");
+        return resource;
+    }
+
+    /** A group a create or an earlier update wrote into {@code zoneId} with change {@code changeId}. */
+    private static StackResource existingGroup(String zoneId, String changeId, ResourceRecordSet... records)
+            throws Exception {
+        StackResource resource = recordGroup();
+        resource.setPhysicalId("Group");
+        resource.getAttributes().put("Id", changeId);
+        resource.getAttributes().put("__FlociRoute53RecordZoneId", zoneId);
+        resource.getAttributes().put("__FlociRoute53GroupRecords",
+                new ObjectMapper().writeValueAsString(List.of(records)));
+        return resource;
+    }
+
+    /**
+     * A group created in ZOLD as {@code old} that an update has just moved to ZNEW, writing
+     * {@link #movedRecord()} there; the update has neither committed nor rolled back.
+     */
+    private static StackResource movedGroup(Route53CfnProvisioner owner, Route53Service service,
+                                            ResourceRecordSet old) throws Exception {
+        StackResource resource = existingGroup("ZOLD", "C1", old);
+        when(service.changeResourceRecordSets(eq("ZNEW"), any(), any())).thenReturn(new ChangeInfo("C2", "now", null));
+        owner.provision(resource, new ObjectMapper().readTree("""
+                {"HostedZoneId": "ZNEW", "RecordSets": [
+                  {"Name": "www.example.test", "Type": "A", "TTL": "300", "ResourceRecords": ["192.0.2.2"]}
+                ]}
+                """), groupContext("Group"));
+        return resource;
+    }
+
+    private static ResourceRecordSet movedRecord() {
+        return aRecord("www.example.test.", "192.0.2.2");
+    }
+
+    /**
+     * A moved group, under {@code UpdateReplacePolicy: Retain}, whose rollback could not delete the
+     * record it wrote into ZNEW; the next delete there succeeds.
+     */
+    private static StackResource failedMoveRollback(Route53CfnProvisioner owner, Route53Service service,
+                                                    ResourceRecordSet old) throws Exception {
+        when(service.listResourceRecordSets("ZNEW", null, null, 0)).thenReturn(List.of(movedRecord()));
+        StackResource resource = movedGroup(owner, service, old);
+        resource.setUpdateReplacePolicy("Retain");
+        doThrow(new AwsException("InvalidChangeBatch", "values do not match", 400)).doReturn(null)
+                .when(service).changeResourceRecordSets(eq("ZNEW"), any(), eq("CloudFormation delete Group"));
+        AwsException failure = assertThrows(AwsException.class, () -> owner.rollbackUpdate(resource));
+        assertEquals("values do not match", failure.getMessage());
+        // As the rollback walker marks a resource whose rollback failed.
+        resource.setStatus("UPDATE_FAILED");
+        return resource;
+    }
+
+    private static ResourceRecordSet aRecord(String name, String address) {
+        ResourceRecordSet record = new ResourceRecordSet();
+        record.setName(name);
+        record.setType("A");
+        record.setTtl(300L);
+        record.setRecords(List.of(new ResourceRecord(address)));
+        return record;
+    }
+
+    private static List<String> describe(List<Map<String, Object>> changes) {
+        return changes.stream()
+                .map(change -> change.get("action") + " " + ((ResourceRecordSet) change.get("rrs")).getName())
+                .toList();
+    }
+
+    private static ProvisionContext groupContext(String priorPhysicalId) {
+        CloudFormationTemplateEngine engine = recordEngine();
+        when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        return priorPhysicalId == null
+                ? new ProvisionContext(engine, "us-east-1", "000000000000", "dns-stack")
+                : new ProvisionContext(engine, "us-east-1", "000000000000", "dns-stack", priorPhysicalId);
+    }
+
+    @Test
     void healthCheckIsCreatedWithItsConfigTagsAndExactAttributes() throws Exception {
         Route53Service service = mock(Route53Service.class);
         when(service.createHealthCheck(any(), any(), any()))
@@ -908,7 +1455,7 @@ class Route53CfnProvisionerTest {
         when(service.getHealthCheck("hc-1")).thenReturn(prior);
         when(service.updateHealthCheck(eq("hc-1"), any())).thenReturn(prior);
         when(service.listTagsForResource("healthcheck", "hc-1")).thenReturn(Map.of());
-        org.mockito.Mockito.doThrow(new AwsException("Throttling", "slow down", 400)).doNothing()
+        Mockito.doThrow(new AwsException("Throttling", "slow down", 400)).doNothing()
                 .when(service).changeTagsForResource(eq("healthcheck"), eq("hc-1"), any(), any());
         StackResource resource = existingCheck();
         JsonNode props = new ObjectMapper().readTree("""
@@ -927,7 +1474,7 @@ class Route53CfnProvisionerTest {
         Route53Service service = mock(Route53Service.class);
         when(service.createHealthCheck(any(), any(), any()))
                 .thenAnswer(inv -> new HealthCheck("hc-1", inv.getArgument(0), inv.getArgument(1), inv.getArgument(2)));
-        org.mockito.Mockito.doThrow(new AwsException("Throttling", "slow down", 400))
+        Mockito.doThrow(new AwsException("Throttling", "slow down", 400))
                 .when(service).changeTagsForResource(any(), any(), any(), any());
         JsonNode props = new ObjectMapper().readTree("""
                 {"HealthCheckConfig": {"Type": "TCP", "IPAddress": "10.0.0.5", "Port": 22},
@@ -1016,7 +1563,7 @@ class Route53CfnProvisionerTest {
     @Test
     void deletingAHealthCheckAlreadyGoneIsTolerated() {
         Route53Service service = mock(Route53Service.class);
-        org.mockito.Mockito.doThrow(new AwsException("NoSuchHealthCheck", "gone", 404))
+        Mockito.doThrow(new AwsException("NoSuchHealthCheck", "gone", 404))
                 .when(service).deleteHealthCheck("hc-1");
         StackResource resource = new StackResource();
         resource.setLogicalId("Check");

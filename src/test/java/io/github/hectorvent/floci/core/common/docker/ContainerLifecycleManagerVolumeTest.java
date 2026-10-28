@@ -348,7 +348,7 @@ class ContainerLifecycleManagerVolumeTest {
         InspectVolumeResponse second = mock(InspectVolumeResponse.class);
         when(dockerClient.listVolumesCmd()).thenReturn(cmd);
         when(cmd.exec()).thenReturn(response);
-        when(response.getVolumes()).thenReturn(java.util.List.of(first, second));
+        when(response.getVolumes()).thenReturn(List.of(first, second));
         when(first.getName()).thenReturn("floci-code-first");
         when(second.getName()).thenReturn("shared-data");
 
@@ -362,7 +362,7 @@ class ContainerLifecycleManagerVolumeTest {
         ListVolumesResponse response = mock(ListVolumesResponse.class);
         when(dockerClient.listVolumesCmd()).thenReturn(cmd);
         when(cmd.exec()).thenReturn(response);
-        when(response.getVolumes()).thenReturn(java.util.List.of());
+        when(response.getVolumes()).thenReturn(List.of());
 
         assertEquals(Optional.of(Set.of()), manager.tryListVolumeNames());
     }

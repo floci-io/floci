@@ -7,6 +7,7 @@ import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.net.InetAddress;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -78,11 +79,18 @@ class Ec2VpcEndpointNetworkInterfaceIdsIntegrationTest {
                 "VpcId", vpcId, "AmazonProvidedIpv6CidrBlock", "true");
     }
 
+    /**
+     * The /64 at {@code offset} inside the VPC's /56. It is worked out from the address bytes
+     * rather than the text, because compressed text drops a zero fourth group.
+     */
     private String ipv6SubnetCidr(String block, int offset) {
-        String network = block.substring(0, block.indexOf("::"));
-        int separator = network.lastIndexOf(':');
-        int subnet = Integer.parseInt(network.substring(separator + 1), 16) + offset;
-        return network.substring(0, separator + 1) + Integer.toHexString(subnet) + "::/64";
+        byte[] address = InetAddress.ofLiteral(block.substring(0, block.indexOf('/'))).getAddress();
+        address[7] = (byte) (address[7] + offset);
+        StringBuilder cidr = new StringBuilder();
+        for (int i = 0; i < 8; i += 2) {
+            cidr.append(Integer.toHexString(((address[i] & 0xff) << 8) | (address[i + 1] & 0xff))).append(':');
+        }
+        return cidr.append(":/64").toString();
     }
 
     private XmlPath describeEndpoint(String endpointId) {
