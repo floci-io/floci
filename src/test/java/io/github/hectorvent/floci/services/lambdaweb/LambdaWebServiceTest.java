@@ -915,6 +915,39 @@ class LambdaWebServiceTest {
         }
     }
 
+    @Test
+    void aPolicyResourceIsReadByItsServiceAndResourceOnly() {
+        LambdaWebService service = service();
+        String missing = "arn:aws:lambda:us-east-1:000000000000:web-function/missing";
+        String function = "web-function/missing";
+        for (String accepted : List.of("arn:aws-cn:lambda:us-east-1:000000000000:" + function,
+                "arn::lambda:us-east-1:000000000000:" + function, "xyz:aws:lambda:us-east-1:000000000000:" + function,
+                "ARN:aws:lambda:us-east-1:000000000000:" + function, "arn:aws:lambda:*:*:" + function,
+                "arn:aws:lambda:foo:000000000000:" + function, "arn:aws:lambda:us-west-2:111122223333:" + function,
+                "arn:aws:lambda:us-east-1::" + function, missing + "*", missing + "/", missing + "/endpoint/x:y",
+                missing + "//x")) {
+            assertEquals("ResourceNotFoundException", error(() -> service.putResourcePolicy(REGION, missing,
+                    policy(resourcePolicy("\"" + accepted + "\"")))).getErrorCode(), accepted);
+        }
+        for (String refused : List.of("arn:aws:lambda*:us-east-1:000000000000:" + function,
+                "arn:aws:LAMBDA:us-east-1:000000000000:" + function, "arn:aws:lambda:us-east-1:" + function,
+                "arn:aws:lambda:us-east-1:000000000000:Web-Function/missing", missing + ":1", missing + "**",
+                missing + "x", missing + "x*", missing + "*/endpoint/x", missing + "?",
+                "arn:aws:lambda:us-east-1:000000000000:web-function/miss*", "arn:aws:lambda:us-east-1:000000000000:*",
+                "*")) {
+            assertEquals("Policy has syntax errors.", message(() -> service.putResourcePolicy(REGION, missing,
+                    policy(resourcePolicy("\"" + refused + "\"")))), refused);
+        }
+        String other = "arn:aws:lambda:us-east-1:000000000000:web-function/other";
+        assertEquals("Policy has syntax errors.", message(() -> service.putResourcePolicy(REGION, missing,
+                policy(resourcePolicy("[\"" + missing + "\",\"" + other + "\"]")))));
+    }
+
+    private static String resourcePolicy(String resource) {
+        return "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"000000000000\"},"
+                + "\"Action\":\"lambda:GetWebFunction\",\"Resource\":" + resource + "}]}";
+    }
+
     private static String principalPolicy(String effect, String principal, String functionArn) {
         return "{\"Statement\":[" + statement(effect, principal, functionArn) + "]}";
     }

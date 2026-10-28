@@ -1524,11 +1524,19 @@ public class LambdaWebService implements Resettable {
                 throw policySyntax();
             }
         }
+        String function = AwsArnUtils.parse(functionArn).resource();
         for (String resource : policyValues(statement.get("Resource"))) {
-            if (!resource.equals(functionArn) && !resource.startsWith(functionArn + "/")) {
+            if (!namesFunction(resource, function)) {
                 throw policySyntax();
             }
         }
+    }
+
+    /** AWS reads only the service and the resource, so any prefix, partition, region or account passes. */
+    private static boolean namesFunction(String resource, String function) {
+        String[] parts = resource.split(":", 6);
+        return parts.length == 6 && "lambda".equals(parts[2])
+                && (parts[5].equals(function) || parts[5].equals(function + "*") || parts[5].startsWith(function + "/"));
     }
 
     private static void requireNotPublic(JsonNode statement) {

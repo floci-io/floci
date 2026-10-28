@@ -527,6 +527,12 @@ class LambdaWebIntegrationTest {
                 .then().statusCode(400)
                 .body("message", equalTo("Lambda blocked the creation of this policy because it would grant public"
                         + " access to your function."));
+        given().contentType("application/json")
+                .body(Map.of("Policy", publicPolicy.replace(ARN, "arn:aws:lambda:*:*:web-function/" + FN)))
+                .when().put(policyPath)
+                .then().statusCode(400)
+                .body("message", equalTo("Lambda blocked the creation of this policy because it would grant public"
+                        + " access to your function."));
         given().contentType("application/json").body(Map.of("Policy", publicPolicy.replace("\"Allow\"", "\"Maybe\"")))
                 .when().put(policyPath)
                 .then().statusCode(400)
