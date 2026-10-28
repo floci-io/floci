@@ -1638,7 +1638,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /**
      * Logs, Secrets Manager and KMS targets depend on the serving operation and the request's partition, STS
      * targets on the serving operation;
-     * Scheduler and Pipes targets on the request's partition, which those services mint their ARNs in; and the
+     * Scheduler and Pipes targets on the request's partition, which those services mint their ARNs in, as are
+     * API Gateway's path ARNs; and the
      * targets of a namespace the table of request resources reads on {@code operation}, the one the request is
      * dispatched as (see {@link RequestResources}).
      */
@@ -1656,7 +1657,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         if ("sts".equals(credentialScope)) {
             return arnBuilder.buildStsResources(action, ctx);
         }
-        if ("scheduler".equals(credentialScope) || "pipes".equals(credentialScope) || "dsql".equals(credentialScope)) {
+        if ("scheduler".equals(credentialScope) || "pipes".equals(credentialScope) || "dsql".equals(credentialScope)
+                || "apigateway".equals(credentialScope)) {
             return arnBuilder.buildResources(credentialScope, ctx, region, accountId, requestPartition());
         }
         return arnBuilder.buildResources(credentialScope, operation, ctx, region, accountId,

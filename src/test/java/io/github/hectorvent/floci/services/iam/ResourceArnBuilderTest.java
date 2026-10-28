@@ -1897,6 +1897,70 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void apiGatewayRoutesResolveThePathTheyNameWithNoAccount() {
+        request("/restapis/abc123/stages");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        // Each segment is decoded as the router decodes it, so an encoded id names the API it routes to.
+        request("/restapis/%61bc123/stages");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        // Dot segments are resolved after decoding, as the router resolves them.
+        request("/restapis/x/%2E%2E/abc123/stages");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        request("/restapis/%2e/abc123");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        // Empty segments are dropped once the dots are resolved, as the router collapses them.
+        request("/restapis//abc123");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        request("/restapis/x/..//abc123");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        request("/restapis/x//../abc123");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/x/abc123"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        request("/v2/tags/arn:aws:apigateway:us-east-1::/apis/x/%2E%2E/a1b2c3");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        request("/restapis/");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        // An HTTP or WebSocket API path's /v2 is not part of the resource it names.
+        request("/v2/apis");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        request("/v2/apis/a1b2c3/stages/prod");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis/a1b2c3/stages/prod"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        // A stage name keeps the characters it is written with, sent literally or encoded.
+        request("/v2/apis/a1b2c3/stages/$default");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis/a1b2c3/stages/$default"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        request("/v2/apis/a1b2c3/stages/%24default");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/apis/a1b2c3/stages/$default"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        request("/v2domains");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/v2domains"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        // A tagging route names the ARN it tags still encoded, as AWS names its Tags resource.
+        request("/v2/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        request("/v2/tags/arn:aws:apigateway:us-east-1::/apis/a1b2c3");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fa1b2c3"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        request("/tags/arn%3aaws%3aapigateway%3aus-east-1%3a%3a%2frestapis%2fabc123");
+        assertEquals(List.of("arn:aws:apigateway:us-east-1::/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Frestapis%2Fabc123"),
+                builder.buildResources("apigateway", ctx, "us-east-1", ACCOUNT));
+        request("/restapis");
+        assertEquals(List.of("arn:aws-us-gov:apigateway:us-gov-west-1::/restapis"),
+                builder.buildResources("apigateway", ctx, "us-gov-west-1", ACCOUNT, "aws-us-gov"));
+    }
+
+    @Test
     void schedulerRoutesResolveTheScheduleInItsGroupTheGroupOrTheTaggedArn() {
         when(uriInfo.getPath()).thenReturn("/schedules/nightly");
         assertEquals("arn:aws:scheduler:us-east-1:000000000000:schedule/default/nightly",

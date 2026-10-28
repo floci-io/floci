@@ -1525,7 +1525,7 @@ action is denied. The routed protocol determines the status, not just the reques
 
 A request is checked against the resources it names. Floci builds their ARNs itself for S3, Lambda,
 SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge Scheduler, EventBridge
-Pipes, Aurora DSQL, EKS, CloudWatch Logs, Secrets Manager and STS. For Elastic Load Balancing, ECR,
+Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs, Secrets Manager and STS. For Elastic Load Balancing, ECR,
 Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
 AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract and Amazon Translate they come from a
@@ -1612,7 +1612,17 @@ API Gateway's management API, v1 and v2, is checked as `apigateway:` and the HTT
 method, `apigateway:GET`, `apigateway:POST` and so on, except `RejectDomainNameAccessAssociation`
 (`apigateway:RejectAccessAssociation`) and `PutRoutingRule` (`apigateway:UpdateRoutingRule`); the
 v2 routing rule, portal and portal product operations, which AWS checks as actions of their own
-names, are not served.
+names, are not served. A management call is checked against the path it names, in the request's
+Region and partition and with no account, as the
+[API Gateway ARN reference](https://docs.aws.amazon.com/apigateway/latest/developerguide/arn-format-reference.html)
+gives it: `GET /restapis/<id>/stages` against `arn:aws:apigateway:<region>::/restapis/<id>/stages`.
+The `/v2` that starts an HTTP or WebSocket API path is not part of the resource, so `GET /v2/apis`
+is checked against `arn:aws:apigateway:<region>::/apis`. The path is read as the router reads it,
+without a trailing `/`: each segment decoded, then `.` dropped and `..` resolved, so `/restapis/%61bc`
+and `/restapis/x/%2E%2E/abc` are both checked against `::/restapis/abc`, the API they reach, and a
+stage keeps its name as written, `::/apis/<id>/stages/$default`. Only the ARN a
+tagging route names, everything after `/tags/` whether its slashes are sent encoded or not, is
+re-encoded, in SigV4 canonical form, as the `Tags` resource's `/tags/<UrlEncodedResourceARN>` gives it.
 
 A Scheduler request is checked against `schedule/<group>/<name>`, the group from the body's
 `GroupName` on a create or an update, from `groupName` otherwise, and `default` when neither names

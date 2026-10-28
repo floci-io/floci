@@ -402,6 +402,7 @@ class IamEnforcementFilterTest {
                 + "SignedHeaders=host, Signature=abc";
         requestContext.setAccountId("000000000000");
         requestContext.setRegion("us-east-1");
+        requestContext.setPartition("aws");
         when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
         when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
         when(containerRequest.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
@@ -417,7 +418,7 @@ class IamEnforcementFilterTest {
 
         verify(actionRegistry).resolveRoute("apigateway", containerRequest);
         verify(actionRegistry, never()).resolveRoute("iam", containerRequest);
-        verify(arnBuilder).buildResources(eq("apigateway"), any(), eq(containerRequest), eq("us-east-1"), eq("000000000000"), eq("aws"));
+        verify(arnBuilder).buildResources("apigateway", containerRequest, "us-east-1", "000000000000", "aws");
         verify(conditionContextResolver).resolve("apigateway", "apigateway:POST", containerRequest);
     }
 
@@ -444,6 +445,31 @@ class IamEnforcementFilterTest {
         newFilter(resourceInfo(SchedulerController.class)).filter(containerRequest);
 
         verify(arnBuilder).buildResources("scheduler", containerRequest, "xx-local-1", "000000000000", "aws-cn");
+    }
+
+    @Test
+    void apiGatewayResourcesAreBuiltInTheRequestsPartition() {
+        // A Region no partition publishes takes the deployment's partition, the one its path ARNs are in.
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260924/xx-local-1/apigateway/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        requestContext.setRegion("xx-local-1");
+        requestContext.setPartition("aws-cn");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
+                .thenReturn(ProtocolClaim.rest());
+        when(catalog.byResourceClass(ApiGatewayController.class))
+                .thenReturn(Optional.of(descriptor("apigateway", ServiceProtocol.REST_JSON,
+                        Set.of("apigateway", "execute-api"), ApiGatewayController.class)));
+        when(actionRegistry.resolveRoute("apigateway", containerRequest)).thenReturn("apigateway:GET");
+        when(arnBuilder.buildResources(any(), any(), any(), any(), any())).thenReturn(List.of("*"));
+        when(iamService.resolveCallerContext(eq("AKIAUSER"), any())).thenReturn(CallerContext.of(List.of()));
+
+        newFilter(resourceInfo(ApiGatewayController.class)).filter(containerRequest);
+
+        verify(arnBuilder).buildResources("apigateway", containerRequest, "xx-local-1", "000000000000", "aws-cn");
     }
 
     @Test

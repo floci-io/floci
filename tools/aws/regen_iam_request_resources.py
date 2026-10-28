@@ -135,8 +135,8 @@ CLIENTS_NOT_READ: dict[str, str] = {
 }
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ("dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes", "resource-groups",
-              "s3", "scheduler", "secretsmanager", "sns", "sqs", "ssm", "sts")
+HAND_BUILT = ("apigateway", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes",
+              "resource-groups", "s3", "scheduler", "secretsmanager", "sns", "sqs", "ssm", "sts")
 
 _LATER = "not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
 _REST = "REST: its requests name their resources in the path, which RequestResources does not read yet"
@@ -146,7 +146,6 @@ NOT_COVERED: dict[str, str] = {
     "access-analyzer": _REST,
     "account": _REST,
     "airflow": _REST,
-    "apigateway": _REST,
     "app-integrations": _REST,
     "appconfig": _REST,
     "application-autoscaling": "not read yet: a scalable target's ARN ends in an id the service mints, "
