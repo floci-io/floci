@@ -353,12 +353,7 @@ public class RedshiftEventService {
         subscription.setSnsTopicArn(snsTopicArn);
         subscription.setStatus("active");
         subscription.setSubscriptionCreationTime(clock.instant().truncatedTo(ChronoUnit.MILLIS));
-        subscription.setSourceType(blankToNull(sourceType));
-        subscription.setSourceIdsList(sourceIds == null ? new ArrayList<>() : new ArrayList<>(sourceIds));
-        subscription.setEventCategoriesList(categories == null ? new ArrayList<>() : new ArrayList<>(categories));
-        subscription.setSeverity(blankToNull(severity) == null ? null : severity.toUpperCase(Locale.ROOT));
-        subscription.setEnabled(enabled == null || enabled);
-        subscription.setTags(tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags));
+        applyConfiguration(subscription, sourceType, sourceIds, categories, severity, enabled, tags);
         subscriptions.put(key(name), subscription);
         subscriptions.flush();
         return subscription;
@@ -599,14 +594,20 @@ public class RedshiftEventService {
         updated.setSubscriptionCreationTime(prior.getSubscriptionCreationTime());
         updated.setSnsTopicArn(snsTopicArn);
         updated.setStatus(restoredStatus != null ? restoredStatus : changedTopic ? "active" : prior.getStatus());
-        updated.setSourceType(blankToNull(sourceType));
-        updated.setSourceIdsList(new ArrayList<>(sourceIds == null ? List.of() : sourceIds));
-        updated.setEventCategoriesList(new ArrayList<>(categories == null ? List.of() : categories));
-        updated.setSeverity(blankToNull(severity) == null ? null : severity.toUpperCase(Locale.ROOT));
-        updated.setEnabled(enabled == null || enabled);
-        updated.setTags(new LinkedHashMap<>(tags == null ? Map.of() : tags));
+        applyConfiguration(updated, sourceType, sourceIds, categories, severity, enabled, tags);
         subscriptions.put(key(name), updated);
         subscriptions.flush();
         return updated;
+    }
+
+    private static void applyConfiguration(EventSubscription subscription, String sourceType,
+                                           List<String> sourceIds, List<String> categories, String severity,
+                                           Boolean enabled, Map<String, String> tags) {
+        subscription.setSourceType(blankToNull(sourceType));
+        subscription.setSourceIdsList(sourceIds == null ? new ArrayList<>() : new ArrayList<>(sourceIds));
+        subscription.setEventCategoriesList(categories == null ? new ArrayList<>() : new ArrayList<>(categories));
+        subscription.setSeverity(blankToNull(severity) == null ? null : severity.toUpperCase(Locale.ROOT));
+        subscription.setEnabled(enabled == null || enabled);
+        subscription.setTags(tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags));
     }
 }

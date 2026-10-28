@@ -63,15 +63,13 @@ public class RedshiftQueryHandler {
     private final RegionResolver regionResolver;
     private final RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer;
     private final IamEnforcementFilter iamEnforcementFilter;
-    private final RedshiftApiEventPublisher apiEvents;
 
     @Inject
     public RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
                                 EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
                                 RegionResolver regionResolver,
                                 RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer,
-                                IamEnforcementFilter iamEnforcementFilter,
-                                RedshiftApiEventPublisher apiEvents) {
+                                IamEnforcementFilter iamEnforcementFilter) {
         this.service = service;
         this.credentialBroker = credentialBroker;
         this.config = config;
@@ -79,15 +77,6 @@ public class RedshiftQueryHandler {
         this.regionResolver = regionResolver;
         this.zeroEtlConsumer = zeroEtlConsumer;
         this.iamEnforcementFilter = iamEnforcementFilter;
-        this.apiEvents = apiEvents;
-    }
-
-    RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
-                         EmulatorConfig config, RedshiftIamDbUserResolver iamDbUserResolver,
-                         RegionResolver regionResolver, RedshiftDynamoDbZeroEtlConsumer zeroEtlConsumer,
-                         IamEnforcementFilter iamEnforcementFilter) {
-        this(service, credentialBroker, config, iamDbUserResolver, regionResolver, zeroEtlConsumer,
-                iamEnforcementFilter, null);
     }
 
     RedshiftQueryHandler(RedshiftService service, RedshiftCredentialBroker credentialBroker,
@@ -101,14 +90,6 @@ public class RedshiftQueryHandler {
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String authorizationHeader) {
-        Response response = handleRequest(action, params, authorizationHeader);
-        if (apiEvents != null && response.getStatusInfo().getFamily() == Response.Status.Family.SUCCESSFUL) {
-            apiEvents.publish(action);
-        }
-        return response;
-    }
-
-    private Response handleRequest(String action, MultivaluedMap<String, String> params, String authorizationHeader) {
         switch (action) {
         case "CreateCluster" -> {
             String identifier = params.getFirst("ClusterIdentifier");

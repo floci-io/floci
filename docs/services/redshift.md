@@ -79,23 +79,6 @@ existing subscription; changing `SubscriptionName` replaces it. Removing optiona
 filters from the template clears them. Stack deletion removes the subscription.
 The attributes follow the [CloudFormation resource schema](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-redshift-eventsubscription.html).
 
-### EventBridge
-
-Successful Redshift management writes also emit a simulated API event to the default
-EventBridge bus in the request's account and region. Match `source: aws.redshift`,
-`detail-type: AWS API Call via CloudTrail` and `detail.eventName`, for example
-`CreateClusterParameterGroup`. This uses the
-[documented API-event route](https://docs.aws.amazon.com/eventbridge/latest/ref/events-ref-redshift.html).
-Read operations and failed requests do not emit these events. Disabling EventBridge
-stops publication without affecting Redshift operations.
-
-This route does not require a CloudTrail trail in Floci. It supplies operation,
-time, region and account metadata, without a full audit identity, request parameters
-or response elements. Passwords and other operation data are never passed to this
-publisher. Direct `Redshift Integration Monitoring`, `Redshift Integration Configuration`
-and `Redshift Integration Operation` event payloads are not implemented. The Redshift
-Data API's statement events are separate; see [Redshift Data API](redshift-data.md).
-
 ## Supported Actions
 
 <!-- floci:actions:start -->
