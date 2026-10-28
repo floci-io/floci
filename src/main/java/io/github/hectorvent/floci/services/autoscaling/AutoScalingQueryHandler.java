@@ -602,18 +602,23 @@ public class AutoScalingQueryHandler {
     // ── Instances ─────────────────────────────────────────────────────────────
 
     private Response handleDescribeAutoScalingInstances(MultivaluedMap<String, String> p, String region) {
-        List<AsgInstance> instances = service.describeAutoScalingInstances(
+        List<AutoScalingService.AutoScalingInstanceDetails> instances = service.describeAutoScalingInstances(
                 region, memberList(p, "InstanceIds"));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeAutoScalingInstancesResponse", NS)
                   .start("DescribeAutoScalingInstancesResult")
                     .start("AutoScalingInstances");
-        for (AsgInstance inst : instances) {
+        for (AutoScalingService.AutoScalingInstanceDetails details : instances) {
+            AsgInstance inst = details.instance();
+            // This API spells health in capitals (HEALTHY, UNHEALTHY); the instance list of
+            // DescribeAutoScalingGroups and SetInstanceHealth use the stored Healthy and Unhealthy.
+            String healthStatus = inst.getHealthStatus() == null ? null : inst.getHealthStatus().toUpperCase(Locale.ROOT);
             xml.start("member")
                .elem("InstanceId", inst.getInstanceId())
+               .elem("AutoScalingGroupName", details.autoScalingGroupName())
                .elem("AvailabilityZone", inst.getAvailabilityZone())
                .elem("LifecycleState", inst.getLifecycleState())
-               .elem("HealthStatus", inst.getHealthStatus())
+               .elem("HealthStatus", healthStatus)
                .elem("ProtectedFromScaleIn", String.valueOf(inst.isProtectedFromScaleIn()));
             if (inst.getLaunchConfigurationName() != null) {
                 xml.elem("LaunchConfigurationName", inst.getLaunchConfigurationName());

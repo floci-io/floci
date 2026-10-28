@@ -766,15 +766,19 @@ public class AutoScalingService implements PassedRoleLookup {
 
     // ── Instance management ────────────────────────────────────────────────────
 
-    public List<AsgInstance> describeAutoScalingInstances(String region, List<String> instanceIds) {
-        List<AsgInstance> all = groups.values().stream()
+    /** An instance as {@code DescribeAutoScalingInstances} reports it: with the name of the group it belongs to. */
+    public record AutoScalingInstanceDetails(String autoScalingGroupName, AsgInstance instance) {}
+
+    public List<AutoScalingInstanceDetails> describeAutoScalingInstances(String region, List<String> instanceIds) {
+        List<AutoScalingInstanceDetails> all = groups.values().stream()
                 .filter(Objects::nonNull)
                 .filter(g -> region.equals(g.getRegion()))
-                .flatMap(g -> g.getInstances().stream())
+                .flatMap(g -> g.getInstances().stream()
+                        .map(i -> new AutoScalingInstanceDetails(g.getAutoScalingGroupName(), i)))
                 .collect(Collectors.toList());
         if (instanceIds != null && !instanceIds.isEmpty()) {
             Set<String> ids = new HashSet<>(instanceIds);
-            return all.stream().filter(i -> ids.contains(i.getInstanceId())).collect(Collectors.toList());
+            return all.stream().filter(d -> ids.contains(d.instance().getInstanceId())).collect(Collectors.toList());
         }
         return all;
     }
