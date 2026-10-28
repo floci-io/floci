@@ -8,14 +8,19 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbConditionKeys;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbTableNames;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
+import io.github.hectorvent.floci.services.iam.IamResourceTagActions;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.s3.S3ObjectActions;
 import io.github.hectorvent.floci.services.s3.S3ObjectKeys;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -86,6 +91,8 @@ public class IamConditionContextResolver {
     private final Instance<DynamoDbFacade> dynamoDbFacade;
     private final Instance<Ec2Service> ec2Service;
     private final Instance<S3Service> s3Service;
+    private final Instance<SqsService> sqsService;
+    private final Instance<SnsService> snsService;
     private final Instance<CloudWatchLogsService> logsService;
     private final RequestContext requestContext;
     private final EmulatorConfig config;
@@ -101,18 +108,22 @@ public class IamConditionContextResolver {
     public IamConditionContextResolver(Instance<DynamoDbFacade> dynamoDbFacade,
                                        Instance<Ec2Service> ec2Service,
                                        Instance<S3Service> s3Service,
+                                       Instance<SqsService> sqsService,
+                                       Instance<SnsService> snsService,
                                        Instance<CloudWatchLogsService> logsService,
                                        RequestContext requestContext,
                                        EmulatorConfig config,
                                        CurrentVertxRequest currentVertxRequest,
                                        ResolvedServiceCatalog serviceCatalog) {
-        this(dynamoDbFacade, ec2Service, s3Service, logsService, requestContext, config, currentVertxRequest,
-                serviceCatalog, Clock.systemUTC());
+        this(dynamoDbFacade, ec2Service, s3Service, sqsService, snsService, logsService, requestContext, config,
+                currentVertxRequest, serviceCatalog, Clock.systemUTC());
     }
 
     IamConditionContextResolver(Instance<DynamoDbFacade> dynamoDbFacade,
                                 Instance<Ec2Service> ec2Service,
                                 Instance<S3Service> s3Service,
+                                Instance<SqsService> sqsService,
+                                Instance<SnsService> snsService,
                                 Instance<CloudWatchLogsService> logsService,
                                 RequestContext requestContext,
                                 EmulatorConfig config,
@@ -121,6 +132,8 @@ public class IamConditionContextResolver {
         this.dynamoDbFacade = dynamoDbFacade;
         this.ec2Service = ec2Service;
         this.s3Service = s3Service;
+        this.sqsService = sqsService;
+        this.snsService = snsService;
         this.logsService = logsService;
         this.requestContext = requestContext;
         this.config = config;
@@ -137,6 +150,8 @@ public class IamConditionContextResolver {
             case "dynamodb" -> dynamoDbConditionContext(action, ctx);
             case "iam" -> iamConditionContext(action, ctx);
             case "logs" -> logsConditionContext(action, ctx);
+            case "sqs" -> sqsConditionContext(action, ctx);
+            case "sns" -> snsConditionContext(action, ctx);
             default -> null;
         };
     }
@@ -655,6 +670,245 @@ public class IamConditionContextResolver {
         }
     }
 
+    // ── SQS ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * {@code aws:ResourceTag/<key>} from the queue named by the request. The queue URL is read from
+     * the same place the handler reads it: a form POST's body, a Query GET's parameters, or a JSON
+     * body. Reading only the body for a form POST keeps the tag off a decoy URL parameter that the
+     * handler never acts on. The URL carries the owning account, so the tags are read from that
+     * account, while {@code ListQueueTags} itself stays caller-scoped. A queue that does not exist
+     * offers no keys and is left for the handler to report.
+     */
+    private Map<String, List<String>> sqsConditionContext(String action, ContainerRequestContext ctx) {
+        if (!IamResourceTagActions.supports(action) || !sqsService.isResolvable()) {
+            return null;
+        }
+        String region = requestRegion();
+        Map<String, String> tags;
+        try {
+            tags = switch (action) {
+                case "sqs:CreateQueue" -> null;
+                case "sqs:GetQueueUrl" -> queueTagsByName(requestField(ctx, "QueueName"), region);
+                case "sqs:StartMessageMoveTask", "sqs:ListMessageMoveTasks" ->
+                        queueTagsFromArn(requestField(ctx, "SourceArn"), region);
+                case "sqs:CancelMessageMoveTask" ->
+                        queueTagsForMoveTask(requestField(ctx, "TaskHandle"), region);
+                default -> {
+                    String queueUrl = requestField(ctx, "QueueUrl");
+                    yield queueUrl == null || queueUrl.isBlank() ? null : listQueueTagsForPolicy(queueUrl);
+                }
+            };
+        } catch (AwsException e) {
+            if (!"AWS.SimpleQueueService.NonExistentQueue".equals(e.getErrorCode())) {
+                throw e;
+            }
+            return null;
+        }
+        return resourceTagConditions(tags);
+    }
+
+    /** The tags of the queue a {@code GetQueueUrl} names by {@code QueueName}. */
+    private Map<String, String> queueTagsByName(String queueName, String region) {
+        if (queueName == null || queueName.isBlank()) {
+            return null;
+        }
+        return listQueueTagsForPolicy(sqsService.get().getQueueUrl(queueName, region));
+    }
+
+    /**
+     * The tags of the queue a message-move action names by {@code SourceArn}. The ARN carries the
+     * owning account and Region, so the lookup runs in the queue's account.
+     */
+    private Map<String, String> queueTagsFromArn(String sourceArn, String region) {
+        if (sourceArn == null || !AwsArnUtils.isArnFor(sourceArn, "sqs")) {
+            return null;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(sourceArn);
+        String queueName = arn.resource();
+        if (queueName.isBlank() || queueName.contains("/") || arn.accountId().isBlank()) {
+            return null;
+        }
+        String queueRegion = arn.region().isBlank() ? region : arn.region();
+        return RequestScopes.callAs(arn.accountId(), () -> {
+            String queueUrl = sqsService.get().getQueueUrl(queueName, queueRegion);
+            return sqsService.get().listQueueTags(queueUrl, queueRegion);
+        });
+    }
+
+    /** The tags of the queue a {@code CancelMessageMoveTask} task belongs to. */
+    private Map<String, String> queueTagsForMoveTask(String taskHandle, String region) {
+        if (taskHandle == null || taskHandle.isBlank()) {
+            return null;
+        }
+        String sourceArn = sqsService.get().moveTaskSourceArn(taskHandle).orElse(null);
+        return queueTagsFromArn(sourceArn, region);
+    }
+
+    /**
+     * The queue's tags read in the account its URL names, not the caller's. This mirrors the
+     * message operations, which resolve the queue from the URL too; the public
+     * {@code ListQueueTags} keeps reading the caller's account, which the SQS reference scopes that
+     * operation to.
+     */
+    private Map<String, String> listQueueTagsForPolicy(String queueUrl) {
+        String owner = queueOwnerAccount(queueUrl);
+        if (owner == null) {
+            return sqsService.get().listQueueTags(queueUrl, requestRegion());
+        }
+        return RequestScopes.callAs(owner, () -> sqsService.get().listQueueTags(queueUrl, requestRegion()));
+    }
+
+    /** The 12-digit account in a queue URL's path, or null when it names none. */
+    static String queueOwnerAccount(String queueUrl) {
+        try {
+            String path = URI.create(queueUrl).getPath();
+            if (path == null) {
+                return null;
+            }
+            // Execution keys a queue by the last two segments, <account>/<name>, so a numeric
+            // prefix earlier in the path is not the owner.
+            String[] segments = path.split("/");
+            int accountIndex = segments.length - 2;
+            if (accountIndex >= 0 && segments[accountIndex].matches("[0-9]{12}")) {
+                return segments[accountIndex];
+            }
+        } catch (IllegalArgumentException ignored) {
+            LOG.debugv("Queue URL {0} does not parse, so its tags are read in the request account", queueUrl);
+        }
+        return null;
+    }
+
+    // ── SNS ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * {@code aws:ResourceTag/<key>} from the topic named by the request. {@code Publish} also
+     * accepts {@code TargetArn} for an endpoint and {@code PhoneNumber} for SMS, neither of which
+     * is a tagged topic, so only {@code TopicArn} yields keys. The ARN is read from the same place
+     * the handler reads it, so a decoy URL parameter on a form POST never supplies the tags. The ARN
+     * carries the owning account, so a topic in another account is read as that account's topic.
+     */
+    private Map<String, List<String>> snsConditionContext(String action, ContainerRequestContext ctx) {
+        if (!IamResourceTagActions.supports(action) || !snsService.isResolvable()) {
+            return null;
+        }
+        String topicArn = snsTopicForAction(action, ctx);
+        if (topicArn == null || !AwsArnUtils.isArnFor(topicArn, "sns")) {
+            return null;
+        }
+        Map<String, String> tags;
+        try {
+            tags = snsService.get().listTagsForResource(topicArn,
+                    AwsArnUtils.regionOrDefault(topicArn, requestRegion()));
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            return null;
+        }
+        return resourceTagConditions(tags);
+    }
+
+    /**
+     * The topic each SNS action actually names: {@code ResourceArn} for the tagging and data
+     * protection actions, the topic of a {@code SubscriptionArn} for the subscription actions,
+     * and the effective target for {@code Publish}, which prefers {@code TopicArn} over
+     * {@code TargetArn} and sends SMS whenever {@code PhoneNumber} is present.
+     */
+    private String snsTopicForAction(String action, ContainerRequestContext ctx) {
+        return switch (action) {
+            case "sns:CreateTopic" -> null;
+            case "sns:TagResource", "sns:UntagResource", "sns:ListTagsForResource",
+                 "sns:GetDataProtectionPolicy", "sns:PutDataProtectionPolicy" ->
+                    requestField(ctx, "ResourceArn");
+            case "sns:Unsubscribe", "sns:GetSubscriptionAttributes", "sns:SetSubscriptionAttributes" ->
+                    topicOfSubscription(requestField(ctx, "SubscriptionArn"));
+            case "sns:Publish" -> "PublishBatch".equals(requestOperation(ctx))
+                    ? requestField(ctx, "TopicArn")
+                    : publishTopic(ctx);
+            default -> requestField(ctx, "TopicArn");
+        };
+    }
+
+    private String publishTopic(ContainerRequestContext ctx) {
+        if (requestField(ctx, "PhoneNumber") != null) {
+            return null;
+        }
+        String topicArn = requestField(ctx, "TopicArn");
+        String targetArn = requestField(ctx, "TargetArn");
+        String effectiveArn = topicArn != null ? topicArn : targetArn;
+        if (effectiveArn == null || !AwsArnUtils.isArnFor(effectiveArn, "sns")) {
+            return null;
+        }
+        String resource = AwsArnUtils.parse(effectiveArn).resource();
+        return resource.startsWith("endpoint/") || resource.startsWith("app/") ? null : effectiveArn;
+    }
+
+    /** A subscription ARN is its topic's ARN with one more {@code :<subscription-id>} segment. */
+    private static String topicOfSubscription(String subscriptionArn) {
+        if (subscriptionArn == null || !AwsArnUtils.isArnFor(subscriptionArn, "sns")) {
+            return null;
+        }
+        int colon = subscriptionArn.lastIndexOf(':');
+        return colon < 0 ? null : subscriptionArn.substring(0, colon);
+    }
+
+    private static Map<String, List<String>> resourceTagConditions(Map<String, String> tags) {
+        if (tags == null || tags.isEmpty()) {
+            return null;
+        }
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        tags.forEach((key, value) -> conditions.put(RESOURCE_TAG_PREFIX + key,
+                List.of(value == null ? "" : value)));
+        return conditions;
+    }
+
+    private String requestRegion() {
+        return requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
+    }
+
+    /**
+     * The operation the request names, which for SQS and SNS can differ from the IAM action:
+     * {@code PublishBatch} authorizes as {@code sns:Publish} but always targets {@code TopicArn}.
+     */
+    private String requestOperation(ContainerRequestContext ctx) {
+        String target = ctx.getHeaderString("X-Amz-Target");
+        if (target != null && !target.isBlank()) {
+            int dot = target.lastIndexOf('.');
+            return dot < 0 ? target : target.substring(dot + 1);
+        }
+        String action = formParameters(ctx).get("Action");
+        if (action == null) {
+            action = formParameters(ctx).get("Operation");
+        }
+        if (action != null && !action.isBlank()) {
+            return action;
+        }
+        JsonNode body = bufferedJsonBody(ctx);
+        if (body == null || !body.isObject()) {
+            return null;
+        }
+        if (body.hasNonNull("Action")) {
+            return body.get("Action").asText();
+        }
+        return body.hasNonNull("Operation") ? body.get("Operation").asText() : null;
+    }
+
+    /** A request member, from the form body/query the handler reads or from a JSON body. */
+    private String requestField(ContainerRequestContext ctx, String name) {
+        String value = formParameters(ctx).get(name);
+        return value == null ? jsonField(ctx, name) : value;
+    }
+
+    private String jsonField(ContainerRequestContext ctx, String name) {
+        JsonNode body = bufferedJsonBody(ctx);
+        if (body == null || !body.isObject() || !body.hasNonNull(name)) {
+            return null;
+        }
+        String value = body.get(name).asText().trim();
+        return value.isEmpty() ? null : value;
+    }
+
     // ── Request body access ─────────────────────────────────────────────────────
 
     /**
@@ -943,6 +1197,48 @@ public class IamConditionContextResolver {
                 ? config.defaultRegion() : requestContext.getRegion();
         DynamoDbFacade dynamoDb = dynamoDbFacade.get();
         return dynamoDb.tables().findTable(dynamoDb.scope(region), tableName).orElse(null);
+    }
+
+    /**
+     * {@code aws:ResourceTag/<key>} from the table a resolved resource ARN names, so a request
+     * that names several tables is evaluated once per table with only that table's tags.
+     *
+     * <p>The lookup uses the request's account and Region, which is the table the DynamoDB
+     * handler executes against: an ARN's account is not used, because the handler drops it and
+     * resolves the table name in the caller's account. Tags are read through
+     * {@link DynamoDbTableAccess#tableTags}, a keyed lookup by table name, so the native backend
+     * does not scan its tables and a backend that keeps tags separately from its table
+     * description (the local backend) still supplies them.
+     *
+     * <p>An index ARN names the table's index, which is not tagged separately, so it reads the
+     * table's tags as well. Any other shape, such as a stream or export ARN, is not a taggable
+     * table and offers no keys.
+     */
+    Map<String, List<String>> dynamoDbResourceTagContext(String resourceArn) {
+        if (resourceArn == null || !dynamoDbFacade.isResolvable()
+                || !AwsArnUtils.isArnFor(resourceArn, "dynamodb")) {
+            return null;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        String resource = arn.resource();
+        if (!resource.startsWith("table/")) {
+            return null;
+        }
+        String tableName = resource.substring("table/".length());
+        int index = tableName.indexOf('/');
+        if (index >= 0) {
+            if (!tableName.substring(index).startsWith("/index/")) {
+                return null;
+            }
+            tableName = tableName.substring(0, index);
+        }
+        if (tableName.isEmpty()) {
+            return null;
+        }
+        String region = requestRegion();
+        DynamoDbFacade dynamoDb = dynamoDbFacade.get();
+        Scope scope = dynamoDb.scope(region);
+        return resourceTagConditions(dynamoDb.tables().tableTags(scope, tableName));
     }
 
     /** The table targeted by a non-batch request. */

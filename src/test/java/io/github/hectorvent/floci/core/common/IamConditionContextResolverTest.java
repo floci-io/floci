@@ -6,6 +6,9 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbFacade;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbItemAccess;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess;
 import io.github.hectorvent.floci.services.dynamodb.backend.NativeDynamoDbBackend;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
@@ -14,6 +17,8 @@ import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.services.sqs.SqsService;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
@@ -59,6 +64,8 @@ class IamConditionContextResolverTest {
     private Instance<DynamoDbFacade> dynamoDbFacadeInstance;
     private Ec2Service ec2Service;
     private S3Service s3Service;
+    private SqsService sqsService;
+    private SnsService snsService;
     private CloudWatchLogsService logsService;
     private RequestContext requestContext;
     private EmulatorConfig config;
@@ -82,6 +89,14 @@ class IamConditionContextResolverTest {
         Instance<S3Service> s3ServiceInstance = mock(Instance.class);
         when(s3ServiceInstance.isResolvable()).thenReturn(true);
         when(s3ServiceInstance.get()).thenReturn(s3Service);
+        sqsService = mock(SqsService.class);
+        Instance<SqsService> sqsServiceInstance = mock(Instance.class);
+        when(sqsServiceInstance.isResolvable()).thenReturn(true);
+        when(sqsServiceInstance.get()).thenReturn(sqsService);
+        snsService = mock(SnsService.class);
+        Instance<SnsService> snsServiceInstance = mock(Instance.class);
+        when(snsServiceInstance.isResolvable()).thenReturn(true);
+        when(snsServiceInstance.get()).thenReturn(snsService);
         logsService = mock(CloudWatchLogsService.class);
         Instance<CloudWatchLogsService> logsServiceInstance = mock(Instance.class);
         when(logsServiceInstance.isResolvable()).thenReturn(true);
@@ -98,8 +113,8 @@ class IamConditionContextResolverTest {
         ServiceCatalog catalog = new ServiceCatalog(List.of(dynamo));
         when(serviceCatalog.matchTarget(any())).thenAnswer(call -> catalog.matchTarget(call.getArgument(0)));
         resolver = new IamConditionContextResolver(
-                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance, requestContext, config,
-                null, serviceCatalog);
+                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, sqsServiceInstance,
+                snsServiceInstance, logsServiceInstance, requestContext, config, null, serviceCatalog);
     }
 
     @Test
@@ -148,6 +163,17 @@ class IamConditionContextResolverTest {
                 .thenReturn(MediaType.valueOf("application/x-www-form-urlencoded"));
         when(containerRequest.getEntityStream())
                 .thenAnswer(invocation -> new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
+        return containerRequest;
+    }
+
+    /** A form POST whose URL query carries a value the handler never reads. */
+    private static ContainerRequestContext formRequestWithDecoyQuery(String body, String name, String decoy) {
+        ContainerRequestContext containerRequest = formRequest(body);
+        UriInfo uriInfo = mock(UriInfo.class);
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.putSingle(name, decoy);
+        when(uriInfo.getQueryParameters()).thenReturn(query);
+        when(containerRequest.getUriInfo()).thenReturn(uriInfo);
         return containerRequest;
     }
 
@@ -404,7 +430,8 @@ class IamConditionContextResolverTest {
     @SuppressWarnings("unchecked")
     private IamConditionContextResolver resolverAt(Instant now) {
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                mock(Instance.class), requestContext, config, null, serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
+                mock(Instance.class), mock(Instance.class), mock(Instance.class), requestContext, config, null,
+                serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
     }
 
     @Test
@@ -638,6 +665,265 @@ class IamConditionContextResolverTest {
         assertEquals(List.of("USER_bob"), resolver.dynamoDbBatchConditionContext(
                 "dynamodb:BatchGetItem", containerRequest,
                 "arn:aws:dynamodb:us-east-1:000000000000:table/OtherTable").get("dynamodb:LeadingKeys"));
+    }
+
+    // ── SQS and SNS resource tags ──────────────────────────────────────────────
+
+    @Test
+    void sqsQueueTagsComeFromTheFormQueueUrl() {
+        when(sqsService.listQueueTags("http://localhost:4566/111122223333/orders", "us-east-1"))
+                .thenReturn(Map.of("team", "blue"));
+
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), resolver.resolve("sqs",
+                "sqs:SendMessage", formRequest(
+                        "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F111122223333%2Forders")));
+    }
+
+    @Test
+    void sqsQueueTagsComeFromTheJsonQueueUrl() {
+        ContainerRequestContext request = mock(ContainerRequestContext.class);
+        when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json(
+                "{\"QueueUrl\":\"http://localhost:4566/111122223333/orders\",\"MessageBody\":\"hi\"}"));
+        when(sqsService.listQueueTags("http://localhost:4566/111122223333/orders", "us-east-1"))
+                .thenReturn(Map.of("team", "blue"));
+
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")),
+                resolver.resolve("sqs", "sqs:SendMessage", request));
+    }
+
+    @Test
+    void sqsTagsComeFromTheFormBodyNotADecoyUrlParameter() {
+        ContainerRequestContext request = formRequestWithDecoyQuery(
+                "Action=SendMessage&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F111122223333%2Fbody-queue",
+                "QueueUrl", "http://localhost:4566/111122223333/decoy-queue");
+        when(sqsService.listQueueTags("http://localhost:4566/111122223333/body-queue", "us-east-1"))
+                .thenReturn(Map.of("team", "blue"));
+
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")),
+                resolver.resolve("sqs", "sqs:SendMessage", request));
+    }
+
+    @Test
+    void snsTagsComeFromTheFormBodyNotADecoyUrlParameter() {
+        ContainerRequestContext request = formRequestWithDecoyQuery(
+                "Action=Publish&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A111122223333%3Abody-topic&Message=hi",
+                "TopicArn", "arn:aws:sns:us-east-1:111122223333:decoy-topic");
+        when(snsService.listTagsForResource("arn:aws:sns:us-east-1:111122223333:body-topic", "us-east-1"))
+                .thenReturn(Map.of("team", "blue"));
+
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")),
+                resolver.resolve("sns", "sns:Publish", request));
+    }
+
+    @Test
+    void sqsCreateQueueDoesNotTakeTagsFromADecoyQueueUrl() {
+        assertNull(resolver.resolve("sqs", "sqs:CreateQueue", formRequest(
+                "Action=CreateQueue&QueueName=orders"
+                        + "&QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F111122223333%2Ftagged")));
+    }
+
+    @Test
+    void sqsQueueTagsAreNotPopulatedForActionsOutsideTheScope() {
+        assertNull(resolver.resolve("sqs", "sqs:ListQueues",
+                formRequest("QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F111122223333%2Forders")));
+    }
+
+    @Test
+    void aQueueUrlNamesTheAccountItsTagsAreReadIn() {
+        assertEquals("111122223333",
+                IamConditionContextResolver.queueOwnerAccount("http://localhost:4566/111122223333/orders"));
+        assertEquals("111122223333",
+                IamConditionContextResolver.queueOwnerAccount("http://localhost:4566/111122223333/123456789012"));
+        assertEquals("222222222222",
+                IamConditionContextResolver.queueOwnerAccount(
+                        "http://localhost:4566/111111111111/222222222222/orders"));
+        assertNull(IamConditionContextResolver.queueOwnerAccount("123456789012"));
+        assertNull(IamConditionContextResolver.queueOwnerAccount("http://localhost:4566/123456789012"));
+        assertNull(IamConditionContextResolver.queueOwnerAccount("http://localhost:4566/orders"));
+        assertNull(IamConditionContextResolver.queueOwnerAccount("not a url"));
+    }
+
+    @Test
+    void sqsQueueThatDoesNotExistOffersNoKeys() {
+        when(sqsService.listQueueTags("http://localhost:4566/111122223333/missing", "us-east-1"))
+                .thenThrow(new AwsException("AWS.SimpleQueueService.NonExistentQueue",
+                        "The specified queue does not exist.", 400));
+
+        assertNull(resolver.resolve("sqs", "sqs:ReceiveMessage",
+                formRequest("QueueUrl=http%3A%2F%2Flocalhost%3A4566%2F111122223333%2Fmissing")));
+    }
+
+    @Test
+    void snsTopicTagsComeFromTheFormTopicArn() {
+        when(snsService.listTagsForResource("arn:aws:sns:us-east-1:111122223333:orders", "us-east-1"))
+                .thenReturn(Map.of("team", "blue"));
+
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), resolver.resolve("sns",
+                "sns:Publish", formRequest("Action=Publish&TopicArn=arn%3Aaws%3Asns%3Aus-east-1"
+                        + "%3A111122223333%3Aorders&Message=hi")));
+    }
+
+    @Test
+    void sqsGetQueueUrlResolvesTagsFromTheQueueName() {
+        when(sqsService.getQueueUrl("orders", "us-east-1"))
+                .thenReturn("http://localhost:4566/111122223333/orders");
+        when(sqsService.listQueueTags("http://localhost:4566/111122223333/orders", "us-east-1"))
+                .thenReturn(Map.of("team", "blue"));
+
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), resolver.resolve("sqs",
+                "sqs:GetQueueUrl", formRequest("Action=GetQueueUrl&QueueName=orders")));
+    }
+
+    @Test
+    void sqsMessageMoveActionsResolveTagsFromTheSourceArn() {
+        when(sqsService.getQueueUrl("orders", "us-east-1"))
+                .thenReturn("http://localhost:4566/111122223333/orders");
+        when(sqsService.listQueueTags("http://localhost:4566/111122223333/orders", "us-east-1"))
+                .thenReturn(Map.of("team", "blue"));
+
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), resolver.resolve("sqs",
+                "sqs:StartMessageMoveTask", formRequest("Action=StartMessageMoveTask"
+                        + "&SourceArn=arn%3Aaws%3Asqs%3Aus-east-1%3A111122223333%3Aorders")));
+    }
+
+    @Test
+    void sqsCancelMessageMoveTaskResolvesTheQueuesTagsFromTheHandle() {
+        when(sqsService.moveTaskSourceArn("task-1"))
+                .thenReturn(Optional.of("arn:aws:sqs:us-east-1:111122223333:orders"));
+        when(sqsService.getQueueUrl("orders", "us-east-1"))
+                .thenReturn("http://localhost:4566/111122223333/orders");
+        when(sqsService.listQueueTags("http://localhost:4566/111122223333/orders", "us-east-1"))
+                .thenReturn(Map.of("team", "blue"));
+
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), resolver.resolve("sqs",
+                "sqs:CancelMessageMoveTask", formRequest("Action=CancelMessageMoveTask&TaskHandle=task-1")));
+    }
+
+    @Test
+    void snsTaggingActionsResolveTheTopicFromResourceArn() {
+        when(snsService.listTagsForResource("arn:aws:sns:us-east-1:111122223333:orders", "us-east-1"))
+                .thenReturn(Map.of("team", "blue"));
+
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), resolver.resolve("sns",
+                "sns:ListTagsForResource", formRequest("Action=ListTagsForResource"
+                        + "&ResourceArn=arn%3Aaws%3Asns%3Aus-east-1%3A111122223333%3Aorders")));
+    }
+
+    @Test
+    void snsSubscriptionActionsResolveTheTopicsTags() {
+        when(snsService.listTagsForResource("arn:aws:sns:us-east-1:111122223333:orders", "us-east-1"))
+                .thenReturn(Map.of("team", "blue"));
+
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), resolver.resolve("sns",
+                "sns:GetSubscriptionAttributes", formRequest("Action=GetSubscriptionAttributes"
+                        + "&SubscriptionArn=arn%3Aaws%3Asns%3Aus-east-1"
+                        + "%3A111122223333%3Aorders%3Aabcd-1234")));
+    }
+
+    @Test
+    void snsPublishWithAPhoneNumberDoesNotUseTopicTags() {
+        assertNull(resolver.resolve("sns", "sns:Publish", formRequest("Action=Publish"
+                + "&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A111122223333%3Aorders"
+                + "&PhoneNumber=%2B15555550100&Message=hi")));
+    }
+
+    @Test
+    void snsPublishToAnEndpointTargetDoesNotUseTopicTags() {
+        assertNull(resolver.resolve("sns", "sns:Publish", formRequest("Action=Publish"
+                + "&TargetArn=arn%3Aaws%3Asns%3Aus-east-1%3A111122223333"
+                + "%3Aendpoint%2FGCM%2Fapp%2Fuuid&Message=hi")));
+    }
+
+    @Test
+    void snsPublishBatchUsesTheTopicEvenWhenAPhoneNumberIsPresent() {
+        when(snsService.listTagsForResource("arn:aws:sns:us-east-1:111122223333:orders", "us-east-1"))
+                .thenReturn(Map.of("team", "blue"));
+
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), resolver.resolve("sns",
+                "sns:Publish", formRequest("Action=PublishBatch"
+                        + "&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A111122223333%3Aorders"
+                        + "&PhoneNumber=%2B15555550100"
+                        + "&PublishBatchRequestEntries.member.1.Id=1"
+                        + "&PublishBatchRequestEntries.member.1.Message=hi")));
+    }
+
+    @Test
+    void snsPublishBatchOperationSpellingUsesTheTopicEvenWithAPhoneNumber() {
+        when(snsService.listTagsForResource("arn:aws:sns:us-east-1:111122223333:orders", "us-east-1"))
+                .thenReturn(Map.of("team", "blue"));
+
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), resolver.resolve("sns",
+                "sns:Publish", formRequest("Operation=PublishBatch"
+                        + "&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A111122223333%3Aorders"
+                        + "&PhoneNumber=%2B15555550100"
+                        + "&PublishBatchRequestEntries.member.1.Id=1"
+                        + "&PublishBatchRequestEntries.member.1.Message=hi")));
+    }
+
+    @Test
+    void snsPublishToATopicTargetUsesItsTags() {
+        when(snsService.listTagsForResource("arn:aws:sns:us-east-1:111122223333:orders", "us-east-1"))
+                .thenReturn(Map.of("team", "blue"));
+
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), resolver.resolve("sns",
+                "sns:Publish", formRequest("Action=Publish"
+                        + "&TargetArn=arn%3Aaws%3Asns%3Aus-east-1%3A111122223333%3Aorders&Message=hi")));
+    }
+
+    @Test
+    void snsCreateTopicDoesNotTakeTagsFromADecoyTopicArn() {
+        assertNull(resolver.resolve("sns", "sns:CreateTopic", formRequest("Action=CreateTopic"
+                + "&Name=orders&TopicArn=arn%3Aaws%3Asns%3Aus-east-1%3A111122223333%3Atagged")));
+    }
+
+    @Test
+    void snsPublishToANonTopicTargetOffersNoKeys() {
+        assertNull(resolver.resolve("sns", "sns:Publish",
+                formRequest("Action=Publish&PhoneNumber=%2B15555550100&Message=hi")));
+        assertNull(resolver.resolve("sns", "sns:CreateTopic",
+                formRequest("Name=orders")));
+    }
+
+    @Test
+    void dynamoDbResourceTagsReadTheExecutionAccountAndRegion() {
+        requestContext.setRegion("eu-west-1");
+        TableDefinition table = fgacTable();
+        table.setTags(Map.of("team", "blue"));
+        when(dynamoDbService.findTable("FgacTable", "eu-west-1")).thenReturn(Optional.of(table));
+
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), resolver.dynamoDbResourceTagContext(
+                "arn:aws:dynamodb:eu-west-1:111122223333:table/FgacTable"));
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), resolver.dynamoDbResourceTagContext(
+                "arn:aws:dynamodb:eu-west-1:111122223333:table/FgacTable/index/ByTeam"));
+    }
+
+    @Test
+    void dynamoDbResourceTagsUseTheExecutionScopeNotTheArns() {
+        DynamoDbTableAccess tables = mock(DynamoDbTableAccess.class);
+        when(tables.tableTags(any(), eq("FgacTable"))).thenReturn(Map.of("team", "blue"));
+        DynamoDbFacade facade = new DynamoDbFacade(mock(DynamoDbItemAccess.class), tables,
+                new RegionResolver("us-east-1", "000000000000"));
+        Instance<DynamoDbFacade> facadeInstance = mock(Instance.class);
+        when(facadeInstance.isResolvable()).thenReturn(true);
+        when(facadeInstance.get()).thenReturn(facade);
+        IamConditionContextResolver crossAccountResolver = new IamConditionContextResolver(facadeInstance,
+                mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                mock(Instance.class), requestContext, config, null, serviceCatalog);
+
+        assertEquals(Map.of("aws:ResourceTag/team", List.of("blue")), crossAccountResolver
+                .dynamoDbResourceTagContext("arn:aws:dynamodb:eu-west-1:111122223333:table/FgacTable"));
+        ArgumentCaptor<Scope> scope = ArgumentCaptor.forClass(Scope.class);
+        verify(tables).tableTags(scope.capture(), eq("FgacTable"));
+        assertEquals("000000000000", scope.getValue().accountId());
+        assertEquals("us-east-1", scope.getValue().region());
+    }
+
+    @Test
+    void dynamoDbResourceTagsIgnoreResourcesThatAreNotTaggedTables() {
+        assertNull(resolver.dynamoDbResourceTagContext(
+                "arn:aws:dynamodb:us-east-1:111122223333:table/FgacTable/stream/2026-01-01T00:00:00.000"));
+        assertNull(resolver.dynamoDbResourceTagContext("arn:aws:s3:::my-bucket"));
+        assertNull(resolver.dynamoDbResourceTagContext("*"));
     }
 
     // ── aws:RequestTag and aws:ResourceTag ─────────────────────────────────────

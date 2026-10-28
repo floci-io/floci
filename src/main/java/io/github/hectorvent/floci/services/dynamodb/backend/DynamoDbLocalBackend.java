@@ -506,6 +506,12 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
                 .orElse(Map.of()));
     }
 
+    @Override
+    public Map<String, String> tableTags(Scope scope, String tableName) {
+        return new LinkedHashMap<>(tags.getForAccount(scope.accountId(), key(scope.region(), tableName))
+                .orElse(Map.of()));
+    }
+
     // ponytail: no tag limits or tag-key validation; Floci records what callers send.
     @Override
     public void tagResource(Scope scope, String resourceArn, Map<String, String> tagsToAdd) {

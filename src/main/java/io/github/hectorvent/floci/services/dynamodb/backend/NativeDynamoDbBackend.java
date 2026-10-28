@@ -214,6 +214,14 @@ public class NativeDynamoDbBackend implements DynamoDbBackend {
     }
 
     @Override
+    public Map<String, String> tableTags(Scope scope, String tableName) {
+        return RequestScopes.callAs(scope.accountId(), () -> dynamoDbService.findTable(tableName, scope.region())
+                .map(TableDefinition::getTags)
+                .map(tags -> tags == null ? Map.<String, String>of() : Map.copyOf(tags))
+                .orElse(Map.of()));
+    }
+
+    @Override
     public void tagResource(Scope scope, String resourceArn, Map<String, String> tags) {
         RequestScopes.runAs(scope.accountId(), () -> dynamoDbService.tagResource(resourceArn, tags, scope.region()));
     }

@@ -44,6 +44,13 @@ public interface DynamoDbTableAccess {
 
     Map<String, String> listTagsOfResource(Scope scope, String resourceArn);
 
+    /**
+     * The tags stored for a table by name. Unlike {@link #listTagsOfResource}, which takes an ARN
+     * and may have to find the table among a scan, this is a keyed lookup by table name for the
+     * policy check that runs before every data request.
+     */
+    Map<String, String> tableTags(Scope scope, String tableName);
+
     void tagResource(Scope scope, String resourceArn, Map<String, String> tags);
 
     void untagResource(Scope scope, String resourceArn, List<String> tagKeys);

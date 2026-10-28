@@ -1743,6 +1743,18 @@ public class SqsService implements Resettable, ResourceProvider {
         return sourceQueues;
     }
 
+    /**
+     * The source queue ARN of a message move task, for the policy check on the queue the task
+     * belongs to. Empty when the handle is not one Floci issued, which the handler reports.
+     */
+    public Optional<String> moveTaskSourceArn(String taskHandle) {
+        if (taskHandle == null || taskHandle.isBlank()) {
+            return Optional.empty();
+        }
+        MoveTask task = moveTasksByHandle.get(taskHandle);
+        return task == null ? Optional.empty() : Optional.of(task.sourceArn());
+    }
+
     public String startMessageMoveTask(String sourceArn, String destinationArn, String region) {
         return startMessageMoveTask(sourceArn, destinationArn, 0, region);
     }

@@ -123,6 +123,11 @@ jobs:
       - name: Check the vendored map of operations to their IAM actions is well-formed
         run: make iam-authorized-actions-check
 
+      # And for the actions whose resource type carries aws:ResourceTag: a hand-edited entry would
+      # populate the condition key for an action AWS does not tag, or drop one AWS does.
+      - name: Check the vendored resource-tag action list is well-formed
+        run: make iam-resource-tag-actions-check
+
       # And for the CloudFormation property types, which come from AWS's live resource schema
       # archive: shape here, the online comparison in cfn-schema-drift.yml.
       - name: Check the vendored CloudFormation property types are well-formed

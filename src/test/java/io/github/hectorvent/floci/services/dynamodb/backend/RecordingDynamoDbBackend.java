@@ -134,6 +134,12 @@ public final class RecordingDynamoDbBackend implements DynamoDbItemAccess, Dynam
     }
 
     @Override
+    public Map<String, String> tableTags(Scope scope, String tableName) {
+        record("tableTags", scope);
+        return Map.of();
+    }
+
+    @Override
     public void tagResource(Scope scope, String resourceArn, Map<String, String> tags) {
         record("tagResource", scope);
     }

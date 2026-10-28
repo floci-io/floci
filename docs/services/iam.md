@@ -2234,6 +2234,30 @@ floci populates:
   `logs:CreateLogStream`, `logs:DeleteLogStream`, `logs:TagResource`, `logs:UntagResource`,
   `logs:ListTagsForResource`, `logs:DeleteLogGroup`, `logs:PutRetentionPolicy` and
   `logs:DeleteRetentionPolicy` use the owning log group's tags.
+  Every SQS and SNS action whose resource type carries `aws:ResourceTag` in the Service Reference
+  uses the target queue's or topic's tags. That is 19 SQS actions and 18 SNS actions; the action
+  list is generated from the reference (`make iam-resource-tag-actions-check`), so it does not
+  drift by hand, and the batch operations are absent because they are not IAM actions: SQS
+  `SendMessageBatch` authorizes as `sqs:SendMessage` and SNS `PublishBatch` as `sns:Publish`. The
+  target is read from the field the action uses: `QueueUrl`, `QueueName` for `GetQueueUrl`,
+  `SourceArn` for the message-move actions, and the task's source queue for
+  `CancelMessageMoveTask`; `TopicArn`, `ResourceArn` for the tagging and data-protection actions,
+  the topic of a `SubscriptionArn` for the subscription actions, and `Publish`'s effective target.
+  A `Publish` with a `PhoneNumber` sends SMS and takes no topic tags, and an endpoint or platform
+  application `TargetArn` is not a topic either. `PublishBatch`, which authorizes as
+  `sns:Publish`, always targets `TopicArn`; its handler ignores `PhoneNumber`, so the tag check
+  does too. The operation is read from `Action` or its legacy `Operation` fallback, as the Query
+  controller reads it. `CreateQueue` and `CreateTopic` have no existing
+  resource, so they take no `aws:ResourceTag` keys; the tags their request carries are
+  `aws:RequestTag` through the tag-on-create check. The queue is read from the account its URL names,
+  as the message operations read it, while `ListQueueTags` itself stays caller-scoped, which is the
+  SQS reference's cross-account rule. The topic is read from its ARN's account.
+  Every DynamoDB request is evaluated once per table it names, with only that table's tags, and
+  the table is read in the request's account and Region, which is the table the handler executes
+  against: an ARN's account is not used. Tags are read by table name through a keyed lookup, so the
+  native backend does not scan its tables and the local backend sees its separately stored tags. That covers the single-item actions, `Query`, `Scan`,
+  the batch actions, the transaction items and PartiQL, as well as an ARN naming a table index
+  (indexes are not tagged separately).
 - `s3:ExistingObjectTag/<key>`: the tags already on the target object version, for
   `s3:GetObject`, `s3:GetObjectTagging`, `s3:GetObjectAcl`, `s3:PutObjectAcl`,
   `s3:DeleteObjectTagging`, `s3:PutObjectTagging` and the annotation actions, and for their
