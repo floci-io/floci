@@ -251,6 +251,8 @@ floci:
       shutdown-timeout-seconds: 10
     redshift-serverless:
       enabled: true
+      scheduled-actions-enabled: false
+      scheduled-action-sweep-interval-seconds: 60
     neptune:
       enabled: true
       proxy-base-port: 8182

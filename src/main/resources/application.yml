@@ -583,6 +583,8 @@ floci:
       shutdown-timeout-seconds: ${FLOCI_SERVICES_REDSHIFT_DATA_SHUTDOWN_TIMEOUT_SECONDS:10}
     redshift-serverless:
       enabled: true
+      scheduled-actions-enabled: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SCHEDULED_ACTIONS_ENABLED:true}
+      scheduled-action-sweep-interval-seconds: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SCHEDULED_ACTION_SWEEP_INTERVAL_SECONDS:60}
     neptune:
       enabled: true
       proxy-base-port: 8182

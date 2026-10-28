@@ -7,6 +7,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -59,6 +60,25 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
         candidate.putAll(Map.copyOf(entries));
         store = candidate;
         dirty.set(true);
+    }
+
+    /** Writes the candidate file before publishing it, so a failed write leaves memory unchanged. */
+    @Override
+    public synchronized void putAllDurably(Map<K, V> entries) {
+        Map<K, V> replacements = Map.copyOf(entries);
+        if (replacements.isEmpty()) {
+            return;
+        }
+        ConcurrentHashMap<K, V> candidate = new ConcurrentHashMap<>(store);
+        candidate.putAll(replacements);
+        synchronized (flushLock) {
+            try {
+                StorageFiles.writeAtomically(filePath, tempFile -> objectMapper.writeValue(tempFile.toFile(), candidate));
+            } catch (IOException exception) {
+                throw new UncheckedIOException("Failed to commit durable batch to " + filePath, exception);
+            }
+            store = candidate;
+        }
     }
 
     @Override

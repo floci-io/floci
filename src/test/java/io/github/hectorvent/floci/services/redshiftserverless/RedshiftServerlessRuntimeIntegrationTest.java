@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshiftserverless;
 
+import io.github.hectorvent.floci.services.redshiftserverless.model.ScheduledAction;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ExtractableResponse;
@@ -20,6 +21,8 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Objects;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -107,9 +110,13 @@ class RedshiftServerlessRuntimeIntegrationTest {
     }
 
     private String executeAndWait(String sql) {
+        return executeAndWait(sql, WORKGROUP);
+    }
+
+    private String executeAndWait(String sql, String workgroup) {
         String id = RestAssuredJsonUtils.awsAction("RedshiftData", "ExecuteStatement", """
                 {"Sql": "%s", "WorkgroupName": "%s", "Database": "dev"}
-                """.formatted(sql, WORKGROUP)).then().statusCode(200)
+                """.formatted(sql, workgroup)).then().statusCode(200)
                 .extract().path("Id");
         Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
                 .pollInterval(Duration.ofMillis(250)).until(() -> {
@@ -161,6 +168,44 @@ class RedshiftServerlessRuntimeIntegrationTest {
         RestAssuredJsonUtils.awsAction("RedshiftData", "ExecuteStatement", """
                 {"Sql": "select 1", "WorkgroupName": "%s", "Database": "dev"}
                 """.formatted(workgroupArn)).then().statusCode(200);
+    }
+
+    @Inject
+    RedshiftServerlessScheduledActionService scheduledActions;
+
+    @Test
+    void aScheduledSnapshotCapturesRowsAndRestoresThem() {
+        executeAndWait("CREATE TABLE sl_scheduled (id int)");
+        executeAndWait("INSERT INTO sl_scheduled VALUES (1), (2), (3)");
+        ScheduledAction request = new ScheduledAction();
+        request.setScheduledActionName("rt-it-sched");
+        request.setNamespaceName(NAMESPACE);
+        request.setRoleArn("arn:aws:iam::000000000000:role/r");
+        request.setScheduleCron("0 * * * ? *");
+        request.setTargetNamespaceName(NAMESPACE);
+        request.setSnapshotNamePrefix("rt-sched");
+        scheduledActions.createScheduledAction(request, REGION);
+        Instant tick = Instant.now().plusSeconds(3 * 3600);
+        String snapshot = RedshiftServerlessScheduledActionService.snapshotName("rt-sched",
+                tick.truncatedTo(ChronoUnit.HOURS));
+        String restoredNamespace = "rt-it-restored-ns";
+        String restoredWorkgroup = "rt-it-restored-wg";
+        try {
+            scheduledActions.runScheduledActions(tick);
+
+            RestAssuredJsonUtils.awsAction("RedshiftServerless", "RestoreFromSnapshot", """
+                    {"namespaceName":"%s","workgroupName":"%s","snapshotName":"%s"}
+                    """.formatted(restoredNamespace, restoredWorkgroup, snapshot)).then().statusCode(200);
+            String id = executeAndWait("SELECT count(*) FROM sl_scheduled", restoredWorkgroup);
+            ExtractableResponse<Response> result = RestAssuredJsonUtils.awsAction("RedshiftData", "GetStatementResult",
+                    "{\"Id\":\"" + id + "\"}").then().statusCode(200).extract();
+            assertEquals(3, ((Number) result.path("Records[0][0].longValue")).intValue());
+        } finally {
+            scheduledActions.deleteScheduledAction("rt-it-sched", REGION);
+            service.deleteWorkgroup(restoredWorkgroup, REGION);
+            service.deleteNamespace(restoredNamespace, REGION);
+            service.deleteSnapshot(snapshot, REGION);
+        }
     }
 
     @Test

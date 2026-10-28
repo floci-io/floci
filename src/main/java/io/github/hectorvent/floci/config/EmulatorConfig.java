@@ -1908,6 +1908,12 @@ public interface EmulatorConfig {
     interface RedshiftServerlessServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("true")
+        boolean scheduledActionsEnabled();
+
+        @WithDefault("60")
+        int scheduledActionSweepIntervalSeconds();
     }
 
     interface NeptuneServiceConfig {

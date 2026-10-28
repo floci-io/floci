@@ -132,7 +132,8 @@ class RedshiftServerlessJsonHandlerTest {
                         new RedshiftServerlessEndpointAccessService(storageFactory, regionResolver, service),
                         customDomains,
                         new RedshiftServerlessSnapshotCopyService(storageFactory, regionResolver, service),
-                        new RedshiftServerlessScheduledActionService(storageFactory, service)),
+                        new RedshiftServerlessScheduledActionService(storageFactory, service,
+                                mock(RedshiftServerlessScheduledActionAuthorizer.class), regionResolver)),
                 customDomains);
     }
 
