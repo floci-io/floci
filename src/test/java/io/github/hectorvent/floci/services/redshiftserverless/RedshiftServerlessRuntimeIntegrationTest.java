@@ -185,26 +185,24 @@ class RedshiftServerlessRuntimeIntegrationTest {
         request.setTargetNamespaceName(NAMESPACE);
         request.setSnapshotNamePrefix("rt-sched");
         scheduledActions.createScheduledAction(request, REGION);
-        Instant tick = Instant.now().plusSeconds(3 * 3600);
+        Instant tick = Instant.now().truncatedTo(ChronoUnit.HOURS).plus(Duration.ofHours(3)).plus(Duration.ofMinutes(15));
         String snapshot = RedshiftServerlessScheduledActionService.snapshotName("rt-sched",
                 tick.truncatedTo(ChronoUnit.HOURS));
-        String restoredNamespace = "rt-it-restored-ns";
-        String restoredWorkgroup = "rt-it-restored-wg";
         try {
             scheduledActions.runScheduledActions(tick);
+            executeAndWait("DROP TABLE sl_scheduled");
 
             RestAssuredJsonUtils.awsAction("RedshiftServerless", "RestoreFromSnapshot", """
                     {"namespaceName":"%s","workgroupName":"%s","snapshotName":"%s"}
-                    """.formatted(restoredNamespace, restoredWorkgroup, snapshot)).then().statusCode(200);
-            String id = executeAndWait("SELECT count(*) FROM sl_scheduled", restoredWorkgroup);
+                    """.formatted(NAMESPACE, WORKGROUP, snapshot)).then().statusCode(200);
+            String id = executeAndWait("SELECT count(*) FROM sl_scheduled", WORKGROUP);
             ExtractableResponse<Response> result = RestAssuredJsonUtils.awsAction("RedshiftData", "GetStatementResult",
                     "{\"Id\":\"" + id + "\"}").then().statusCode(200).extract();
             assertEquals(3, ((Number) result.path("Records[0][0].longValue")).intValue());
         } finally {
             scheduledActions.deleteScheduledAction("rt-it-sched", REGION);
-            service.deleteWorkgroup(restoredWorkgroup, REGION);
-            service.deleteNamespace(restoredNamespace, REGION);
             service.deleteSnapshot(snapshot, REGION);
+            executeAndWait("DROP TABLE IF EXISTS sl_scheduled");
         }
     }
 

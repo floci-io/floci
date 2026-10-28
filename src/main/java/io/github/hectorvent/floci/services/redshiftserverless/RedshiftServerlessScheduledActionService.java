@@ -15,6 +15,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -63,18 +64,28 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
     private final RedshiftServerlessService serverless;
     private final RedshiftServerlessScheduledActionAuthorizer authorizer;
     private final RegionResolver regionResolver;
+    private final Clock clock;
     private final ConcurrentHashMap<String, ReentrantLock> actionLocks = new ConcurrentHashMap<>();
 
     @Inject
     public RedshiftServerlessScheduledActionService(StorageFactory storageFactory,
                                                     RedshiftServerlessService serverless,
                                                     RedshiftServerlessScheduledActionAuthorizer authorizer,
-                                                    RegionResolver regionResolver) {
+                                                    RegionResolver regionResolver,
+                                                    Clock clock) {
         this.actions = storageFactory.create("redshiftserverless", "redshiftserverless-scheduledactions.json",
                 new TypeReference<Map<String, ScheduledAction>>() {});
         this.serverless = serverless;
         this.authorizer = authorizer;
         this.regionResolver = regionResolver;
+        this.clock = clock;
+    }
+
+    RedshiftServerlessScheduledActionService(StorageFactory storageFactory,
+                                            RedshiftServerlessService serverless,
+                                            RedshiftServerlessScheduledActionAuthorizer authorizer,
+                                            RegionResolver regionResolver) {
+        this(storageFactory, serverless, authorizer, regionResolver, Clock.systemUTC());
     }
 
     /**
@@ -97,7 +108,7 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
             action.setOwnerId(namespaceIdOf(request.getNamespaceName(), region));
             action.setScheduledActionUuid(UUID.randomUUID().toString());
             action.setEnabled(request.getEnabled() == null || request.getEnabled());
-            action.setActivatedAt(Instant.now());
+            action.setActivatedAt(clock.instant());
             actions.put(storageKey(region, action.getScheduledActionName()), action);
             return new ScheduledAction(action);
         });
@@ -137,7 +148,7 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
             }
             if (changes.getEnabled() != null) {
                 if (changes.getEnabled() && Boolean.FALSE.equals(current.getEnabled())) {
-                    updated.setActivatedAt(Instant.now());
+                    updated.setActivatedAt(clock.instant());
                 }
                 updated.setEnabled(changes.getEnabled());
             }
@@ -151,7 +162,7 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
                 validateSchedule(changes);
                 updated.setScheduleAt(changes.getScheduleAt());
                 updated.setScheduleCron(changes.getScheduleCron());
-                updated.setActivatedAt(Instant.now());
+                updated.setActivatedAt(clock.instant());
                 updated.setLastClaimedInvocation(null);
             }
             boolean changesTarget = changes.isTargetSpecified()
@@ -368,6 +379,9 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
             throw ServerlessSupport.validation("targetAction must set createSnapshot.");
         }
         requireNamespace(action.getTargetNamespaceName(), region);
+        if (action.getSnapshotNamePrefix() != null) {
+            RedshiftServerlessService.validateSnapshotName(snapshotName(action.getSnapshotNamePrefix(), Instant.EPOCH));
+        }
         Integer retention = action.getRetentionPeriod();
         if (retention != null && retention != -1 && (retention < 1 || retention > MAX_RETENTION_DAYS)) {
             throw ServerlessSupport.validation("targetAction.createSnapshot.retentionPeriod must be -1 "

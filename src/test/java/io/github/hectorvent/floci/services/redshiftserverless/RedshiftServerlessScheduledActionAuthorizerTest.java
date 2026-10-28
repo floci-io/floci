@@ -93,6 +93,46 @@ class RedshiftServerlessScheduledActionAuthorizerTest {
         assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, TARGET).isEmpty());
     }
     @Test
+    void trustPolicyWithMatchingSourceAccountConditionIsAllowed() {
+        String conditionalTrust = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Principal":{"Service":"scheduler.redshift.amazonaws.com"},"Action":"sts:AssumeRole",
+                "Condition":{"StringEquals":{"aws:SourceAccount":"%s"}}}]}""".formatted(ACCOUNT_ID);
+        role(ROLE_ARN, conditionalTrust, ALLOW);
+        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, TARGET).isEmpty());
+    }
+
+    @Test
+    void trustPolicyWithMismatchedSourceAccountConditionIsRefused() {
+        String conditionalTrust = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Principal":{"Service":"scheduler.redshift.amazonaws.com"},"Action":"sts:AssumeRole",
+                "Condition":{"StringEquals":{"aws:SourceAccount":"999999999999"}}}]}""";
+        role(ROLE_ARN, conditionalTrust, ALLOW);
+        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, TARGET).isPresent());
+    }
+
+    @Test
+    void regionalConditionMatchingTargetRegionIsAllowed() {
+        String regionalPolicy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Action":"redshift-serverless:CreateSnapshot","Resource":"*",
+                "Condition":{"StringEquals":{"aws:RequestedRegion":"us-east-1"}}}]}""";
+        role(ROLE_ARN, TRUST, regionalPolicy);
+        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, TARGET).isEmpty());
+    }
+
+    @Test
+    void regionalConditionForDifferentRegionIsRefused() {
+        String regionalPolicy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Action":"redshift-serverless:CreateSnapshot","Resource":"*",
+                "Condition":{"StringEquals":{"aws:RequestedRegion":"us-west-2"}}}]}""";
+        role(ROLE_ARN, TRUST, regionalPolicy);
+        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, TARGET).isPresent());
+    }
+
+    @Test
     void missingPermissionIsRefused() {
         role(ROLE_ARN, TRUST, ALLOW.replace("CreateSnapshot", "GetSnapshot"));
         assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, TARGET).isPresent());

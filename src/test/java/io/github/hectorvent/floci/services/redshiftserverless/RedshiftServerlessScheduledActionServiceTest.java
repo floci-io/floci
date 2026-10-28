@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshiftserverless;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -12,8 +13,10 @@ import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -41,6 +44,7 @@ class RedshiftServerlessScheduledActionServiceTest {
     private static final String ACCOUNT_ID = "123456789012";
     private static final String ROLE_ARN = "arn:aws:iam::" + ACCOUNT_ID + ":role/scheduler";
     private static final String NAMESPACE_ARN = "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID + ":namespace/ns-id";
+    private static final Instant BASE_TIME = Instant.parse("2026-10-28T12:15:00Z");
 
     private final AtomicBoolean failDurableWrites = new AtomicBoolean();
     private AccountAwareStorageBackend<ScheduledAction> store;
@@ -49,12 +53,14 @@ class RedshiftServerlessScheduledActionServiceTest {
     private RedshiftServerlessScheduledActionAuthorizer authorizer;
     private RegionResolver regionResolver;
     private String namespaceId;
+    private Clock clock;
     private RedshiftServerlessScheduledActionService service;
 
     @BeforeEach
     @SuppressWarnings({"unchecked", "rawtypes"})
     void setUp() {
         namespaceId = "ns-id";
+        clock = Clock.fixed(BASE_TIME, ZoneOffset.UTC);
         store = new AccountAwareStorageBackend<>(new InMemoryStorage<String, ScheduledAction>() {
             @Override
             public synchronized void putAllDurably(Map<String, ScheduledAction> entries) {
@@ -77,7 +83,7 @@ class RedshiftServerlessScheduledActionServiceTest {
     }
 
     private RedshiftServerlessScheduledActionService newService() {
-        return new RedshiftServerlessScheduledActionService(storageFactory, serverless, authorizer, regionResolver);
+        return new RedshiftServerlessScheduledActionService(storageFactory, serverless, authorizer, regionResolver, clock);
     }
 
     private Namespace namespace() {
@@ -103,7 +109,7 @@ class RedshiftServerlessScheduledActionServiceTest {
     }
 
     private static Instant later() {
-        return Instant.now().plus(Duration.ofHours(3));
+        return BASE_TIME.plus(Duration.ofHours(3));
     }
 
     private static String expectedName(Instant tick) {
@@ -129,7 +135,7 @@ class RedshiftServerlessScheduledActionServiceTest {
     void missedInvocationsAreCoalescedIntoTheLatestOne() {
         service.createScheduledAction(request("hourly"), REGION);
 
-        service.runScheduledActions(Instant.now().plus(Duration.ofHours(30)));
+        service.runScheduledActions(BASE_TIME.plus(Duration.ofHours(30)));
 
         verify(serverless, times(1)).createSnapshot(anyString(), anyString(), any(), any(), anyString());
     }
@@ -138,7 +144,7 @@ class RedshiftServerlessScheduledActionServiceTest {
     void oneOffActionRunsOnceAtItsTime() {
         ScheduledAction oneOff = request("once");
         oneOff.setScheduleCron(null);
-        Instant at = Instant.now().plusSeconds(600).truncatedTo(ChronoUnit.SECONDS);
+        Instant at = BASE_TIME.plusSeconds(600);
         oneOff.setScheduleAt(at);
         service.createScheduledAction(oneOff, REGION);
 
@@ -154,7 +160,7 @@ class RedshiftServerlessScheduledActionServiceTest {
     @Test
     void activeWindowAndDisabledActionsDoNotRun() {
         ScheduledAction early = request("windowed");
-        early.setStartTime(Instant.now().plus(Duration.ofHours(10)));
+        early.setStartTime(BASE_TIME.plus(Duration.ofHours(10)));
         service.createScheduledAction(early, REGION);
         ScheduledAction disabled = request("off");
         disabled.setEnabled(false);
@@ -175,7 +181,7 @@ class RedshiftServerlessScheduledActionServiceTest {
         enable.setEnabled(true);
         service.updateScheduledAction(enable, REGION);
 
-        service.runScheduledActions(Instant.now().plusSeconds(60));
+        service.runScheduledActions(BASE_TIME.plusSeconds(60));
 
         verify(serverless, never()).createSnapshot(anyString(), anyString(), any(), any(), anyString());
     }
@@ -272,7 +278,7 @@ class RedshiftServerlessScheduledActionServiceTest {
         foreign.setOwnerId(namespaceId);
         foreign.setEnabled(true);
         foreign.setRoleArn("arn:aws:iam::210987654321:role/scheduler");
-        foreign.setActivatedAt(Instant.now());
+        foreign.setActivatedAt(BASE_TIME);
         store.putAllDurablyForAccount("210987654321", Map.of("us-east-1::foreign", foreign));
         when(authorizer.refusal(anyString(), eq("210987654321"), anyString())).thenReturn(Optional.of("denied"));
 
@@ -321,7 +327,22 @@ class RedshiftServerlessScheduledActionServiceTest {
     void snapshotNameStaysWithinTheNamingRules() {
         String name = RedshiftServerlessScheduledActionService.snapshotName("Nightly", Instant.parse("2030-01-07T03:00:00Z"));
         assertEquals("nightly-2030-01-07-03-00-00", name);
-        assertTrue(RedshiftServerlessScheduledActionService.snapshotName("a".repeat(400), Instant.now()).length() <= 255);
+        assertTrue(RedshiftServerlessScheduledActionService.snapshotName("a".repeat(400), BASE_TIME).length() <= 255);
     }
 
+    @Test
+    void unusableSnapshotNamePrefixIsRejectedOnCreate() {
+        ScheduledAction invalid = request("invalid-prefix");
+        invalid.setSnapshotNamePrefix("nightly_backup");
+        assertThrows(AwsException.class, () -> service.createScheduledAction(invalid, REGION));
+    }
+
+    @Test
+    void unusableSnapshotNamePrefixIsRejectedOnUpdate() {
+        service.createScheduledAction(request("valid-prefix"), REGION);
+        ScheduledAction update = new ScheduledAction();
+        update.setScheduledActionName("valid-prefix");
+        update.setSnapshotNamePrefix("nightly_backup");
+        assertThrows(AwsException.class, () -> service.updateScheduledAction(update, REGION));
+    }
 }

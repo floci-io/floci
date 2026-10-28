@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshiftserverless;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
@@ -76,7 +77,8 @@ public class RedshiftServerlessScheduledActionAuthorizer {
         if (role.isEmpty()) {
             return Optional.of("The execution role " + roleArn + " does not exist.");
         }
-        if (!trustEvaluator.allowsService(role.get().getAssumeRolePolicyDocument(), SCHEDULER_PRINCIPAL)) {
+        if (!trustEvaluator.allowsService(role.get().getAssumeRolePolicyDocument(), SCHEDULER_PRINCIPAL,
+                null, accountId)) {
             return Optional.of("The execution role " + roleArn + " does not trust " + SCHEDULER_PRINCIPAL + ".");
         }
         CallerContext caller = iamService.resolvePrincipalContext(role.get().getArn());
@@ -85,7 +87,13 @@ public class RedshiftServerlessScheduledActionAuthorizer {
         if (scpLevels != null) {
             caller = caller.withScpLevels(scpLevels);
         }
-        Decision decision = evaluator.evaluate(caller, List.of(), CREATE_SNAPSHOT, targetArn, Map.of());
+        AwsArnUtils.Arn target = AwsArnUtils.isArn(targetArn) ? AwsArnUtils.parse(targetArn) : null;
+        String targetRegion = target != null ? target.region() : null;
+        String targetAccount = target != null ? target.accountId() : accountId;
+        Map<String, List<String>> context = IamConditionContextResolver.withGlobalContext(
+                Map.of("aws:PrincipalArn", List.of(role.get().getArn())),
+                targetArn, targetRegion, accountId, targetAccount);
+        Decision decision = evaluator.evaluate(caller, List.of(), CREATE_SNAPSHOT, targetArn, context);
         if (decision != Decision.ALLOW) {
             return Optional.of("The execution role " + roleArn + " is not authorized to perform "
                     + CREATE_SNAPSHOT + " on " + targetArn + ".");
