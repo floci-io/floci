@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.eventbridge.model.EcsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.HttpParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
+import io.github.hectorvent.floci.services.eventbridge.model.KinesisParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.Replay;
 import io.github.hectorvent.floci.services.eventbridge.model.ReplayState;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
@@ -268,6 +269,7 @@ public class EventBridgeHandler {
                         target.setSqsParameters(sqsParameters);
                     }
                 }
+                target.setKinesisParameters(KinesisParameters.fromJson(t.path("KinesisParameters")));
                 JsonNode batchParamsNode = t.path("BatchParameters");
                 if (!batchParamsNode.isMissingNode() && batchParamsNode.isObject()) {
                     target.setBatchParameters(objectMapper.convertValue(batchParamsNode, BatchParameters.class));
@@ -345,6 +347,10 @@ public class EventBridgeHandler {
             }
             if (t.getSqsParameters() != null && t.getSqsParameters().getMessageGroupId() != null) {
                 node.putObject("SqsParameters").put("MessageGroupId", t.getSqsParameters().getMessageGroupId());
+            }
+            if (t.getKinesisParameters() != null && t.getKinesisParameters().getPartitionKeyPath() != null) {
+                node.putObject("KinesisParameters")
+                        .put("PartitionKeyPath", t.getKinesisParameters().getPartitionKeyPath());
             }
             if (t.getBatchParameters() != null) {
                 node.set("BatchParameters", objectMapper.valueToTree(t.getBatchParameters()));

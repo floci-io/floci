@@ -139,6 +139,22 @@ aws events put-targets \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
 
+## Kinesis Targets
+
+A matching rule can put the event on a Kinesis stream. `KinesisParameters.PartitionKeyPath` is a JSON path read from the original event, before `Input`, `InputPath`, or `InputTransformer` replace the record body. The body is that transformed payload as UTF-8 bytes. A target without a path, or whose path does not resolve, is logged and not written. `ListTargetsByRule` returns the path. An `AWS::Events::Rule` target keeps `KinesisParameters` the same way `PutTargets` does.
+
+```
+aws events put-targets \
+  --rule order-placed-rule \
+  --targets '[{
+    "Id": "orders-stream",
+    "Arn": "arn:aws:kinesis:us-east-1:000000000000:stream/orders",
+    "InputPath": "$.detail",
+    "KinesisParameters": {"PartitionKeyPath": "$.detail.id"}
+  }]' \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
 ## Step Functions Targets
 
 A matching rule can start an unqualified Step Functions state machine ARN. The target supports the
@@ -238,7 +254,7 @@ aws events put-targets \
 - A retry uses the target's current definition, so `PutTargets` changes apply to pending retries, and a target removed with `RemoveTargets` stops being retried.
 - An accepted asynchronous Lambda invocation counts as delivered. A later function error is handled by Lambda's own retry and destination settings, not by the rule.
 - Pending retries are kept in memory and are dropped by an emulator reset or restart.
-- An `AWS::Events::Rule` target in a CloudFormation template keeps its `RetryPolicy`, `DeadLetterConfig`, `RoleArn` and `EcsParameters`, which reach the rule as `PutTargets` would set them. A value of another type than the resource schema declares for them fails the rule before it is created, with the message CloudFormation gives.
+- An `AWS::Events::Rule` target in a CloudFormation template keeps its `RetryPolicy`, `DeadLetterConfig`, `RoleArn`, `EcsParameters` and `KinesisParameters`, which reach the rule as `PutTargets` would set them. A value of another type than the resource schema declares for them fails the rule before it is created, with the message CloudFormation gives.
 
 ## Current Behavior
 
@@ -246,5 +262,5 @@ aws events put-targets \
 - A `PutEvents` entry for an event bus that does not exist is answered as AWS answers it: with an event id, not counted in `FailedEntryCount`, and dropped, as no rule matches it. Floci logs the drop at `INFO`. Floci's own deliveries to a bus, for a rule, a pipe or a schedule, are unchanged: an entry for a bus that does not exist fails there.
 - A `Detail` forwarded to an event bus must be a JSON object, as in AWS; anything else is dropped, including an `InputPath` selecting a scalar such as `$.detail.orderId` or an envelope carrying `"detail": null`.
 - A bus ARN naming another account is forwarded under that account, so the target bus and its rules resolve there.
-- Onward delivery from that bus follows each target type: SQS and Step Functions resolve cross-account, while Lambda, SNS, Batch and Firehose resolve in the caller's account.
+- Onward delivery from that bus follows each target type: SQS and Step Functions resolve cross-account, while Lambda, SNS, Batch and Firehose resolve in the caller's account. Kinesis uses the account and region in the stream ARN when a request region is set, and the caller's region otherwise.
 - An event is forwarded between buses only once, matching AWS: a bus that received an event from another bus does not forward it on to a third. The second hop is dropped with only a `WARN` rather than reported to the caller.

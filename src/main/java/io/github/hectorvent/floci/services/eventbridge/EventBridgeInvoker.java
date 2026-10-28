@@ -21,9 +21,11 @@ import io.github.hectorvent.floci.services.eventbridge.model.Connection;
 import io.github.hectorvent.floci.services.eventbridge.model.EcsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.HttpParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
+import io.github.hectorvent.floci.services.eventbridge.model.KinesisParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
+import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -71,6 +73,7 @@ public class EventBridgeInvoker {
     private final SnsService snsService;
     private final BatchService batchService;
     private final FirehoseService firehoseService;
+    private final KinesisService kinesisService;
     private final EventBridgeService eventBridgeService;
     private final EcsService ecsService;
     private final EcsJsonHandler ecsJsonHandler;
@@ -87,6 +90,7 @@ public class EventBridgeInvoker {
                               SnsService snsService,
                               BatchService batchService,
                               FirehoseService firehoseService,
+                              KinesisService kinesisService,
                               EventBridgeService eventBridgeService,
                               EcsService ecsService,
                               EcsJsonHandler ecsJsonHandler,
@@ -94,7 +98,8 @@ public class EventBridgeInvoker {
                               RegionResolver regionResolver,
                               ObjectMapper objectMapper,
                               EmulatorConfig config) {
-        this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
+        this(lambdaService, sqsService, snsService, batchService, firehoseService, kinesisService,
+                eventBridgeService,
                 ecsService, ecsJsonHandler, stepFunctionsService, regionResolver, objectMapper, config,
                 HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
     }
@@ -104,6 +109,7 @@ public class EventBridgeInvoker {
                        SnsService snsService,
                        BatchService batchService,
                        FirehoseService firehoseService,
+                       KinesisService kinesisService,
                        EventBridgeService eventBridgeService,
                        EcsService ecsService,
                        EcsJsonHandler ecsJsonHandler,
@@ -117,6 +123,7 @@ public class EventBridgeInvoker {
         this.snsService = snsService;
         this.batchService = batchService;
         this.firehoseService = firehoseService;
+        this.kinesisService = kinesisService;
         this.eventBridgeService = eventBridgeService;
         this.ecsService = ecsService;
         this.ecsJsonHandler = ecsJsonHandler;
@@ -133,7 +140,7 @@ public class EventBridgeInvoker {
                        ObjectMapper objectMapper,
                        EmulatorConfig config) {
         this(lambdaService, sqsService, snsService,
-                null /* batch */, null /* firehose */, null /* eventBridge */, null /* ecs */,
+                null /* batch */, null /* firehose */, null /* kinesis */, null /* eventBridge */, null /* ecs */,
                 null /* ecsJsonHandler */, null /* stepFunctions */, null /* regionResolver */, objectMapper, config);
     }
 
@@ -207,6 +214,8 @@ public class EventBridgeInvoker {
                     firehoseService.putRecord(streamArn.accountId(), streamArn.region(), streamName, record);
                 }
                 LOG.debugv("EventBridge delivered to Firehose: {0}", arn);
+            } else if (arn.contains(":kinesis:") && arn.contains(":stream/")) {
+                deliverToKinesis(target, arn, payload, eventJson, region);
             } else if (isStateMachineArn(arn)) {
                 String targetRegion = extractRegionFromArn(arn, region);
                 String targetAccount = AwsArnUtils.parse(arn).accountId();
@@ -360,6 +369,52 @@ public class EventBridgeInvoker {
                 new io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration();
         target.setAwsvpcConfiguration(targetVpc);
         return target;
+    }
+
+    /**
+     * A Kinesis target writes the input-transformed payload and takes its partition key from the
+     * original event. {@code TestingEventHub} sets {@code InputPath} to {@code $.detail} and
+     * {@code PartitionKeyPath} to {@code $.detail.id}; the path has to see {@code detail}.
+     */
+    private void deliverToKinesis(Target target, String arn, String payload, String eventJson, String region) {
+        if (kinesisService == null) {
+            LOG.warnv("EventBridge Kinesis target missing Kinesis service: {0}", arn);
+            return;
+        }
+        String partitionKey = kinesisPartitionKey(target, eventJson);
+        if (partitionKey == null) {
+            return;
+        }
+        AwsArnUtils.Arn streamArn = AwsArnUtils.parse(arn);
+        String streamName = streamArn.resource().substring("stream/".length());
+        int slash = streamName.indexOf('/');
+        if (slash >= 0) {
+            streamName = streamName.substring(0, slash);
+        }
+        byte[] data = payload.getBytes(StandardCharsets.UTF_8);
+        if (regionResolver == null || regionResolver.getRegion() == null) {
+            kinesisService.putRecord(streamName, data, partitionKey, region);
+        } else {
+            kinesisService.putRecordForAccount(
+                    streamArn.accountId(), streamName, data, partitionKey, streamArn.region());
+        }
+        LOG.debugv("EventBridge delivered to Kinesis: {0}", arn);
+    }
+
+    private String kinesisPartitionKey(Target target, String eventJson) {
+        KinesisParameters parameters = target.getKinesisParameters();
+        String path = parameters == null ? null : parameters.getPartitionKeyPath();
+        if (path == null || path.isBlank()) {
+            LOG.warnv("EventBridge Kinesis target missing KinesisParameters.PartitionKeyPath: {0}", target.getArn());
+            return null;
+        }
+        String key = extractJsonPath(path, eventJson);
+        if (key == null || key.isBlank()) {
+            LOG.warnv("EventBridge Kinesis target partition key path {0} did not resolve on {1}",
+                    path, target.getArn());
+            return null;
+        }
+        return key;
     }
 
     String applyInputPath(String inputPath, String eventJson) {
