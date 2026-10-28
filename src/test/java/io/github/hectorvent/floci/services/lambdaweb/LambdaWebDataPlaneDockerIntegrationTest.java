@@ -127,7 +127,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                   env: {endpoint: process.env.AWS_LAMBDA_HTTP_ENDPOINT, init: process.env.AWS_LAMBDA_INITIALIZATION_TYPE,
                         exec: process.env.AWS_EXECUTION_ENV, account: process.env.AWS_ACCOUNT_ID,
                         region: process.env.AWS_REGION, custom: process.env.CUSTOM},
-                  execArgv: process.execArgv}));
+                  execArgv: process.execArgv, heapSizeLimit: require('node:v8').getHeapStatistics().heap_size_limit}));
               });
             }).listen(Number(port), host);
             """;
@@ -767,7 +767,8 @@ class LambdaWebDataPlaneDockerIntegrationTest {
 
         given().header("Host", domain).when().get("/").then().statusCode(200)
                 .body("execArgv", contains("--expose-gc", "--max-http-header-size", "135168",
-                        "--no-experimental-require-module", "--max-old-space-size=1536"));
+                        "--no-experimental-require-module", "--max-old-space-size=1536"))
+                .body("heapSizeLimit", equalTo(1811939328));
     }
 
     @Test
