@@ -3326,11 +3326,7 @@ public class Ec2QueryHandler {
         String azId = p.getFirst("AvailabilityZoneId");
         String ipv6CidrBlock = p.getFirst("Ipv6CidrBlock");
         List<Tag> tags = parseTagsForResource(p, "subnet", Set.of("subnet"));
-        // Floci looks up the VPC before it answers a dry run, as its RunInstances dry run looks up the subnet
-        // and groups: the Service Authorization Reference lists the VPC, with its tags and tenancy, in
-        // CreateSubnet's permission (https://docs.aws.amazon.com/service-authorization/latest/reference/list_ec2.html).
-        // The dry run is answered before Ec2Service checks the CIDR block, the zone, the IPv6 block and
-        // overlap with other subnets, an order AWS does not document.
+        // A dry run needs the VPC to exist and is answered before the CIDR, zone and overlap checks.
         requireParameter(p, "VpcId");
         service.requireVpc(region, vpcId);
         checkDryRun(p);
@@ -3412,11 +3408,7 @@ public class Ec2QueryHandler {
         String groupName = requireParameter(p, "GroupName");
         String description = requireParameter(p, "GroupDescription");
         String vpcId = p.getFirst("VpcId");
-        // Floci looks up the VPC, the default one when VpcId is absent, before it answers a dry run, as its
-        // RunInstances dry run looks up the subnet and groups: the Service Authorization Reference lists the
-        // VPC, with its tags and tenancy, in CreateSecurityGroup's permission
-        // (https://docs.aws.amazon.com/service-authorization/latest/reference/list_ec2.html). The dry run is
-        // answered before Ec2Service checks whether the group name is taken, an order AWS does not document.
+        // A dry run needs the (default) VPC to exist and is answered before the taken-name check.
         service.requireSecurityGroupVpc(region, vpcId);
         checkDryRun(p);
         SecurityGroup sg = service.createSecurityGroup(region, groupName, description, vpcId);

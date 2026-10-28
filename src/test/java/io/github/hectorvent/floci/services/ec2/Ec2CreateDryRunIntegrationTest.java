@@ -11,7 +11,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.UUID;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.Ec2Requests.ec2;
 import static org.hamcrest.Matchers.emptyOrNullString;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -24,7 +24,6 @@ import static org.hamcrest.Matchers.equalTo;
 @QuarkusTest
 class Ec2CreateDryRunIntegrationTest {
 
-    private static final String AUTH = "AWS4-HMAC-SHA256 Credential=test/20261022/us-east-1/ec2/aws4_request";
     private static final String MISSING_VPC = "vpc-0123456789abcdef0";
 
     @Test
@@ -33,7 +32,7 @@ class Ec2CreateDryRunIntegrationTest {
         try {
             assertDryRun(tagged(createVpc("10.91.0.0/16"), "vpc", name).formParam("DryRun", "true"));
 
-            ec2("DescribeVpcs")
+            ec2("DescribeVpcs", "test", "us-east-1")
                     .formParam("Filter.1.Name", "tag:Name")
                     .formParam("Filter.1.Value.1", name)
                     .post("/").then().statusCode(200)
@@ -53,7 +52,7 @@ class Ec2CreateDryRunIntegrationTest {
         try {
             assertDryRun(createSubnet(vpcId, "10.92.1.0/24").formParam("DryRun", "true"));
 
-            ec2("DescribeSubnets")
+            ec2("DescribeSubnets", "test", "us-east-1")
                     .formParam("Filter.1.Name", "vpc-id")
                     .formParam("Filter.1.Value.1", vpcId)
                     .post("/").then().statusCode(200)
@@ -73,7 +72,7 @@ class Ec2CreateDryRunIntegrationTest {
         try {
             assertDryRun(createSecurityGroup(vpcId, "dryrun-group").formParam("DryRun", "true"));
 
-            ec2("DescribeSecurityGroups")
+            ec2("DescribeSecurityGroups", "test", "us-east-1")
                     .formParam("Filter.1.Name", "vpc-id")
                     .formParam("Filter.1.Value.1", vpcId)
                     .post("/").then().statusCode(200)
@@ -93,7 +92,7 @@ class Ec2CreateDryRunIntegrationTest {
     void aGroupDryRunWithoutAVpcIdIsAnsweredForTheDefaultVpc(String vpcId) {
         String name = "dryrun-default-" + UUID.randomUUID();
         try {
-            RequestSpecification dryRun = ec2("CreateSecurityGroup")
+            RequestSpecification dryRun = ec2("CreateSecurityGroup", "test", "us-east-1")
                     .formParam("GroupName", name)
                     .formParam("GroupDescription", "dry run test group")
                     .formParam("DryRun", "true");
@@ -106,7 +105,7 @@ class Ec2CreateDryRunIntegrationTest {
         } finally {
             for (String groupId : groupsNamed(name).extract().xmlPath()
                     .getList("DescribeSecurityGroupsResponse.securityGroupInfo.item.groupId", String.class)) {
-                ec2("DeleteSecurityGroup").formParam("GroupId", groupId).post("/").then().statusCode(200);
+                ec2("DeleteSecurityGroup", "test", "us-east-1").formParam("GroupId", groupId).post("/").then().statusCode(200);
             }
         }
     }
@@ -168,7 +167,7 @@ class Ec2CreateDryRunIntegrationTest {
     private static RequestSpecification missingVpcCreate(String request) {
         return switch (request) {
             case "subnet-in-missing-vpc" -> createSubnet(MISSING_VPC, "10.97.1.0/24");
-            case "subnet-without-vpc-id" -> ec2("CreateSubnet").formParam("CidrBlock", "10.97.1.0/24");
+            case "subnet-without-vpc-id" -> ec2("CreateSubnet", "test", "us-east-1").formParam("CidrBlock", "10.97.1.0/24");
             case "group-in-missing-vpc" -> createSecurityGroup(MISSING_VPC, "missing-vpc-group");
             default -> throw new IllegalArgumentException(request);
         };
@@ -197,14 +196,10 @@ class Ec2CreateDryRunIntegrationTest {
     }
 
     private static ValidatableResponse groupsNamed(String name) {
-        return ec2("DescribeSecurityGroups")
+        return ec2("DescribeSecurityGroups", "test", "us-east-1")
                 .formParam("Filter.1.Name", "group-name")
                 .formParam("Filter.1.Value.1", name)
                 .post("/").then().statusCode(200);
-    }
-
-    private static RequestSpecification ec2(String action) {
-        return given().header("Authorization", AUTH).formParam("Action", action);
     }
 
     private static RequestSpecification tagged(RequestSpecification request, String resourceType, String name) {
@@ -215,15 +210,15 @@ class Ec2CreateDryRunIntegrationTest {
     }
 
     private static RequestSpecification createVpc(String cidrBlock) {
-        return ec2("CreateVpc").formParam("CidrBlock", cidrBlock);
+        return ec2("CreateVpc", "test", "us-east-1").formParam("CidrBlock", cidrBlock);
     }
 
     private static RequestSpecification createSubnet(String vpcId, String cidrBlock) {
-        return ec2("CreateSubnet").formParam("VpcId", vpcId).formParam("CidrBlock", cidrBlock);
+        return ec2("CreateSubnet", "test", "us-east-1").formParam("VpcId", vpcId).formParam("CidrBlock", cidrBlock);
     }
 
     private static RequestSpecification createSecurityGroup(String vpcId, String groupName) {
-        return ec2("CreateSecurityGroup")
+        return ec2("CreateSecurityGroup", "test", "us-east-1")
                 .formParam("VpcId", vpcId)
                 .formParam("GroupName", groupName)
                 .formParam("GroupDescription", "dry run test group");
@@ -235,7 +230,7 @@ class Ec2CreateDryRunIntegrationTest {
     }
 
     private static void deleteVpcsNamed(String name) {
-        XmlPath vpcs = ec2("DescribeVpcs")
+        XmlPath vpcs = ec2("DescribeVpcs", "test", "us-east-1")
                 .formParam("Filter.1.Name", "tag:Name")
                 .formParam("Filter.1.Value.1", name)
                 .post("/").then().statusCode(200).extract().xmlPath();
@@ -246,21 +241,21 @@ class Ec2CreateDryRunIntegrationTest {
 
     /** Deletes the VPC with every subnet and non-default group in it, including any a dry run left. */
     private static void deleteVpcAndItsContents(String vpcId) {
-        XmlPath subnets = ec2("DescribeSubnets")
+        XmlPath subnets = ec2("DescribeSubnets", "test", "us-east-1")
                 .formParam("Filter.1.Name", "vpc-id")
                 .formParam("Filter.1.Value.1", vpcId)
                 .post("/").then().statusCode(200).extract().xmlPath();
         for (String subnetId : subnets.getList("DescribeSubnetsResponse.subnetSet.item.subnetId", String.class)) {
-            ec2("DeleteSubnet").formParam("SubnetId", subnetId).post("/").then().statusCode(200);
+            ec2("DeleteSubnet", "test", "us-east-1").formParam("SubnetId", subnetId).post("/").then().statusCode(200);
         }
-        XmlPath groups = ec2("DescribeSecurityGroups")
+        XmlPath groups = ec2("DescribeSecurityGroups", "test", "us-east-1")
                 .formParam("Filter.1.Name", "vpc-id")
                 .formParam("Filter.1.Value.1", vpcId)
                 .post("/").then().statusCode(200).extract().xmlPath();
         for (String groupId : groups.getList("DescribeSecurityGroupsResponse.securityGroupInfo.item"
                 + ".findAll { it.groupName != 'default' }.groupId", String.class)) {
-            ec2("DeleteSecurityGroup").formParam("GroupId", groupId).post("/").then().statusCode(200);
+            ec2("DeleteSecurityGroup", "test", "us-east-1").formParam("GroupId", groupId).post("/").then().statusCode(200);
         }
-        ec2("DeleteVpc").formParam("VpcId", vpcId).post("/").then().statusCode(200);
+        ec2("DeleteVpc", "test", "us-east-1").formParam("VpcId", vpcId).post("/").then().statusCode(200);
     }
 }
