@@ -18,8 +18,9 @@ import static org.hamcrest.Matchers.not;
  * #6402 settled for this package.
  *
  * <p>{@code AttachRolePolicy}'s {@code RoleName} is the parity case rather than a change:
- * {@code IamService.validateRoleName} already answered it in this form, from the same bounds and
- * the same pattern, and the message is unchanged by the model taking it over.
+ * {@code IamService.validateRoleName} answers it from the same bounds and the same pattern, and
+ * both write the message IAM writes, which names the member with no value beside it: that is
+ * DRIFT-13's reading, and `docs/services/iam.md` carries it.
  */
 @QuarkusTest
 class IamRequestConstraintsIntegrationTest {
@@ -48,9 +49,8 @@ class IamRequestConstraintsIntegrationTest {
             .formParam("PolicyArn", "arn:aws:iam::1:p/ab")
         .when().post("/").then().statusCode(400)
             .body(CODE, equalTo("ValidationError"))
-            .body(MESSAGE, equalTo("1 validation error detected: Value 'arn:aws:iam::1:p/ab' at"
-                    + " 'policyArn' failed to satisfy constraint: Member must have length greater"
-                    + " than or equal to 20"))
+            .body(MESSAGE, equalTo("1 validation error detected: Value at 'policyArn' failed to"
+                    + " satisfy constraint: Member must have length greater than or equal to 20"))
             .body(not(containsString("NoSuchEntity")));
 
         // The same ARN one character longer clears the constraint and reaches the lookup.
@@ -76,7 +76,7 @@ class IamRequestConstraintsIntegrationTest {
             .formParam("PolicyArn", SHORTEST_ARN)
             .formParam("VersionId", "1")
         .when().post("/").then().statusCode(400)
-            .body(MESSAGE, equalTo("1 validation error detected: Value '1' at 'versionId' failed to"
+            .body(MESSAGE, equalTo("1 validation error detected: Value at 'versionId' failed to"
                     + " satisfy constraint: Member must satisfy regular expression pattern:"
                     + " v[1-9][0-9]*(\\.[A-Za-z0-9-]*)?"));
 
@@ -98,10 +98,10 @@ class IamRequestConstraintsIntegrationTest {
             .formParam("PolicyArn", SHORTEST_ARN)
             .formParam("PolicyDocument", "")
         .when().post("/").then().statusCode(400)
-            .body(MESSAGE, containsString("2 validation errors detected: Value '' at"
+            .body(MESSAGE, containsString("2 validation errors detected: Value at"
                     + " 'policyDocument' failed to satisfy constraint: Member must have length"
                     + " greater than or equal to 1"))
-            .body(MESSAGE, containsString("Value '' at 'policyDocument' failed to satisfy"
+            .body(MESSAGE, containsString("Value at 'policyDocument' failed to satisfy"
                     + " constraint: Member must satisfy regular expression pattern:"));
     }
 
@@ -114,10 +114,10 @@ class IamRequestConstraintsIntegrationTest {
      */
     @Test
     void twoBrokenMembersAreReportedTogetherInTheModelsOrder() {
-        String expected = "2 validation errors detected: Value '" + "a".repeat(65) + "' at"
-                + " 'userName' failed to satisfy constraint: Member must have length less than"
-                + " or equal to 64; Value 'short' at 'policyArn' failed to satisfy constraint:"
-                + " Member must have length greater than or equal to 20";
+        String expected = "2 validation errors detected: Value at 'userName' failed to satisfy"
+                + " constraint: Member must have length less than or equal to 64; Value at"
+                + " 'policyArn' failed to satisfy constraint: Member must have length greater"
+                + " than or equal to 20";
 
         iam("AttachUserPolicy")
             .formParam("UserName", "a".repeat(65))
@@ -144,9 +144,9 @@ class IamRequestConstraintsIntegrationTest {
             .formParam("PolicyArn", SHORTEST_ARN)
         .when().post("/").then().statusCode(400)
             .body(CODE, equalTo("ValidationError"))
-            .body(MESSAGE, equalTo("1 validation error detected: Value 'two words' at 'roleName'"
-                    + " failed to satisfy constraint: Member must satisfy regular expression"
-                    + " pattern: [\\w+=,.@-]+"));
+            .body(MESSAGE, equalTo("1 validation error detected: Value at 'roleName' failed to"
+                    + " satisfy constraint: Member must satisfy regular expression pattern:"
+                    + " [\\w+=,.@-]+"));
     }
 
     /**
@@ -170,9 +170,9 @@ class IamRequestConstraintsIntegrationTest {
             .formParam("PolicyArn", SHORTEST_ARN)
         .when().post("/").then().statusCode(400)
             .body(CODE, equalTo("ValidationError"))
-            .body(MESSAGE, equalTo("2 validation errors detected: Value '' at 'roleName' failed to"
+            .body(MESSAGE, equalTo("2 validation errors detected: Value at 'roleName' failed to"
                     + " satisfy constraint: Member must have length greater than or equal to 1;"
-                    + " Value '' at 'roleName' failed to satisfy constraint: Member must satisfy"
+                    + " Value at 'roleName' failed to satisfy constraint: Member must satisfy"
                     + " regular expression pattern: [\\w+=,.@-]+"));
 
         // The same empty name on an operation this wave leaves alone, reported the older way.
@@ -180,7 +180,7 @@ class IamRequestConstraintsIntegrationTest {
             .formParam("RoleName", "")
             .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
         .when().post("/").then().statusCode(400)
-            .body(MESSAGE, equalTo("1 validation error detected: Value '' at 'roleName' failed to"
+            .body(MESSAGE, equalTo("1 validation error detected: Value at 'roleName' failed to"
                     + " satisfy constraint: Member must have length greater than or equal to 1"));
     }
 
@@ -195,7 +195,7 @@ class IamRequestConstraintsIntegrationTest {
             .formParam("RoleName", " ")
             .formParam("PolicyArn", SHORTEST_ARN)
         .when().post("/").then().statusCode(400)
-            .body(MESSAGE, equalTo("1 validation error detected: Value ' ' at 'roleName' failed to"
+            .body(MESSAGE, equalTo("1 validation error detected: Value at 'roleName' failed to"
                     + " satisfy constraint: Member must satisfy regular expression pattern:"
                     + " [\\w+=,.@-]+"));
     }
@@ -244,9 +244,9 @@ class IamRequestConstraintsIntegrationTest {
             .formParam("Filter.member.1", "Users")
         .when().post("/").then().statusCode(400)
             .body(CODE, equalTo("ValidationError"))
-            .body(MESSAGE, equalTo("1 validation error detected: Value 'Users' at"
-                    + " 'filter.1.member' failed to satisfy constraint: Member must satisfy enum"
-                    + " value set: [User, Role, Group, LocalManagedPolicy, AWSManagedPolicy]"));
+            .body(MESSAGE, equalTo("1 validation error detected: Value at 'filter.1.member'"
+                    + " failed to satisfy constraint: Member must satisfy enum value set:"
+                    + " [User, Role, Group, LocalManagedPolicy, AWSManagedPolicy]"));
 
         iam("GetAccountAuthorizationDetails")
             .formParam("Filter.member.1", "User")
@@ -265,9 +265,9 @@ class IamRequestConstraintsIntegrationTest {
             .formParam("Filter.member.9", "Policies")
         .when().post("/").then().statusCode(400)
             .body(CODE, equalTo("ValidationError"))
-            .body(MESSAGE, containsString("2 validation errors detected: Value 'Users' at"
+            .body(MESSAGE, containsString("2 validation errors detected: Value at"
                     + " 'filter.2.member'"))
-            .body(MESSAGE, containsString("Value 'Policies' at 'filter.9.member'"));
+            .body(MESSAGE, containsString("Value at 'filter.9.member'"));
     }
 
     /** {@code maxItemsType} is 1 to 1000, which this operation reads nothing of today. */
@@ -277,8 +277,8 @@ class IamRequestConstraintsIntegrationTest {
             .formParam("MaxItems", "1001")
         .when().post("/").then().statusCode(400)
             .body(CODE, equalTo("ValidationError"))
-            .body(MESSAGE, equalTo("1 validation error detected: Value '1001' at 'maxItems' failed"
-                    + " to satisfy constraint: Member must have value less than or equal to 1000"));
+            .body(MESSAGE, equalTo("1 validation error detected: Value at 'maxItems' failed to"
+                    + " satisfy constraint: Member must have value less than or equal to 1000"));
 
         iam("GetAccountAuthorizationDetails")
             .formParam("MaxItems", "1000")
@@ -289,9 +289,8 @@ class IamRequestConstraintsIntegrationTest {
             .formParam("MaxItems", "9223372036854775808")
         .when().post("/").then().statusCode(400)
             .body(CODE, equalTo("ValidationError"))
-            .body(MESSAGE, equalTo("1 validation error detected: Value '9223372036854775808' at"
-                    + " 'maxItems' failed to satisfy constraint: Member must have value less than"
-                    + " or equal to 1000"));
+            .body(MESSAGE, equalTo("1 validation error detected: Value at 'maxItems' failed to"
+                    + " satisfy constraint: Member must have value less than or equal to 1000"));
     }
 
     /** A marker sent empty breaks its minimum and its pattern, and both are reported. */
@@ -301,7 +300,7 @@ class IamRequestConstraintsIntegrationTest {
             .formParam("Marker", "")
         .when().post("/").then().statusCode(400)
             .body(CODE, equalTo("ValidationError"))
-            .body(MESSAGE, containsString("2 validation errors detected: Value '' at 'marker'"
+            .body(MESSAGE, containsString("2 validation errors detected: Value at 'marker'"
                     + " failed to satisfy constraint: Member must have length greater than or"
                     + " equal to 1"))
             .body(MESSAGE, containsString("Member must satisfy regular expression pattern:"));

@@ -11,6 +11,9 @@ import jakarta.ws.rs.core.MultivaluedMap;
  * ValidationError} whether or not the thing it names exists, the ordering #6402 settled for this
  * package.
  *
+ * <p>The violations read as IAM writes them, naming the member with no value beside it, which is
+ * {@link IamValidationErrors}' reading of the captures rather than the walk's own default.
+ *
  * <p>The vendored file carries a wave of operations rather than all 180, and grows a wave at a
  * time, each one chosen where no operation checks a declared constraint by hand, so the model adds
  * the refusals AWS answers without rewording an answer already given. The managed-policy family
@@ -24,8 +27,8 @@ import jakarta.ws.rs.core.MultivaluedMap;
  */
 final class IamRequestShapes {
 
-    private static final QueryConstraintCheck CHECK =
-            QueryConstraintCheck.load("aws/iam-request-shapes.json", "IAM request shapes");
+    private static final QueryConstraintCheck CHECK = QueryConstraintCheck.load(
+            "aws/iam-request-shapes.json", "IAM request shapes", IamValidationErrors.MESSAGES);
 
     private IamRequestShapes() {
     }

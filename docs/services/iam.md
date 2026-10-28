@@ -236,6 +236,29 @@ whose `SortKey` is held to its enum by hand, `ListPoliciesGrantingServiceAccess`
 `SimulatePrincipalPolicy`, whose `ContextEntries` nest a list inside a list of structures, which the
 walk does not read.
 
+Every constraint violation IAM answers names the member and leaves the offending value out,
+`Value at 'roleName' failed to satisfy constraint: Member must have length greater than or equal to
+1`, where most services write `Value 'x' at 'roleName'` and STS still does. That is a reading rather
+than a published rule, and it is where the recorded messages point. Without the value: the two IAM
+messages in LocalStack's AWS-validated IAM snapshot, recorded 2025-03-06, a 2026 capture of a
+`UserName` over 64 characters, and the messages the Identity Center guide lists as the ones that
+"commonly appear in CloudTrail events", which read `Value at 'name.familyName'`. With it: two older
+issue reports, from 2019 and 2024. So the reading is that IAM stopped carrying the value between
+them and the older captures are stale, and this service answers the newer form everywhere, from a
+check written by hand to a constraint read off the model. STS keeps the value, which its own 2024
+capture carries and which is the same split recorded here for pattern and enum messages.
+
+A list is named the same way, with its members left out: a tag list over its limit, or one holding a
+key that breaks its own shape, reads `Value at 'tagKeys'` rather than echoing every key back. That
+was already this service's choice for a list over its limit, and it is now what a list says
+whatever it breaks. Other services do quote a list, Lambda's `Value '[x86_64, arm64]' at
+'architectures'` being a captured one, which is why this is IAM's reading and not a rule.
+
+The one message that still carries a word where the value would go is the required member a request
+leaves out, `Value null at '<member>'`, which no capture covers in either form. The form is chosen
+in one place, so a direct capture that ever shows IAM carrying its values again moves it back in one
+edit rather than across the service.
+
 ### Permission Boundaries
 
 | Action | Description |

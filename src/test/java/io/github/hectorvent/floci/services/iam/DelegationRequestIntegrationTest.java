@@ -276,7 +276,12 @@ class DelegationRequestIntegrationTest {
         // here too rather than with the InvalidInput these operations happen to model.
         byId(PARTNER_AUTH, "GetDelegationRequest", "dr-short")
             .statusCode(400)
-                .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                // The whole message, since these operations name the member with no value beside
+                // it, as every other IAM check does.
+                .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at"
+                        + " 'delegationRequestId' failed to satisfy constraint: Member must have"
+                        + " length greater than or equal to 16"));
     }
 
     @Test

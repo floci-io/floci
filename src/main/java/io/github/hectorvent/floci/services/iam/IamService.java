@@ -1311,9 +1311,10 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         } else {
             return;
         }
-        String value = roleName == null ? "null" : "'" + roleName + "'";
-        throw SmithyValidationErrors.validationError("Value " + value
-                + " at 'roleName' failed to satisfy constraint: " + constraint);
+        if (roleName == null) {
+            throw SmithyValidationErrors.validationError(SmithyValidationErrors.notNull("roleName"));
+        }
+        throw IamValidationErrors.validationError("roleName", roleName, constraint);
     }
 
     /**
@@ -1778,10 +1779,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 && !"All".equalsIgnoreCase(scope)
                 && !"AWS".equalsIgnoreCase(scope)
                 && !"Local".equalsIgnoreCase(scope)) {
-            throw SmithyValidationErrors.validationError(
-                    "Value '" + scope + "' at 'scope' failed to "
-                            + "satisfy constraint: Member must satisfy enum value set: "
-                            + "[All, AWS, Local]");
+            throw IamValidationErrors.validationError("scope", scope,
+                    "Member must satisfy enum value set: [All, AWS, Local]");
         }
         String prefix = pathPrefix != null ? pathPrefix : "/";
         boolean blankScope = scope == null || scope.isBlank();
@@ -3045,10 +3044,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private String validateAccountPropertyKey(String key) {
         if (key == null || key.isEmpty() || key.length() > MAX_ACCOUNT_PROPERTY_KEY_LENGTH
                 || !ACCOUNT_PROPERTY_KEY_PATTERN.matcher(key).matches()) {
-            throw SmithyValidationErrors.validationError(
-                    "Value '" + key + "' at 'properties' failed "
-                            + "to satisfy constraint: Map keys "
-                            + "must satisfy constraint: [Member must have length less than or "
+            throw IamValidationErrors.validationError("properties", key,
+                    "Map keys must satisfy constraint: [Member must have length less than or "
                             + "equal to " + MAX_ACCOUNT_PROPERTY_KEY_LENGTH + ", Member must "
                             + "satisfy regular expression pattern: "
                             + ACCOUNT_PROPERTY_KEY_PATTERN.pattern() + "]");
@@ -3077,10 +3074,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public void setSecurityTokenServicePreferences(String globalEndpointTokenVersion) {
         if (globalEndpointTokenVersion == null
                 || !GLOBAL_ENDPOINT_TOKEN_VERSIONS.contains(globalEndpointTokenVersion)) {
-            throw SmithyValidationErrors.validationError(
-                    "Value '" + globalEndpointTokenVersion
-                            + "' at 'globalEndpointTokenVersion' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: ["
+            throw IamValidationErrors.validationError("globalEndpointTokenVersion",
+                    globalEndpointTokenVersion, "Member must satisfy enum value set: ["
                             + String.join(", ", GLOBAL_ENDPOINT_TOKEN_VERSIONS) + "]");
         }
         stsPreferences.put(STS_PREFERENCES_KEY, globalEndpointTokenVersion);
@@ -3815,11 +3810,9 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             }
             if (credentialAgeDays < MIN_CREDENTIAL_AGE_DAYS
                     || credentialAgeDays > MAX_CREDENTIAL_AGE_DAYS) {
-                throw SmithyValidationErrors.validationError(
-                        "Value '" + credentialAgeDays
-                                + "' at 'credentialAgeDays' failed to satisfy constraint: "
-                                + "Member must be between " + MIN_CREDENTIAL_AGE_DAYS + " and "
-                                + MAX_CREDENTIAL_AGE_DAYS);
+                throw IamValidationErrors.validationError("credentialAgeDays",
+                        String.valueOf(credentialAgeDays), "Member must be between "
+                                + MIN_CREDENTIAL_AGE_DAYS + " and " + MAX_CREDENTIAL_AGE_DAYS);
             }
         }
         synchronized (serviceCredentialLock) {
@@ -4140,10 +4133,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     public List<VirtualMfaDevice> listVirtualMfaDevices(String assignmentStatus) {
         String status = assignmentStatus == null || assignmentStatus.isBlank() ? "Any" : assignmentStatus;
         if (!status.equals("Any") && !status.equals("Assigned") && !status.equals("Unassigned")) {
-            throw SmithyValidationErrors.validationError(
-                    "Value '" + assignmentStatus
-                            + "' at 'assignmentStatus' failed to satisfy constraint: "
-                            + "Member must satisfy enum value set: [Any, Unassigned, Assigned]");
+            throw IamValidationErrors.validationError("assignmentStatus", assignmentStatus,
+                    "Member must satisfy enum value set: [Any, Unassigned, Assigned]");
         }
         return virtualMfaDevices.scan(k -> true).stream()
                 .filter(d -> switch (status) {

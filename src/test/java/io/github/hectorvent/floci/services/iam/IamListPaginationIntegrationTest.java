@@ -888,14 +888,14 @@ class IamListPaginationIntegrationTest {
                 listRequest(action, fixture, Integer.toString(min - 1), null).when().post("/").then()
                     .statusCode(400)
                     .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-                    .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value '"
-                            + (min - 1) + "' at 'maxItems' failed to satisfy constraint: "
+                    .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: "
+                            + "Value at 'maxItems' failed to satisfy constraint: "
                             + "Member must have value greater than or equal to " + min));
                 listRequest(action, fixture, Integer.toString(max + 1), null).when().post("/").then()
                     .statusCode(400)
                     .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-                    .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value '"
-                            + (max + 1) + "' at 'maxItems' failed to satisfy constraint: "
+                    .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: "
+                            + "Value at 'maxItems' failed to satisfy constraint: "
                             + "Member must have value less than or equal to " + max));
 
                 List<String> all = walkFrom(action, paginator, fixture, Integer.toString(max), null);

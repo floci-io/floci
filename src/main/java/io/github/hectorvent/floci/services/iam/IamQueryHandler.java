@@ -1004,10 +1004,8 @@ public class IamQueryHandler {
         try {
             return Integer.valueOf(raw.trim());
         } catch (NumberFormatException e) {
-            throw SmithyValidationErrors.validationError(
-                    "Value '" + raw + "' at '"
-                            + Character.toLowerCase(name.charAt(0)) + name.substring(1)
-                            + "' failed to satisfy constraint: Member must be an integer");
+            throw validationError(raw, Character.toLowerCase(name.charAt(0)) + name.substring(1),
+                    "Member must be an integer");
         }
     }
 
@@ -3608,13 +3606,12 @@ public class IamQueryHandler {
 
     /**
      * IAM's constraint-violation shape for a scalar member, which leads with the error count and
-     * quotes the offending value. Only the bound actually broken is named, as AWS does: a value
-     * outside a range reports the side it fell outside, not the whole range.
+     * names the member without the offending value, as {@link IamValidationErrors} reads it. Only
+     * the bound actually broken is named, as AWS does: a value outside a range reports the side it
+     * fell outside, not the whole range.
      */
     private static AwsException validationError(String value, String at, String constraint) {
-        return SmithyValidationErrors.validationError(
-                "Value '" + value + "' at '" + at + "' failed to satisfy constraint: "
-                        + constraint);
+        return IamValidationErrors.validationError(at, value, constraint);
     }
 
     private List<String> getMemberList(MultivaluedMap<String, String> params, String name) {
