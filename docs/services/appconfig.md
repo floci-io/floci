@@ -85,8 +85,7 @@ Floci provisions these resource types:
 - `AWS::AppConfig::DeploymentStrategy`
 
 `Ref` returns the AppConfig ID of each, which `Fn::GetAtt` also returns as `ApplicationId`, `EnvironmentId`,
-`ConfigurationProfileId` and `Id`. A configuration profile's `KmsKeyArn` is not set. An environment's or
-configuration profile's `ApplicationId` is the application's ID, as on AWS, not its name.
+`ConfigurationProfileId` and `Id`. A configuration profile's `KmsKeyArn` is not set.
 
 An update that changes only mutable properties keeps the ID and changes the resource in place: the name and
 description of an application, environment or configuration profile, an environment's `Monitors`, an application's

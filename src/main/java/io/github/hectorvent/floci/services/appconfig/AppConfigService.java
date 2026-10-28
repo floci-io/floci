@@ -130,21 +130,7 @@ public class AppConfigService {
 
     public Environment createEnvironment(String applicationIdentifier, Map<String, Object> request) {
         List<Monitor> monitors = monitors(request.get("Monitors"));
-        return newEnvironment(resolveApplication(applicationIdentifier).getId(), monitors, request);
-    }
-
-    /**
-     * Creates an environment in the application whose ID is exactly {@code applicationId}, as a
-     * CloudFormation {@code ApplicationId} names it; unlike {@link #createEnvironment} it never
-     * falls back to a name, so an application already deleted through the API fails with
-     * ResourceNotFoundException rather than take another application named like its ID.
-     */
-    public synchronized Environment createEnvironmentById(String applicationId, Map<String, Object> request) {
-        List<Monitor> monitors = monitors(request.get("Monitors"));
-        return newEnvironment(requireApplicationById(applicationId).getId(), monitors, request);
-    }
-
-    private Environment newEnvironment(String appId, List<Monitor> monitors, Map<String, Object> request) {
+        String appId = resolveApplication(applicationIdentifier).getId();
         Environment env = new Environment();
         env.setId(shortId(7));
         env.setApplicationId(appId);
@@ -257,19 +243,7 @@ public class AppConfigService {
     // ──────────────────────────── Configuration Profile ────────────────────────────
 
     public ConfigurationProfile createConfigurationProfile(String applicationIdentifier, Map<String, Object> request) {
-        return newConfigurationProfile(resolveApplication(applicationIdentifier).getId(), request);
-    }
-
-    /**
-     * Creates a configuration profile in the application whose ID is exactly {@code applicationId};
-     * like {@link #createEnvironmentById}, it never falls back to a name.
-     */
-    public synchronized ConfigurationProfile createConfigurationProfileById(String applicationId,
-                                                                            Map<String, Object> request) {
-        return newConfigurationProfile(requireApplicationById(applicationId).getId(), request);
-    }
-
-    private ConfigurationProfile newConfigurationProfile(String appId, Map<String, Object> request) {
+        String appId = resolveApplication(applicationIdentifier).getId();
         ConfigurationProfile profile = new ConfigurationProfile();
         profile.setId(shortId(7));
         profile.setApplicationId(appId);

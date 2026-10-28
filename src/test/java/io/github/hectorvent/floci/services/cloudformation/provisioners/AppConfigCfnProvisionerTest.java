@@ -534,25 +534,22 @@ class AppConfigCfnProvisionerTest {
     }
 
     /**
-     * {@code ApplicationId} is an ID, as on AWS: an environment or profile whose application is gone
-     * fails rather than land under another application named like that ID.
+     * {@code ApplicationId} is the application's ID or name, as on AWS: an environment and a profile
+     * whose {@code ApplicationId} names an existing application are created under it.
      */
     @Test
-    void anEnvironmentOrProfileOfAGoneApplicationIsNotCreatedUnderOneNamedLikeItsId() {
+    void anEnvironmentAndAProfileCanNameTheirApplication() {
         String appId = create(APPLICATION, props("Name", "orders")).getPhysicalId();
-        service.deleteApplication(appId);
-        Application namedLikeTheId = service.createApplication(Map.of("Name", appId));
 
-        AwsException environment = assertThrows(AwsException.class, () -> provisioner.provision(resource(ENVIRONMENT),
-                MAPPER.valueToTree(props("ApplicationId", appId, "Name", "beta")), context(null)));
-        AwsException profile = assertThrows(AwsException.class, () -> provisioner.provision(resource(PROFILE),
-                MAPPER.valueToTree(props("ApplicationId", appId, "Name", "settings", "LocationUri", "hosted")),
-                context(null)));
+        StackResource env = create(ENVIRONMENT, props("ApplicationId", "orders", "Name", "beta"));
+        StackResource profile = create(PROFILE, props("ApplicationId", "orders", "Name", "settings",
+                "LocationUri", "hosted"));
 
-        assertEquals("ResourceNotFoundException", environment.getErrorCode());
-        assertEquals("ResourceNotFoundException", profile.getErrorCode());
-        assertTrue(service.listEnvironments(namedLikeTheId.getId()).isEmpty());
-        assertTrue(service.listConfigurationProfiles(namedLikeTheId.getId()).isEmpty());
+        assertEquals(appId, service.findEnvironment(env.getPhysicalId()).orElseThrow().getApplicationId());
+        assertEquals(appId, service.findConfigurationProfile(profile.getPhysicalId()).orElseThrow().getApplicationId());
+        String recordedApplication = CfnRollback.USES_ATTR_PREFIX + "AppConfigApplicationId";
+        assertEquals(appId, env.getAttributes().get(recordedApplication), "the stack records the application's ID");
+        assertEquals(appId, profile.getAttributes().get(recordedApplication));
     }
 
     @Test

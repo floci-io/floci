@@ -158,7 +158,7 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
         request.put("Name", name);
         request.put("Description", description);
         request.put("Monitors", monitors);
-        Environment env = service.createEnvironmentById(applicationId, request);
+        Environment env = service.createEnvironment(applicationId, request);
         r.setPhysicalId(env.getId());
         r.getAttributes().put("EnvironmentId", env.getId());
         r.getAttributes().put(APPLICATION_ATTR, env.getApplicationId());
@@ -190,7 +190,7 @@ public class AppConfigCfnProvisioner implements CfnResourceProvisioner {
         request.put("Description", description);
         request.put("LocationUri", locationUri);
         request.put("Type", type);
-        ConfigurationProfile profile = service.createConfigurationProfileById(applicationId, request);
+        ConfigurationProfile profile = service.createConfigurationProfile(applicationId, request);
         r.setPhysicalId(profile.getId());
         r.getAttributes().put("ConfigurationProfileId", profile.getId());
         r.getAttributes().put(APPLICATION_ATTR, profile.getApplicationId());
