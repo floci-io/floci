@@ -4,9 +4,11 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPointInTimeRecovery.ItemChange;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.PointInTimeChange;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.Test;
@@ -28,11 +30,24 @@ class DynamoDbPointInTimeRecoveryTest {
     private static final String TABLE_KEY = "us-east-1::Items";
 
     private final MutableClock clock = new MutableClock();
+    private final StorageBackend<String, PointInTimeChange> store = new InMemoryStorage<>();
     private final DynamoDbPointInTimeRecovery recovery =
-            new DynamoDbPointInTimeRecovery(new InMemoryStorage<>(), ACCOUNT, Duration.ofMinutes(5), clock);
+            new DynamoDbPointInTimeRecovery(store, ACCOUNT, Duration.ofMinutes(5), clock);
     private final TableDefinition table = new TableDefinition("Items",
             List.of(new KeySchemaElement("pk", "HASH")), List.of(new AttributeDefinition("pk", "S")));
     private final Map<String, JsonNode> live = new ConcurrentHashMap<>();
+
+    @Test
+    void recordItemDropsTheChangesThatLeftTheRecoveryPeriod() {
+        table.setPointInTimeRecoveryEnabled(true);
+        table.setPointInTimeRecoveryRecoveryPeriodInDays(1);
+        for (String value : List.of("A", "B", "C")) {
+            recovery.recordItem(ACCOUNT, TABLE_KEY, table, "k", item(value));
+            clock.advance(Duration.ofHours(12));
+        }
+
+        assertEquals(Set.of(TABLE_KEY + "#1", TABLE_KEY + "#2"), store.keys());
+    }
 
     @Test
     void changesBetweenWaitsForAWriteThatIsRecordedButNotYetWritten() {

@@ -10,10 +10,12 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,7 +38,7 @@ final class DynamoDbPointInTimeRecovery {
 
     /** The changes of one table, oldest first. */
     private static final class Changes {
-        private final List<PointInTimeChange> list = new ArrayList<>();
+        private final ArrayDeque<PointInTimeChange> list = new ArrayDeque<>();
         private long nextSequence;
         private boolean dropped;
         // itemsAt leaves out a change recorded after it read the list, so that change must fall after its time.
@@ -62,11 +64,13 @@ final class DynamoDbPointInTimeRecovery {
                 store.get(key).ifPresent(change -> stored.put(defaultAccountId + "/" + key, change));
             }
         }
-        stored.forEach((key, change) -> changesByTable
-                .computeIfAbsent(key.substring(0, key.lastIndexOf('#')), ignored -> new Changes())
-                .list.add(change));
+        stored.entrySet().stream()
+                .sorted(Comparator.comparingLong(entry -> entry.getValue().getSequence()))
+                .forEach(entry -> changesByTable
+                        .computeIfAbsent(entry.getKey().substring(0, entry.getKey().lastIndexOf('#')),
+                                ignored -> new Changes())
+                        .list.add(entry.getValue()));
         for (Changes changes : changesByTable.values()) {
-            changes.list.sort(Comparator.comparingLong(PointInTimeChange::getSequence));
             changes.nextSequence = changes.list.getLast().getSequence() + 1;
         }
     }
@@ -105,12 +109,9 @@ final class DynamoDbPointInTimeRecovery {
             changes.list.add(change);
             put(accountId, storageKey, change);
             Instant cutoff = now.minus(recoveryPeriod(table));
-            int expired = 0;
-            while (expired < changes.list.size() && changes.list.get(expired).getTime().isBefore(cutoff)) {
-                delete(accountId, storageKey, changes.list.get(expired));
-                expired++;
+            while (changes.list.getFirst().getTime().isBefore(cutoff)) {
+                delete(accountId, storageKey, changes.list.removeFirst());
             }
-            changes.list.subList(0, expired).clear();
         }
     }
 
@@ -224,11 +225,16 @@ final class DynamoDbPointInTimeRecovery {
 
         JsonNode of(String itemKey) {
             synchronized (changes) {
-                int i = changes.list.size();
-                while (0 < i && read <= changes.list.get(i - 1).getSequence()) {
-                    i--;
+                List<PointInTimeChange> unread = new ArrayList<>();
+                Iterator<PointInTimeChange> newestFirst = changes.list.descendingIterator();
+                while (newestFirst.hasNext()) {
+                    PointInTimeChange change = newestFirst.next();
+                    if (change.getSequence() < read) {
+                        break;
+                    }
+                    unread.add(change);
                 }
-                for (PointInTimeChange change : changes.list.subList(i, changes.list.size())) {
+                for (PointInTimeChange change : unread.reversed()) {
                     if (!replaced.containsKey(change.getItemKey())) {
                         replaced.put(change.getItemKey(), change.getOldItem());
                     }
