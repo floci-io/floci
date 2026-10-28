@@ -68,7 +68,7 @@ EC2 instance can use a default subnet in a different zone.
 
 | Operation | Notes |
 |---|---|
-| `DescribeAutoScalingInstances` | Returns all ASG-tracked instances with their group name, lifecycle state and health status. As in AWS, this API spells health `HEALTHY` or `UNHEALTHY`, while `DescribeAutoScalingGroups` reports `Healthy` or `Unhealthy` |
+| `DescribeAutoScalingInstances` | Returns all ASG-tracked instances with their group name, lifecycle state and health status. Health is in capitals here: `HEALTHY`, as the AWS samples show, and `UNHEALTHY` by the same rule. `DescribeAutoScalingGroups` reports `Healthy` or `Unhealthy` |
 | `SetInstanceHealth` | Updates an instance's health status immediately; accepts but does not enforce the grace-period flag |
 | `SetInstanceProtection` | Enables or disables scale-in protection for named instances in a group |
 | `SetDesiredCapacity` | Updates desired count; reconciler handles scale-out / scale-in within 10 s |
