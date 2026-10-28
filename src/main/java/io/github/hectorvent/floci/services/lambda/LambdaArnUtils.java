@@ -70,7 +70,7 @@ public final class LambdaArnUtils {
      */
     public static String functionArn(String reference, String partition, String region, String defaultAccount) {
         ResolvedFunctionRef ref = resolve(reference);
-        if (reference.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(reference)) {
             return reference;
         }
         String resource = ref.qualifier() == null
@@ -106,7 +106,7 @@ public final class LambdaArnUtils {
                     "Member must have length less than or equal to " + MAX_TOTAL_LENGTH);
         }
 
-        if (input.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(input)) {
             return parseFullArn(input);
         }
         if (input.contains(":function:")) {

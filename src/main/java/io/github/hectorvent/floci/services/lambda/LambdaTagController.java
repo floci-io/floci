@@ -50,7 +50,7 @@ public class LambdaTagController {
      * the ARN's resource type. The region comes from the ARN itself.
      */
     private static String arnRegion(String arn) {
-        String[] parts = arn.split(":");
+        String[] parts = arn.split(":"); // partition-literal: Lambda reads the fourth field of any tag target, ARN or not
         return parts.length > 3 ? parts[3] : "";
     }
 

@@ -905,11 +905,7 @@ public class LambdaController {
     }
 
     private String runtimeVersionArn(LambdaFunction fn) {
-        String region = regionResolver.getDefaultRegion();
-        String[] arnParts = fn.getFunctionArn() != null ? fn.getFunctionArn().split(":") : new String[0];
-        if (arnParts.length > 3 && !arnParts[3].isBlank()) {
-            region = arnParts[3];
-        }
+        String region = AwsArnUtils.regionOrDefault(fn.getFunctionArn(), regionResolver.getDefaultRegion());
         return AwsArnUtils.Arn.of("lambda", region, "", "runtime:" + runtimeVersionId(fn.getRuntime())).toString();
     }
 

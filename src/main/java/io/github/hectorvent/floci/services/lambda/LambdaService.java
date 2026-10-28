@@ -661,7 +661,7 @@ public class LambdaService implements ResourceProvider {
         if (effective == null) {
             return getFunction(region, functionName);
         }
-        if (functionName.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(functionName)) {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(functionName);
             return targetResolver.resolveReadTargetForAccount(arn.accountId(), region, ref.name(), effective);
         }
@@ -3742,7 +3742,7 @@ public class LambdaService implements ResourceProvider {
         if (principal == null) {
             return null;
         }
-        if (principal.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(principal)) {
             return Map.of("AWS", principal);
         }
         if (ACCOUNT_ID_PATTERN.matcher(principal).matches()) {
@@ -3966,7 +3966,7 @@ public class LambdaService implements ResourceProvider {
      * than the mapping's is reported as missing, as AWS does.
      */
     private EventSourceMapping taggedEventSourceMapping(String resourceArn) {
-        if (resourceArn == null || !resourceArn.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(resourceArn)) {
             return null;
         }
         AwsArnUtils.Arn arn;
@@ -3996,7 +3996,7 @@ public class LambdaService implements ResourceProvider {
         if (functionArn == null || functionArn.isBlank()) {
             throw new AwsException("InvalidParameterValueException", "Resource ARN is required", 400);
         }
-        if (!functionArn.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(functionArn)) {
             throw new AwsException("InvalidParameterValueException",
                     "Resource ARN must be a full Lambda function ARN: " + functionArn, 400);
         }

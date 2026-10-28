@@ -11,7 +11,6 @@ arn-concat	src/main/java/io/github/hectorvent/floci/services/stepfunctions/State
 arn-concat	src/main/java/io/github/hectorvent/floci/services/stepfunctions/StepFunctionsService.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/core/common/IamConditionContextResolver.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/core/common/PassedRoles.java	2
-arn-probe	src/main/java/io/github/hectorvent/floci/services/apigatewayv2/ApiGatewayV2Service.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/services/appintegrations/AppIntegrationsService.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/services/appsync/graphql/datasource/AppSyncDataSourceAuthorizer.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/services/appsync/graphql/datasource/RelationalDataSourceInvoker.java	1
@@ -34,9 +33,6 @@ arn-probe	src/main/java/io/github/hectorvent/floci/services/glue/GlueService.jav
 arn-probe	src/main/java/io/github/hectorvent/floci/services/iam/ResourceArnBuilder.java	8
 arn-probe	src/main/java/io/github/hectorvent/floci/services/iot/IotService.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/services/lakeformation/LakeFormationService.java	1
-arn-probe	src/main/java/io/github/hectorvent/floci/services/lambda/LambdaArnUtils.java	2
-arn-probe	src/main/java/io/github/hectorvent/floci/services/lambda/LambdaService.java	4
-arn-probe	src/main/java/io/github/hectorvent/floci/services/lambdamicrovms/LambdaMicrovmsService.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/services/redshift/RedshiftService.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/services/redshiftserverless/RedshiftServerlessService.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/services/resourcegroups/ResourceGroupsService.java	2
@@ -57,9 +53,6 @@ arn-split	src/main/java/io/github/hectorvent/floci/services/ec2/Ec2InstanceCrede
 arn-split	src/main/java/io/github/hectorvent/floci/services/glue/GlueService.java	1
 arn-split	src/main/java/io/github/hectorvent/floci/services/iam/PublicAccessConditions.java	1
 arn-split	src/main/java/io/github/hectorvent/floci/services/kms/KmsJsonHandler.java	1
-arn-split	src/main/java/io/github/hectorvent/floci/services/lambda/LambdaController.java	1
-arn-split	src/main/java/io/github/hectorvent/floci/services/lambda/LambdaTagController.java	1
-arn-split	src/main/java/io/github/hectorvent/floci/services/lambdamicrovms/LambdaMicrovmsController.java	1
 arn-split	src/main/java/io/github/hectorvent/floci/services/ram/RamService.java	2
 arn-split	src/main/java/io/github/hectorvent/floci/services/redshift/RedshiftService.java	1
 arn-split	src/main/java/io/github/hectorvent/floci/services/resourcegroupstagging/ResourceGroupsTaggingService.java	1
