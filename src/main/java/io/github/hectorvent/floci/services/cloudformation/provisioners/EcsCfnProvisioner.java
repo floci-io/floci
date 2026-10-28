@@ -389,7 +389,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             return "default";
         }
         int slash = clusterRef.lastIndexOf('/');
-        return clusterRef.startsWith("arn:") && slash >= 0 ? clusterRef.substring(slash + 1) : clusterRef;
+        return AwsArnUtils.looksLikeArn(clusterRef) && slash >= 0 ? clusterRef.substring(slash + 1) : clusterRef;
     }
 
     /** The cluster segment of {@code service/<cluster>/<name>}; the legacy {@code service/<name>} form is the default. */

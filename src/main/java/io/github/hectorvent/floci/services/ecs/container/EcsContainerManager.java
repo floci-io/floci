@@ -2124,7 +2124,7 @@ public class EcsContainerManager {
 
     /** The region embedded in an ARN {@code valueFrom} (4th segment), or {@code taskRegion} for a bare name. */
     private String arnRegion(String valueFrom, String taskRegion) {
-        if (valueFrom != null && valueFrom.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(valueFrom)) {
             String[] parts = valueFrom.split(":", 5);
             if (parts.length >= 4 && !parts[3].isBlank()) {
                 return parts[3];
