@@ -193,4 +193,32 @@ class CloudMapIntegrationTest {
                 .then().statusCode(404)
                 .body("__type", equalTo("NamespaceNotFound"));
     }
+
+    @Test
+    @Order(13)
+    void healthCheckCustomConfigAlwaysReadsBackFailureThresholdOne() {
+        String operationId = call("CreateHttpNamespace", "{\"Name\":\"floci-cm-custom-health\"}")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("OperationId");
+        String customNamespaceId = call("GetOperation", "{\"OperationId\":\"" + operationId + "\"}")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("Operation.Targets.NAMESPACE");
+        String emptyId = createCustomHealthService("empty", customNamespaceId, "{}");
+        String thresholdId = createCustomHealthService("threshold", customNamespaceId, "{\"FailureThreshold\":3}");
+
+        for (String id : List.of(emptyId, thresholdId)) {
+            call("GetService", "{\"Id\":\"" + id + "\"}")
+                    .then().statusCode(200)
+                    .body("Service.HealthCheckCustomConfig.FailureThreshold", equalTo(1));
+            call("DeleteService", "{\"Id\":\"" + id + "\"}").then().statusCode(200);
+        }
+        call("DeleteNamespace", "{\"Id\":\"" + customNamespaceId + "\"}").then().statusCode(200);
+    }
+
+    private static String createCustomHealthService(String name, String nsId, String healthCheckCustomConfig) {
+        return call("CreateService", "{\"Name\":\"" + name + "\",\"NamespaceId\":\"" + nsId
+                + "\",\"HealthCheckCustomConfig\":" + healthCheckCustomConfig + "}")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("Service.Id");
+    }
 }

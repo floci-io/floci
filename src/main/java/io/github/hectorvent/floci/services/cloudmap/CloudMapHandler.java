@@ -151,7 +151,7 @@ public class CloudMapHandler {
         Service created = service.createService(
                 text(request, "Name"), text(request, "NamespaceId"), text(request, "CreatorRequestId"),
                 text(request, "Description"), rawJson(request.path("DnsConfig")),
-                rawJson(request.path("HealthCheckConfig")), rawJson(request.path("HealthCheckCustomConfig")),
+                rawJson(request.path("HealthCheckConfig")), objectJson(request.path("HealthCheckCustomConfig")),
                 text(request, "Type"), parseTags(request), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Service", buildServiceNode(created));
@@ -434,6 +434,11 @@ public class CloudMapHandler {
 
     private String rawJson(JsonNode node) {
         return (node != null && node.isObject() && !node.isEmpty()) ? node.toString() : null;
+    }
+
+    /** Unlike {@link #rawJson}, keeps {@code {}}: an empty HealthCheckCustomConfig still enables it. */
+    private String objectJson(JsonNode node) {
+        return node.isObject() ? node.toString() : null;
     }
 
     private void setRawJson(ObjectNode target, String field, String rawJson) {

@@ -59,6 +59,8 @@ public class CloudMapService {
     private static final String ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789";
     /** Route 53 answers a service discovery query with at most eight records. */
     private static final int MAX_DNS_ANSWERS = 8;
+    /** FailureThreshold is no longer supported: AWS always sets it to 1. */
+    private static final String HEALTH_CHECK_CUSTOM_CONFIG = "{\"FailureThreshold\":1}";
 
     private final SecureRandom random = new SecureRandom();
 
@@ -227,7 +229,7 @@ public class CloudMapService {
         service.setDescription(description);
         service.setDnsConfig(dnsConfig);
         service.setHealthCheckConfig(healthCheckConfig);
-        service.setHealthCheckCustomConfig(healthCheckCustomConfig);
+        service.setHealthCheckCustomConfig(healthCheckCustomConfig == null ? null : HEALTH_CHECK_CUSTOM_CONFIG);
         service.setType(resolveServiceType(type, dnsConfig));
         service.setCreatorRequestId(creatorRequestId != null ? creatorRequestId : UUID.randomUUID().toString());
         service.setCreateDate(Instant.now());
