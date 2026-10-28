@@ -2238,8 +2238,9 @@ floci populates:
 - `s3:prefix`, `s3:delimiter`, `s3:max-keys`: from the S3 request parameters.
 - `aws:RequestTag/<key>`: the tags named in the request itself, before they are applied, for
   `ec2:RunInstances` (`TagSpecification.N`), `ec2:CreateTags` (`Tag.N`) and
-  `s3:PutBucketTagging` (the `<Tagging>` body), and for every create in the tag-on-create table
-  whose action takes it, as described under the tag-on-create check above.
+  `s3:PutBucketTagging` (the `<Tagging>` body), for S3 Control's `s3:TagResource` (its `Tags` body),
+  and for every create in the tag-on-create table whose action takes it, as described under the
+  tag-on-create check above.
 - `aws:ResourceTag/<key>`: the target resource's current tags, for `ec2:CreateTags`,
   `ec2:DeleteTags`, `ec2:TerminateInstances` and `ec2:DescribeInstances` (the first
   `ResourceId.N` or `InstanceId.N`), and for `s3:GetBucketTagging`, `s3:DeleteBucket` and the
@@ -2314,8 +2315,11 @@ floci populates:
   cannot match: an absent key has no equal or like value. That absence is the enforcement rather
   than a gap in it.
 - `aws:TagKeys`: the case-sensitive requested tag keys for EC2 `RunInstances` and
-  `CreateTags`, S3 `PutBucketTagging`, and every create in the tag-on-create table whose action
-  takes it. `ForAllValues:StringEquals` can restrict the
+  `CreateTags`, S3 `PutBucketTagging`, S3 Control `TagResource` (its `Tags` body) and
+  `UntagResource` (its `tagKeys` query parameters), and every create in the tag-on-create table
+  whose action takes it. S3 Control's come from `s3control-tag-condition-keys.json`, which
+  `tools/aws/regen_s3control_tag_condition_keys.py` builds from the Service Reference's condition
+  keys and botocore's `s3control` request members; S3's own were measured against AWS. `ForAllValues:StringEquals` can restrict the
   complete requested set without a `Null` guard; no tags still means absent context.
 - `dynamodb:LeadingKeys`, `dynamodb:Attributes`, `dynamodb:Select`: from the DynamoDB request
   body, for `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`, `BatchGetItem` and

@@ -1,0 +1,352 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_s3control_tag_condition_keys.py",
+    "reference": "https://servicereference.us-east-1.amazonaws.com/v1/s3/s3.json",
+    "botocore": "botocore 1.43.113 (installed package)",
+    "note": "make s3control-tag-condition-keys-check re-derives members from botocore; make s3control-tag-condition-keys-verify checks actions against AWS."
+  },
+  "actions": {
+    "s3:AssociateAccessGrantsIdentityCenter": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:CreateAccessGrant": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:CreateAccessGrantsInstance": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:CreateAccessGrantsLocation": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:CreateAccessPoint": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:CreateBucket": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:CreateJob": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:CreateStorageLensGroup": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:DeleteAccessGrant": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:DeleteAccessGrantsInstance": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:DeleteAccessGrantsInstanceResourcePolicy": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:DeleteAccessGrantsLocation": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:DeleteJobTagging": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:DeleteStorageLensConfiguration": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:DeleteStorageLensConfigurationTagging": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:DeleteStorageLensGroup": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:DescribeJob": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:DissociateAccessGrantsIdentityCenter": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:GetAccessGrant": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:GetAccessGrantsInstance": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:GetAccessGrantsInstanceForPrefix": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:GetAccessGrantsInstanceResourcePolicy": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:GetAccessGrantsLocation": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:GetDataAccess": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:GetJobTagging": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:GetStorageLensConfiguration": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:GetStorageLensConfigurationTagging": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:GetStorageLensDashboard": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:GetStorageLensGroup": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:ListAccessGrants": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:ListAccessGrantsLocations": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:ListCallerAccessGrants": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:ListTagsForResource": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:PutAccessGrantsInstanceResourcePolicy": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:PutJobTagging": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:PutStorageLensConfiguration": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:PutStorageLensConfigurationTagging": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:TagResource": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:UntagResource": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:UpdateAccessGrantsLocation": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:UpdateJobPriority": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:UpdateJobStatus": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "s3:UpdateStorageLensGroup": [
+      "aws:RequestTag/${TagKey}",
+      "aws:TagKeys"
+    ]
+  },
+  "members": {
+    "s3:CreateAccessGrant": {
+      "aws:RequestTag/${TagKey}": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ],
+      "aws:TagKeys": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ]
+    },
+    "s3:CreateAccessGrantsInstance": {
+      "aws:RequestTag/${TagKey}": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ],
+      "aws:TagKeys": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ]
+    },
+    "s3:CreateAccessGrantsLocation": {
+      "aws:RequestTag/${TagKey}": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ],
+      "aws:TagKeys": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ]
+    },
+    "s3:CreateAccessPoint": {
+      "aws:RequestTag/${TagKey}": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ],
+      "aws:TagKeys": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ]
+    },
+    "s3:CreateJob": {
+      "aws:RequestTag/${TagKey}": [
+        {
+          "member": "Tags[]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ],
+      "aws:TagKeys": [
+        {
+          "member": "Tags[]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ]
+    },
+    "s3:CreateStorageLensGroup": {
+      "aws:RequestTag/${TagKey}": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ],
+      "aws:TagKeys": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ]
+    },
+    "s3:PutJobTagging": {
+      "aws:RequestTag/${TagKey}": [
+        {
+          "member": "Tags[]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ],
+      "aws:TagKeys": [
+        {
+          "member": "Tags[]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ]
+    },
+    "s3:PutStorageLensConfiguration": {
+      "aws:RequestTag/${TagKey}": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ],
+      "aws:TagKeys": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ]
+    },
+    "s3:PutStorageLensConfigurationTagging": {
+      "aws:RequestTag/${TagKey}": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ],
+      "aws:TagKeys": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ]
+    },
+    "s3:TagResource": {
+      "aws:RequestTag/${TagKey}": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ],
+      "aws:TagKeys": [
+        {
+          "member": "Tags[Tag]",
+          "key": "Key",
+          "value": "Value"
+        }
+      ]
+    },
+    "s3:UntagResource": {
+      "aws:TagKeys": [
+        {
+          "member": "tagKeys",
+          "location": "querystring"
+        }
+      ]
+    }
+  }
+}

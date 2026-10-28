@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
+import io.github.hectorvent.floci.services.s3.S3ControlTagConditionKeys;
 import io.github.hectorvent.floci.services.s3.S3ObjectActions;
 import io.github.hectorvent.floci.services.s3.S3ObjectKeys;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -296,6 +297,12 @@ public class IamConditionContextResolver {
     // ── S3 ──────────────────────────────────────────────────────────────────────
 
     private Map<String, List<String>> s3ConditionContext(String action, ContainerRequestContext ctx) {
+        // S3 Control's request tag keys come from the generated table; S3's own below were measured
+        // against AWS, and do not all match the Service Reference.
+        if (IamActionRegistry.isS3ControlRequest("s3", ctx)) {
+            return S3ControlTagConditionKeys.conditions(action, () -> bodyText(ctx),
+                    ctx.getUriInfo().getQueryParameters());
+        }
         Map<String, List<String>> conditions = s3ActionConditionContext(action, ctx);
         // A version action is checked only for a request naming a version, and carries its id.
         if (S3ObjectActions.isVersionAction(action) && ctx.getUriInfo() != null) {

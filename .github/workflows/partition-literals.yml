@@ -105,6 +105,8 @@ jobs:
 
       - name: Check IAM condition key request members
         run: make iam-condition-keys-check
+      - name: Check S3 Control tag condition request members
+        run: make s3control-tag-condition-keys-check
 
       - name: Check partitions.json against a fresh generation
         run: make aws-data-check
