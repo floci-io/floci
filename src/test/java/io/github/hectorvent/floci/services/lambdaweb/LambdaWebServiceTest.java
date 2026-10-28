@@ -944,8 +944,33 @@ class LambdaWebServiceTest {
     }
 
     private static String resourcePolicy(String resource) {
+        return grantPolicy("\"lambda:GetWebFunction\"", resource);
+    }
+
+    private static String grantPolicy(String action, String resource) {
         return "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"000000000000\"},"
-                + "\"Action\":\"lambda:GetWebFunction\",\"Resource\":" + resource + "}]}";
+                + "\"Action\":" + action + ",\"Resource\":" + resource + "}]}";
+    }
+
+    @Test
+    void aPolicyActionIsAStarOrALambdaActionInAnyCase() {
+        LambdaWebService service = service();
+        String missing = "arn:aws:lambda:us-east-1:000000000000:web-function/missing";
+        for (String accepted : List.of("\"*\"", "\"Lambda:GetWebFunction\"", "\"LAMBDA:GetWebFunction\"", "\"lambda:\"",
+                "\"lambda:*x\"", "\"lambda:Get?ebFunction\"", "\"lambda:a b!c\"", "[\"*\",\"s3:GetObject\"]",
+                "[\"s3:GetObject\",\"*\"]", "[\"*\",\"*\"]", "[\"*\",\"a.b:x\"]", "[\"*\",\"9:x\"]", "[\"*\",\"s3:\"]",
+                "[\"lambda:GetWebFunction\",\"Lambda:x\"]")) {
+            assertEquals("ResourceNotFoundException", error(() -> service.putResourcePolicy(REGION, missing,
+                    policy(grantPolicy(accepted, "\"" + missing + "\"")))).getErrorCode(), accepted);
+        }
+        for (String refused : List.of("\"lambda*\"", "\"*:*\"", "\"*:GetWebFunction\"", "\" lambda:GetWebFunction\"",
+                "\"lambda :GetWebFunction\"", "\"lambda\"", "\"**\"", "\"*x\"", "\"?\"", "\"lambda::x\"", "\"\"",
+                "\"s3:GetObject\"", "[\"lambda:GetWebFunction\",\"s3:GetObject\"]", "[\"lambda:*\",\"s3:GetObject\"]",
+                "[\"*\",\"garbage\"]", "[\"*\",\"\"]", "[\"*\",\"lambda::x\"]", "[\"*\",\"a_b:x\"]", "[\"*\",\"a+b:x\"]",
+                "[\"*\",\"l*:x\"]")) {
+            assertEquals("Policy has syntax errors.", message(() -> service.putResourcePolicy(REGION, missing,
+                    policy(grantPolicy(refused, "\"" + missing + "\"")))), refused);
+        }
     }
 
     private static String principalPolicy(String effect, String principal, String functionArn) {

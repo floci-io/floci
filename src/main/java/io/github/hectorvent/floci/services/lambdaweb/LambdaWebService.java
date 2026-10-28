@@ -135,6 +135,7 @@ public class LambdaWebService implements Resettable {
     private static final Pattern PRINCIPAL_AWS = Pattern.compile("[\\w+=,.@\\:-]*");
     private static final Pattern PRINCIPAL_AWS_ARN = Pattern.compile("[\\w+=/:,.@-]*");
     private static final Pattern PRINCIPAL_SERVICE = Pattern.compile("[\\w+=,.@-]*");
+    private static final Pattern POLICY_ACTION = Pattern.compile("\\*|[a-zA-Z0-9.-]+:[^:]*");
 
     /** AWS assigns one shard label per cell. */
     private static final String DOMAIN_SHARD = "001";
@@ -1519,10 +1520,16 @@ public class LambdaWebService implements Resettable {
         if (statement.has("NotPrincipal") || statement.has("NotAction") || statement.has("NotResource")) {
             throw policySyntax();
         }
-        for (String action : policyValues(statement.get("Action"))) {
-            if (!action.startsWith("lambda:")) {
+        List<String> actions = policyValues(statement.get("Action"));
+        for (String action : actions) {
+            if (!POLICY_ACTION.matcher(action).matches()) {
                 throw policySyntax();
             }
+        }
+        // AWS lets an action of any service through when the list also holds "*".
+        if (!actions.contains("*")
+                && !actions.stream().allMatch(action -> action.regionMatches(true, 0, "lambda:", 0, 7))) {
+            throw policySyntax();
         }
         String function = AwsArnUtils.parse(functionArn).resource();
         for (String resource : policyValues(statement.get("Resource"))) {
