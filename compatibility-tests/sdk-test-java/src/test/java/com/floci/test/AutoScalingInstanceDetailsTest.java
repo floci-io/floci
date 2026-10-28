@@ -6,6 +6,7 @@ import software.amazon.awssdk.services.autoscaling.AutoScalingClient;
 import software.amazon.awssdk.services.autoscaling.model.AutoScalingException;
 import software.amazon.awssdk.services.autoscaling.model.AutoScalingInstanceDetails;
 import software.amazon.awssdk.services.autoscaling.model.Instance;
+import software.amazon.awssdk.services.autoscaling.model.LifecycleState;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.InstanceType;
 
@@ -41,8 +42,11 @@ class AutoScalingInstanceDetailsTest {
                 TestFixtures.await(() -> {
                     members.set(autoScaling.describeAutoScalingGroups(request -> request.autoScalingGroupNames(name))
                             .autoScalingGroups().get(0).instances());
-                    return members.get().size() == 2;
-                }, name, "two instances launched by the group", TimeUnit.SECONDS.toNanos(120), 1000);
+                    // Health is only marked once both are in service: Floci resets it when it
+                    // promotes a Pending member.
+                    return members.get().size() == 2 && members.get().stream()
+                            .allMatch(member -> member.lifecycleState() == LifecycleState.IN_SERVICE);
+                }, name, "two in-service instances", TimeUnit.SECONDS.toNanos(120), 1000);
                 String healthy = members.get().get(0).instanceId();
                 String unhealthy = members.get().get(1).instanceId();
                 autoScaling.setInstanceHealth(request -> request.instanceId(unhealthy).healthStatus("Unhealthy")

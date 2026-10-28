@@ -44,7 +44,13 @@ class AutoScalingInstanceDetailsIntegrationTest {
         createGroup(name, name, 2);
         createGroup(other, name, 1);
         try {
+            // The first pass launches the members and the second puts them in service. Promotion
+            // resets health to Healthy, so marking a member unhealthy while it is still Pending
+            // would race the reconciler's own 10-second schedule.
             reconciler.reconcileAll();
+            reconciler.reconcileAll();
+            assertEquals(List.of("InService", "InService"),
+                    groupInstances(name).getList(GROUP_INSTANCES + ".LifecycleState"));
             List<String> members = groupInstances(name).getList(GROUP_INSTANCES + ".InstanceId");
             String healthy = members.get(0);
             String unhealthy = members.get(1);
