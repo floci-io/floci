@@ -15,6 +15,7 @@ import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -862,11 +863,31 @@ public class CloudFrontController {
                                 @QueryParam("Stage") String stage) {
         try {
             CloudFrontFunction fn = service.describeFunction(name, stage);
-            return Response.ok(fn.getFunctionCode() != null ? fn.getFunctionCode() : "", OCTET_STREAM)
+            return Response.ok(functionCodeBytes(fn), OCTET_STREAM)
                     .header("ETag", fn.getEtag())
                     .build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
+        }
+    }
+
+    /**
+     * GetFunction serves the function code as the response body. The code reached this emulator
+     * as the base64 text of the CreateFunction or UpdateFunction FunctionCode element, so it is
+     * decoded back to the bytes the caller originally encoded. The ETag header carries the
+     * function's version identifier, and the media type is application/octet-stream, matching
+     * the GetFunction response contract in the CloudFront API reference.
+     */
+    private byte[] functionCodeBytes(CloudFrontFunction fn) {
+        String encoded = fn.getFunctionCode();
+        if (encoded == null || encoded.isBlank()) {
+            return new byte[0];
+        }
+        try {
+            return Base64.getDecoder().decode(encoded.trim());
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidArgument",
+                    "The function code must be base64-encoded.", 400);
         }
     }
 
