@@ -103,6 +103,7 @@ public class RedshiftService implements ManagedSecretRotator {
     private final DynamoDbStreamReader streamReader;
     private final RedshiftAuditLogPublisher auditLogPublisher;
     private final RedshiftEventService events;
+    private final RedshiftIntegrationEventPublisher integrationEvents;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<ResourceKey, ResourceLock> resourceLocks = new ConcurrentHashMap<>();
@@ -181,7 +182,7 @@ public class RedshiftService implements ManagedSecretRotator {
                             RedshiftCredentialBroker credentialBroker,
                             SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
                             DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher,
-                            RedshiftEventService events) {
+                            RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.parameterGroups = storageFactory.create("redshift", "redshift-parameter-groups.json", new TypeReference<Map<String, ClusterParameterGroup>>() {});
@@ -202,6 +203,18 @@ public class RedshiftService implements ManagedSecretRotator {
         this.streamReader = streamReader;
         this.auditLogPublisher = auditLogPublisher;
         this.events = events;
+        this.integrationEvents = integrationEvents;
+    }
+
+    RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
+                    EmulatorConfig config, RegionResolver regionResolver, RedshiftProxyManager proxyManager,
+                    DockerHostResolver dockerHostResolver, RedshiftCredentialBroker credentialBroker,
+                    SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
+                    DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher,
+                    RedshiftEventService events) {
+        this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
+                credentialBroker, secretsManagerService, objectMapper, streamReader, auditLogPublisher, events,
+                null);
     }
 
     RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
@@ -511,10 +524,20 @@ public class RedshiftService implements ManagedSecretRotator {
     // Metadata only: no data is replicated from the source. The shape and the lower case status
     // were captured from a live integration in us-west-2.
 
-    public synchronized Integration createIntegration(String integrationName, String sourceArn, String targetArn,
-                                                      String kmsKeyId, String description,
-                                                      Map<String, String> additionalEncryptionContext,
-                                                      Map<String, String> tags, String region) {
+    public Integration createIntegration(String integrationName, String sourceArn, String targetArn,
+                                         String kmsKeyId, String description,
+                                         Map<String, String> additionalEncryptionContext,
+                                         Map<String, String> tags, String region) {
+        Integration integration = createIntegrationLocked(integrationName, sourceArn, targetArn, kmsKeyId,
+                description, additionalEncryptionContext, tags, region);
+        publishIntegrationEvents();
+        return integration;
+    }
+
+    private synchronized Integration createIntegrationLocked(String integrationName, String sourceArn,
+                                                             String targetArn, String kmsKeyId, String description,
+                                                             Map<String, String> additionalEncryptionContext,
+                                                             Map<String, String> tags, String region) {
         if (integrationName == null || integrationName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "IntegrationName is required.", 400);
         }
@@ -591,6 +614,7 @@ public class RedshiftService implements ManagedSecretRotator {
         integration.setTags(tags);
         integrations.put(integrationId, integration);
         LOG.infov("Created Redshift zero-ETL integration: {0}", integration.getIntegrationArn());
+        queueIntegrationEvent(RedshiftIntegrationEventPublisher.IntegrationEvent.SYNCHRONIZING, integration);
         return integration;
     }
 
@@ -666,15 +690,23 @@ public class RedshiftService implements ManagedSecretRotator {
                 .toList();
     }
 
-    public synchronized void updateIntegrationRuntime(String accountId, String integrationArn,
-                                                       Map<String, String> shardSequenceNumbers,
-                                                       boolean successful, String error) {
+    public void updateIntegrationRuntime(String accountId, String integrationArn,
+                                         Map<String, String> shardSequenceNumbers,
+                                         boolean successful, String error) {
+        updateIntegrationRuntimeLocked(accountId, integrationArn, shardSequenceNumbers, successful, error);
+        publishIntegrationEvents();
+    }
+
+    private synchronized void updateIntegrationRuntimeLocked(String accountId, String integrationArn,
+                                                              Map<String, String> shardSequenceNumbers,
+                                                              boolean successful, String error) {
         for (String key : integrations.keysForAccount(accountId)) {
             Optional<Integration> stored = integrations.getForAccount(accountId, key);
             if (stored.isEmpty() || !integrationArn.equals(stored.get().getIntegrationArn())) {
                 continue;
             }
             Integration integration = stored.get();
+            String previousStatus = integration.getStatus();
             if (successful) {
                 integration.setShardSequenceNumbers(shardSequenceNumbers);
                 integration.setRetryCount(0);
@@ -686,26 +718,36 @@ public class RedshiftService implements ManagedSecretRotator {
                 integration.setStatus("failed");
             }
             integrations.putForAccount(accountId, key, integration);
+            queueStatusChange(integration, previousStatus);
             return;
         }
         throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
     }
 
-    public synchronized void updateIntegrationBackfillProgress(String accountId, String integrationArn,
-                                                                String backfillLastEvaluatedKey,
-                                                                boolean backfillCompleted) {
+    public void updateIntegrationBackfillProgress(String accountId, String integrationArn,
+                                                  String backfillLastEvaluatedKey, boolean backfillCompleted) {
+        updateIntegrationBackfillProgressLocked(accountId, integrationArn, backfillLastEvaluatedKey,
+                backfillCompleted);
+        publishIntegrationEvents();
+    }
+
+    private synchronized void updateIntegrationBackfillProgressLocked(String accountId, String integrationArn,
+                                                                       String backfillLastEvaluatedKey,
+                                                                       boolean backfillCompleted) {
         for (String key : integrations.keysForAccount(accountId)) {
             Optional<Integration> stored = integrations.getForAccount(accountId, key);
             if (stored.isEmpty() || !integrationArn.equals(stored.get().getIntegrationArn())) {
                 continue;
             }
             Integration integration = stored.get();
+            String previousStatus = integration.getStatus();
             integration.setBackfillLastEvaluatedKey(backfillLastEvaluatedKey);
             integration.setBackfillCompleted(backfillCompleted);
             integration.setRetryCount(0);
             integration.setLastError(null);
             integration.setStatus(backfillCompleted ? "active" : "syncing");
             integrations.putForAccount(accountId, key, integration);
+            queueStatusChange(integration, previousStatus);
             return;
         }
         throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
@@ -752,7 +794,13 @@ public class RedshiftService implements ManagedSecretRotator {
         return maxRecords;
     }
 
-    public synchronized Integration deleteIntegration(String integrationArn) {
+    public Integration deleteIntegration(String integrationArn) {
+        Integration deleted = deleteIntegrationLocked(integrationArn);
+        publishIntegrationEvents();
+        return deleted;
+    }
+
+    private synchronized Integration deleteIntegrationLocked(String integrationArn) {
         if (integrationArn == null || integrationArn.isBlank()) {
             throw new AwsException("InvalidParameterValue", "IntegrationArn is required.", 400);
         }
@@ -761,10 +809,47 @@ public class RedshiftService implements ManagedSecretRotator {
             if (stored.isPresent() && integrationArn.equals(stored.get().getIntegrationArn())) {
                 integrations.delete(key);
                 LOG.infov("Deleted Redshift zero-ETL integration: {0}", integrationArn);
+                // Deletion is immediate here, so both the start and the end of it are reported.
+                queueIntegrationEvent(RedshiftIntegrationEventPublisher.IntegrationEvent.DELETION_INITIATED,
+                        stored.get());
+                queueIntegrationEvent(RedshiftIntegrationEventPublisher.IntegrationEvent.DELETED, stored.get());
                 return stored.get();
             }
         }
         throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
+    }
+
+    private void queueIntegrationEvent(RedshiftIntegrationEventPublisher.IntegrationEvent event,
+                                       Integration integration) {
+        if (integrationEvents != null) {
+            integrationEvents.queue(event, integration, AwsArnUtils.parse(integration.getIntegrationArn()).region(),
+                    Instant.now());
+        }
+    }
+
+    /** Queues the event for a move into syncing, active or failed; any other change is silent. */
+    private void queueStatusChange(Integration integration, String previousStatus) {
+        String status = integration.getStatus();
+        if (status == null || status.equals(previousStatus)) {
+            return;
+        }
+        switch (status) {
+            case "syncing" -> queueIntegrationEvent(
+                    RedshiftIntegrationEventPublisher.IntegrationEvent.SYNCHRONIZING, integration);
+            // Leaving the initial backfill is the integration becoming ACTIVE; a recovery from failure is "now ACTIVE".
+            case "active" -> queueIntegrationEvent("syncing".equals(previousStatus)
+                    ? RedshiftIntegrationEventPublisher.IntegrationEvent.CREATED_ACTIVE
+                    : RedshiftIntegrationEventPublisher.IntegrationEvent.ACTIVE, integration);
+            case "failed" -> queueIntegrationEvent(
+                    RedshiftIntegrationEventPublisher.IntegrationEvent.FAILED, integration);
+            default -> { }
+        }
+    }
+
+    private void publishIntegrationEvents() {
+        if (integrationEvents != null) {
+            integrationEvents.publishQueued();
+        }
     }
 
     public List<Cluster> describeClusters(String identifier) {

@@ -343,6 +343,32 @@ approximation to indicate that initial backfill is in progress); it becomes `act
 exhausted. The landing table is an append-only log, so an item changed while its table is still being
 backfilled can appear twice: once from the scan and once from the stream.
 
+### EventBridge events
+
+As an integration changes state, Floci sends `aws.redshift` events to the default EventBridge bus
+of the integration's account and Region, as AWS does for zero-ETL integrations. No subscription is
+needed: a rule on `source = aws.redshift` receives them. The `detail-type` is
+`Redshift Integration Monitoring`, and the event IDs, severities and messages follow the
+[AWS event table](https://docs.aws.amazon.com/redshift/latest/mgmt/integration-event-notifications.html).
+`resources` holds the integration ARN.
+
+| Event ID | Severity | Sent when |
+| --- | --- | --- |
+| `REDSHIFT-INTEGRATION-EVENT-0003` | INFO | The integration starts or resumes synchronizing (`syncing`) |
+| `REDSHIFT-INTEGRATION-EVENT-0000` | INFO | The initial backfill finishes and the integration becomes `active` |
+| `REDSHIFT-INTEGRATION-EVENT-0013` | INFO | The integration returns to `active` after a failure |
+| `REDSHIFT-INTEGRATION-EVENT-0007` | ERROR | The consumer fails to write and the integration becomes `failed` |
+| `REDSHIFT-INTEGRATION-EVENT-0002` | INFO | `DeleteIntegration` starts |
+| `REDSHIFT-INTEGRATION-EVENT-0001` | INFO | `DeleteIntegration` finishes |
+
+The `detail` object carries `eventId`, `severity`, `category`, `message` and `integrationArn`.
+AWS does not publish a JSON example of the `detail` of these events, so these field names are
+Floci's representation of the table's columns, not a claim of byte-for-byte AWS parity.
+Floci sends only the events its DynamoDB integration can raise: the Aurora, primary-key,
+data-type, pause and resume, serverless restore and modification events do not occur here. Delivery
+is best effort. It is skipped when the EventBridge service is disabled, a refused or failed
+delivery is logged, and neither changes the outcome of the Redshift operation.
+
 Serverless Redshift targets, schema inference, and relational projection are not supported in this
 first implementation.
 
