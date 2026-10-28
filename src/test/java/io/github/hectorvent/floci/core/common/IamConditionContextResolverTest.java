@@ -215,6 +215,33 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void iamAwsServiceNameComesFromCreateServiceLinkedRole() {
+        assertEquals(Map.of("iam:AWSServiceName", List.of("replication.ecr.amazonaws.com")),
+                resolver.resolve("iam", "iam:CreateServiceLinkedRole",
+                        formRequest("AWSServiceName=replication.ecr.amazonaws.com")));
+        assertNull(resolver.resolve("iam", "iam:CreateServiceLinkedRole", formRequest("Description=d")));
+        assertNull(resolver.resolve("iam", "iam:DeleteServiceLinkedRole",
+                formRequest("AWSServiceName=replication.ecr.amazonaws.com")));
+    }
+
+    @Test
+    void iamNotificationChannelComesFromCreateDelegationRequest() {
+        assertEquals(Map.of("iam:NotificationChannel", List.of("arn:aws:sns:us-east-1:123456789012:t")),
+                resolver.resolve("iam", "iam:CreateDelegationRequest",
+                        formRequest("NotificationChannel=arn%3Aaws%3Asns%3Aus-east-1%3A123456789012%3At")));
+        assertNull(resolver.resolve("iam", "iam:CreateDelegationRequest", formRequest("Description=d")));
+    }
+
+    @Test
+    void iamOrganizationsPolicyIdComesFromGenerateOrganizationsAccessReport() {
+        assertEquals(Map.of("iam:OrganizationsPolicyId", List.of("p-12345678")),
+                resolver.resolve("iam", "iam:GenerateOrganizationsAccessReport",
+                        formRequest("EntityPath=o-a%2Fr-b&OrganizationsPolicyId=p-12345678")));
+        assertNull(resolver.resolve("iam", "iam:GenerateOrganizationsAccessReport",
+                formRequest("EntityPath=o-a%2Fr-b")));
+    }
+
+    @Test
     void aPermissionsBoundaryConditionAllowsOnlyACreateRoleThatSetsThatBoundary() {
         String policy = """
                 {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"iam:CreateRole",

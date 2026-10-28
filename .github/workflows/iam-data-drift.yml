@@ -1,12 +1,12 @@
 name: IAM Data Drift
 
-# Checks the eight vendored files that come from AWS's live service reference rather than from a
+# Checks the nine vendored files that come from AWS's live service reference rather than from a
 # pinned dependency: the IAM service namespace list, the map of which resource each IAM action is
 # authorized against, the map of operations AWS authorizes as an action of another name, the
 # table of the operations that pass a role and the services they pass it to, the table of the
 # operations that pass a Lambda network connector, the table of the
 # tagging actions operations that tag what they create need, and the table of the resources each
-# operation's request names, and the DynamoDB condition key table. That
+# operation's request names, the DynamoDB condition key table, and the IAM condition key table. That
 # needs the live service reference index, so unlike every other check here it can
 # fail without anything in the repository having changed: an AWS outage, or a namespace AWS has
 # retired. It therefore runs on its own, never as part of a job that ordinary changes trigger.
@@ -26,7 +26,8 @@ name: IAM Data Drift
 # An entry AWS has *added* since the last sync is reported without failing: a new namespace makes
 # the service-last-accessed report incomplete rather than wrong, and a new action or resource type
 # leaves that action evaluated against `*`, which is where it was before any of this existed. The
-# fix for a real failure is to run the matching sync target and commit the result.
+# two condition key tables fail on an added pair as well: a key missing from the context stops a
+# conditioned Allow matching and a conditioned Deny applying. The fix for a real failure is to run the matching sync target and commit the result.
 #
 # The offline shape check is hermetic and runs per pull request inside the "Vendored AWS data in
 # sync" job in partition-literals.yml instead.
@@ -58,6 +59,9 @@ on:
       - 'src/main/resources/aws/dynamodb-condition-keys.json'
       - 'tools/aws/regen_dynamodb_condition_keys.py'
       - 'tools/aws/test_regen_dynamodb_condition_keys.py'
+      - 'src/main/resources/aws/iam-condition-keys.json'
+      - 'tools/aws/regen_iam_condition_keys.py'
+      - 'tools/aws/test_regen_iam_condition_keys.py'
       - 'tools/aws/regen_partitions.py'
       - 'tools/aws/regen_query_services.py'
       - '.github/workflows/iam-data-drift.yml'

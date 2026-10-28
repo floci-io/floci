@@ -2218,12 +2218,23 @@ trust policy and the value it sits in matches nothing.
 A `Condition` operator can only match a key floci actually places in the request context.
 floci populates:
 
-- `iam:PolicyARN`: the managed policy ARN in the form body for `AttachRolePolicy`,
-  `DetachRolePolicy`, `AttachUserPolicy`, `DetachUserPolicy`, `AttachGroupPolicy` and
-  `DetachGroupPolicy`. The target role, user or group remains the authorized resource.
-- `iam:PermissionsBoundary`: the boundary policy ARN in the `PermissionsBoundary` parameter of
-  `CreateRole`, `CreateUser`, `PutRolePermissionsBoundary` and `PutUserPermissionsBoundary`.
-  A request without the parameter carries no value for the key.
+- The `iam:` keys an IAM request carries in its own parameters, from
+  `src/main/resources/aws/iam-condition-keys.json`. `tools/aws/regen_iam_condition_keys.py`
+  generates it: for each action and `iam:` key the AWS Service Reference lists, the key is read
+  when the request has a string parameter of the same name, ignoring case. The table reads:
+  - `iam:PolicyARN` from `PolicyArn` on `AttachRolePolicy`, `DetachRolePolicy`,
+    `AttachUserPolicy`, `DetachUserPolicy`, `AttachGroupPolicy` and `DetachGroupPolicy`.
+  - `iam:PermissionsBoundary` from `PermissionsBoundary` on `CreateRole`, `CreateUser`,
+    `PutRolePermissionsBoundary` and `PutUserPermissionsBoundary`.
+  - `iam:AWSServiceName` from `AWSServiceName` on `CreateServiceLinkedRole`.
+  - `iam:NotificationChannel` from `NotificationChannel` on `CreateDelegationRequest`.
+  - `iam:OrganizationsPolicyId` from `OrganizationsPolicyId` on
+    `GenerateOrganizationsAccessReport`.
+
+  A request without the parameter carries no value for the key, and the target remains the
+  authorized resource. Every other pair the reference lists is in the table's `notRead` with
+  its reason, such as the actions where `iam:PermissionsBoundary` is the target's current
+  boundary. Regenerate with `make iam-condition-keys-sync`.
 - `s3:prefix`, `s3:delimiter`, `s3:max-keys`: from the S3 request parameters.
 - `aws:RequestTag/<key>`: the tags named in the request itself, before they are applied, for
   `ec2:RunInstances` (`TagSpecification.N`), `ec2:CreateTags` (`Tag.N`) and

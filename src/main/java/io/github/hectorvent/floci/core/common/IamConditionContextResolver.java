@@ -209,19 +209,19 @@ public class IamConditionContextResolver {
     }
 
     private static Map<String, List<String>> iamConditionContext(String action, ContainerRequestContext ctx) {
-        return switch (action) {
-            case "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:AttachUserPolicy",
-                    "iam:DetachUserPolicy", "iam:AttachGroupPolicy", "iam:DetachGroupPolicy" -> {
-                String policyArn = formParameters(ctx).get("PolicyArn");
-                yield policyArn == null ? null : Map.of("iam:PolicyARN", List.of(policyArn));
+        Map<String, String> members = IamConditionKeys.members(action);
+        if (members.isEmpty()) {
+            return null;
+        }
+        Map<String, String> form = formParameters(ctx);
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        members.forEach((key, member) -> {
+            String value = form.get(member);
+            if (value != null) {
+                conditions.put(key, List.of(value));
             }
-            case "iam:CreateRole", "iam:CreateUser", "iam:PutRolePermissionsBoundary",
-                    "iam:PutUserPermissionsBoundary" -> {
-                String boundary = formParameters(ctx).get("PermissionsBoundary");
-                yield boundary == null ? null : Map.of("iam:PermissionsBoundary", List.of(boundary));
-            }
-            default -> null;
-        };
+        });
+        return conditions.isEmpty() ? null : conditions;
     }
 
     public static Map<String, List<String>> withGlobalContext(Map<String, List<String>> serviceContext,
