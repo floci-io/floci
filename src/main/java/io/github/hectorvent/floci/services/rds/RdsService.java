@@ -1160,7 +1160,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String sourceId = sourceIdentifier;
         String sourceRegion = targetRegion;
         String sourceAccount = currentAccountId();
-        if (sourceIdentifier != null && sourceIdentifier.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(sourceIdentifier)) {
             try {
                 AwsArnUtils.Arn parsed = AwsArnUtils.parse(sourceIdentifier);
                 // Both regions must belong to the ARN's partition; changing its prefix must
@@ -1520,7 +1520,7 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidParameterCombination",
                     "Either SourceDBInstanceIdentifier or SourceDBClusterIdentifier must be specified.", 400);
         }
-        boolean sourceByArn = sourceRef.startsWith("arn:");
+        boolean sourceByArn = AwsArnUtils.looksLikeArn(sourceRef);
         if (request.replicaMode() != null && !request.replicaMode().isBlank()) {
             // ReplicaMode selects mounted or open-read-only for Db2 and Oracle replicas; no
             // emulated engine is either, so AWS's parameter check applies to all of them.
@@ -1711,7 +1711,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String accountId = currentAccountId();
         String region = requestRegion;
         String sourceId = sourceRef;
-        if (sourceRef.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(sourceRef)) {
             // A source in another Region is named by ARN; the replica lands in the request Region.
             String[] parts = sourceRef.split(":", 7);
             if (parts.length == 7 && "rds".equals(parts[2]) && "db".equals(parts[5])
@@ -2269,7 +2269,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     /** A cluster named by identifier or by ARN; an ARN for another account or Region names no cluster here. */
     private String clusterIdentifierFromArnOrName(String source, String region) {
-        if (!source.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(source)) {
             return source;
         }
         return clusterIdFromArn(source, region,
@@ -2304,7 +2304,7 @@ public class RdsService implements Resettable, ResourceProvider {
         if (source == null || source.isBlank()) {
             throw new AwsException("InvalidParameterValue", "A DB cluster snapshot identifier is required.", 400);
         }
-        if (!source.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(source)) {
             return source;
         }
         AwsArnUtils.Arn arn;
@@ -2470,7 +2470,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         String type = "db";
         String id = resourceName;
-        if (resourceName.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(resourceName)) {
             AwsArnUtils.Arn arn;
             try {
                 arn = AwsArnUtils.parse(resourceName);
@@ -7129,7 +7129,7 @@ public class RdsService implements Resettable, ResourceProvider {
      * ({@code arn:aws:rds:region:account:pg:name}); names cannot contain a colon.
      */
     private static String groupNameFromIdentifier(String identifier) {
-        if (identifier != null && identifier.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(identifier)) {
             return identifier.substring(identifier.lastIndexOf(':') + 1);
         }
         return identifier;

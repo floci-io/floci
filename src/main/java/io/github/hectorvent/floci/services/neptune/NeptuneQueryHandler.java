@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.neptune;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorMessages;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
@@ -137,8 +138,7 @@ public class NeptuneQueryHandler {
         if (region == null || region.isBlank()) {
             return true;
         }
-        String[] parts = arn == null ? new String[0] : arn.split(":", -1);
-        return parts.length >= 4 && region.equals(parts[3]);
+        return AwsArnUtils.isArn(arn) && region.equals(AwsArnUtils.parse(arn).region());
     }
 
     private Response handleDeleteDbCluster(MultivaluedMap<String, String> params) {

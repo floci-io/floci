@@ -203,7 +203,7 @@ public class NeptuneService {
     }
 
     public boolean hasResourceWithArn(String arn) {
-        if (arn == null || !arn.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(arn)) {
             return false;
         }
         return scanClusters().stream()
@@ -218,7 +218,7 @@ public class NeptuneService {
             // full ARN against each cluster's stored ARN rather than reducing it to
             // the bare identifier, so a cross-account or cross-region ARN does not
             // resolve a same-named local cluster.
-            if (filterId.startsWith("arn:")) {
+            if (AwsArnUtils.looksLikeArn(filterId)) {
                 return scanClusters().stream()
                         .filter(c -> filterId.equalsIgnoreCase(c.getDbClusterArn()))
                         .toList();
@@ -390,7 +390,7 @@ public class NeptuneService {
         if (filterId != null && !filterId.isBlank()) {
             // The db-instance-id filter accepts ARNs as well as identifiers; see
             // listDbClusters for why the match is against the stored ARN.
-            if (filterId.startsWith("arn:")) {
+            if (AwsArnUtils.looksLikeArn(filterId)) {
                 return scanInstances().stream()
                         .filter(i -> filterId.equalsIgnoreCase(i.getDbInstanceArn()))
                         .toList();
