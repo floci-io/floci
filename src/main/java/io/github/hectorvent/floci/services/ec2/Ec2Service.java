@@ -303,9 +303,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private final StorageBackend<String, LaunchTemplate> launchTemplates;
     private final StorageBackend<String, VpcEndpoint> vpcEndpoints;
     private final StorageBackend<String, NatGateway> natGateways;
-    /** In memory unless the StorageFactory constructor replaces it, so hermetic test constructors need no change. */
-    private StorageBackend<String, InstanceConnectEndpoint> instanceConnectEndpoints =
-            AccountAwareStorageBackend.inMemory("000000000000");
+    private final StorageBackend<String, InstanceConnectEndpoint> instanceConnectEndpoints;
     private final StorageBackend<String, SpotInstanceRequest> spotInstanceRequests;
     private final StorageBackend<String, NetworkAcl> networkAcls;
     private final StorageBackend<String, ManagedPrefixList> managedPrefixLists;
@@ -590,10 +588,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 storageFactory.create("ec2", "ec2-egress-only-internet-gateways.json",
                         new TypeReference<Map<String, EgressOnlyInternetGateway>>() {}),
                 storageFactory.create("ec2", "ec2-dhcp-options.json",
-                        new TypeReference<Map<String, DhcpOptions>>() {}));
-
-        this.instanceConnectEndpoints = storageFactory.create("ec2", "ec2-instance-connect-endpoints.json",
-                new TypeReference<Map<String, InstanceConnectEndpoint>>() {});
+                        new TypeReference<Map<String, DhcpOptions>>() {}),
+                storageFactory.create("ec2", "ec2-instance-connect-endpoints.json",
+                        new TypeReference<Map<String, InstanceConnectEndpoint>>() {}));
     }
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
@@ -659,7 +656,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 null, null, null, new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), dhcpOptions);
+                new InMemoryStorage<>(), dhcpOptions, AccountAwareStorageBackend.inMemory("000000000000"));
     }
 
     // Package-private for hermetic tests, transit-gateway-aware. The shorter overload above keeps its
@@ -886,7 +883,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 transitGatewayPropagations, transitGatewayRoutes, vpcPeeringConnections,
                 networkInterfaces, capacityReservations, volumeModifications,
                 requestContextInstance, iamService, volumeBlockDeviceManager, hosts,
-                transitGatewayPeeringAttachments, egressOnlyInternetGateways, new InMemoryStorage<>());
+                transitGatewayPeeringAttachments, egressOnlyInternetGateways, new InMemoryStorage<>(),
+                AccountAwareStorageBackend.inMemory("000000000000"));
     }
 
     Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
@@ -927,7 +925,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                StorageBackend<String, Host> hosts,
                StorageBackend<String, TransitGatewayPeeringAttachment> transitGatewayPeeringAttachments,
                StorageBackend<String, EgressOnlyInternetGateway> egressOnlyInternetGateways,
-               StorageBackend<String, DhcpOptions> dhcpOptions) {
+               StorageBackend<String, DhcpOptions> dhcpOptions,
+               StorageBackend<String, InstanceConnectEndpoint> instanceConnectEndpoints) {
+        this.instanceConnectEndpoints = instanceConnectEndpoints;
         this.hosts = hosts;
         this.egressOnlyInternetGateways = egressOnlyInternetGateways;
         this.transitGatewayPeeringAttachments = transitGatewayPeeringAttachments;
@@ -12570,6 +12570,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                                  List<String> securityGroupIds,
                                                                  Boolean preserveClientIp, String ipAddressType,
                                                                  List<Tag> tagList, String clientToken) {
+        // Held from the client-token replay scan to the save: two creates with one token then see
+        // each other, and deleteSubnet, which takes the same lock, cannot remove the subnet between
+        // requireSubnet and the save.
+        synchronized (attachmentTopologyLock(region)) {
+            return createInstanceConnectEndpointHeld(region, subnetId, securityGroupIds, preserveClientIp,
+                    ipAddressType, tagList, clientToken);
+        }
+    }
+
+    private InstanceConnectEndpoint createInstanceConnectEndpointHeld(String region, String subnetId,
+                                                                      List<String> securityGroupIds,
+                                                                      Boolean preserveClientIp, String ipAddressType,
+                                                                      List<Tag> tagList, String clientToken) {
         if (subnetId == null || subnetId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter SubnetId", 400);
         }

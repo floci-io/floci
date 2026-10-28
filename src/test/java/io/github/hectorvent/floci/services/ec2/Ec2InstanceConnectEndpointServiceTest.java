@@ -8,8 +8,15 @@ import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager
 import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -19,7 +26,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /** CreateInstanceConnectEndpoint, DescribeInstanceConnectEndpoints and DeleteInstanceConnectEndpoint. */
-class Ec2InstanceConnectEndpointTest {
+class Ec2InstanceConnectEndpointServiceTest {
 
     private static final String REGION = "us-east-1";
 
@@ -113,5 +120,76 @@ class Ec2InstanceConnectEndpointTest {
         assertEquals("IdempotentParameterMismatch", assertThrows(AwsException.class, () -> service
                 .createInstanceConnectEndpoint(REGION, otherSubnet, List.of(), null, null, List.of(), "token-1"))
                 .getErrorCode());
+    }
+
+    @Test
+    void concurrentCreatesWithOneClientTokenMakeOneEndpoint() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        try {
+            for (int round = 0; round < 50; round++) {
+                Ec2Service service = newService();
+                String vpcId = service.createVpc(REGION, "10.73.0.0/16", false).getVpcId();
+                String subnetId = service.createSubnet(REGION, vpcId, "10.73.1.0/24", "us-east-1a").getSubnetId();
+                CountDownLatch go = new CountDownLatch(1);
+                List<Future<String>> ids = new ArrayList<>();
+                for (int i = 0; i < 8; i++) {
+                    ids.add(pool.submit(() -> {
+                        go.await();
+                        return service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null,
+                                List.of(), "token-" + subnetId).getInstanceConnectEndpointId();
+                    }));
+                }
+                go.countDown();
+                Set<String> distinct = ConcurrentHashMap.newKeySet();
+                for (Future<String> id : ids) {
+                    distinct.add(id.get());
+                }
+                assertEquals(1, distinct.size(), "round " + round + ": " + distinct);
+                assertEquals(1, service.describeInstanceConnectEndpoints(REGION, List.of(), Map.of()).size());
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void aSubnetDeletedDuringACreateNeverLeavesAnEndpointOnIt() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            for (int round = 0; round < 200; round++) {
+                Ec2Service service = newService();
+                String vpcId = service.createVpc(REGION, "10.74.0.0/16", false).getVpcId();
+                String subnetId = service.createSubnet(REGION, vpcId, "10.74.1.0/24", "us-east-1a").getSubnetId();
+                CountDownLatch go = new CountDownLatch(1);
+                Future<?> create = pool.submit(() -> {
+                    go.await();
+                    try {
+                        service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null, List.of(), null);
+                    } catch (AwsException gone) {
+                        // InvalidSubnetID.NotFound: the delete won.
+                    }
+                    return null;
+                });
+                Future<?> delete = pool.submit(() -> {
+                    go.await();
+                    try {
+                        service.deleteSubnet(REGION, subnetId);
+                    } catch (AwsException inUse) {
+                        // DependencyViolation: the create won.
+                    }
+                    return null;
+                });
+                go.countDown();
+                create.get();
+                delete.get();
+                boolean subnetGone = service.describeSubnets(REGION, List.of(), Map.of()).stream()
+                        .noneMatch(subnet -> subnetId.equals(subnet.getSubnetId()));
+                boolean endpointOnIt = service.describeInstanceConnectEndpoints(REGION, List.of(), Map.of()).stream()
+                        .anyMatch(endpoint -> subnetId.equals(endpoint.getSubnetId()));
+                assertFalse(subnetGone && endpointOnIt, "round " + round + ": endpoint left on a deleted subnet");
+            }
+        } finally {
+            pool.shutdownNow();
+        }
     }
 }
