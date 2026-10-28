@@ -883,6 +883,9 @@ public class EcrService implements ResourceProvider {
      * read before the drop, which restores the identical digest. The repository's write lock
      * (see {@link #lockRepositoryWrites}) is held across the whole sequence, so a manifest
      * pushed to the repository between the drop and the write-back cannot be overwritten by
+     * the restore, and the drop and the restore run under the registry manager's monitor,
+     * the monitor {@code /_floci/ecr/gc} holds while it runs, so a concurrent GC cannot see
+     * the manifest's layers as unreferenced in that window and reclaim them out from under
      * the restore.
      */
     private void deleteImageTag(Repository repo, String repositoryName, String internal,
@@ -921,8 +924,10 @@ public class EcrService implements ResourceProvider {
             failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
             return;
         }
-        for (String survivingTag : survivingTags) {
-            restoreTag(internal, http, digest, manifest, survivingTag, id.getImageTag(), repositoryName);
+        synchronized (registryManager) {
+            for (String survivingTag : survivingTags) {
+                restoreTag(internal, http, digest, manifest, survivingTag, id.getImageTag(), repositoryName);
+            }
         }
         deleted.add(new ImageIdentifier(id.getImageTag(), digest));
     }
@@ -1259,10 +1264,16 @@ public class EcrService implements ResourceProvider {
      * restore of the older manifest. Keyed by the repository name as the backing registry
      * stores it, the only namespace in which two writes address the same manifests. The
      * lock's entry counting, its cross-thread release and its interruption behavior are
-     * {@link KeyedWriteLocks}' contract.
+     * {@link KeyedWriteLocks}' contract; the interruption surfaces here as a
+     * {@code ServerException}.
      */
     public void lockRepositoryWrites(String storageRepositoryName) {
-        repositoryWriteLocks.acquire(storageRepositoryName);
+        try {
+            repositoryWriteLocks.acquire(storageRepositoryName);
+        } catch (InterruptedException e) {
+            throw new AwsException("ServerException",
+                    "Interrupted while waiting for the write lock on " + storageRepositoryName, 500);
+        }
     }
 
     /**

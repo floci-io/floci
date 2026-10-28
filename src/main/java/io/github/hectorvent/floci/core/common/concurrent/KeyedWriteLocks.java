@@ -1,7 +1,5 @@
 package io.github.hectorvent.floci.core.common.concurrent;
 
-import io.github.hectorvent.floci.core.common.AwsException;
-
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
@@ -28,19 +26,18 @@ public final class KeyedWriteLocks<K> {
     private final Map<K, Entry> entries = new ConcurrentHashMap<>();
 
     /**
-     * Takes the key's lock, waiting for its current holder to release it. Interruptible:
-     * the waiter's count departs and the interruption surfaces as a {@code ServerException},
-     * the error AWS services report for an internal failure.
+     * Takes the key's lock, waiting for its current holder to release it. Interruptible: on
+     * interruption the waiter's count departs and the interrupt status is cleared before
+     * {@code InterruptedException} is rethrown for the caller to translate.
      */
-    public void acquire(K key) {
+    public void acquire(K key) throws InterruptedException {
         Entry entry = retain(key);
         try {
             entry.permits.acquire();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             depart(key, entry);
-            throw new AwsException("ServerException",
-                    "Interrupted while waiting for the write lock on " + key, 500);
+            throw e;
         }
     }
 
