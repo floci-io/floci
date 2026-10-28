@@ -16,7 +16,12 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Supplies active queues and AWS-shaped depth gauges and counter samples to the minute publisher. */
+/**
+ * Supplies the AWS/SQS metrics of every active queue to the minute publisher, shaped as SQS sends
+ * them: one sample of each depth gauge, and for each counter one sample per call in the minute plus
+ * the zero sample AWS adds to every minute. SentMessageSize has one sample per message and no zero
+ * sample.
+ */
 @ApplicationScoped
 public class SqsMetricsPublisher {
 

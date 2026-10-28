@@ -12,7 +12,12 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
-/** Shared scheduling, minute claims and retention for service-generated CloudWatch metrics. */
+/**
+ * Shared scheduling, minute claims and retention for service-generated CloudWatch metrics. A tick
+ * runs just after each minute boundary and stamps its samples with the minute that ended, so a call
+ * lands in the minute it was made, as on AWS. Once an hour it drops the namespace's datapoints older
+ * than the 15 days AWS keeps one-minute data, so the generated history stays bounded.
+ */
 public abstract class MinuteMetricsPublisher<T> {
 
     private static final Logger LOG = Logger.getLogger(MinuteMetricsPublisher.class);
@@ -66,6 +71,10 @@ public abstract class MinuteMetricsPublisher<T> {
         }
     }
 
+    /**
+     * Nothing may escape: the scheduler stops for good after a tick throws. One target's failed write
+     * drops only that target's samples for the minute.
+     */
     public synchronized void publish(Instant now) {
         long minute = endedMinute(now);
         if (minute <= lastAttemptedMinute) {
