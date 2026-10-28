@@ -520,6 +520,13 @@ class LambdaWebIntegrationTest {
                 .then().statusCode(400)
                 .body("message", equalTo("Lambda blocked the creation of this policy because it would grant public"
                         + " access to your function."));
+        String federatedPolicy = publicPolicy.replace("\"*\",\"Action\"",
+                "{\"Federated\":\"cognito-identity.amazonaws.com\"},\"Action\"");
+        given().contentType("application/json").body(Map.of("Policy", federatedPolicy))
+                .when().put(policyPath)
+                .then().statusCode(400)
+                .body("message", equalTo("Lambda blocked the creation of this policy because it would grant public"
+                        + " access to your function."));
 
         String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":"
                 + "{\"AWS\":\"arn:aws:iam::000000000000:root\"},\"Action\":\"lambda:InvokeWebFunctionEndpoint\","

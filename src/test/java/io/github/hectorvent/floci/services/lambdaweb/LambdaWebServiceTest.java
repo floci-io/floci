@@ -721,9 +721,10 @@ class LambdaWebServiceTest {
         assertEquals("ResourceNotFoundException", error(() -> service.putResourcePolicy(REGION, missing,
                 policy(members.formatted("{\"AWS\":\"arn:aws:iam::000000000000:user/path/alice\"}", invoke,
                         "\"" + resource + "\"")))).getErrorCode());
-        assertEquals("ValidationException", error(() -> service.putResourcePolicy(REGION, missing,
-                policy(members.formatted("{\"CanonicalUser\":\"arn:aws:iam::000000000000:foo/bar\"}", invoke,
-                        "\"" + resource + "\"")))).getErrorCode(), "only an AWS principal may carry a path");
+        assertEquals("The provided principal was invalid. Please check the principal and try again.",
+                message(() -> service.putResourcePolicy(REGION, missing,
+                        policy(members.formatted("{\"CanonicalUser\":\"arn:aws:iam::000000000000:foo/bar\"}", invoke,
+                                "\"" + resource + "\"")))), "a canonical user is never found, whatever its pattern");
         assertEquals("Lambda blocked the creation of this policy because it would grant public access to your function.",
                 message(() -> service.putResourcePolicy(REGION, missing, policy("{\"Statement\":[{\"Effect\":\"Allow\","
                         + "\"Principal\":{\"AWS\":[\"arn:aws:iam::000000000000:root\",\"*\"]},"
@@ -815,6 +816,39 @@ class LambdaWebServiceTest {
         assertEquals("The provided principal was invalid. Please check the principal and try again.",
                 message(() -> service.putResourcePolicy(REGION, missing,
                         policy("{\"Statement\":[" + open + "," + gone + "]}"))));
+    }
+
+    @Test
+    void aFederatedPrincipalIsPublicUnlessAConditionPinsTheCaller() {
+        LambdaWebService service = service();
+        String missing = "arn:aws:lambda:us-east-1:000000000000:web-function/missing";
+        String cognito = "{\"Federated\":\"cognito-identity.amazonaws.com\"}";
+        for (String federated : List.of(cognito, "{\"Federated\":\"bad!value\"}", "{\"Federated\":\"\"}",
+                "{\"Federated\":\"arn:aws:iam::000000000000:saml-provider/gone\"}",
+                "{\"Federated\":[\"cognito-identity.amazonaws.com\",\"accounts.google.com\"]}",
+                "{\"AWS\":\"000000000000\",\"Federated\":\"cognito-identity.amazonaws.com\"}")) {
+            assertEquals("Lambda blocked the creation of this policy because it would grant public access to your"
+                    + " function.", message(() -> service.putResourcePolicy(REGION, missing,
+                    policy(principalPolicy("Allow", federated, missing)))), federated);
+        }
+        for (String accepted : List.of(principalPolicy("Deny", cognito, missing),
+                principalPolicy("Deny", "{\"Federated\":\"a/b\"}", missing),
+                principalPolicy("Deny", "{\"Federated\":\"arn:aws:iam::000000000000:saml-provider/gone\"}", missing),
+                principalPolicy("Allow", "{\"Federated\":[\"*\",\"cognito-identity.amazonaws.com\"]}", missing),
+                federatedPolicy(missing, "{\"StringEquals\":{\"aws:PrincipalAccount\":\"000000000000\"}}"),
+                federatedPolicy(missing, "{\"Bool\":{\"aws:PrincipalIsAWSService\":\"true\"}}"))) {
+            assertEquals("ResourceNotFoundException",
+                    error(() -> service.putResourcePolicy(REGION, missing, policy(accepted))).getErrorCode(), accepted);
+        }
+        assertEquals("Lambda blocked the creation of this policy because it would grant public access to your function.",
+                message(() -> service.putResourcePolicy(REGION, missing, policy(federatedPolicy(missing,
+                        "{\"StringNotEquals\":{\"aws:PrincipalAccount\":\"000000000000\"}}")))));
+    }
+
+    private static String federatedPolicy(String functionArn, String condition) {
+        return "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Federated\":\"cognito-identity.amazonaws.com\"},"
+                + "\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + functionArn + "/endpoint/*\","
+                + "\"Condition\":" + condition + "}]}";
     }
 
     private static String principalPolicy(String effect, String principal, String functionArn) {

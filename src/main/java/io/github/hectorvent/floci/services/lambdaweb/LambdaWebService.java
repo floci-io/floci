@@ -1455,7 +1455,7 @@ public class LambdaWebService implements Resettable {
     }
 
     private static void requireNotPublic(JsonNode statement) {
-        if (statement.path("Effect").asText().equalsIgnoreCase("Allow") && isWildcardPrincipal(statement.get("Principal"))
+        if (statement.path("Effect").asText().equalsIgnoreCase("Allow") && isPublicPrincipal(statement.get("Principal"))
                 && !hasTrustedCondition(statement.path("Condition"))) {
             throw new AwsException("ValidationException", "Lambda blocked the creation of this policy"
                     + " because it would grant public access to your function.", 400);
@@ -1484,7 +1484,12 @@ public class LambdaWebService implements Resettable {
             if (field.getValue().isArray() && field.getValue().isEmpty()) {
                 throw new AwsException("ValidationException", INVALID_PRINCIPAL, 400);
             }
-            for (String value : policyValues(field.getValue())) {
+            List<String> values = policyValues(field.getValue());
+            // AWS checks no pattern on these, so a slash or a "!" passes.
+            if ("Federated".equals(field.getKey()) || "CanonicalUser".equals(field.getKey())) {
+                continue;
+            }
+            for (String value : values) {
                 Pattern allowed = "Service".equals(field.getKey()) ? PRINCIPAL_SERVICE
                         : "AWS".equals(field.getKey()) && AwsArnUtils.isArn(value) ? PRINCIPAL_AWS_ARN : PRINCIPAL_AWS;
                 if (!"*".equals(value) && !allowed.matcher(value).matches()) {
@@ -1525,13 +1530,18 @@ public class LambdaWebService implements Resettable {
         return values;
     }
 
-    /** AWS counts a bare "*" and a "*" under AWS as public. Service and Federated wildcards are not. */
-    private static boolean isWildcardPrincipal(JsonNode principal) {
+    /**
+     * AWS counts a bare "*", a "*" under AWS and any Federated principal as public. A Service "*" is not, and
+     * neither is a Federated list that holds "*".
+     */
+    private static boolean isPublicPrincipal(JsonNode principal) {
         if (principal.isTextual()) {
             return "*".equals(principal.textValue());
         }
         JsonNode aws = principal.get("AWS");
-        return aws != null && policyValues(aws).contains("*");
+        JsonNode federated = principal.get("Federated");
+        return (aws != null && policyValues(aws).contains("*"))
+                || (federated != null && !policyValues(federated).contains("*"));
     }
 
     private static boolean hasTrustedCondition(JsonNode condition) {
