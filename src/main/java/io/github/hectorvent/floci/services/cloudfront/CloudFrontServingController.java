@@ -883,7 +883,8 @@ public class CloudFrontServingController {
         String host;
         try {
             host = normalizeOriginHost(origin.getDomainName());
-        } catch (IllegalArgumentException e) {
+        } catch (IllegalArgumentException ignored) {
+            // An invalid domain cannot name a local API; the normal origin fetch rejects it.
             return null;
         }
         String apiId = ApiGatewayExecuteApiHostFilter.extractApiId(host, flociHostname);

@@ -162,14 +162,14 @@ class ApiGatewayExecuteApiHostFilterDecisionTest {
 
     @Test
     void restApiInTheHostRegionRoutes() {
-        lookup.restRegion = Optional.of(REGION);
+        lookup.restRegion = REGION;
 
         assertTrue(filter.routes(HOST, "/dev/"));
     }
 
     @Test
     void restApiWithAnotherRegionLabelDoesNotRoute() {
-        lookup.restRegion = Optional.of(REGION);
+        lookup.restRegion = REGION;
 
         assertFalse(filter.routes(WRONG_REGION_HOST, "/dev/"));
     }
@@ -188,7 +188,7 @@ class ApiGatewayExecuteApiHostFilterDecisionTest {
 
     @Test
     void internalExecuteApiPathDoesNotRoute() {
-        lookup.restRegion = Optional.of(REGION);
+        lookup.restRegion = REGION;
 
         assertFalse(filter.routes(HOST, "/execute-api/" + API_ID + "/dev/"));
     }
@@ -204,7 +204,7 @@ class ApiGatewayExecuteApiHostFilterDecisionTest {
         private final RequestContext viewer;
         private final List<String> accountsSeen = new ArrayList<>();
         private ApiGatewayV2Service.ApiOwner owner;
-        private Optional<String> restRegion = Optional.empty();
+        private String restRegion;
         private String stage = "dev";
         private boolean disabled;
         private boolean crash;
@@ -225,7 +225,7 @@ class ApiGatewayExecuteApiHostFilterDecisionTest {
 
         @Override
         public Optional<String> findRestApiRegion(String apiId) {
-            return restRegion;
+            return Optional.ofNullable(restRegion);
         }
 
         @Override
