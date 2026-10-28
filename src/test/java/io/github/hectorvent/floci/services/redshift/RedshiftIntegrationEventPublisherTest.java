@@ -67,7 +67,7 @@ class RedshiftIntegrationEventPublisherTest {
         assertEquals("Monitoring", body.path("category").asText());
         assertEquals(ARN, body.path("integrationArn").asText());
         assertEquals("Your zero-ETL Integration orders-to-warehouse has been created and became ACTIVE at "
-                + "2026-10-28 11:30:15 UTC.", body.path("message").asText());
+                + "2026-10-28 11:30 UTC.", body.path("message").asText());
     }
 
     @Test

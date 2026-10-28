@@ -156,11 +156,15 @@ public class RedshiftService implements ManagedSecretRotator {
         return mutation.get();
     }
 
-    private static final DateTimeFormatter EVENT_MESSAGE_TIME =
+    static final DateTimeFormatter EVENT_MESSAGE_TIME =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm").withZone(ZoneOffset.UTC);
 
+    static String eventTime(Instant at) {
+        return EVENT_MESSAGE_TIME.format(at) + " UTC";
+    }
+
     private static String eventTime() {
-        return EVENT_MESSAGE_TIME.format(Instant.now()) + " UTC";
+        return eventTime(Instant.now());
     }
 
     private void emitEvent(EventInfo info, String sourceIdentifier, String message) {
@@ -718,7 +722,7 @@ public class RedshiftService implements ManagedSecretRotator {
                 integration.setStatus("failed");
             }
             integrations.putForAccount(accountId, key, integration);
-            queueStatusChange(integration, previousStatus, false);
+            queueStatusChange(integration, previousStatus);
             return;
         }
         throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
@@ -748,7 +752,11 @@ public class RedshiftService implements ManagedSecretRotator {
             integration.setLastError(null);
             integration.setStatus(backfillCompleted ? "active" : "syncing");
             integrations.putForAccount(accountId, key, integration);
-            queueStatusChange(integration, previousStatus, backfillJustCompleted);
+            if (backfillJustCompleted) {
+                queueIntegrationEvent(RedshiftIntegrationEventPublisher.IntegrationEvent.CREATED_ACTIVE, integration);
+            } else {
+                queueStatusChange(integration, previousStatus);
+            }
             return;
         }
         throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
@@ -829,7 +837,7 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     /** Queues the event for a move into syncing, active or failed; any other change is silent. */
-    private void queueStatusChange(Integration integration, String previousStatus, boolean backfillJustCompleted) {
+    private void queueStatusChange(Integration integration, String previousStatus) {
         String status = integration.getStatus();
         if (status == null || status.equals(previousStatus)) {
             return;
@@ -837,10 +845,8 @@ public class RedshiftService implements ManagedSecretRotator {
         switch (status) {
             case "syncing" -> queueIntegrationEvent(
                     RedshiftIntegrationEventPublisher.IntegrationEvent.SYNCHRONIZING, integration);
-            // Leaving the initial backfill is the integration becoming ACTIVE; a recovery from failure is "now ACTIVE".
-            case "active" -> queueIntegrationEvent(backfillJustCompleted || "syncing".equals(previousStatus)
-                    ? RedshiftIntegrationEventPublisher.IntegrationEvent.CREATED_ACTIVE
-                    : RedshiftIntegrationEventPublisher.IntegrationEvent.ACTIVE, integration);
+            case "active" -> queueIntegrationEvent(
+                    RedshiftIntegrationEventPublisher.IntegrationEvent.ACTIVE, integration);
             case "failed" -> queueIntegrationEvent(
                     RedshiftIntegrationEventPublisher.IntegrationEvent.FAILED, integration);
             default -> { }

@@ -12,8 +12,6 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -33,8 +31,6 @@ class RedshiftIntegrationEventPublisher {
 
     private static final Logger LOG = Logger.getLogger(RedshiftIntegrationEventPublisher.class);
     static final String SOURCE = "aws.redshift";
-    private static final DateTimeFormatter TIME =
-            DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss 'UTC'").withZone(ZoneOffset.UTC);
 
     /** The implemented rows of the AWS table: category doubles as the detail type's suffix. */
     enum IntegrationEvent {
@@ -103,7 +99,7 @@ class RedshiftIntegrationEventPublisher {
         detail.put("eventId", event.eventId());
         detail.put("severity", event.severity);
         detail.put("category", event.category);
-        detail.put("message", event.render(integration.getIntegrationName(), TIME.format(at)));
+        detail.put("message", event.render(integration.getIntegrationName(), RedshiftService.eventTime(at)));
         detail.put("integrationArn", integration.getIntegrationArn());
         queued.add(new Queued(event.detailType(), detail.toString(), integration.getIntegrationArn(), region,
                 accountId(integration)));

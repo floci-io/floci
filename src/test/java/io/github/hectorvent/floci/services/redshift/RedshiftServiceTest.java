@@ -677,8 +677,8 @@ class RedshiftServiceTest {
         when(integrationBackend.keysForAccount("111111111111")).thenReturn(Set.of("one"));
         when(integrationBackend.getForAccount("111111111111", "one")).thenReturn(Optional.of(integration));
 
-        service.updateIntegrationRuntime("111111111111", integrationArn, Map.of(), true, null);
-        service.updateIntegrationRuntime("111111111111", integrationArn, Map.of(), true, null);
+        service.updateIntegrationBackfillProgress("111111111111", integrationArn, null, true);
+        service.updateIntegrationBackfillProgress("111111111111", integrationArn, null, true);
         service.updateIntegrationRuntime("111111111111", integrationArn, Map.of(), false, "boom");
         service.updateIntegrationRuntime("111111111111", integrationArn, Map.of(), false, "boom");
         service.updateIntegrationRuntime("111111111111", integrationArn, Map.of(), true, null);
