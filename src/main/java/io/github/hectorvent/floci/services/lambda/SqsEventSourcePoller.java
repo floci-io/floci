@@ -49,6 +49,7 @@ public class SqsEventSourcePoller implements Resettable {
 
     /** AWS SQS default visibility timeout, used as the retry backoff when a queue has none configured. */
     private static final int DEFAULT_RETRY_VISIBILITY_SECONDS = 30;
+    private static final int MAX_MESSAGES_PER_RECEIVE = 10;
 
     private final Vertx vertx;
     private final SqsService sqsService;
@@ -197,8 +198,7 @@ public class SqsEventSourcePoller implements Resettable {
                 int alreadyBuffered = pending != null ? pending.messages.size() : 0;
                 int wanted = Math.max(1, esm.getBatchSize() - alreadyBuffered);
 
-                List<Message> received = sqsService.receiveMessage(
-                        esm.getQueueUrl(), wanted, visibilityTimeout, 0, esm.getRegion());
+                List<Message> received = receiveUpTo(esm, wanted, visibilityTimeout);
 
                 List<Message> messages;
                 if (window <= 0) {
@@ -321,6 +321,25 @@ public class SqsEventSourcePoller implements Resettable {
                 activePolls.remove(esm.getUuid());
             }
         });
+    }
+
+    /**
+     * Receives up to {@code wanted} messages in calls of at most ten, the most one ReceiveMessage
+     * returns, stopping once a call returns fewer than it asked for: the queue has no more visible
+     * messages for now.
+     */
+    private List<Message> receiveUpTo(EventSourceMapping esm, int wanted, int visibilityTimeout) {
+        List<Message> received = new ArrayList<>();
+        while (received.size() < wanted) {
+            int chunk = Math.min(MAX_MESSAGES_PER_RECEIVE, wanted - received.size());
+            List<Message> messages = sqsService.receiveMessage(
+                    esm.getQueueUrl(), chunk, visibilityTimeout, 0, esm.getRegion());
+            received.addAll(messages);
+            if (messages.size() < chunk) {
+                break;
+            }
+        }
+        return received;
     }
 
     /**

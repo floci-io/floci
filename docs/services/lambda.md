@@ -401,8 +401,16 @@ disabled fails with Lambda's error as the resource status reason.
 !!! note "Concurrency enforcement"
     Reserved concurrency is enforced function-wide: invocations of every
     version and alias count against the function's reservation, and
-    invocations beyond the reserved value return `TooManyRequestsException`
-    (HTTP 429). Functions without a reserved value share a **per-region**
+    synchronous invocations beyond the reserved value return
+    `TooManyRequestsException` (HTTP 429). An asynchronous (`Event`)
+    invocation is always accepted with 202 and queued: an attempt that finds
+    the function's concurrency in use waits for a free slot, without using up
+    a retry, until the event reaches its `MaximumEventAgeInSeconds`. It checks
+    again after 1 second, then after waits that double up to 30 seconds, and a
+    wait never runs past the event's maximum age. With a
+    reserved value of 0, an asynchronous invocation goes straight to the
+    function's `OnFailure` destination or dead-letter queue, without retries.
+    Functions without a reserved value share a **per-region**
     pool. AWS Lambda's "account-level" limit is in fact a
     per-account-per-region quota, and Floci mirrors that by partitioning
     counters on the ARN's region segment. The pool size (default 1000) is
@@ -1227,6 +1235,13 @@ accumulating messages across polls, and invokes the function once the batch reac
 first. A window of 0 (or an unset window) invokes as soon as any message is
 available, which is the previous behaviour.
 
+An SQS mapping's `BatchSize` must be between 1 and 10000, or between 1 and 10 for a
+FIFO queue, and a `BatchSize` above 10 requires a `MaximumBatchingWindowInSeconds` of
+at least 1. `CreateEventSourceMapping` and `UpdateEventSourceMapping` reject other
+values with `InvalidParameterValueException`. The poller reads a batch in
+`ReceiveMessage` calls of at most 10 messages each, until the batch is full or the
+queue has no more visible messages.
+
 ```bash
 aws lambda create-event-source-mapping \
   --function-name my-function \
@@ -1331,8 +1346,9 @@ of `{}` or with an empty `Filters` array clears any existing filters.
     `FilterCriteria`, `MaximumBatchingWindowInSeconds`, `ScalingConfig` and
     `DestinationConfig`, so a stack-created mapping behaves as one created
     through the Lambda API. SAM `SQS`, `Kinesis` and `DynamoDB` function events
-    forward only the queue or stream, `BatchSize` and `Enabled`, so any other
-    event property, `FilterCriteria` included, is dropped.
+    forward only the queue or stream, `BatchSize`, `MaximumBatchingWindowInSeconds`
+    and `Enabled`, so any other event property, `FilterCriteria` included, is
+    dropped.
 
 ## Supported Runtimes
 

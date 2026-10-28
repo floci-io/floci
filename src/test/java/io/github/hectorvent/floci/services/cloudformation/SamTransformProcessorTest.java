@@ -1547,6 +1547,42 @@ class SamTransformProcessorTest {
     }
 
     @Test
+    void expandSamTemplate_sqsEventForwardsMaximumBatchingWindow() throws Exception {
+        // An SQS BatchSize above 10 needs MaximumBatchingWindowInSeconds of at least 1.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs20.x",
+                    "InlineCode": "code",
+                    "Events": {
+                      "SqsTrigger": {
+                        "Type": "SQS",
+                        "Properties": {
+                          "Queue": "arn:aws:sqs:us-east-1:123456789012:my-queue",
+                          "BatchSize": 25,
+                          "MaximumBatchingWindowInSeconds": 5
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode esmProps = processor.expandSamTemplate(template)
+                .path("Resources").path("MyFuncSqsTrigger").path("Properties");
+
+        assertEquals(25, esmProps.path("BatchSize").asInt());
+        assertEquals(5, esmProps.path("MaximumBatchingWindowInSeconds").asInt());
+    }
+
+    @Test
     void expandSamTemplate_generatesImplicitApiFromApiEvents() throws Exception {
         // Functions with Api events and no explicit RestApiId must produce a full implicit REST API.
         JsonNode template = objectMapper.readTree("""

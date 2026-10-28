@@ -112,6 +112,9 @@ public class LambdaService implements ResourceProvider {
     private static final Pattern ALIAS_FUNCTION_VERSION_PATTERN = Pattern.compile("(\\$LATEST(\\.PUBLISHED)?|[0-9]+)");
     private static final int DEFAULT_SQS_BATCH_SIZE = 10;
     private static final int DEFAULT_STREAM_BATCH_SIZE = 100;
+    private static final int MAX_SQS_BATCH_SIZE = 10_000;
+    private static final int MAX_SQS_FIFO_BATCH_SIZE = 10;
+    private static final int MAX_SQS_BATCH_SIZE_WITHOUT_WINDOW = 10;
     // The model's own Role pattern, which AWS quotes verbatim in its validation message; it
     // already accepts every partition.
     private static final Pattern ROLE_ARN_PATTERN = Pattern.compile(
@@ -1539,6 +1542,7 @@ public class LambdaService implements ResourceProvider {
                 ? DEFAULT_SQS_BATCH_SIZE : DEFAULT_STREAM_BATCH_SIZE;
         int batchSize = toInt(request.get("BatchSize"), defaultBatchSize);
         Integer maximumBatchingWindowInSeconds = parseMaximumBatchingWindow(request);
+        validateSqsBatchSize(eventSourceArn, batchSize, maximumBatchingWindowInSeconds);
         boolean enabled = !Boolean.FALSE.equals(request.get("Enabled"));
 
         List<String> functionResponseTypes = parseFunctionResponseTypes(request);
@@ -1993,6 +1997,33 @@ public class LambdaService implements ResourceProvider {
         return (int) value;
     }
 
+    /**
+     * An SQS mapping reads at most 10,000 messages per batch, or 10 from a FIFO queue, and a batch
+     * larger than one ReceiveMessage call (10) needs a batching window of at least one second to
+     * gather it.
+     */
+    private static void validateSqsBatchSize(String eventSourceArn, int batchSize, Integer batchingWindow) {
+        if (eventSourceArn == null || !eventSourceArn.contains(":sqs:")) {
+            return;
+        }
+        if (batchSize < 1 || batchSize > MAX_SQS_BATCH_SIZE) {
+            String bound = batchSize < 1 ? "greater than or equal to 1" : "less than or equal to " + MAX_SQS_BATCH_SIZE;
+            throw SmithyValidationErrors.exception("InvalidParameterValueException",
+                    "Value '" + batchSize + "' at 'batchSize' failed to satisfy constraint: Member must have value "
+                            + bound);
+        }
+        if (eventSourceArn.endsWith(".fifo") && batchSize > MAX_SQS_FIFO_BATCH_SIZE) {
+            throw new AwsException("InvalidParameterValueException",
+                    "BatchSize must be between 1 and " + MAX_SQS_FIFO_BATCH_SIZE + " for FIFO queues (got "
+                            + batchSize + ")", 400);
+        }
+        if (batchSize > MAX_SQS_BATCH_SIZE_WITHOUT_WINDOW && (batchingWindow == null || batchingWindow < 1)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Maximum batch window in seconds must be greater than 0 if maximum batch size is greater than "
+                            + MAX_SQS_BATCH_SIZE_WITHOUT_WINDOW, 400);
+        }
+    }
+
     private Integer parseMaximumRetryAttempts(Map<String, Object> request) {
         Object raw = request.get("MaximumRetryAttempts");
         if (raw == null) {
@@ -2118,12 +2149,16 @@ public class LambdaService implements ResourceProvider {
         // of them is applied: a request that fails validation must leave the mapping unchanged.
         List<Consumer<EventSourceMapping>> changes = new ArrayList<>();
 
+        int batchSize = toInt(request.get("BatchSize"), esm.getBatchSize());
+        Integer batchingWindow = request.containsKey("MaximumBatchingWindowInSeconds")
+                ? parseMaximumBatchingWindow(request) : esm.getMaximumBatchingWindowInSeconds();
+        if (request.containsKey("BatchSize") || request.containsKey("MaximumBatchingWindowInSeconds")) {
+            validateSqsBatchSize(esm.getEventSourceArn(), batchSize, batchingWindow);
+        }
         if (request.containsKey("BatchSize")) {
-            int batchSize = toInt(request.get("BatchSize"), esm.getBatchSize());
             changes.add(m -> m.setBatchSize(batchSize));
         }
         if (request.containsKey("MaximumBatchingWindowInSeconds")) {
-            Integer batchingWindow = parseMaximumBatchingWindow(request);
             changes.add(m -> m.setMaximumBatchingWindowInSeconds(batchingWindow));
         }
         if (request.containsKey("Enabled")) {

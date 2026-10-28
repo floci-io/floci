@@ -159,20 +159,28 @@ class LambdaConcurrencyTest {
 
     @Test
     @Order(10)
-    void invoke_whenReservedZero_throwsTooManyRequests() {
+    void invoke_whenReservedZero_throttlesSyncAndAcceptsEvent() {
         lambda.putFunctionConcurrency(PutFunctionConcurrencyRequest.builder()
                 .functionName(FUNCTION_NAME)
                 .reservedConcurrentExecutions(0)
                 .build());
 
-        // Event-type invoke still goes through the concurrency gate; reserved=0
-        // should throttle every request regardless of invocation type.
         assertThatThrownBy(() -> lambda.invoke(InvokeRequest.builder()
                 .functionName(FUNCTION_NAME)
-                .invocationType(InvocationType.EVENT)
+                .invocationType(InvocationType.REQUEST_RESPONSE)
                 .payload(SdkBytes.fromUtf8String("{}"))
                 .build()))
                 .isInstanceOf(TooManyRequestsException.class);
+
+        // AWS queues an asynchronous invoke and answers 202; with reserved=0 the
+        // event goes to the OnFailure destination or DLQ instead of being throttled.
+        InvokeResponse response = lambda.invoke(InvokeRequest.builder()
+                .functionName(FUNCTION_NAME)
+                .invocationType(InvocationType.EVENT)
+                .payload(SdkBytes.fromUtf8String("{}"))
+                .build());
+
+        assertThat(response.statusCode()).isEqualTo(202);
 
         // Clear so teardown and other tests are not affected
         lambda.deleteFunctionConcurrency(DeleteFunctionConcurrencyRequest.builder()
@@ -216,7 +224,7 @@ class LambdaConcurrencyTest {
         assertThatThrownBy(() -> lambda.invoke(InvokeRequest.builder()
                 .functionName(FUNCTION_NAME)
                 .qualifier("1")
-                .invocationType(InvocationType.EVENT)
+                .invocationType(InvocationType.REQUEST_RESPONSE)
                 .payload(SdkBytes.fromUtf8String("{}"))
                 .build()))
                 .isInstanceOf(TooManyRequestsException.class);

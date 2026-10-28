@@ -42,6 +42,7 @@ public class PipesPoller implements Resettable {
     private static final Logger LOG = Logger.getLogger(PipesPoller.class);
     private static final long POLL_INTERVAL_MS = 1000;
     private static final int DEFAULT_BATCH_SIZE = 10;
+    private static final int MAX_SQS_MESSAGES_PER_RECEIVE = 10;
 
     private final Vertx vertx;
     private final SqsService sqsService;
@@ -167,7 +168,7 @@ public class PipesPoller implements Resettable {
     void pollSqs(Pipe pipe, String region) {
         String queueUrl = AwsArnUtils.arnToQueueUrl(pipe.getSource(), baseUrl);
         int batchSize = getBatchSize(pipe, "SqsQueueParameters");
-        List<Message> messages = sqsService.receiveMessage(queueUrl, batchSize, 30, 0, region);
+        List<Message> messages = receiveSqsUpTo(queueUrl, Math.max(1, batchSize), region);
         if (messages.isEmpty()) {
             return;
         }
@@ -244,6 +245,24 @@ public class PipesPoller implements Resettable {
                 }
             }
         }
+    }
+
+    /**
+     * Receives up to {@code wanted} messages in calls of at most ten, the most one ReceiveMessage
+     * returns, stopping once a call returns fewer than it asked for: the queue has no more visible
+     * messages for now.
+     */
+    private List<Message> receiveSqsUpTo(String queueUrl, int wanted, String region) {
+        List<Message> received = new ArrayList<>();
+        while (received.size() < wanted) {
+            int chunk = Math.min(MAX_SQS_MESSAGES_PER_RECEIVE, wanted - received.size());
+            List<Message> messages = sqsService.receiveMessage(queueUrl, chunk, 30, 0, region);
+            received.addAll(messages);
+            if (messages.size() < chunk) {
+                break;
+            }
+        }
+        return received;
     }
 
     void pollKinesis(Pipe pipe, String region) {

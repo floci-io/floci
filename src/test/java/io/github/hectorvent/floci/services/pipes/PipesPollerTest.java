@@ -224,6 +224,44 @@ class PipesPollerTest {
     }
 
     @Test
+    void pollSqs_batchSizeAboveTenReceivesInChunksOfAtMostTenAndDeliversOneBatch() throws Exception {
+        Pipe pipe = new Pipe();
+        pipe.setName("large-batch");
+        pipe.setSource("arn:aws:sqs:us-east-1:000000000000:src-queue");
+        pipe.setTarget("arn:aws:lambda:us-east-1:000000000000:function:tgt");
+        pipe.setSourceParameters(MAPPER.readTree(
+                "{\"SqsQueueParameters\":{\"BatchSize\":25,\"MaximumBatchingWindowInSeconds\":5}}"));
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(sqsMessages("a", 10))
+                .thenReturn(sqsMessages("b", 10))
+                .thenReturn(sqsMessages("c", 5))
+                .thenReturn(List.of());
+
+        poller.pollSqs(pipe, "us-east-1");
+
+        // SQS ReceiveMessage accepts at most 10 messages per call.
+        ArgumentCaptor<Integer> maxMessages = ArgumentCaptor.forClass(Integer.class);
+        verify(sqsService, atLeastOnce())
+                .receiveMessage(anyString(), maxMessages.capture(), anyInt(), anyInt(), eq("us-east-1"));
+        assertTrue(maxMessages.getAllValues().stream().allMatch(n -> n >= 1 && n <= 10),
+                "every receive must ask for 1 to 10 messages, asked for " + maxMessages.getAllValues());
+        ArgumentCaptor<String> payload = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker).invoke(eq(pipe), payload.capture(), eq("us-east-1"));
+        assertEquals(25, MAPPER.readTree(payload.getValue()).path("Records").size());
+    }
+
+    private static List<Message> sqsMessages(String prefix, int count) {
+        List<Message> messages = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            Message msg = new Message("{\"n\":" + i + "}");
+            msg.setMessageId(prefix + i);
+            msg.setReceiptHandle("rh-" + prefix + i);
+            messages.add(msg);
+        }
+        return messages;
+    }
+
+    @Test
     void pollKafka_filtersUsingDecodedPayloadButDeliversOriginalRecord() throws Exception {
         Pipe pipe = selfManagedKafkaPipe();
         byte[] key = "customer-123".getBytes(StandardCharsets.UTF_8);
