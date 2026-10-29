@@ -560,6 +560,10 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         distStore.put(targetDistributionId, dist);
     }
 
+    public boolean hasDistributions() {
+        return !distStore.isEmpty();
+    }
+
     /**
      * Finds the distribution whose data-plane requests should be served for the given {@code Host}
      * header. A distribution matches when the host equals its assigned CloudFront domain name
