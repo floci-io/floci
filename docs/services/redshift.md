@@ -36,8 +36,15 @@ the original container to still exist: if it was removed externally, Floci retur
 an error instead of creating an empty replacement database. A failed resume attempts
 to stop the container again so it can be retried. If that rollback also fails, the
 cluster is marked `unavailable` and its data-bearing container is retained.
+Failure to close the proxy during pause also marks the cluster `unavailable`,
+because its listener may have partially stopped. Resume rollback attempts proxy
+shutdown and database shutdown independently and keeps the proxy port reserved.
 Delete a paused cluster with `SkipFinalClusterSnapshot=true`, or resume it before
 requesting a final snapshot.
+
+Zero-ETL polling skips paused targets without consuming stream records or changing
+their checkpoints. Polling continues after resume; a healthy poll clears an earlier
+integration failure even when the stream has no new records.
 
 ```bash
 aws --endpoint-url http://localhost:4566 redshift pause-cluster --cluster-identifier warehouse

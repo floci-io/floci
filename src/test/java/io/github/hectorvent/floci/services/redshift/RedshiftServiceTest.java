@@ -126,14 +126,64 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void pauseProxyFailurePreservesDatabaseAndAvailableState() {
+    void pauseProxyFailurePreservesDatabaseAndMarksUnavailable() {
         Cluster cluster = lifecycleCluster("available");
         doThrow(new IllegalStateException("close failed")).when(proxyManager)
                 .stopProxy("111111111111:warehouse");
         assertEquals("InternalFailure", assertThrows(AwsException.class,
                 () -> service.pauseCluster("warehouse")).getErrorCode());
-        assertEquals("available", cluster.getClusterStatus());
+        assertEquals("unavailable", cluster.getClusterStatus());
+        assertNull(cluster.getContainerHost());
+        assertEquals(0, cluster.getContainerPort());
+        verify(clusterBackend).put("warehouse", cluster);
+        verify(clusterBackend).flush();
         verifyNoInteractions(cm);
+    }
+
+    @Test
+    void resumeRollbackStopsDatabaseEvenWhenProxyCleanupFails() {
+        Cluster cluster = lifecycleCluster("paused");
+        service.reserveProxyPort(7107);
+        when(cm.resume("111111111111", "warehouse", "admin", "dev"))
+                .thenReturn(new RedshiftContainerHandle("original", "warehouse", "backend", 5432));
+        doThrow(new IllegalStateException("proxy start failed")).when(proxyManager).startProxy(
+                anyString(), anyInt(), anyString(), anyInt(), anyString(), anyString(), anyString(), anyString(),
+                any(), anyList(), isNull());
+        doThrow(new IllegalStateException("proxy close failed")).when(proxyManager)
+                .stopProxy("111111111111:warehouse");
+
+        assertThrows(AwsException.class, () -> service.resumeCluster("warehouse"));
+
+        verify(cm).pause("111111111111", "warehouse");
+        verify(cm, never()).stop(anyString(), anyString());
+        assertEquals("unavailable", cluster.getClusterStatus());
+        assertNull(cluster.getContainerHost());
+        assertEquals(0, cluster.getContainerPort());
+        assertFalse(service.reserveProxyPort(7107));
+    }
+
+    @Test
+    void pollingFailureReportedAfterPauseDoesNotFailIntegration() {
+        Cluster cluster = lifecycleCluster("paused");
+        when(clusterBackend.getForAccount("111111111111", "warehouse")).thenReturn(Optional.of(cluster));
+        Integration integration = new Integration();
+        integration.setIntegrationArn("arn:aws:redshift:us-east-1:111111111111:integration:one");
+        integration.setTargetClusterIdentifier("warehouse");
+        integration.setStatus("active");
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(Set.of("one"));
+        when(integrationBackend.getForAccount("111111111111", "one")).thenReturn(Optional.of(integration));
+
+        service.updateIntegrationRuntime("111111111111", integration.getIntegrationArn(), Map.of(), false, "database stopped");
+
+        assertEquals("active", integration.getStatus());
+        assertEquals(0, integration.getRetryCount());
+        assertNull(integration.getLastError());
+        verify(integrationBackend, never()).putForAccount(anyString(), anyString(), any());
+        cluster.setClusterStatus("available");
+        service.updateIntegrationRuntime("111111111111", integration.getIntegrationArn(), Map.of(), false, "genuine failure");
+        assertEquals("failed", integration.getStatus());
+        assertEquals(1, integration.getRetryCount());
+        assertEquals("genuine failure", integration.getLastError());
     }
 
     @Test

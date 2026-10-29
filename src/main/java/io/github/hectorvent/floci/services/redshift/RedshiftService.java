@@ -717,6 +717,11 @@ public class RedshiftService implements ManagedSecretRotator {
                 continue;
             }
             Integration integration = stored.get();
+            String targetIdentifier = integration.getTargetClusterIdentifier();
+            if (!successful && targetIdentifier != null && clusters.getForAccount(accountId, targetIdentifier)
+                    .filter(cluster -> "paused".equals(cluster.getClusterStatus())).isPresent()) {
+                return;
+            }
             String previousStatus = integration.getStatus();
             if (successful) {
                 integration.setShardSequenceNumbers(shardSequenceNumbers);
@@ -1334,6 +1339,11 @@ public class RedshiftService implements ManagedSecretRotator {
                 proxyManager.stopProxy(relayKey(accountId, clusterIdentifier));
             } catch (RuntimeException failure) {
                 LOG.warnv(failure, "Failed to stop auth proxy while pausing cluster {0}", clusterIdentifier);
+                cluster.setClusterStatus("unavailable");
+                cluster.setContainerHost(null);
+                cluster.setContainerPort(0);
+                clusters.put(clusterIdentifier, cluster);
+                clusters.flush();
                 throw new AwsException("InternalFailure", "Failed to stop auth proxy for cluster "
                         + clusterIdentifier, 500);
             }
@@ -1382,6 +1392,11 @@ public class RedshiftService implements ManagedSecretRotator {
                 cluster.setClusterStatus("paused");
                 try {
                     proxyManager.stopProxy(relayKey(accountId, clusterIdentifier));
+                } catch (RuntimeException rollbackFailure) {
+                    LOG.warnv(rollbackFailure, "Failed to stop proxy during resume rollback for cluster {0}", clusterIdentifier);
+                    cluster.setClusterStatus("unavailable");
+                }
+                try {
                     containerManager.pause(accountId, clusterIdentifier);
                 } catch (RuntimeException rollbackFailure) {
                     LOG.warnv(rollbackFailure, "Failed to return cluster {0} to paused state", clusterIdentifier);
