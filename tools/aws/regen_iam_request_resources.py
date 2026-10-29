@@ -67,8 +67,10 @@ or not. `HAND_BUILT` are the namespaces `ResourceArnBuilder` builds resources fo
 resource there may apply only `when` a member has one of some values (`Type` picks the load balancer
 v2 `CreateLoadBalancer` creates), or `unless` it has, a member given a JSON null counting as absent
 (Cloud Map's handler then reads `DnsConfig.NamespaceId`), and a member read as a value when it is
-`absent` (an EventBridge request naming no event bus names the default one), a variable may be filled from a field
-of each element of a list of structures, one resource for each element and the `absent` value for an
+`absent` (an EventBridge request naming no event bus names the default one), a member filling a variable may be
+read up to a character `before` (a CodeBuild build id, `<project>:<id>`, names its project), a variable may be
+filled from a field of each element of a list of structures, one resource for each element and the `absent` value
+for an
 element lacking it (`PutEvents` publishes each entry to its bus), or from a structure's field (`pipeline.name`),
 a variable no member gives may be `fixed` to the one value its handler uses (a CodePipeline custom action
 type's owner, `Custom`), and an ARN member's value may be read
@@ -117,8 +119,8 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 
 # The namespaces read, in batches: each moves here from NOT_COVERED with the tests that show its ARNs
 # are the ones its handlers mint.
-NAMESPACES = ("acm", "codepipeline", "cognito-identity", "cognito-idp", "ecr", "elasticloadbalancing", "events",
-              "firehose", "servicediscovery", "states")
+NAMESPACES = ("acm", "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "ecr", "elasticloadbalancing",
+              "events", "firehose", "kinesisanalytics", "servicediscovery", "states")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.
@@ -126,6 +128,9 @@ CLIENTS_NOT_READ: dict[str, str] = {
     "eventbridgev2": "EventBridge V2, the AWSEventsV2 target over Smithy RPC v2 CBOR on the eventsv2 endpoint, which "
                      "Floci does not serve; its operations share EventBridge's names and name their resources by "
                      "other members",
+    "kinesisanalytics": "Kinesis Data Analytics v1, SQL applications on the KinesisAnalytics_20150814 target, which "
+                        "Floci does not serve (it serves v2, kinesisanalyticsv2); its operations share v2's names and "
+                        "name their resources by other members",
 }
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
@@ -167,7 +172,6 @@ NOT_COVERED: dict[str, str] = {
     "cloudtrail": _LATER,
     "cloudwatch": _LATER,
     "codeartifact": _REST,
-    "codebuild": _LATER,
     "codedeploy": _LATER,
     "codeguru-reviewer": _REST,
     "comprehend": _LATER,
@@ -197,7 +201,6 @@ NOT_COVERED: dict[str, str] = {
     "inspector2": _REST,
     "iot": _LATER,
     "kafka": _REST,
-    "kinesisanalytics": _LATER,
     "lightsail": _LATER,
     "macie2": _REST,
     "memorydb": _LATER,
@@ -246,6 +249,12 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
         {"type": "loadbalancer/net/", "fill": {"LoadBalancerName": "Name"}, "when": {"Type": ["network"]}},
     ], "the classic API names its load balancer by LoadBalancerName; the v2 API by Name, its type by Type, "
        "an application load balancer when it gives none, which the rule cannot tell apart"),
+    **{f"codebuild:{operation}": ([{"type": "project", "fill": {"ProjectName": member}, "before": ":"}],
+                                  "a build is checked on its project (the CodeBuild User Guide's permissions reference "
+                                  "gives each of these the resource project/project-name), which its id names before "
+                                  "its ':' (CODEBUILD_BUILD_ID, for example codebuild-demo-project:b1e6661e-...)")
+       for operation, member in (("BatchDeleteBuilds", "ids[]"), ("BatchGetBuilds", "ids[]"), ("RetryBuild", "id"),
+                                 ("StopBuild", "id"))},
     **{f"codepipeline:{operation}": ([{"type": "pipeline", "fill": {"PipelineName": "pipeline.name"}}],
                                      "the request names the pipeline by its pipeline structure's name, which the "
                                      "rule does not read inside a structure; its roleArn is the role CodePipeline "
@@ -860,19 +869,20 @@ def validate(document: dict) -> list[str]:
 def _resource_problems(operation: str, resource: object, types: set[str], formats: dict[str, str]) -> list[str]:
     if not isinstance(resource, dict) or not ({"types", "arn"} <= set(resource) <= {"types", "arn", "before", "made"}
                                               or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "absent", "arnOf", "account",
-                                                                                       "fixed", "made"}):
+                                                                                       "fixed", "made", "before"}):
         return [f"{operation} names {resource!r}, which is neither an ARN member nor a type's variables"]
     if resource.get("made", True) is not True:
         return [f"{operation} marks {resource!r} made by {resource['made']!r}, which is not true"]
+    before = resource.get("before", "#")
+    if not isinstance(before, str) or len(before) != 1:
+        return [f"{operation} reads its members before {before!r}, which is no one character"]
     kinds = resource.get("types") or [resource.get("type")]
     if not all(isinstance(kind, str) and kind in types and kind in formats for kind in kinds):
         return [f"{operation} names {kinds}, not resource types its action acts on with an ARN format"]
     if "arn" in resource:
         if not isinstance(resource["arn"], str) or not ARN_PATH_RE.match(resource["arn"]):
             return [f"{operation} reads an ARN at {resource['arn']!r}, which is no member"]
-        before = resource.get("before", "#")
-        return [] if isinstance(before, str) and len(before) == 1 else [
-            f"{operation} reads its ARN before {before!r}, which is no one character"]
+        return []
     fill = resource["fill"]
     variables = set(VARIABLE_RE.findall(formats[kinds[0]])) - KNOWN_VARIABLES
     if not isinstance(fill, dict) or set(fill) - variables or not all(

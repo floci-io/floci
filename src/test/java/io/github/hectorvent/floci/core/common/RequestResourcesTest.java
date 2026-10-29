@@ -418,6 +418,26 @@ class RequestResourcesTest {
                 json("{\"Name\":\"s\",\"NamespaceId\":\"ns-a\"}")));
     }
 
+    /** A CodeBuild build is checked on its project, which its id names before its {@code :}. */
+    @Test
+    void aBuildIsCheckedOnItsProject() {
+        String project = "arn:aws:codebuild:us-east-1:000000000000:project/";
+        assertEquals(List.of(project + "a"), of("codebuild:StopBuild", json("{\"id\":\"a:1\"}")));
+        assertEquals(List.of(project + "a", project + "b"), of("codebuild:BatchGetBuilds",
+                json("{\"ids\":[\"a:1\",\"b:2\",\"a:3\"]}")));
+        assertEquals(List.of(project + "a"), of("codebuild:RetryBuild", form("Action=RetryBuild&id=a:1")));
+    }
+
+    /** A list taking a name or an ARN for each value names each value's resource, whichever it gives. */
+    @Test
+    void aListMixingNamesAndArnsNamesEachValuesResource() {
+        String project = "arn:aws:codebuild:us-east-1:000000000000:project/";
+        assertEquals(List.of(project + "b", project + "a"), of("codebuild:BatchGetProjects",
+                json("{\"names\":[\"a\",\"" + project + "b\"]}")));
+        assertEquals(List.of(project + "a", project + "b"), of("codebuild:BatchGetProjects",
+                json("{\"names\":[\"" + project + "a\",\"" + project + "b\"]}")));
+    }
+
     @Test
     void aRequestNamingNoResourceOrOfANamespaceTheTableDoesNotReadIsCheckedOnStar() {
         assertEquals(List.of(), of("ecr:DescribeRepositories", json("{}")));

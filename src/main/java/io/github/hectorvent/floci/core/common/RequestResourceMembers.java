@@ -120,9 +120,11 @@ final class RequestResourceMembers {
      * of the ARN that structure gives, if any. Such a member is in {@code absent} or {@code arnOf} only when it
      * fills a variable. A member filling a variable may also be a field of a structure ({@code pipeline.name}). A
      * variable no member gives may be {@code fixed} to the one value its handler uses (a CodePipeline custom action
-     * type's owner, {@code Custom}). An ARN member's value is read up to the character {@code before}, when there
-     * is one, as its handler drops the rest. A create naming other resources beside the one it makes marks that one
-     * {@code made}, where its tags go (a webhook, not the pipeline it connects to).
+     * type's owner, {@code Custom}). A member's value, an ARN or a variable's, is read up to the character
+     * {@code before}, when there is one: Step Functions Local's handler drops a test case after {@code #}, and a
+     * CodeBuild build id is {@code <project>:<id>}, a build being checked on its project. A create naming other
+     * resources beside the one it makes marks that one {@code made}, where its tags go (a webhook, not the pipeline
+     * it connects to).
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
@@ -234,16 +236,16 @@ final class RequestResourceMembers {
                     + resource.path("made") + ", which is not true");
         }
         boolean made = resource.has("made");
+        String before = resource.has("before") ? resource.path("before").asText("") : null;
+        if (before != null && before.length() != 1) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads a member for " + operation
+                    + " before " + before + ", no one character");
+        }
         if (resource.has("arn")) {
             List<String> types = resource.path("types").valueStream().map(JsonNode::asText).toList();
             if (types.isEmpty() || !formats.keySet().containsAll(types)) {
                 throw new IllegalStateException(RESOURCE_NAME + " reads an ARN for " + operation
                         + " of types with no format: " + types);
-            }
-            String before = resource.has("before") ? resource.path("before").asText("") : null;
-            if (before != null && before.length() != 1) {
-                throw new IllegalStateException(RESOURCE_NAME + " reads an ARN for " + operation
-                        + " before " + before + ", no one character");
             }
             return new Resource(types, arnMember(operation, resource.path("arn").asText("")), Map.of(), Map.of(),
                     Map.of(), Map.of(), Map.of(), null, before, Map.of(), made);
@@ -304,7 +306,7 @@ final class RequestResourceMembers {
                     + " from " + account.name() + ", no member of one account or a type of none");
         }
         return new Resource(List.of(type), null, Map.copyOf(fill), when, unless, Map.copyOf(absent), Map.copyOf(arnOf),
-                account, null, Map.copyOf(fixed), made);
+                account, before, Map.copyOf(fixed), made);
     }
 
     /** The values each member named in {@code when} or {@code unless} may have, an empty one for the member absent. */

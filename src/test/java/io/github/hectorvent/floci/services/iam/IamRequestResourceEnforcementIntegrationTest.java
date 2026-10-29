@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.path.json.config.JsonPathConfig;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
@@ -722,6 +723,66 @@ class IamRequestResourceEnforcementIntegrationTest {
         cleanup.register(() -> adminJson("servicediscovery", "Route53AutoNaming_v20170314.DeleteNamespace")
                 .body("{\"Id\":\"" + id + "\"}").post("/"));
         return id;
+    }
+
+    /**
+     * A build is checked on its project, which its id names before its {@code :}, as CodeBuild authorizes builds,
+     * and a project on the ARN its name gives, a list naming it by name and by ARN alike.
+     */
+    @Test
+    void aBuildIsCheckedOnTheProjectItsIdNames() {
+        String project = "res-project-" + suffix();
+        String arn = adminJson("codebuild", "CodeBuild_20161006.CreateProject").body("{\"name\":\"" + project
+                + "\",\"source\":{\"type\":\"NO_SOURCE\",\"buildspec\":\"version: 0.2\"},\"artifacts\":{\"type\":"
+                + "\"NO_ARTIFACTS\"},\"environment\":{\"type\":\"LINUX_CONTAINER\",\"image\":\"aws/codebuild/standard:7.0\","
+                + "\"computeType\":\"BUILD_GENERAL1_SMALL\"},\"serviceRole\":\"arn:aws:iam::" + ACCOUNT
+                + ":role/codebuild-role\"}").post("/").then().statusCode(200).extract().path("project.arn");
+        cleanup.register(() -> adminJson("codebuild", "CodeBuild_20161006.DeleteProject")
+                .body("{\"name\":\"" + project + "\"}").post("/"));
+        assertEquals("arn:aws:codebuild:" + REGION + ":" + ACCOUNT + ":project/" + project, arn);
+
+        User user = user("res-build");
+        user.policy(allowOn("codebuild:BatchGetProjects", arn) + "," + allowOn("codebuild:BatchGetBuilds", arn) + ","
+                + allowOn("codebuild:StopBuild", arn));
+        codeBuild(user, "BatchGetProjects", "{\"names\":[\"" + project + "\"]}").statusCode(200);
+        codeBuild(user, "BatchGetProjects", "{\"names\":[\"" + project + "\",\"" + arn + "\"]}").statusCode(200);
+        codeBuild(user, "BatchGetBuilds", "{\"ids\":[\"" + project + ":1\"]}").statusCode(200);
+        refusedJson(codeBuild(user, "BatchGetBuilds", "{\"ids\":[\"" + project + ":1\",\"" + project + "-other:1\"]}"),
+                "codebuild:BatchGetBuilds");
+        codeBuild(user, "StopBuild", "{\"id\":\"" + project + ":1\"}").statusCode(400)
+                .body(containsString("ResourceNotFoundException"));
+        refusedJson(codeBuild(user, "StopBuild", "{\"id\":\"" + project + "-other:1\"}"), "codebuild:StopBuild");
+    }
+
+    /** A Managed Service for Apache Flink application is checked on the ARN its name gives. */
+    @Test
+    void anApplicationIsCheckedOnTheArnItsNameGives() {
+        String name = "res-app-" + suffix();
+        String arn = adminJson("kinesisanalytics", "KinesisAnalytics_20180523.CreateApplication")
+                .body("{\"ApplicationName\":\"" + name + "\",\"RuntimeEnvironment\":\"FLINK-1_18\","
+                        + "\"ServiceExecutionRole\":\"arn:aws:iam::" + ACCOUNT + ":role/flink-role\"}")
+                .post("/").then().statusCode(200).extract().path("ApplicationDetail.ApplicationARN");
+        cleanup.register(() -> adminJson("kinesisanalytics", "KinesisAnalytics_20180523.DeleteApplication")
+                .body("{\"ApplicationName\":\"" + name + "\",\"CreateTimestamp\":"
+                        + adminJson("kinesisanalytics", "KinesisAnalytics_20180523.DescribeApplication")
+                        .body("{\"ApplicationName\":\"" + name + "\"}").post("/").then().statusCode(200).extract()
+                        .jsonPath(new JsonPathConfig(JsonPathConfig.NumberReturnType.BIG_DECIMAL))
+                        .getString("ApplicationDetail.CreateTimestamp") + "}").post("/"));
+        assertEquals("arn:aws:kinesisanalytics:" + REGION + ":" + ACCOUNT + ":application/" + name, arn);
+
+        User user = user("res-application");
+        user.policy(allowOn("kinesisanalytics:DescribeApplication", arn));
+        describeApplication(user, name).statusCode(200);
+        refusedJson(describeApplication(user, name + "-other"), "kinesisanalytics:DescribeApplication");
+    }
+
+    private static ValidatableResponse codeBuild(User user, String operation, String body) {
+        return user.json("codebuild", "CodeBuild_20161006." + operation, "1.1").body(body).post("/").then();
+    }
+
+    private static ValidatableResponse describeApplication(User user, String name) {
+        return user.json("kinesisanalytics", "KinesisAnalytics_20180523.DescribeApplication", "1.1")
+                .body("{\"ApplicationName\":\"" + name + "\"}").post("/").then();
     }
 
     private static RequestSpecification adminJson(String service, String target) {
