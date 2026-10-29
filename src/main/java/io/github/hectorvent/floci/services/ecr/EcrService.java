@@ -920,11 +920,11 @@ public class EcrService implements ResourceProvider {
             failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
             return;
         }
-        if (!http.deleteManifest(internal, digest)) {
-            failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
-            return;
-        }
         synchronized (registryManager) {
+            if (!http.deleteManifest(internal, digest)) {
+                failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
+                return;
+            }
             for (String survivingTag : survivingTags) {
                 restoreTag(internal, http, digest, manifest, survivingTag, id.getImageTag(), repositoryName);
             }
@@ -1271,6 +1271,7 @@ public class EcrService implements ResourceProvider {
         try {
             repositoryWriteLocks.acquire(storageRepositoryName);
         } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
             throw new AwsException("ServerException",
                     "Interrupted while waiting for the write lock on " + storageRepositoryName, 500);
         }

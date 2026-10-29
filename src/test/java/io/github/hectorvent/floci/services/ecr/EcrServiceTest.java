@@ -1072,8 +1072,40 @@ class EcrServiceTest {
         }
     }
 
-    /** Probes the repository write lock without taking it: true when another writer holds it. */
-    private boolean repositoryWriteLockHeld(String storageRepositoryName) {
+    @Test
+    void batchDeleteByTagHoldsTheRegistryManagerMonitorAcrossTheSwap() throws Exception {
+        String repositoryName = "batch-delete/monitor-held";
+        RegistryHttpClient http = Mockito.mock(RegistryHttpClient.class);
+        when(registryManager.httpClient()).thenReturn(http);
+        when(http.headManifestDigest(anyString(), anyString(), any())).thenReturn(DELETE_DIGEST);
+        when(http.headManifestDigestStrict(anyString(), anyString(), any())).thenReturn(DELETE_DIGEST);
+        when(http.listTagsStrict(anyString())).thenReturn(List.of("stable"));
+        when(http.getManifest(anyString(), anyString(), any())).thenReturn(new RegistryHttpClient.ManifestResult(
+                DELETE_DIGEST, DELETE_MANIFEST, "application/vnd.docker.distribution.manifest.v2+json"));
+        AtomicBoolean holdsAtDrop = new AtomicBoolean();
+        AtomicBoolean holdsAtRestore = new AtomicBoolean();
+        when(http.deleteManifest(anyString(), anyString())).thenAnswer(inv -> {
+            holdsAtDrop.set(Thread.holdsLock(registryManager));
+            return true;
+        });
+        when(http.putManifest(anyString(), anyString(), anyString(), any())).thenAnswer(inv -> {
+            holdsAtRestore.set(Thread.holdsLock(registryManager));
+            return DELETE_DIGEST;
+        });
+        service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+        EcrService.BatchDeleteImageResult result = service.batchDeleteImage(
+                repositoryName, List.of(new ImageIdentifier("release", null)), null, REGION);
+
+        assertTrue(result.failures().isEmpty(), () -> "unexpected failures: " + result.failures());
+        assertEquals(1, result.imageIds().size());
+        assertTrue(holdsAtDrop.get(),
+                "the drop must run under the registry manager's monitor, which /_floci/ecr/gc holds");
+        assertTrue(holdsAtRestore.get(),
+                "the restore must run under the same monitor hold the drop opened");
+    }
+
+    /** Probes the repository write lock without taking it: true when another writer holds it. */    private boolean repositoryWriteLockHeld(String storageRepositoryName) {
         boolean acquired = service.tryLockRepositoryWrites(storageRepositoryName);
         if (acquired) {
             service.unlockRepositoryWrites(storageRepositoryName);

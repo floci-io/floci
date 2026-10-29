@@ -27,15 +27,14 @@ public final class KeyedWriteLocks<K> {
 
     /**
      * Takes the key's lock, waiting for its current holder to release it. Interruptible: on
-     * interruption the waiter's count departs and the interrupt status is cleared before
-     * {@code InterruptedException} is rethrown for the caller to translate.
+     * interruption the waiter's count departs and the interrupt status stays cleared before
+     * {@code InterruptedException} is rethrown for the caller to translate and restore.
      */
     public void acquire(K key) throws InterruptedException {
         Entry entry = retain(key);
         try {
             entry.permits.acquire();
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
             depart(key, entry);
             throw e;
         }
