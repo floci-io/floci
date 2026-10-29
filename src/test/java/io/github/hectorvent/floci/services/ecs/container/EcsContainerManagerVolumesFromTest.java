@@ -205,7 +205,7 @@ class EcsContainerManagerVolumesFromTest {
                         List.of(), "us-east-1"));
 
         verify(containerBuilder, never()).newContainer(anyString());
-        verify(lifecycleManager, never()).create(any());
+        verify(lifecycleManager, never()).create(any(), any());
         verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
         verify(lifecycleManager, never()).ensureVolume(anyString(), any());
     }
@@ -234,7 +234,7 @@ class EcsContainerManagerVolumesFromTest {
                 failure.getMessage());
         verify(s3Service).getObject("firelens-configs", "missing.conf");
         verify(containerBuilder, never()).newContainer(anyString());
-        verify(lifecycleManager, never()).create(any());
+        verify(lifecycleManager, never()).create(any(), any());
         verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
         verify(lifecycleManager, never()).ensureVolume(anyString(), any());
     }

@@ -348,7 +348,7 @@ class EcsContainerManagerFirelensTest {
         assertEquals("Unable to download firelens s3 config file: unable to download s3 config "
                 + "missing.conf from bucket firelens-configs: The specified key does not exist.",
                 failure.getMessage());
-        verify(lifecycleManager, never()).create(any(ContainerSpec.class));
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class), any());
         verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
     }
 
@@ -379,7 +379,7 @@ class EcsContainerManagerFirelensTest {
 
         assertEquals("ClientException", failure.getErrorCode());
         assertEquals("A task definition can have only one FireLens log router.", failure.getMessage());
-        verify(lifecycleManager, never()).create(any(ContainerSpec.class));
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class), any());
         verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
     }
 
@@ -392,7 +392,7 @@ class EcsContainerManagerFirelensTest {
 
         assertEquals("ClientException", failure.getErrorCode());
         assertEquals("FireLens port 24224 must not be exposed.", failure.getMessage());
-        verify(lifecycleManager, never()).create(any(ContainerSpec.class));
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class), any());
     }
 
     @Test
@@ -404,7 +404,7 @@ class EcsContainerManagerFirelensTest {
 
         assertEquals("ClientException", failure.getErrorCode());
         assertEquals("FireLens configuration type must be fluentbit or fluentd.", failure.getMessage());
-        verify(lifecycleManager, never()).create(any(ContainerSpec.class));
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class), any());
     }
 
     @ParameterizedTest
@@ -545,7 +545,7 @@ class EcsContainerManagerFirelensTest {
         when(dockerClient.inspectVolumeCmd(anyString()).exec().getMountpoint()).thenReturn(path);
         assertThrows(AwsException.class, () -> manager.startTask(
                 task(), retryTaskDefinition("fluentbit", false, ""), null, "us-east-1"));
-        verify(lifecycleManager, never()).create(any());
+        verify(lifecycleManager, never()).create(any(), any());
         verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
         verifyFirelensVolumeRemoved();
     }
@@ -596,7 +596,7 @@ class EcsContainerManagerFirelensTest {
         } else {
             assertThrows(AwsException.class, () -> manager.startTask(
                     task(), retryTaskDefinition("fluentbit", false, ""), null, "us-east-1"));
-            verify(lifecycleManager, never()).create(any());
+            verify(lifecycleManager, never()).create(any(), any());
             verifyFirelensVolumeRemoved();
         }
     }
