@@ -123,6 +123,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
     private static final String LOG_DELIVERY_GROUP_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery";
     private static final String LEGACY_ACCESS_KEY_ID = "test";
+    private static final MessageDigest MD5_PROTOTYPE = newMd5();
     private static final String S3_XML_SCHEMA_ERROR =
             "The XML you provided was not well-formed or did not validate against our published schema.";
     private static final Set<String> OBJECT_OWNERSHIP_VALUES = Set.of(
@@ -7528,10 +7529,22 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private static byte[] computeETagBytes(byte[] data) {
+        return md5().digest(data);
+    }
+
+    static MessageDigest md5() {
         try {
-            return MessageDigest.getInstance("MD5").digest(data);
+            return (MessageDigest) MD5_PROTOTYPE.clone();
+        } catch (CloneNotSupportedException e) {
+            return newMd5();
+        }
+    }
+
+    private static MessageDigest newMd5() {
+        try {
+            return MessageDigest.getInstance("MD5");
         } catch (NoSuchAlgorithmException e) {
-            throw new RuntimeException("MD5 algorithm not available", e);
+            throw new IllegalStateException("MD5 algorithm not available", e);
         }
     }
 

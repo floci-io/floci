@@ -4,13 +4,24 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class S3ServiceBodyAndSequencerTest {
+
+    @Test
+    void md5MatchesProviderDigestAndReturnsFreshInstances() throws NoSuchAlgorithmException {
+        byte[] data = "floci".getBytes(StandardCharsets.UTF_8);
+        assertArrayEquals(MessageDigest.getInstance("MD5").digest(data), S3Service.md5().digest(data));
+        assertNotSame(S3Service.md5(), S3Service.md5());
+    }
 
     @Test
     void toSequencerMatchesFormattedValue() {

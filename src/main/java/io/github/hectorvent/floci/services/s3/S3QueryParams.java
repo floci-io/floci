@@ -18,6 +18,10 @@ final class S3QueryParams {
         this.decoded = uriInfo.getQueryParameters();
     }
 
+    MultivaluedMap<String, String> decoded() {
+        return decoded;
+    }
+
     boolean has(String name) {
         return decoded.containsKey(name) || rawNames().contains(name);
     }

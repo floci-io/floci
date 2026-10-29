@@ -926,8 +926,8 @@ public class S3Controller {
                 }
                 requireDeclaredSizeWithin(httpHeaders, contentEncoding, contentSha256, S3Service.MAX_PART_SIZE);
                 Part part = s3Service.storePart(bucket, key, uploadId, parsedPartNumber,
-                        decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
-                        uploadChecksums(httpHeaders, uriInfo),
+                        decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, params)),
+                        uploadChecksums(httpHeaders, params),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key"),
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-key-MD5"));
@@ -953,7 +953,7 @@ public class S3Controller {
 
             rejectUnimplementedPutConditions(ifMatch, ifNoneMatch);
 
-            Map<String, String> inlineTags = parseInlineTaggingHeader(resolveInlineTaggingSource(tagging, uriInfo));
+            Map<String, String> inlineTags = parseInlineTaggingHeader(resolveInlineTaggingSource(tagging, params));
 
             ObjectLockHeaders lock = objectLockHeaders(httpHeaders);
 
@@ -972,8 +972,8 @@ public class S3Controller {
             requireDeclaredSizeWithin(httpHeaders, contentEncoding, contentSha256, S3Service.MAX_PUT_OBJECT_SIZE);
             long declaredSize = declaredBodySize(httpHeaders, contentEncoding, contentSha256);
             S3Object obj = s3Service.putObject(bucket, key,
-                    decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
-                    uploadChecksums(httpHeaders, uriInfo), contentType, extractUserMetadata(httpHeaders, uriInfo),
+                    decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, params)),
+                    uploadChecksums(httpHeaders, params), contentType, extractUserMetadata(httpHeaders, params),
                     new PutObjectOptions()
                             .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
                             .withContentEncoding(persistedEncoding)
@@ -1133,7 +1133,7 @@ public class S3Controller {
                             "Request specific response headers cannot be used for anonymous GET requests.", 400));
                 }
 
-                boolean includeChecksum = "ENABLED".equalsIgnoreCase(resolveHeaderOrQueryParam(checksumMode, uriInfo, "x-amz-checksum-mode"));
+                boolean includeChecksum = "ENABLED".equalsIgnoreCase(resolveHeaderOrQueryParam(checksumMode, params, "x-amz-checksum-mode"));
                 String partNumber = params.first("partNumber");
                 if (partNumber != null) {
                     Response partResponse = handlePartRequest("GetObject", bucket, key, obj, read.body(),
@@ -1445,7 +1445,7 @@ public class S3Controller {
                         "Request specific response headers cannot be used for anonymous GET requests.", 400));
             }
             boolean checksumMode = "ENABLED".equalsIgnoreCase(
-                    resolveHeaderOrQueryParam(checksumModeHeader, uriInfo, "x-amz-checksum-mode"));
+                    resolveHeaderOrQueryParam(checksumModeHeader, params, "x-amz-checksum-mode"));
             String partNumber = params.first("partNumber");
             if (partNumber != null) {
                 return headOnlyResponse(handlePartRequest("HeadObject", bucket, key, obj, null, partNumber,
@@ -2547,6 +2547,10 @@ public class S3Controller {
         return resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-trailer");
     }
 
+    private static String trailerHeader(HttpHeaders httpHeaders, S3QueryParams params) {
+        return resolveHeaderOrQueryParam(httpHeaders.getHeaderString("x-amz-trailer"), params, "x-amz-trailer");
+    }
+
     /** The whole of a body that is small by nature, such as a subresource's XML. */
     private static byte[] readWholeBody(InputStream body) {
         if (body == null) {
@@ -3516,9 +3520,17 @@ public class S3Controller {
      * with the same key, because the presigned URL signature covers the query value.
      */
     private Map<String, String> extractUserMetadata(HttpHeaders httpHeaders, UriInfo uriInfo) {
+        return extractUserMetadata(httpHeaders, uriInfo != null ? uriInfo.getQueryParameters() : null);
+    }
+
+    private Map<String, String> extractUserMetadata(HttpHeaders httpHeaders, S3QueryParams params) {
+        return extractUserMetadata(httpHeaders, params.decoded());
+    }
+
+    private Map<String, String> extractUserMetadata(HttpHeaders httpHeaders, MultivaluedMap<String, String> query) {
         Map<String, String> metadata = new LinkedHashMap<>();
-        if (uriInfo != null) {
-            addUserMetadata(metadata, uriInfo.getQueryParameters());
+        if (query != null) {
+            addUserMetadata(metadata, query);
         }
         addUserMetadata(metadata, httpHeaders.getRequestHeaders());
         return metadata;
@@ -3526,11 +3538,10 @@ public class S3Controller {
 
     private static void addUserMetadata(Map<String, String> metadata, Map<String, List<String>> source) {
         for (Map.Entry<String, List<String>> entry : source.entrySet()) {
-            String name = entry.getKey().toLowerCase(Locale.ROOT);
-            if (!name.startsWith("x-amz-meta-")) {
+            if (!entry.getKey().regionMatches(true, 0, "x-amz-meta-", 0, 11)) {
                 continue;
             }
-            String key = name.substring("x-amz-meta-".length());
+            String key = entry.getKey().toLowerCase(Locale.ROOT).substring(11);
             if (!key.isBlank() && !entry.getValue().isEmpty()) {
                 metadata.putIfAbsent(key, entry.getValue().get(0));
             }
@@ -3546,19 +3557,27 @@ public class S3Controller {
         if (headerValue != null && !headerValue.isBlank()) {
             return headerValue;
         }
-        if (uriInfo != null) {
-            MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
-            if (queryParams != null) {
-                String val = queryParams.getFirst(name);
-                if (val != null && !val.isBlank()) {
-                    return val;
-                }
-                for (Map.Entry<String, List<String>> entry : queryParams.entrySet()) {
-                    if (entry.getKey().equalsIgnoreCase(name) && !entry.getValue().isEmpty()) {
-                        String v = entry.getValue().get(0);
-                        if (v != null && !v.isBlank()) {
-                            return v;
-                        }
+        return uriInfo != null ? resolveQueryParam(uriInfo.getQueryParameters(), name) : null;
+    }
+
+    static String resolveHeaderOrQueryParam(String headerValue, S3QueryParams params, String name) {
+        if (headerValue != null && !headerValue.isBlank()) {
+            return headerValue;
+        }
+        return resolveQueryParam(params.decoded(), name);
+    }
+
+    private static String resolveQueryParam(MultivaluedMap<String, String> queryParams, String name) {
+        if (queryParams != null) {
+            String val = queryParams.getFirst(name);
+            if (val != null && !val.isBlank()) {
+                return val;
+            }
+            for (Map.Entry<String, List<String>> entry : queryParams.entrySet()) {
+                if (entry.getKey().equalsIgnoreCase(name) && !entry.getValue().isEmpty()) {
+                    String v = entry.getValue().get(0);
+                    if (v != null && !v.isBlank()) {
+                        return v;
                     }
                 }
             }
@@ -3607,6 +3626,14 @@ public class S3Controller {
     }
 
     private UploadChecksums uploadChecksums(HttpHeaders httpHeaders, UriInfo uriInfo) {
+        return uploadChecksums(httpHeaders, resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-trailer"));
+    }
+
+    private UploadChecksums uploadChecksums(HttpHeaders httpHeaders, S3QueryParams params) {
+        return uploadChecksums(httpHeaders, trailerHeader(httpHeaders, params));
+    }
+
+    private UploadChecksums uploadChecksums(HttpHeaders httpHeaders, String trailer) {
         Map<ChecksumAlgorithm, String> claimed = new EnumMap<>(ChecksumAlgorithm.class);
         for (ChecksumAlgorithm algorithm : ChecksumAlgorithm.values()) {
             String value = httpHeaders.getHeaderString(algorithm.headerName());
@@ -3615,7 +3642,7 @@ public class S3Controller {
             }
         }
         return new UploadChecksums(httpHeaders.getHeaderString("Content-MD5"), claimed,
-                trailerChecksumAlgorithm(resolveHeaderOrQueryParam(httpHeaders, uriInfo, "x-amz-trailer")));
+                trailerChecksumAlgorithm(trailer));
     }
 
     /** The checksum algorithm an {@code x-amz-trailer} value names, as {@code x-amz-checksum-crc32}. */
@@ -4448,10 +4475,18 @@ public class S3Controller {
      * {@link #parseInlineTaggingHeader(String)} unchanged. Real S3 honors both forms.
      */
     private static String resolveInlineTaggingSource(String taggingHeader, UriInfo uriInfo) {
+        return resolveInlineTaggingSource(taggingHeader, uriInfo.getQueryParameters());
+    }
+
+    private static String resolveInlineTaggingSource(String taggingHeader, S3QueryParams params) {
+        return resolveInlineTaggingSource(taggingHeader, params.decoded());
+    }
+
+    private static String resolveInlineTaggingSource(String taggingHeader, MultivaluedMap<String, String> query) {
         if (taggingHeader != null) {
             return taggingHeader;
         }
-        return uriInfo.getQueryParameters().getFirst("x-amz-tagging");
+        return query.getFirst("x-amz-tagging");
     }
 
     /**
@@ -4548,10 +4583,14 @@ public class S3Controller {
         String rawPath = currentVertxRequest.getCurrent().request().path();
         String decodedPath;
         try {
-            decodedPath = URLDecoder.decode(rawPath.replace("+", "%2B"), StandardCharsets.UTF_8);
+            decodedPath = rawPath.indexOf('%') < 0 && rawPath.indexOf('+') < 0
+                    ? rawPath : URLDecoder.decode(rawPath.replace("+", "%2B"), StandardCharsets.UTF_8);
         }
         catch (IllegalArgumentException e) {
             throw new AwsException("BadRequest", null, 400);
+        }
+        if (decodedPath.indexOf("..") < 0) {
+            return;
         }
 
         String[] segments = decodedPath.split("/", -1);

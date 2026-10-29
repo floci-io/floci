@@ -34,7 +34,8 @@ public final class S3ObjectKeys {
             rawKey = rawPath.substring(prefixIndex + bucketPrefix.length());
         }
         try {
-            return URLDecoder.decode(rawKey.replace("+", "%2B"), StandardCharsets.UTF_8);
+            return rawKey.indexOf('%') < 0 && rawKey.indexOf('+') < 0
+                    ? rawKey : URLDecoder.decode(rawKey.replace("+", "%2B"), StandardCharsets.UTF_8);
         } catch (IllegalArgumentException ignored) {
             // A malformed escape names no key; S3Controller refuses the request as BadRequest.
             return null;
