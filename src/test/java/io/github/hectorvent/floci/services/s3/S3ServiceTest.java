@@ -972,6 +972,47 @@ class S3ServiceTest {
         assertTrue(deleted.compareTo(put) > 0, put + " then " + deleted);
     }
 
+    @Test
+    void notificationCarriesDocumentedEventFieldsAndConfiguredId() throws IOException {
+        RecordingLambdaInvoker invoker = new RecordingLambdaInvoker();
+        S3Service service = bucketNotifyingOnCreation(invoker, "notification-consumer-fields");
+        service.putObject("test-bucket", "original/a b+c.txt",
+                "payload".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        JsonNode event = onlyRecordedS3Event(invoker);
+        assertFalse(event.path("responseElements").path("x-amz-id-2").asText().isBlank());
+        assertFalse(event.path("responseElements").path("x-amz-request-id").asText().isBlank());
+        assertEquals("000000000000", event.path("s3").path("bucket")
+                .path("ownerIdentity").path("principalId").asText());
+        assertEquals("lambda-notif", event.path("s3").path("configurationId").asText());
+        assertEquals("original/a+b%2Bc.txt", event.path("s3").path("object").path("key").asText());
+        assertEquals(7, event.path("s3").path("object").path("size").asInt());
+    }
+
+    @Test
+    void eachMatchingNotificationCarriesItsOwnConfigurationId() throws IOException {
+        RecordingLambdaInvoker invoker = new RecordingLambdaInvoker();
+        S3Service service = bucketNotifyingOnCreation(invoker, "notification-rule-identity");
+        NotificationConfiguration config = service.getBucketNotificationConfiguration("test-bucket");
+        config.getLambdaFunctionConfigurations().add(new LambdaNotification(
+                "second-rule", "arn:aws:lambda:us-east-1:000000000000:function:second",
+                List.of("s3:ObjectCreated:*"), List.of()));
+        service.putBucketNotificationConfiguration("test-bucket", config, true);
+        service.putObject("test-bucket", "original.txt", new byte[]{1}, "text/plain", null);
+
+        assertEquals(2, invoker.payloads.size());
+        ObjectMapper mapper = new ObjectMapper();
+        assertEquals("lambda-notif", mapper.readTree(invoker.payloads.get(0))
+                .path("Records").get(0).path("s3").path("configurationId").asText());
+        assertEquals("second-rule", mapper.readTree(invoker.payloads.get(1))
+                .path("Records").get(0).path("s3").path("configurationId").asText());
+        JsonNode first = mapper.readTree(invoker.payloads.get(0)).path("Records").get(0);
+        JsonNode second = mapper.readTree(invoker.payloads.get(1)).path("Records").get(0);
+        assertEquals(first.path("eventTime"), second.path("eventTime"));
+        assertEquals(first.path("responseElements"), second.path("responseElements"));
+        assertEquals(first.path("s3").path("object"), second.path("s3").path("object"));
+    }
+
     private S3Service bucketNotifyingOnCreation(RecordingLambdaInvoker lambdaInvoker, String dataDir) {
         return bucketNotifyingOn(lambdaInvoker, dataDir, "s3:ObjectCreated:*");
     }
@@ -1029,6 +1070,7 @@ class S3ServiceTest {
         private String region;
         private String functionName;
         private byte[] payload;
+        private final List<byte[]> payloads = new ArrayList<>();
         private InvocationType type;
 
         @Override
@@ -1036,6 +1078,7 @@ class S3ServiceTest {
             this.region = region;
             this.functionName = functionName;
             this.payload = payload;
+            this.payloads.add(payload);
             this.type = type;
         }
     }
