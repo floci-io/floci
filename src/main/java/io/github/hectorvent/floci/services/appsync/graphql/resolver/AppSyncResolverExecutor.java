@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.appsync.graphql.resolver;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncVtlContext;
@@ -473,14 +474,7 @@ public class AppSyncResolverExecutor {
         private record Invocation(Object result, JsEvaluation.JsError error) {}
 
         private String regionOf(DataSource dataSource) {
-            String arn = dataSource.getDataSourceArn();
-            if (arn != null && arn.startsWith("arn:")) {
-                String[] parts = arn.split(":", 5);
-                if (parts.length > 3 && !parts[3].isBlank()) {
-                    return parts[3];
-                }
-            }
-            return null;
+            return AwsArnUtils.regionOrDefault(dataSource.getDataSourceArn(), null);
         }
 
         /**

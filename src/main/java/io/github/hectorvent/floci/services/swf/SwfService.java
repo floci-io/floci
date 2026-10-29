@@ -1546,8 +1546,9 @@ public class SwfService implements Resettable {
         }
         String name = resourceArn.substring(marker + "/domain/".length());
         // arn:aws:swf:<region>:<account>:/domain/<name>
-        String[] parts = resourceArn.split(":", 5);
-        String arnRegion = parts.length >= 4 ? parts[3] : regionResolver.getDefaultRegion();
+        String arnRegion = AwsArnUtils.isArn(resourceArn)
+                ? AwsArnUtils.parse(resourceArn).region()
+                : regionResolver.getDefaultRegion();
         return domainStore.get(domainKey(arnRegion, name))
                 .orElseThrow(() -> SwfFaults.unknownDomain(name));
     }
