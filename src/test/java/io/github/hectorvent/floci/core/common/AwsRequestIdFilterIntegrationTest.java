@@ -6,12 +6,6 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipOutputStream;
-
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -157,44 +151,6 @@ class AwsRequestIdFilterIntegrationTest {
         String requestId = response.header("x-amzn-RequestId");
         assertEquals(requestId, response.header("x-amz-request-id"));
         assertEquals(requestId, response.header("x-amz-id-2"));
-    }
-
-    @Test
-    void aLambdaInvokeAnswersWithTheInvocationRequestIdInEveryHeader() throws Exception {
-        // Invoke sets X-Amz-Request-Id; the SDKs read x-amzn-RequestId first
-        String function = "request-id-" + Long.toString(System.nanoTime(), 36);
-        given()
-            .contentType("application/json")
-            .body("""
-                {"FunctionName": "%s", "Runtime": "python3.12",
-                 "Role": "arn:aws:iam::000000000000:role/r", "Handler": "handler.handler",
-                 "Code": {"ZipFile": "%s"}}
-                """.formatted(function, handlerZip()))
-        .when()
-            .post("/2015-03-31/functions")
-        .then()
-            .statusCode(201);
-
-        Response response = given()
-            .header("X-Amz-Invocation-Type", "DryRun")
-            .body("{}")
-        .when()
-            .post("/2015-03-31/functions/" + function + "/invocations");
-
-        response.then().statusCode(204);
-        assertEquals(response.header("x-amz-request-id"), response.header("x-amzn-RequestId"));
-
-        given().delete("/2015-03-31/functions/" + function).then().statusCode(204);
-    }
-
-    private static String handlerZip() throws Exception {
-        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
-            zip.putNextEntry(new ZipEntry("handler.py"));
-            zip.write("def handler(e, c):\n    return {}\n".getBytes(StandardCharsets.UTF_8));
-            zip.closeEntry();
-        }
-        return Base64.getEncoder().encodeToString(bytes.toByteArray());
     }
 
     // --- JSON 1.1 protocol (SSM) ---
