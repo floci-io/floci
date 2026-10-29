@@ -35,6 +35,8 @@ target=${2:-origin/main}
 backup="$branch-before-rename"
 
 toplevel=$(git rev-parse --show-toplevel 2>/dev/null) || die "run it inside a checkout of the repository"
+# Pathspecs and git archive paths are relative to the current directory.
+cd "$toplevel"
 old_tip=$(git rev-parse --verify --quiet "refs/heads/$branch^{commit}") || die "no local branch $branch"
 target_sha=$(git rev-parse --verify --quiet "$target^{commit}") || die "unknown target $target"
 command -v "$PYTHON" >/dev/null 2>&1 || die "$PYTHON not found (set PYTHON to a Python 3 interpreter)"

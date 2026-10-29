@@ -70,8 +70,8 @@ def commit(root: Path, message: str, author: str = "main") -> str:
     return git(root, "rev-parse", "HEAD").strip()
 
 
-def run_script(root: Path, *args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["bash", str(SCRIPT), *args], cwd=root, env=ENV, capture_output=True, text=True)
+def run_script(root: Path, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(["bash", str(SCRIPT), *args], cwd=cwd or root, env=ENV, capture_output=True, text=True)
 
 
 def land_cut(root: Path) -> None:
@@ -140,6 +140,14 @@ def test_a_checked_out_branch_moves_in_place(repo: Path):
     assert git(repo, "status", "--porcelain") == ""
     assert (repo / moved(SNS)).is_file()
     assert not (repo / SNS).exists()
+
+
+def test_runs_from_a_subdirectory_of_the_checkout(repo: Path):
+    result = run_script(repo, "feature", "main", cwd=repo / "src/main")
+
+    assert result.returncode == 0, result.stderr
+    assert git(repo, "rev-parse", "feature^").strip() == git(repo, "rev-parse", "main").strip()
+    assert sorted(git(repo, "diff", "--name-only", "main", "feature").split()) == sorted([moved(SNS), moved(SQS)])
 
 
 def test_a_real_conflict_stops_and_keeps_the_scratch_worktree(repo: Path):
