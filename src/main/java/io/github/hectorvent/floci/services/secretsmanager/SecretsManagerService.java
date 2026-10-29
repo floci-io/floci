@@ -479,7 +479,7 @@ public class SecretsManagerService implements ResourceProvider {
      * included, however the request names the secret.
      */
     public Optional<String> findArn(String accountId, String secretId, String region) {
-        if (!secretId.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(secretId)) {
             return findArnByName(accountId, secretId, region);
         }
         AwsArnUtils.Arn arn = parseOrNull(secretId);
@@ -513,7 +513,7 @@ public class SecretsManagerService implements ResourceProvider {
      * addresses. Passing a name instead of an ARN would read the wrong account.
      */
     public void markOwnedByService(String secretArn, String owningService) {
-        if (secretArn == null || !secretArn.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(secretArn)) {
             return;
         }
         AwsArnUtils.Arn arn;
@@ -2021,7 +2021,7 @@ public class SecretsManagerService implements ResourceProvider {
     }
 
     private Secret resolveSecret(String secretId, String region) {
-        if (secretId.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(secretId)) {
             // 1. Exact full-ARN match
             List<Secret> found = store.scan(key -> {
                 Secret s = store.get(key).orElse(null);

@@ -271,7 +271,7 @@ public class IamConditionContextResolver {
         // the owner has to come from service state. When neither source knows it, the key is left
         // out rather than guessed: an absent key fails a Condition that tests it, whereas a wrong
         // one would silently authorize cross-account access the policy meant to refuse.
-        String resourceAccount = accountFromArn(resourceArn);
+        String resourceAccount = AwsArnUtils.accountOrDefault(resourceArn, null);
         if (resourceAccount == null || resourceAccount.isBlank()) {
             resourceAccount = resourceOwnerAccountId;
         }
@@ -308,19 +308,11 @@ public class IamConditionContextResolver {
                 && AwsArnUtils.isArnFor(resourceArn, "sns")) {
             putIfPresent(conditions, "aws:SourceOwner", sourceAccount);
         }
-        String resourceAccount = accountFromArn(resourceArn);
+        String resourceAccount = AwsArnUtils.accountOrDefault(resourceArn, null);
         putIfPresent(conditions, "aws:ResourceAccount",
                 resourceAccount == null || resourceAccount.isBlank() ? resourceOwnerAccountId : resourceAccount);
         putIfPresent(conditions, "aws:RequestedRegion", AwsArnUtils.regionOrDefault(resourceArn, null));
         return conditions;
-    }
-
-    private static String accountFromArn(String arn) {
-        if (arn == null || !arn.startsWith("arn:")) {
-            return null;
-        }
-        String[] segments = arn.split(":", 6);
-        return segments.length > 4 ? segments[4] : null;
     }
 
     private static void putIfPresent(Map<String, List<String>> conditions, String key, String value) {
