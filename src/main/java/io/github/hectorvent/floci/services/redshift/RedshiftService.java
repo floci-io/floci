@@ -1351,36 +1351,31 @@ public class RedshiftService implements ManagedSecretRotator {
                 proxyManager.stopProxy(relayKey(accountId, clusterIdentifier));
             } catch (RuntimeException failure) {
                 LOG.warnv(failure, "Failed to stop auth proxy while pausing cluster {0}", clusterIdentifier);
-                cluster.setClusterStatus("unavailable");
-                cluster.setContainerHost(null);
-                cluster.setContainerPort(0);
-                clusters.put(clusterIdentifier, cluster);
-                clusters.flush();
+                persistClusterWithoutBackend(cluster, "unavailable");
                 throw new AwsException("InternalFailure", "Failed to stop auth proxy for cluster "
                         + clusterIdentifier, 500);
             }
             try {
                 containerManager.pause(accountId, clusterIdentifier);
-                cluster.setClusterStatus("paused");
-                cluster.setContainerHost(null);
-                cluster.setContainerPort(0);
-                clusters.put(clusterIdentifier, cluster);
-                clusters.flush();
+                persistClusterWithoutBackend(cluster, "paused");
                 return cluster;
             } catch (RuntimeException failure) {
+                boolean restored = false;
                 try {
                     RedshiftContainerHandle handle = containerManager.resume(accountId, clusterIdentifier,
                             cluster.getMasterUsername(), CLUSTER_DB_NAME);
                     startResumedProxy(accountId, cluster, handle);
                     cluster.setClusterStatus("available");
+                    restored = true;
                 } catch (RuntimeException rollbackFailure) {
                     LOG.warnv(rollbackFailure, "Failed to restore cluster {0} after unsuccessful pause", clusterIdentifier);
-                    cluster.setClusterStatus("unavailable");
-                    cluster.setContainerHost(null);
-                    cluster.setContainerPort(0);
                 }
-                clusters.put(clusterIdentifier, cluster);
-                clusters.flush();
+                if (restored) {
+                    clusters.put(clusterIdentifier, cluster);
+                    clusters.flush();
+                } else {
+                    persistClusterWithoutBackend(cluster, "unavailable");
+                }
                 LOG.warnv(failure, "Failed to pause Redshift cluster {0}", clusterIdentifier);
                 throw new AwsException("InternalFailure", "Failed to pause cluster " + clusterIdentifier, 500);
             }
@@ -1414,10 +1409,7 @@ public class RedshiftService implements ManagedSecretRotator {
                     LOG.warnv(rollbackFailure, "Failed to return cluster {0} to paused state", clusterIdentifier);
                     cluster.setClusterStatus("unavailable");
                 }
-                cluster.setContainerHost(null);
-                cluster.setContainerPort(0);
-                clusters.put(clusterIdentifier, cluster);
-                clusters.flush();
+                persistClusterWithoutBackend(cluster, cluster.getClusterStatus());
                 if (failure instanceof AwsException awsFailure) {
                     throw awsFailure;
                 }
@@ -1425,6 +1417,14 @@ public class RedshiftService implements ManagedSecretRotator {
                 throw new AwsException("InternalFailure", "Failed to resume cluster " + clusterIdentifier, 500);
             }
         });
+    }
+
+    private void persistClusterWithoutBackend(Cluster cluster, String status) {
+        cluster.setClusterStatus(status);
+        cluster.setContainerHost(null);
+        cluster.setContainerPort(0);
+        clusters.put(cluster.getClusterIdentifier(), cluster);
+        clusters.flush();
     }
 
     private Cluster clusterInState(String identifier, String requiredState) {
