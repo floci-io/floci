@@ -255,6 +255,7 @@ class EmrServerlessJobRunServiceTest {
         assertEquals(REGION, job.region());
         assertEquals("emr-7.5.0", job.releaseLabel());
         assertNull(job.imageTemplate());
+        assertNull(job.customImage());
         assertNull(job.dockerNetwork());
         assertEquals(ROLE, job.executionRole());
         assertEquals(List.of("s3://bucket/jobs/app.jar"), job.application());
@@ -262,6 +263,33 @@ class EmrServerlessJobRunServiceTest {
         assertEquals(Duration.ZERO, runner.jobs.get(1).timeout());
         assertNull(job.logFolder());
         assertNull(job.cloudWatchLogs());
+    }
+
+    @Test
+    void theRunnerGetsTheDriverWorkerTypesCustomImageElseTheApplicationsElseTheReleases() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        String applicationImage = "123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0";
+        String driverImage = "123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/driver:7.5.0";
+        CreateApplicationRequest wholeApplication = applicationRequest("custom", "emr-7.5.0", "SPARK");
+        wholeApplication.setImageConfiguration(EmrServerlessServiceTest.image(applicationImage));
+        // Local mode runs the executors in the driver's container, so an Executor image is not used.
+        wholeApplication.setWorkerTypeSpecifications(
+                Map.of("Executor", EmrServerlessServiceTest.workerType(driverImage)));
+        CreateApplicationRequest perWorkerType = applicationRequest("per-worker-type", "emr-7.5.0", "SPARK");
+        perWorkerType.setImageConfiguration(EmrServerlessServiceTest.image(applicationImage));
+        perWorkerType.setWorkerTypeSpecifications(Map.of("Driver", EmrServerlessServiceTest.workerType(driverImage)));
+
+        service.startJobRun(applications.createApplication(wholeApplication).getApplicationId(), request(null, null));
+        service.startJobRun(applications.createApplication(perWorkerType).getApplicationId(), request(null, null));
+        service.startJobRun(applicationId, request(null, null));
+        for (int i = 0; i < 3; i++) {
+            runNext();
+        }
+
+        assertEquals(applicationImage, runner.jobs.get(0).customImage());
+        assertEquals(driverImage, runner.jobs.get(1).customImage());
+        assertNull(runner.jobs.get(2).customImage());
     }
 
     @Test
