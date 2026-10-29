@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.testing.SamlMetadata;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import org.bouncycastle.asn1.x500.X500Name;
@@ -207,9 +208,7 @@ class AssumeRoleWithSamlValidationIntegrationTest {
 
     @Test
     void duplicateProviderCreationIsRejected() {
-        String metadata = "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\""
-                + ISSUER + "\"><md:IDPSSODescriptor><md:KeyDescriptor use=\"signing\"><ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data><ds:X509Certificate>"
-                + certificateBase64 + "</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor></md:IDPSSODescriptor></md:EntityDescriptor>";
+        String metadata = SamlMetadata.forEntity(ISSUER, certificateBase64);
         given().contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "CreateSAMLProvider").formParam("Name", PROVIDER_NAME)
                 .formParam("SAMLMetadataDocument", metadata)
@@ -303,9 +302,7 @@ class AssumeRoleWithSamlValidationIntegrationTest {
     }
 
     private static void registerProvider() {
-        String metadata = "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\"" + ISSUER
-                + "\"><md:IDPSSODescriptor><md:KeyDescriptor use=\"signing\"><ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data><ds:X509Certificate>"
-                + certificateBase64 + "</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor></md:IDPSSODescriptor></md:EntityDescriptor>";
+        String metadata = SamlMetadata.forEntity(ISSUER, certificateBase64);
         given().contentType("application/x-www-form-urlencoded").formParam("Action", "CreateSAMLProvider")
                 .formParam("Name", PROVIDER_NAME).formParam("SAMLMetadataDocument", metadata)
                 .header("Authorization", auth("iam")).when().post("/").then().statusCode(200);

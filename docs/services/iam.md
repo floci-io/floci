@@ -190,10 +190,10 @@ reads "Map value must satisfy constraint".
 customer managed policies by name, then the AWS managed catalog, and does not yet apply
 `OnlyAttached` or `PolicyUsageFilter`.
 
-The declared constraints on the managed-policy family are read from the model rather than from a
-hand-written check, `tools/aws/regen_iam_shapes.py` vendoring them for `GetPolicy`, `DeletePolicy`,
-`CreatePolicyVersion`, `GetPolicyVersion`, `DeletePolicyVersion`, `SetDefaultPolicyVersion` and the
-six attach and detach operations. A `PolicyArn` is held to `arnType`'s 20 to 2048 characters, a
+The declared constraints are read from the model rather than from a hand-written check, for every
+operation the model constrains: `tools/aws/regen_iam_shapes.py` vendors 162 of IAM's 180, which is
+all 164 that declare a required member, a length, a pattern, an enum or a range, bar the two
+account alias operations named below. A `PolicyArn` is held to `arnType`'s 20 to 2048 characters, a
 `VersionId` to `policyVersionIdType`'s pattern, a `PolicyDocument` to its 1 to 131072 characters and
 its pattern, and each principal name to its own bound, which for a role is the 1 to 64 characters of
 `[\w+=,.@-]` this service already answered. The check runs ahead of the operation, so a value that
@@ -217,24 +217,91 @@ index for the same reason, which is a reading: two other services here answer on
 whole list instead, and nothing recorded says which form AWS answers on this protocol. A list of
 no members is how an absent list arrives, so a required one reads as null rather than as a list
 breaking a minimum of 1. A structure member arrives as `TaskPolicyArn.Arn` and is named
-`taskPolicyArn.arn`. A map is not read yet, nor is anything nested deeper than a list of
-structures. The request form is published, `AcquireRole`'s own sample numbering a map as
-`ReplacementValues.entry.1.key` and `.entry.1.value`, but the message this service answers for one
-names the whole map rather than the entry that broke a constraint, and nothing here says which AWS
-names, so reading a map would move a merged answer on a guess. `GetAccountAuthorizationDetails` is
+`taskPolicyArn.arn`.
+
+A map is read the same way, from the entries the protocol numbers under its name:
+`ReplacementValues.entry.1.key` and `.entry.1.value`, which is the form `AcquireRole`'s own sample
+publishes, or the bare `ReplacementValues.1.key`. An entry's value is named under the key that
+entry carries, `replacementValues.Department.values` and `properties.Team/Owner`, which is how both
+maps this service answered by hand already named one and how the JSON protocols name a map's value
+here. An entry is read off its key, so one numbered with a value and no key is not an entry the map
+could hold: it is neither counted nor answered. The count is held to the map's own bounds with the
+value left out of the message, and a map the request names nowhere is how an absent map arrives, so
+a required one reads as null. A key outside its shape's rules is answered with the whole set that
+shape declares, nested under the map's own name, `Value at 'properties' failed to satisfy
+constraint: Map keys must satisfy constraint: [...]`, which is the form every map key recorded here
+carries and what this service already answered for an account property key.
+
+The two maps answered by hand are answered from the model now, and `AcquireRole`'s answers do not
+move at all: its count of 30, each entry's required `Values` and the 20 values one entry admits read
+exactly as that check read them, by the key the entry was sent under. `PutAccountProperties` keeps
+the set it answered for a key with the minimum length of 1 the model declares now inside it, where
+the hand-written set listed the maximum and the pattern alone, and a value outside its bounds is
+answered in the words every other member carries rather than the `must have length between 1 and
+1024` that check wrote. The `Namespace/PropertyName` rule stays exactly where it was, being a rule
+the service applies after the format is good rather than a constraint the model declares.
+
+Nothing is nested too deeply to read now. A structure's field may be a list, a list's member may
+hold a list of its own and a map's value may be a structure, each read under the name the request
+gives it and named the way the walk names it anywhere else: `permissions.parameters.1.member` for a
+list inside a structure, `contextEntries.1.member.contextKeyValues.2.member` for one inside a
+list's member. That is what takes the last operations into the file: the maps on `AcquireRole` and
+`PutAccountProperties`, the structure holding a list on `CreateDelegationRequest` and the context
+entries on both simulators. `GetAccountAuthorizationDetails` is
 the first operation read through the walk, and nothing of it was read before: a `Filter` member
 outside the model's enum, a `MaxItems` outside 1 to 1000 and a `Marker` breaking its length or its
 pattern were all answered with a 200. A number too large for a 64-bit integer is a number all the
 same, so a `MaxItems` of `9223372036854775808` breaks the maximum rather than reading as no number
 at all.
 
-Every other paged operation joined that wave (see [Pagination](#pagination)), most with their whole
-request. Six join with `MaxItems` and `Marker` alone and keep the reading they have for the rest:
-the three report readers, whose `JobId` is answered as one fixed length ("length equal to 36") and
-whose `SortKey` is held to its enum by hand, `ListPoliciesGrantingServiceAccess`, whose empty
-`ServiceNamespaces` is answered `InvalidInput`, and `SimulateCustomPolicy` and
-`SimulatePrincipalPolicy`, whose `ContextEntries` nest a list inside a list of structures, which the
-walk does not read.
+Every paged operation is read too (see [Pagination](#pagination)), each with its whole request.
+The two alias operations are the only ones left out at all, their single member being answered in
+AWS's own wording, and a constraint the model changes on anything the file carries makes it stale,
+which the generator's own check answers.
+
+Eight operations are vendored without the model's required members: `CreateLoginProfile`,
+`UpdateLoginProfile`, `UploadServerCertificate`, `UploadSigningCertificate`, `UploadSSHPublicKey`,
+`CreateOpenIDConnectProvider`, `RemoveClientIDFromOpenIDConnectProvider` and
+`UpdateOpenIDConnectProviderThumbprint`. Each answers a member the request leaves out with AWS's
+own Query wording, "The request must contain the parameter CertificateBody.", which is the form
+this emulator answers for a missing Query parameter in several services, and nothing recorded says
+IAM answers the validation layer's null violation there instead. So their lengths and patterns are
+read from the model while that refusal stands, and the vendored file carries their shapes with the
+required list left off rather than rewording an answer no capture covers.
+
+A blank value is a value wherever a member is read, so a request sending one empty breaks the
+minimum length its shape declares rather than reading as absent, and only a member the request
+names nowhere is answered as null. That is the model's reading and it holds for every operation the
+file carries, which is what the check behind it used to answer the other way. That check still
+answers a blank as an absent member for a member the model gives no minimum, and for the two alias
+operations the file does not carry, so nothing reaches an operation with a blank where it used to be
+refused.
+
+Nine wordings this service wrote for itself are gone with the checks that wrote them, each replaced
+by the words the model's own violation carries: `MinimumPasswordLength must be between 6 and 128.`,
+the same for `MaxPasswordAge` and `PasswordReusePrevention`, `UserName must be 1-128 characters
+matching [\w+=,.@-].` and the group, server certificate and instance profile names beside it, the
+path refusal that spelled out its own rule, `AuthenticationCode1 must be exactly 6 digits.`,
+`VirtualMFADeviceName must be at least 1 character matching [\w+=,.@-].` and `SerialNumber must be
+9-256 characters matching [\w+=/:,.@-].`. A member whose shape fixes one length is answered for
+that length rather than for a bound it sits under, `Member must have length equal to 6`, which is
+the wording a report's 36-character job id already answered and which now comes from one writer for
+every member like it. The two checks that stay, on a name and a path, are reached by a caller inside
+the emulator rather than by a request, a seeded configuration or a role template, and they answer
+in those same words.
+
+Some refusals stay as this service answers them, and the members behind them are left out of the
+vendored shapes so the walk cannot reword them. A service-linked role's principal and suffix answer
+`InvalidInput` rather than a validation error at all, and so does an empty `ServiceNamespaces` on
+`ListPoliciesGrantingServiceAccess`. An account alias carries AWS's own sentence about its own
+bounds, which is why neither alias operation is read at all. `statusType`, on all four operations
+that take it, is answered without the offending value and without the permitted set, which is what
+the recorded refusal carries and what the walk would spell out. `Encoding` on `GetSSHPublicKey`
+answers the modelled `UnrecognizedPublicKeyEncoding` rather than a constraint violation. And
+`TagKeys` on the eight untag operations is answered against the list as a whole, `Value at
+'tagKeys' failed to satisfy constraint: Member must satisfy constraint: [...]`, where the walk
+names the member that broke it under its own index: both forms are readings, nothing recorded
+settles which one AWS answers on this protocol, and these operations keep the one they merged.
 
 Every constraint violation IAM answers names the member and leaves the offending value out,
 `Value at 'roleName' failed to satisfy constraint: Member must have length greater than or equal to

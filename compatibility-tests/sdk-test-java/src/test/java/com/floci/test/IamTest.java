@@ -150,17 +150,37 @@ class IamTest {
      * contends with the one the Organizations suite builds for the default account.
      */
     private static final String REPORT_MANAGEMENT_ACCOUNT = "555555555557";
-    private static final String SAML_METADATA_DOCUMENT = "<md:EntityDescriptor "
+    /** The minimum AWS declares for {@code SAMLMetadataDocument}. */
+    private static final int SAML_METADATA_MINIMUM = 1000;
+    private static final String SAML_METADATA_BODY = "<md:EntityDescriptor "
             + "xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\"https://idp.example.test/sdk-test\">"
             + "<md:IDPSSODescriptor><md:KeyDescriptor use=\"signing\"><ds:KeyInfo "
             + "xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data><ds:X509Certificate>"
             + "c2RrLXRlc3QtY2VydGlmaWNhdGU=</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor>"
-            + "</md:IDPSSODescriptor></md:EntityDescriptor>";
-    private static final String SAML_METADATA_DOCUMENT_UPDATED = SAML_METADATA_DOCUMENT
-            .replace("sdk-test", "sdk-test-updated").replace("c2RrLXRlc3QtY2VydGlmaWNhdGU=", "dXBkYXRlZC1jZXJ0");
+            + "</md:IDPSSODescriptor>";
+    private static final String SAML_METADATA_DOCUMENT = samlMetadata(SAML_METADATA_BODY);
+    /** The same document under another entity id and certificate, padded on its own: the
+     * replacements are shorter than what they replace, so padding the first document and editing
+     * it would leave the second under the minimum. */
+    private static final String SAML_METADATA_DOCUMENT_UPDATED = samlMetadata(SAML_METADATA_BODY
+            .replace("sdk-test", "sdk-test-updated").replace("c2RrLXRlc3QtY2VydGlmaWNhdGU=", "dXBkYXRlZC1jZXJ0"));
     private static String policyArn;
     private static String accessKeyId;
     private static String samlProviderArn;
+
+    /**
+     * The document closed off and padded to the minimum AWS declares for it. A document carrying
+     * nothing but an entity id and one signing key is about a third of that, and the service holds
+     * the member to its published bound, so the filler comment brings it up: it parses as nothing,
+     * the entity id and the certificate being what the provider is read from.
+     */
+    private static String samlMetadata(String body) {
+        String end = "</md:EntityDescriptor>";
+        String open = "<!-- ";
+        String close = " -->";
+        int filler = SAML_METADATA_MINIMUM - body.length() - end.length() - open.length() - close.length();
+        return body + open + "x".repeat(Math.max(1, filler)) + close + end;
+    }
 
     @BeforeAll
     static void setup() {
