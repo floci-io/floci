@@ -1651,6 +1651,9 @@ public class S3Controller {
                         new PutObjectOptions()
                                 .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
                                 .withContentDisposition(httpHeaders.getHeaderString("Content-Disposition"))
+                                .withContentEncoding(toPersistedContentEncoding(
+                                        httpHeaders.getHeaderString("Content-Encoding")))
+                                .withCacheControl(httpHeaders.getHeaderString("Cache-Control"))
                                 .withServerSideEncryption(httpHeaders.getHeaderString("x-amz-server-side-encryption"))
                                 .withSseKmsKeyId(httpHeaders.getHeaderString(
                                         "x-amz-server-side-encryption-aws-kms-key-id"))

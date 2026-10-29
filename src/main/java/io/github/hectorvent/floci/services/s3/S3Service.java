@@ -4603,9 +4603,9 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /**
      * Starts a multipart upload of an object that gets {@code objectOptions} when it completes, as a
-     * PutObject takes them: its storage class, encryption, checksum algorithm, canned ACL or grants,
-     * tags and Object Lock settings. The ACL is checked here, so one S3 refuses fails the upload's
-     * creation rather than its completion.
+     * PutObject takes them: its storage class, content encoding, cache control, encryption, checksum
+     * algorithm, canned ACL or grants, tags and Object Lock settings. The ACL is checked here, so one
+     * S3 refuses fails the upload's creation rather than its completion.
      */
     public MultipartUpload initiateMultipartUpload(String bucket, String key, String contentType,
                                                    Map<String, String> metadata, String checksumType,
@@ -4643,6 +4643,8 @@ public class S3Service implements Resettable, ResourceProvider {
             }
             upload.setStorageClass(ObjectAttributeName.normalizeStorageClass(storageClass));
             upload.setContentDisposition(contentDisposition);
+            upload.setContentEncoding(objectOptions.getContentEncoding());
+            upload.setCacheControl(objectOptions.getCacheControl());
             upload.setServerSideEncryption(normalizedServerSideEncryption);
             upload.setSseKmsKeyId("aws:kms".equals(normalizedServerSideEncryption) ? sseKmsKeyId : null);
             if (customerKey != null) {
@@ -5118,6 +5120,8 @@ public class S3Service implements Resettable, ResourceProvider {
                             new PutObjectOptions()
                                     .withStorageClass(upload.getStorageClass())
                                     .withContentDisposition(upload.getContentDisposition())
+                                    .withContentEncoding(upload.getContentEncoding())
+                                    .withCacheControl(upload.getCacheControl())
                                     .withServerSideEncryption(upload.getServerSideEncryption())
                                     .withSseKmsKeyId(upload.getSseKmsKeyId())
                                     .withAcl(upload.getAcl())

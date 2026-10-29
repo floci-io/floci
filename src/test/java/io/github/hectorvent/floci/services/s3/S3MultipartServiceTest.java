@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
 import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
 import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.Part;
+import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.github.hectorvent.floci.services.s3.model.S3Checksum;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
@@ -267,6 +268,19 @@ class S3MultipartServiceTest {
         s3Service.completeMultipartUpload("test-bucket", "untagged.bin", upload.getUploadId(), List.of(1), null, null);
 
         assertTrue(s3Service.getObjectTagging("test-bucket", "untagged.bin").isEmpty());
+    }
+
+    @Test
+    void completeMultipartUploadAppliesContentEncodingAndCacheControl() {
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "encoded.yaml", "application/yaml",
+                null, null, new PutObjectOptions().withContentEncoding("gzip").withCacheControl("no-cache"));
+        s3Service.uploadPart("test-bucket", "encoded.yaml", upload.getUploadId(), 1, "part1".getBytes());
+
+        s3Service.completeMultipartUpload("test-bucket", "encoded.yaml", upload.getUploadId(), List.of(1), null, null);
+
+        S3Object object = s3Service.headObject("test-bucket", "encoded.yaml");
+        assertEquals("gzip", object.getContentEncoding());
+        assertEquals("no-cache", object.getCacheControl());
     }
 
     @Test
