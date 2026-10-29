@@ -120,16 +120,17 @@ class CloudFrontControllerTest {
     }
 
     @Test
-    void getFunctionRejectsAFunctionCodeThatIsNotBase64() {
+    void getFunctionServesAPlainTextCodePersistedByAnOlderFlociVersion() {
         CloudFrontService service = mock(CloudFrontService.class);
         CloudFrontController controller = new CloudFrontController(service);
+        String legacyCode = "function handler(event) { return event.request; }";
         CloudFrontFunction fn = function("routing");
-        fn.setFunctionCode("function handler(event) { return event.request; }");
+        fn.setFunctionCode(legacyCode);
         when(service.describeFunction("routing", null)).thenReturn(fn);
 
         try (Response response = controller.getFunction("routing", null)) {
-            assertEquals(400, response.getStatus());
-            assertTrue(((String) response.getEntity()).contains("InvalidArgument"));
+            assertEquals(200, response.getStatus());
+            assertArrayEquals(legacyCode.getBytes(StandardCharsets.UTF_8), (byte[]) response.getEntity());
         }
     }
 

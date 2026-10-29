@@ -22,6 +22,7 @@ class CloudFrontFunctionTest {
         byte[] updatedCode = "function handler(event) { return event.response; }"
                 .getBytes(StandardCharsets.UTF_8);
         String etag = null;
+        String updatedEtag = null;
 
         try (CloudFrontClient cloudFront = TestFixtures.cloudFrontClient()) {
             CreateFunctionResponse created = cloudFront.createFunction(request -> request
@@ -51,13 +52,13 @@ class CloudFrontFunctionTest {
             GetFunctionResponse afterUpdate = cloudFront.getFunction(request -> request
                     .name(name)
                     .stage(FunctionStage.DEVELOPMENT));
+            updatedEtag = afterUpdate.eTag();
             assertArrayEquals(updatedCode, afterUpdate.functionCode().asByteArray());
-            etag = afterUpdate.eTag();
             assertEquals("application/octet-stream", afterUpdate.contentType());
         } finally {
             try (CloudFrontClient cloudFront = TestFixtures.cloudFrontClient()) {
-                if (etag != null) {
-                    String currentEtag = etag;
+                String currentEtag = updatedEtag != null ? updatedEtag : etag;
+                if (currentEtag != null) {
                     cloudFront.deleteFunction(request -> request
                             .name(name)
                             .ifMatch(currentEtag));

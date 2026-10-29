@@ -14,6 +14,7 @@ import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
@@ -877,6 +878,11 @@ public class CloudFrontController {
      * decoded back to the bytes the caller originally encoded. The ETag header carries the
      * function's version identifier, and the media type is application/octet-stream, matching
      * the GetFunction response contract in the CloudFront API reference.
+     *
+     * <p>Records persisted by older Floci versions may hold plain code instead: the
+     * CloudFormation provisioner once wrote the template's raw body. Those still read back
+     * as their stored bytes rather than failing, and the next UpdateFunction rewrites them
+     * into the uniform base64 form.
      */
     private byte[] functionCodeBytes(CloudFrontFunction fn) {
         String encoded = fn.getFunctionCode();
@@ -886,8 +892,9 @@ public class CloudFrontController {
         try {
             return Base64.getDecoder().decode(encoded.trim());
         } catch (IllegalArgumentException e) {
-            throw new AwsException("InvalidArgument",
-                    "The function code must be base64-encoded.", 400);
+            LOG.warnv("Function {0} holds non-base64 code persisted by an older Floci version; serving it as stored",
+                    fn.getName());
+            return encoded.getBytes(StandardCharsets.UTF_8);
         }
     }
 
