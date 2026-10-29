@@ -19,6 +19,8 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.IOException;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -837,6 +839,26 @@ class IamRequestResourceEnforcementIntegrationTest {
         refusedJson(serviceQuota(user, "L-00000000"), "servicequotas:GetServiceQuota");
     }
 
+    /** A translation is checked on the terminology its {@code TerminologyNames} give, {@code terminology/<name>}. */
+    @Test
+    void aTranslationIsCheckedOnTheTerminologyItNames() {
+        String name = "res-terminology-" + suffix();
+        String arn = "arn:aws:translate:" + REGION + ":" + ACCOUNT + ":terminology/" + name;
+        String text = "\"Text\":\"hello\",\"SourceLanguageCode\":\"en\",\"TargetLanguageCode\":\"fr\"";
+        String document = "\"Document\":{\"Content\":\""
+                + Base64.getEncoder().encodeToString("hello".getBytes(StandardCharsets.UTF_8))
+                + "\",\"ContentType\":\"text/plain\"},\"SourceLanguageCode\":\"en\",\"TargetLanguageCode\":\"fr\"";
+        User user = user("res-terminology");
+        user.policy(allowOn("translate:TranslateText", arn) + "," + allowOn("translate:TranslateDocument", arn));
+        translate(user, "TranslateText", "{" + text + ",\"TerminologyNames\":[\"" + name + "\"]}").statusCode(200);
+        refusedJson(translate(user, "TranslateText", "{" + text + ",\"TerminologyNames\":[\"" + name + "-other\"]}"),
+                "translate:TranslateText");
+        translate(user, "TranslateDocument", "{" + document + ",\"TerminologyNames\":[\"" + name + "\"]}")
+                .statusCode(200);
+        refusedJson(translate(user, "TranslateDocument", "{" + document + ",\"TerminologyNames\":[\"" + name
+                + "-other\"]}"), "translate:TranslateDocument");
+    }
+
     /** A monthly cost budget of the name, with a billing view ARN when one is given. */
     private static String budget(String name, String billingViewArn) {
         return "{\"BudgetName\":\"" + name + "\",\"BudgetType\":\"COST\",\"TimeUnit\":\"MONTHLY\",\"BudgetLimit\":"
@@ -863,6 +885,11 @@ class IamRequestResourceEnforcementIntegrationTest {
     private static ValidatableResponse serviceQuota(User user, String quotaCode) {
         return user.json("servicequotas", "ServiceQuotasV20190624.GetServiceQuota", "1.1")
                 .body("{\"ServiceCode\":\"codebuild\",\"QuotaCode\":\"" + quotaCode + "\"}").post("/").then();
+    }
+
+    private static ValidatableResponse translate(User user, String operation, String body) {
+        return user.json("translate", "AWSShineFrontendService_20170701." + operation, "1.1").body(body).post("/")
+                .then();
     }
 
     private static ValidatableResponse codeBuild(User user, String operation, String body) {
