@@ -58,6 +58,8 @@ public class AccountContextFilter implements ContainerRequestFilter {
     // this class also carries the JAX-RS @Provider annotation.
     private final jakarta.inject.Provider<EmulatorConfig> configProvider;
     private final jakarta.inject.Provider<ResolvedServiceCatalog> catalogProvider;
+    private volatile EmulatorConfig config;
+    private volatile ResolvedServiceCatalog catalog;
 
     @Inject
     public AccountContextFilter(AccountResolver accountResolver,
@@ -72,6 +74,24 @@ public class AccountContextFilter implements ContainerRequestFilter {
         this.sessionAccountLookup = sessionAccountLookup;
         this.configProvider = configProvider;
         this.catalogProvider = catalogProvider;
+    }
+
+    private EmulatorConfig config() {
+        EmulatorConfig resolved = config;
+        if (resolved == null) {
+            resolved = configProvider.get();
+            config = resolved;
+        }
+        return resolved;
+    }
+
+    private ResolvedServiceCatalog catalog() {
+        ResolvedServiceCatalog resolved = catalog;
+        if (resolved == null) {
+            resolved = catalogProvider.get();
+            catalog = resolved;
+        }
+        return resolved;
     }
 
     @Override
@@ -89,9 +109,9 @@ public class AccountContextFilter implements ContainerRequestFilter {
         if (rejectAmbiguousRegion(ctx, auth)) {
             return;
         }
-        String akid = resourceInfo != null && catalogProvider.get().byResourceClass(resourceInfo.getResourceClass())
+        String akid = resourceInfo != null && catalog().byResourceClass(resourceInfo.getResourceClass())
                 .map(ServiceDescriptor::acceptsLegacyAuthorization).orElse(false)
-                && !configProvider.get().services().iam().enforcementEnabled()
+                && !config().services().iam().enforcementEnabled()
                 ? accountResolver.extractS3AccessKeyId(auth) : accountResolver.extractAccessKeyId(auth);
         if (akid != null) {
             requestContext.setAccountId(resolveAccount(akid, accountResolver.resolve(auth)));
@@ -195,7 +215,7 @@ public class AccountContextFilter implements ContainerRequestFilter {
     private boolean rejectUnknownRegion(ContainerRequestContext ctx, String region, Optional<String> signingName) {
         boolean ambiguous = RegionResolver.containsArnDelimiter(region);
         if (!ambiguous && (RegionResolver.isKnownRegion(region)
-                || configProvider.get().partitions().allowUnknownRegions())) {
+                || config().partitions().allowUnknownRegions())) {
             return false;
         }
         LOG.debugv("Refusing request signed for unknown region {0} (service {1}): {2} {3}",
@@ -247,7 +267,7 @@ public class AccountContextFilter implements ContainerRequestFilter {
      * service in every partition.
      */
     private void rejectPartitionAbsentService(ContainerRequestContext ctx, String signingName) {
-        if (signingName == null || !configProvider.get().partitions().strict()) {
+        if (signingName == null || !config().partitions().strict()) {
             return;
         }
         Optional<AwsPartition> partition = AwsPartitions.find(requestContext.getPartition());

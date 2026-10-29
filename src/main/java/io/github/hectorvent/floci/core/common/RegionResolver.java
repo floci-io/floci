@@ -50,6 +50,8 @@ public class RegionResolver {
     @Inject
     Instance<RequestContext> requestContextInstance;
 
+    private volatile RequestContext requestContextProxy;
+
     @Inject
     public RegionResolver(EmulatorConfig config) {
         this(config.defaultRegion(), config.defaultAccountId(),
@@ -244,6 +246,15 @@ public class RegionResolver {
         return AwsPartitions.forRegion(region).map(AwsPartition::id).orElse(defaultPartition);
     }
 
+    private RequestContext requestContext() {
+        RequestContext proxy = requestContextProxy;
+        if (proxy == null) {
+            proxy = requestContextInstance.get();
+            requestContextProxy = proxy;
+        }
+        return proxy;
+    }
+
     /**
      * The partition of the current request when called from a request context, or the
      * deployment's partition otherwise (async workers, startup, tests).
@@ -251,7 +262,7 @@ public class RegionResolver {
     public String getPartition() {
         if (requestContextInstance != null) {
             try {
-                String partition = requestContextInstance.get().getPartition();
+                String partition = requestContext().getPartition();
                 if (partition != null) {
                     return partition;
                 }
@@ -269,7 +280,7 @@ public class RegionResolver {
     public String getRegion() {
         if (requestContextInstance != null) {
             try {
-                String region = requestContextInstance.get().getRegion();
+                String region = requestContext().getRegion();
                 if (region != null) {
                     return region;
                 }
@@ -287,7 +298,7 @@ public class RegionResolver {
     public String getAccountId() {
         if (requestContextInstance != null) {
             try {
-                String accountId = requestContextInstance.get().getAccountId();
+                String accountId = requestContext().getAccountId();
                 if (accountId != null) {
                     return accountId;
                 }

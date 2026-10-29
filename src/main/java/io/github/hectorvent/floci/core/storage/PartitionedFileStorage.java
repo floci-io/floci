@@ -251,6 +251,11 @@ public class PartitionedFileStorage<E> implements StorageBackend<String, Map<Str
         return Collections.unmodifiableSet(store.keySet());
     }
 
+    @Override
+    public boolean isEmpty() {
+        return store.isEmpty();
+    }
+
     /**
      * Writes every dirty shard; in journal mode this is a compaction.
      *

@@ -42,6 +42,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
 
     private final StorageBackend<String, V> delegate;
     private final Instance<RequestContext> requestContextInstance;
+    private volatile RequestContext requestContextProxy;
     private final String defaultAccountId;
 
     // Accounts that own keys here, so findAnyAccountEntry does one get per account instead of a scan.
@@ -139,6 +140,11 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
                 .filter(k -> k.startsWith(prefix))
                 .map(k -> k.substring(prefix.length()))
                 .collect(Collectors.toUnmodifiableSet());
+    }
+
+    @Override
+    public boolean isEmpty() {
+        return delegate.isEmpty();
     }
 
     @Override
@@ -591,10 +597,19 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return prefix();
     }
 
+    private RequestContext requestContext() {
+        RequestContext proxy = requestContextProxy;
+        if (proxy == null) {
+            proxy = requestContextInstance.get();
+            requestContextProxy = proxy;
+        }
+        return proxy;
+    }
+
     private String prefix() {
         if (requestContextInstance != null) {
             try {
-                String accountId = requestContextInstance.get().getAccountId();
+                String accountId = requestContext().getAccountId();
                 if (accountId != null) {
                     return accountId;
                 }
