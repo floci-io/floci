@@ -128,6 +128,19 @@ class EcsContainerManagerAwsBaselineTest {
     }
 
     @Test
+    void aTaskContainersJvmsTrustFlocisCa() {
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("test-family");
+        taskDef.setContainerDefinitions(List.of(containerDef("app", "app:latest", List.of())));
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
+
+        manager.startTask(task, taskDef, null, "us-east-1");
+
+        verify(builder).withJavaTrustStore();
+    }
+
+    @Test
     void runTaskOverrideWinsOverBaseline() {
         ContainerDefinition app = containerDef("app", "app:latest", List.of());
 

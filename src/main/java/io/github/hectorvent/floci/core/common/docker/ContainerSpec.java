@@ -49,6 +49,8 @@ import java.util.regex.Pattern;
  *        images whose command does not handle SIGTERM itself
  * @param linuxOptions Capabilities, devices, shared memory, tmpfs and swap
  *        ({@link LinuxOptions#NONE} = daemon defaults)
+ * @param javaTrustStore Whether, with TLS on, the container's JVMs trust Floci's CA: the CA bundle's Java trust
+ *        store goes in beside the bundle, and {@code JAVA_TOOL_OPTIONS} points at it
  */
 public record ContainerSpec(
         String image,
@@ -80,7 +82,8 @@ public record ContainerSpec(
         List<String> linkLocalIps,
         Map<Integer, String> portBindingHostIps,
         boolean init,
-        LinuxOptions linuxOptions
+        LinuxOptions linuxOptions,
+        boolean javaTrustStore
 ) {
     private static final Pattern LINK_LOCAL_IPV4 = Pattern.compile("^169\\.254\\.(\\d{1,3})\\.(\\d{1,3})$");
     private static final Set<String> NETWORKS_WITHOUT_ENDPOINT_IPAM = Set.of("bridge", "default", "host", "none");
@@ -103,7 +106,50 @@ public record ContainerSpec(
     public ContainerSpec(String image) {
         this(image, null, List.of(), null, null, null, Map.of(), List.of(), List.of(), null,
                 List.of(), List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(),
-                null, null, List.of(), List.of(), null, null, false, List.of(), Map.of(), false, LinuxOptions.NONE);
+                null, null, List.of(), List.of(), null, null, false, List.of(), Map.of(), false, LinuxOptions.NONE,
+                false);
+    }
+
+    /**
+     * Backward-compatible constructor that leaves the container's JVMs on the image's trust store, so callers
+     * that predate the Java trust store keep their existing behaviour.
+     */
+    public ContainerSpec(
+            String image,
+            String name,
+            List<String> env,
+            List<String> cmd,
+            List<String> entrypoint,
+            Long memoryBytes,
+            Map<Integer, Integer> portBindings,
+            List<Integer> loopbackPortBindings,
+            List<Integer> exposedPorts,
+            String networkMode,
+            List<Mount> mounts,
+            List<Bind> binds,
+            List<VolumesFrom> volumesFrom,
+            List<String> extraHosts,
+            Map<String, String> labels,
+            LogConfig logConfig,
+            boolean privileged,
+            String cgroupnsMode,
+            List<String> dnsServers,
+            String workingDir,
+            String user,
+            List<String> groupAdd,
+            List<DeviceRequest> deviceRequests,
+            Long nanoCpus,
+            Integer cpuShares,
+            boolean readonlyRootfs,
+            List<String> linkLocalIps,
+            Map<Integer, String> portBindingHostIps,
+            boolean init,
+            LinuxOptions linuxOptions
+    ) {
+        this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
+                exposedPorts, networkMode, mounts, binds, volumesFrom, extraHosts, labels, logConfig,
+                privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, deviceRequests,
+                nanoCpus, cpuShares, readonlyRootfs, linkLocalIps, portBindingHostIps, init, linuxOptions, false);
     }
 
     /**

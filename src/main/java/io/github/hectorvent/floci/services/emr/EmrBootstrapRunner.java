@@ -141,7 +141,9 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
                     .build();
             String containerId = lifecycleManager.createAndStart(spec).containerId();
             launch.started(containerId);
-            // In before the first action, for the actions' JVMs to find it.
+            // In before the first action, for the actions' JVMs to find it. Not through the spec: the container is
+            // kept as an image, which would keep a JAVA_TOOL_OPTIONS given at its creation, naming a trust store
+            // the cleanup removes.
             lifecycleManager.copyJavaTrustStore(containerId);
             // A stop, a reset or a shutdown while the image was pulled or the trust store copied is read now.
             if (launch.stopRequested() || cancelled.getAsBoolean()) {

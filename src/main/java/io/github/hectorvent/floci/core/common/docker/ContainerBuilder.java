@@ -178,6 +178,7 @@ public class ContainerBuilder {
         private final Map<String, String> tmpfs = new HashMap<>();
         private Long memorySwapBytes;
         private Long memorySwappiness;
+        private boolean javaTrustStore;
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
                 EmbeddedDnsServer embeddedDnsServer,
@@ -293,6 +294,16 @@ public class ContainerBuilder {
          */
         public Builder withInit() {
             this.init = true;
+            return this;
+        }
+
+        /**
+         * With TLS on, has the container's JVMs trust Floci's CA: the CA bundle's Java trust store goes in beside
+         * the bundle, and {@code JAVA_TOOL_OPTIONS} points at it, ahead of the options the container would have
+         * had, so a trust store they name replaces Floci's. For a container whose workload may be Java.
+         */
+        public Builder withJavaTrustStore() {
+            this.javaTrustStore = true;
             return this;
         }
 
@@ -779,7 +790,8 @@ public class ContainerBuilder {
                     Map.copyOf(portBindingHostIps),
                     init,
                     new LinuxOptions(List.copyOf(capAdd), List.copyOf(capDrop), List.copyOf(devices),
-                            shmSizeBytes, Map.copyOf(tmpfs), memorySwapBytes, memorySwappiness)
+                            shmSizeBytes, Map.copyOf(tmpfs), memorySwapBytes, memorySwappiness),
+                    javaTrustStore
             );
         }
     }

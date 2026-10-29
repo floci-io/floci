@@ -6,7 +6,6 @@ import com.github.dockerjava.api.exception.InternalServerErrorException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
-import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -136,16 +135,16 @@ class EmrServerlessSparkRunnerTest {
         runner(builder).run(job(Duration.ZERO), progress);
 
         verify(builder).newContainer("public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest");
-        // bash -c runs Floci's wrapper with "floci" as its $0 and spark-submit and its arguments as "$@".
-        verify(spec).withEntrypoint(List.of("/bin/bash", "-c",
-                ContainerCaBundle.JAVA_TRUST_SHELL_LINE + "\nexec \"$@\"", "floci"));
-        verify(spec).withCmd(argThat((List<String> cmd) -> "/usr/lib/spark/bin/spark-submit".equals(cmd.getFirst())
-                && List.of("--master", "local[*]").equals(cmd.subList(1, 3))
+        verify(spec).withEntrypoint(List.of("/usr/lib/spark/bin/spark-submit"));
+        verify(spec).withCmd(argThat((List<String> cmd) -> List.of("--master", "local[*]").equals(cmd.subList(0, 2))
                 && "s3://bucket/jobs/app.jar".equals(cmd.getLast())));
         verify(spec).withName(ContainerStorageHelper.dockerName(config, "emr-serverless-00f0000000000001"));
         verify(spec).withDockerNetwork(Optional.of("floci-network"));
         verify(spec).withLabels(argThat(labels ->
                 "emr-serverless".equals(labels.get(ContainerStorageHelper.SERVICE_LABEL))));
+        // Its JVMs trust Floci's CA, the trust store going in with the CA bundle as the container is created.
+        verify(spec).withJavaTrustStore();
+        verify(lifecycle, never()).copyJavaTrustStore(anyString());
     }
 
     @Test
@@ -160,23 +159,14 @@ class EmrServerlessSparkRunnerTest {
         // bash -c runs Floci's wrapper with "floci" as its $0 and the command as "$@".
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.size() == 4
                 && entrypoint.subList(0, 2).equals(List.of("/bin/bash", "-c"))
-                && entrypoint.get(2).startsWith(ContainerCaBundle.JAVA_TRUST_SHELL_LINE + "\n")
                 && entrypoint.get(2).contains("export SPARK_CONF_DIR=") && entrypoint.get(2).endsWith("exec \"$@\"")
                 && "floci".equals(entrypoint.get(3))));
         verify(spec).withCmd(command);
         verify(spec).withEnv(eq("FLOCI_SPARK_DEFAULTS"),
                 argThat(file -> file.startsWith("spark.master local[*]\n")
                         && file.endsWith("\nspark.executor.cores 4")));
-    }
-
-    @Test
-    void theJavaTrustStoreGoesIntoTheDriversContainerBeforeItStarts() {
-        runner().run(job(Duration.ZERO), progress);
-
-        InOrder order = inOrder(lifecycle);
-        order.verify(lifecycle).create(any());
-        order.verify(lifecycle).copyJavaTrustStore("driver");
-        order.verify(lifecycle).startCreated(eq("driver"), any());
+        verify(spec, never()).withEntrypoint(List.of("/usr/lib/spark/bin/spark-submit"));
+        verify(spec).withJavaTrustStore();
     }
 
     @Test
@@ -287,34 +277,17 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
-    void aRunStoppedWhileTheTrustStoreIsCopiedNeverStartsItsDriver() {
+    void aRunStoppedWhileItsContainerIsCreatedNeverStartsItsDriver() {
         EmrServerlessSparkRunner runner = runner();
         SparkJobRunner.Job job = job(Duration.ZERO);
-        // The copy can wait on Docker, and a stop only marks the run.
-        when(lifecycle.copyJavaTrustStore("driver")).thenAnswer(copy -> {
+        // The create pulls the image and copies the trust store in, either of which can wait on Docker, and a
+        // stop only marks the run.
+        when(lifecycle.create(any())).thenAnswer(creating -> {
             runner.stop(job.runId());
-            return true;
+            return "driver";
         });
 
         SparkJobRunner.Outcome outcome = runner.run(job, progress);
-
-        assertTrue(outcome.stopped());
-        verify(progress, never()).started();
-        verify(lifecycle, never()).startCreated(anyString(), any());
-        verify(lifecycle).stopAndRemove("driver", null, 0);
-    }
-
-    @Test
-    void aRunCancelledWhileTheTrustStoreIsCopiedNeverStartsItsDriver() {
-        EmrServerlessSparkRunner runner = runner();
-        AtomicBoolean cancelled = new AtomicBoolean();
-        when(progress.cancelled()).thenAnswer(look -> cancelled.get());
-        when(lifecycle.copyJavaTrustStore("driver")).thenAnswer(copy -> {
-            cancelled.set(true);
-            return true;
-        });
-
-        SparkJobRunner.Outcome outcome = runner.run(job(Duration.ZERO), progress);
 
         assertTrue(outcome.stopped());
         verify(progress, never()).started();

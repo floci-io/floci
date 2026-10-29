@@ -404,6 +404,7 @@ public class EcsContainerManager {
                         // own loopback.
                         .withHostDockerInternalOnLinux()
                         .withEmbeddedDns()
+                        .withJavaTrustStore()
                         .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                                 "ecs", taskId, regionResolver.getAccountId(), region))
                         .withLabels(ownerLabels());

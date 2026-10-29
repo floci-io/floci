@@ -5,7 +5,6 @@ import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
-import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RequestScopes;
@@ -57,17 +56,11 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private static final Logger LOG = Logger.getLogger(EmrServerlessSparkRunner.class);
     private static final String SPARK_SUBMIT = "/usr/lib/spark/bin/spark-submit";
     private static final String SPARK_DEFAULTS_VARIABLE = "FLOCI_SPARK_DEFAULTS";
-    // spark-submit runs after this, its JVMs trusting Floci's CA once its trust store is in the container.
-    private static final String SPARK_SUBMIT_WRAPPER = String.join("\n",
-            ContainerCaBundle.JAVA_TRUST_SHELL_LINE,
-            "exec \"$@\"");
     // A command runs after this sets up a Spark configuration of its own, so a spark-submit it starts runs
     // locally on Floci's S3: the image's spark-defaults.conf names EMR Serverless's resource manager as its
     // master, which a system property cannot override, so its master and that manager's lines give way to
-    // local mode, Floci's settings and the job's spark-defaults, passed in SPARK_DEFAULTS_VARIABLE. Its JVMs
-    // trust Floci's CA as spark-submit's do.
+    // local mode, Floci's settings and the job's spark-defaults, passed in SPARK_DEFAULTS_VARIABLE.
     private static final String COMMAND_WRAPPER = String.join("\n",
-            ContainerCaBundle.JAVA_TRUST_SHELL_LINE,
             "conf=/tmp/floci-spark-conf",
             "mkdir -p \"$conf\"",
             "cp -r /usr/lib/spark/conf/. \"$conf\" 2>/dev/null",
@@ -149,12 +142,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                             image(job.imageTemplate(), job.releaseLabel()))
                     .withName(ContainerStorageHelper.dockerName(config, job.service() + "-" + job.runId()))
                     .withEnv(awsEnv.sdkBaselineEnv(job.region(), Optional.empty(), credentials, job.accountId()));
-            // bash -c's script gets "floci" as its $0, and spark-submit or the command as its arguments, "$@".
             if (job.command() == null) {
-                List<String> submit = new ArrayList<>(List.of(SPARK_SUBMIT));
-                submit.addAll(sparkSubmitArguments(job, endpoint));
-                container.withEntrypoint(List.of("/bin/bash", "-c", SPARK_SUBMIT_WRAPPER, "floci")).withCmd(submit);
+                container.withEntrypoint(List.of(SPARK_SUBMIT)).withCmd(sparkSubmitArguments(job, endpoint));
             } else {
+                // bash -c's script gets "floci" as its $0, and the command as its arguments, "$@".
                 container.withEntrypoint(List.of("/bin/bash", "-c", COMMAND_WRAPPER, "floci"))
                         .withCmd(job.command())
                         .withEnv(SPARK_DEFAULTS_VARIABLE, sparkDefaultsFile(job, endpoint));
@@ -165,11 +156,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                     .withEmbeddedDns()
                     .withLogRotation()
                     .withLabels(labels)
+                    .withJavaTrustStore()
                     .build();
             String containerId = lifecycleManager.create(spec);
             launch.started(containerId);
-            // In before the driver starts, for its JVMs to find it.
-            lifecycleManager.copyJavaTrustStore(containerId);
             // A stop, a reset or a shutdown while the image was pulled or the trust store copied is read now,
             // before the driver starts.
             if (launch.stopRequested() || progress.cancelled()) {
