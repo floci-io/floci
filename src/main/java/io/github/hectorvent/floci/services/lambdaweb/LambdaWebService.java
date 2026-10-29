@@ -1052,16 +1052,16 @@ public class LambdaWebService implements Resettable {
         if (fn.endpoints.containsKey(endpoint.endpointName)) {
             throw new AwsException("ConflictException", "The endpoint " + endpoint.endpointName + " already exists.", 409);
         }
-        if (fn.endpoints.size() >= MAX_ENDPOINTS_PER_FUNCTION) {
-            throw new AwsException("ServiceQuotaExceededException", "The function " + fn.functionArn
-                    + " has reached the maxEndpointsPerFunction quota of " + MAX_ENDPOINTS_PER_FUNCTION + ".", 402);
-        }
         if (initialRevision != null) {
             endpoint.revisionWeights = List.of(weight(initialRevision.revisionId, 100));
         } else if (!endpoint.revisionWeights.isEmpty()) {
             endpoint.revisionWeights = resolveWeights(fn, endpoint.endpointType, endpoint.revisionWeights);
         } else {
             endpoint.revisionWeights = latestRevision(fn).map(id -> List.of(weight(id, 100))).orElse(List.of());
+        }
+        if (fn.endpoints.size() >= MAX_ENDPOINTS_PER_FUNCTION) {
+            throw new AwsException("ServiceQuotaExceededException", "The function " + fn.functionArn
+                    + " has reached the maxEndpointsPerFunction quota of " + MAX_ENDPOINTS_PER_FUNCTION + ".", 402);
         }
         endpoint.endpointArn = fn.functionArn + "/endpoint/" + endpoint.endpointName;
         endpoint.functionArn = fn.functionArn;
