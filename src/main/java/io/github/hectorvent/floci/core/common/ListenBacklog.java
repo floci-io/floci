@@ -1,5 +1,9 @@
 package io.github.hectorvent.floci.core.common;
 
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+
 /**
  * The accept backlog Floci's data-plane TCP listeners bind with.
  *
@@ -19,6 +23,27 @@ public final class ListenBacklog {
 
     /** The accept backlog of the database auth proxies and the EC2 port-forward socat. */
     public static final int ACCEPT = 4096;
+
+    /**
+     * Binds the accept socket for one of Floci's data-plane listeners: reuse-address on, a
+     * bind at the given port with the given backlog, and the socket closed when the bind
+     * fails so a caller's retry cannot leak one socket per attempt.
+     */
+    public static ServerSocket acceptSocket(int port, int backlog) throws IOException {
+        ServerSocket socket = new ServerSocket();
+        try {
+            socket.setReuseAddress(true);
+            socket.bind(new InetSocketAddress(port), backlog);
+            return socket;
+        } catch (IOException e) {
+            try {
+                socket.close();
+            } catch (IOException ignored) {
+                // the socket was never bound, so nothing could have been listening on it
+            }
+            throw e;
+        }
+    }
 
     private ListenBacklog() {
     }

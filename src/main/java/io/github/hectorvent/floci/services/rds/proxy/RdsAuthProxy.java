@@ -162,10 +162,7 @@ public class RdsAuthProxy {
      * {@code ServerSocket} does not report the backlog it was created with.
      */
     ServerSocket listenSocket(int proxyPort, int backlog) throws IOException {
-        ServerSocket socket = new ServerSocket();
-        socket.setReuseAddress(true);
-        socket.bind(new InetSocketAddress(proxyPort), backlog);
-        return socket;
+        return ListenBacklog.acceptSocket(proxyPort, backlog);
     }
 
     /** Swap the master-password snapshot after a rotation; new connections authenticate against it. */

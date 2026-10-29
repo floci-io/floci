@@ -164,20 +164,11 @@ public class RedshiftAuthProxy {
     }
 
     /**
-     * Binds one listener attempt, closing the socket when the bind fails so a retry cannot
-     * leak it. A seam so a test can pin the accept backlog: a bound {@code ServerSocket}
-     * does not report the backlog it was created with.
+     * Binds one listener attempt. A seam so a test can pin the accept backlog: a bound
+     * {@code ServerSocket} does not report the backlog it was created with.
      */
     ServerSocket listenSocket(int proxyPort, int backlog) throws IOException {
-        ServerSocket socket = new ServerSocket();
-        try {
-            socket.setReuseAddress(true);
-            socket.bind(new InetSocketAddress(proxyPort), backlog);
-            return socket;
-        } catch (IOException e) {
-            closeQuietly(socket);
-            throw e;
-        }
+        return ListenBacklog.acceptSocket(proxyPort, backlog);
     }
 
     private static void closeQuietly(ServerSocket s) {
