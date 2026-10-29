@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudfront;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.LocalStackParity;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -2159,7 +2160,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     public RealtimeLogConfig getRealtimeLogConfig(String nameOrArn) {
-        if (nameOrArn != null && nameOrArn.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(nameOrArn)) {
             String name = nameOrArn.substring(nameOrArn.lastIndexOf('/') + 1);
             return realtimeLogConfigStore.get(name).orElseThrow(() ->
                     new AwsException("NoSuchRealtimeLogConfig",

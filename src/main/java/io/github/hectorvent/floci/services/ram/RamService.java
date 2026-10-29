@@ -313,8 +313,7 @@ public class RamService {
 
     /** {@code arn:aws:ram:<region>:<account>:resource-share/<id>} → {@code <region>}. */
     private static String extractRegion(String resourceShareArn) {
-        String[] parts = resourceShareArn.split(":", 6);
-        return parts.length < 4 ? "" : parts[3];
+        return AwsArnUtils.regionOrDefault(resourceShareArn, "");
     }
 
     private void putInvitation(ResourceShareInvitation invitation) {
@@ -761,12 +760,12 @@ public class RamService {
 
     /** {@code arn:aws:ec2:...:transit-gateway/tgw-1} → {@code ec2:TransitGateway}. */
     private static String ramResourceType(String resourceArn) {
-        String[] parts = resourceArn.split(":", 6);
-        if (parts.length < 6) {
+        if (!AwsArnUtils.isArn(resourceArn)) {
             return "";
         }
-        String service = parts[2];
-        String resource = parts[5];
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(resourceArn);
+        String service = parsed.service();
+        String resource = parsed.resource();
         int separator = indexOfTypeSeparator(resource);
         String typeSegment = separator >= 0 ? resource.substring(0, separator) : resource;
         StringBuilder camel = new StringBuilder();

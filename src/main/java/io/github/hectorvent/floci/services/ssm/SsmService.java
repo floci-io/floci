@@ -1118,7 +1118,7 @@ public class SsmService implements ResourceProvider {
     }
 
     private String parameterName(String nameOrArn, String region, boolean parameterRead) {
-        if (nameOrArn != null && nameOrArn.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(nameOrArn)) {
             try {
                 AwsArnUtils.Arn arn = AwsArnUtils.parse(nameOrArn);
                 if ("ssm".equals(arn.service()) && arn.resource().startsWith("parameter")) {

@@ -922,7 +922,7 @@ public class CloudTrailService {
 
     private Trail findTrail(String region, String nameOrArn) {
         // ARN → cross-region scan is valid (callers use ARN to target another Region)
-        if (nameOrArn != null && nameOrArn.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(nameOrArn)) {
             for (String k : store.keys()) {
                 CloudTrailEntry entry = store.get(k).orElse(null);
                 if (entry == null) continue;

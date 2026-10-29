@@ -1326,11 +1326,8 @@ public class ServiceCatalogService implements PassedRoleLookup {
         ObjectNode instance = objectMapper.createObjectNode();
         instance.put("Account", text(product, "PhysicalId"));
         String arn = text(product, "Arn");
-        if (arn != null) {
-            String[] parts = arn.split(":");
-            if (parts.length >= 4) {
-                instance.put("Region", parts[3]);
-            }
+        if (AwsArnUtils.isArn(arn)) {
+            instance.put("Region", AwsArnUtils.parse(arn).region());
         }
         instance.put("StackInstanceStatus", "CURRENT");
         return List.of(instance);
