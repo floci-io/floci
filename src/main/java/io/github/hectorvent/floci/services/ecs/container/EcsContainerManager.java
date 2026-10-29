@@ -271,6 +271,9 @@ public class EcsContainerManager {
 
         List<ContainerDefinition> launchOrder = orderForDependencies(
                 launchOrder(taskDef.getContainerDefinitions(), firelensRouter), firelensRouter);
+        String platform = taskDef.getRuntimePlatform() != null
+                ? taskDef.getRuntimePlatform().dockerPlatform()
+                : null;
 
         // Task-level volumes consumed by per-container mountPoints: host volumes map their
         // name -> absolute host source path; efsVolumeConfiguration volumes map their
@@ -326,7 +329,7 @@ public class EcsContainerManager {
             // tag again cannot swap the image under this task's reported digest.
             for (ContainerDefinition def : launchOrder) {
                 LaunchImage launchImage = lifecycleManager.resolveImageForLaunch(imagesByContainer.get(def),
-                        config.services().ecs().imagePullBehavior());
+                        config.services().ecs().imagePullBehavior(), platform);
                 imagesByContainer.put(def, launchImage.imageId());
                 if (launchImage.manifestDigest() != null) {
                     imageDigestsByContainer.put(def.getName(), launchImage.manifestDigest());
@@ -557,7 +560,7 @@ public class EcsContainerManager {
 
                 String dockerId;
                 if (def == firelensRouter) {
-                    dockerId = lifecycleManager.create(spec);
+                    dockerId = lifecycleManager.create(spec, platform);
                     try {
                         copyFirelensConfig(dockerId, firelensConfig, isFluentdRouter(firelensRouter),
                                 firelensExternalConfig, firelensBackoffMillis);
@@ -568,7 +571,7 @@ public class EcsContainerManager {
                     }
                     fluentHost = inspectContainerIp(dockerId);
                 } else {
-                    ContainerInfo info = lifecycleManager.createAndStartEphemeral(spec);
+                    ContainerInfo info = lifecycleManager.createAndStartEphemeral(spec, platform);
                     dockerId = info.containerId();
                 }
 

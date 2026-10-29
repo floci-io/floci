@@ -137,9 +137,29 @@ public class ContainerLifecycleManager {
         return createAndStart(spec, true);
     }
 
+    /**
+     * Starts a disposable container for a specific Docker platform, reclaiming its anonymous
+     * volumes if startup fails.
+     *
+     * @param platform Docker platform, such as {@code linux/amd64}, or null for the daemon's own
+     */
+    public ContainerInfo createAndStartEphemeral(ContainerSpec spec, String platform) {
+        return createAndStart(spec, platform, true);
+    }
+
     private ContainerInfo createAndStart(ContainerSpec spec, boolean removeAnonymousVolumes) {
         String resolvedImage = imageCacheService.ensureImageExists(spec.image());
-        String containerId = create(spec, resolvedImage, null, removeAnonymousVolumes);
+        return createAndStart(spec, resolvedImage, null, removeAnonymousVolumes);
+    }
+
+    private ContainerInfo createAndStart(ContainerSpec spec, String platform, boolean removeAnonymousVolumes) {
+        String resolvedImage = imageCacheService.ensureImageExists(spec.image(), platform);
+        return createAndStart(spec, resolvedImage, platform, removeAnonymousVolumes);
+    }
+
+    private ContainerInfo createAndStart(ContainerSpec spec, String resolvedImage, String platform,
+                                         boolean removeAnonymousVolumes) {
+        String containerId = create(spec, resolvedImage, platform, removeAnonymousVolumes);
         try {
             return withPublishedHostPorts(startCreated(containerId, spec), spec);
         } catch (RuntimeException failure) {
@@ -164,9 +184,12 @@ public class ContainerLifecycleManager {
      * Resolves the image a container launch is about to run, pulling it as the ECS agent does
      * under {@code behavior}. A spec built from the returned image id runs exactly that image,
      * whatever a later pull of the same reference moves its tag to.
+     *
+     * @param platform the Docker platform the container runs, such as {@code linux/amd64}, or null
+     *        for the daemon's own
      */
-    public LaunchImage resolveImageForLaunch(String image, ImagePullBehavior behavior) {
-        return imageCacheService.resolveForLaunch(image, behavior);
+    public LaunchImage resolveImageForLaunch(String image, ImagePullBehavior behavior, String platform) {
+        return imageCacheService.resolveForLaunch(image, behavior, platform);
     }
 
     /**
