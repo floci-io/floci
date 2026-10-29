@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebResponses;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebService;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
@@ -219,6 +220,8 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("FunctionArn", endpoint.functionArn);
         r.getAttributes().put("EndpointArn", endpoint.endpointArn);
         r.getAttributes().put("DomainName", endpoint.domainName);
+        r.getAttributes().put("RegionalEndpoints", upperKeys(MAPPER.valueToTree(
+                LambdaWebResponses.regionalEndpoints(endpoint)), false).toString());
         r.getAttributes().put("State", "Active");
         r.getAttributes().put("StateReason", "The endpoint is active and invokable.");
         if (endpoint.updateStatus != null) {
@@ -342,6 +345,35 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
             out.set(key, "EnvironmentVariables".equals(entry.getKey()) ? value : lowerKeys(value));
         });
         return out;
+    }
+
+    @Override
+    public JsonNode attributeValue(String resourceType, String attributeName, String value) {
+        if (ENDPOINT.equals(resourceType) && "RegionalEndpoints".equals(attributeName)) {
+            try {
+                return MAPPER.readTree(value);
+            } catch (JsonProcessingException e) {
+                throw new IllegalStateException("Invalid stored web function endpoint attribute " + attributeName, e);
+            }
+        }
+        return CfnResourceProvisioner.super.attributeValue(resourceType, attributeName, value);
+    }
+
+    /** The API's members in PascalCase. The region names that key RegionalEndpoints stay as they are. */
+    private static JsonNode upperKeys(JsonNode node, boolean member) {
+        if (node.isObject()) {
+            ObjectNode out = MAPPER.createObjectNode();
+            node.properties().forEach(entry -> out.set(member
+                    ? Character.toUpperCase(entry.getKey().charAt(0)) + entry.getKey().substring(1)
+                    : entry.getKey(), upperKeys(entry.getValue(), true)));
+            return out;
+        }
+        if (node.isArray()) {
+            ArrayNode out = MAPPER.createArrayNode();
+            node.forEach(item -> out.add(upperKeys(item, true)));
+            return out;
+        }
+        return node;
     }
 
     private static JsonNode lowerKeys(JsonNode node) {

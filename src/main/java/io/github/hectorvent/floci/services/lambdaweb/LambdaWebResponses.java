@@ -13,7 +13,7 @@ import java.util.Map;
 import java.util.TreeMap;
 
 /** The wire shapes of Lambda Web responses. AWS emits members in alphabetical order with microsecond timestamps. */
-final class LambdaWebResponses {
+public final class LambdaWebResponses {
 
     private static final DateTimeFormatter TIMESTAMP =
             DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss.SSSSSS'Z'").withZone(ZoneOffset.UTC);
@@ -123,6 +123,17 @@ final class LambdaWebResponses {
     static Map<String, Object> endpoint(WebFunctionEndpoint endpoint, WebFunctionEndpoint regionalSource, View view) {
         Map<String, Object> out = endpointSummary(endpoint, view);
         out.put("functionArn", endpoint.functionArn);
+        out.put("regionalEndpoints", regionalEndpoints(endpoint, regionalSource, view));
+        return out;
+    }
+
+    /** The per-region block of a stored endpoint, which CloudFormation's RegionalEndpoints gives too. */
+    public static Map<String, Object> regionalEndpoints(WebFunctionEndpoint endpoint) {
+        return regionalEndpoints(endpoint, endpoint, View.STORED);
+    }
+
+    private static Map<String, Object> regionalEndpoints(WebFunctionEndpoint endpoint, WebFunctionEndpoint regionalSource,
+                                                         View view) {
         Map<String, Object> regional = node();
         for (String region : endpoint.regions) {
             Map<String, Object> entry = node();
@@ -136,8 +147,7 @@ final class LambdaWebResponses {
             putEndpointState(entry, regionalSource, view, true);
             regional.put(region, entry);
         }
-        out.put("regionalEndpoints", regional);
-        return out;
+        return regional;
     }
 
     private static void putConfigs(Map<String, Object> out, WebFunctionEndpoint endpoint) {

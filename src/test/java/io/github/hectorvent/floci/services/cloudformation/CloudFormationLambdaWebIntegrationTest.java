@@ -144,6 +144,24 @@ class CloudFormationLambdaWebIntegrationTest {
                 .then().statusCode(404));
     }
 
+    @Test
+    void regionalEndpointsIsAnObjectThatAnOutputCannotHold() {
+        LambdaWebRoles.trustLambda(iamService, "arn:aws:iam::000000000000:role/cfn-web");
+        LambdaWebCodeBuckets.create(s3Service, BUCKET);
+        s3Service.putObject(BUCKET, "app.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of());
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String functionName = "cfn-web-regional-" + suffix;
+        String stackName = "cfn-web-regional-stack-" + suffix;
+        String state = "\"EpState\": {\"Value\": {\"Fn::GetAtt\": [\"Ep\", \"State\"]}}";
+
+        cloudFormation(stackName, "CreateStack", template(functionName, 30).replace(state,
+                state + ", \"EpRegional\": {\"Value\": {\"Fn::GetAtt\": [\"Ep\", \"RegionalEndpoints\"]}}"));
+        await().untilAsserted(() -> describeStacks(stackName, "ROLLBACK_COMPLETE"));
+        stackEvents(stackName).body(containsString("Template format error: Every Value member must be a string."));
+        given().when().get("/2025-03-07/web-functions/" + functionName).then().statusCode(404);
+        cloudFormation(stackName, "DeleteStack", null);
+    }
+
     private static ValidatableResponse stackEvents(String stackName) {
         return given()
             .contentType("application/x-www-form-urlencoded")
