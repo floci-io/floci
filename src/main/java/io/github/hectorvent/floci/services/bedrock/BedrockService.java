@@ -333,7 +333,7 @@ public class BedrockService implements ResourceProvider {
             return null;
         }
         String value = identifier.asText();
-        String profileId = value.startsWith("arn:")
+        String profileId = AwsArnUtils.looksLikeArn(value)
                 ? value.substring(value.lastIndexOf('/') + 1)
                 : value;
         ObjectNode details = objectMapper.createObjectNode();
@@ -413,7 +413,7 @@ public class BedrockService implements ResourceProvider {
         }
         String guardrailId = resolveGuardrailId(resourceArn);
         return guardrails.get(storageKey(region, guardrailId, DRAFT_VERSION))
-                .filter(guardrail -> !resourceArn.startsWith("arn:") || resourceArn.equals(guardrail.getGuardrailArn()))
+                .filter(guardrail -> !AwsArnUtils.looksLikeArn(resourceArn) || resourceArn.equals(guardrail.getGuardrailArn()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Resource " + resourceArn + " does not exist.", 404));
     }
@@ -422,7 +422,7 @@ public class BedrockService implements ResourceProvider {
         if (identifier == null || identifier.isBlank()) {
             throw new AwsException("ValidationException", "guardrailIdentifier is required", 400);
         }
-        if (!identifier.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(identifier)) {
             return identifier;
         }
         String resource;

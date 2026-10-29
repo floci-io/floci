@@ -547,11 +547,11 @@ public class SageMakerService {
 
     /** ARN shape: {@code arn:aws:sagemaker:<region>:<account>:<type>/<name>}. */
     private static String arnRegion(String arn) {
-        String[] parts = arn.split(":", 6);
-        if (parts.length < 4 || parts[3].isBlank()) {
+        String region = AwsArnUtils.regionOrDefault(arn, "");
+        if (region.isBlank()) {
             throw validation("ResourceArn is invalid");
         }
-        return parts[3];
+        return region;
     }
 
     private static String regionKey(String region, String name) {
