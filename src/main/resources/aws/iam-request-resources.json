@@ -336,7 +336,7 @@
     "cur:DeleteReportDefinition": {"action": "cur:DeleteReportDefinition", "types": ["cur"], "resources": [{"type": "cur", "fill": {"ReportName": "ReportName"}}]},
     "cur:DescribeReportDefinitions": {"action": "cur:DescribeReportDefinitions", "types": [], "resources": []},
     "cur:ListTagsForResource": {"action": "cur:ListTagsForResource", "types": ["cur"], "resources": [{"type": "cur", "fill": {"ReportName": "ReportName"}}]},
-    "cur:ModifyReportDefinition": {"action": "cur:ModifyReportDefinition", "types": ["cur"], "resources": [{"types": ["cur"], "arn": "ReportDefinition.BillingViewArn"}, {"type": "cur", "fill": {"ReportName": "ReportName"}}]},
+    "cur:ModifyReportDefinition": {"action": "cur:ModifyReportDefinition", "types": ["cur"], "resources": [{"type": "cur", "fill": {"ReportName": "ReportName"}}]},
     "cur:PutReportDefinition": {"action": "cur:PutReportDefinition", "types": ["cur"], "resources": [{"type": "cur", "fill": {"ReportName": "ReportDefinition.ReportName"}}]},
     "cur:TagResource": {"action": "cur:TagResource", "types": ["cur"], "resources": [{"type": "cur", "fill": {"ReportName": "ReportName"}}]},
     "cur:UntagResource": {"action": "cur:UntagResource", "types": ["cur"], "resources": [{"type": "cur", "fill": {"ReportName": "ReportName"}}]},

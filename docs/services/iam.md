@@ -1563,8 +1563,8 @@ namespace its `NamespaceId` names or, when it gives none or a JSON null, the one
 project, which its id names before its `:` (`<project>:<id>`), as CodeBuild authorizes
 `BatchGetBuilds`, `StopBuild`, `RetryBuild` and `BatchDeleteBuilds`. `CreateBudget` and `UpdateBudget`
 are checked on the budget their `Budget.BudgetName` or `NewBudget.BudgetName` names, and Cost and Usage
-Reports' `PutReportDefinition` on the report its `ReportDefinition.ReportName` names, not on the billing
-view ARN each may carry, which names no budget or report. An EventBridge rule is on the event bus
+Reports' `PutReportDefinition` and `ModifyReportDefinition` on the report their `ReportDefinition.ReportName`
+or `ReportName` names, not on the billing view ARN each may carry, which names no budget or report. An EventBridge rule is on the event bus
 its request's `EventBusName` names, by name or by ARN, and on the default bus when it names none
 or gives a null, whose rules are `rule/<name>`, with no bus; a bus ARN of another account, the
 default bus's included, names that account's rule, checked as given and as the caller's own, which

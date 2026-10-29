@@ -809,17 +809,23 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     /**
      * A Cost and Usage Report definition is checked on {@code definition/<name>}, a put on the one its
-     * {@code ReportDefinition.ReportName} names, not on one its billing view ARN gives.
+     * {@code ReportDefinition.ReportName} names and a modify on the one its {@code ReportName} names, neither on one
+     * its billing view ARN gives.
      */
     @Test
     void aReportDefinitionIsCheckedOnTheArnItsNameGives() {
         String name = "res-report-" + suffix();
         String arn = "arn:aws:cur:" + REGION + ":" + ACCOUNT + ":definition/" + name;
         User user = user("res-report");
-        user.policy(allowOn("cur:PutReportDefinition", arn) + "," + allowOn("cur:DeleteReportDefinition", arn));
+        user.policy(allowOn("cur:PutReportDefinition", arn) + "," + allowOn("cur:ModifyReportDefinition", arn) + ","
+                + allowOn("cur:DeleteReportDefinition", arn));
         refusedJson(cur(user, "PutReportDefinition", "{\"ReportDefinition\":" + reportDefinition(name + "-other", arn)
                 + "}"), "cur:PutReportDefinition");
         cur(user, "PutReportDefinition", "{\"ReportDefinition\":" + reportDefinition(name, null) + "}").statusCode(200);
+        cur(user, "ModifyReportDefinition", "{\"ReportName\":\"" + name + "\",\"ReportDefinition\":"
+                + reportDefinition(name, arn + "-other") + "}").statusCode(200);
+        refusedJson(cur(user, "ModifyReportDefinition", "{\"ReportName\":\"" + name + "-other\",\"ReportDefinition\":"
+                + reportDefinition(name + "-other", arn) + "}"), "cur:ModifyReportDefinition");
         cur(user, "DeleteReportDefinition", "{\"ReportName\":\"" + name + "\"}").statusCode(200);
     }
 

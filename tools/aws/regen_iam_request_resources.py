@@ -265,10 +265,12 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
                                   "its ':' (CODEBUILD_BUILD_ID, for example codebuild-demo-project:b1e6661e-...)")
        for operation, member in (("BatchDeleteBuilds", "ids[]"), ("BatchGetBuilds", "ids[]"), ("RetryBuild", "id"),
                                  ("StopBuild", "id"))},
-    "cur:PutReportDefinition": ([{"type": "cur", "fill": {"ReportName": "ReportDefinition.ReportName"}}],
-                                "the request names the report by ReportDefinition.ReportName ('The name of the report "
-                                "that you want to create'), which the rule does not read inside a structure; its "
-                                "BillingViewArn is a billing view's ARN, never a report definition's"),
+    **{f"cur:{operation}": ([{"type": "cur", "fill": {"ReportName": member}}],
+                            f"the request names the report by {member} ('The name of the report that you want to "
+                            "create') alone; its ReportDefinition's BillingViewArn, which the rule reads as a report "
+                            "definition's ARN, is a billing view's (arn:aws:billing::<payer account>:billingview/...)")
+       for operation, member in (("ModifyReportDefinition", "ReportName"),
+                                 ("PutReportDefinition", "ReportDefinition.ReportName"))},
     **{f"codepipeline:{operation}": ([{"type": "pipeline", "fill": {"PipelineName": "pipeline.name"}}],
                                      "the request names the pipeline by its pipeline structure's name, which the "
                                      "rule does not read inside a structure; its roleArn is the role CodePipeline "
