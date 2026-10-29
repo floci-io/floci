@@ -413,6 +413,19 @@ class EventBridgeInvokerTest {
     }
 
     @Test
+    void indexedPathsAreSharedByInputPathAndInputTransformer() {
+        String event = "{\"detail\":{\"items\":[{\"name\":\"first\"},{\"name\":\"second\"}]}}";
+        assertEquals("second", invoker.applyInputPath("$.detail.items[1].name", event));
+
+        InputTransformer transformer = new InputTransformer();
+        transformer.setInputPathsMap(Map.of("name", "$.detail.items[0].name"));
+        transformer.setInputTemplate("{\"name\":<name>}");
+        assertEquals("{\"name\":\"first\"}", invoker.applyInputTransformer(transformer, event));
+        assertTrue(invoker.extractNode("$.detail.items[2]", event).isMissingNode());
+        assertEquals("value", invoker.extractNode("$[0][0]", "[[\"value\"]]").asText());
+    }
+
+    @Test
     void applyInputPath_extractsNestedField() {
         String event = "{\"source\":\"aws.s3\",\"detail\":{\"bucket\":\"my-bucket\",\"key\":\"file.txt\"}}";
         String result = invoker.applyInputPath("$.detail", event);
