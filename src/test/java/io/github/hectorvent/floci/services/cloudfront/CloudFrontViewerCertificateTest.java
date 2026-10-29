@@ -148,6 +148,17 @@ class CloudFrontViewerCertificateTest {
     }
 
     @Test
+    void createDistributionRejectsAnIamCertificateArnAsAnAcmCertificate() {
+        ServerCertificate certificate = uploadCertificate("cf-cert-as-acm-" + suffix());
+
+        AwsException rejected = assertThrows(AwsException.class, () -> cloudFrontService.createDistribution(
+                distributionWithViewerCertificate("ACMCertificateArn", certificate.getArn()), Map.of()));
+
+        assertEquals("InvalidViewerCertificate", rejected.getErrorCode());
+        assertEquals(400, rejected.getHttpStatus());
+    }
+
+    @Test
     void anAcmCertificateIsHeldByTheDistributionUntilItIsGone() {
         String certificateArn = importAcmCertificate().getArn();
 

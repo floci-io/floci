@@ -314,16 +314,25 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                             + "or doesn't include a valid certificate chain.", 400);
         }
         String certificateArn = acmCertificateArn(config);
-        if (certificateArn != null && certificates != null
-                && !certificates.exists(arnRegion(certificateArn), certificateArn)) {
+        if (certificateArn != null && !isExistingAcmCertificate(certificateArn)) {
             throw new AwsException("InvalidViewerCertificate",
                     "The specified SSL certificate doesn't exist, isn't valid, "
                             + "or doesn't include a valid certificate chain.", 400);
         }
     }
 
-    private static String arnRegion(String arn) {
-        return AwsArnUtils.isArn(arn) ? AwsArnUtils.parse(arn).region() : "";
+    /**
+     * Only an ACM certificate: the resolver also answers for IAM server certificates, but one named
+     * here would never be held by {@link #serverCertificateReferences}, which reads
+     * {@code IAMCertificateId}.
+     */
+    private boolean isExistingAcmCertificate(String arn) {
+        if (!AwsArnUtils.isArn(arn)) {
+            return false;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return "acm".equals(parsed.service())
+                && (certificates == null || certificates.exists(parsed.region(), arn));
     }
 
     /**
