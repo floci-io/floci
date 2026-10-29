@@ -41,11 +41,11 @@ import java.util.function.Supplier;
  * <p>An action belongs to a namespace but lives in its own store, so deleting the namespace needs
  * no hook here. Each read checks that the namespace is still there and drops the action otherwise.
  *
- * <p>Execution is at most once per scheduled time. The sweep persists a claim on the time through a
- * failure-reporting write before it takes the snapshot, and a claimed time is never retried, even after a
- * failure or a restart. A process that stops between the claim and the snapshot therefore misses that
- * snapshot. After downtime only the latest due time is attempted, and nothing before an action was
- * created, scheduled again or enabled again is replayed. Memory storage forgets claims on restart.
+ * <p>The sweep records its checkpoint with a normal atomic write after attempting the snapshot.
+ * A crash before that write, or before a hybrid flush, can cause the time to be retried. Snapshot names
+ * derive from the scheduled time, so an existing snapshot prevents a duplicate on retry. After downtime
+ * only the latest due time is attempted, and nothing before an action was created, scheduled again or
+ * enabled again is replayed. Memory storage forgets actions on restart.
  *
  * <p>Lock order: the action's lock, then this service's monitor, then the Serverless service's. A
  * mutation and a sweep of the same action hold its lock, so neither sees the other half done; the
@@ -232,7 +232,7 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
             // A stored action from before scheduling existed starts counting now, without replaying history.
             ScheduledAction activated = new ScheduledAction(action);
             activated.setActivatedAt(now);
-            actions.putAllDurablyForAccount(accountId, Map.of(key, activated));
+            actions.putAllAtomicallyForAccount(accountId, Map.of(key, activated));
             return;
         }
         Instant checkpoint = action.getLastClaimedInvocation() != null
@@ -243,23 +243,14 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
             return;
         }
         Instant scheduled = due.get();
-        ScheduledAction claimed = new ScheduledAction(action);
-        claimed.setLastClaimedInvocation(scheduled);
-        claimed.setLastFailure(null);
-        try {
-            // A claim that is not durable must not be followed by a snapshot: after a restart it would be taken again.
-            actions.putAllDurablyForAccount(accountId, Map.of(key, claimed));
-        } catch (RuntimeException e) {
-            LOG.warnv(e, "Scheduled action {0} in account {1} did not run at {2}: its claim could not be stored",
-                    action.getScheduledActionName(), accountId, scheduled);
-            return;
-        }
-        ScheduledAction outcome = new ScheduledAction(claimed);
+        ScheduledAction outcome = new ScheduledAction(action);
+        outcome.setLastClaimedInvocation(scheduled);
+        outcome.setLastFailure(null);
         try {
             takeSnapshot(action, accountId, region, scheduled);
             outcome.setLastCompletedInvocation(scheduled);
         } catch (RuntimeException e) {
-            LOG.warnv(e, "Scheduled action {0} in account {1} failed at {2} and is not retried",
+            LOG.warnv(e, "Scheduled action {0} in account {1} failed at {2}",
                     action.getScheduledActionName(), accountId, scheduled);
             outcome.setLastFailure(String.valueOf(e.getMessage()));
         }
@@ -277,15 +268,16 @@ public class RedshiftServerlessScheduledActionService implements Resettable {
                 action.getTargetNamespaceName(), action.getRetentionPeriod(), action.getSnapshotTags(), region);
     }
 
-    /** Keeps the claim; the outcome is stored only for the action that was run, not for a recreated one. */
+    /** Stores the checkpoint and outcome only for the action that was run, not for a recreated one. */
     private void recordOutcome(String accountId, String key, String uuid, ScheduledAction outcome) {
         try {
             ScheduledAction current = actions.getForAccount(accountId, key).orElse(null);
             if (current != null && Objects.equals(current.getScheduledActionUuid(), uuid)) {
                 ScheduledAction recorded = new ScheduledAction(current);
+                recorded.setLastClaimedInvocation(outcome.getLastClaimedInvocation());
                 recorded.setLastCompletedInvocation(outcome.getLastCompletedInvocation());
                 recorded.setLastFailure(outcome.getLastFailure());
-                actions.putAllDurablyForAccount(accountId, Map.of(key, recorded));
+                actions.putAllAtomicallyForAccount(accountId, Map.of(key, recorded));
             }
         } catch (RuntimeException e) {
             LOG.warnv(e, "The outcome of scheduled action {0} in account {1} could not be stored", key, accountId);

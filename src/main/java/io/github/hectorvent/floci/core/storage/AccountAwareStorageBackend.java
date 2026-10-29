@@ -95,18 +95,6 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     @Override
-    public void putAllDurably(Map<String, V> entries) {
-        putAllDurablyForAccount(prefix(), entries);
-    }
-
-    public void putAllDurablyForAccount(String accountId, Map<String, V> entries) {
-        Map<String, V> prefixedEntries = new LinkedHashMap<>();
-        entries.forEach((key, value) -> prefixedEntries.put(accountId + "/" + key, value));
-        delegate.putAllDurably(prefixedEntries);
-        trackOwner(accountId);
-    }
-
-    @Override
     public Optional<V> get(String key) {
         String prefixedKey = prefixed(key);
         Optional<V> result = delegate.get(prefixedKey);

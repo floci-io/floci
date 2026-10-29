@@ -46,7 +46,7 @@ class RedshiftServerlessScheduledActionServiceTest {
     private static final String NAMESPACE_ARN = "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID + ":namespace/ns-id";
     private static final Instant BASE_TIME = Instant.parse("2026-10-28T12:15:00Z");
 
-    private final AtomicBoolean failDurableWrites = new AtomicBoolean();
+    private final AtomicBoolean failCheckpointWrites = new AtomicBoolean();
     private AccountAwareStorageBackend<ScheduledAction> store;
     private StorageFactory storageFactory;
     private RedshiftServerlessService serverless;
@@ -63,11 +63,11 @@ class RedshiftServerlessScheduledActionServiceTest {
         clock = Clock.fixed(BASE_TIME, ZoneOffset.UTC);
         store = new AccountAwareStorageBackend<>(new InMemoryStorage<String, ScheduledAction>() {
             @Override
-            public synchronized void putAllDurably(Map<String, ScheduledAction> entries) {
-                if (failDurableWrites.get()) {
+            public synchronized void putAllAtomically(Map<String, ScheduledAction> entries) {
+                if (failCheckpointWrites.get()) {
                     throw new UncheckedIOException(new IOException("disk full"));
                 }
-                super.putAllDurably(entries);
+                super.putAllAtomically(entries);
             }
         }, null, ACCOUNT_ID);
         storageFactory = mock(StorageFactory.class);
@@ -225,13 +225,19 @@ class RedshiftServerlessScheduledActionServiceTest {
     }
 
     @Test
-    void failedClaimPreventsTheSnapshot() {
+    void failedCheckpointLeavesTheInvocationEligibleForRetry() {
         service.createScheduledAction(request("hourly"), REGION);
-        failDurableWrites.set(true);
+        failCheckpointWrites.set(true);
 
         service.runScheduledActions(later());
 
-        verify(serverless, never()).createSnapshot(anyString(), anyString(), any(), any(), anyString());
+        assertNull(store.getForAccount(ACCOUNT_ID, "us-east-1::hourly").orElseThrow().getLastClaimedInvocation());
+        failCheckpointWrites.set(false);
+        service.runScheduledActions(later().plusSeconds(60));
+
+        verify(serverless, times(2)).createSnapshot(eq(expectedName(later())), anyString(), any(), any(), eq(REGION));
+        assertEquals(later().truncatedTo(ChronoUnit.HOURS),
+                store.getForAccount(ACCOUNT_ID, "us-east-1::hourly").orElseThrow().getLastCompletedInvocation());
     }
 
     @Test
@@ -279,7 +285,7 @@ class RedshiftServerlessScheduledActionServiceTest {
         foreign.setEnabled(true);
         foreign.setRoleArn("arn:aws:iam::210987654321:role/scheduler");
         foreign.setActivatedAt(BASE_TIME);
-        store.putAllDurablyForAccount("210987654321", Map.of("us-east-1::foreign", foreign));
+        store.putAllAtomicallyForAccount("210987654321", Map.of("us-east-1::foreign", foreign));
         when(authorizer.refusal(anyString(), eq("210987654321"), anyString())).thenReturn(Optional.of("denied"));
 
         service.runScheduledActions(later());

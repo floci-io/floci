@@ -35,15 +35,6 @@ public interface StorageBackend<K, V> {
         throw new UnsupportedOperationException("Atomic batches are not supported by this backend");
     }
 
-    /**
-     * Publish replacement values as one batch only after they are durable, reporting a failed write by
-     * throwing before any entry is published. Persistent and WAL backends already commit atomic batches
-     * synchronously; memory has nothing to persist; hybrid overrides this to bypass its asynchronous flush.
-     */
-    default void putAllDurably(Map<K, V> entries) {
-        putAllAtomically(entries);
-    }
-
     Optional<V> get(K key);
 
     void delete(K key);
