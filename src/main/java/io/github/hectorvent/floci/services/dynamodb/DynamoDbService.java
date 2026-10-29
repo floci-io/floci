@@ -84,6 +84,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -126,6 +127,17 @@ public class DynamoDbService {
     // Items stored per table: storageKey -> Map<itemKey, item>
     // itemKey is "pk" or "pk#sk" depending on table schema
     private final ConcurrentHashMap<String, ConcurrentSkipListMap<String, JsonNode>> itemsByTable = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, SnapshotOrder> snapshotOrders = new ConcurrentHashMap<>();
+
+    private static final class SnapshotOrder {
+        private final ConcurrentSkipListMap<String, JsonNode> items;
+        private final AtomicLong taken = new AtomicLong();
+        private final AtomicLong stored = new AtomicLong();
+
+        private SnapshotOrder(ConcurrentSkipListMap<String, JsonNode> items) {
+            this.items = items;
+        }
+    }
 
     // Per-item locks: storageKey -> itemKey -> ReentrantLock. Locks are created lazily
     // on first access and cleared with the table (see deleteTable); transactWriteItems
@@ -339,6 +351,7 @@ public class DynamoDbService {
     /** Emulator reset: drops the in-process item cache, locks and idempotency tokens, and stream state. */
     public void clearProcessState() {
         itemsByTable.clear();
+        snapshotOrders.clear();
         itemLocks.clear();
         txIdempotency.clear();
         pointInTimeRecovery.clear();
@@ -410,12 +423,64 @@ public class DynamoDbService {
 
     private void persistItems(String storageKey) {
         if (itemStore == null) return;
-        ConcurrentSkipListMap<String, JsonNode> items = currentItems(storageKey, false);
-        if (items != null) {
-            itemStore.put(storageKey, new HashMap<>(items));
-        } else {
+        String scopedKey = scopedItemsKey(storageKey);
+        ConcurrentSkipListMap<String, JsonNode> items = itemsByTable.get(scopedKey);
+        if (items == null) {
             itemStore.delete(storageKey);
+            return;
         }
+        storeSnapshot(scopedKey, regionResolver.getAccountId(), storageKey, items,
+                snapshot -> itemStore.put(storageKey, snapshot));
+    }
+
+    // A copy numbered n holds every write finished before n was taken, so storing only higher numbers keeps them all.
+    private void storeSnapshot(String scopedKey, String accountId, String storageKey,
+                               ConcurrentSkipListMap<String, JsonNode> items, Consumer<Map<String, JsonNode>> store) {
+        if (itemStore == null) return;
+        SnapshotOrder order = snapshotOrder(scopedKey, items);
+        if (order == null) {
+            return;
+        }
+        long number = order.taken.incrementAndGet();
+        Map<String, JsonNode> snapshot = new HashMap<>(items);
+        itemsByTable.computeIfPresent(scopedKey, (key, live) -> {
+            if (live == items && number > order.stored.get() && tableExists(accountId, storageKey)) {
+                store.accept(snapshot);
+                order.stored.set(number);
+            }
+            return live;
+        });
+    }
+
+    private boolean tableExists(String accountId, String storageKey) {
+        return storedTable(accountId, storageKey).isPresent();
+    }
+
+    private Optional<TableDefinition> storedTable(String accountId, String storageKey) {
+        if (accountId != null && tableStore instanceof AccountAwareStorageBackend<TableDefinition> aware) {
+            return aware.getForAccount(accountId, storageKey);
+        }
+        return tableStore.get(storageKey);
+    }
+
+    /** Whether {@code table} is still the table stored under its name, not one deleted (and maybe recreated) since. */
+    private boolean isCurrentTable(String accountId, String storageKey, TableDefinition table) {
+        return storedTable(accountId, storageKey)
+                .filter(stored -> stored == table || stored.getTableId().equals(table.getTableId()))
+                .isPresent();
+    }
+
+    private SnapshotOrder snapshotOrder(String scopedKey, ConcurrentSkipListMap<String, JsonNode> items) {
+        SnapshotOrder order = snapshotOrders.get(scopedKey);
+        if (order == null || order.items != items) {
+            order = snapshotOrders.compute(scopedKey, (key, current) -> {
+                if (current != null && current.items == items) {
+                    return current;
+                }
+                return itemsByTable.get(key) == items ? new SnapshotOrder(items) : current;
+            });
+        }
+        return order != null && order.items == items ? order : null;
     }
 
     /**
@@ -1002,7 +1067,9 @@ public class DynamoDbService {
         table.setPointInTimeRecoveryEnabled(false);
         pointInTimeRecovery.drop(regionResolver.getAccountId(), storageKey);
         tableStore.delete(storageKey);
-        itemsByTable.remove(scopedItemsKey(storageKey));
+        ConcurrentSkipListMap<String, JsonNode> removedItems = itemsByTable.remove(scopedItemsKey(storageKey));
+        snapshotOrders.computeIfPresent(scopedItemsKey(storageKey),
+                (key, order) -> order.items == removedItems ? null : order);
         itemLocks.remove(scopedItemsKey(storageKey));
         if (itemStore != null) {
             itemStore.delete(storageKey);
@@ -1128,7 +1195,7 @@ public class DynamoDbService {
         validateIndexKeyTypes(table, normalizedItem, false);
 
         return withItemLock(storageKey, itemKey, () -> {
-            ConcurrentSkipListMap<String, JsonNode> tableItems = itemsFor(storageKey, stagedItems, true);
+            ConcurrentSkipListMap<String, JsonNode> tableItems = itemsForWrite(table, storageKey, stagedItems, true);
 
             JsonNode existing = tableItems.get(itemKey);
 
@@ -1151,12 +1218,13 @@ public class DynamoDbService {
             LOG.tracev("Put item in {0}: key={1} item={2}", canonicalTableName, itemKey, item);
 
             String eventName = existing == null ? "INSERT" : "MODIFY";
+            boolean unchanged = existing != null && sameItem(existing, normalizedItem);
             // Captured in request scope on purpose: this event may be deferred to the batch drain,
             // and resolving the account inside the lambda would fall back to the default account,
             // which is the ambient-account bug this commit exists to remove.
             String ownerAccountId = regionResolver.getAccountId();
             Runnable streamEvent = () -> {
-                if (streamService != null) {
+                if (streamService != null && !unchanged) {
                     streamService.captureEvent(eventName, existing, item, table, region);
                 }
                 if (kinesisForwarder != null) {
@@ -1247,7 +1315,7 @@ public class DynamoDbService {
         String itemKey = buildItemKey(table, key, true);
 
         return withItemLock(storageKey, itemKey, () -> {
-            ConcurrentSkipListMap<String, JsonNode> items = itemsFor(storageKey, stagedItems, false);
+            ConcurrentSkipListMap<String, JsonNode> items = itemsForWrite(table, storageKey, stagedItems, false);
             if (existingItemCheck != null) {
                 existingItemCheck.accept(items == null ? null : items.get(itemKey));
             }
@@ -1382,7 +1450,7 @@ public class DynamoDbService {
         String itemKey = buildItemKey(table, key, true);
 
         return withItemLock(storageKey, itemKey, () -> {
-            ConcurrentSkipListMap<String, JsonNode> items = itemsFor(storageKey, stagedItems, true);
+            ConcurrentSkipListMap<String, JsonNode> items = itemsForWrite(table, storageKey, stagedItems, true);
 
             // Get existing item or create new one from key
             JsonNode existing = items.get(itemKey);
@@ -1511,12 +1579,14 @@ public class DynamoDbService {
             // and resolving the account inside the lambda would fall back to the default account,
             // which is the ambient-account bug this commit exists to remove.
             String ownerAccountId = regionResolver.getAccountId();
+            String eventName = existing == null ? "INSERT" : "MODIFY";
+            boolean unchanged = existing != null && sameItem(existing, item);
             Runnable streamEvent = () -> {
-                if (streamService != null) {
-                    streamService.captureEvent("MODIFY", existing, item, table, region);
+                if (streamService != null && !unchanged) {
+                    streamService.captureEvent(eventName, existing, item, table, region);
                 }
                 if (kinesisForwarder != null) {
-                    kinesisForwarder.forward("MODIFY", existing, item, table, region, ownerAccountId);
+                    kinesisForwarder.forward(eventName, existing, item, table, region, ownerAccountId);
                 }
             };
             if (deferredStreamEvents != null) {
@@ -1604,50 +1674,42 @@ public class DynamoDbService {
         // order. Using only the first sort-key attribute would ignore the remaining components
         // (e.g. a "requestStateQuery RANGE, createdAt RANGE" index would never order by createdAt),
         // which in turn breaks ScanIndexForward=false. See floci-io/floci#1675.
+        // Items tied on the sort key stay in base item key order, the order they were read in.
+        String tablePkName = table.getPartitionKeyName();
+        String tableSkName = table.getSortKeyName();
+        List<String> finalSortKeyNames = sortKeyNames;
+        Comparator<JsonNode> keyOrder = ((Comparator<JsonNode>) (a, b) -> {
+            for (String name : finalSortKeyNames) {
+                JsonNode aAttr = a.get(name);
+                JsonNode bAttr = b.get(name);
+                int cmp;
+                if (aAttr == null && bAttr == null) cmp = 0;
+                else if (aAttr == null) cmp = -1;
+                else if (bAttr == null) cmp = 1;
+                else cmp = ExpressionEvaluator.compareAttributeValues(aAttr, bAttr);
+                if (cmp != 0) return cmp;
+            }
+            return 0;
+        }).thenComparing(item -> buildItemKeyFromNode(item, tablePkName, tableSkName));
+        boolean descending = !sortKeyNames.isEmpty() && Boolean.FALSE.equals(scanIndexForward);
         if (!sortKeyNames.isEmpty()) {
-            List<String> finalSortKeyNames = sortKeyNames;
             results = new ArrayList<>(results);
-            results.sort((a, b) -> {
-                for (String name : finalSortKeyNames) {
-                    JsonNode aAttr = a.get(name);
-                    JsonNode bAttr = b.get(name);
-                    int cmp;
-                    if (aAttr == null && bAttr == null) cmp = 0;
-                    else if (aAttr == null) cmp = -1;
-                    else if (bAttr == null) cmp = 1;
-                    else cmp = ExpressionEvaluator.compareAttributeValues(aAttr, bAttr);
-                    if (cmp != 0) return cmp;
-                }
-                return 0;
-            });
-            if (Boolean.FALSE.equals(scanIndexForward)) {
+            results.sort(keyOrder);
+            if (descending) {
                 Collections.reverse(results);
             }
         }
 
-        // Apply ExclusiveStartKey offset
+        // ExclusiveStartKey is a position in key order: the item it names may have been
+        // deleted since the page that returned it, so the read resumes after where it sorts.
         if (exclusiveStartKey != null) {
-            String tablePkName = table.getPartitionKeyName();
-            String tableSkName = table.getSortKeyName();
-            boolean hasTableKeys = exclusiveStartKey.has(tablePkName);
-
-            String startItemKey = hasTableKeys
-                    ? buildItemKeyFromNode(exclusiveStartKey, tablePkName, tableSkName)
-                    : buildItemKeyFromNode(exclusiveStartKey, pkName, sortKeyNames);
-
-            int startIdx = -1;
-            for (int i = 0; i < results.size(); i++) {
-                String thisKey = hasTableKeys
-                        ? buildItemKeyFromNode(results.get(i), tablePkName, tableSkName)
-                        : buildItemKeyFromNode(results.get(i), pkName, sortKeyNames);
-                if (thisKey.equals(startItemKey)) {
-                    startIdx = i;
-                    break;
-                }
+            int direction = descending ? -1 : 1;
+            int startIdx = 0;
+            while (startIdx < results.size()
+                    && direction * keyOrder.compare(results.get(startIdx), exclusiveStartKey) <= 0) {
+                startIdx++;
             }
-            if (startIdx >= 0) {
-                results = new ArrayList<>(results.subList(startIdx + 1, results.size()));
-            }
+            results = new ArrayList<>(results.subList(startIdx, results.size()));
         }
 
         List<JsonNode> evaluatedItems = results;
@@ -2107,11 +2169,17 @@ public class DynamoDbService {
             Map<String, DynamoDbWriteCapacity.Cost> replayCapacity =
                     transactCapacity(transactItems, memberParticipants, oldImages, newImages, true);
 
+            // Every participant's table is checked before any is changed, so a transaction that a
+            // DeleteTable overtook fails whole instead of committing part of it.
+            Map<TransactParticipant, ConcurrentSkipListMap<String, JsonNode>> liveTables = new LinkedHashMap<>();
+            for (TransactParticipant participant : toAcquire.keySet()) {
+                liveTables.put(participant, itemsForWrite(participant.table(), participant.storageKey(), null, true));
+            }
             // Each participant remains protected by the locks acquired above. Only participant
             // entries are committed, so concurrent writes to other items are never overwritten.
-            for (TransactParticipant participant : toAcquire.keySet()) {
-                ConcurrentSkipListMap<String, JsonNode> live = itemsByTable.computeIfAbsent(
-                        scopedItemsKey(participant.storageKey()), ignored -> new ConcurrentSkipListMap<>());
+            for (Map.Entry<TransactParticipant, ConcurrentSkipListMap<String, JsonNode>> entry : liveTables.entrySet()) {
+                TransactParticipant participant = entry.getKey();
+                ConcurrentSkipListMap<String, JsonNode> live = entry.getValue();
                 ConcurrentSkipListMap<String, JsonNode> stagedTable = staged.get(participant.storageKey());
                 JsonNode value = stagedTable.get(participant.itemKey());
                 JsonNode before = live.get(participant.itemKey());
@@ -2177,7 +2245,7 @@ public class DynamoDbService {
         return byTable;
     }
 
-    private record TransactParticipant(String storageKey, String itemKey, String tableName) {}
+    private record TransactParticipant(String storageKey, String itemKey, String tableName, TableDefinition table) {}
 
     private static final Comparator<TransactParticipant> PARTICIPANT_ORDER =
             Comparator.comparing(TransactParticipant::storageKey)
@@ -2208,7 +2276,7 @@ public class DynamoDbService {
         String storageKey = regionKey(region, tableName);
         TableDefinition table = requireActiveTable(storageKey);
         String itemKey = buildItemKey(table, keyOrItem);
-        return new TransactParticipant(storageKey, itemKey, tableName);
+        return new TransactParticipant(storageKey, itemKey, tableName, table);
     }
 
     // AWS checks every member's key against the table schema, in order, before it looks for
@@ -2428,6 +2496,46 @@ public class DynamoDbService {
     }
 
     public TransactGetResult transactGetItems(List<JsonNode> transactItems, String region) {
+        // Holding every participant's item lock, taken in the order applyTransactWrite takes them,
+        // isolates the reads from a concurrent TransactWriteItems: they see all of it or none.
+        TreeMap<TransactParticipant, ReentrantLock> toAcquire = new TreeMap<>(PARTICIPANT_ORDER);
+        for (JsonNode transactItem : transactItems) {
+            TransactParticipant participant = resolveGetParticipant(transactItem, region);
+            if (participant != null) {
+                toAcquire.putIfAbsent(participant, lockFor(participant.storageKey(), participant.itemKey()));
+            }
+        }
+        List<ReentrantLock> acquired = new ArrayList<>(toAcquire.size());
+        try {
+            for (ReentrantLock lock : toAcquire.values()) {
+                lock.lock();
+                acquired.add(lock);
+            }
+            return readTransactGetItems(transactItems, region);
+        } finally {
+            for (int i = acquired.size() - 1; i >= 0; i--) {
+                acquired.get(i).unlock();
+            }
+        }
+    }
+
+    private TransactParticipant resolveGetParticipant(JsonNode transactItem, String region) {
+        JsonNode get = transactItem.get("Get");
+        if (get == null || get.get("Key") == null) {
+            return null;
+        }
+        try {
+            String tableName = canonicalTableName(region, get.path("TableName").asText());
+            String storageKey = regionKey(region, tableName);
+            TableDefinition table = requireActiveTable(storageKey);
+            return new TransactParticipant(storageKey, buildItemKey(table, get.get("Key"), true), tableName, table);
+        } catch (AwsException ignored) {
+            // The read of this member fails the same way and reports it there.
+            return null;
+        }
+    }
+
+    private TransactGetResult readTransactGetItems(List<JsonNode> transactItems, String region) {
         List<JsonNode> results = new ArrayList<>();
         Map<String, DynamoDbWriteCapacity.Cost> capacity = new LinkedHashMap<>();
         List<TransactionCanceledException.CancellationReason> cancelReasons = new ArrayList<>();
@@ -3192,14 +3300,10 @@ public class DynamoDbService {
             }
             if (deletedForTable > 0 && entryStore == null) {
                 // A DeleteTable during the loop detached this map; writing it back would revive its items.
-                // Persisting under the entry's lock holds off DeleteTable, which removes the entry before
-                // it deletes the stored items.
-                itemsByTable.computeIfPresent(scan.rawKey(), (key, live) -> {
-                    if (live == items) {
-                        persistItemsForAccount(scan.accountId(), scan.storageKey(), items);
-                    }
-                    return live;
-                });
+                // The copy is taken outside the entry lock and stored only while this map is still the
+                // live one and the table definition still exists.
+                storeSnapshot(scan.rawKey(), scan.accountId(), scan.storageKey(), items,
+                        snapshot -> persistItemsForAccount(scan.accountId(), scan.storageKey(), snapshot));
             }
             totalDeleted += deletedForTable;
         }
@@ -3209,12 +3313,12 @@ public class DynamoDbService {
     }
 
     /** Like {@link #persistItems}, but for callers with no ambient request account to rely on. */
-    private void persistItemsForAccount(String accountId, String storageKey, Map<String, JsonNode> items) {
+    private void persistItemsForAccount(String accountId, String storageKey, Map<String, JsonNode> snapshot) {
         if (itemStore == null) return;
         if (accountId != null && itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware) {
-            aware.putForAccount(accountId, storageKey, new HashMap<>(items));
+            aware.putForAccount(accountId, storageKey, snapshot);
         } else {
-            itemStore.put(storageKey, new HashMap<>(items));
+            itemStore.put(storageKey, snapshot);
         }
     }
 
@@ -4300,6 +4404,23 @@ public class DynamoDbService {
         return ExpressionEvaluator.attributeValuesEqual(a, b);
     }
 
+    // DynamoDB Streams writes no record for a PutItem or UpdateItem that leaves the item as it was.
+    // Numbers compare by value and sets by membership, so neither a rewritten number nor a
+    // reordered set counts as a change.
+    private static boolean sameItem(JsonNode a, JsonNode b) {
+        if (a.size() != b.size()) {
+            return false;
+        }
+        Iterator<Map.Entry<String, JsonNode>> fields = a.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            if (!ExpressionEvaluator.attributeValuesEqual(field.getValue(), b.get(field.getKey()))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /**
      * Returns true if the item has the given attribute with a non-null DynamoDB value.
      * An attribute is considered null if it is the DynamoDB NULL type ({@code {"NULL": true}}).
@@ -4397,6 +4518,30 @@ public class DynamoDbService {
         return create
                 ? itemsByTable.computeIfAbsent(scopedItemsKey(storageKey), k -> new ConcurrentSkipListMap<>())
                 : itemsByTable.get(scopedItemsKey(storageKey));
+    }
+
+    /**
+     * The live items a write to {@code table} changes. A table deleted and created again under the same
+     * name has its own items, so a write that looked up the earlier table fails as a write to a deleted
+     * table does instead of reaching them.
+     */
+    private ConcurrentSkipListMap<String, JsonNode> itemsForWrite(
+            TableDefinition table,
+            String storageKey,
+            Map<String, ConcurrentSkipListMap<String, JsonNode>> stagedItems,
+            boolean create) {
+        if (stagedItems != null) {
+            return itemsFor(storageKey, stagedItems, create);
+        }
+        String accountId = regionResolver.getAccountId();
+        // Checked inside the update so DeleteTable, which removes the definition and then the items,
+        // can only leave this write holding the deleted table's items, never a recreated table's.
+        return itemsByTable.compute(scopedItemsKey(storageKey), (key, live) -> {
+            if (!isCurrentTable(accountId, storageKey, table)) {
+                throw itemCallResourceNotFound();
+            }
+            return live == null && create ? new ConcurrentSkipListMap<>() : live;
+        });
     }
 
     private ReentrantLock lockFor(String storageKey, String itemKey) {

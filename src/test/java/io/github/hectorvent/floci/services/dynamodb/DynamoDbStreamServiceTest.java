@@ -11,10 +11,13 @@ import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -128,7 +131,7 @@ class DynamoDbStreamServiceTest {
         String iterator = service.getShardIterator(
                 table.getStreamArn(), DynamoDbStreamService.SHARD_ID, "AT_SEQUENCE_NUMBER", "000000000000000000001");
 
-        for (int i = 0; i < DynamoDbStreamService.MAX_RECORDS; i++) {
+        for (int i = 0; i < DynamoDbStreamService.DEFAULT_MAX_RECORDS; i++) {
             service.captureEvent("INSERT", null, item, table, "us-east-1");
         }
 
@@ -151,7 +154,7 @@ class DynamoDbStreamServiceTest {
         String iterator = service.getShardIterator(
                 stream.getStreamArn(), DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
 
-        for (int i = 0; i <= DynamoDbStreamService.MAX_RECORDS; i++) {
+        for (int i = 0; i <= DynamoDbStreamService.DEFAULT_MAX_RECORDS; i++) {
             service.captureEvent("INSERT", null, item, table, "us-east-1");
         }
 
@@ -174,7 +177,7 @@ class DynamoDbStreamServiceTest {
         String iterator = service.getShardIterator(
                 stream.getStreamArn(), DynamoDbStreamService.SHARD_ID, "LATEST", null);
 
-        for (int i = 0; i <= DynamoDbStreamService.MAX_RECORDS; i++) {
+        for (int i = 0; i <= DynamoDbStreamService.DEFAULT_MAX_RECORDS; i++) {
             service.captureEvent("INSERT", null, item, table, "us-east-1");
         }
 
@@ -197,7 +200,7 @@ class DynamoDbStreamServiceTest {
         String iterator = service.getShardIterator(
                 stream.getStreamArn(), DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
 
-        for (int i = 0; i < DynamoDbStreamService.MAX_RECORDS; i++) {
+        for (int i = 0; i < DynamoDbStreamService.DEFAULT_MAX_RECORDS; i++) {
             service.captureEvent("INSERT", null, item, table, "us-east-1");
         }
 
@@ -243,7 +246,7 @@ class DynamoDbStreamServiceTest {
                 table.getStreamArn(), DynamoDbStreamService.SHARD_ID,
                 "AT_SEQUENCE_NUMBER", "000000000000000000002");
 
-        for (int i = 3; i <= DynamoDbStreamService.MAX_RECORDS + 1; i++) {
+        for (int i = 3; i <= DynamoDbStreamService.DEFAULT_MAX_RECORDS + 1; i++) {
             service.captureEvent("EVENT_" + i, null, item, table, "us-east-1");
         }
 
@@ -420,6 +423,86 @@ class DynamoDbStreamServiceTest {
         DynamoDbStreamRecord record = onlyRecordIn(stream.getStreamArn());
         assertEquals("REMOVE", record.getEventName());
         assertFalse(record.isTtlDeletion());
+    }
+
+    @Test
+    void aConfiguredCapRetainsThatManyRecordsFromTheTrimHorizon() throws Exception {
+        DynamoDbStreamService capped = new DynamoDbStreamService(mapper, storage, 1500);
+        TableDefinition table = sharedNameTable(ACCOUNT_A);
+        StreamDescription stream = capped.enableStream(SHARED_TABLE, table.getTableArn(), "KEYS_ONLY", "us-east-1");
+        JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
+
+        for (int i = 0; i < 1500; i++) {
+            capped.captureEvent("INSERT", null, item, table, "us-east-1");
+        }
+
+        String iterator = capped.getShardIterator(
+                stream.getStreamArn(), DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
+        List<DynamoDbStreamRecord> records = capped.getRecords(iterator, 1500).records();
+        assertEquals(1500, records.size());
+        assertEquals("000000000000000000001", records.get(0).getSequenceNumber());
+    }
+
+    @Test
+    void aConfiguredCapKeepsAnEmptyStreamIteratorValidUntilItIsExceeded() throws Exception {
+        DynamoDbStreamService capped = new DynamoDbStreamService(mapper, storage, 1500);
+        TableDefinition table = sharedNameTable(ACCOUNT_A);
+        StreamDescription stream = capped.enableStream(SHARED_TABLE, table.getTableArn(), "KEYS_ONLY", "us-east-1");
+        JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
+        String iterator = capped.getShardIterator(
+                stream.getStreamArn(), DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
+
+        for (int i = 0; i < 1500; i++) {
+            capped.captureEvent("INSERT", null, item, table, "us-east-1");
+        }
+
+        List<DynamoDbStreamRecord> records = capped.getRecords(iterator, 1).records();
+        assertEquals("000000000000000000001", records.get(0).getSequenceNumber());
+    }
+
+    @Test
+    void rejectsAStreamsMaxRecordsBelowOne() {
+        for (int maxRecords : new int[]{0, -1}) {
+            IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
+                    () -> new DynamoDbStreamService(mapper, storage, maxRecords));
+            assertEquals("floci.services.dynamodb.streams-max-records must be at least 1, got " + maxRecords,
+                    error.getMessage());
+        }
+    }
+
+    @Test
+    void trimmingRecordsNoConsumerHasReadLogsAWarningWithTheCount() throws Exception {
+        DynamoDbStreamService capped = new DynamoDbStreamService(mapper, storage, 3);
+        TableDefinition table = sharedNameTable(ACCOUNT_A);
+        StreamDescription stream = capped.enableStream(SHARED_TABLE, table.getTableArn(), "KEYS_ONLY", "us-east-1");
+        JsonNode item = mapper.readTree("{\"userId\":{\"S\":\"u1\"}}");
+        for (int i = 0; i < 3; i++) {
+            capped.captureEvent("INSERT", null, item, table, "us-east-1");
+        }
+        String iterator = capped.getShardIterator(
+                stream.getStreamArn(), DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
+        assertEquals(3, capped.getRecords(iterator, 10).records().size());
+
+        List<LogRecord> readTrimmed = LogCapture.capture(DynamoDbStreamService.class, () -> {
+            for (int i = 0; i < 3; i++) {
+                capped.captureEvent("INSERT", null, item, table, "us-east-1");
+            }
+        });
+        List<LogRecord> unreadTrimmed = LogCapture.capture(DynamoDbStreamService.class,
+                () -> capped.captureEvent("INSERT", null, item, table, "us-east-1"));
+
+        assertTrue(warnings(readTrimmed).isEmpty(), "trimming records a consumer already read is not worth a warning");
+        List<LogRecord> warnings = warnings(unreadTrimmed);
+        assertEquals(1, warnings.size());
+        assertEquals(stream.getStreamArn(), warnings.get(0).getParameters()[0]);
+        assertEquals(1L, warnings.get(0).getParameters()[1]);
+        assertEquals(3, warnings.get(0).getParameters()[2]);
+    }
+
+    private static List<LogRecord> warnings(List<LogRecord> records) {
+        return records.stream()
+                .filter(record -> record.getLevel().intValue() >= Level.WARNING.intValue())
+                .toList();
     }
 
     private DynamoDbStreamRecord onlyRecordIn(String streamArn) {

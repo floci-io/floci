@@ -1831,6 +1831,94 @@ class NativeDynamoDbJsonHandlerTest {
                 + "Attributes in the item have nested levels beyond supported limit", ex.getMessage());
     }
 
+    private void createOrdersTable(String region) {
+        service.createTable("Orders",
+                List.of(new KeySchemaElement("orderId", "HASH")),
+                List.of(new AttributeDefinition("orderId", "S")),
+                5L, 5L, region);
+    }
+
+    private ArrayNode putRequests(String keyName, String prefix, int count) {
+        ArrayNode writes = mapper.createArrayNode();
+        for (int i = 0; i < count; i++) {
+            ObjectNode putRequest = mapper.createObjectNode();
+            putRequest.set("PutRequest", mapper.createObjectNode().set("Item", item(keyName, prefix + i)));
+            writes.add(putRequest);
+        }
+        return writes;
+    }
+
+    private ObjectNode keysRequest(String keyName, String prefix, int count) {
+        ArrayNode keys = mapper.createArrayNode();
+        for (int i = 0; i < count; i++) {
+            keys.add(item(keyName, prefix + i));
+        }
+        return mapper.createObjectNode().set("Keys", keys);
+    }
+
+    @Test
+    void batchWriteItemRejectsMoreThan25RequestsAcrossTables() {
+        createUsersTable("eu-west-1");
+        createOrdersTable("eu-west-1");
+        ObjectNode requestItems = mapper.createObjectNode();
+        requestItems.set("Users", putRequests("userId", "u", 13));
+        requestItems.set("Orders", putRequests("orderId", "o", 13));
+        ObjectNode request = mapper.createObjectNode();
+        request.set("RequestItems", requestItems);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("BatchWriteItem", request, "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Too many items requested for the BatchWriteItem call", ex.getMessage());
+        assertNull(service.getItem("Users", item("userId", "u0"), "eu-west-1"));
+        assertNull(service.getItem("Orders", item("orderId", "o0"), "eu-west-1"));
+    }
+
+    @Test
+    void batchWriteItemAccepts25RequestsAcrossTables() throws Exception {
+        createUsersTable("eu-west-1");
+        createOrdersTable("eu-west-1");
+        ObjectNode requestItems = mapper.createObjectNode();
+        requestItems.set("Users", putRequests("userId", "u", 13));
+        requestItems.set("Orders", putRequests("orderId", "o", 12));
+        ObjectNode request = mapper.createObjectNode();
+        request.set("RequestItems", requestItems);
+
+        assertEquals(200, handler.handle("BatchWriteItem", request, "eu-west-1").getStatus());
+        assertNotNull(service.getItem("Orders", item("orderId", "o11"), "eu-west-1"));
+    }
+
+    @Test
+    void batchGetItemRejectsMoreThan100KeysAcrossTables() {
+        createUsersTable("eu-west-1");
+        createOrdersTable("eu-west-1");
+        ObjectNode requestItems = mapper.createObjectNode();
+        requestItems.set("Users", keysRequest("userId", "u", 51));
+        requestItems.set("Orders", keysRequest("orderId", "o", 51));
+        ObjectNode request = mapper.createObjectNode();
+        request.set("RequestItems", requestItems);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("BatchGetItem", request, "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Too many items requested for the BatchGetItem call", ex.getMessage());
+    }
+
+    @Test
+    void batchGetItemAccepts100KeysAcrossTables() throws Exception {
+        createUsersTable("eu-west-1");
+        createOrdersTable("eu-west-1");
+        ObjectNode requestItems = mapper.createObjectNode();
+        requestItems.set("Users", keysRequest("userId", "u", 50));
+        requestItems.set("Orders", keysRequest("orderId", "o", 50));
+        ObjectNode request = mapper.createObjectNode();
+        request.set("RequestItems", requestItems);
+
+        assertEquals(200, handler.handle("BatchGetItem", request, "eu-west-1").getStatus());
+    }
+
     @Test
     void batchWriteItemRejectsAPutItemWithALeafAtLevel33BeforeTheTableLookup() {
         ObjectNode item = item("userId", "u1");

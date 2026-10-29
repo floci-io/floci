@@ -180,6 +180,136 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void updateItemThatCreatesTheItemEmitsInsertToStreamAndKinesis() throws Exception {
+        String region = "eu-west-1";
+        DynamoDbStreamService stream = mock(DynamoDbStreamService.class);
+        KinesisStreamingForwarder kinesis = mock(KinesisStreamingForwarder.class);
+        service = new DynamoDbService(new InMemoryStorage<>(), null,
+                new RegionResolver(region, "000000000000"), stream, kinesis);
+        createUsersTable(region);
+
+        service.updateItem("Users", item("userId", "new"), null, "SET #name = :name",
+                mapper.readTree("{\"#name\":\"name\"}"), mapper.readTree("{\":name\":{\"S\":\"created\"}}"),
+                "NONE", region);
+
+        verify(stream).captureEvent(eq("INSERT"), isNull(), any(), any(), eq(region));
+        verify(kinesis).forward(eq("INSERT"), isNull(), any(), any(), eq(region), eq("000000000000"));
+        verify(stream, never()).captureEvent(eq("MODIFY"), any(), any(), any(), any());
+    }
+
+    @Test
+    void updateItemOnAnExistingItemEmitsModifyToStreamAndKinesis() throws Exception {
+        String region = "eu-west-1";
+        DynamoDbStreamService stream = mock(DynamoDbStreamService.class);
+        KinesisStreamingForwarder kinesis = mock(KinesisStreamingForwarder.class);
+        service = new DynamoDbService(new InMemoryStorage<>(), null,
+                new RegionResolver(region, "000000000000"), stream, kinesis);
+        createUsersTable(region);
+        service.putItem("Users", item("userId", "u1", "name", "before"), region);
+
+        service.updateItem("Users", item("userId", "u1"), null, "SET #name = :name",
+                mapper.readTree("{\"#name\":\"name\"}"), mapper.readTree("{\":name\":{\"S\":\"after\"}}"),
+                "NONE", region);
+
+        verify(stream).captureEvent(eq("MODIFY"), any(), any(), any(), eq(region));
+        verify(kinesis).forward(eq("MODIFY"), any(), any(), any(), eq(region), eq("000000000000"));
+    }
+
+    @Test
+    void transactUpdateThatCreatesTheItemEmitsInsertToStreamAndKinesis() throws Exception {
+        String region = "eu-west-1";
+        DynamoDbStreamService stream = mock(DynamoDbStreamService.class);
+        KinesisStreamingForwarder kinesis = mock(KinesisStreamingForwarder.class);
+        service = new DynamoDbService(new InMemoryStorage<>(), null,
+                new RegionResolver(region, "000000000000"), stream, kinesis);
+        createUsersTable(region);
+        JsonNode update = mapper.readTree("""
+                {"Update":{"TableName":"Users","Key":{"userId":{"S":"new"}},
+                  "UpdateExpression":"SET #name = :name",
+                  "ExpressionAttributeNames":{"#name":"name"},
+                  "ExpressionAttributeValues":{":name":{"S":"created"}}}}
+                """);
+
+        service.transactWriteItems(List.of(update), region);
+
+        verify(stream).captureEvent(eq("INSERT"), isNull(), any(), any(), eq(region));
+        verify(kinesis).forward(eq("INSERT"), isNull(), any(), any(), eq(region), eq("000000000000"));
+        verify(stream, never()).captureEvent(eq("MODIFY"), any(), any(), any(), any());
+    }
+
+    @Test
+    void putItemThatChangesNothingWritesNoStreamRecord() throws Exception {
+        String region = "eu-west-1";
+        DynamoDbStreamService stream = mock(DynamoDbStreamService.class);
+        KinesisStreamingForwarder kinesis = mock(KinesisStreamingForwarder.class);
+        service = new DynamoDbService(new InMemoryStorage<>(), null,
+                new RegionResolver(region, "000000000000"), stream, kinesis);
+        createUsersTable(region);
+
+        service.putItem("Users", item("userId", "u1", "name", "same"), region);
+        service.putItem("Users", item("userId", "u1", "name", "same"), region);
+
+        verify(stream, times(1)).captureEvent(any(), any(), any(), any(), eq(region));
+        verify(stream).captureEvent(eq("INSERT"), isNull(), any(), any(), eq(region));
+        verify(kinesis, times(2)).forward(any(), any(), any(), any(), eq(region), eq("000000000000"));
+    }
+
+    @Test
+    void putItemThatOnlyReordersASetOrRewritesANumberWritesNoStreamRecord() throws Exception {
+        String region = "eu-west-1";
+        DynamoDbStreamService stream = mock(DynamoDbStreamService.class);
+        service = new DynamoDbService(new InMemoryStorage<>(), null,
+                new RegionResolver(region, "000000000000"), stream, null);
+        createUsersTable(region);
+
+        service.putItem("Users", mapper.readTree("""
+                {"userId":{"S":"u1"},"tags":{"SS":["a","b"]},"scores":{"NS":["1","2.5"]},"n":{"N":"10"}}
+                """), region);
+        service.putItem("Users", mapper.readTree("""
+                {"userId":{"S":"u1"},"tags":{"SS":["b","a"]},"scores":{"NS":["2.50","1.0"]},"n":{"N":"1E1"}}
+                """), region);
+
+        verify(stream, times(1)).captureEvent(any(), any(), any(), any(), eq(region));
+    }
+
+    @Test
+    void putItemThatChangesAnAttributeStillWritesAStreamRecord() throws Exception {
+        String region = "eu-west-1";
+        DynamoDbStreamService stream = mock(DynamoDbStreamService.class);
+        service = new DynamoDbService(new InMemoryStorage<>(), null,
+                new RegionResolver(region, "000000000000"), stream, null);
+        createUsersTable(region);
+
+        service.putItem("Users", item("userId", "u1", "name", "before"), region);
+        service.putItem("Users", item("userId", "u1", "name", "after"), region);
+        service.putItem("Users", item("userId", "u1"), region);
+
+        verify(stream).captureEvent(eq("INSERT"), isNull(), any(), any(), eq(region));
+        verify(stream, times(2)).captureEvent(eq("MODIFY"), any(), any(), any(), eq(region));
+    }
+
+    @Test
+    void updateItemThatChangesNothingWritesNoStreamRecord() throws Exception {
+        String region = "eu-west-1";
+        DynamoDbStreamService stream = mock(DynamoDbStreamService.class);
+        KinesisStreamingForwarder kinesis = mock(KinesisStreamingForwarder.class);
+        service = new DynamoDbService(new InMemoryStorage<>(), null,
+                new RegionResolver(region, "000000000000"), stream, kinesis);
+        createUsersTable(region);
+        service.putItem("Users", item("userId", "u1", "name", "same"), region);
+
+        service.updateItem("Users", item("userId", "u1"), null, "SET #name = :name",
+                mapper.readTree("{\"#name\":\"name\"}"), mapper.readTree("{\":name\":{\"S\":\"same\"}}"),
+                "NONE", region);
+        service.updateItem("Users", item("userId", "u1"), null, "REMOVE absentAttr",
+                null, null, "NONE", region);
+
+        verify(stream, times(1)).captureEvent(any(), any(), any(), any(), eq(region));
+        verify(stream, never()).captureEvent(eq("MODIFY"), any(), any(), any(), any());
+        verify(kinesis, times(3)).forward(any(), any(), any(), any(), eq(region), eq("000000000000"));
+    }
+
+    @Test
     void validTransactWriteCommitsAllMutations() throws Exception {
         String region = "eu-west-1";
         createUsersTable(region);

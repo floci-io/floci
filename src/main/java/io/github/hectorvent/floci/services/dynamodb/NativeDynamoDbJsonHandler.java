@@ -1509,6 +1509,10 @@ public class NativeDynamoDbJsonHandler {
                         + "Member must have length greater than or equal to 1]");
             }
         }
+        if (items.values().stream().mapToInt(List::size).sum() > 25) {
+            throw new AwsException("ValidationException",
+                    "Too many items requested for the BatchWriteItem call", 400);
+        }
 
         for (Map.Entry<String, List<JsonNode>> entry : items.entrySet()) {
             TableDefinition bwTable = dynamoDbService.requireTableForItemCall(entry.getKey(), region);
@@ -1614,6 +1618,10 @@ public class NativeDynamoDbJsonHandler {
                         + ".member.Keys' failed to satisfy constraint: "
                         + "Member must have length less than or equal to 100");
             }
+        }
+        if (items.values().stream().mapToInt(tableRequest -> tableRequest.path("Keys").size()).sum() > 100) {
+            throw new AwsException("ValidationException",
+                    "Too many items requested for the BatchGetItem call", 400);
         }
 
         for (Map.Entry<String, JsonNode> entry : items.entrySet()) {

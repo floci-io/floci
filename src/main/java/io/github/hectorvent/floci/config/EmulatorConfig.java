@@ -1528,6 +1528,14 @@ public interface EmulatorConfig {
         @WithDefault("300")
         int latestRestorableLagSeconds();
 
+        /**
+         * Records each DynamoDB stream of the native backend keeps in memory. A write past it trims
+         * the oldest record. AWS keeps stream records for 24 hours rather than by count.
+         * Env: FLOCI_SERVICES_DYNAMODB_STREAMS_MAX_RECORDS
+         */
+        @WithDefault("1000")
+        int streamsMaxRecords();
+
         /** The engine behind the DynamoDB API: {@code native} or {@code local}. Env: FLOCI_SERVICES_DYNAMODB_BACKEND. */
         @WithDefault("native")
         String backend();

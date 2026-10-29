@@ -10,6 +10,9 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -544,6 +547,172 @@ class DynamoDbLimitBoundaryPaginationIntegrationTest {
         assertEquals(3, result.path("Count").asInt());
         assertTrue(result.path("LastEvaluatedKey").isMissingNode() || result.path("LastEvaluatedKey").isNull(),
                 "a Scan that exhausts the table below Limit must not carry a cursor: " + summary(result));
+    }
+
+    // --- A cursor whose item was deleted between pages: ExclusiveStartKey is a position in key
+    // order, not a reference to a stored item, so the next page starts after where that key
+    // would sort, never back at the first item.
+
+    private static final String DELETED_CURSOR_TABLE = "LimitBoundaryDeletedCursor";
+    private static final String RANK_INDEX = "rankIndex";
+
+    @Test
+    @Order(13)
+    void queryResumesAfterADeletedCursorItem() throws Exception {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "N"},
+                        {"AttributeName": "sk", "AttributeType": "N"},
+                        {"AttributeName": "category", "AttributeType": "S"},
+                        {"AttributeName": "rank", "AttributeType": "N"}
+                    ],
+                    "GlobalSecondaryIndexes": [
+                        {
+                            "IndexName": "%s",
+                            "KeySchema": [
+                                {"AttributeName": "category", "KeyType": "HASH"},
+                                {"AttributeName": "rank", "KeyType": "RANGE"}
+                            ],
+                            "Projection": {"ProjectionType": "ALL"}
+                        }
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(DELETED_CURSOR_TABLE, RANK_INDEX))
+        .when().post("/")
+        .then().statusCode(200);
+        for (int pk = 1; pk <= 2; pk++) {
+            for (int sk = 1; sk <= 5; sk++) {
+                putItem("{\"pk\": {\"N\": \"%d\"}, \"sk\": {\"N\": \"%d\"}}".formatted(pk, sk));
+            }
+        }
+
+        JsonNode first = query("""
+            {
+                "TableName": "%s",
+                "KeyConditionExpression": "pk = :p",
+                "ExpressionAttributeValues": {":p": {"N": "1"}},
+                "Limit": 2
+            }
+            """.formatted(DELETED_CURSOR_TABLE));
+        assertEquals("[1, 2]", sortKeys(first, "sk"));
+        JsonNode lek = first.path("LastEvaluatedKey");
+        assertEquals("2", lek.path("sk").path("N").asText());
+
+        deleteItem("{\"pk\": {\"N\": \"1\"}, \"sk\": {\"N\": \"2\"}}");
+
+        JsonNode second = query("""
+            {
+                "TableName": "%s",
+                "KeyConditionExpression": "pk = :p",
+                "ExpressionAttributeValues": {":p": {"N": "1"}},
+                "Limit": 2,
+                "ExclusiveStartKey": %s
+            }
+            """.formatted(DELETED_CURSOR_TABLE, lek.toString()));
+        assertEquals("[3, 4]", sortKeys(second, "sk"),
+                "the page after a deleted cursor item must start at the next key: " + summary(second));
+    }
+
+    @Test
+    @Order(14)
+    void descendingQueryResumesAfterADeletedCursorItem() throws Exception {
+        JsonNode first = query("""
+            {
+                "TableName": "%s",
+                "KeyConditionExpression": "pk = :p",
+                "ExpressionAttributeValues": {":p": {"N": "2"}},
+                "ScanIndexForward": false,
+                "Limit": 2
+            }
+            """.formatted(DELETED_CURSOR_TABLE));
+        assertEquals("[5, 4]", sortKeys(first, "sk"));
+        JsonNode lek = first.path("LastEvaluatedKey");
+
+        deleteItem("{\"pk\": {\"N\": \"2\"}, \"sk\": {\"N\": \"4\"}}");
+
+        JsonNode second = query("""
+            {
+                "TableName": "%s",
+                "KeyConditionExpression": "pk = :p",
+                "ExpressionAttributeValues": {":p": {"N": "2"}},
+                "ScanIndexForward": false,
+                "Limit": 2,
+                "ExclusiveStartKey": %s
+            }
+            """.formatted(DELETED_CURSOR_TABLE, lek.toString()));
+        assertEquals("[3, 2]", sortKeys(second, "sk"),
+                "a descending page after a deleted cursor item must continue downwards: " + summary(second));
+    }
+
+    @Test
+    @Order(15)
+    void indexQueryResumesAfterADeletedCursorItemThatTiedOnTheIndexSortKey() throws Exception {
+        // sk=2 and sk=3 share rank 20, so the index orders them by the table key.
+        putItem("{\"pk\": {\"N\": \"3\"}, \"sk\": {\"N\": \"1\"}, \"category\": {\"S\": \"g\"}, \"rank\": {\"N\": \"10\"}}");
+        putItem("{\"pk\": {\"N\": \"3\"}, \"sk\": {\"N\": \"2\"}, \"category\": {\"S\": \"g\"}, \"rank\": {\"N\": \"20\"}}");
+        putItem("{\"pk\": {\"N\": \"3\"}, \"sk\": {\"N\": \"3\"}, \"category\": {\"S\": \"g\"}, \"rank\": {\"N\": \"20\"}}");
+        putItem("{\"pk\": {\"N\": \"3\"}, \"sk\": {\"N\": \"4\"}, \"category\": {\"S\": \"g\"}, \"rank\": {\"N\": \"30\"}}");
+
+        JsonNode first = query("""
+            {
+                "TableName": "%s",
+                "IndexName": "%s",
+                "KeyConditionExpression": "category = :c",
+                "ExpressionAttributeValues": {":c": {"S": "g"}},
+                "Limit": 2
+            }
+            """.formatted(DELETED_CURSOR_TABLE, RANK_INDEX));
+        assertEquals("[1, 2]", sortKeys(first, "sk"));
+        JsonNode lek = first.path("LastEvaluatedKey");
+
+        deleteItem("{\"pk\": {\"N\": \"3\"}, \"sk\": {\"N\": \"2\"}}");
+
+        JsonNode second = query("""
+            {
+                "TableName": "%s",
+                "IndexName": "%s",
+                "KeyConditionExpression": "category = :c",
+                "ExpressionAttributeValues": {":c": {"S": "g"}},
+                "Limit": 2,
+                "ExclusiveStartKey": %s
+            }
+            """.formatted(DELETED_CURSOR_TABLE, RANK_INDEX, lek.toString()));
+        assertEquals("[3, 4]", sortKeys(second, "sk"),
+                "the item that tied with the deleted cursor item on rank must not be skipped: " + summary(second));
+    }
+
+    private static String sortKeys(JsonNode response, String attribute) {
+        List<String> values = new ArrayList<>();
+        response.path("Items").forEach(item -> values.add(item.path(attribute).path("N").asText()));
+        return values.toString();
+    }
+
+    private void putItem(String item) {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{\"TableName\": \"%s\", \"Item\": %s}".formatted(DELETED_CURSOR_TABLE, item))
+        .when().post("/")
+        .then().statusCode(200);
+    }
+
+    private void deleteItem(String key) {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{\"TableName\": \"%s\", \"Key\": %s}".formatted(DELETED_CURSOR_TABLE, key))
+        .when().post("/")
+        .then().statusCode(200);
     }
 
     /** Response summary without the bulky Items array, for assertion messages. */

@@ -153,6 +153,7 @@ floci:
       vector-index-allocation-seconds: 0
       vector-index-backfill-seconds: 0
       latest-restorable-lag-seconds: 0
+      streams-max-records: 1000
       backend: native
     sns:
       enabled: true

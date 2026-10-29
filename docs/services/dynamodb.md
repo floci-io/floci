@@ -89,7 +89,9 @@ For legacy `Expected` conditions it also accepts `ComparisonOperator` with a sin
 `Value`, including EQ and NE, just as the live AWS service does. Supplying both
 `Value` and `AttributeValueList`, omitting a required operand, or supplying the wrong
 number of operands returns `ValidationException` without changing the item.
-`NULL` and `NOT_NULL` take no operands.
+`NULL` and `NOT_NULL` take no operands. An `Expected` condition is checked atomically with the
+write, like a `ConditionExpression`, so version checks such as DynamoDBMapper optimistic locking
+hold when several writers race on the same item.
 
 These behaviors were verified against AWS in `us-east-1` on October 12, 2026:
 40 pairs of equivalent conditional writes, matching and nonmatching queries,
@@ -114,6 +116,11 @@ DynamoDB Streams are supported via a separate target (`DynamoDBStreams_20120810`
 | `GetShardIterator` | Get a shard iterator |
 | `GetRecords` | Read stream records from a shard |
 
+As in AWS, a `PutItem` or `UpdateItem` that leaves the item unchanged writes no stream record. Numbers
+compare by value and sets by membership, so rewriting `1.0` as `1` or reordering a set is not a
+change. A [Kinesis streaming destination](#kinesis-change-data-capture-cdc) still receives a `MODIFY`
+record for such a write.
+
 Redshift zero-ETL integrations can consume these stream records directly. See the
 [Redshift DynamoDB zero-ETL](redshift.md#dynamodb-zero-etl) section for the supported target,
 landing table, checkpoint, and retry behavior.
@@ -121,6 +128,13 @@ landing table, checkpoint, and retry behavior.
 Stream records are held in memory. `POST /_floci/state/reset` removes every stream along with the
 tables, so `ListStreams` and `DescribeStream` no longer return the streams of tables created before
 the reset.
+
+Each stream keeps the newest 1000 records, where AWS keeps records for 24 hours. A write past the
+limit trims the oldest record, `TRIM_HORIZON` then starts at the oldest record still held, and an
+iterator positioned before it fails with `TrimmedDataAccessException`. Floci logs a warning when it
+trims records that no `GetRecords` call has returned yet. Raise the limit with
+`FLOCI_SERVICES_DYNAMODB_STREAMS_MAX_RECORDS` when a consumer, such as a Lambda event source
+mapping, can fall further behind than that.
 
 ## Time to Live
 
@@ -249,6 +263,7 @@ region is rejected.
 | `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_ALLOCATION_SECONDS` | `4` | Seconds a vector index added by `UpdateTable` spends in resource allocation |
 | `FLOCI_SERVICES_DYNAMODB_VECTOR_INDEX_BACKFILL_SECONDS` | `10` | Seconds that index then spends backfilling before it goes `ACTIVE` |
 | `FLOCI_SERVICES_DYNAMODB_LATEST_RESTORABLE_LAG_SECONDS` | `300` | Seconds `LatestRestorableDateTime` of point-in-time recovery trails the current time. Set `0` to restore the latest writes with `UseLatestRestorableTime` |
+| `FLOCI_SERVICES_DYNAMODB_STREAMS_MAX_RECORDS` | `1000` | Records each DynamoDB stream keeps in memory before the oldest is trimmed. Must be at least `1`; with the native backend a smaller value fails startup. See [Streams](#streams) |
 | `FLOCI_SERVICES_DYNAMODB_BACKEND` | `native` | Engine behind the DynamoDB API: `native` or `local`, case-insensitive. Any other value fails startup. See [DynamoDB Local backend](#dynamodb-local-backend) |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_ENDPOINT` | *(none)* | Base URL of DynamoDB Local, for example `http://dynamodb-local:8000`. Required when the backend is `local`. Must be `http` or `https` with a host. AWS endpoints (hosts under `amazonaws.com`, `amazonaws.com.cn` or `api.aws`) are rejected |
 | `FLOCI_SERVICES_DYNAMODB_LOCAL_CONNECT_TIMEOUT_SECONDS` | `2` | Seconds to wait for a connection to DynamoDB Local |
@@ -257,6 +272,8 @@ region is rejected.
 ### Storage and Performance
 
 Under `persistent` storage mode, single-item writes (`PutItem`, `UpdateItem`, `DeleteItem`) flush the affected table to disk synchronously. Batch operations (`BatchWriteItem` and `TransactWriteItems`) batch disk flushes per affected table across the entire operation, rather than flushing on every individual item mutation.
+
+Concurrent writes to the same table copy it in parallel but never store an older copy over a newer one, so in every storage mode the stored table holds every write that has returned. Once `DeleteTable` has removed a table, its items are never stored again, not even by a write that was still in flight when the table was deleted. A write that reaches the table's items after `DeleteTable` removed the table fails with `ResourceNotFoundException`, so it never reaches a table created again under the same name.
 
 For write-heavy workloads under persistent setups, configuring `FLOCI_STORAGE_SERVICES_DYNAMODB_MODE=wal` or `hybrid` is recommended to avoid full-file rewrites on each write operation:
 - `wal`: Uses an append-only write-ahead log with background compaction.

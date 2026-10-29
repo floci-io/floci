@@ -1206,6 +1206,8 @@ For both stream sources, the first retry waits twice `FLOCI_SERVICES_LAMBDA_POLL
 
 For SQS mappings, a function error returns every delivered message to the queue with the queue's `VisibilityTimeout`, so it is received again after that timeout and the queue's `RedrivePolicy` applies as usual. With `FunctionResponseTypes: ["ReportBatchItemFailures"]`, only the messages the function reports are returned and the rest are deleted; a malformed response returns the whole batch.
 
+A DynamoDB stream keeps only its newest 1000 records by default (`FLOCI_SERVICES_DYNAMODB_STREAMS_MAX_RECORDS`, see [DynamoDB Streams](dynamodb.md#streams)). A DynamoDB Streams mapping whose checkpoint falls behind that window logs a warning and resumes from the oldest record still held; the records in between are not delivered.
+
 A DynamoDB Streams mapping created with `StartingPosition: LATEST` delivers only records written after it is created, so a stream that is empty at creation delivers everything written later. After a restart it still resumes from the trim horizon, because native stream records are volatile. Deleting or disabling a mapping stops any poll that has not yet invoked the function. An invocation already running completes, but its checkpoint is not saved: a deleted mapping is never recreated and its result is dropped, and a disabled mapping re-reads that batch when it is enabled again.
 
 ```bash

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -35,7 +36,7 @@ public class DynamoDbStreamService {
     private static final Logger LOG = Logger.getLogger(DynamoDbStreamService.class);
 
     static final String SHARD_ID = "shardId-0000000001-00000000001";
-    static final int MAX_RECORDS = 1000;
+    static final int DEFAULT_MAX_RECORDS = 1000;
     private static final String ZERO_SEQUENCE_NUMBER = "000000000000000000000";
 
     private static final DateTimeFormatter STREAM_LABEL_FORMAT =
@@ -48,18 +49,39 @@ public class DynamoDbStreamService {
     private final ConcurrentHashMap<String, AtomicLong> streamRecordCounts = new ConcurrentHashMap<>();
     /** Per stream (the stream ARN embeds account + region + table) so accounts never share a counter. */
     private final ConcurrentHashMap<String, AtomicLong> sequenceCounters = new ConcurrentHashMap<>();
+    /** Per stream: the highest sequence number a GetRecords call has returned. */
+    private final ConcurrentHashMap<String, AtomicLong> readSequences = new ConcurrentHashMap<>();
+    /** Per stream: records trimmed before any GetRecords call returned them. */
+    private final ConcurrentHashMap<String, AtomicLong> unreadTrimmedCounts = new ConcurrentHashMap<>();
 
     private final ObjectMapper objectMapper;
+    private final int maxRecords;
 
     @Inject
+    public DynamoDbStreamService(ObjectMapper objectMapper, StorageFactory storageFactory, EmulatorConfig config) {
+        this(objectMapper, storageFactory.create("dynamodb", "dynamodb-tables.json",
+                new TypeReference<Map<String, TableDefinition>>() {}),
+                config.services().dynamodb().streamsMaxRecords());
+    }
+
     public DynamoDbStreamService(ObjectMapper objectMapper, StorageFactory storageFactory) {
         this(objectMapper, storageFactory.create("dynamodb", "dynamodb-tables.json",
-                new TypeReference<Map<String, TableDefinition>>() {}));
+                new TypeReference<Map<String, TableDefinition>>() {}), DEFAULT_MAX_RECORDS);
     }
 
     /** Package-private constructor for testing. */
     DynamoDbStreamService(ObjectMapper objectMapper, StorageBackend<String, TableDefinition> tableStore) {
+        this(objectMapper, tableStore, DEFAULT_MAX_RECORDS);
+    }
+
+    DynamoDbStreamService(ObjectMapper objectMapper, StorageBackend<String, TableDefinition> tableStore,
+                          int maxRecords) {
+        if (maxRecords < 1) {
+            throw new IllegalArgumentException(
+                    "floci.services.dynamodb.streams-max-records must be at least 1, got " + maxRecords);
+        }
         this.objectMapper = objectMapper;
+        this.maxRecords = maxRecords;
         loadPersistedStreams(tableStore);
     }
 
@@ -144,6 +166,8 @@ public class DynamoDbStreamService {
             records.remove(sd.getStreamArn());
             streamRecordCounts.remove(sd.getStreamArn());
             sequenceCounters.remove(sd.getStreamArn());
+            readSequences.remove(sd.getStreamArn());
+            unreadTrimmedCounts.remove(sd.getStreamArn());
             LOG.infov("Deleted stream for table {0}", tableArn);
         }
     }
@@ -153,6 +177,8 @@ public class DynamoDbStreamService {
         streams.clear();
         records.clear();
         streamRecordCounts.clear();
+        readSequences.clear();
+        unreadTrimmedCounts.clear();
     }
 
     public void captureEvent(String eventName, JsonNode oldItem, JsonNode newItem,
@@ -198,10 +224,30 @@ public class DynamoDbStreamService {
                 streamRecordCounts.computeIfAbsent(sd.getStreamArn(), ignored -> new AtomicLong())
                         .incrementAndGet();
                 deque.addLast(record);
-                while (deque.size() > MAX_RECORDS) {
-                    deque.pollFirst();
+                long readSequence = readSequences.getOrDefault(sd.getStreamArn(), new AtomicLong()).get();
+                int unreadTrimmed = 0;
+                while (deque.size() > maxRecords) {
+                    DynamoDbStreamRecord trimmed = deque.pollFirst();
+                    if (Long.parseLong(trimmed.getSequenceNumber()) > readSequence) {
+                        unreadTrimmed++;
+                    }
+                }
+                if (unreadTrimmed > 0) {
+                    warnUnreadTrimmed(sd.getStreamArn(), unreadTrimmed);
                 }
             }
+        }
+    }
+
+    // Warns on the first unread record a stream trims, then once per cap's worth more, so a stream
+    // that nothing reads does not warn on every write.
+    private void warnUnreadTrimmed(String streamArn, int trimmed) {
+        long total = unreadTrimmedCounts.computeIfAbsent(streamArn, ignored -> new AtomicLong()).addAndGet(trimmed);
+        long before = total - trimmed;
+        if (before == 0 || before / maxRecords != total / maxRecords) {
+            LOG.warnv("DynamoDB stream {0} has trimmed {1} record(s) that no GetRecords call returned; it keeps "
+                    + "the newest {2} records (floci.services.dynamodb.streams-max-records)",
+                    streamArn, total, maxRecords);
         }
     }
 
@@ -331,7 +377,7 @@ public class DynamoDbStreamService {
         }
         int position = findSequencePosition(snapshot, cursorSequence, inclusive);
         if (zeroSequence().equals(cursorSequence) && cursorRecordCount >= 0
-                && currentRecordCount - cursorRecordCount > MAX_RECORDS) {
+                && currentRecordCount - cursorRecordCount > maxRecords) {
             throw new AwsException("TrimmedDataAccessException",
                     "The requested sequence number has been trimmed", 400);
         }
@@ -345,6 +391,10 @@ public class DynamoDbStreamService {
         int end = Math.min(position + effectiveLimit, snapshot.size());
         List<DynamoDbStreamRecord> page = snapshot.subList(position, end);
 
+        if (!page.isEmpty()) {
+            long lastRead = Long.parseLong(page.get(page.size() - 1).getSequenceNumber());
+            readSequences.computeIfAbsent(streamArn, ignored -> new AtomicLong()).accumulateAndGet(lastRead, Math::max);
+        }
         String nextSequence = page.isEmpty()
                 ? cursorSequence
                 : page.get(page.size() - 1).getSequenceNumber();
