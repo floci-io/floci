@@ -9,7 +9,9 @@ import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 
@@ -91,6 +93,45 @@ public class S3Object {
         this.checksum.setChecksumType(ChecksumType.FULL_OBJECT);
         this.parts = new ArrayList<>();
         this.tags = new HashMap<>();
+    }
+
+    public S3Object(S3Object source) {
+        this.bucketName = source.bucketName;
+        this.key = source.key;
+        this.data = source.data != null ? Arrays.copyOf(source.data, source.data.length) : null;
+        this.metadata = new HashMap<>(source.metadata);
+        this.contentType = source.contentType;
+        this.contentEncoding = source.contentEncoding;
+        this.contentDisposition = source.contentDisposition;
+        this.cacheControl = source.cacheControl;
+        this.serverSideEncryption = source.serverSideEncryption;
+        this.sseKmsKeyId = source.sseKmsKeyId;
+        this.sseCustomerAlgorithm = source.sseCustomerAlgorithm;
+        this.sseCustomerKeyMd5 = source.sseCustomerKeyMd5;
+        this.size = source.size;
+        this.lastModified = source.lastModified;
+        this.eTag = source.eTag;
+        this.storageClass = source.storageClass;
+        this.checksum = source.checksum == null ? null : source.checksum.copy();
+        if (source.parts == null) {
+            this.parts = new ArrayList<>();
+        } else {
+            this.parts = new ArrayList<>(source.parts.size());
+            for (Part part : source.parts) {
+                this.parts.add(part == null ? null : new Part(part));
+            }
+        }
+        this.versionId = source.versionId;
+        this.deleteMarker = source.deleteMarker;
+        this.isLatest = source.isLatest;
+        this.tags = new HashMap<>(source.tags);
+        this.objectLockMode = source.objectLockMode;
+        this.retainUntilDate = source.retainUntilDate;
+        this.legalHoldStatus = source.legalHoldStatus;
+        this.acl = source.acl;
+        this.ownerAccountId = source.ownerAccountId;
+        this.dataGeneration = source.dataGeneration;
+        this.eventSequencer = source.eventSequencer;
     }
 
     public String getBucketName() { return bucketName; }
@@ -184,12 +225,7 @@ public class S3Object {
         try {
             MessageDigest md = MessageDigest.getInstance("MD5");
             byte[] digest = md.digest(data);
-            StringBuilder sb = new StringBuilder("\"");
-            for (byte b : digest) {
-                sb.append(String.format("%02x", b));
-            }
-            sb.append("\"");
-            return sb.toString();
+            return "\"" + HexFormat.of().formatHex(digest) + "\"";
         } catch (NoSuchAlgorithmException e) {
             return "\"\"";
         }

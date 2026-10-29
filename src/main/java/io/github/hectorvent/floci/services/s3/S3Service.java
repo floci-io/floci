@@ -140,6 +140,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private static final Logger LOG = Logger.getLogger(S3Service.class);
     /** Last {@code s3.object.sequencer} handed out, in microseconds since the epoch. */
     private final AtomicLong lastEventSequencer = new AtomicLong();
+    private final AtomicLong dataGenerations = new AtomicLong();
 
     record RequestAuthorization(boolean signed, String accessKeyId, String sessionToken) {
         static RequestAuthorization unsigned() {
@@ -746,6 +747,12 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     S3Object putObject(String bucketName, String key, InputStream body, UploadChecksums checksums,
                        String contentType, Map<String, String> metadata, PutObjectOptions options) {
+        return putObject(bucketName, key, body, checksums, contentType, metadata, options, -1);
+    }
+
+    S3Object putObject(String bucketName, String key, InputStream body, UploadChecksums checksums,
+                       String contentType, Map<String, String> metadata, PutObjectOptions options,
+                       long declaredSize) {
         requirePublicObjectKey(key);
         PutObjectOptions effectiveOptions = options != null ? options : new PutObjectOptions();
         checksums.requireWellFormedContentMd5();
@@ -762,7 +769,8 @@ public class S3Service implements Resettable, ResourceProvider {
         // Checked again under the bucket lock when the object is stored; this only spares a transfer.
         checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
         if (inMemory) {
-            byte[] data = readVerified(body, checksums, "PutObject of " + bucketName + "/" + key);
+            byte[] data = readVerified(body, checksums, "PutObject of " + bucketName + "/" + key,
+                    declaredSize);
             S3Object object = storeObject(checkedBucket, bucketName, key, new BytesBody(data),
                     contentType, metadata, null, null, effectiveOptions, null);
             fireNotifications(bucketName, key, "ObjectCreated:Put", object);
@@ -1077,7 +1085,7 @@ public class S3Service implements Resettable, ResourceProvider {
             // A fresh per-write token, compared by getObject's optimistic read against a
             // later re-read of this same field to detect a concurrent overwrite - see the
             // dataGeneration javadoc on S3Object.
-            object.setDataGeneration(UUID.randomUUID().toString());
+            object.setDataGeneration(nextDataGeneration());
 
             // Write the body before publishing metadata - see the comment in the versioned
             // branch above; the same ordering requirement applies here.
@@ -2531,7 +2539,7 @@ public class S3Service implements Resettable, ResourceProvider {
                                 .max(WRITE_ORDER)
                                 .orElseThrow());
                         if (newLatest.getVersionId() == null) {
-                            newLatest.setDataGeneration(UUID.randomUUID().toString());
+                            newLatest.setDataGeneration(nextDataGeneration());
                         }
                         // The promoted version's body becomes current before its metadata is
                         // published, the order storeObjectInternal writes in, so a concurrent GET
@@ -4847,10 +4855,15 @@ public class S3Service implements Resettable, ResourceProvider {
      * with EntityTooLarge once it outgrows the largest array the JDK allocates.
      */
     private static byte[] readVerified(InputStream body, UploadChecksums checksums, String upload) {
+        return readVerified(body, checksums, upload, -1);
+    }
+
+    private static byte[] readVerified(InputStream body, UploadChecksums checksums, String upload,
+                                       long declaredSize) {
         // The memory cap is lower than the most S3 takes in one body, so it is the limit here.
         DigestingInputStream digests = new DigestingInputStream(body, digestAlgorithms(checksums, null),
                 Long.MAX_VALUE);
-        byte[] data = readWithin(digests, MAX_IN_MEMORY_OBJECT_SIZE,
+        byte[] data = readWithin(digests, MAX_IN_MEMORY_OBJECT_SIZE, declaredSize,
                 readSoFar -> warnTooLargeForMemory(upload, readSoFar));
         checksums.verify(digests.md5(), digests::checksum);
         verifyChunkedTrailers(body, digests, checksums);
@@ -4862,7 +4875,46 @@ public class S3Service implements Resettable, ResourceProvider {
      * {@code maxSize}, after telling {@code tooLarge} how many bytes it had read by then.
      */
     static byte[] readWithin(InputStream body, long maxSize, LongConsumer tooLarge) {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        return readWithin(body, maxSize, -1, tooLarge);
+    }
+
+    private static final long MAX_EXACT_READ = 64L * 1024 * 1024;
+
+    /**
+     * Like {@link #readWithin(InputStream, long, LongConsumer)}, sizing the array from the length the
+     * request declared. A body shorter or longer than declared is still read in full.
+     */
+    static byte[] readWithin(InputStream body, long maxSize, long declaredSize, LongConsumer tooLarge) {
+        if (declaredSize < 0 || declaredSize > maxSize || declaredSize > MAX_EXACT_READ) {
+            return readGrowing(body, maxSize, declaredSize, new byte[0], tooLarge);
+        }
+        byte[] exact = new byte[(int) declaredSize];
+        try {
+            int filled = body.readNBytes(exact, 0, exact.length);
+            if (filled < exact.length) {
+                return Arrays.copyOf(exact, filled);
+            }
+            int extra = body.read();
+            if (extra < 0) {
+                return exact;
+            }
+            byte[] prefix = Arrays.copyOf(exact, exact.length + 1);
+            prefix[exact.length] = (byte) extra;
+            return readGrowing(body, maxSize, declaredSize, prefix, tooLarge);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to read the upload body", e);
+        }
+    }
+
+    private static byte[] readGrowing(InputStream body, long maxSize, long declaredSize, byte[] prefix,
+                                      LongConsumer tooLarge) {
+        if (prefix.length > maxSize) {
+            tooLarge.accept(prefix.length);
+            throw entityTooLarge(maxSize);
+        }
+        int initial = declaredSize >= 0 ? (int) Math.min(declaredSize, 1024 * 1024) : 32;
+        ByteArrayOutputStream out = new ByteArrayOutputStream(Math.max(initial, prefix.length));
+        out.write(prefix, 0, prefix.length);
         byte[] buffer = new byte[64 * 1024];
         try {
             for (int read = body.read(buffer); read >= 0; read = body.read(buffer)) {
@@ -6287,8 +6339,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private static boolean ownershipIsEnforced(Bucket bucket) {
-        return XmlParser.containsValue(bucket.getOwnershipControlsConfiguration(),
-                "ObjectOwnership", "BucketOwnerEnforced");
+        return bucket.isObjectOwnershipEnforced();
     }
 
     private static String objectOwnerAccount(Bucket bucket, String bucketOwnerAccount,
@@ -7309,7 +7360,23 @@ public class S3Service implements Resettable, ResourceProvider {
     private String nextEventSequencer() {
         long nowMicros = ChronoUnit.MICROS.between(Instant.EPOCH, Instant.now());
         long value = lastEventSequencer.updateAndGet(last -> Math.max(last + 1, nowMicros));
-        return String.format(Locale.ROOT, "%018X", value);
+        return toSequencer(value);
+    }
+
+    private String nextDataGeneration() {
+        return Long.toString(dataGenerations.incrementAndGet());
+    }
+
+    private static final String SEQUENCER_DIGITS = "0123456789ABCDEF";
+
+    static String toSequencer(long value) {
+        char[] digits = new char[18];
+        long remaining = value;
+        for (int index = digits.length - 1; index >= 0; index--) {
+            digits[index] = SEQUENCER_DIGITS.charAt((int) (remaining & 0xF));
+            remaining >>>= 4;
+        }
+        return new String(digits);
     }
 
     private void cleanupMultipart(String uploadId) {
@@ -7393,37 +7460,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private static S3Object copyObject(S3Object source) {
-        S3Object copy = new S3Object();
-        copy.setBucketName(source.getBucketName());
-        copy.setKey(source.getKey());
-        copy.setData(source.getData() != null ? Arrays.copyOf(source.getData(), source.getData().length) : null);
-        copy.setMetadata(new HashMap<>(source.getMetadata()));
-        copy.setContentType(source.getContentType());
-        copy.setContentEncoding(source.getContentEncoding());
-        copy.setContentDisposition(source.getContentDisposition());
-        copy.setCacheControl(source.getCacheControl());
-        copy.setServerSideEncryption(source.getServerSideEncryption());
-        copy.setSseKmsKeyId(source.getSseKmsKeyId());
-        copy.setSseCustomerAlgorithm(source.getSseCustomerAlgorithm());
-        copy.setSseCustomerKeyMd5(source.getSseCustomerKeyMd5());
-        copy.setSize(source.getSize());
-        copy.setLastModified(source.getLastModified());
-        copy.setETag(source.getETag());
-        copy.setStorageClass(source.getStorageClass());
-        copy.setChecksum(copyChecksum(source.getChecksum()));
-        copy.setParts(copyParts(source.getParts()));
-        copy.setVersionId(source.getVersionId());
-        copy.setDeleteMarker(source.isDeleteMarker());
-        copy.setLatest(source.isLatest());
-        copy.setTags(new HashMap<>(source.getTags()));
-        copy.setObjectLockMode(source.getObjectLockMode());
-        copy.setRetainUntilDate(source.getRetainUntilDate());
-        copy.setLegalHoldStatus(source.getLegalHoldStatus());
-        copy.setAcl(source.getAcl());
-        copy.setOwnerAccountId(source.getOwnerAccountId());
-        copy.setDataGeneration(source.getDataGeneration());
-        copy.setEventSequencer(source.getEventSequencer());
-        return copy;
+        return new S3Object(source);
     }
 
     private static S3Checksum copyChecksum(S3Checksum source) {
@@ -7434,20 +7471,15 @@ public class S3Service implements Resettable, ResourceProvider {
         if (sourceParts == null) {
             return new ArrayList<>();
         }
-        return sourceParts.stream().map(S3Service::copyPart).toList();
+        List<Part> copies = new ArrayList<>(sourceParts.size());
+        for (Part part : sourceParts) {
+            copies.add(copyPart(part));
+        }
+        return copies;
     }
 
     private static Part copyPart(Part source) {
-        if (source == null) {
-            return null;
-        }
-        Part copy = new Part();
-        copy.setPartNumber(source.getPartNumber());
-        copy.setETag(source.getETag());
-        copy.setSize(source.getSize());
-        copy.setChecksum(copyChecksum(source.getChecksum()));
-        copy.setLastModified(source.getLastModified());
-        return copy;
+        return source == null ? null : new Part(source);
     }
 
     private static String computeETag(byte[] data) {
@@ -7463,11 +7495,7 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private static String bytesToHex(byte[] bytes) {
-        var sb = new StringBuilder();
-        for (byte b : bytes) {
-            sb.append(String.format("%02x", b));
-        }
-        return sb.toString();
+        return HexFormat.of().formatHex(bytes);
     }
 
     private void ensureBucketExists(String bucketName) {
@@ -7988,7 +8016,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         resolveObjectPath(accountId, bucketName, key));
             }
             S3Object restored = copyObject(previous);
-            restored.setDataGeneration(UUID.randomUUID().toString());
+            restored.setDataGeneration(nextDataGeneration());
             putObjectForAccount(accountId, objectKey(bucketName, key), restored);
             deleteObjectForAccount(accountId, versionedKey(bucketName, key, failedVersionId));
             if (priorHistory != null) {
@@ -8019,7 +8047,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         resolveObjectPath(accountId, bucketName, key));
             }
             S3Object restored = copyObject(previous);
-            restored.setDataGeneration(UUID.randomUUID().toString());
+            restored.setDataGeneration(nextDataGeneration());
             putObjectForAccount(accountId, versionedKey(bucketName, key, storedVersionId(restored)), restored);
             putObjectForAccount(accountId, objectKey(bucketName, key), restored);
         } catch (RuntimeException recoveryFailure) {

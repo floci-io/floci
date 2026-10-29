@@ -928,7 +928,7 @@ public class S3Controller {
                 // S3 echoes the part checksum only when the upload declared an algorithm.
                 ChecksumAlgorithm declared = s3Service.getMultipartUpload(bucket, key, uploadId).getChecksumAlgorithm();
                 if (declared != null) {
-                    response.header("x-amz-checksum-" + declared.wireValue(), part.getChecksum().valueFor(declared));
+                    response.header(declared.headerName(), part.getChecksum().valueFor(declared));
                 }
                 appendSseCustomerHeaders(response,
                         httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
@@ -963,6 +963,7 @@ public class S3Controller {
             authorizeObjectCreation(bucket, key, httpHeaders, uriInfo, false, authorization);
             authorizeConditionalWriteRead(bucket, key, ifMatch, authorization);
             requireDeclaredSizeWithin(httpHeaders, contentEncoding, contentSha256, S3Service.MAX_PUT_OBJECT_SIZE);
+            long declaredSize = declaredBodySize(httpHeaders, contentEncoding, contentSha256);
             S3Object obj = s3Service.putObject(bucket, key,
                     decodedBody(body, contentEncoding, contentSha256, trailerHeader(httpHeaders, uriInfo)),
                     uploadChecksums(httpHeaders, uriInfo), contentType, extractUserMetadata(httpHeaders, uriInfo),
@@ -989,7 +990,8 @@ public class S3Controller {
                             .withClientChecksum(extractChecksum(httpHeaders))
                             .withIfMatch(ifMatch)
                             .withIfNoneMatch(ifNoneMatch)
-                            .withTagging(inlineTags));
+                            .withTagging(inlineTags),
+                    declaredSize);
             var resp = Response.ok().header("ETag", obj.getETag());
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
@@ -2473,20 +2475,24 @@ public class S3Controller {
      */
     static void requireDeclaredSizeWithin(HttpHeaders httpHeaders, String contentEncoding, String contentSha256,
                                           long maxSize) {
+        long size = declaredBodySize(httpHeaders, contentEncoding, contentSha256);
+        if (size > maxSize) {
+            throw S3Service.entityTooLarge(size, maxSize);
+        }
+    }
+
+    /** The size the request declares for its body, or -1 when it declares none it can be read as. */
+    static long declaredBodySize(HttpHeaders httpHeaders, String contentEncoding, String contentSha256) {
         boolean awsChunked = declaresStreamingPayload(contentSha256) || namesAwsChunked(contentEncoding);
         String declared = httpHeaders.getHeaderString(awsChunked ? "x-amz-decoded-content-length" : "Content-Length");
         if (declared == null) {
-            return;
+            return -1;
         }
-        long size;
         try {
-            size = Long.parseLong(declared.trim());
+            return Long.parseLong(declared.trim());
         } catch (NumberFormatException ignored) {
-            // Not a size, so nothing is known before the body is read, which is held to the limit as it arrives.
-            return;
-        }
-        if (size > maxSize) {
-            throw S3Service.entityTooLarge(size, maxSize);
+            // Not a size, so the body is read without one.
+            return -1;
         }
     }
 
@@ -3585,7 +3591,7 @@ public class S3Controller {
     private UploadChecksums uploadChecksums(HttpHeaders httpHeaders, UriInfo uriInfo) {
         Map<ChecksumAlgorithm, String> claimed = new EnumMap<>(ChecksumAlgorithm.class);
         for (ChecksumAlgorithm algorithm : ChecksumAlgorithm.values()) {
-            String value = httpHeaders.getHeaderString("x-amz-checksum-" + algorithm.wireValue());
+            String value = httpHeaders.getHeaderString(algorithm.headerName());
             if (value != null) {
                 claimed.put(algorithm, value);
             }

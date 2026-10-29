@@ -31,6 +31,14 @@ public class Part {
         this.lastModified = Instant.now().truncatedTo(ChronoUnit.SECONDS);
     }
 
+    public Part(Part source) {
+        this.partNumber = source.partNumber;
+        this.eTag = source.eTag;
+        this.size = source.size;
+        this.checksum = source.checksum == null ? null : source.checksum.copy();
+        this.lastModified = source.lastModified;
+    }
+
     public int getPartNumber() { return partNumber; }
     public void setPartNumber(int partNumber) { this.partNumber = partNumber; }
 
