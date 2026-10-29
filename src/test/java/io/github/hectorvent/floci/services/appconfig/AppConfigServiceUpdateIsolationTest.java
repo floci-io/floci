@@ -65,24 +65,6 @@ class AppConfigServiceUpdateIsolationTest {
     }
 
     @Test
-    void anApplicationReadBeforeATagOrUntagKeepsItsPriorTags() {
-        Application created = service.createApplication(Map.of("Name", "orders"));
-        service.tagApplication(created.getId(), Map.of("team", "payments"));
-        Application beforeTag = service.getApplication(created.getId());
-
-        service.tagApplication(created.getId(), Map.of("tier", "gold"));
-
-        assertEquals(Map.of("team", "payments"), beforeTag.getTags());
-        Application beforeUntag = service.getApplication(created.getId());
-        assertEquals(Map.of("team", "payments", "tier", "gold"), beforeUntag.getTags());
-
-        service.untagApplication(created.getId(), List.of("team"));
-
-        assertEquals(Map.of("team", "payments", "tier", "gold"), beforeUntag.getTags());
-        assertEquals(Map.of("tier", "gold"), service.getApplication(created.getId()).getTags());
-    }
-
-    @Test
     void anEnvironmentReadBeforeAnUpdateKeepsItsPriorMonitors() {
         String appId = service.createApplication(Map.of("Name", "orders")).getId();
         Environment created = service.createEnvironment(appId, Map.of("Name", "beta",

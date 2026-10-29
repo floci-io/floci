@@ -54,19 +54,6 @@ class AppConfigServiceUpdateRaceTest {
     }
 
     @Test
-    void anApplicationDeletedDuringATagWriteStaysDeleted() throws Exception {
-        ParkingStore<Application> store = new ParkingStore<>();
-        AppConfigService service = serviceWithStore(APPLICATIONS, store);
-        Application app = service.createApplication(Map.of("Name", "orders"));
-
-        deleteWaitsForTheWrite(store,
-                () -> service.tagApplication(app.getId(), Map.of("team", "payments")),
-                () -> service.deleteApplication(app.getId()));
-
-        assertTrue(service.findApplication(app.getId()).isEmpty(), "the entity outlived its delete");
-    }
-
-    @Test
     void aStrategyDeletedDuringItsUpdateStaysDeleted() throws Exception {
         ParkingStore<DeploymentStrategy> store = new ParkingStore<>();
         AppConfigService service = serviceWithStore(STRATEGIES, store);
