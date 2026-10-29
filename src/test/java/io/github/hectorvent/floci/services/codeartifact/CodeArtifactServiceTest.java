@@ -398,6 +398,8 @@ class CodeArtifactServiceTest {
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         when(reposiliteClient.packageExists(anyString(), eq("dom"), eq("repo"), eq("com.example"), eq("removed")))
                 .thenReturn(true);
+        when(reposiliteClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), eq("com.example"),
+                eq("removed"))).thenReturn(true);
         recordBytes("dom", "repo", "maven", "com.example", "kept", 40L);
         recordBytes("dom", "repo", "maven", "com.example", "removed", 60L);
         assertEquals(100L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
@@ -495,6 +497,8 @@ class CodeArtifactServiceTest {
                 "late");
         when(reposiliteClient.packageExists(anyString(), eq("dom"), eq("repo"), eq("com.example"), eq("late")))
                 .thenReturn(true);
+        when(reposiliteClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), eq("com.example"),
+                eq("late"))).thenReturn(true);
         service.deletePackage(REGION, "dom", null, "repo", "maven", "com.example", "late");
 
         service.recordContainerBackedAssetBytes(REGION, "dom", null, "repo", "maven", "com.example", "late", 999L,
@@ -517,6 +521,8 @@ class CodeArtifactServiceTest {
                 "late");
         when(reposiliteClient.packageExists(anyString(), eq("dom"), eq("repo"), eq("com.example"), eq("late")))
                 .thenReturn(true);
+        when(reposiliteClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), eq("com.example"),
+                eq("late"))).thenReturn(true);
         service.deletePackage(REGION, "dom", null, "repo", "maven", "com.example", "late");
         // The republish: a different publish, same coordinates, after the first one's snapshot.
         recordBytes("dom", "repo", "maven", "com.example", "late", 10L);
@@ -562,6 +568,8 @@ class CodeArtifactServiceTest {
         assertEquals(42L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
         when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my_package")))
                 .thenReturn(true);
+        when(pypiserverClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), isNull(), eq("my_package")))
+                .thenReturn(true);
 
         service.deletePackage(REGION, "dom", null, "repo", "pypi", null, "my_package");
 
@@ -581,6 +589,8 @@ class CodeArtifactServiceTest {
         recordBytes("dom", "repo", "nuget", null, "My.Package", 42L);
         assertEquals(42L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
         when(bagetterClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my.package")))
+                .thenReturn(true);
+        when(bagetterClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), isNull(), eq("my.package")))
                 .thenReturn(true);
 
         service.deletePackage(REGION, "dom", null, "repo", "nuget", null, "my.package");
@@ -2107,6 +2117,8 @@ class CodeArtifactServiceTest {
         // something real to delete and, as part of its own ordinary cleanup, wipes the origin map
         // entry outright, the same way it already does today, regardless of any in-flight count.
         when(reposiliteClient.packageExists(repoId, "dom", "repo", "com.example", "widget")).thenReturn(true);
+        when(reposiliteClient.hasAnyContentToDelete(repoId, "dom", "repo", "com.example", "widget"))
+                .thenReturn(true);
         service.deletePackage(REGION, "dom", null, "repo", "maven", "com.example", "widget");
 
         // A brand new episode is claimed fresh under the exact same connection name.
@@ -2290,38 +2302,38 @@ class CodeArtifactServiceTest {
     }
 
     /**
-     * DeletePackage on a package with no real content yet (nothing a stalled import has written
-     * back) removes the origin claim outright but, having deleted nothing, never bumps the package
-     * fence. A sibling attempt still mid-fetch under that now-removed claim takes its
-     * versionFenceSnapshot/packageFenceSnapshot before the delete, so neither fence alone would
-     * ever catch the delete happening in between; a fresh claim made afterward under a different
-     * connection must still be shielded from that sibling's own stale write.
+     * A failed attempt (nothing imported) releases its own claim through {@link
+     * CodeArtifactService#finishMavenRetainedVersionOriginAttempt} without touching either fence
+     * at all, so a fresh claim made afterward under a different connection leaves both fences
+     * exactly as they were. A very late, straggling write from the attempt that already reported
+     * itself finished (its own real network write's retry or duplicate, arriving well after its
+     * finish call already ran) would otherwise still see both fences match and write real bytes
+     * under whatever connection claimed the version next, mixing assets from two different public
+     * sources into one version; only the episode check catches this, since neither fence ever
+     * moved. {@link #deployMavenAssetUnderVersionFenceRefusesAStaleEpisodeAfterAnEmptyPackageDeleteAndFreshClaim}'s
+     * delete-based scenario now also gets caught by the package fence itself, since {@link
+     * CodeArtifactService#deletePackage} bumps it on an origin-config-only delete too; this
+     * scenario has no delete in it at all, so it keeps the episode check genuinely necessary.
      */
     @Test
-    void deployMavenAssetUnderVersionFenceRefusesAStaleEpisodeAfterAnEmptyPackageDeleteAndFreshClaim() {
+    void deployMavenAssetUnderVersionFenceRefusesAStaleEpisodeAfterAFailedAttemptReleasesItAndAFreshClaimFollows() {
         service.createDomain(REGION, "dom", null, Map.of());
         CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
                 Map.of());
         String repoId = created.getSidecarContainerIds().get("maven");
-        // An origin configuration (e.g. from an earlier PutPackageOriginConfiguration) is what
-        // lets deletePackage find this package at all despite no real content ever landing for
-        // it; without one, deletePackage would 404 outright rather than reaching the empty-content
-        // path this test is exercising.
-        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "maven", "com.example", "widget",
-                "ALLOW", "ALLOW");
         long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
                 "com.example", "widget");
         long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "maven",
                 "com.example", "widget", "1.0");
         // The stalled attempt: claims under the first connection, then takes no further action
-        // until after the delete and fresh claim below (simulating a fetch still in flight).
+        // until after it finishes empty-handed and a fresh claim follows below (simulating a
+        // fetch still in flight for a real network write that arrives only after that).
         long staleEpisodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
                 "widget", "1.0", "public:maven-central", packageFence).episodeId();
 
-        // No real content exists for this package yet, so this delete finds nothing to remove and
-        // never bumps the package fence, even though it does wipe the origin claim above.
-        when(reposiliteClient.packageExists(repoId, "dom", "repo", "com.example", "widget")).thenReturn(false);
-        service.deletePackage(REGION, "dom", null, "repo", "maven", "com.example", "widget");
+        // Finds nothing from the public repository: releases its own claim, touching neither fence.
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                staleEpisodeId, false);
         assertEquals(packageFence, service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
                 "com.example", "widget"));
 
@@ -2329,9 +2341,9 @@ class CodeArtifactServiceTest {
         service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
                 "public:maven-clojars", packageFence);
 
-        // The stalled attempt's fetch finally returns and tries to write under its own stale
-        // episode: both fences still match (neither was ever bumped), so only the episode check
-        // can refuse this write.
+        // The stalled attempt's own late write finally arrives and tries to write under its own
+        // stale episode: both fences still match (neither was ever bumped), so only the episode
+        // check can refuse this write.
         String gav = "com/example/widget/1.0/widget-1.0.jar";
         CodeArtifactService.MavenDeployAttemptResult result = service.deployMavenAssetUnderVersionFence(REGION,
                 "dom", null, "repo", "com.example", "widget", "1.0", versionFence, packageFence, staleEpisodeId,
@@ -2339,6 +2351,118 @@ class CodeArtifactServiceTest {
 
         assertFalse(result.fenceMatched());
         verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any());
+    }
+
+    /**
+     * {@link CodeArtifactService#mergeMavenMetadataUnderPackageFence}'s own version of the same
+     * race {@link #deployMavenAssetUnderVersionFenceWritesNothingWhenTheVersionFenceHasMoved}
+     * covers for a per-version write: a {@code DeletePackage} that finishes while the real,
+     * public-repository metadata fetch is still in flight must bump the package fence behind the
+     * snapshot the importer took before that fetch, so the merge that follows never lands.
+     */
+    @Test
+    void mergeMavenMetadataUnderPackageFenceWritesNothingWhenThePackageFenceHasMoved() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        long packageFenceSnapshot = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+        // The DeletePackage that lands while the importer's own real fetch is still in flight,
+        // simulated here the same way as every other fence test in this class.
+        when(reposiliteClient.hasAnyContentToDelete(repoId, "dom", "repo", "com.example", "widget"))
+                .thenReturn(true);
+        service.deletePackage(REGION, "dom", null, "repo", "maven", "com.example", "widget");
+
+        boolean merged = service.mergeMavenMetadataUnderPackageFence(REGION, "dom", null, "repo", "com.example",
+                "widget", packageFenceSnapshot, reposiliteClient, repoId, "<metadata/>".getBytes(
+                        StandardCharsets.UTF_8), v -> true);
+
+        assertFalse(merged);
+        verify(reposiliteClient, never()).mergeExternalConnectionReleaseVersions(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void mergeMavenMetadataUnderPackageFenceDelegatesToReposiliteWhenTheFenceStillMatches() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        long packageFenceSnapshot = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+        byte[] metadataBytes = "<metadata/>".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.mergeExternalConnectionReleaseVersions(eq(repoId), eq("com.example"), eq("widget"),
+                eq(metadataBytes), any())).thenReturn(true);
+
+        boolean merged = service.mergeMavenMetadataUnderPackageFence(REGION, "dom", null, "repo", "com.example",
+                "widget", packageFenceSnapshot, reposiliteClient, repoId, metadataBytes, v -> true);
+
+        assertTrue(merged);
+        verify(reposiliteClient).mergeExternalConnectionReleaseVersions(eq(repoId), eq("com.example"), eq("widget"),
+                eq(metadataBytes), any());
+    }
+
+    /**
+     * Raised by Greptile's review: an origin-config-only package (a {@code
+     * PutPackageOriginConfiguration} with no version ever actually published or retained) used to
+     * leave the package fence untouched on delete, since {@link
+     * CodeArtifactMavenExternalConnectionImporterTest} and {@link
+     * #mergeMavenMetadataUnderPackageFenceWritesNothingWhenThePackageFenceHasMoved} only ever cover
+     * a delete that found real content. A {@code DeletePackage} racing a metadata fetch still in
+     * flight for exactly that kind of package would otherwise leave the fence matching, letting the
+     * merge land afterward and resurrect a package {@code DeletePackage} had already told its
+     * caller was gone. See {@link CodeArtifactService#deletePackage}'s own javadoc for the fix.
+     */
+    @Test
+    void mergeMavenMetadataUnderPackageFenceWritesNothingAfterAnOriginConfigOnlyPackageIsDeleted() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "maven", "com.example", "widget",
+                "ALLOW", "ALLOW");
+        long packageFenceSnapshot = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+        // No real content exists for this package, only the origin configuration above, the same
+        // way the importer's own metadata fetch found nothing to retain yet either.
+        when(reposiliteClient.hasAnyContentToDelete(repoId, "dom", "repo", "com.example", "widget"))
+                .thenReturn(false);
+
+        service.deletePackage(REGION, "dom", null, "repo", "maven", "com.example", "widget");
+
+        boolean merged = service.mergeMavenMetadataUnderPackageFence(REGION, "dom", null, "repo", "com.example",
+                "widget", packageFenceSnapshot, reposiliteClient, repoId, "<metadata/>".getBytes(
+                        StandardCharsets.UTF_8), v -> true);
+
+        assertFalse(merged);
+        verify(reposiliteClient, never()).mergeExternalConnectionReleaseVersions(any(), any(), any(), any(), any());
+    }
+
+    /**
+     * Raised by Greptile's review: the package fence alone says nothing about {@link
+     * CodeArtifactService#deleteRepository} removing the whole repository, not just one package,
+     * while the same metadata fetch is in flight; {@code deleteRepository} never touches any
+     * individual package's fence, so the snapshot still matches even though the repository itself
+     * is gone. Without a separate check, the sidecar merge's own {@code ensureRepository} would
+     * transparently recreate the repository {@code deleteRepository} had just torn down.
+     */
+    @Test
+    void mergeMavenMetadataUnderPackageFenceWritesNothingAfterTheRepositoryItselfIsDeleted() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        long packageFenceSnapshot = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+
+        service.deleteRepository(REGION, "dom", null, "repo");
+
+        boolean merged = service.mergeMavenMetadataUnderPackageFence(REGION, "dom", null, "repo", "com.example",
+                "widget", packageFenceSnapshot, reposiliteClient, repoId, "<metadata/>".getBytes(
+                        StandardCharsets.UTF_8), v -> true);
+
+        assertFalse(merged);
+        verify(reposiliteClient, never()).mergeExternalConnectionReleaseVersions(any(), any(), any(), any(), any());
     }
 
     /**
@@ -2564,6 +2688,8 @@ class CodeArtifactServiceTest {
         String repoId = created.getSidecarContainerIds().get("maven");
         when(reposiliteClient.packageExists(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
                 eq("my-artifact"))).thenReturn(true);
+        when(reposiliteClient.hasAnyContentToDelete(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("my-artifact"))).thenReturn(true);
 
         CodeArtifactService.PackageDescription deleted = service.deletePackage(REGION, "dom", null, "repo", "maven",
                 "com.example", "my-artifact");
@@ -2598,6 +2724,8 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(true);
+        when(pypiserverClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
                 .thenReturn(true);
         doThrow(new UnsupportedOperationException("pypi packages cannot be deleted through this sidecar"))
                 .when(pypiserverClient).deletePackage(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg"));
@@ -6243,6 +6371,8 @@ class CodeArtifactServiceTest {
         recordReadme("dom", "repo", "pypi", null, "my-pkg", "1.0.0", "old text");
         when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
                 .thenReturn(true);
+        when(pypiserverClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(true);
 
         service.deletePackage(REGION, "dom", null, "repo", "pypi", null, "my-pkg");
 
@@ -6307,6 +6437,8 @@ class CodeArtifactServiceTest {
         long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "npm", null, "late");
         when(verdaccioClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("late")))
                 .thenReturn(true);
+        when(verdaccioClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), isNull(), eq("late")))
+                .thenReturn(true);
         service.deletePackage(REGION, "dom", null, "repo", "npm", null, "late");
 
         service.recordPublishedPackageVersionReadme(REGION, "dom", null, "repo", "npm", null, "late", "1.0.0",
@@ -6344,6 +6476,8 @@ class CodeArtifactServiceTest {
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         recordReadme("dom", "repo", "pypi", null, "My.Package", "1.0.0", "the readme");
         when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-package")))
+                .thenReturn(true);
+        when(pypiserverClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-package")))
                 .thenReturn(true);
 
         service.deletePackage(REGION, "dom", null, "repo", "pypi", null, "my-package");

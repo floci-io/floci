@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Predicate;
 
 /**
  * HTTP client for the shared Reposilite sidecar. A CodeArtifact repository maps to a named
@@ -149,14 +150,54 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     }
 
     /**
-     * Only a confirmed 404 means absent; confirmed live (a {@code GET} on a missing directory, or a
-     * never-provisioned repository, both answer a clean 404). Anything else, an auth failure or a
-     * server error, throws instead of collapsing to "not found": a Reposilite outage must not read
-     * as every Maven package having been deleted.
+     * {@code true} only when at least one real version subdirectory sits beneath the group/
+     * artifact directory, not merely whenever that directory answers at all: {@link
+     * #mergeExternalConnectionReleaseVersions} writes a {@code maven-metadata.xml} straight into
+     * that same directory purely to advertise resolvable versions, with no version ever actually
+     * retained there, so treating that file's presence alone as "exists" would make {@code
+     * CodeArtifactService#isUpstreamRetentionBlocked} see a brand-new package as already
+     * directly-published and permanently refuse every later retention attempt for it, since no
+     * claim could ever get recorded to prove otherwise. A confirmed 404 means absent (a missing
+     * directory, or a never-provisioned repository, both answer a clean 404). Anything else, an
+     * auth failure or a server error, throws instead of collapsing to "not found": a Reposilite
+     * outage must not read as every Maven package having been deleted.
      */
     @Override
     public boolean packageExists(String repositoryContainerId, String domain, String repository, String namespace,
             String packageName) {
+        String baseUrl = manager.ensureReady();
+        String path = "/api/maven/details" + packageDirectoryPath(repositoryContainerId, namespace, packageName);
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), path))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", manager.basicAuthHeader())
+                .GET()
+                .build();
+        HttpResponse<String> response = send(request, BodyHandlers.ofString());
+        if (response.statusCode() == 404) {
+            return false;
+        }
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Could not look up " + packageName + " on the Reposilite sidecar: "
+                    + "upstream returned " + response.statusCode());
+        }
+        for (JsonNode entry : readTree(response.body()).path("files")) {
+            if ("DIRECTORY".equals(entry.path("type").asText())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Unlike {@link #packageExists}, a bare GET on the group/artifact directory, with no
+     * requirement that anything beneath it be a real version: a metadata-only merge (just a
+     * {@code maven-metadata.xml} file, no version subdirectory) still answers {@code 200} here,
+     * so {@code DeletePackage} actually removes it instead of skipping the delete and reporting
+     * success while leaving it fetchable.
+     */
+    @Override
+    public boolean hasAnyContentToDelete(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName) {
         String baseUrl = manager.ensureReady();
         HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl),
                         packageDirectoryPath(repositoryContainerId, namespace, packageName)))
@@ -622,6 +663,138 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
                 .end("versioning")
                 .end("metadata");
         deployArtifact(repositoryContainerId, gav, metadata.build().getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Merges {@code externalMetadataXml}, a real public Maven repository's own group/artifact-
+     * level {@code maven-metadata.xml} fetched through an external connection, into {@code
+     * repositoryContainerId}'s own copy, so a client resolving a Maven version range or a Gradle
+     * dynamic version can discover a release this repository has never actually retained a byte
+     * of yet. The real asset bytes for whichever version the resolver settles on are still
+     * fetched on demand the normal way, through a separate, per-version import attempt; this
+     * only ever advertises versions, the same separation a real {@code maven-metadata.xml}
+     * request and the version-specific GAV requests that follow it already have.
+     *
+     * <p>Only {@code -SNAPSHOT}-free versions this repository's own {@code versionAllowed} does
+     * not reject are merged in: the snapshot restriction matches an external connection's own
+     * per-asset import ("AWS CodeArtifact only supports importing Maven release versions"), and
+     * {@code versionAllowed} exists so a caller can also keep out any version this repository has
+     * recorded as {@code Archived}/{@code Disposed}. Without that second check, disposing this
+     * package's only locally-listed version deletes its metadata file outright (see {@link
+     * #recordVersionDisposed}), and the next merge would otherwise re-import that exact disposed
+     * version straight back from the public repository's own still-unaware listing: a resolver
+     * could then pick a version whose real bytes this repository will never serve again. A
+     * version already listed locally is never added twice. Returns {@code false} without writing
+     * anything when the public repository's own metadata names no allowed release version this
+     * repository doesn't already have listed.
+     *
+     * <p>Reads the existing local copy through {@link #fetchArtifactConfirmingMissing}, not
+     * {@link #fetchArtifact}: that method's {@code empty()} also means "any non-200," 500/503
+     * included, which this merge must never read as "no local metadata yet," since that would let
+     * a transient sidecar read failure silently replace a real, locally-published package's
+     * {@code latest}/{@code release} with the external source's own guess at them.
+     *
+     * <p>Never lets the external source override an already-existing local {@code latest}/
+     * {@code release}: this bridge has no reliable way to tell whether a locally-published
+     * version a direct {@code mvn deploy} already recorded is newer or older than whatever the
+     * public repository last published, since Maven version strings do not sort by any universal
+     * rule this emulator could apply safely. A package with no local metadata at all has nothing
+     * to protect, so its merged {@code latest}/{@code release} are taken from the external
+     * source's own declared values, falling back to the last release version in document order
+     * when the source's own {@code <latest>}/{@code <release>} elements are themselves missing.
+     *
+     * <p>Writes the matching {@code .sha1}/{@code .md5} checksum siblings alongside every write,
+     * the same upkeep {@link #recordVersionDisposed} already owes this exact file: left out, a
+     * Maven client that verifies checksums could never trust even the first metadata response
+     * this merge ever produces. Raised by Greptile's review: the no-op return below, taken once
+     * every external version is already listed locally, repairs those same two checksums against
+     * the existing metadata first, the same way {@link #recordVersionDisposed}'s own early
+     * returns already do. Without that, a prior attempt whose metadata write succeeded but whose
+     * checksum write then failed would leave a stale checksum in place forever: every later
+     * request for this exact package would keep finding nothing new to add and keep taking this
+     * same no-op path, never repairing it, so a client verifying checksums could keep failing
+     * indefinitely even once the sidecar itself has long since recovered.
+     */
+    public boolean mergeExternalConnectionReleaseVersions(String repositoryContainerId, String namespace,
+            String packageName, byte[] externalMetadataXml, Predicate<String> versionAllowed) {
+        ensureRepository(repositoryContainerId);
+        String externalXml = new String(externalMetadataXml, StandardCharsets.UTF_8);
+        List<String> externalReleaseVersions = XmlParser.extractAll(externalXml, "version").stream()
+                .filter(v -> !v.endsWith("-SNAPSHOT"))
+                .filter(versionAllowed)
+                .toList();
+        if (externalReleaseVersions.isEmpty()) {
+            return false;
+        }
+        String gav = artifactMetadataGav(namespace, packageName);
+        Optional<FetchedArtifact> existing = fetchArtifactConfirmingMissing(repositoryContainerId, gav);
+        List<String> versions = new ArrayList<>();
+        String groupId = namespace;
+        String artifactId = packageName;
+        String latest = null;
+        String release = null;
+        boolean hadLocalMetadata = existing.isPresent();
+        if (hadLocalMetadata) {
+            String xml = new String(existing.get().content(), StandardCharsets.UTF_8);
+            versions.addAll(XmlParser.extractAll(xml, "version"));
+            groupId = XmlParser.extractFirst(xml, "groupId", namespace);
+            artifactId = XmlParser.extractFirst(xml, "artifactId", packageName);
+            latest = XmlParser.extractFirst(xml, "latest", null);
+            release = XmlParser.extractFirst(xml, "release", null);
+        }
+        boolean addedAny = false;
+        for (String version : externalReleaseVersions) {
+            if (!versions.contains(version)) {
+                versions.add(version);
+                addedAny = true;
+            }
+        }
+        if (!addedAny) {
+            if (hadLocalMetadata) {
+                writeMetadataChecksum(repositoryContainerId, gav + ".sha1",
+                        Digests.sha1Hex(existing.get().content()));
+                writeMetadataChecksum(repositoryContainerId, gav + ".md5",
+                        Digests.md5Hex(existing.get().content()));
+            }
+            return false;
+        }
+        if (!hadLocalMetadata) {
+            groupId = XmlParser.extractFirst(externalXml, "groupId", namespace);
+            artifactId = XmlParser.extractFirst(externalXml, "artifactId", packageName);
+            // The external source's own declared <latest>/<release> are trusted only when they
+            // actually name one of this merge's own release versions: a public repository could
+            // declare a SNAPSHOT (or any other value already filtered out above) as its latest,
+            // which must never end up named here without also being listed in <versions>.
+            String lastReleaseVersion = externalReleaseVersions.get(externalReleaseVersions.size() - 1);
+            String declaredLatest = XmlParser.extractFirst(externalXml, "latest", null);
+            latest = externalReleaseVersions.contains(declaredLatest) ? declaredLatest : lastReleaseVersion;
+            String declaredRelease = XmlParser.extractFirst(externalXml, "release", null);
+            release = externalReleaseVersions.contains(declaredRelease) ? declaredRelease : lastReleaseVersion;
+        }
+        XmlBuilder metadata = new XmlBuilder().start("metadata")
+                .elem("groupId", groupId)
+                .elem("artifactId", artifactId)
+                .start("versioning")
+                .elem("latest", latest)
+                .elem("release", release)
+                .start("versions");
+        for (String v : versions) {
+            metadata.elem("version", v);
+        }
+        metadata.end("versions")
+                .elem("lastUpdated", METADATA_TIMESTAMP.format(Instant.now()))
+                .end("versioning")
+                .end("metadata");
+        byte[] metadataBytes = metadata.build().getBytes(StandardCharsets.UTF_8);
+        DeployOutcome outcome = deployArtifact(repositoryContainerId, gav, metadataBytes);
+        if (!outcome.wroteNewContent()) {
+            throw new IllegalStateException("Could not merge external connection release versions into "
+                    + packageName + "'s maven-metadata.xml on the Reposilite sidecar: upstream returned "
+                    + outcome.status());
+        }
+        writeMetadataChecksum(repositoryContainerId, gav + ".sha1", Digests.sha1Hex(metadataBytes));
+        writeMetadataChecksum(repositoryContainerId, gav + ".md5", Digests.md5Hex(metadataBytes));
+        return true;
     }
 
     /**

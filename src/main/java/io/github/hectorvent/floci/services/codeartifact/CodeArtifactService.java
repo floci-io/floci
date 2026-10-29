@@ -53,6 +53,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -3127,6 +3128,54 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
+     * {@link ReposiliteSidecarClient#mergeExternalConnectionReleaseVersions}'s own counterpart to
+     * {@link #deployMavenAssetUnderVersionFence}, at package granularity rather than one version's:
+     * a metadata merge has no single version or claim episode of its own to check against, since
+     * it only ever advertises versions, never retains real bytes for any of them. Checked and
+     * acted on inside this very same {@code synchronized} call {@link #deletePackage} already
+     * holds for its own entire operation (and bumps {@code containerBackedPackageDeletionFence}
+     * behind), so the two can never interleave.
+     *
+     * <p>Raised by Greptile's review: {@code CodeArtifactMavenExternalConnectionImporter} used to
+     * fetch the real public repository's metadata and write the merge straight back with no fence
+     * check at all. A {@code DeletePackage} that finished while that real, slow fetch was still in
+     * flight would have its removal silently undone the moment the fetch finally completed and
+     * this write landed, resurrecting a {@code maven-metadata.xml} (and its checksums) for a
+     * package {@code DeletePackage} had already told its caller was gone, even if the external
+     * connection itself was also removed somewhere in that same gap.
+     *
+     * <p>{@code packageFenceSnapshot} is whatever {@link #currentContainerBackedPackageFence}
+     * returned when the importer called it, right before issuing the real fetch that produced
+     * {@code externalMetadataXml}; {@code reposilite}, {@code repoId}, and the rest of the merge's
+     * own inputs come from the caller for the same reason {@link #deployMavenAssetUnderVersionFence}
+     * takes them as parameters rather than fields: the slow part already happened before this lock
+     * was ever taken.
+     *
+     * <p>Raised by Greptile's review: the package fence alone says nothing about {@link
+     * #deleteRepository} (also {@code synchronized} on this same lock) having removed the whole
+     * repository, not just this one package, while that same fetch was in flight. Without also
+     * checking that here, {@link ReposiliteSidecarClient#mergeExternalConnectionReleaseVersions}'s
+     * own {@code ensureRepository} call would transparently recreate the Reposilite repository
+     * {@code deleteRepository} had just torn down, leaving real metadata and checksum files behind
+     * with no CodeArtifact repository left through which anything could ever delete them again.
+     */
+    public synchronized boolean mergeMavenMetadataUnderPackageFence(String region, String domain,
+            String domainOwner, String repository, String namespace, String packageName, long packageFenceSnapshot,
+            ReposiliteSidecarClient reposilite, String repoId, byte[] externalMetadataXml,
+            Predicate<String> versionAllowed) {
+        if (currentContainerBackedPackageFence(region, domain, domainOwner, repository, "maven", namespace,
+                packageName) != packageFenceSnapshot) {
+            return false;
+        }
+        String owner = effectiveOwner(domainOwner);
+        if (repositories.getForAccount(owner, repositoryKey(region, domain, repository)).isEmpty()) {
+            return false;
+        }
+        return reposilite.mergeExternalConnectionReleaseVersions(repoId, namespace, packageName, externalMetadataXml,
+                versionAllowed);
+    }
+
+    /**
      * Whether a package has any real version behind it: a stored {@code packageVersions} record
      * for generic, or the repository's own sidecar for a container-backed format. Deliberately
      * does not know about {@code packageOriginConfigs}; {@link #describePackage} checks that
@@ -3194,11 +3243,16 @@ public class CodeArtifactService implements Resettable {
         if (CONTAINER_BACKED_FORMATS.contains(format)) {
             hadRealContent = deleteContainerBackedPackageIfPresent(region, domain, owner, repository, format,
                     namespace, packageName);
-            if (hadRealContent) {
-                // Bumped only on an actual deletion, never a no-op (nothing there to begin with):
-                // see currentContainerBackedPackageFence's own javadoc for what this protects
-                // against, and why it can replace a sidecar round trip entirely rather than just
-                // relocate one.
+            if (hadRealContent || originConfig.isPresent()) {
+                // Bumped on any deletion this call actually goes through with, not just one that
+                // removed real content: see currentContainerBackedPackageFence's own javadoc for
+                // what this protects against, and why it can replace a sidecar round trip entirely
+                // rather than just relocate one. Raised by Greptile's review: an origin-config-only
+                // package (no real content, just a stored PutPackageOriginConfiguration) used to
+                // leave this fence untouched, so a Maven metadata merge already in flight for that
+                // exact package, racing this exact delete, could still write maven-metadata.xml
+                // back afterward with a snapshot that still matched, resurrecting a package this
+                // call had already told its caller was gone.
                 containerBackedPackageDeletionFence.put(ownerScopedKey(owner, accountingKey),
                         containerBackedPackageDeletionCounter.incrementAndGet());
             }
@@ -3306,13 +3360,21 @@ public class CodeArtifactService implements Resettable {
      * origin-config-only or not; that cost already existed for every real package before this
      * method's origin-config awareness, this just stops it from being skipped by accident instead
      * of by choice.
+     *
+     * <p>Checked through {@link RepositorySidecarManager#hasAnyContentToDelete}, not {@link
+     * RepositorySidecarManager#packageExists}: a Maven package that only ever had its {@code
+     * maven-metadata.xml} merged in from an external connection, with no version ever actually
+     * retained, correctly answers {@code packageExists} {@code false} (see that method's own
+     * javadoc), but still has that merged metadata file sitting on the sidecar for this call to
+     * actually remove, rather than skipping the delete and reporting success while leaving it
+     * fetchable.
      */
     private boolean deleteContainerBackedPackageIfPresent(String region, String domain, String owner,
             String repository, String format, String namespace, String packageName) {
         String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
         RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
                 .orElseThrow(() -> notFound("Package '" + packageName + "' was not found.", packageName, "package"));
-        if (!manager.packageExists(repoId, domain, repository, namespace, packageName)) {
+        if (!manager.hasAnyContentToDelete(repoId, domain, repository, namespace, packageName)) {
             return false;
         }
         try {
@@ -4530,8 +4592,10 @@ public class CodeArtifactService implements Resettable {
      * delayed callback (its own Vert.x response arriving well after this snapshot was taken, long
      * after Maven's or pypi's near-immediate inline accounting would have run) must not have the
      * first publish's bytes misattributed to the second. {@code deletePackage}'s container-backed
-     * branch bumps the counter behind this snapshot on an actual deletion; so does
-     * {@link #forgetContainerBackedPackage}, for the one other way a container-backed package's
+     * branch bumps the counter behind this snapshot on any deletion it actually goes through with,
+     * real content or an origin-config-only package alike, never a no-op where neither existed to
+     * begin with (that case 404s outright instead); so does {@link #forgetContainerBackedPackage},
+     * for the one other way a container-backed package's
      * real content can disappear: a real npm client's native {@code npm unpublish}, which the
      * pinned Verdaccio image (configured with {@code unpublish: $all}) honors on its own wire
      * protocol without ever calling {@code deletePackage} (confirmed: {@code

@@ -1,13 +1,16 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.codeartifact.model.CodeArtifactRepository;
 import io.github.hectorvent.floci.services.codeartifact.model.ExternalConnection;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -15,6 +18,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -99,7 +103,117 @@ class CodeArtifactMavenExternalConnectionImporterTest {
     }
 
     @Test
-    void doesNothingForABareMavenMetadataPath() {
+    void resolvesMetadataThroughTheExternalConnectionWhenNotFoundLocally() {
+        byte[] metadataBytes = "<metadata/>".getBytes();
+        when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/maven-metadata.xml"))
+                .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset(metadataBytes)));
+        when(service.mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
+                eq("com.example"), eq("widget"), anyLong(), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any()))
+                .thenReturn(true);
+
+        boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
+                "com/example/widget/maven-metadata.xml");
+
+        assertTrue(imported);
+    }
+
+    /**
+     * Raised by Greptile's review: the real fetch from the public repository can take long enough
+     * for a concurrent {@code DeletePackage} to finish while it is still in flight, so the fence
+     * snapshot passed to {@link CodeArtifactService#mergeMavenMetadataUnderPackageFence} must be
+     * taken before that fetch, not after, or a delete landing in between would never be caught by
+     * the check that runs inside that same call.
+     */
+    @Test
+    void takesThePackageFenceSnapshotBeforeFetchingFromThePublicRepository() {
+        byte[] metadataBytes = "<metadata/>".getBytes();
+        when(service.currentContainerBackedPackageFence(REGION, DOMAIN, OWNER, REPOSITORY, "maven", "com.example",
+                "widget")).thenReturn(42L);
+        when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/maven-metadata.xml"))
+                .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset(metadataBytes)));
+        when(service.mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
+                eq("com.example"), eq("widget"), eq(42L), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any()))
+                .thenReturn(true);
+
+        boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
+                "com/example/widget/maven-metadata.xml");
+
+        assertTrue(imported);
+        verify(service).mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
+                eq("com.example"), eq("widget"), eq(42L), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any());
+    }
+
+    /**
+     * {@link CodeArtifactMavenExternalConnectionImporter#tryImportMetadata} builds its own
+     * {@code versionAllowed} predicate from {@link
+     * CodeArtifactService#requireContainerBackedVersionDownloadable}, the exact same existence
+     * check a per-version download itself already enforces: a version this repository knows is
+     * {@code Archived}/{@code Disposed} throws from that check and must come back {@code false},
+     * while a version with no override at all (the common case: nothing here has ever recorded
+     * one) must come back {@code true}.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void versionAllowedPredicateRejectsOnlyVersionsTheServiceReportsNotDownloadable() {
+        byte[] metadataBytes = "<metadata/>".getBytes();
+        when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/maven-metadata.xml"))
+                .thenReturn(Optional.of(new MavenExternalConnectionClient.FetchedAsset(metadataBytes)));
+        when(service.mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
+                eq("com.example"), eq("widget"), anyLong(), eq(reposilite), eq(REPO_ID), eq(metadataBytes), any()))
+                .thenReturn(true);
+        doThrow(new AwsException("ResourceNotFoundException", "gone", 404))
+                .when(service).requireContainerBackedVersionDownloadable(OWNER, REGION, DOMAIN, REPOSITORY, "maven",
+                        "com.example", "widget", "1.0-disposed", REPO_ID);
+
+        importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, "com/example/widget/maven-metadata.xml");
+
+        ArgumentCaptor<Predicate<String>> captor = ArgumentCaptor.forClass(Predicate.class);
+        verify(service).mergeMavenMetadataUnderPackageFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY),
+                eq("com.example"), eq("widget"), anyLong(), eq(reposilite), eq(REPO_ID), eq(metadataBytes),
+                captor.capture());
+        Predicate<String> versionAllowed = captor.getValue();
+        assertFalse(versionAllowed.test("1.0-disposed"));
+        assertTrue(versionAllowed.test("1.0"));
+    }
+
+    @Test
+    void doesNothingForABareMavenMetadataPathWhenTheExternalSourceHasNone() {
+        when(externalConnectionClient.fetchAsset("public:maven-central", "com/example/widget/maven-metadata.xml"))
+                .thenReturn(Optional.empty());
+
+        boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
+                "com/example/widget/maven-metadata.xml");
+
+        assertFalse(imported);
+        verify(service, never()).mergeMavenMetadataUnderPackageFence(any(), any(), any(), any(), any(), any(),
+                anyLong(), any(), any(), any(), any());
+    }
+
+    @Test
+    void doesNothingForAMavenMetadataChecksumSiblingPath() {
+        boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
+                "com/example/widget/maven-metadata.xml.sha1");
+
+        assertFalse(imported);
+        verify(externalConnectionClient, never()).fetchAsset(anyString(), anyString());
+    }
+
+    @Test
+    void doesNothingForMavenMetadataWhenTheRepositoryHasNoMavenExternalConnection() {
+        when(service.describeRepository(REGION, DOMAIN, OWNER, REPOSITORY)).thenReturn(new CodeArtifactRepository());
+
+        boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
+                "com/example/widget/maven-metadata.xml");
+
+        assertFalse(imported);
+        verify(externalConnectionClient, never()).fetchAsset(anyString(), anyString());
+    }
+
+    @Test
+    void doesNothingForMavenMetadataWhenUpstreamRetentionIsBlocked() {
+        when(service.isUpstreamRetentionBlocked(REGION, DOMAIN, OWNER, REPOSITORY, "maven", "com.example",
+                "widget")).thenReturn(true);
+
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID,
                 "com/example/widget/maven-metadata.xml");
 

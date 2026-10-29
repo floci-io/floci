@@ -178,8 +178,9 @@ public class CodeArtifactMavenController {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
         Optional<FetchedArtifact> artifact = reposilite.fetchArtifact(scope.repoId(), gav);
-        if (artifact.isEmpty() && externalConnectionImporter.tryImport(scope.region(), domain, scope.owner(),
-                repository, scope.repoId(), gav)) {
+        if ((artifact.isEmpty() || isBareMavenMetadataFile(gav))
+                && externalConnectionImporter.tryImport(scope.region(), domain, scope.owner(), repository,
+                        scope.repoId(), gav)) {
             artifact = reposilite.fetchArtifact(scope.repoId(), gav);
         }
         return artifact.map(this::toResponse).orElseGet(() -> Response.status(Response.Status.NOT_FOUND).build());
@@ -197,11 +198,27 @@ public class CodeArtifactMavenController {
         // miss would, or a HEAD-first client would see a false "not found" before the real GET
         // ever gets the chance to retain it.
         boolean exists = reposilite.artifactExists(scope.repoId(), gav);
-        if (!exists && externalConnectionImporter.tryImport(scope.region(), domain, scope.owner(), repository,
-                scope.repoId(), gav)) {
+        if ((!exists || isBareMavenMetadataFile(gav))
+                && externalConnectionImporter.tryImport(scope.region(), domain, scope.owner(), repository,
+                        scope.repoId(), gav)) {
             exists = reposilite.artifactExists(scope.repoId(), gav);
         }
         return exists ? Response.ok().build() : Response.status(Response.Status.NOT_FOUND).build();
+    }
+
+    /**
+     * {@code true} only for the exact, bare {@code maven-metadata.xml} path, never a checksum
+     * sibling: unlike a fixed version's own assets, which never change once retained, a package's
+     * available-version list can keep growing on the real public repository after this
+     * repository's own first merge of it, so a request for this exact file always gets a fresh
+     * import attempt even when a local copy already exists, not just on the first ever miss.
+     * Raised by Greptile's review: without this, {@link #fetch}/{@link #head} only ever imported
+     * metadata once, the first time this exact GAV was requested, and every later request for the
+     * same package's version list silently kept serving that same first snapshot forever, no
+     * matter how many releases the public repository published afterward.
+     */
+    private static boolean isBareMavenMetadataFile(String gav) {
+        return gav.endsWith("/maven-metadata.xml");
     }
 
     /**

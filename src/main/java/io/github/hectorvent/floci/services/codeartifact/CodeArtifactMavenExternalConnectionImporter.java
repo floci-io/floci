@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.codeartifact.model.ExternalConnection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -7,6 +8,7 @@ import org.jboss.logging.Logger;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Predicate;
 
 /**
  * Retains a Maven package version from the real public repository a repository's {@code
@@ -50,6 +52,12 @@ import java.util.Optional;
  *   also checks the version's current status directly, not just its fence, so a request already
  *   admitted before a disposal that finished before this attempt's own snapshot was even taken
  *   can never write real bytes back for a version already marked unusable.</li>
+ *   <li><b>Resolving version ranges and dynamic versions.</b> A bare group/artifact-level
+ *   {@code maven-metadata.xml} request is resolved by merging in whichever release versions the
+ *   public repository's own metadata names, not by importing a single fixed version; see
+ *   {@link #tryImportMetadata}'s own javadoc. Without this, a Maven version range or a Gradle
+ *   dynamic version could never resolve against a connected repository that has not already
+ *   retained some other fixed version of this exact package some other way.</li>
  * </ul>
  *
  * <p>Deliberately not modeled here, because it cannot apply without an actual upstream
@@ -84,16 +92,30 @@ public class CodeArtifactMavenExternalConnectionImporter {
      * try again later" applies when nothing here can help (no connection configured, the version
      * is a SNAPSHOT, retention is blocked, a mixed-origin conflict, or the real public repository
      * genuinely doesn't have it).
+     *
+     * <p>A bare group/artifact-level {@code maven-metadata.xml} (no version segment in {@code
+     * gav}) is resolved differently: see {@link #tryImportMetadata}. This only ever merges in
+     * which releases the public repository has; the real bytes of whichever version a resolver
+     * settles on afterward still come through this same method's ordinary per-asset path, on
+     * the request that follows, the same two-step resolution a real {@code mvn}/Gradle client
+     * already does against a connected upstream.
      */
     public boolean tryImport(String region, String domain, String owner, String repository, String repoId,
             String gav) {
         Optional<String[]> coordinate = CodeArtifactMavenController.parseNamespaceAndPackageName(gav);
-        if (coordinate.isEmpty() || coordinate.get()[2] == null || coordinate.get()[2].endsWith("-SNAPSHOT")) {
+        if (coordinate.isEmpty()) {
             return false;
         }
         String namespace = coordinate.get()[0];
         String packageName = coordinate.get()[1];
         String version = coordinate.get()[2];
+        if (version == null) {
+            return gav.endsWith("/maven-metadata.xml") && tryImportMetadata(region, domain, owner, repository,
+                    repoId, namespace, packageName);
+        }
+        if (version.endsWith("-SNAPSHOT")) {
+            return false;
+        }
 
         String externalConnectionName = mavenExternalConnectionName(region, domain, owner, repository);
         if (externalConnectionName == null) {
@@ -249,6 +271,69 @@ public class CodeArtifactMavenExternalConnectionImporter {
         String directory = gav.substring(0, lastSlash + 1);
         String pomGav = directory + packageName + "-" + version + ".pom";
         return externalConnectionClient.exists(externalConnectionName, pomGav);
+    }
+
+    /**
+     * Resolves {@code namespace}/{@code packageName}'s own group/artifact-level {@code
+     * maven-metadata.xml} through {@code repository}'s maven external connection: without this, a
+     * Maven version range or a Gradle dynamic version could never resolve against a connected
+     * repository that has not already retained a fixed version of this exact package some other
+     * way, since nothing else here ever asks the real public repository what versions it
+     * actually has. Every candidate version this repository already knows is {@code Archived}/
+     * {@code Disposed} is kept out of the merge, the same existence check a per-version download
+     * itself already enforces through {@link
+     * CodeArtifactService#requireContainerBackedVersionDownloadable}, so a disposed version's
+     * metadata entry can never come back from the public repository's own still-unaware listing.
+     * Returns {@code true} only when the public repository's own metadata named at least one
+     * allowed release version this repository did not already have listed; see {@link
+     * ReposiliteSidecarClient#mergeExternalConnectionReleaseVersions}'s own javadoc for exactly
+     * how a merge with any locally-published versions is handled.
+     *
+     * <p>Raised by Greptile's review: the real fetch from the public repository below can take
+     * long enough for a concurrent {@code DeletePackage} to finish while it is still in flight.
+     * Without a fence, the merge that follows would write {@code maven-metadata.xml} straight
+     * back once that fetch completes, resurrecting the version list {@code DeletePackage} had
+     * already told its caller was gone. {@code packageFenceSnapshot} is taken here, before that
+     * fetch, for {@link CodeArtifactService#mergeMavenMetadataUnderPackageFence} to check right
+     * before the write, inside the same lock {@code DeletePackage} itself holds for its own entire
+     * operation; see that method's own javadoc for the full race this closes.
+     */
+    private boolean tryImportMetadata(String region, String domain, String owner, String repository, String repoId,
+            String namespace, String packageName) {
+        String externalConnectionName = mavenExternalConnectionName(region, domain, owner, repository);
+        if (externalConnectionName == null) {
+            return false;
+        }
+        if (service.isUpstreamRetentionBlocked(region, domain, owner, repository, "maven", namespace,
+                packageName)) {
+            return false;
+        }
+        long packageFenceSnapshot = service.currentContainerBackedPackageFence(region, domain, owner, repository,
+                "maven", namespace, packageName);
+        String metadataGav = namespace.replace('.', '/') + "/" + packageName + "/maven-metadata.xml";
+        Optional<MavenExternalConnectionClient.FetchedAsset> fetched;
+        try {
+            fetched = externalConnectionClient.fetchAsset(externalConnectionName, metadataGav);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not fetch {0}/{1}''s maven-metadata.xml from {2} while resolving its versions "
+                    + "through an external connection; leaving it unresolved.", namespace, packageName,
+                    externalConnectionName);
+            return false;
+        }
+        if (fetched.isEmpty()) {
+            return false;
+        }
+        Predicate<String> versionAllowed = version -> {
+            try {
+                service.requireContainerBackedVersionDownloadable(owner, region, domain, repository, "maven",
+                        namespace, packageName, version, repoId);
+                return true;
+            } catch (AwsException e) {
+                return false;
+            }
+        };
+        return service.mergeMavenMetadataUnderPackageFence(region, domain, owner, repository, namespace,
+                packageName, packageFenceSnapshot, reposilite, repoId, fetched.get().content(), versionAllowed);
     }
 
     private String mavenExternalConnectionName(String region, String domain, String owner, String repository) {
