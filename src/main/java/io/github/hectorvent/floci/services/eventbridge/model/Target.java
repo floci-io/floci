@@ -18,6 +18,7 @@ public class Target {
     private SqsParameters sqsParameters;
     private BatchParameters batchParameters;
     private EcsParameters ecsParameters;
+    private RedshiftDataParameters redshiftDataParameters;
     private RetryPolicy retryPolicy;
     private DeadLetterConfig deadLetterConfig;
     private HttpParameters httpParameters;
@@ -57,6 +58,11 @@ public class Target {
 
     public EcsParameters getEcsParameters() { return ecsParameters; }
     public void setEcsParameters(EcsParameters ecsParameters) { this.ecsParameters = ecsParameters; }
+
+    public RedshiftDataParameters getRedshiftDataParameters() { return redshiftDataParameters; }
+    public void setRedshiftDataParameters(RedshiftDataParameters redshiftDataParameters) {
+        this.redshiftDataParameters = redshiftDataParameters;
+    }
 
     public RetryPolicy getRetryPolicy() { return retryPolicy; }
     public void setRetryPolicy(RetryPolicy retryPolicy) { this.retryPolicy = retryPolicy; }
