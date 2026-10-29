@@ -718,7 +718,7 @@ public class RedshiftService implements ManagedSecretRotator {
                 integration.setStatus("failed");
             }
             integrations.putForAccount(accountId, key, integration);
-            queueStatusChange(integration, previousStatus);
+            queueStatusChange(integration, previousStatus, false);
             return;
         }
         throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
@@ -741,13 +741,14 @@ public class RedshiftService implements ManagedSecretRotator {
             }
             Integration integration = stored.get();
             String previousStatus = integration.getStatus();
+            boolean backfillJustCompleted = !integration.isBackfillCompleted() && backfillCompleted;
             integration.setBackfillLastEvaluatedKey(backfillLastEvaluatedKey);
             integration.setBackfillCompleted(backfillCompleted);
             integration.setRetryCount(0);
             integration.setLastError(null);
             integration.setStatus(backfillCompleted ? "active" : "syncing");
             integrations.putForAccount(accountId, key, integration);
-            queueStatusChange(integration, previousStatus);
+            queueStatusChange(integration, previousStatus, backfillJustCompleted);
             return;
         }
         throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
@@ -828,7 +829,7 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     /** Queues the event for a move into syncing, active or failed; any other change is silent. */
-    private void queueStatusChange(Integration integration, String previousStatus) {
+    private void queueStatusChange(Integration integration, String previousStatus, boolean backfillJustCompleted) {
         String status = integration.getStatus();
         if (status == null || status.equals(previousStatus)) {
             return;
@@ -837,7 +838,7 @@ public class RedshiftService implements ManagedSecretRotator {
             case "syncing" -> queueIntegrationEvent(
                     RedshiftIntegrationEventPublisher.IntegrationEvent.SYNCHRONIZING, integration);
             // Leaving the initial backfill is the integration becoming ACTIVE; a recovery from failure is "now ACTIVE".
-            case "active" -> queueIntegrationEvent("syncing".equals(previousStatus)
+            case "active" -> queueIntegrationEvent(backfillJustCompleted || "syncing".equals(previousStatus)
                     ? RedshiftIntegrationEventPublisher.IntegrationEvent.CREATED_ACTIVE
                     : RedshiftIntegrationEventPublisher.IntegrationEvent.ACTIVE, integration);
             case "failed" -> queueIntegrationEvent(

@@ -711,6 +711,29 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void backfillCompletionAfterFailureStillQueuesCreatedActive() {
+        String integrationArn = "arn:aws:redshift:us-east-1:111111111111:integration:one";
+        Integration integration = new Integration();
+        integration.setIntegrationArn(integrationArn);
+        integration.setStatus("syncing");
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(Set.of("one"));
+        when(integrationBackend.getForAccount("111111111111", "one")).thenReturn(Optional.of(integration));
+
+        service.updateIntegrationRuntime("111111111111", integrationArn, Map.of(), false, "boom");
+        assertEquals("failed", integration.getStatus());
+
+        service.updateIntegrationBackfillProgress("111111111111", integrationArn, null, true);
+
+        InOrder order = inOrder(integrationEvents);
+        order.verify(integrationEvents).queue(eq(RedshiftIntegrationEventPublisher.IntegrationEvent.FAILED),
+                eq(integration), eq("us-east-1"), any());
+        order.verify(integrationEvents).queue(eq(RedshiftIntegrationEventPublisher.IntegrationEvent.CREATED_ACTIVE),
+                eq(integration), eq("us-east-1"), any());
+        verify(integrationEvents, never()).queue(eq(RedshiftIntegrationEventPublisher.IntegrationEvent.ACTIVE),
+                any(), any(), any());
+    }
+
+    @Test
     void deleteIntegrationQueuesDeletionStartThenEnd() {
         String integrationArn = "arn:aws:redshift:us-east-1:111111111111:integration:one";
         Integration integration = new Integration();
