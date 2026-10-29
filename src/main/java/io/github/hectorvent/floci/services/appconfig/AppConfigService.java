@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.appconfig;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -44,6 +45,7 @@ public class AppConfigService {
     private static final int MAX_DEPLOYMENT_PAGE_TOKENS = 1000;
     private static final int MAX_MONITORS = 5;
     private static final int MAX_ARN_LENGTH = 2048;
+    private static final ObjectMapper COPIER = new ObjectMapper();
     private static final Pattern ROLE_ARN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::\\d{12}:role/.*");
 
     @Inject
@@ -84,7 +86,7 @@ public class AppConfigService {
         return applicationStore.scan(k -> true);
     }
 
-    public void deleteApplication(String idOrName) {
+    public synchronized void deleteApplication(String idOrName) {
         applicationStore.get(idOrName)
                 .or(() -> listApplications().stream().filter(a -> idOrName.equals(a.getName())).findFirst())
                 .ifPresent(application -> applicationStore.delete(application.getId()));
@@ -212,7 +214,7 @@ public class AppConfigService {
                 .toList();
     }
 
-    public void deleteConfigurationProfile(String applicationIdentifier, String profileIdentifier) {
+    public synchronized void deleteConfigurationProfile(String applicationIdentifier, String profileIdentifier) {
         String appId = resolveApplication(applicationIdentifier).getId();
         // Unlike deleteApplication (a single, unscoped ID), a profile is nested under an
         // application - a mismatched appId must not be able to delete another application's
@@ -343,7 +345,7 @@ public class AppConfigService {
         return result;
     }
 
-    public void deleteDeploymentStrategy(String id) {
+    public synchronized void deleteDeploymentStrategy(String id) {
         // Predefined strategies aren't real stored resources (see builtinStrategy above) -
         // silently no-op'ing here would report success for a delete that did nothing, and the
         // "deleted" strategy would still show up in every subsequent Get/List call.
@@ -551,16 +553,27 @@ public class AppConfigService {
         return getApplication(appId).getTags();
     }
 
-    public void tagApplication(String appId, Map<String, String> tags) {
-        Application app = getApplication(appId);
+    public synchronized void tagApplication(String appId, Map<String, String> tags) {
+        Application app = copy(getApplication(appId));
         app.getTags().putAll(tags);
         applicationStore.put(app.getId(), app);
     }
 
-    public void untagApplication(String appId, List<String> tagKeys) {
-        Application app = getApplication(appId);
+    public synchronized void untagApplication(String appId, List<String> tagKeys) {
+        Application app = copy(getApplication(appId));
         tagKeys.forEach(app.getTags()::remove);
         applicationStore.put(app.getId(), app);
+    }
+
+    /**
+     * A copy of a stored entity for a write to change and put back. The in-memory stores hand out the
+     * stored instance itself, so changing it in place would change an entity a caller read earlier,
+     * such as one a GetApplication is still serializing, under that caller. The models are plain
+     * Jackson beans, as storage persists them, so a round trip copies every field.
+     */
+    @SuppressWarnings("unchecked")
+    private static <T> T copy(T entity) {
+        return (T) COPIER.convertValue(entity, entity.getClass());
     }
 
     private static String shortId(int length) {
