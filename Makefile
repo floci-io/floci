@@ -439,7 +439,7 @@ S3CONTROL_TAG_CONDITION_KEYS_PATHS := src/main/resources/aws/s3control-tag-condi
 	tools/aws/regen_iam_tag_on_create.py $(IAM_PASSED_ROLES_GENERATOR)
 LAMBDA_WEB_CONDITION_KEYS_PATHS := src/main/resources/aws/lambda-web-condition-keys.json \
 	tools/aws/regen_lambda_web_condition_keys.py tools/aws/test_regen_lambda_web_condition_keys.py \
-	tools/aws/regen_partitions.py tools/aws/regen_query_services.py
+	tools/aws/regen_dynamodb_condition_keys.py tools/aws/regen_iam_tag_on_create.py $(IAM_PASSED_ROLES_GENERATOR)
 IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json \
 	tools/aws/regen_iam_request_resources.py $(IAM_PASSED_ROLES_GENERATOR) \
 	tools/aws/test_regen_iam_request_resources.py

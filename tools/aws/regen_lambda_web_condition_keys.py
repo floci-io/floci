@@ -36,6 +36,8 @@ import sys
 import urllib.request
 from pathlib import Path
 
+from regen_dynamodb_condition_keys import member_paths
+from regen_iam_tag_on_create import _condition_keys, _resource_keys
 from regen_partitions import resolve_botocore_data
 from regen_query_services import latest_model_dir, load_model
 
@@ -50,26 +52,12 @@ MEMBER = "authType"
 
 def action_keys(reference: dict) -> dict[str, list[str]]:
     """Every action of the namespace that takes either key, with the ones it takes."""
-    resources = {r["Name"]: r.get("ConditionKeys", []) for r in reference["Resources"]}
+    resource_keys = _resource_keys([reference])
     found = {}
     for action in sorted(reference["Actions"], key=lambda entry: entry["Name"]):
-        keys = set(action.get("ActionConditionKeys", []))
-        keys |= {k for r in action.get("Resources", []) for k in r.get("ConditionKeys", resources.get(r["Name"], []))}
-        keys &= {REQUEST_KEY, RESOURCE_KEY}
+        keys = {REQUEST_KEY, RESOURCE_KEY} & _condition_keys(NAMESPACE, action, resource_keys)
         if keys:
             found[f"{NAMESPACE}:{action['Name']}"] = sorted(keys)
-    return found
-
-
-def member_paths(model: dict, shape: str, prefix: str = "", seen: frozenset = frozenset()) -> list[str]:
-    """The paths of the members named MEMBER under a shape."""
-    if shape in seen:
-        return []
-    found = []
-    for name, member in sorted(model["shapes"][shape].get("members", {}).items()):
-        if name == MEMBER:
-            found.append(prefix + name)
-        found += member_paths(model, member["shape"], prefix + name + ".", seen | {shape})
     return found
 
 
@@ -82,7 +70,7 @@ def request_members(model: dict, actions: dict[str, list[str]]) -> dict[str, dic
         operation = model["operations"].get(action.split(":", 1)[1])
         if operation is None or "input" not in operation:
             raise ValueError(f"{action} takes {REQUEST_KEY} but botocore has no request for it")
-        paths = member_paths(model, operation["input"]["shape"])
+        paths = member_paths(model, operation["input"]["shape"], {MEMBER})
         if not paths:
             raise ValueError(f"{action} takes {REQUEST_KEY} but its request has no {MEMBER} member")
         found[action] = {REQUEST_KEY: paths}
