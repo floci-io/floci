@@ -38,6 +38,18 @@ class SigV4SignedRequestTest {
     }
 
     @Test
+    void aSigV4aHeaderIsReadOnlyForItsOwnAlgorithm() {
+        String authorization = "AWS4-ECDSA-P256-SHA256 Credential=AKIDEXAMPLE/20261017/lambda/aws4_request,"
+                + " SignedHeaders=host;x-amz-date;x-amz-region-set, Signature=3044";
+        assertNull(SigV4SignedRequest.fromHeader(authorization, "20261017T120000Z"));
+        SigV4SignedRequest signed = SigV4SignedRequest.fromHeader(authorization, "20261017T120000Z",
+                SigV4aSignature.ALGORITHM);
+        assertEquals("AKIDEXAMPLE/20261017/lambda/aws4_request", signed.credential());
+        assertEquals("host;x-amz-date;x-amz-region-set", signed.signedHeaders());
+        assertNull(SigV4SignedRequest.fromHeader(AUTHORIZATION, "20261017T120000Z", SigV4aSignature.ALGORITHM));
+    }
+
+    @Test
     void thePresignedSignatureNeedsEveryPartAndKeepsAnExpiryItCannotRead() {
         Map<String, String> query = presigned(NOW, "300");
         SigV4SignedRequest signed = SigV4SignedRequest.fromQuery(query::get);
