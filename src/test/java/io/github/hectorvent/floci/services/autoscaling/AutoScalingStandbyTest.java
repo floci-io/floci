@@ -91,14 +91,24 @@ class AutoScalingStandbyTest {
             InstanceState state = ec2States.get(invocation.<String>getArgument(0));
             return state != null && "running".equals(state.getName());
         });
+        // As Ec2Service does, an id EC2 has no record of fails the whole call with InvalidInstanceID.NotFound.
         when(ec2.describeInstances(eq(REGION), anyList(), isNull())).thenAnswer(invocation -> {
             List<Instance> found = new ArrayList<>();
             for (String id : invocation.<List<String>>getArgument(1)) {
-                if (ec2States.containsKey(id)) {
-                    found.add(instance(id, ec2States.get(id)));
+                if (!ec2States.containsKey(id)) {
+                    throw instanceNotFound(id);
                 }
+                found.add(instance(id, ec2States.get(id)));
             }
             return found.isEmpty() ? List.of() : List.of(reservation(found));
+        });
+        when(ec2.terminateInstances(eq(REGION), anyList())).thenAnswer(invocation -> {
+            for (String id : invocation.<List<String>>getArgument(1)) {
+                if (!ec2States.containsKey(id)) {
+                    throw instanceNotFound(id);
+                }
+            }
+            return List.of();
         });
         LaunchTemplate template = new LaunchTemplate();
         template.setLaunchTemplateId("lt-standby");
@@ -363,6 +373,25 @@ class AutoScalingStandbyTest {
         assertEquals("Cancelled", activity(describeScalingActivities(), activityId, "StatusCode"));
         verify(ec2).terminateInstances(REGION, List.of("i-a"));
         assertFalse(memberIds().contains("i-a"));
+    }
+
+    @Test
+    void anInstanceEc2NoLongerHasIsReplacedWhenItLeavesStandby() {
+        ok(enterStandby(true, "i-a"));
+        reconciler.reconcile(group());
+        ec2States.remove("i-a");
+        String activityId = ok(exitStandby("i-a")).getString(EXITED + ".ActivityId");
+        assertEquals(2, group().getDesiredCapacity());
+
+        reconciler.reconcile(group());
+
+        verify(ec2, never()).terminateInstances(eq(REGION), argThat(ids -> ids.contains("i-a")));
+        assertEquals(List.of("i-b", "i-replacement-1"), memberIds());
+        XmlPath activities = describeScalingActivities();
+        assertEquals("Cancelled", activity(activities, activityId, "StatusCode"));
+        assertEquals("Successful", activities.getString(ACTIVITIES
+                + ".find { it.Description == 'Terminating EC2 instance: i-a' }.StatusCode"), activities.prettify());
+        assertEquals(2, group().getDesiredCapacity());
     }
 
     @Test
@@ -667,6 +696,11 @@ class AutoScalingStandbyTest {
         instance.setInstanceId(id);
         instance.setState(state);
         return instance;
+    }
+
+    private static AwsException instanceNotFound(String instanceId) {
+        return new AwsException("InvalidInstanceID.NotFound",
+                "The instance ID '" + instanceId + "' does not exist", 400);
     }
 
     private static Reservation reservation(List<Instance> instances) {

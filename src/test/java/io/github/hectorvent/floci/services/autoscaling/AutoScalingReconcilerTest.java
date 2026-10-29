@@ -919,6 +919,40 @@ class AutoScalingReconcilerTest {
                 eq("Successful"));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"Pending", "Terminating"})
+    void memberEc2HasNoRecordOfIsPrunedAsStale(String lifecycleState) {
+        AutoScalingService asgService = scalingService();
+        ScalingActivity recorded = new ScalingActivity();
+        recorded.setActivityId("activity-1");
+        when(asgService.recordActivity(anyString(), anyString(), anyString(), anyString(), anyString()))
+                .thenReturn(recorded);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, mock(ElbV2Service.class));
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(0);
+        asg.getInstances().add(instance("i-gone", lifecycleState));
+        // Ec2Service answers an id it has no record of with InvalidInstanceID.NotFound, not with an empty list.
+        AwsException notFound = new AwsException("InvalidInstanceID.NotFound",
+                "The instance ID 'i-gone' does not exist", 400);
+        when(ec2Service.describeInstances("us-east-1", List.of("i-gone"), null)).thenThrow(notFound);
+        when(ec2Service.terminateInstances("us-east-1", List.of("i-gone"))).thenThrow(notFound);
+
+        reconciler.reconcile(asg);
+
+        assertEquals(0, asg.getInstances().size());
+        verify(asgService).recordActivity(
+                eq("us-east-1"),
+                eq("app-asg"),
+                eq("Removing stale EC2 instance reference(s): [i-gone]"),
+                eq("Persisted Auto Scaling state referenced instance containers that are no longer running."),
+                eq("Successful"));
+        verify(asgService, never()).recordActivity(anyString(), anyString(),
+                ArgumentMatchers.startsWith("Terminating EC2 instance(s) for refresh"), anyString(), eq("Failed"));
+    }
+
     @Test
     void terminatingInstanceWithMissingEc2RecordIsPrunedAsStale() {
         AutoScalingService asgService = scalingService();

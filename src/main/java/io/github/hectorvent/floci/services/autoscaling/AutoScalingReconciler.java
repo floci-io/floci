@@ -67,6 +67,9 @@ public class AutoScalingReconciler {
      */
     private static final Set<String> TERMINATED_STATES = Set.of("shutting-down", "terminated");
 
+    /** The error EC2 answers for an instance id it has no record of. */
+    private static final String INSTANCE_NOT_FOUND = "InvalidInstanceID.NotFound";
+
     /** The Activity StatusMessage limit (XmlStringMaxLen255). */
     private static final int STATUS_MESSAGE_MAX_LENGTH = 255;
 
@@ -435,6 +438,10 @@ public class AutoScalingReconciler {
             return state != null && terminalStates.contains(state);
         }
         catch (Exception e) {
+            // EC2 answers an id it has no record of with InvalidInstanceID.NotFound rather than an empty list.
+            if (e instanceof AwsException aws && INSTANCE_NOT_FOUND.equals(aws.getErrorCode())) {
+                return true;
+            }
             LOG.debugv("ASG {0}: keeping instance {1} during stale check: {2}",
                     asg.getAutoScalingGroupName(), instanceId, e.getMessage());
             return false;
