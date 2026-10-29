@@ -1527,8 +1527,9 @@ A request is checked against the resources it names. Floci builds their ARNs its
 SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge Scheduler, EventBridge
 Pipes, Aurora DSQL, EKS, CloudWatch Logs, Secrets Manager and STS. For Elastic Load Balancing, ECR,
 Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
-Map, ACM, CodePipeline, CodeBuild and Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2)
-they come from a table generated from AWS's Service
+Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
+AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract and Amazon Translate they come from a
+table generated from AWS's Service
 Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
@@ -1560,7 +1561,10 @@ being `Custom`, which the request does not give. Cloud Map's `CreateService` is 
 namespace its `NamespaceId` names or, when it gives none or a JSON null, the one its
 `DnsConfig.NamespaceId` names, as Cloud Map reads them, and on the service it creates. A CodeBuild build is checked on its
 project, which its id names before its `:` (`<project>:<id>`), as CodeBuild authorizes
-`BatchGetBuilds`, `StopBuild`, `RetryBuild` and `BatchDeleteBuilds`. An EventBridge rule is on the event bus
+`BatchGetBuilds`, `StopBuild`, `RetryBuild` and `BatchDeleteBuilds`. `CreateBudget` and `UpdateBudget`
+are checked on the budget their `Budget.BudgetName` or `NewBudget.BudgetName` names, and Cost and Usage
+Reports' `PutReportDefinition` on the report its `ReportDefinition.ReportName` names, not on the billing
+view ARN each may carry, which names no budget or report. An EventBridge rule is on the event bus
 its request's `EventBusName` names, by name or by ARN, and on the default bus when it names none
 or gives a null, whose rules are `rule/<name>`, with no bus; a bus ARN of another account, the
 default bus's included, names that account's rule, checked as given and as the caller's own, which

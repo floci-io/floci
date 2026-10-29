@@ -125,6 +125,10 @@ resolved AWS Region and are wrapped by the normal account-aware storage layer, p
 account and Region isolation. `/_floci/reset` clears policy stores, policies, templates,
 aliases, identity sources, and idempotency records with other resettable service state.
 
+A policy store's ARN carries no Region, `arn:aws:verifiedpermissions::<account>:policy-store/<id>`,
+as AWS gives it; a policy store alias's does,
+`arn:aws:verifiedpermissions:<region>:<account>:policy-store-alias/<name>`.
+
 ## Limitations
 
 - Token verification currently supports RS256 JWT signatures. Other OIDC signing algorithms are

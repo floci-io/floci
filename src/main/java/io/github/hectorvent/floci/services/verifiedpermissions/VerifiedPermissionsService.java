@@ -1061,8 +1061,14 @@ public class VerifiedPermissionsService implements Resettable {
                 .forEach(a -> aliases.delete(aliasKey(region, a.aliasName())));
     }
 
+    /**
+     * A policy store's ARN carries no Region, as AWS gives it
+     * ({@code arn:aws:verifiedpermissions::123456789012:policy-store/PSEXAMPLEabcdefg111111}), in the partition of the
+     * Region the store is in.
+     */
     private String storeArn(String region, String id) {
-        return AwsArnUtils.Arn.of("verifiedpermissions", region, regionResolver.getAccountId(), "policy-store/" + id).toString();
+        return AwsArnUtils.Arn.global(regionResolver.partitionForRegion(region), "verifiedpermissions",
+                regionResolver.getAccountId(), "policy-store/" + id).toString();
     }
 
     private String aliasArn(String region, String aliasName) {

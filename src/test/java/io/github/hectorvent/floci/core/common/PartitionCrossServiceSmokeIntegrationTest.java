@@ -1223,7 +1223,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
         String policyStoreId = created.jsonPath().getString("policyStoreId");
         cleanup.register(() -> json10(region, "verifiedpermissions", "VerifiedPermissions.DeletePolicyStore",
                 "{\"policyStoreId\":\"" + policyStoreId + "\"}").when().post("/"));
-        PartitionMatrix.assertArnIn(partitionCase, created.jsonPath().getString("arn"));
+        PartitionMatrix.assertGlobalArnIn(partitionCase, created.jsonPath().getString("arn"));
     }
 
     @ParameterizedTest

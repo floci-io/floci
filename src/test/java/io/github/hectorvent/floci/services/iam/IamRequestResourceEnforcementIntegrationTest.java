@@ -776,6 +776,95 @@ class IamRequestResourceEnforcementIntegrationTest {
         refusedJson(describeApplication(user, name + "-other"), "kinesisanalytics:DescribeApplication");
     }
 
+    /**
+     * A budget is checked on {@code budget/<name>}, with no Region, the ARN Budgets tags it under, and an update on the
+     * budget its {@code NewBudget} names, not on one its billing view ARN gives.
+     */
+    @Test
+    void aBudgetIsCheckedOnTheArnItsNameGives() {
+        String name = "res-budget-" + suffix();
+        String other = name + "-other";
+        for (String budget : List.of(name, other)) {
+            adminJson("budgets", "AWSBudgetServiceGateway.CreateBudget")
+                    .body("{\"AccountId\":\"" + ACCOUNT + "\",\"Budget\":" + budget(budget, null) + "}").post("/")
+                    .then().statusCode(200);
+            cleanup.register(() -> adminJson("budgets", "AWSBudgetServiceGateway.DeleteBudget")
+                    .body("{\"AccountId\":\"" + ACCOUNT + "\",\"BudgetName\":\"" + budget + "\"}").post("/"));
+        }
+        String arn = "arn:aws:budgets::" + ACCOUNT + ":budget/" + name;
+        adminJson("budgets", "AWSBudgetServiceGateway.TagResource").body("{\"ResourceARN\":\"" + arn
+                + "\",\"ResourceTags\":[{\"Key\":\"a\",\"Value\":\"b\"}]}").post("/").then().statusCode(200);
+
+        User user = user("res-budget");
+        user.policy(allowOn("budgets:ViewBudget", arn) + "," + allowOn("budgets:ModifyBudget", arn));
+        budgets(user, "DescribeBudget", "{\"AccountId\":\"" + ACCOUNT + "\",\"BudgetName\":\"" + name + "\"}")
+                .statusCode(200);
+        refusedJson(budgets(user, "DescribeBudget", "{\"AccountId\":\"" + ACCOUNT + "\",\"BudgetName\":\"" + other
+                + "\"}"), "budgets:ViewBudget");
+        refusedJson(budgets(user, "UpdateBudget", "{\"AccountId\":\"" + ACCOUNT + "\",\"NewBudget\":"
+                + budget(other, arn) + "}"), "budgets:ModifyBudget");
+        budgets(user, "UpdateBudget", "{\"AccountId\":\"" + ACCOUNT + "\",\"NewBudget\":" + budget(name, null) + "}")
+                .statusCode(200);
+    }
+
+    /**
+     * A Cost and Usage Report definition is checked on {@code definition/<name>}, a put on the one its
+     * {@code ReportDefinition.ReportName} names, not on one its billing view ARN gives.
+     */
+    @Test
+    void aReportDefinitionIsCheckedOnTheArnItsNameGives() {
+        String name = "res-report-" + suffix();
+        String arn = "arn:aws:cur:" + REGION + ":" + ACCOUNT + ":definition/" + name;
+        User user = user("res-report");
+        user.policy(allowOn("cur:PutReportDefinition", arn) + "," + allowOn("cur:DeleteReportDefinition", arn));
+        refusedJson(cur(user, "PutReportDefinition", "{\"ReportDefinition\":" + reportDefinition(name + "-other", arn)
+                + "}"), "cur:PutReportDefinition");
+        cur(user, "PutReportDefinition", "{\"ReportDefinition\":" + reportDefinition(name, null) + "}").statusCode(200);
+        cur(user, "DeleteReportDefinition", "{\"ReportName\":\"" + name + "\"}").statusCode(200);
+    }
+
+    /** A service quota is checked on {@code <service code>/<quota code>}, the ARN Service Quotas gives it. */
+    @Test
+    void aServiceQuotaIsCheckedOnItsArn() {
+        String arn = adminJson("servicequotas", "ServiceQuotasV20190624.GetServiceQuota")
+                .body("{\"ServiceCode\":\"codebuild\",\"QuotaCode\":\"L-2DC20C30\"}").post("/").then().statusCode(200)
+                .extract().path("Quota.QuotaArn");
+        assertEquals("arn:aws:servicequotas:" + REGION + ":" + ACCOUNT + ":codebuild/L-2DC20C30", arn);
+
+        User user = user("res-quota");
+        user.policy(allowOn("servicequotas:GetServiceQuota", arn));
+        serviceQuota(user, "L-2DC20C30").statusCode(200);
+        refusedJson(serviceQuota(user, "L-00000000"), "servicequotas:GetServiceQuota");
+    }
+
+    /** A monthly cost budget of the name, with a billing view ARN when one is given. */
+    private static String budget(String name, String billingViewArn) {
+        return "{\"BudgetName\":\"" + name + "\",\"BudgetType\":\"COST\",\"TimeUnit\":\"MONTHLY\",\"BudgetLimit\":"
+                + "{\"Amount\":\"100\",\"Unit\":\"USD\"}" + (billingViewArn == null ? ""
+                : ",\"BillingViewArn\":\"" + billingViewArn + "\"") + "}";
+    }
+
+    /** A daily Parquet report definition of the name, with a billing view ARN when one is given. */
+    private static String reportDefinition(String name, String billingViewArn) {
+        return "{\"ReportName\":\"" + name + "\",\"TimeUnit\":\"DAILY\",\"Format\":\"Parquet\",\"Compression\":\"Parquet\","
+                + "\"AdditionalSchemaElements\":[\"RESOURCES\"],\"S3Bucket\":\"my-bucket\",\"S3Prefix\":\"reports/\","
+                + "\"S3Region\":\"" + REGION + "\"" + (billingViewArn == null ? ""
+                : ",\"BillingViewArn\":\"" + billingViewArn + "\"") + "}";
+    }
+
+    private static ValidatableResponse budgets(User user, String operation, String body) {
+        return user.json("budgets", "AWSBudgetServiceGateway." + operation, "1.1").body(body).post("/").then();
+    }
+
+    private static ValidatableResponse cur(User user, String operation, String body) {
+        return user.json("cur", "AWSOrigamiServiceGatewayService." + operation, "1.1").body(body).post("/").then();
+    }
+
+    private static ValidatableResponse serviceQuota(User user, String quotaCode) {
+        return user.json("servicequotas", "ServiceQuotasV20190624.GetServiceQuota", "1.1")
+                .body("{\"ServiceCode\":\"codebuild\",\"QuotaCode\":\"" + quotaCode + "\"}").post("/").then();
+    }
+
     private static ValidatableResponse codeBuild(User user, String operation, String body) {
         return user.json("codebuild", "CodeBuild_20161006." + operation, "1.1").body(body).post("/").then();
     }

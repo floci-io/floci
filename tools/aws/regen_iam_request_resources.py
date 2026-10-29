@@ -119,8 +119,9 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 
 # The namespaces read, in batches: each moves here from NOT_COVERED with the tests that show its ARNs
 # are the ones its handlers mint.
-NAMESPACES = ("acm", "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "ecr", "elasticloadbalancing",
-              "events", "firehose", "kinesisanalytics", "servicediscovery", "states")
+NAMESPACES = ("acm", "budgets", "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "cur", "ecr",
+              "elasticloadbalancing", "events", "firehose", "kinesisanalytics", "servicediscovery", "servicequotas",
+              "states", "textract", "translate")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.
@@ -156,7 +157,9 @@ NOT_COVERED: dict[str, str] = {
     "appsync": _REST,
     "aps": _REST,
     "athena": _LATER,
-    "autoscaling": _LATER,
+    "autoscaling": "not read yet: AWS's group and launch configuration ARNs carry an id the service mints, "
+                   "`autoScalingGroup:<id>:autoScalingGroupName/<name>`, while Floci mints `autoScalingGroup:<name>`, "
+                   "which other services (ECS capacity providers) read back; the mint is fixed first",
     "aws-marketplace": _LATER,
     "backup": _REST,
     "batch": _REST,
@@ -164,11 +167,12 @@ NOT_COVERED: dict[str, str] = {
     "bcm-pricing-calculator": _LATER,
     "bedrock": _LATER,
     "bedrock-agentcore": _REST,
-    "budgets": _LATER,
     "ce": _LATER,
     "cloudformation": _LATER,
     "cloudfront": _REST,
-    "cloudhsm": _LATER,
+    "cloudhsm": "not read yet: its ARN formats end in ${CloudHsmClusterInstanceName} and "
+                "${CloudHsmBackupInstanceName}, names, while its requests give ClusterId and BackupId, ids, which the "
+                "rule does not fill a name from, so nearly every operation needs a correction",
     "cloudtrail": _LATER,
     "cloudwatch": _LATER,
     "codeartifact": _REST,
@@ -179,7 +183,6 @@ NOT_COVERED: dict[str, str] = {
     "connect": _REST,
     "controlcatalog": _REST,
     "controltower": _REST,
-    "cur": _LATER,
     "datasync": _LATER,
     "detective": _REST,
     "dlm": _REST,
@@ -224,18 +227,20 @@ NOT_COVERED: dict[str, str] = {
     "sagemaker": _LATER,
     "securityhub": _REST,
     "servicecatalog": _LATER,
-    "servicequotas": _LATER,
     "ses": _LATER,
     "signin": _REST,
     "sso": _LATER,
     "sso-oauth": _REST,
-    "swf": _LATER,
-    "textract": _LATER,
+    "swf": "not read yet: the Service Reference gives a domain's ARN no Region, `swf::<account>:/domain/<name>`, "
+           "while the SWF Developer Guide gives it as arn:aws:swf:Region:AccountID:/domain/DomainName, as Floci mints "
+           "it; reading it needs that format corrected",
     "timestream-influxdb": _LATER,
     "transcribe": _LATER,
     "transfer": _LATER,
-    "translate": _LATER,
-    "verifiedpermissions": _LATER,
+    "verifiedpermissions": "not read yet: a policyStoreId may name its store by an alias, `policy-store-alias/<name>`, "
+                           "which AWS authorizes as the action on the store the alias points to and "
+                           "GetPolicyStoreAlias on the alias, and an aliasName carries the `policy-store-alias/` its "
+                           "format already gives; reading it needs both",
     "wafv2": _LATER,
 }
 
@@ -249,12 +254,21 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
         {"type": "loadbalancer/net/", "fill": {"LoadBalancerName": "Name"}, "when": {"Type": ["network"]}},
     ], "the classic API names its load balancer by LoadBalancerName; the v2 API by Name, its type by Type, "
        "an application load balancer when it gives none, which the rule cannot tell apart"),
+    **{f"budgets:{operation}": ([{"type": "budget", "fill": {"BudgetName": member}}],
+                                f"the request names the budget by {member} ('The name of a budget'), which the rule "
+                                "does not read inside a structure; its BillingViewArn is a billing view's ARN "
+                                "(arn:aws:billing::<account>:billingview/...), never a budget's")
+       for operation, member in (("CreateBudget", "Budget.BudgetName"), ("UpdateBudget", "NewBudget.BudgetName"))},
     **{f"codebuild:{operation}": ([{"type": "project", "fill": {"ProjectName": member}, "before": ":"}],
                                   "a build is checked on its project (the CodeBuild User Guide's permissions reference "
                                   "gives each of these the resource project/project-name), which its id names before "
                                   "its ':' (CODEBUILD_BUILD_ID, for example codebuild-demo-project:b1e6661e-...)")
        for operation, member in (("BatchDeleteBuilds", "ids[]"), ("BatchGetBuilds", "ids[]"), ("RetryBuild", "id"),
                                  ("StopBuild", "id"))},
+    "cur:PutReportDefinition": ([{"type": "cur", "fill": {"ReportName": "ReportDefinition.ReportName"}}],
+                                "the request names the report by ReportDefinition.ReportName ('The name of the report "
+                                "that you want to create'), which the rule does not read inside a structure; its "
+                                "BillingViewArn is a billing view's ARN, never a report definition's"),
     **{f"codepipeline:{operation}": ([{"type": "pipeline", "fill": {"PipelineName": "pipeline.name"}}],
                                      "the request names the pipeline by its pipeline structure's name, which the "
                                      "rule does not read inside a structure; its roleArn is the role CodePipeline "
