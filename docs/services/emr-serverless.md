@@ -136,6 +136,14 @@ publishes for customizing EMR Serverless images (`public.ecr.aws/emr-serverless/
 * **Credentials**: the container gets a session for the run's execution role when IAM knows the role,
   otherwise the account's placeholder credentials, and `AWS_ENDPOINT_URL` pointing at Floci, so the
   job's own SDK clients reach Floci too.
+* **HTTPS**: with [TLS](../configuration/tls.md) on, the container also gets Floci's CA bundle as a
+  Java trust store, `/etc/floci-ca-bundle.p12`, which every JVM in it uses through
+  `JAVA_TOOL_OPTIONS`, each saying so on its standard error (`Picked up JAVA_TOOL_OPTIONS: ...`); a
+  trust store the job names itself, with `-Djavax.net.ssl.trustStore`, replaces it. So
+  the job trusts Floci over HTTPS, and with
+  [`FLOCI_DNS_SPOOF_AWS_ENDPOINTS`](../configuration/environment-variables.md#transparent-endpoints)
+  on as well, which leads AWS's own endpoint names to Floci, SDK clients that ignore `AWS_ENDPOINT_URL`,
+  the AWS SDK for Java 1.x's for one, reach Floci unchanged.
 * **Output**: the driver's output goes to Floci's log, prefixed `emr-serverless:<jobRunId>`. With an S3
   log destination, the run's `s3MonitoringConfiguration` or else the application's, its standard output
   and error also go to Floci's S3 once the run ends, gzipped, as `stdout.gz` and `stderr.gz` under
@@ -156,7 +164,7 @@ publishes for customizing EMR Serverless images (`public.ecr.aws/emr-serverless/
 
 ## Limitations and Differences from AWS
 
-* **Jobs do not execute by default**: in the `immediate` runner mode `StartJobRun` records a job run and moves it through its states, but nothing runs. In the `docker` mode a Spark run executes in local mode in one container, so worker counts and sizes, initial and maximum capacity are not applied; a Hive run is `FAILED` without running, in Floci's own wording, as is a driver's failure. Of the monitoring configuration, the S3 log destination gets the driver's `stdout.gz` and `stderr.gz` once a run ends (no event logs, rotated files or uploads while it runs), and CloudWatch Logs the driver's output while it runs (there are no executor logs, local mode having no executors, and `encryptionKeyArn` is ignored), and Floci's CA is not in the job's Java truststore, so a job reaches Floci over its HTTP endpoint only.
+* **Jobs do not execute by default**: in the `immediate` runner mode `StartJobRun` records a job run and moves it through its states, but nothing runs. In the `docker` mode a Spark run executes in local mode in one container, so worker counts and sizes, initial and maximum capacity are not applied; a Hive run is `FAILED` without running, in Floci's own wording, as is a driver's failure. Of the monitoring configuration, the S3 log destination gets the driver's `stdout.gz` and `stderr.gz` once a run ends (no event logs, rotated files or uploads while it runs), and CloudWatch Logs the driver's output while it runs (there are no executor logs, local mode having no executors, and `encryptionKeyArn` is ignored).
 * **Unsourced errors**: AWS documents neither the error for a run submitted to an application whose auto-start is off nor the one for a run on a terminated application; Floci answers both with `ValidationException`. The same holds for a `BATCH` timeout outside 1 to 10080 minutes on `emr-7.11.0` or later (`ValidationException`) and for `GetJobRun` naming an attempt a run never made (`ResourceNotFoundException`), both in Floci's own wording. A run needs a `jobDriver`, as every `JobRun` carries one, and `jobDriver` is a union, so a run without a driver, or with one that sets both `sparkSubmit` and `hive` or neither, is refused with `ValidationException` too, in Floci's own wording.
 * **StopApplication with running jobs**: AWS requires running jobs to finish or be cancelled before an application stops. Floci does not enforce it; with the default duration of `0` no `BATCH` run is ever running.
 * **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, queuing (`QUEUED`), `totalResourceUtilization` and `billedResourceUtilization`, and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).

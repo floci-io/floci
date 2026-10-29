@@ -36,6 +36,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -270,20 +271,70 @@ class ContainerLifecycleManagerCaBundleTest {
         verify(dockerClient, times(1)).copyArchiveToContainerCmd(anyString());
     }
 
+    @Test
+    void theJavaTrustStoreIsCopiedBesideTheBundleWhenALauncherAsks() throws Exception {
+        when(tlsConfig.enabled()).thenReturn(true);
+        byte[] trustStore = {0x30, (byte) 0x82, 0x01, 0x02};
+        Files.write(Files.createDirectories(tempDir.resolve("tls")).resolve("floci-ca-bundle.p12"), trustStore);
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("container-id")).thenReturn(copyCmd);
+        List<InputStream> streams = new ArrayList<>();
+        when(copyCmd.withTarInputStream(any(InputStream.class))).thenAnswer(invocation -> {
+            streams.add(invocation.getArgument(0));
+            return copyCmd;
+        });
+        when(copyCmd.exec()).thenAnswer(invocation -> {
+            assertSingleFileArchive(streams.getLast(), "floci-ca-bundle.p12", trustStore);
+            return null;
+        });
+
+        assertTrue(manager().copyJavaTrustStore("container-id"));
+
+        verify(copyCmd).withRemotePath("/etc");
+        verify(copyCmd).exec();
+    }
+
+    @Test
+    void noJavaTrustStoreIsCopiedWithTlsOffOrWithoutOneFromTheBoot() throws Exception {
+        when(tlsConfig.enabled()).thenReturn(true);
+        writeBundle();
+
+        assertFalse(manager().copyJavaTrustStore("container-id"), "the boot wrote no trust store");
+        Files.write(tempDir.resolve("tls").resolve("floci-ca-bundle.p12"), new byte[] {1});
+        when(tlsConfig.enabled()).thenReturn(false);
+        assertFalse(manager().copyJavaTrustStore("container-id"), "TLS is off");
+        verify(dockerClient, never()).copyArchiveToContainerCmd(anyString());
+    }
+
+    @Test
+    void aJavaTrustStoreThatCannotBeCopiedIsReportedMissing() throws Exception {
+        when(tlsConfig.enabled()).thenReturn(true);
+        Files.write(Files.createDirectories(tempDir.resolve("tls")).resolve("floci-ca-bundle.p12"), new byte[] {1});
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("container-id")).thenReturn(copyCmd);
+        when(copyCmd.exec()).thenThrow(new NotFoundException("Could not find the file /etc in container"));
+
+        assertFalse(manager().copyJavaTrustStore("container-id"));
+    }
+
     private Path writeBundle() throws Exception {
         Path tlsDir = Files.createDirectories(tempDir.resolve("tls"));
         return Files.writeString(tlsDir.resolve("floci-ca-bundle.pem"), BUNDLE_PEM);
     }
 
     private static void assertBundleArchive(InputStream stream) throws IOException {
+        assertSingleFileArchive(stream, "floci-ca-bundle.pem", BUNDLE_PEM.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void assertSingleFileArchive(InputStream stream, String name, byte[] content) throws IOException {
         byte[] archive = stream.readAllBytes();
         try (TarArchiveInputStream in = new TarArchiveInputStream(new ByteArrayInputStream(archive))) {
             TarArchiveEntry entry = in.getNextEntry();
             assertNotNull(entry, "every attempt must begin with a complete tar header");
-            assertEquals("floci-ca-bundle.pem", entry.getName());
+            assertEquals(name, entry.getName());
             assertEquals(0644, entry.getMode() & 0777, "world-readable, so a non-root USER can read it");
-            assertArrayEquals(BUNDLE_PEM.getBytes(StandardCharsets.UTF_8), in.readAllBytes());
-            assertNull(in.getNextEntry(), "the archive holds only the bundle");
+            assertArrayEquals(content, in.readAllBytes());
+            assertNull(in.getNextEntry(), "the archive holds only " + name);
         }
     }
 

@@ -34,6 +34,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.Closeable;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -367,10 +368,7 @@ public class ContainerLifecycleManager {
      */
     private boolean copyCaBundle(String containerId, Path bundle) {
         try {
-            byte[] content = Files.readAllBytes(bundle);
-            RetryingTarCopier.copyBytes(dockerClient, containerId, ContainerCaBundle.CONTAINER_DIR,
-                    ContainerCaBundle.FILE_NAME, content, 0644,
-                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
+            copyIntoContainerDir(containerId, bundle, ContainerCaBundle.FILE_NAME);
             LOG.debugv("Copied the CA bundle into container {0} at {1}", containerId, ContainerCaBundle.CONTAINER_PATH);
             return true;
         } catch (Exception e) {
@@ -379,6 +377,35 @@ public class ContainerLifecycleManager {
                     containerId, e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Copies the CA bundle's Java trust store into {@code containerId}, before it starts, at
+     * {@link ContainerCaBundle#JAVA_TRUST_STORE_PATH}, for a container whose JVMs are then pointed at
+     * it, as {@link ContainerCaBundle#JAVA_TRUST_SHELL_LINE} does. Returns whether it is there: false
+     * when TLS is off, the boot wrote no trust store, or the copy failed, which is logged; the JVMs then
+     * keep the image's trust store.
+     */
+    public boolean copyJavaTrustStore(String containerId) {
+        Optional<Path> trustStore = ContainerCaBundle.javaTrustStoreHostPath(config);
+        if (trustStore.isEmpty()) {
+            return false;
+        }
+        try {
+            copyIntoContainerDir(containerId, trustStore.get(), ContainerCaBundle.JAVA_TRUST_STORE_FILE_NAME);
+            return true;
+        } catch (Exception e) {
+            LOG.warnv("Could not copy the Java trust store into container {0}, whose JVMs keep the image's trust"
+                    + " store and will not trust Floci HTTPS: {1}", containerId, e.getMessage());
+            return false;
+        }
+    }
+
+    // Copies a file of the CA bundle's to the container's ContainerCaBundle.CONTAINER_DIR as name, readable by
+    // any user, so a non-root USER can read it.
+    private void copyIntoContainerDir(String containerId, Path file, String name) throws IOException {
+        RetryingTarCopier.copyBytes(dockerClient, containerId, ContainerCaBundle.CONTAINER_DIR, name,
+                Files.readAllBytes(file), 0644, RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
     }
 
     /**

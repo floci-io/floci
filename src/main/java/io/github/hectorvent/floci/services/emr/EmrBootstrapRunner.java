@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.emr;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.model.Image;
+import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
@@ -47,7 +48,8 @@ import java.util.zip.GZIPOutputStream;
  * runs its command as it is, and what it leaves in that home is the {@code hadoop} user's. Each action's
  * script is read from Floci's S3 as the cluster's account and runs through {@code docker exec}, with the
  * credentials of the cluster's EC2 instance profile in its environment alone, so that they never become
- * part of the image.
+ * part of the image. With TLS on, the JVMs an action starts trust Floci's CA, through the Java trust store
+ * copied in once the container is up, which goes before the image is kept.
  */
 @ApplicationScoped
 public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
@@ -71,8 +73,10 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
             "  esac",
             "done",
             "exec env \"$@\"");
-    // What each action runs as root: $1 is its script, and the rest that script's arguments.
+    // What each action runs as root: $1 is its script, and the rest that script's arguments. The JVMs it starts
+    // trust Floci's CA once the container has its trust store.
     private static final String ACTION_COMMAND = String.join("\n",
+            ContainerCaBundle.JAVA_TRUST_SHELL_LINE,
             "mkdir -p /tmp/floci-bin",
             "cat > /tmp/floci-bin/sudo <<'SUDO'",
             SUDO,
@@ -87,9 +91,10 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
             "code=$?",
             "chown -R hadoop:hadoop /home/hadoop",
             "exit $code");
-    // Run once every action has: what only the actions needed goes before the image is kept.
-    private static final String CLEANUP_COMMAND = "rm -f /tmp/floci-bin/sudo /tmp/floci-bootstrap-action-*;"
-            + " rmdir /tmp/floci-bin";
+    // Run once every action has: what only the actions needed goes before the image is kept, the trust store
+    // included, which each step's container gets afresh.
+    private static final String CLEANUP_COMMAND = "rm -f /tmp/floci-bin/sudo /tmp/floci-bootstrap-action-* "
+            + ContainerCaBundle.JAVA_TRUST_STORE_PATH + "; rmdir /tmp/floci-bin";
 
     // The bootstraps inside run(); a stop for one not here comes after its container has gone, and is dropped.
     private final ContainerLaunches launches = new ContainerLaunches();
@@ -136,7 +141,9 @@ public class EmrBootstrapRunner implements BootstrapRunner, ContainerTeardown {
                     .build();
             String containerId = lifecycleManager.createAndStart(spec).containerId();
             launch.started(containerId);
-            // A stop, a reset or a shutdown while the image was pulled is read now the container is up.
+            // In before the first action, for the actions' JVMs to find it.
+            lifecycleManager.copyJavaTrustStore(containerId);
+            // A stop, a reset or a shutdown while the image was pulled or the trust store copied is read now.
             if (launch.stopRequested() || cancelled.getAsBoolean()) {
                 return Outcome.halted();
             }
