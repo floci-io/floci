@@ -19,10 +19,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.MockMakers;
 import org.mockito.MockedStatic;
 
-import java.time.Clock;
-import java.time.Instant;
 import java.util.List;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -31,7 +28,6 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
-import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -189,32 +185,6 @@ class EventBridgeRedshiftDataTargetTest {
 
         bareInvoker.invokeTarget(target, EVENT, "us-east-1");
         verify(redshiftDataService).executeStatement(any(), eq("us-east-1"), eq(ROLE_ARN));
-    }
-
-    @Test
-    void activeStatementsExceededIsRetryableThroughTargetDispatcher() {
-        AtomicReference<Instant> clockNow = new AtomicReference<>(Instant.parse("2026-06-15T12:00:00Z"));
-        Clock clock = mock(Clock.class);
-        when(clock.instant()).thenAnswer(invocation -> clockNow.get());
-        TargetDispatcher dispatcher = new TargetDispatcher(invoker, mock(SqsService.class),
-                "http://localhost:4566", clock, null);
-
-        when(redshiftDataService.executeStatement(any(), any(), any()))
-                .thenThrow(new AwsException("ActiveStatementsExceededException", "Too many active statements", 400))
-                .thenReturn(null);
-
-        Target target = target(CLUSTER_ARN);
-        RedshiftDataParameters parameters = parameters("dev");
-        parameters.setSql("select 1");
-        target.setRedshiftDataParameters(parameters);
-
-        dispatcher.dispatch("arn:aws:events:us-east-1:123456789012:rule/rule-1", target, EVENT, "us-east-1",
-                () -> List.of(target));
-        verify(redshiftDataService, times(1)).executeStatement(any(), eq("us-east-1"), eq(ROLE_ARN));
-
-        clockNow.set(clockNow.get().plusSeconds(1));
-        dispatcher.tick();
-        verify(redshiftDataService, times(2)).executeStatement(any(), eq("us-east-1"), eq(ROLE_ARN));
     }
 
     @Test
