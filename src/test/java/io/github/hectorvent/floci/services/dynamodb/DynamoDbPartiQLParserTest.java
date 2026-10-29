@@ -334,6 +334,44 @@ class DynamoDbPartiQLParserTest {
                 + "[MISSING, NULL, BOOLEAN, BLOB, STRING, NUMERIC, STRUCT, TUPLE, LIST] at 2:3:5", e.getMessage());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            SELECT pk FROM "t" WHERE                   | Unexpected term
+            SELECT pk FROM "t" WHERE ;                 | Unexpected term
+            SELECT pk FROM "t" WHERE NOT               | Unexpected term
+            SELECT pk FROM "t" WHERE (                 | Unexpected term
+            SELECT pk FROM "t" WHERE *                 | Unexpected term
+            SELECT pk FROM "t" WHERE begins_with(      | Unexpected term
+            SELECT pk FROM "t" WHERE pk IN ['a',       | Unexpected term
+            SELECT pk FROM "t" WHERE pk = 'a' OR ;     | Unexpected term
+            SELECT * FROM                              | Unexpected term
+            ;                                          | Unexpected term
+            UPDATE "t" SET a =                         | Unexpected term
+            INSERT INTO "t"                            | Unexpected term
+            INSERT INTO "t" VALUE {'pk':               | Unexpected term
+            SELECT pk FROM "t" WHERE ORDER BY pk       | Unexpected keyword
+            SELECT pk FROM "t" WHERE pk = - ORDER      | Unexpected keyword
+            SELECT pk FROM "t" WHERE IS NULL           | Unexpected operator
+            SELECT pk FROM "t" WHERE pk = LIKE         | Unexpected operator
+            SELECT pk FROM "t" WHERE pk = 'a' AND      | Missing right-hand side expression of infix operator
+            SELECT pk FROM "t" WHERE pk <              | Missing right-hand side expression of infix operator
+            SELECT pk FROM "t" WHERE pk IN             | Missing right-hand side expression of infix operator
+            UPDATE "t" SET a = a +                     | Missing right-hand side expression of infix operator
+            SELECT pk FROM "t" WHERE pk BETWEEN 'a' AND | Expected expression after AND
+            DELETE FROM                                | Expected identifier for simple path
+            DELETE FROM WHERE pk = 'a'                 | Expected identifier for simple path
+            UPDATE "t" SET a = 1,                      | Expected identifier for simple path
+            INSERT INTO like VALUE {'pk': 'a'}         | Expected identifier for simple path
+            SELECT FROM "t"                            | Expected identifier or an expression but found unexpected keyword 'from' in a select list.
+            SELECT pk, * FROM "t" WHERE                | Other expressions may not be present in the select list when '*' is used without dot notation.
+            SELECT *, pk FROM "t"                      | Other expressions may not be present in the select list when '*' is used without dot notation.
+            """)
+    void namesWhatItFoundWhereATermShouldStart(String statement, String message) {
+        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, List.of()));
+
+        assertEquals("Statement wasn't well formed, can't be processed: " + message, e.getMessage());
+    }
+
     @Test
     void parsesNotAheadOfThePredicateItNegates() {
         Stmt stmt = DynamoDbPartiQLParser.parse(

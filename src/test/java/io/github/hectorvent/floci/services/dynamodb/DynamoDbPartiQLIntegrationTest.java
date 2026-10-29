@@ -422,6 +422,32 @@ class DynamoDbPartiQLIntegrationTest {
                     + (unsupported.indexOf("n IS") + 1) + ":1"));
     }
 
+    @Test
+    @Order(23)
+    void aStatementThatBreaksOffNamesWhatItFoundWhereATermShouldStart() {
+        String notWellFormed = "Statement wasn't well formed, can't be processed: ";
+
+        statement("SELECT * FROM \"" + TABLE + "-never-created\" WHERE")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(notWellFormed + "Unexpected term"));
+        statement("DELETE FROM WHERE pk = 'x'")
+            .statusCode(400)
+            .body("message", equalTo(notWellFormed + "Expected identifier for simple path"));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"SELECT * FROM \\"%s\\" WHERE pk = 'x' AND"}]}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: " + notWellFormed
+                    + "Missing right-hand side expression of infix operator"));
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":"SELECT * FROM \\"%s\\" WHERE IS NULL"}]}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(notWellFormed + "Unexpected operator"));
+    }
+
     private static void putItem(String pk, String attributes) {
         request("DynamoDB_20120810.PutItem", """
                 {"TableName":"%s","Item":{"pk":{"S":"%s"},%s}}
