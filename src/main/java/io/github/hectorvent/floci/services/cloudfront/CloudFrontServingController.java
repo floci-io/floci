@@ -118,6 +118,7 @@ public class CloudFrontServingController {
     private final ApiGatewayV2Service apiGatewayV2Service;
     private final ApiGatewayExecuteApiHostFilter executeApiHostFilter;
     private final String flociHostname;
+    private final int flociPort;
     private final LambdaWebIamAuth lambdaWebIamAuth;
     private final CurrentVertxRequest currentVertxRequest;
     private final HttpServer httpServer;
@@ -138,6 +139,7 @@ public class CloudFrontServingController {
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.executeApiHostFilter = executeApiHostFilter;
         this.flociHostname = emulatorConfig.hostname().orElse("localhost");
+        this.flociPort = emulatorConfig.port();
         this.lambdaWebIamAuth = lambdaWebIamAuth;
         this.currentVertxRequest = currentVertxRequest;
         this.httpServer = httpServer;
@@ -787,15 +789,17 @@ public class CloudFrontServingController {
             // Floci serves its own Web Function and execute-api endpoints, whatever port and protocol the origin names.
             String webEndpoint = webFunctionEndpoint(origin);
             String executeApiHost = webEndpoint == null ? executeApiHost(origin) : null;
-            boolean inProcess = webEndpoint != null || executeApiHost != null;
+            String selfHost = webEndpoint == null && executeApiHost == null ? selfHost(origin, viewerScheme) : null;
+            boolean inProcess = webEndpoint != null || executeApiHost != null || selfHost != null;
             if (inProcess && originRequest.headers().stream()
                     .anyMatch(header -> "Host".equalsIgnoreCase(header.name()))) {
-                // CloudFront checks the endpoint's certificate against the forwarded viewer Host, which it never names.
+                // CloudFront checks the endpoint's certificate against the forwarded viewer Host, which it never
+                // names, and a self origin would route the distribution's own Host back to the distribution.
                 LOG.debugv("CloudFront forwards the viewer Host to in-process origin {0}", origin.getId());
                 return OriginResponse.error(502, "Bad Gateway.");
             }
             // Dot segments would be resolved after the host filter's check and escape the API's stage.
-            String originPath = executeApiHost != null
+            String originPath = executeApiHost != null || selfHost != null
                     ? CloudFrontRequestRouter.normalizePath(rawPath(forwardUri)) : forwardUri;
             if (executeApiHost != null && !executeApiHostFilter.routes(executeApiHost, originPath)) {
                 byte[] notFound = ApiGatewayExecuteApiHostFilter.NOT_FOUND_BODY.getBytes(StandardCharsets.UTF_8);
@@ -822,6 +826,9 @@ public class CloudFrontServingController {
             }
             if (executeApiHost != null) {
                 originHeaders.put("Host", executeApiHost);
+            }
+            if (selfHost != null) {
+                originHeaders.put("Host", selfHost);
             }
             if (webEndpoint != null) {
                 originHeaders.put("Host", webEndpoint);
@@ -852,6 +859,11 @@ public class CloudFrontServingController {
         } catch (CloudFrontOriginTimeoutException e) {
             LOG.warnv("CloudFront custom origin timed out for host {0}", safeOriginName(origin));
             return OriginResponse.error(504, ORIGIN_TIMEOUT_MESSAGE);
+        } catch (CloudFrontOriginHttpClient.BlockedOriginHostException e) {
+            LOG.warnv("CloudFront custom origin host {0} resolves to a private or reserved address;"
+                    + " list it in floci.services.cloudfront.allowed-private-origin-hosts to allow it",
+                    safeOriginName(origin));
+            return OriginResponse.error(502, "Bad Gateway.");
         } catch (Exception e) {
             // Do not log the target URI: forwarded query strings can contain credentials or tokens.
             LOG.warnv("CloudFront custom origin fetch failed for host {0}: {1}",
@@ -873,6 +885,28 @@ public class CloudFrontServingController {
         } catch (IllegalArgumentException e) {
             return null;
         }
+    }
+
+    /**
+     * The origin's host when it names this Floci: its hostname, {@code localhost} or a loopback
+     * address, on the port Floci listens on for the protocol the request would use. Such an origin,
+     * typically a path-style S3 bucket, is served in-process, so the private-address guard that
+     * protects the other custom origins does not refuse it.
+     */
+    private String selfHost(Origin origin, String viewerScheme) {
+        String host;
+        try {
+            host = normalizeOriginHost(origin.getDomainName());
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+        boolean flociHost = host.equalsIgnoreCase(flociHostname) || host.equalsIgnoreCase("localhost")
+                || host.equals("127.0.0.1") || host.equals("::1");
+        if (!flociHost) {
+            return null;
+        }
+        int port = buildCustomOriginUri(origin, viewerScheme, "/", null).getPort();
+        return port == flociPort || port == httpServer.getPort() ? origin.getDomainName().trim() : null;
     }
 
     /**
