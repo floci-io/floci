@@ -6838,12 +6838,13 @@ public class S3Service implements Resettable, ResourceProvider {
         String region = bucket.getRegion();
         String eventTime = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
         String requestId = UUID.randomUUID().toString();
+        ObjectNode event = buildS3Event(bucketName, key, eventName, obj, region,
+                bucket.isVersioningEnabled(), sequencer, eventTime, requestId);
 
         for (QueueNotification qn : config.getQueueConfigurations()) {
             if (qn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && qn.matchesKey(key)) {
                 try {
-                    String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region,
-                            bucket.isVersioningEnabled(), sequencer, qn.id(), eventTime, requestId);
+                    String eventJson = notificationEventJson(event, qn.id());
                     sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), eventJson, 0,
                             extractRegionFromArn(qn.queueArn()));
                     LOG.debugv("Fired S3 event {0} to SQS {1}", eventName, qn.queueArn());
@@ -6856,8 +6857,7 @@ public class S3Service implements Resettable, ResourceProvider {
         for (TopicNotification tn : config.getTopicConfigurations()) {
             if (tn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && tn.matchesKey(key)) {
                 try {
-                    String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region,
-                            bucket.isVersioningEnabled(), sequencer, tn.id(), eventTime, requestId);
+                    String eventJson = notificationEventJson(event, tn.id());
                     snsService.publish(tn.topicArn(), null, eventJson, "Amazon S3 Notification",
                             extractRegionFromArn(tn.topicArn()));
                     LOG.debugv("Fired S3 event {0} to SNS {1}", eventName, tn.topicArn());
@@ -6877,8 +6877,7 @@ public class S3Service implements Resettable, ResourceProvider {
                             throw new AwsException("InvalidParameterValueException",
                                     "Invalid Lambda function ARN: " + ln.functionArn(), 400);
                         }
-                        String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region,
-                                bucket.isVersioningEnabled(), sequencer, ln.id(), eventTime, requestId);
+                        String eventJson = notificationEventJson(event, ln.id());
                         invokeLambda(lambdaRegion, ln.functionArn(), eventJson.getBytes(StandardCharsets.UTF_8));
                         LOG.debugv("Fired S3 event {0} to Lambda {1}", eventName, ln.functionArn());
                     } catch (Exception e) {
@@ -7010,9 +7009,9 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    private String buildS3EventJson(String bucketName, String key, String eventName,
+    private ObjectNode buildS3Event(String bucketName, String key, String eventName,
                                     S3Object obj, String region, boolean isVersionEnabled, String sequencer,
-                                    String configurationId, String eventTime, String requestId) {
+                                    String eventTime, String requestId) {
         try {
             long size = obj != null ? obj.getSize() : 0;
             String eTag = obj != null && obj.getETag() != null ? obj.getETag().replace("\"", "") : "";
@@ -7034,7 +7033,7 @@ public class S3Service implements Resettable, ResourceProvider {
             objectNode.put("sequencer", sequencer);
             ObjectNode s3Node = objectMapper.createObjectNode();
             s3Node.put("s3SchemaVersion", "1.0");
-            s3Node.put("configurationId", configurationId == null ? "emulator" : configurationId);
+            s3Node.put("configurationId", "emulator");
             s3Node.set("bucket", bucketNode);
             s3Node.set("object", objectNode);
 
@@ -7056,10 +7055,21 @@ public class S3Service implements Resettable, ResourceProvider {
 
             ObjectNode root = objectMapper.createObjectNode();
             root.putArray("Records").add(record);
-            return objectMapper.writeValueAsString(root);
+            return root;
         } catch (Exception e) {
-            return "{\"Records\":[]}";
+            LOG.warnv("Failed to build S3 event for {0}: {1}", bucketName, e.getMessage());
+            ObjectNode empty = objectMapper.createObjectNode();
+            empty.putArray("Records");
+            return empty;
         }
+    }
+
+    private String notificationEventJson(ObjectNode event, String configurationId) throws JsonProcessingException {
+        ObjectNode copy = event.deepCopy();
+        if (copy.path("Records").path(0).path("s3") instanceof ObjectNode s3) {
+            s3.put("configurationId", configurationId == null ? "emulator" : configurationId);
+        }
+        return objectMapper.writeValueAsString(copy);
     }
 
     /**

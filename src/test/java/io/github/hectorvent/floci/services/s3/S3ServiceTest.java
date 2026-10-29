@@ -998,7 +998,9 @@ class S3ServiceTest {
                 "second-rule", "arn:aws:lambda:us-east-1:000000000000:function:second",
                 List.of("s3:ObjectCreated:*"), List.of()));
         service.putBucketNotificationConfiguration("test-bucket", config, true);
-        service.putObject("test-bucket", "original.txt", new byte[]{1}, "text/plain", null);
+        service.putBucketVersioning("test-bucket", "Enabled");
+        invoker.afterDelivery = () -> service.putBucketVersioning("test-bucket", "Suspended");
+        S3Object stored = service.putObject("test-bucket", "original.txt", new byte[]{1}, "text/plain", null);
 
         assertEquals(2, invoker.payloads.size());
         ObjectMapper mapper = new ObjectMapper();
@@ -1008,6 +1010,8 @@ class S3ServiceTest {
                 .path("Records").get(0).path("s3").path("configurationId").asText());
         JsonNode first = mapper.readTree(invoker.payloads.get(0)).path("Records").get(0);
         JsonNode second = mapper.readTree(invoker.payloads.get(1)).path("Records").get(0);
+        assertFalse(first.path("s3").path("object").path("versionId").asText().isBlank());
+        assertEquals(stored.getVersionId(), first.path("s3").path("object").path("versionId").asText());
         assertEquals(first.path("eventTime"), second.path("eventTime"));
         assertEquals(first.path("responseElements"), second.path("responseElements"));
         assertEquals(first.path("s3").path("object"), second.path("s3").path("object"));
@@ -1071,6 +1075,7 @@ class S3ServiceTest {
         private String functionName;
         private byte[] payload;
         private final List<byte[]> payloads = new ArrayList<>();
+        private Runnable afterDelivery;
         private InvocationType type;
 
         @Override
@@ -1080,6 +1085,9 @@ class S3ServiceTest {
             this.payload = payload;
             this.payloads.add(payload);
             this.type = type;
+            if (afterDelivery != null) {
+                afterDelivery.run();
+            }
         }
     }
 
