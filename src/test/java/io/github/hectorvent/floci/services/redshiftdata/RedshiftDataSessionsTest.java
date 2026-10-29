@@ -14,12 +14,15 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
@@ -31,6 +34,44 @@ class RedshiftDataSessionsTest {
     private static final RedshiftDataSessions.Scope OWNER = new RedshiftDataSessions.Scope("000000000000", "us-east-1", "caller");
     private static final RedshiftDataResourceResolver.DatabaseTarget TARGET = new RedshiftDataResourceResolver.DatabaseTarget(
             "arn:aws:redshift:us-east-1:000000000000:cluster:warehouse", "localhost", 5439, "dev", "admin", "password");
+
+    @Test
+    void snapshotsKeepSessionsRetiredDuringTheLiveScan() throws Exception {
+        Clock clock = mock(Clock.class);
+        Instant now = Instant.parse("2026-10-29T00:00:00Z");
+        when(clock.instant()).thenReturn(now);
+        try (RedshiftDataSessions sessions = new RedshiftDataSessions(clock)) {
+            RedshiftDataConnectionFactory factory = mock(RedshiftDataConnectionFactory.class);
+            when(factory.open(any())).thenAnswer(invocation -> mock(Connection.class));
+            List<RedshiftDataSessions.Reservation> closing = new ArrayList<>();
+            for (int n = 0; n < 64; n++) {
+                RedshiftDataSessions.Reservation first = sessions.reserve(OWNER,
+                        request().put("SessionKeepAliveSeconds", 60), TARGET);
+                first.admitted();
+                first.connection(factory);
+                first.finish();
+                RedshiftDataSessions.Reservation last = sessions.reserve(OWNER,
+                        MAPPER.createObjectNode().put("SessionId", first.id()).put("SessionKeepAliveSeconds", 0), TARGET);
+                last.admitted();
+                closing.add(last);
+            }
+            AtomicInteger reads = new AtomicInteger();
+            when(clock.instant()).thenAnswer(invocation -> {
+                // The sweep reads each live session's deadline. Close them at the first live metadata read,
+                // after the original implementation copied history but before it finishes scanning live sessions.
+                if (reads.incrementAndGet() == closing.size() + 1) {
+                    closing.forEach(RedshiftDataSessions.Reservation::finish);
+                }
+                return now;
+            });
+
+            List<RedshiftDataSessions.SessionInfo> snapshot = sessions.snapshots();
+
+            assertEquals(closing.size(), snapshot.size(), "Retirement must not hide a session from both maps");
+            assertTrue(snapshot.stream().allMatch(info -> "CLOSED".equals(info.status())));
+            assertEquals(closing.size(), sessions.snapshots().size());
+        }
+    }
 
     @Test
     void failedConnectionOpeningCannotAdmitAReplacementReservation() throws Exception {

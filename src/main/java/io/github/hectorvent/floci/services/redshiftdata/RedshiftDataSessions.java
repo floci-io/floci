@@ -282,7 +282,7 @@ class RedshiftDataSessions implements AutoCloseable {
 
     List<SessionInfo> snapshots() {
         sweep();
-        ConcurrentHashMap<String, SessionInfo> result = new ConcurrentHashMap<>(history);
+        ConcurrentHashMap<String, SessionInfo> result = new ConcurrentHashMap<>();
         for (Session session : sessions.values()) {
             synchronized (session) {
                 if (session.admitted && clock.instant().isBefore(session.createdAt.plus(MAX_AGE))) {
@@ -290,6 +290,7 @@ class RedshiftDataSessions implements AutoCloseable {
                 }
             }
         }
+        result.putAll(history);
         return new ArrayList<>(result.values());
     }
 
