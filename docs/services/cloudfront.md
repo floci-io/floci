@@ -267,8 +267,8 @@ PUT, PATCH and DELETE).
 - Custom origins that resolve to loopback, private, link-local, carrier-grade NAT, or other non-routable addresses are rejected by default. Development-only private origins must be explicitly allowlisted by exact hostname.
   A refused origin is logged with the host and the setting that allows it.
 - A custom origin that names this Floci itself, as `localhost`, `127.0.0.1`, `::1` or the configured
-  `floci.hostname`, on the port Floci listens on for the protocol the request uses, is served by Floci
-  itself, so neither DNS nor the private address check applies. This is the usual local setup for a
+  `floci.hostname`, on a port Floci listens on (its own port, or `floci.tls.aws-https-port` with TLS on)
+  for the protocol the request uses, is served by Floci itself, so neither DNS nor the private address check applies. This is the usual local setup for a
   single-page app: a path-style S3 bucket as the origin path, fronted by the distribution's custom error
   responses. The request reaches Floci with the origin's domain as its `Host`, and dot segments cannot
   leave the origin path. A forwarded viewer `Host` is a 502, since it would route the request back to the

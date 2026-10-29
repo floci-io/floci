@@ -1,12 +1,14 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
 import com.sun.net.httpserver.HttpServer;
+import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
+import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import jakarta.inject.Inject;
@@ -25,6 +27,7 @@ import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.mockito.Mockito.when;
 
 /**
  * Distributions whose custom origin is this Floci itself, addressed as {@code localhost} or a
@@ -43,10 +46,14 @@ class CloudFrontSelfOriginServingTest {
     @Inject
     S3Service s3Service;
 
+    @InjectMock
+    TlsProxyServer tlsProxyServer;
+
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
 
     private String bucket;
+    private String otherBucket;
     private HttpServer backend;
 
     @BeforeEach
@@ -58,6 +65,14 @@ class CloudFrontSelfOriginServingTest {
         cleanup.register(() -> {
             s3Service.deleteObject(bucket, "index.html");
             s3Service.deleteBucket(bucket);
+        });
+        otherBucket = "self-origin-other-" + UUID.randomUUID().toString().substring(0, 8);
+        s3Service.createBucket(otherBucket, REGION);
+        s3Service.putObject(otherBucket, "secret.txt", "secret".getBytes(StandardCharsets.UTF_8),
+                "text/plain", Map.of());
+        cleanup.register(() -> {
+            s3Service.deleteObject(otherBucket, "secret.txt");
+            s3Service.deleteBucket(otherBucket);
         });
     }
 
@@ -102,6 +117,32 @@ class CloudFrontSelfOriginServingTest {
     }
 
     @Test
+    void dotSegmentsCannotClimbOutOfTheOriginPathIntoAnotherBucket() {
+        Distribution created = createDistribution("localhost", "/" + bucket, RestAssured.port,
+                CloudFrontService.MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID);
+
+        given().header("Host", created.getDomainName()).urlEncodingEnabled(false)
+                .when().get("/x/../../" + otherBucket + "/secret.txt")
+                .then().statusCode(404);
+        // Floci's listener refuses encoded dot segments outright.
+        given().header("Host", created.getDomainName()).urlEncodingEnabled(false)
+                .when().get("/x/%2e%2e/%2e%2e/" + otherBucket + "/secret.txt")
+                .then().statusCode(400);
+    }
+
+    @Test
+    void anHttpsOriginOnTheTlsProxyAwsPortServesThePathStyleBucket() {
+        when(tlsProxyServer.reservesPort(8443)).thenReturn(true);
+        Distribution created = createDistribution("localhost", "/" + bucket, 80, 8443, "https-only",
+                CloudFrontService.MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID);
+
+        given().header("Host", created.getDomainName())
+                .when().get("/index.html")
+                .then().statusCode(200)
+                .body(equalTo("<h1>spa</h1>"));
+    }
+
+    @Test
     void forwardingTheViewerHostToASelfOriginIsABadGateway() {
         Distribution created = createDistribution("localhost", "/" + bucket, RestAssured.port,
                 CloudFrontService.MANAGED_ALL_VIEWER_ORIGIN_REQUEST_POLICY_ID);
@@ -131,14 +172,19 @@ class CloudFrontSelfOriginServingTest {
 
     private Distribution createDistribution(String domain, String originPath, int originPort,
                                             String originRequestPolicyId) {
+        return createDistribution(domain, originPath, originPort, 443, "http-only", originRequestPolicyId);
+    }
+
+    private Distribution createDistribution(String domain, String originPath, int httpPort, int httpsPort,
+                                            String protocolPolicy, String originRequestPolicyId) {
         Origin origin = new Origin();
         origin.setId("self");
         origin.setDomainName(domain);
         origin.setOriginPath(originPath);
         Map<String, Object> customOriginConfig = new LinkedHashMap<>();
-        customOriginConfig.put("HTTPPort", String.valueOf(originPort));
-        customOriginConfig.put("HTTPSPort", "443");
-        customOriginConfig.put("OriginProtocolPolicy", "http-only");
+        customOriginConfig.put("HTTPPort", String.valueOf(httpPort));
+        customOriginConfig.put("HTTPSPort", String.valueOf(httpsPort));
+        customOriginConfig.put("OriginProtocolPolicy", protocolPolicy);
         origin.setCustomOriginConfig(customOriginConfig);
         DefaultCacheBehavior behavior = new DefaultCacheBehavior();
         behavior.setTargetOriginId("self");

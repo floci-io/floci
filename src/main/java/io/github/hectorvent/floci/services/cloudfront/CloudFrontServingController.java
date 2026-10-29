@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayExecuteApiHostFilter;
@@ -122,6 +123,7 @@ public class CloudFrontServingController {
     private final LambdaWebIamAuth lambdaWebIamAuth;
     private final CurrentVertxRequest currentVertxRequest;
     private final HttpServer httpServer;
+    private final TlsProxyServer tlsProxyServer;
     private final CloudFrontOriginHttpClient httpClient;
     private final CloudFrontOriginHttpClient flociClient = CloudFrontOriginHttpClient.toFloci();
 
@@ -131,7 +133,7 @@ public class CloudFrontServingController {
                                        ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
                                        ApiGatewayExecuteApiHostFilter executeApiHostFilter,
                                        EmulatorConfig emulatorConfig, CurrentVertxRequest currentVertxRequest,
-                                       HttpServer httpServer) {
+                                       HttpServer httpServer, TlsProxyServer tlsProxyServer) {
         this.service = service;
         this.s3Service = s3Service;
         this.lambdaWebService = lambdaWebService;
@@ -143,6 +145,7 @@ public class CloudFrontServingController {
         this.lambdaWebIamAuth = lambdaWebIamAuth;
         this.currentVertxRequest = currentVertxRequest;
         this.httpServer = httpServer;
+        this.tlsProxyServer = tlsProxyServer;
         this.httpClient = new CloudFrontOriginHttpClient(
                 emulatorConfig.services().cloudfront().allowedPrivateOriginHosts().orElse(List.of()));
     }
@@ -799,8 +802,8 @@ public class CloudFrontServingController {
                 return OriginResponse.error(502, "Bad Gateway.");
             }
             // Dot segments would be resolved after the host filter's check and escape the API's stage.
-            String originPath = executeApiHost != null || selfHost != null
-                    ? CloudFrontRequestRouter.normalizePath(rawPath(forwardUri)) : forwardUri;
+            String originPath = executeApiHost != null ? CloudFrontRequestRouter.normalizePath(rawPath(forwardUri))
+                    : selfHost != null ? selfOriginPath(origin, rawPath(forwardUri)) : forwardUri;
             if (executeApiHost != null && !executeApiHostFilter.routes(executeApiHost, originPath)) {
                 byte[] notFound = ApiGatewayExecuteApiHostFilter.NOT_FOUND_BODY.getBytes(StandardCharsets.UTF_8);
                 return new OriginResponse(404, MediaType.APPLICATION_JSON, notFound, notFound.length, Map.of());
@@ -906,7 +909,19 @@ public class CloudFrontServingController {
             return null;
         }
         int port = buildCustomOriginUri(origin, viewerScheme, "/", null).getPort();
-        return port == flociPort || port == httpServer.getPort() ? origin.getDomainName().trim() : null;
+        return port == flociPort || port == httpServer.getPort() || tlsProxyServer.reservesPort(port)
+                ? origin.getDomainName().trim() : null;
+    }
+
+    /**
+     * The path a self origin is asked for. CloudFront resolves the viewer's dot segments before it
+     * prepends the origin path, so they cannot climb out of the bucket that path names.
+     */
+    private static String selfOriginPath(Origin origin, String forwardPath) {
+        String prefix = CloudFrontRequestRouter.joinPath(origin.getOriginPath(), "");
+        prefix = prefix.substring(0, prefix.length() - 1);
+        String viewerPath = forwardPath.substring(prefix.length());
+        return CloudFrontRequestRouter.normalizePath(prefix + CloudFrontRequestRouter.normalizePath(viewerPath));
     }
 
     /**
