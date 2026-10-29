@@ -254,7 +254,7 @@ public class ElastiCacheService implements ResourceProvider {
         ReplicationGroupSettings settings = request.settings() != null
                 ? request.settings() : ReplicationGroupSettings.defaults();
         settings.validate();
-        settings.validateTransitEncryption(request.authMode() != AuthMode.NO_AUTH);
+        settings.validateTransitEncryption(isTransitEncryptionRequested(request));
         // resolved with the other validations, before a port is taken or a container started
         ReplicationGroupSettings resolvedSettings =
                 settings.withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), request.region()));
@@ -300,8 +300,7 @@ public class ElastiCacheService implements ResourceProvider {
         }
         String engine = engineFor(request);
         String engineVersion = request.engineVersion() != null ? request.engineVersion() : defaultEngineVersion(engine);
-        boolean transitEncrypted = Boolean.TRUE.equals(request.transitEncryptionEnabled())
-                || (request.authMode() != null && request.authMode() != AuthMode.NO_AUTH);
+        boolean transitEncrypted = isTransitEncryptionRequested(request);
         synchronized (userGroupLock) {
             List<String> reserved = new ArrayList<>();
             for (String userGroupId : request.userGroupIds()) {
@@ -351,7 +350,7 @@ public class ElastiCacheService implements ResourceProvider {
                 String engineVersion = request.engineVersion() != null ? request.engineVersion() : defaultEngineVersion(engine);
                 if (request.authMode() == AuthMode.IAM) {
                     requireIamEngineVersionCompatible(engine, engineVersion);
-                    if (!Boolean.TRUE.equals(request.transitEncryptionEnabled())) {
+                    if (!isTransitEncryptionRequested(request)) {
                         throw new AwsException("InvalidParameterCombination",
                                 "Transit encryption must be enabled to use IAM authentication.", 400);
                     }
@@ -600,6 +599,11 @@ public class ElastiCacheService implements ResourceProvider {
         if (request.tags() != null && !request.tags().isEmpty()) {
             group.setTags(new LinkedHashMap<>(request.tags()));
         }
+    }
+
+    private static boolean isTransitEncryptionRequested(CreateReplicationGroupRequest request) {
+        return Boolean.TRUE.equals(request.transitEncryptionEnabled())
+                || (request.settings() != null && Boolean.TRUE.equals(request.settings().transitEncryptionEnabled()));
     }
 
     private String engineFor(CreateReplicationGroupRequest request) {
@@ -1757,7 +1761,7 @@ public class ElastiCacheService implements ResourceProvider {
 
                         @Override
                         public TransitEncryption transitEncryption() {
-                            return cluster.getAuthMode() != AuthMode.NO_AUTH
+                            return cluster.isEncryptedInTransit()
                                     ? TransitEncryption.REQUIRED : TransitEncryption.NONE;
                         }
                     });

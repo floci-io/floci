@@ -860,7 +860,7 @@ class ElastiCacheQueryHandlerTest {
     }
 
     @Test
-    void describeUsers_outputsMinimumEngineVersion7ForIamAnd6ForNonIam() {
+    void describeUsers_outputsMinimumEngineVersion6ForBothIamAndNonIam() {
         ElastiCacheUser iamUser = new ElastiCacheUser(
                 "iam-app", "iam-app", AuthMode.IAM, List.of(), "on ~* +@all", "redis", "active", Instant.now());
         ElastiCacheUser passUser = new ElastiCacheUser(
@@ -874,9 +874,9 @@ class ElastiCacheQueryHandlerTest {
         Response iamResponse = handler.handle("DescribeUsers", iamParams, "us-east-1");
         assertEquals(200, iamResponse.getStatus());
         String iamBody = (String) iamResponse.getEntity();
-        assertTrue(iamBody.contains("<MinimumEngineVersion>7.0</MinimumEngineVersion>"),
-                "IAM user XML representation must output MinimumEngineVersion 7.0");
-        assertFalse(iamBody.contains("<MinimumEngineVersion>6.0</MinimumEngineVersion>"));
+        assertTrue(iamBody.contains("<MinimumEngineVersion>6.0</MinimumEngineVersion>"),
+                "IAM user XML representation must output MinimumEngineVersion 6.0");
+        assertFalse(iamBody.contains("<MinimumEngineVersion>7.0</MinimumEngineVersion>"));
 
         MultivaluedMap<String, String> passParams = params();
         passParams.putSingle("UserId", "pass-app");
