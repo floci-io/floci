@@ -704,13 +704,19 @@ public class RedshiftService implements ManagedSecretRotator {
     public void updateIntegrationRuntime(String accountId, String integrationArn,
                                          Map<String, String> shardSequenceNumbers,
                                          boolean successful, String error) {
-        updateIntegrationRuntimeLocked(accountId, integrationArn, shardSequenceNumbers, successful, error);
+        updateIntegrationRuntimeLocked(accountId, integrationArn, shardSequenceNumbers, successful, error, false);
+        publishIntegrationEvents();
+    }
+
+    /** Recovers idle polling health without replacing checkpoints or persisting unchanged state. */
+    public void recoverIntegrationRuntime(String accountId, String integrationArn) {
+        updateIntegrationRuntimeLocked(accountId, integrationArn, null, true, null, true);
         publishIntegrationEvents();
     }
 
     private synchronized void updateIntegrationRuntimeLocked(String accountId, String integrationArn,
                                                               Map<String, String> shardSequenceNumbers,
-                                                              boolean successful, String error) {
+                                                              boolean successful, String error, boolean recoveryOnly) {
         for (String key : integrations.keysForAccount(accountId)) {
             Optional<Integration> stored = integrations.getForAccount(accountId, key);
             if (stored.isEmpty() || !integrationArn.equals(stored.get().getIntegrationArn())) {
@@ -723,8 +729,14 @@ public class RedshiftService implements ManagedSecretRotator {
                 return;
             }
             String previousStatus = integration.getStatus();
+            if (recoveryOnly && "active".equals(previousStatus)
+                    && integration.getRetryCount() == 0 && integration.getLastError() == null) {
+                return;
+            }
             if (successful) {
-                integration.setShardSequenceNumbers(shardSequenceNumbers);
+                if (!recoveryOnly) {
+                    integration.setShardSequenceNumbers(shardSequenceNumbers);
+                }
                 integration.setRetryCount(0);
                 integration.setLastError(null);
                 integration.setStatus("active");

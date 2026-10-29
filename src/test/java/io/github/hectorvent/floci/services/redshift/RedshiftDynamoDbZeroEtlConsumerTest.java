@@ -71,6 +71,25 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
     private static final String SHARD_ID = "shardId-0000000001-00000000001";
 
     @Test
+    void healthyIdlePollsDoNotRewriteCheckpointState() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftService service = mock(RedshiftService.class);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        Integration integration = streamingIntegration();
+        integration.setStatus("active");
+        integration.setShardSequenceNumbers(Map.of(SHARD_ID, "s1"));
+        streams.shard(SHARD_ID, null).add(streamRecord("s1"));
+        RedshiftDynamoDbZeroEtlConsumer consumer = new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, service, writer);
+
+        consumer.pollOnce(integration);
+        consumer.pollOnce(integration);
+
+        verify(service, never()).updateIntegrationRuntime(any(), any(), any(), anyBoolean(), any());
+        verify(writer, never()).writeBatch(any(), any(), any(), any());
+        assertEquals(Map.of(SHARD_ID, "s1"), integration.getShardSequenceNumbers());
+    }
+
+    @Test
     void pausedClusterSkipsPollingWithoutAdvancingProgressOrFailingIntegration() {
         FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
         RedshiftService service = mock(RedshiftService.class);
@@ -114,8 +133,7 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
 
         new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, service, writer).pollOnce(integration);
 
-        verify(service).updateIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn(),
-                Map.of(SHARD_ID, "s1"), true, null);
+        verify(service).recoverIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn());
         verify(writer, never()).writeBatch(any(), any(), any(), any());
         assertEquals(Map.of(SHARD_ID, "s1"), integration.getShardSequenceNumbers());
     }

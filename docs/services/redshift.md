@@ -45,6 +45,8 @@ requesting a final snapshot.
 Zero-ETL polling skips paused targets without consuming stream records or changing
 their checkpoints. Polling continues after resume; a healthy poll clears an earlier
 integration failure even when the stream has no new records.
+Healthy idle polls do not rewrite integration state; recovery persists only changed
+health fields and retains the stored stream checkpoints.
 
 ```bash
 aws --endpoint-url http://localhost:4566 redshift pause-cluster --cluster-identifier warehouse

@@ -155,8 +155,7 @@ public class RedshiftDynamoDbZeroEtlConsumer implements Resettable {
             }
         }
         if (!checkpointPersisted) {
-            redshiftService.updateIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn(),
-                    integration.getShardSequenceNumbers(), true, null);
+            redshiftService.recoverIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn());
         }
     }
 

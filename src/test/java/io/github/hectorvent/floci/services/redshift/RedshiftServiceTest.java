@@ -187,6 +187,63 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void idleRecoveryDoesNotRewriteHealthyIntegration() {
+        Integration integration = storedIntegrationForIdleRecovery();
+
+        service.recoverIntegrationRuntime("111111111111", integration.getIntegrationArn());
+        service.recoverIntegrationRuntime("111111111111", integration.getIntegrationArn());
+
+        verify(integrationBackend, never()).putForAccount(anyString(), anyString(), any());
+        verify(integrationEvents, never()).queue(any(), any(), any(), any());
+        assertEquals(Map.of("shard", "s1"), integration.getShardSequenceNumbers());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"status", "retryCount", "lastError"})
+    void idleRecoveryPersistsOnlyChangedHealthFieldsAndKeepsCheckpoints(String field) {
+        Integration integration = storedIntegrationForIdleRecovery();
+        switch (field) {
+            case "status" -> integration.setStatus("failed");
+            case "retryCount" -> integration.setRetryCount(2);
+            case "lastError" -> integration.setLastError("transient failure");
+            default -> throw new IllegalArgumentException(field);
+        }
+        Map<String, String> checkpoints = integration.getShardSequenceNumbers();
+
+        service.recoverIntegrationRuntime("111111111111", integration.getIntegrationArn());
+        service.recoverIntegrationRuntime("111111111111", integration.getIntegrationArn());
+
+        assertEquals("active", integration.getStatus());
+        assertEquals(0, integration.getRetryCount());
+        assertNull(integration.getLastError());
+        assertSame(checkpoints, integration.getShardSequenceNumbers());
+        assertEquals(Map.of("shard", "s1"), checkpoints);
+        verify(integrationBackend).putForAccount("111111111111", "one", integration);
+    }
+
+    @Test
+    void successfulBatchPersistsCheckpointEvenWhenStoredMapWasMutated() {
+        Integration integration = storedIntegrationForIdleRecovery();
+        integration.getShardSequenceNumbers().put("shard", "s2");
+
+        service.updateIntegrationRuntime("111111111111", integration.getIntegrationArn(),
+                integration.getShardSequenceNumbers(), true, null);
+
+        verify(integrationBackend).putForAccount("111111111111", "one", integration);
+        assertEquals(Map.of("shard", "s2"), integration.getShardSequenceNumbers());
+    }
+
+    private Integration storedIntegrationForIdleRecovery() {
+        Integration integration = new Integration();
+        integration.setIntegrationArn("arn:aws:redshift:us-east-1:111111111111:integration:one");
+        integration.setStatus("active");
+        integration.setShardSequenceNumbers(Map.of("shard", "s1"));
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(Set.of("one"));
+        when(integrationBackend.getForAccount("111111111111", "one")).thenReturn(Optional.of(integration));
+        return integration;
+    }
+
+    @Test
     void pauseContainerFailureRestoresTheOriginalRuntime() {
         Cluster cluster = lifecycleCluster("available");
         doThrow(new IllegalStateException("stop failed")).when(cm).pause("111111111111", "warehouse");
