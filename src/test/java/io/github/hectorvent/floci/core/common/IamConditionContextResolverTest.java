@@ -16,6 +16,8 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebService;
+import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -64,6 +66,7 @@ class IamConditionContextResolverTest {
     private S3Service s3Service;
     private CloudWatchLogsService logsService;
     private IamService iamService;
+    private LambdaWebService lambdaWebService;
     private RequestContext requestContext;
     private EmulatorConfig config;
     private IamConditionContextResolver resolver;
@@ -94,6 +97,10 @@ class IamConditionContextResolverTest {
         Instance<IamService> iamServiceInstance = mock(Instance.class);
         when(iamServiceInstance.isResolvable()).thenReturn(true);
         when(iamServiceInstance.get()).thenReturn(iamService);
+        lambdaWebService = mock(LambdaWebService.class);
+        Instance<LambdaWebService> lambdaWebServiceInstance = mock(Instance.class);
+        when(lambdaWebServiceInstance.isResolvable()).thenReturn(true);
+        when(lambdaWebServiceInstance.get()).thenReturn(lambdaWebService);
         requestContext = new RequestContext();
         requestContext.setAccountId("123456789012");
         requestContext.setRegion("us-east-1");
@@ -108,8 +115,44 @@ class IamConditionContextResolverTest {
         when(serviceCatalog.matchTarget(any())).thenAnswer(call -> catalog.matchTarget(call.getArgument(0)));
         resolver = new IamConditionContextResolver(
                 dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance, iamServiceInstance,
+                lambdaWebServiceInstance,
                 requestContext, config,
                 null, serviceCatalog);
+    }
+
+    @Test
+    void aWebFunctionEndpointRequestCarriesTheAuthTypeItNamesAndTheOneItHas() throws Exception {
+        String function = "arn:aws:lambda:us-east-1:123456789012:web-function/app";
+        WebFunctionEndpoint stored = new WebFunctionEndpoint();
+        stored.authType = "ApplicationManaged";
+        when(lambdaWebService.getEndpoint("us-east-1", function, "dev")).thenReturn(stored);
+        when(lambdaWebService.getEndpoint("us-east-1", function, "gone"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "The endpoint gone does not exist.", 404));
+        String request = "lambda:Request/WebFunctionAuthType";
+        String resource = "lambda:Resource/WebFunctionAuthType";
+
+        assertEquals(Map.of(request, List.of("IamAuth")), resolver.resolve("lambda", "lambda:CreateWebFunction",
+                webRequest("/2025-03-07/web-functions", "{\"endpointConfig\":{\"authType\":\"IamAuth\"}}")));
+        assertEquals(Map.of(request, List.of("IamAuth")), resolver.resolve("lambda",
+                "lambda:CreateWebFunctionEndpoint", webRequest("/2025-03-07/web-functions/app/endpoints",
+                        "{\"authType\":\"IamAuth\"}")));
+        assertEquals(Map.of(request, List.of("IamAuth"), resource, List.of("ApplicationManaged")),
+                resolver.resolve("lambda", "lambda:UpdateWebFunctionEndpoint",
+                        webRequest("/2025-03-07/web-functions/app/endpoints/dev", "{\"authType\":\"IamAuth\"}")));
+        assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda",
+                "lambda:UpdateWebFunctionEndpoint", webRequest("/2025-03-07/web-functions/app/endpoints/dev",
+                        "{\"description\":\"d\"}")), "an update without authType names none");
+        for (String action : List.of("lambda:GetWebFunctionEndpoint", "lambda:DeleteWebFunctionEndpoint")) {
+            assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda", action,
+                    webRequest("/2025-03-07/web-functions/" + function + "/endpoints/" + function + "/endpoint/dev",
+                            "")));
+            assertNull(resolver.resolve("lambda", action,
+                    webRequest("/2025-03-07/web-functions/app/endpoints/gone", "")), "a missing endpoint has none");
+        }
+        assertNull(resolver.resolve("lambda", "lambda:GetWebFunction",
+                webRequest("/2025-03-07/web-functions/app", "")));
+        assertNull(resolver.resolve("lambda", "lambda:ListWebFunctionEndpoints",
+                webRequest("/2025-03-07/web-functions/app/list-endpoints", "{}")));
     }
 
     @Test
@@ -158,6 +201,16 @@ class IamConditionContextResolverTest {
                 .thenReturn(MediaType.valueOf("application/x-www-form-urlencoded"));
         when(containerRequest.getEntityStream())
                 .thenAnswer(invocation -> new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
+        return containerRequest;
+    }
+
+    private ContainerRequestContext webRequest(String path, String body) throws Exception {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(containerRequest.getUriInfo()).thenReturn(uriInfo);
+        when(uriInfo.getPath()).thenReturn(path);
+        when(containerRequest.getProperty("floci.bufferedJsonBody"))
+                .thenReturn(body.isEmpty() ? null : mapper.readTree(body));
         return containerRequest;
     }
 
@@ -550,8 +603,8 @@ class IamConditionContextResolverTest {
     @SuppressWarnings("unchecked")
     private IamConditionContextResolver resolverAt(Instant now) {
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                mock(Instance.class), mock(Instance.class), requestContext, config, null, serviceCatalog,
-                Clock.fixed(now, ZoneOffset.UTC));
+                mock(Instance.class), mock(Instance.class), mock(Instance.class), requestContext, config, null,
+                serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
     }
 
     @Test

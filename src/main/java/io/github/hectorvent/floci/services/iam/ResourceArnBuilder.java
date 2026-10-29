@@ -1348,7 +1348,7 @@ public class ResourceArnBuilder {
      * "Lambda Web Function permissions"). ListWebFunctions, GetWebAccountSettings and CreateWebFunction
      * name no resource. Null for every other Lambda route.
      */
-    private static String webFunctionArn(String path, String region, String accountId) {
+    public static String webFunctionArn(String path, String region, String accountId) {
         if (!path.startsWith("/2025-03-07/")) {
             return null;
         }

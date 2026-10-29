@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebService;
 import io.github.hectorvent.floci.services.s3.S3ControlTagConditionKeys;
 import io.github.hectorvent.floci.services.s3.S3ObjectActions;
 import io.github.hectorvent.floci.services.s3.S3ObjectKeys;
@@ -86,12 +87,15 @@ public class IamConditionContextResolver {
     public static final String OBJECT_LOCK_RETAIN_UNTIL_DATE = "s3:object-lock-retain-until-date";
     public static final String OBJECT_LOCK_REMAINING_RETENTION_DAYS = "s3:object-lock-remaining-retention-days";
     public static final String OBJECT_LOCK_LEGAL_HOLD = "s3:object-lock-legal-hold";
+    static final String REQUEST_AUTH_TYPE = "lambda:Request/WebFunctionAuthType";
+    static final String RESOURCE_AUTH_TYPE = "lambda:Resource/WebFunctionAuthType";
 
     private final Instance<DynamoDbFacade> dynamoDbFacade;
     private final Instance<Ec2Service> ec2Service;
     private final Instance<S3Service> s3Service;
     private final Instance<CloudWatchLogsService> logsService;
     private final Instance<IamService> iamService;
+    private final Instance<LambdaWebService> lambdaWebService;
     private final RequestContext requestContext;
     private final EmulatorConfig config;
     private final CurrentVertxRequest currentVertxRequest;
@@ -108,12 +112,13 @@ public class IamConditionContextResolver {
                                        Instance<S3Service> s3Service,
                                        Instance<CloudWatchLogsService> logsService,
                                        Instance<IamService> iamService,
+                                       Instance<LambdaWebService> lambdaWebService,
                                        RequestContext requestContext,
                                        EmulatorConfig config,
                                        CurrentVertxRequest currentVertxRequest,
                                        ResolvedServiceCatalog serviceCatalog) {
-        this(dynamoDbFacade, ec2Service, s3Service, logsService, iamService, requestContext, config, currentVertxRequest,
-                serviceCatalog, Clock.systemUTC());
+        this(dynamoDbFacade, ec2Service, s3Service, logsService, iamService, lambdaWebService, requestContext,
+                config, currentVertxRequest, serviceCatalog, Clock.systemUTC());
     }
 
     IamConditionContextResolver(Instance<DynamoDbFacade> dynamoDbFacade,
@@ -121,6 +126,7 @@ public class IamConditionContextResolver {
                                 Instance<S3Service> s3Service,
                                 Instance<CloudWatchLogsService> logsService,
                                 Instance<IamService> iamService,
+                                Instance<LambdaWebService> lambdaWebService,
                                 RequestContext requestContext,
                                 EmulatorConfig config,
                                 CurrentVertxRequest currentVertxRequest,
@@ -130,6 +136,7 @@ public class IamConditionContextResolver {
         this.s3Service = s3Service;
         this.logsService = logsService;
         this.iamService = iamService;
+        this.lambdaWebService = lambdaWebService;
         this.requestContext = requestContext;
         this.config = config;
         this.currentVertxRequest = currentVertxRequest;
@@ -145,6 +152,7 @@ public class IamConditionContextResolver {
             case "dynamodb" -> dynamoDbConditionContext(action, ctx);
             case "iam" -> iamConditionContext(action, ctx);
             case "logs" -> logsConditionContext(action, ctx);
+            case "lambda" -> lambdaConditionContext(action, ctx);
             default -> null;
         };
     }
@@ -318,6 +326,53 @@ public class IamConditionContextResolver {
     private static void putIfPresent(Map<String, List<String>> conditions, String key, String value) {
         if (value != null && !value.isBlank()) {
             conditions.put(key, List.of(value));
+        }
+    }
+
+    // ── Lambda ──────────────────────────────────────────────────────────────────
+
+    /** The authType a web function endpoint request names, and the one the endpoint has before it. */
+    private Map<String, List<String>> lambdaConditionContext(String action, ContainerRequestContext ctx) {
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        switch (action) {
+            case "lambda:CreateWebFunction" -> putIfPresent(conditions, REQUEST_AUTH_TYPE,
+                    requestAuthType(PassedRoles.jsonBody(ctx), "endpointConfig"));
+            case "lambda:CreateWebFunctionEndpoint" -> putIfPresent(conditions, REQUEST_AUTH_TYPE,
+                    requestAuthType(PassedRoles.jsonBody(ctx), null));
+            case "lambda:UpdateWebFunctionEndpoint" -> {
+                putIfPresent(conditions, REQUEST_AUTH_TYPE, requestAuthType(PassedRoles.jsonBody(ctx), null));
+                putIfPresent(conditions, RESOURCE_AUTH_TYPE, storedAuthType(ctx));
+            }
+            case "lambda:GetWebFunctionEndpoint", "lambda:DeleteWebFunctionEndpoint" ->
+                    putIfPresent(conditions, RESOURCE_AUTH_TYPE, storedAuthType(ctx));
+            default -> {
+                return null;
+            }
+        }
+        return conditions.isEmpty() ? null : conditions;
+    }
+
+    private static String requestAuthType(JsonNode body, String member) {
+        if (body == null) {
+            return null;
+        }
+        return (member == null ? body : body.path(member)).path("authType").textValue();
+    }
+
+    private String storedAuthType(ContainerRequestContext ctx) {
+        if (!lambdaWebService.isResolvable()) {
+            return null;
+        }
+        String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
+        String endpointArn = ResourceArnBuilder.webFunctionArn(ctx.getUriInfo().getPath(), region,
+                requestContext.getAccountId());
+        int child = endpointArn.lastIndexOf("/endpoint/");
+        try {
+            return lambdaWebService.get().getEndpoint(region, endpointArn.substring(0, child),
+                    endpointArn.substring(child + "/endpoint/".length())).authType;
+        } catch (AwsException expected) {
+            // The handler refuses the same names, so the key is only left out, as for a missing endpoint on AWS.
+            return null;
         }
     }
 
