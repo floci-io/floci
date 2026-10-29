@@ -13,6 +13,9 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -60,6 +63,7 @@ class IamConditionContextResolverTest {
     private Ec2Service ec2Service;
     private S3Service s3Service;
     private CloudWatchLogsService logsService;
+    private IamService iamService;
     private RequestContext requestContext;
     private EmulatorConfig config;
     private IamConditionContextResolver resolver;
@@ -86,7 +90,12 @@ class IamConditionContextResolverTest {
         Instance<CloudWatchLogsService> logsServiceInstance = mock(Instance.class);
         when(logsServiceInstance.isResolvable()).thenReturn(true);
         when(logsServiceInstance.get()).thenReturn(logsService);
+        iamService = mock(IamService.class);
+        Instance<IamService> iamServiceInstance = mock(Instance.class);
+        when(iamServiceInstance.isResolvable()).thenReturn(true);
+        when(iamServiceInstance.get()).thenReturn(iamService);
         requestContext = new RequestContext();
+        requestContext.setAccountId("123456789012");
         requestContext.setRegion("us-east-1");
         config = mock(EmulatorConfig.class);
         when(config.defaultRegion()).thenReturn("us-east-1");
@@ -98,7 +107,8 @@ class IamConditionContextResolverTest {
         ServiceCatalog catalog = new ServiceCatalog(List.of(dynamo));
         when(serviceCatalog.matchTarget(any())).thenAnswer(call -> catalog.matchTarget(call.getArgument(0)));
         resolver = new IamConditionContextResolver(
-                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance, requestContext, config,
+                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance, iamServiceInstance,
+                requestContext, config,
                 null, serviceCatalog);
     }
 
@@ -212,6 +222,47 @@ class IamConditionContextResolverTest {
             assertNull(resolver.resolve("iam", action, formRequest("RoleName=r&UserName=u")), action);
         }
         assertNull(resolver.resolve("iam", "iam:GetRole", formRequest("PermissionsBoundary=example")));
+    }
+
+    @Test
+    void iamPermissionsBoundaryOfAnExistingRoleOrUserIsTheBoundaryStoredOnIt() {
+        IamRole bounded = new IamRole();
+        bounded.setPermissionsBoundaryArn("arn:aws:iam::123456789012:policy/Boundary");
+        IamUser boundedUser = new IamUser();
+        boundedUser.setPermissionsBoundaryArn("arn:aws:iam::123456789012:policy/UserBoundary");
+        when(iamService.findRole("123456789012", "bounded")).thenReturn(Optional.of(bounded));
+        when(iamService.findRole("123456789012", "open")).thenReturn(Optional.of(new IamRole()));
+        when(iamService.findUser("123456789012", "bounded")).thenReturn(Optional.of(boundedUser));
+        for (String action : List.of("iam:AttachRolePolicy", "iam:DeleteRole", "iam:DeleteRolePermissionsBoundary",
+                "iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:GetRole", "iam:PutRolePolicy",
+                "iam:UpdateAssumeRolePolicy", "iam:UpdateRole", "iam:UpdateRoleDescription")) {
+            assertEquals(List.of("arn:aws:iam::123456789012:policy/Boundary"),
+                    resolver.resolve("iam", action, formRequest("RoleName=bounded")).get("iam:PermissionsBoundary"),
+                    action);
+            assertNull(resolver.resolve("iam", action, formRequest("RoleName=open")), action);
+            assertNull(resolver.resolve("iam", action, formRequest("RoleName=missing")), action);
+        }
+        for (String action : List.of("iam:AttachUserPolicy", "iam:DeleteUserPermissionsBoundary",
+                "iam:DeleteUserPolicy", "iam:DetachUserPolicy", "iam:PutUserPolicy")) {
+            assertEquals(List.of("arn:aws:iam::123456789012:policy/UserBoundary"),
+                    resolver.resolve("iam", action, formRequest("UserName=bounded")).get("iam:PermissionsBoundary"),
+                    action);
+            assertNull(resolver.resolve("iam", action, formRequest("UserName=missing")), action);
+        }
+    }
+
+    @Test
+    void iamPermissionsBoundaryOnAPutBoundaryIsTheRequestedOneAndAttachKeepsItsPolicyArn() {
+        IamRole bounded = new IamRole();
+        bounded.setPermissionsBoundaryArn("arn:aws:iam::123456789012:policy/Old");
+        when(iamService.findRole("123456789012", "bounded")).thenReturn(Optional.of(bounded));
+        assertEquals(Map.of("iam:PermissionsBoundary", List.of("arn:aws:iam::123456789012:policy/New")),
+                resolver.resolve("iam", "iam:PutRolePermissionsBoundary", formRequest(
+                        "RoleName=bounded&PermissionsBoundary=arn%3Aaws%3Aiam%3A%3A123456789012%3Apolicy%2FNew")));
+        assertEquals(Map.of("iam:PolicyARN", List.of("arn:aws:iam::aws:policy/ReadOnlyAccess"),
+                        "iam:PermissionsBoundary", List.of("arn:aws:iam::123456789012:policy/Old")),
+                resolver.resolve("iam", "iam:AttachRolePolicy", formRequest(
+                        "RoleName=bounded&PolicyArn=arn%3Aaws%3Aiam%3A%3Aaws%3Apolicy%2FReadOnlyAccess")));
     }
 
     @Test
@@ -499,7 +550,8 @@ class IamConditionContextResolverTest {
     @SuppressWarnings("unchecked")
     private IamConditionContextResolver resolverAt(Instant now) {
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                mock(Instance.class), requestContext, config, null, serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
+                mock(Instance.class), mock(Instance.class), requestContext, config, null, serviceCatalog,
+                Clock.fixed(now, ZoneOffset.UTC));
     }
 
     @Test

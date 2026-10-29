@@ -2290,10 +2290,15 @@ floci populates:
   - `iam:OrganizationsPolicyId` from `OrganizationsPolicyId` on
     `GenerateOrganizationsAccessReport`.
 
+  The table's `fromTarget` entries read `iam:PermissionsBoundary` from the role or user the
+  request names in `RoleName` or `UserName`: its stored boundary, on the 15 actions on an
+  existing role or user, such as `AttachRolePolicy`, `PutUserPolicy`, `GetRole` and
+  `DeleteRolePermissionsBoundary`. A role or user without a boundary, or one that does not
+  exist, carries no value for the key.
+
   A request without the parameter carries no value for the key, and the target remains the
   authorized resource. Every other pair the reference lists is in the table's `notRead` with
-  its reason, such as the actions where `iam:PermissionsBoundary` is the target's current
-  boundary. Regenerate with `make iam-condition-keys-sync`.
+  its reason. Regenerate with `make iam-condition-keys-sync`.
 - `s3:prefix`, `s3:delimiter`, `s3:max-keys`: from the S3 request parameters.
 - `aws:RequestTag/<key>`: the tags named in the request itself, before they are applied, for
   `ec2:RunInstances` (`TagSpecification.N`), `ec2:CreateTags` (`Tag.N`) and

@@ -13,9 +13,14 @@ MODEL = {"operations": {
     "GetRole": {"input": {"shape": "GetInput"}},
     "CreateServiceSpecificCredential": {"input": {"shape": "CredentialInput"}},
     "CreateDelegationRequest": {"input": {"shape": "DelegationInput"}},
+    "DeleteUserPolicy": {"input": {"shape": "UserInput"}},
+    "ListRoles": {"input": {"shape": "ListInput"}},
 }, "shapes": {
     "AttachInput": {"type": "structure", "members": {"PolicyArn": {"shape": "Arn"}}},
     "GetInput": {"type": "structure", "members": {"RoleName": {"shape": "Name"}}},
+    "UserInput": {"type": "structure", "members": {"UserName": {"shape": "Name"},
+                                                   "PolicyName": {"shape": "Name"}}},
+    "ListInput": {"type": "structure", "members": {"PathPrefix": {"shape": "Name"}}},
     "CredentialInput": {"type": "structure", "members": {"CredentialAgeDays": {"shape": "Days"},
                                                          "ServiceName": {"shape": "Name"}}},
     "DelegationInput": {"type": "structure", "members": {"Permissions": {"shape": "Permission"},
@@ -38,22 +43,35 @@ def test_resource_and_action_keys_are_combined_and_global_keys_dropped():
 
 
 def test_member_is_matched_ignoring_case_only_on_actions_listing_the_key():
-    read, not_read = classify([("iam:AttachRolePolicy", "iam:PolicyARN")], {"iam:PolicyARN": ["ARN"]}, MODEL)
+    read, from_target, not_read = classify([("iam:AttachRolePolicy", "iam:PolicyARN")],
+                                           {"iam:PolicyARN": ["ARN"]}, MODEL)
     assert read == [{"action": "iam:AttachRolePolicy", "key": "iam:PolicyARN", "member": "PolicyArn"}]
-    assert not_read == []
+    assert from_target == not_read == []
+
+
+def test_permissions_boundary_without_a_request_member_is_read_from_the_named_role_or_user():
+    pairs = [("iam:GetRole", "iam:PermissionsBoundary"), ("iam:DeleteUserPolicy", "iam:PermissionsBoundary")]
+    read, from_target, not_read = classify(pairs, {"iam:PermissionsBoundary": ["ARN"]}, MODEL)
+    assert read == not_read == []
+    assert from_target == [
+        {"action": "iam:DeleteUserPolicy", "key": "iam:PermissionsBoundary", "target": "UserName"},
+        {"action": "iam:GetRole", "key": "iam:PermissionsBoundary", "target": "RoleName"}]
+
+
+def test_permissions_boundary_on_an_operation_naming_no_role_or_user_fails():
+    with pytest.raises(ValueError, match="iam:ListRoles: no member names the role or user"):
+        classify([("iam:ListRoles", "iam:PermissionsBoundary")], {"iam:PermissionsBoundary": ["ARN"]}, MODEL)
 
 
 def test_unread_pairs_name_their_reason():
-    pairs = [("iam:GetRole", "iam:PermissionsBoundary"), ("iam:GetRole", "iam:RoleTemplateARN"),
-             ("iam:PassRole", "iam:PassedToService"),
+    pairs = [("iam:GetRole", "iam:RoleTemplateARN"), ("iam:PassRole", "iam:PassedToService"),
              ("iam:CreateServiceSpecificCredential", "iam:CredentialAgeDays")]
-    types = {"iam:PermissionsBoundary": ["ARN"], "iam:RoleTemplateARN": ["ARN"],
+    types = {"iam:RoleTemplateARN": ["ARN"],
              "iam:PassedToService": ["String"], "iam:CredentialAgeDays": ["Numeric"]}
-    read, not_read = classify(pairs, types, MODEL)
-    assert read == []
+    read, from_target, not_read = classify(pairs, types, MODEL)
+    assert read == from_target == []
     assert {(e["action"], e["key"]): e["reason"] for e in not_read} == {
         ("iam:CreateServiceSpecificCredential", "iam:CredentialAgeDays"): "the key's type is Numeric",
-        ("iam:GetRole", "iam:PermissionsBoundary"): "the value is the target's current permissions boundary",
         ("iam:GetRole", "iam:RoleTemplateARN"): "the value is the role template a service acquires the role from",
         ("iam:PassRole", "iam:PassedToService"): "no SDK operation of this name"}
 
@@ -64,8 +82,8 @@ BY_HAND_TYPES = {"iam:DelegationDuration": ["String"], "iam:TemplateArn": ["ARN"
 
 
 def test_by_hand_pairs_read_their_member_including_a_nested_one():
-    read, not_read = classify(sorted(regen_iam_condition_keys.BY_HAND), BY_HAND_TYPES, MODEL)
-    assert not_read == []
+    read, from_target, not_read = classify(sorted(regen_iam_condition_keys.BY_HAND), BY_HAND_TYPES, MODEL)
+    assert from_target == not_read == []
     assert {(e["action"], e["key"]): e["member"] for e in read} == regen_iam_condition_keys.BY_HAND
 
 
@@ -89,7 +107,7 @@ def test_by_hand_pair_the_reference_no_longer_lists_fails():
         require_by_hand_listed(pairs)
 
 
-def test_vendored_table_reads_nine_keys_on_fourteen_actions():
+def test_vendored_table_reads_nine_keys_on_fourteen_actions_and_the_boundary_of_fifteen_targets():
     document = json.loads(OUTPUT.read_text())
     assert {(e["action"], e["key"]) for e in document["read"]} == {
         *(("iam:" + verb + kind + "Policy", "iam:PolicyARN")
@@ -104,8 +122,21 @@ def test_vendored_table_reads_nine_keys_on_fourteen_actions():
         ("iam:CreateServiceSpecificCredential", "iam:ServiceSpecificCredentialAgeDays"),
         ("iam:CreateServiceSpecificCredential", "iam:ServiceSpecificCredentialServiceName"),
         ("iam:GenerateOrganizationsAccessReport", "iam:OrganizationsPolicyId")}
-    current = [e["action"] for e in document["notRead"] if e["key"] == "iam:PermissionsBoundary"]
-    assert len(current) == 15 and "iam:GetRole" in current
+    assert not [e for e in document["notRead"] if e["key"] == "iam:PermissionsBoundary"]
+    targets = {e["action"]: e["target"] for e in document["fromTarget"]}
+    assert len(targets) == 15 and {e["key"] for e in document["fromTarget"]} == {"iam:PermissionsBoundary"}
+    assert targets["iam:GetRole"] == "RoleName" and targets["iam:DeleteUserPermissionsBoundary"] == "UserName"
+
+
+def test_check_fails_on_a_hand_edited_target(tmp_path, monkeypatch):
+    pytest.importorskip("botocore")
+    document = json.loads(OUTPUT.read_text())
+    document["fromTarget"][0]["target"] = "UserName"
+    edited = tmp_path / "iam-condition-keys.json"
+    edited.write_text(json.dumps(document))
+    monkeypatch.setattr(regen_iam_condition_keys, "OUTPUT", edited)
+    with pytest.raises(ValueError, match="differ from pinned botocore"):
+        regen_iam_condition_keys.main(["--check"])
 
 
 def test_check_fails_on_a_hand_edited_member(tmp_path, monkeypatch):

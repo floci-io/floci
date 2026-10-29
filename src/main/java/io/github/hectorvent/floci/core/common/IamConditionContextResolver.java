@@ -12,7 +12,10 @@ import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.s3.S3ControlTagConditionKeys;
 import io.github.hectorvent.floci.services.s3.S3ObjectActions;
 import io.github.hectorvent.floci.services.s3.S3ObjectKeys;
@@ -88,6 +91,7 @@ public class IamConditionContextResolver {
     private final Instance<Ec2Service> ec2Service;
     private final Instance<S3Service> s3Service;
     private final Instance<CloudWatchLogsService> logsService;
+    private final Instance<IamService> iamService;
     private final RequestContext requestContext;
     private final EmulatorConfig config;
     private final CurrentVertxRequest currentVertxRequest;
@@ -103,11 +107,12 @@ public class IamConditionContextResolver {
                                        Instance<Ec2Service> ec2Service,
                                        Instance<S3Service> s3Service,
                                        Instance<CloudWatchLogsService> logsService,
+                                       Instance<IamService> iamService,
                                        RequestContext requestContext,
                                        EmulatorConfig config,
                                        CurrentVertxRequest currentVertxRequest,
                                        ResolvedServiceCatalog serviceCatalog) {
-        this(dynamoDbFacade, ec2Service, s3Service, logsService, requestContext, config, currentVertxRequest,
+        this(dynamoDbFacade, ec2Service, s3Service, logsService, iamService, requestContext, config, currentVertxRequest,
                 serviceCatalog, Clock.systemUTC());
     }
 
@@ -115,6 +120,7 @@ public class IamConditionContextResolver {
                                 Instance<Ec2Service> ec2Service,
                                 Instance<S3Service> s3Service,
                                 Instance<CloudWatchLogsService> logsService,
+                                Instance<IamService> iamService,
                                 RequestContext requestContext,
                                 EmulatorConfig config,
                                 CurrentVertxRequest currentVertxRequest,
@@ -123,6 +129,7 @@ public class IamConditionContextResolver {
         this.ec2Service = ec2Service;
         this.s3Service = s3Service;
         this.logsService = logsService;
+        this.iamService = iamService;
         this.requestContext = requestContext;
         this.config = config;
         this.currentVertxRequest = currentVertxRequest;
@@ -209,9 +216,10 @@ public class IamConditionContextResolver {
         return conditions;
     }
 
-    private static Map<String, List<String>> iamConditionContext(String action, ContainerRequestContext ctx) {
+    private Map<String, List<String>> iamConditionContext(String action, ContainerRequestContext ctx) {
         Map<String, String> members = IamConditionKeys.members(action);
-        if (members.isEmpty()) {
+        Map<String, String> targets = IamConditionKeys.targets(action);
+        if (members.isEmpty() && targets.isEmpty()) {
             return null;
         }
         Map<String, String> form = formParameters(ctx);
@@ -222,7 +230,26 @@ public class IamConditionContextResolver {
                 conditions.put(key, List.of(value));
             }
         });
+        // iam:PermissionsBoundary on an existing role or user is the boundary stored on it, left off when it has none.
+        targets.forEach((key, target) -> {
+            String value = storedPermissionsBoundary(target, form.get(target));
+            if (value != null) {
+                conditions.put(key, List.of(value));
+            }
+        });
         return conditions.isEmpty() ? null : conditions;
+    }
+
+    private String storedPermissionsBoundary(String target, String name) {
+        if (name == null || !iamService.isResolvable()) {
+            return null;
+        }
+        String account = requestContext.getAccountId();
+        return switch (target) {
+            case "RoleName" -> iamService.get().findRole(account, name).map(IamRole::getPermissionsBoundaryArn).orElse(null);
+            case "UserName" -> iamService.get().findUser(account, name).map(IamUser::getPermissionsBoundaryArn).orElse(null);
+            default -> throw new IllegalStateException("Unknown IAM condition key target: " + target);
+        };
     }
 
     public static Map<String, List<String>> withGlobalContext(Map<String, List<String>> serviceContext,
