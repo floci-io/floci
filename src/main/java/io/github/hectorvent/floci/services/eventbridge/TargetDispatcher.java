@@ -179,7 +179,10 @@ public class TargetDispatcher implements Resettable {
             return "INTERNAL_ERROR";
         }
         String code = aws.getErrorCode() != null ? aws.getErrorCode() : "";
-        if (aws.getHttpStatus() == 429 || code.contains("Throttl") || code.contains("TooManyRequests")) {
+        if (aws.getHttpStatus() == 429
+                || code.contains("Throttl")
+                || code.contains("TooManyRequests")
+                || "ActiveStatementsExceededException".equals(code)) {
             return "THROTTLING";
         }
         if (aws.getHttpStatus() >= 500) {

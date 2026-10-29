@@ -86,6 +86,27 @@ class TargetDispatcherTest {
     }
 
     @Test
+    void activeStatementsExceededIsRetriedAfterBackoffUntilAccepted() {
+        when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION))
+                .thenThrow(new AwsException("ActiveStatementsExceededException", "Too many active statements", 400))
+                .thenReturn(null);
+        Target target = sqsTarget(null, DLQ_ARN);
+
+        dispatcher.dispatch(RULE_ARN, target, EVENT, REGION, () -> List.of(target));
+        verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+
+        tickAt(T0.plusMillis(999));
+        verify(sqsService, times(1)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+
+        tickAt(T0.plusSeconds(1));
+        verify(sqsService, times(2)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+
+        tickAt(T0.plusSeconds(3600));
+        verify(sqsService, times(2)).sendMessage(TARGET_URL, EVENT, 0, null, null, REGION);
+        verifyNoDeadLetter();
+    }
+
+    @Test
     void queuedRetryWakesItselfUpOnTheExecutor() {
         when(sqsService.sendMessage(TARGET_URL, EVENT, 0, null, null, REGION))
                 .thenThrow(unavailable())

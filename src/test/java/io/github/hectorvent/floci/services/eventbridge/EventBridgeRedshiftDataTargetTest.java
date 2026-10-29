@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.services.eventbridge.model.RedshiftDataParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
@@ -14,16 +16,26 @@ import io.github.hectorvent.floci.services.sqs.SqsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.MockMakers;
+import org.mockito.MockedStatic;
 
+import java.time.Clock;
+import java.time.Instant;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.withSettings;
 
 class EventBridgeRedshiftDataTargetTest {
 
@@ -75,11 +87,11 @@ class EventBridgeRedshiftDataTargetTest {
         parameters.setDbUser("$.detail.user");
         parameters.setSecretManagerArn("$.detail.secret");
         parameters.setStatementName("$.detail.name");
-        parameters.setSql("$.detail.queries[0]");
+        parameters.setSql("$.detail.query");
         target.setRedshiftDataParameters(parameters);
         String event = """
                 {"detail":{"database":"dev","user":"admin","secret":"secret-arn",
-                  "name":"event-statement","queries":["select 42"]}}
+                  "name":"event-statement","query":"select 42"}}
                 """;
 
         invoker.invokeTarget(target, event, "us-east-1");
@@ -98,10 +110,10 @@ class EventBridgeRedshiftDataTargetTest {
     void resolvesBatchSqlPathsAndPreservesStaticSql() {
         Target target = target(WORKGROUP_ARN);
         RedshiftDataParameters parameters = parameters("dev");
-        parameters.setSqls(List.of("$.detail.queries[0]", "select '$.detail.literal'"));
+        parameters.setSqls(List.of("$.detail.query", "select '$.detail.literal'"));
         target.setRedshiftDataParameters(parameters);
 
-        invoker.invokeTarget(target, "{\"detail\":{\"queries\":[\"select 42\"]}}", "us-west-2");
+        invoker.invokeTarget(target, "{\"detail\":{\"query\":\"select 42\"}}", "us-west-2");
 
         ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
         verify(redshiftDataService).batchExecuteStatement(request.capture(), eq("us-west-2"), eq(ROLE_ARN));
@@ -161,6 +173,98 @@ class EventBridgeRedshiftDataTargetTest {
         JsonNode response = objectMapper.valueToTree(parameters);
         assertEquals("dev", response.path("Database").asText());
         assertEquals("secret", response.path("SecretManagerArn").asText());
+    }
+
+    @Test
+    void doesNotThrowWhenServiceRegistryIsNull() {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.baseUrl()).thenReturn("http://localhost:4566");
+        EventBridgeInvoker bareInvoker = new EventBridgeInvoker(mock(LambdaService.class), mock(SqsService.class),
+                mock(SnsService.class), redshiftDataService, null, new ObjectMapper(), config);
+        Target target = target(CLUSTER_ARN);
+        RedshiftDataParameters parameters = parameters("dev");
+        parameters.setSql("select 1");
+        target.setRedshiftDataParameters(parameters);
+
+        bareInvoker.invokeTarget(target, EVENT, "us-east-1");
+        verify(redshiftDataService).executeStatement(any(), eq("us-east-1"), eq(ROLE_ARN));
+    }
+
+    @Test
+    void activeStatementsExceededIsRetryableThroughTargetDispatcher() {
+        AtomicReference<Instant> clockNow = new AtomicReference<>(Instant.parse("2026-06-15T12:00:00Z"));
+        Clock clock = mock(Clock.class);
+        when(clock.instant()).thenAnswer(invocation -> clockNow.get());
+        TargetDispatcher dispatcher = new TargetDispatcher(invoker, mock(SqsService.class),
+                "http://localhost:4566", clock, null);
+
+        when(redshiftDataService.executeStatement(any(), any(), any()))
+                .thenThrow(new AwsException("ActiveStatementsExceededException", "Too many active statements", 400))
+                .thenReturn(null);
+
+        Target target = target(CLUSTER_ARN);
+        RedshiftDataParameters parameters = parameters("dev");
+        parameters.setSql("select 1");
+        target.setRedshiftDataParameters(parameters);
+
+        dispatcher.dispatch("arn:aws:events:us-east-1:123456789012:rule/rule-1", target, EVENT, "us-east-1",
+                () -> List.of(target));
+        verify(redshiftDataService, times(1)).executeStatement(any(), eq("us-east-1"), eq(ROLE_ARN));
+
+        clockNow.set(clockNow.get().plusSeconds(1));
+        dispatcher.tick();
+        verify(redshiftDataService, times(2)).executeStatement(any(), eq("us-east-1"), eq(ROLE_ARN));
+    }
+
+    @Test
+    void runsInRulesAccountRatherThanTargetArnAccount() {
+        RegionResolver resolver = mock(RegionResolver.class);
+        when(resolver.getAccountId()).thenReturn("999999999999");
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.baseUrl()).thenReturn("http://localhost:4566");
+        EventBridgeInvoker scopedInvoker = new EventBridgeInvoker(
+                mock(LambdaService.class), mock(SqsService.class), mock(SnsService.class),
+                null, null, null, null, null, null,
+                redshiftDataService, serviceRegistry, resolver, new ObjectMapper(), config);
+
+        Target target = target(CLUSTER_ARN);
+        RedshiftDataParameters parameters = parameters("dev");
+        parameters.setSql("select 1");
+        target.setRedshiftDataParameters(parameters);
+
+        try (MockedStatic<RequestScopes> scopes =
+                     mockStatic(RequestScopes.class, withSettings().mockMaker(MockMakers.INLINE))) {
+            scopes.when(() -> RequestScopes.callAs(eq("999999999999"), eq("us-east-1"), any(Supplier.class)))
+                    .thenAnswer(invocation -> invocation.<Supplier<?>>getArgument(2).get());
+
+            scopedInvoker.invokeTarget(target, EVENT, "us-east-1");
+
+            scopes.verify(() -> RequestScopes.callAs(eq("999999999999"), eq("us-east-1"), any(Supplier.class)));
+        }
+    }
+
+    @Test
+    void missingPathThrowsValidationException() {
+        Target target = target(CLUSTER_ARN);
+        RedshiftDataParameters parameters = parameters("$.detail.nonexistent");
+        parameters.setSql("select 1");
+        target.setRedshiftDataParameters(parameters);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> invoker.invokeTarget(target, "{\"detail\":{}}", "us-east-1"));
+        assertEquals("ValidationException", failure.getErrorCode());
+    }
+
+    @Test
+    void nullPathThrowsValidationException() {
+        Target target = target(CLUSTER_ARN);
+        RedshiftDataParameters parameters = parameters("$.detail.nullDatabase");
+        parameters.setSql("select 1");
+        target.setRedshiftDataParameters(parameters);
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> invoker.invokeTarget(target, "{\"detail\":{\"nullDatabase\":null}}", "us-east-1"));
+        assertEquals("ValidationException", failure.getErrorCode());
     }
 
     private static Target target(String arn) {

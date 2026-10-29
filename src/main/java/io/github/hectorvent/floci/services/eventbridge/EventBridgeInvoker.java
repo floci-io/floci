@@ -6,8 +6,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import com.jayway.jsonpath.JsonPath;
-import com.jayway.jsonpath.JsonPathException;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -69,7 +67,7 @@ public class EventBridgeInvoker {
     private static final int MAX_BUS_TO_BUS_DEPTH = 1;
     private static final int MAX_IDLE_RATE_WINDOWS = 256;
     private static final Pattern DYNAMIC_PARAMETER_PATH =
-            Pattern.compile("\\$(?:\\.[\\w*/-]+|\\[(?:\\d+|\\*)\\])*");
+            Pattern.compile("\\$(?:\\.[\\w*/-]+)+");
     // Headers the JDK HttpClient manages itself; setting them by hand throws IllegalArgumentException.
     private static final Set<String> RESTRICTED_HEADERS =
             Set.of("connection", "content-length", "expect", "host", "transfer-encoding", "upgrade");
@@ -355,7 +353,7 @@ public class EventBridgeInvoker {
     }
 
     private void deliverToRedshiftData(Target target, String targetArn, String eventJson) {
-        if (!serviceRegistry.isServiceEnabled("redshift-data")) {
+        if (serviceRegistry != null && !serviceRegistry.isServiceEnabled("redshift-data")) {
             throw new AwsException("ServiceNotAvailableException", "Service redshift-data is not enabled.", 400);
         }
         RedshiftDataParameters parameters = target.getRedshiftDataParameters();
@@ -392,12 +390,14 @@ public class EventBridgeInvoker {
             request.put("WithEvent", parameters.getWithEvent());
         }
 
-        String targetAccount = arn.accountId();
+        String ruleAccount = regionResolver != null && regionResolver.getAccountId() != null
+                ? regionResolver.getAccountId()
+                : arn.accountId();
         if (parameters.getSqls() != null) {
-            RequestScopes.callAs(targetAccount, targetRegion,
+            RequestScopes.callAs(ruleAccount, targetRegion,
                     () -> redshiftDataService.batchExecuteStatement(request, targetRegion, target.getRoleArn()));
         } else {
-            RequestScopes.callAs(targetAccount, targetRegion,
+            RequestScopes.callAs(ruleAccount, targetRegion,
                     () -> redshiftDataService.executeStatement(request, targetRegion, target.getRoleArn()));
         }
         LOG.debugv("EventBridge submitted SQL to Redshift Data API: {0}", targetArn);
@@ -407,16 +407,14 @@ public class EventBridgeInvoker {
         if (value == null || !DYNAMIC_PARAMETER_PATH.matcher(value).matches()) {
             return value;
         }
-        try {
-            Object resolved = JsonPath.read(eventJson, value);
-            if (resolved == null) {
-                throw new AwsException("ValidationException", "Redshift target path resolved to null: " + value, 400);
-            }
-            JsonNode node = objectMapper.valueToTree(resolved);
-            return node.isTextual() ? node.asText() : node.toString();
-        } catch (JsonPathException e) {
+        JsonNode node = extractNode(value, eventJson);
+        if (node.isMissingNode()) {
             throw new AwsException("ValidationException", "Cannot resolve Redshift target path: " + value, 400);
         }
+        if (node.isNull()) {
+            throw new AwsException("ValidationException", "Redshift target path resolved to null: " + value, 400);
+        }
+        return node.isTextual() ? node.asText() : node.toString();
     }
 
     private static void putIfPresent(ObjectNode request, String field, String value) {

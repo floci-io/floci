@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.ecs.EcsService;
@@ -21,6 +22,7 @@ import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
@@ -67,6 +69,8 @@ class EventBridgeInvokerTest {
         EmulatorConfig emulatorConfig =
                 mock(EmulatorConfig.class,
                         Mockito.RETURNS_DEEP_STUBS);
+        RedshiftDataService redshiftDataService = mock(RedshiftDataService.class);
+        ServiceRegistry serviceRegistry = mock(ServiceRegistry.class);
         invoker = new EventBridgeInvoker(
                 lambdaService,
                 sqsService,
@@ -78,6 +82,8 @@ class EventBridgeInvokerTest {
                 new EcsJsonHandler(ecsService, new ObjectMapper(),
                         new HostVolumePolicy(emulatorConfig)),
                 stepFunctionsService,
+                redshiftDataService,
+                serviceRegistry,
                 regionResolver,
                 new ObjectMapper(),
                 emulatorConfig
