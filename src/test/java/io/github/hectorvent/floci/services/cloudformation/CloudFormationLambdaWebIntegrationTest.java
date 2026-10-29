@@ -1,18 +1,28 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebCodeBuckets;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebRoles;
 import io.github.hectorvent.floci.services.lambdaweb.LambdaWebZips;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -22,6 +32,9 @@ import static org.hamcrest.Matchers.hasSize;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.when;
 
 /**
  * A stack with the three Web Function types against the real service: {@code Ref} is each ARN,
@@ -35,6 +48,12 @@ class CloudFormationLambdaWebIntegrationTest {
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
     private static final String BUCKET = "cfn-web-code";
+    private static final String PROBE_TOKEN = "arn:aws:lambda:us-east-1:000000000000:function:cfn-web-regional-probe";
+
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    @InjectMock
+    LambdaService lambdaService;
 
     @Inject
     S3Service s3Service;
@@ -145,6 +164,51 @@ class CloudFormationLambdaWebIntegrationTest {
     }
 
     @Test
+    void aCustomResourceIsGivenRegionalEndpointsAsAnObject() {
+        LambdaWebRoles.trustLambda(iamService, "arn:aws:iam::000000000000:role/cfn-web");
+        LambdaWebCodeBuckets.create(s3Service, BUCKET);
+        s3Service.putObject(BUCKET, "app.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of());
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String functionName = "cfn-web-probe-" + suffix;
+        String stackName = "cfn-web-probe-stack-" + suffix;
+        List<JsonNode> events = new CopyOnWriteArrayList<>();
+        when(lambdaService.invoke(any(), eq(PROBE_TOKEN), any(), eq(InvocationType.RequestResponse)))
+                .thenAnswer(invocation -> {
+                    JsonNode event = mapper.readTree((byte[]) invocation.getArgument(2));
+                    events.add(event);
+                    succeed(event);
+                    return new InvokeResult(200, null, "null".getBytes(StandardCharsets.UTF_8), null, "req-1");
+                });
+        String probe = """
+                "Probe": {
+                  "Type": "Custom::Probe",
+                  "Properties": {"ServiceToken": "%s", "Value": {"Fn::GetAtt": ["Ep", "RegionalEndpoints"]}}
+                },
+                """.formatted(PROBE_TOKEN);
+
+        cloudFormation(stackName, "CreateStack", template(functionName, 30, probe));
+        await().untilAsserted(() -> describeStacks(stackName, "CREATE_COMPLETE"));
+        String revisionId = outputs(describeStacks(stackName, "CREATE_COMPLETE")).get("RevId");
+        JsonNode create = events.stream().filter(event -> "Create".equals(event.path("RequestType").asText()))
+                .findFirst().orElseThrow();
+        JsonNode value = create.path("ResourceProperties").path("Value");
+        assertEquals(List.of("us-east-1"), value.properties().stream().map(Map.Entry::getKey).toList());
+        JsonNode home = value.path("us-east-1");
+        assertEquals(List.of("AuthType", "RevisionWeights", "State", "StateReason"),
+                home.properties().stream().map(Map.Entry::getKey).toList());
+        assertEquals("ApplicationManaged", home.path("AuthType").asText());
+        assertEquals(revisionId, home.path("RevisionWeights").path(0).path("RevisionId").asText());
+        // The custom resource stringifies every scalar it is given, so the weight is compared as text.
+        assertEquals("100", home.path("RevisionWeights").path(0).path("Weight").asText());
+        assertEquals("Active", home.path("State").asText());
+        assertEquals("The endpoint is active in the region.", home.path("StateReason").asText());
+
+        cloudFormation(stackName, "DeleteStack", null);
+        await().untilAsserted(() -> given().when().get("/2025-03-07/web-functions/" + functionName)
+                .then().statusCode(404));
+    }
+
+    @Test
     void regionalEndpointsIsAnObjectThatAnOutputCannotHold() {
         LambdaWebRoles.trustLambda(iamService, "arn:aws:iam::000000000000:role/cfn-web");
         LambdaWebCodeBuckets.create(s3Service, BUCKET);
@@ -160,6 +224,16 @@ class CloudFormationLambdaWebIntegrationTest {
         stackEvents(stackName).body(containsString("Template format error: Every Value member must be a string."));
         given().when().get("/2025-03-07/web-functions/" + functionName).then().statusCode(404);
         cloudFormation(stackName, "DeleteStack", null);
+    }
+
+    private void succeed(JsonNode event) {
+        ObjectNode response = mapper.createObjectNode().put("Status", "SUCCESS")
+                .put("RequestId", event.get("RequestId").asText())
+                .put("StackId", event.get("StackId").asText())
+                .put("LogicalResourceId", event.get("LogicalResourceId").asText())
+                .put("PhysicalResourceId", "regional-probe");
+        given().body(response.toString()).when().put(URI.create(event.get("ResponseURL").asText()).getPath())
+                .then().statusCode(200);
     }
 
     private static ValidatableResponse stackEvents(String stackName) {

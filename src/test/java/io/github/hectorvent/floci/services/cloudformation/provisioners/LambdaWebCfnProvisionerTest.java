@@ -434,7 +434,14 @@ class LambdaWebCfnProvisionerTest {
         assertEquals("The endpoint is updated.", r.getAttributes().get("UpdateStatusReason"));
         assertFalse(provisioner.hasReplacementUpdate(r));
         // A failed stack update puts the prior configuration back.
+        WebFunctionEndpoint restoredEndpoint = endpoint("prod", "HomeRegion", List.of("us-east-1"));
+        restoredEndpoint.authType = "ApplicationManaged";
+        when(service.updateEndpoint(eq(REGION), eq(FN_ARN), eq("prod"), any()))
+                .thenReturn(new LambdaWebService.EndpointUpdate(updated, restoredEndpoint));
         assertTrue(provisioner.rollbackUpdate(r));
+        assertEquals("ApplicationManaged", provisioner.attributeValue(LambdaWebCfnProvisioner.ENDPOINT,
+                "RegionalEndpoints", r.getAttributes().get("RegionalEndpoints")).path("us-east-1").path("AuthType")
+                .textValue(), "the restored endpoint's regional block");
         ArgumentCaptor<JsonNode> restored = ArgumentCaptor.forClass(JsonNode.class);
         verify(service).updateEndpoint(eq(REGION), eq(FN_ARN), eq("prod"), restored.capture());
         assertEquals("ApplicationManaged", restored.getValue().path("authType").asText());

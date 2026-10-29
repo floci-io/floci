@@ -121,7 +121,9 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
         String region = snapshot.path("region").asText();
         String functionArn = snapshot.path("functionArn").asText();
         if ("endpoint".equals(snapshot.path("type").asText())) {
-            service.updateEndpoint(region, functionArn, snapshot.path("endpointName").asText(), snapshot.get("patch"));
+            WebFunctionEndpoint restored = service.updateEndpoint(region, functionArn,
+                    snapshot.path("endpointName").asText(), snapshot.get("patch")).after();
+            resource.getAttributes().put("RegionalEndpoints", regionalEndpoints(restored));
         } else {
             service.replaceTags(region, functionArn,
                     MAPPER.convertValue(snapshot.get("tags"), new TypeReference<Map<String, String>>() {}));
@@ -220,8 +222,7 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("FunctionArn", endpoint.functionArn);
         r.getAttributes().put("EndpointArn", endpoint.endpointArn);
         r.getAttributes().put("DomainName", endpoint.domainName);
-        r.getAttributes().put("RegionalEndpoints", upperKeys(MAPPER.valueToTree(
-                LambdaWebResponses.regionalEndpoints(endpoint)), false).toString());
+        r.getAttributes().put("RegionalEndpoints", regionalEndpoints(endpoint));
         r.getAttributes().put("State", "Active");
         r.getAttributes().put("StateReason", "The endpoint is active and invokable.");
         if (endpoint.updateStatus != null) {
@@ -357,6 +358,10 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         return CfnResourceProvisioner.super.attributeValue(resourceType, attributeName, value);
+    }
+
+    private static String regionalEndpoints(WebFunctionEndpoint endpoint) {
+        return upperKeys(MAPPER.valueToTree(LambdaWebResponses.regionalEndpoints(endpoint)), false).toString();
     }
 
     /** The API's members in PascalCase. The region names that key RegionalEndpoints stay as they are. */
