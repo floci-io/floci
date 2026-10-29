@@ -102,11 +102,13 @@ class AutoScalingStandbyTest {
             }
             return found.isEmpty() ? List.of() : List.of(reservation(found));
         });
+        // Ec2Service terminates the ids in order and stops at the first it has no record of.
         when(ec2.terminateInstances(eq(REGION), anyList())).thenAnswer(invocation -> {
             for (String id : invocation.<List<String>>getArgument(1)) {
                 if (!ec2States.containsKey(id)) {
                     throw instanceNotFound(id);
                 }
+                ec2States.put(id, InstanceState.terminated());
             }
             return List.of();
         });

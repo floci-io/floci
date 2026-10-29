@@ -67,7 +67,7 @@ public class AutoScalingReconciler {
      */
     private static final Set<String> TERMINATED_STATES = Set.of("shutting-down", "terminated");
 
-    /** The error EC2 answers for an instance id it has no record of. */
+    /** The error EC2 answers, rather than an empty list, for an instance id it has no record of. */
     private static final String INSTANCE_NOT_FOUND = "InvalidInstanceID.NotFound";
 
     /** The Activity StatusMessage limit (XmlStringMaxLen255). */
@@ -421,6 +421,11 @@ public class AutoScalingReconciler {
         return false;
     }
 
+    /** Whether EC2 has no record of the instance at all, whatever state a record would be in. */
+    private boolean hasNoEc2Record(AutoScalingGroup asg, String instanceId) {
+        return isMissingOrTerminalEc2Instance(asg, instanceId, Set.of());
+    }
+
     private boolean isMissingOrTerminalEc2Instance(AutoScalingGroup asg, String instanceId,
                                                    Set<String> terminalStates) {
         try {
@@ -438,7 +443,6 @@ public class AutoScalingReconciler {
             return state != null && terminalStates.contains(state);
         }
         catch (Exception e) {
-            // EC2 answers an id it has no record of with InvalidInstanceID.NotFound rather than an empty list.
             if (e instanceof AwsException aws && INSTANCE_NOT_FOUND.equals(aws.getErrorCode())) {
                 return true;
             }
@@ -490,16 +494,21 @@ public class AutoScalingReconciler {
             return;
         }
 
+        // A terminating instance whose EC2 record is already gone is not a failure: it is pruned as stale by
+        // removeStaleInstances in this same pass. It stays out of the batch, which EC2 would stop at its id.
         List<String> instanceIds = terminatingInstances.stream()
                 .map(AsgInstance::getInstanceId)
+                .filter(id -> !hasNoEc2Record(asg, id))
                 .collect(Collectors.toList());
+        if (instanceIds.isEmpty()) {
+            return;
+        }
         try {
             ec2Service.terminateInstances(asg.getRegion(), instanceIds);
         } catch (Exception e) {
             LOG.warnv("ASG {0}: failed to terminate refreshing instances {1}: {2}",
                     asg.getAutoScalingGroupName(), instanceIds, e.getMessage());
-            // A terminating instance whose EC2 record is already gone is not a failure: it is pruned
-            // as stale by removeStaleInstances in this same pass. Only real failures are recorded.
+            // Only real failures are recorded, not an instance that is going away or has gone in the meantime.
             List<String> stillPresent = instanceIds.stream()
                     .filter(id -> !isMissingOrTerminalEc2Instance(asg, id, TERMINATED_STATES))
                     .toList();
