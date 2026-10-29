@@ -67,7 +67,7 @@ public class EventBridgeInvoker {
     private static final int MAX_BUS_TO_BUS_DEPTH = 1;
     private static final int MAX_IDLE_RATE_WINDOWS = 256;
     private static final Pattern DYNAMIC_PARAMETER_PATH =
-            Pattern.compile("\\$(?:\\.[\\w*/-]+)+");
+            Pattern.compile("\\$(?:\\.[\\w*/-]+|\\[\\d+\\])+");
     // Headers the JDK HttpClient manages itself; setting them by hand throws IllegalArgumentException.
     private static final Set<String> RESTRICTED_HEADERS =
             Set.of("connection", "content-length", "expect", "host", "transfer-encoding", "upgrade");

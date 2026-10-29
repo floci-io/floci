@@ -87,11 +87,11 @@ class EventBridgeRedshiftDataTargetTest {
         parameters.setDbUser("$.detail.user");
         parameters.setSecretManagerArn("$.detail.secret");
         parameters.setStatementName("$.detail.name");
-        parameters.setSql("$.detail.query");
+        parameters.setSql("$.detail.queries[0]");
         target.setRedshiftDataParameters(parameters);
         String event = """
                 {"detail":{"database":"dev","user":"admin","secret":"secret-arn",
-                  "name":"event-statement","query":"select 42"}}
+                  "name":"event-statement","queries":["select 42"]}}
                 """;
 
         invoker.invokeTarget(target, event, "us-east-1");
@@ -110,15 +110,16 @@ class EventBridgeRedshiftDataTargetTest {
     void resolvesBatchSqlPathsAndPreservesStaticSql() {
         Target target = target(WORKGROUP_ARN);
         RedshiftDataParameters parameters = parameters("dev");
-        parameters.setSqls(List.of("$.detail.query", "select '$.detail.literal'"));
+        parameters.setSqls(List.of("$.detail.queries[0]", "$.detail.queries[1]", "select '$.detail.literal'"));
         target.setRedshiftDataParameters(parameters);
 
-        invoker.invokeTarget(target, "{\"detail\":{\"query\":\"select 42\"}}", "us-west-2");
+        invoker.invokeTarget(target, "{\"detail\":{\"queries\":[\"select 42\",\"select 43\"]}}", "us-west-2");
 
         ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
         verify(redshiftDataService).batchExecuteStatement(request.capture(), eq("us-west-2"), eq(ROLE_ARN));
         assertEquals("select 42", request.getValue().path("Sqls").get(0).asText());
-        assertEquals("select '$.detail.literal'", request.getValue().path("Sqls").get(1).asText());
+        assertEquals("select 43", request.getValue().path("Sqls").get(1).asText());
+        assertEquals("select '$.detail.literal'", request.getValue().path("Sqls").get(2).asText());
     }
 
     @Test

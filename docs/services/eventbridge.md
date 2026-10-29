@@ -182,7 +182,7 @@ the region used for execution; statements run in the rule's account. The stored 
 as the Data API principal; Floci does not assume the role or evaluate its IAM policies.
 
 String parameters, including entries in `Sqls`, can be complete JSONPath references such as
-`$.detail.database` or `$.detail.query`. Paths resolve against the original event, before
+`$.detail.database`, `$.detail.query` or `$.detail.queries[0]`. Paths resolve against the original event, before
 `Input`, `InputPath` or `InputTransformer`; embedded paths inside SQL text are left unchanged.
 Dispatch is rejected when the `redshift-data` service is disabled.
 
