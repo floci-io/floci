@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshiftserverless;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -1029,7 +1030,7 @@ public class RedshiftServerlessService implements Resettable {
         if (nameOrArn == null || nameOrArn.isBlank()) {
             throw ServerlessSupport.validation("workgroupName is required.");
         }
-        if (!nameOrArn.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(nameOrArn)) {
             return getWorkgroup(nameOrArn, region);
         }
         return workgroupByArn(nameOrArn, region).orElseThrow(() -> workgroupNotFound(nameOrArn));

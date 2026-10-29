@@ -784,11 +784,7 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     private static String sourceType(String sourceArn) {
-        if (sourceArn == null) {
-            return null;
-        }
-        String[] parts = sourceArn.split(":");
-        return parts.length > 2 ? parts[2] : null;
+        return AwsArnUtils.isArn(sourceArn) ? AwsArnUtils.parse(sourceArn).service() : null;
     }
 
     private static int resolveMaxRecords(Integer maxRecords) {
@@ -2746,7 +2742,7 @@ public class RedshiftService implements ManagedSecretRotator {
         if (resourceName == null || resourceName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "ResourceName is required.", 400);
         }
-        if (!resourceName.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(resourceName)) {
             throw new AwsException("InvalidParameterValue", "ResourceName must be a Redshift ARN: " + resourceName, 400);
         }
         AwsArnUtils.Arn arn;
