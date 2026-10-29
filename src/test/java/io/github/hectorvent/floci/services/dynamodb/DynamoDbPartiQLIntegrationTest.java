@@ -318,6 +318,82 @@ class DynamoDbPartiQLIntegrationTest {
             .body("Responses[2].TableName", equalTo(TABLE));
     }
 
+    @Test
+    @Order(19)
+    void aFailedConditionReturnsTheItemWithAllOld() {
+        putItem("rvocf-upd", "\"val\":{\"S\":\"here\"}");
+        putItem("rvocf-del", "\"val\":{\"S\":\"here\"}");
+
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"UPDATE \\"%s\\" SET touched = 'yes' WHERE pk = 'rvocf-upd' AND val = 'wrong'",
+                 "ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"))
+            .body("Item.val.S", equalTo("here"));
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"DELETE FROM \\"%s\\" WHERE pk = 'rvocf-del' AND val = 'wrong'",
+                 "ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("Item.val.S", equalTo("here"));
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"UPDATE \\"%s\\" SET touched = 'yes' WHERE pk = 'rvocf-upd' AND val = 'wrong'",
+                 "ReturnValuesOnConditionCheckFailure":"NONE"}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("Item", nullValue());
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"UPDATE \\"%s\\" SET touched = 'yes' WHERE pk = 'rvocf-ghost'",
+                 "ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("Item", nullValue());
+    }
+
+    @Test
+    @Order(20)
+    void aFailedBatchMemberCarriesTheItemOnItsErrorWithAllOld() {
+        putItem("rvocf-batch", "\"val\":{\"S\":\"here\"}");
+        putItem("rvocf-batch-none", "\"val\":{\"S\":\"here\"}");
+
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[
+                  {"Statement":"UPDATE \\"%1$s\\" SET touched = 'yes' WHERE pk = 'rvocf-batch' AND val = 'wrong'",
+                   "ReturnValuesOnConditionCheckFailure":"ALL_OLD"},
+                  {"Statement":"DELETE FROM \\"%1$s\\" WHERE pk = 'rvocf-batch-none' AND val = 'wrong'"}]}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ConditionalCheckFailed"))
+            .body("Responses[0].Error.Item.val.S", equalTo("here"))
+            .body("Responses[0].Item", nullValue())
+            .body("Responses[1].Error.Code", equalTo("ConditionalCheckFailed"))
+            .body("Responses[1].Error.Item", nullValue());
+    }
+
+    @Test
+    @Order(21)
+    void aCancelledTransactionCarriesTheItemOfAFailedWriteWithAllOld() {
+        putItem("rvocf-tx-upd", "\"val\":{\"S\":\"here\"}");
+        putItem("rvocf-tx-del", "\"val\":{\"S\":\"here\"}");
+
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[
+                  {"Statement":"UPDATE \\"%1$s\\" SET touched = 'yes' WHERE pk = 'rvocf-tx-upd' AND val = 'wrong'",
+                   "ReturnValuesOnConditionCheckFailure":"ALL_OLD"},
+                  {"Statement":"DELETE FROM \\"%1$s\\" WHERE pk = 'rvocf-tx-del' AND val = 'wrong'",
+                   "ReturnValuesOnConditionCheckFailure":"ALL_OLD"},
+                  {"Statement":"EXISTS(SELECT * FROM \\"%1$s\\" WHERE pk = 'rvocf-upd' AND val = 'wrong')",
+                   "ReturnValuesOnConditionCheckFailure":"ALL_OLD"}]}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("CancellationReasons[0].Code", equalTo("ConditionalCheckFailed"))
+            .body("CancellationReasons[0].Item.val.S", equalTo("here"))
+            .body("CancellationReasons[1].Item.val.S", equalTo("here"))
+            .body("CancellationReasons[2].Code", equalTo("ConditionalCheckFailed"))
+            .body("CancellationReasons[2].Item", nullValue());
+    }
+
     private static void putItem(String pk, String attributes) {
         request("DynamoDB_20120810.PutItem", """
                 {"TableName":"%s","Item":{"pk":{"S":"%s"},%s}}
