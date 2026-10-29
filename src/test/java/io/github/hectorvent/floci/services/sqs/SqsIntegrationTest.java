@@ -1020,6 +1020,63 @@ class SqsIntegrationTest {
     }
 
     @Test
+    void delaySecondsAboveTheAwsMaximumIsRejected() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "query-delay-range-queue")
+            .formParam("Attribute.1.Name", "DelaySeconds")
+            .formParam("Attribute.1.Value", "901")
+        .when().post("/").then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidAttributeValue</Code>"))
+            .body(containsString("<Message>Invalid value for the parameter DelaySeconds.</Message>"));
+
+        String delayQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "query-delay-range-queue")
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", delayQueueUrl)
+                .formParam("MessageBody", "x")
+                .formParam("DelaySeconds", "901")
+            .when().post("/").then()
+                .statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"))
+                .body(containsString("Value 901 for parameter DelaySeconds is invalid. Reason: Must be &gt;= 0 and &lt;= 900."));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessageBatch")
+                .formParam("QueueUrl", delayQueueUrl)
+                .formParam("SendMessageBatchRequestEntry.1.Id", "ok")
+                .formParam("SendMessageBatchRequestEntry.1.MessageBody", "x")
+                .formParam("SendMessageBatchRequestEntry.1.DelaySeconds", "900")
+                .formParam("SendMessageBatchRequestEntry.2.Id", "late")
+                .formParam("SendMessageBatchRequestEntry.2.MessageBody", "x")
+                .formParam("SendMessageBatchRequestEntry.2.DelaySeconds", "901")
+            .when().post("/").then()
+                .statusCode(200)
+                .body("SendMessageBatchResponse.SendMessageBatchResult.SendMessageBatchResultEntry.Id", equalTo("ok"))
+                .body("SendMessageBatchResponse.SendMessageBatchResult.BatchResultErrorEntry.Id", equalTo("late"))
+                .body("SendMessageBatchResponse.SendMessageBatchResult.BatchResultErrorEntry.Code",
+                        equalTo("InvalidParameterValue"));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", delayQueueUrl)
+            .when().post("/");
+        }
+    }
+
+    @Test
     void receiveMessageReturnsPerMessageSenderId() {
         String testQueueUrl = given()
             .contentType("application/x-www-form-urlencoded")

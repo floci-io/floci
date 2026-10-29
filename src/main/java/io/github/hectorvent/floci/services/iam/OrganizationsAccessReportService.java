@@ -275,11 +275,16 @@ public class OrganizationsAccessReportService {
         }
     }
 
-    /** AWS's shape-violation message: an unquoted null, a quoted value, and what it failed. */
+    /**
+     * IAM's shape-violation message, which names the member and leaves the value out, as
+     * {@link IamValidationErrors} reads it. A member the request never sent is the one place a
+     * word still stands where the value would, {@code Value null at '<member>'}.
+     */
     private static AwsException validationError(String value, String at, String constraint) {
-        return SmithyValidationErrors.validationError("Value "
-                + (value == null ? "null" : "'" + value + "'") + " at '" + at
-                + "' failed to satisfy constraint: " + constraint);
+        if (value == null) {
+            return SmithyValidationErrors.validationError(SmithyValidationErrors.notNull(at));
+        }
+        return IamValidationErrors.validationError(at, value, constraint);
     }
 
     private OrganizationsAccessReportJob completed(String callerAccountId, String entityPath,

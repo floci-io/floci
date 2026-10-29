@@ -63,7 +63,7 @@ class EcsContainerManagerImagePullTest {
         when(containerBuilder.resolveImage(anyString())).thenAnswer(invocation -> invocation.getArgument(0));
 
         lifecycleManager = mock(ContainerLifecycleManager.class);
-        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("docker-id", Map.of()));
+        when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerInfo("docker-id", Map.of()));
 
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().imagePullBehavior()).thenReturn(ImagePullBehavior.ALWAYS);
@@ -91,7 +91,7 @@ class EcsContainerManagerImagePullTest {
         InOrder order = inOrder(lifecycleManager);
         order.verify(lifecycleManager).resolveImageForLaunch(APP_IMAGE, ImagePullBehavior.ALWAYS);
         order.verify(lifecycleManager).resolveImageForLaunch(SIDECAR_IMAGE, ImagePullBehavior.ALWAYS);
-        order.verify(lifecycleManager).createAndStart(any());
+        order.verify(lifecycleManager).createAndStartEphemeral(any());
         List<Container> containers = task.getContainers();
         assertEquals("sha256:new-manifest", containers.get(0).getImageDigest());
         assertNull(containers.get(1).getImageDigest(), "a locally built image has no manifest digest");
@@ -136,7 +136,7 @@ class EcsContainerManagerImagePullTest {
         assertThrows(NotFoundException.class,
                 () -> manager.startTask(task(), taskDefinition(), List.of(), "us-east-1"));
 
-        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
     }
 
     private static TaskDefinition taskDefinition() {

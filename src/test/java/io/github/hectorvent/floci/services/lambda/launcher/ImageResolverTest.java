@@ -154,12 +154,30 @@ class ImageResolverTest {
         assertEquals("public.ecr.aws/lambda/python:3.11", configuredResolver.resolve("python3.11"));
     }
 
+    @ParameterizedTest
+    @CsvSource({"linux/amd64, a", "linux/arm64, b", "linux/riscv64, c", ", c"})
+    void selectsPlatformManifestBeforeRuntimeWideFallback(String platform, String digest) {
+        String repository = "registry.example/lambda-python@sha256:";
+        when(config.services().lambda().runtimeImages()).thenReturn(Map.of(
+                "python3.12.linux.amd64", repository + "a".repeat(64),
+                "python3.12.linux.arm64", repository + "b".repeat(64),
+                "python3.12", repository + "c".repeat(64)));
+        ImageResolver configuredResolver = new ImageResolver(config);
+
+        assertEquals(repository + digest.repeat(64), configuredResolver.resolve("python3.12", platform));
+        assertEquals("public.ecr.aws/lambda/python:3.11", configuredResolver.resolve("python3.11", platform));
+        assertEquals("custom/image:tag", configuredResolver.resolve("custom/image:tag", platform));
+    }
+
     @Test
     void unknownRuntimeCannotBeOverridden() {
-        when(config.services().lambda().runtimeImages()).thenReturn(Map.of("unknown", "example.com/unknown:1"));
+        when(config.services().lambda().runtimeImages()).thenReturn(Map.of(
+                "unknown", "example.com/unknown:1",
+                "unknown.linux.arm64", "example.com/unknown:arm64"));
         ImageResolver configuredResolver = new ImageResolver(config);
 
         assertThrows(AwsException.class, () -> configuredResolver.resolve("unknown"));
+        assertThrows(AwsException.class, () -> configuredResolver.resolve("unknown", "linux/arm64"));
     }
 
     @Test

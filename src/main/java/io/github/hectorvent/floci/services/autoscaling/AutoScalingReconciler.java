@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.elb.ElbClassicService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
@@ -1063,7 +1064,7 @@ public class AutoScalingReconciler {
             String instanceType,
             String keyName,
             List<String> securityGroupIds,
-            List<io.github.hectorvent.floci.services.ec2.model.Tag> instanceTags,
+            List<Tag> instanceTags,
             String userData,
             String encodedUserData,
             String iamInstanceProfile,

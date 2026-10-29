@@ -916,6 +916,25 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
      *                  {@code null} whenever the target is in the caller's own account.
      */
     public PutEventsResult putEvents(List<Map<String, Object>> entries, String region, String accountId) {
+        return putEvents(entries, region, accountId, false);
+    }
+
+    /**
+     * Publishes the entries of a {@code PutEvents} request. As {@link #putEvents(List, String)}, except that
+     * an entry for an event bus that does not exist is answered as published, with an event id and not
+     * counted as failed, and goes no further, as the EventBridge User Guide gives it: "If you use PutEvents
+     * to publish an event to an event bus that does not exist, EventBridge event matching will not find a
+     * corresponding rule and will drop the event. Although EventBridge will send a 200 response, it will not
+     * fail the request or include the event in the FailedEntryCount value of the request response." Floci's
+     * own deliveries to a bus, for a rule, a pipe or a schedule, go through {@link #putEvents} and still fail
+     * such an entry: the guide's sentence is about the action, and no document says how AWS answers them.
+     */
+    public PutEventsResult putEventsFromRequest(List<Map<String, Object>> entries, String region) {
+        return putEvents(entries, region, null, true);
+    }
+
+    private PutEventsResult putEvents(List<Map<String, Object>> entries, String region, String accountId,
+                                      boolean dropForMissingBus) {
         int failed = 0;
         List<Map<String, String>> resultEntries = new ArrayList<>();
 
@@ -969,6 +988,12 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             if ("default".equals(effectiveBus)) {
                 getOrCreateDefaultBus(region);
             } else if (accountGet(busStore, accountId, busStoreKey).isEmpty()) {
+                if (dropForMissingBus) {
+                    LOG.infov("PutEvents dropped an event for event bus {0}, which does not exist in {1}",
+                            effectiveBus, region);
+                    resultEntries.add(Map.of("EventId", UUID.randomUUID().toString()));
+                    continue;
+                }
                 failed++;
                 Map<String, String> errorEntry = new HashMap<>();
                 errorEntry.put("ErrorCode", "InvalidArgument");

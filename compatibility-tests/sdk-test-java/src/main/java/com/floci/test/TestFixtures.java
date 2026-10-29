@@ -1578,6 +1578,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static BedrockAgentCoreControlClient bedrockAgentCoreControlClient(String accountId) {
+        return BedrockAgentCoreControlClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accountId, "test")))
+                .build();
+    }
+
     public static BedrockAgentCoreClient bedrockAgentCoreClient() {
         return BedrockAgentCoreClient.builder()
                 .endpointOverride(ENDPOINT)

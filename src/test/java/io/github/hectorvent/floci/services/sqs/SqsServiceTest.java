@@ -255,6 +255,43 @@ class SqsServiceTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"901", "-1", "abc", " 5"})
+    void delaySecondsAttributeOutsideAwsRangeIsRejected(String invalid) {
+        String region = "eu-west-1";
+        AwsException onCreate = assertThrows(AwsException.class,
+                () -> sqsService.createQueue("delay-range", Map.of("DelaySeconds", invalid), region));
+        assertEquals("InvalidAttributeValue", onCreate.getErrorCode());
+        assertEquals("Invalid value for the parameter DelaySeconds.", onCreate.getMessage());
+
+        Queue queue = sqsService.createQueue("delay-range", null, region);
+        AwsException onSet = assertThrows(AwsException.class,
+                () -> sqsService.setQueueAttributes(queue.getQueueUrl(), Map.of("DelaySeconds", invalid), region));
+        assertEquals("InvalidAttributeValue", onSet.getErrorCode());
+        assertEquals("Invalid value for the parameter DelaySeconds.", onSet.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {901, -1})
+    void sendMessageRejectsDelaySecondsOutsideAwsRange(int delay) {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("delay-send", null, region);
+        AwsException e = assertThrows(AwsException.class,
+                () -> sqsService.sendMessage(queue.getQueueUrl(), "x", delay, region));
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+        assertEquals("Value " + delay + " for parameter DelaySeconds is invalid. Reason: Must be >= 0 and <= 900.",
+                e.getMessage());
+    }
+
+    @Test
+    void delaySecondsAcceptsAwsRangeBounds() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("delay-bounds", Map.of("DelaySeconds", "900"), region);
+        sqsService.setQueueAttributes(queue.getQueueUrl(), Map.of("DelaySeconds", "0"), region);
+        sqsService.sendMessage(queue.getQueueUrl(), "x", 0, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "x", 900, region);
+    }
+
+    @ParameterizedTest
     @CsvSource({"60, 60", "1209600, 1209600", "060, 60", "+60, 60"})
     void messageRetentionPeriodIsStoredInCanonicalForm(String value, String stored) {
         String region = "eu-west-1";

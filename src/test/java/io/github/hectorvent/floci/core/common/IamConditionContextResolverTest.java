@@ -202,6 +202,101 @@ class IamConditionContextResolverTest {
     }
 
     @Test
+    void iamPermissionsBoundaryComesFromTheBoundaryParameterOfEachActionThatTakesIt() {
+        for (String action : List.of("iam:CreateRole", "iam:CreateUser", "iam:PutRolePermissionsBoundary",
+                "iam:PutUserPermissionsBoundary")) {
+            assertEquals(Map.of("iam:PermissionsBoundary", List.of("arn:aws:iam::123456789012:policy/Boundary")),
+                    resolver.resolve("iam", action,
+                            formRequest("PermissionsBoundary=arn%3Aaws%3Aiam%3A%3A123456789012%3Apolicy%2FBoundary")),
+                    action);
+            assertNull(resolver.resolve("iam", action, formRequest("RoleName=r&UserName=u")), action);
+        }
+        assertNull(resolver.resolve("iam", "iam:GetRole", formRequest("PermissionsBoundary=example")));
+    }
+
+    @Test
+    void iamAwsServiceNameComesFromCreateServiceLinkedRole() {
+        assertEquals(Map.of("iam:AWSServiceName", List.of("replication.ecr.amazonaws.com")),
+                resolver.resolve("iam", "iam:CreateServiceLinkedRole",
+                        formRequest("AWSServiceName=replication.ecr.amazonaws.com")));
+        assertNull(resolver.resolve("iam", "iam:CreateServiceLinkedRole", formRequest("Description=d")));
+        assertNull(resolver.resolve("iam", "iam:DeleteServiceLinkedRole",
+                formRequest("AWSServiceName=replication.ecr.amazonaws.com")));
+    }
+
+    @Test
+    void iamNotificationChannelComesFromCreateDelegationRequest() {
+        assertEquals(Map.of("iam:NotificationChannel", List.of("arn:aws:sns:us-east-1:123456789012:t")),
+                resolver.resolve("iam", "iam:CreateDelegationRequest",
+                        formRequest("NotificationChannel=arn%3Aaws%3Asns%3Aus-east-1%3A123456789012%3At")));
+        assertNull(resolver.resolve("iam", "iam:CreateDelegationRequest", formRequest("Description=d")));
+    }
+
+    @Test
+    void iamDelegationDurationAndTemplateArnComeFromCreateDelegationRequest() {
+        assertEquals(Map.of("iam:DelegationDuration", List.of("43200"),
+                        "iam:TemplateArn", List.of("arn:aws:iam::aws:template/partner/t")),
+                resolver.resolve("iam", "iam:CreateDelegationRequest", formRequest(
+                        "SessionDuration=43200&Permissions.PolicyTemplateArn=arn%3Aaws%3Aiam%3A%3Aaws%3Atemplate%2Fpartner%2Ft")));
+    }
+
+    @Test
+    void iamServiceSpecificCredentialKeysComeFromCreateServiceSpecificCredential() {
+        assertEquals(Map.of("iam:ServiceSpecificCredentialServiceName", List.of("bedrock.amazonaws.com"),
+                        "iam:ServiceSpecificCredentialAgeDays", List.of("90")),
+                resolver.resolve("iam", "iam:CreateServiceSpecificCredential",
+                        formRequest("UserName=u&ServiceName=bedrock.amazonaws.com&CredentialAgeDays=90")));
+        assertEquals(Map.of("iam:ServiceSpecificCredentialServiceName", List.of("codecommit.amazonaws.com")),
+                resolver.resolve("iam", "iam:CreateServiceSpecificCredential",
+                        formRequest("UserName=u&ServiceName=codecommit.amazonaws.com")));
+        assertNull(resolver.resolve("iam", "iam:UpdateServiceSpecificCredential",
+                formRequest("ServiceSpecificCredentialId=ACCA1234567890EXAMPLE&Status=Inactive")));
+    }
+
+    @Test
+    void aCredentialAgeConditionMatchesTheNumericOperators() {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                  "Action":"iam:CreateServiceSpecificCredential","Resource":"*","Condition":
+                  {"NumericLessThanEquals":{"iam:ServiceSpecificCredentialAgeDays":"90"}}}]}""";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(List.of(policy),
+                "iam:CreateServiceSpecificCredential", "*", resolver.resolve("iam",
+                        "iam:CreateServiceSpecificCredential",
+                        formRequest("ServiceName=bedrock.amazonaws.com&CredentialAgeDays=30"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy),
+                "iam:CreateServiceSpecificCredential", "*", resolver.resolve("iam",
+                        "iam:CreateServiceSpecificCredential",
+                        formRequest("ServiceName=bedrock.amazonaws.com&CredentialAgeDays=365"))));
+    }
+
+    @Test
+    void iamOrganizationsPolicyIdComesFromGenerateOrganizationsAccessReport() {
+        assertEquals(Map.of("iam:OrganizationsPolicyId", List.of("p-12345678")),
+                resolver.resolve("iam", "iam:GenerateOrganizationsAccessReport",
+                        formRequest("EntityPath=o-a%2Fr-b&OrganizationsPolicyId=p-12345678")));
+        assertNull(resolver.resolve("iam", "iam:GenerateOrganizationsAccessReport",
+                formRequest("EntityPath=o-a%2Fr-b")));
+    }
+
+    @Test
+    void aPermissionsBoundaryConditionAllowsOnlyACreateRoleThatSetsThatBoundary() {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"iam:CreateRole",
+                  "Resource":"*","Condition":{"StringEquals":
+                  {"iam:PermissionsBoundary":"arn:aws:iam::123456789012:policy/Boundary"}}}]}""";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(List.of(policy), "iam:CreateRole", "*",
+                resolver.resolve("iam", "iam:CreateRole", formRequest(
+                        "RoleName=r&PermissionsBoundary=arn%3Aaws%3Aiam%3A%3A123456789012%3Apolicy%2FBoundary"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), "iam:CreateRole", "*",
+                resolver.resolve("iam", "iam:CreateRole", formRequest(
+                        "RoleName=r&PermissionsBoundary=arn%3Aaws%3Aiam%3A%3A123456789012%3Apolicy%2FOther"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), "iam:CreateRole", "*",
+                resolver.resolve("iam", "iam:CreateRole", formRequest("RoleName=r"))));
+    }
+
+    @Test
     void queryGetConditionsUseTheFirstDecodedUrlValue() {
         MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
         query.add("Action", "CreateTags");

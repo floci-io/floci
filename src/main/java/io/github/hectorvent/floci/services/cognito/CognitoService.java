@@ -3771,11 +3771,29 @@ public class CognitoService implements ResourceProvider {
                 return false;
             }
             user.setSoftwareTokenMfaSecret(pending);
+            user.setLastSoftwareTokenMfaStep(null);
             user.setSoftwareTokenMfaDeviceName(friendlyDeviceName == null || friendlyDeviceName.isEmpty()
                     ? null : friendlyDeviceName);
             user.setPendingSoftwareTokenMfaSecret(null);
             user.setPendingSoftwareTokenMfaAttemptsRemaining(null);
             user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(poolId, user.getUsername()), user);
+            return true;
+        }
+    }
+
+    /**
+     * Records {@code step} as the user's last accepted software-token step, refusing it when a code
+     * from that step or an earlier one already answered a challenge (RFC 6238 section 5.2).
+     */
+    boolean consumeSoftwareTokenStep(String poolId, String username, long step) {
+        synchronized (userLock(poolId, username)) {
+            CognitoUser user = adminGetUser(poolId, username);
+            Long last = user.getLastSoftwareTokenMfaStep();
+            if (last != null && step <= last) {
+                return false;
+            }
+            user.setLastSoftwareTokenMfaStep(step);
             userStore.put(userKey(poolId, user.getUsername()), user);
             return true;
         }

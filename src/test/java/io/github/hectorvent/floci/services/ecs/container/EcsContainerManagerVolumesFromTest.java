@@ -37,6 +37,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -73,7 +74,7 @@ class EcsContainerManagerVolumesFromTest {
         lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.resolveImageForLaunch(any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(lifecycleManager.createAndStart(any()))
+        when(lifecycleManager.createAndStartEphemeral(any()))
                 .thenReturn(new ContainerInfo("source-id", Map.of()))
                 .thenReturn(new ContainerInfo("app-id", Map.of()));
 
@@ -134,7 +135,7 @@ class EcsContainerManagerVolumesFromTest {
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
         InspectVolumeCmd inspectVolumeCmd = mock(InspectVolumeCmd.class);
         InspectVolumeResponse volume = mock(InspectVolumeResponse.class);
-        when(dockerClient.inspectVolumeCmd("floci-aws-ecs-firelens-volumesfrom1")).thenReturn(inspectVolumeCmd);
+        when(dockerClient.inspectVolumeCmd(anyString())).thenReturn(inspectVolumeCmd);
         when(inspectVolumeCmd.exec()).thenReturn(volume);
         when(volume.getMountpoint()).thenReturn("/var/lib/docker/volumes/floci-ecs-firelens-volumesfrom1/_data");
         CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
@@ -159,15 +160,15 @@ class EcsContainerManagerVolumesFromTest {
         order.verify(containerBuilder).newContainer("router:latest");
         order.verify(containerBuilder).newContainer("app:latest");
         InOrder lifecycleOrder = inOrder(lifecycleManager, copyCmd);
-        lifecycleOrder.verify(lifecycleManager).createAndStart(any(ContainerSpec.class));
+        lifecycleOrder.verify(lifecycleManager).createAndStartEphemeral(any(ContainerSpec.class));
         lifecycleOrder.verify(lifecycleManager).create(any(ContainerSpec.class));
         lifecycleOrder.verify(copyCmd).exec();
         lifecycleOrder.verify(lifecycleManager).startCreated(eq("router-id"), any(ContainerSpec.class));
-        lifecycleOrder.verify(lifecycleManager).createAndStart(any(ContainerSpec.class));
+        lifecycleOrder.verify(lifecycleManager).createAndStartEphemeral(any(ContainerSpec.class));
         verify(routerBuilder).withVolumesFrom("source-id", false);
         verify(appBuilder).withVolumesFrom("source-id", true);
-        verify(lifecycleManager).ensureVolume("floci-aws-ecs-firelens-volumesfrom1");
-        verify(routerBuilder).withNamedVolume("floci-aws-ecs-firelens-volumesfrom1", "/var/run");
+        verify(lifecycleManager).ensureVolume(eq(handle.getFirelensVolumeName()), any());
+        verify(routerBuilder).withNamedVolume(handle.getFirelensVolumeName(), "/var/run");
         verify(copyCmd).withRemotePath("/fluent-bit/etc");
         verify(routerBuilder, never()).withLoopbackPortBinding(anyInt(), anyInt());
         verify(appBuilder, never()).withNetworkMode(anyString());
@@ -184,7 +185,7 @@ class EcsContainerManagerVolumesFromTest {
         verify(logStreamer, never()).attachForAccount(any(), eq("app-id"), any(), any(), any(), any());
         verify(logStreamer).attachForAccount(eq("000000000000"), eq("source-id"), any(), any(), eq("us-east-1"), any());
         verify(logStreamer).attachForAccount(eq("000000000000"), eq("router-id"), any(), any(), eq("us-east-1"), any());
-        assertEquals("floci-aws-ecs-firelens-volumesfrom1", handle.getFirelensVolumeName());
+        assertTrue(handle.getFirelensVolumeName().length() <= 55);
         assertEquals(List.of("source", "router", "app"), handle.getContainerIds().keySet().stream().toList());
         assertEquals(List.of("app", "router", "source"),
                 ecsTask.getContainers().stream().map(Container::getName).toList());
@@ -205,8 +206,8 @@ class EcsContainerManagerVolumesFromTest {
 
         verify(containerBuilder, never()).newContainer(anyString());
         verify(lifecycleManager, never()).create(any());
-        verify(lifecycleManager, never()).createAndStart(any());
-        verify(lifecycleManager, never()).ensureVolume(anyString());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).ensureVolume(anyString(), any());
     }
 
     @Test
@@ -234,8 +235,8 @@ class EcsContainerManagerVolumesFromTest {
         verify(s3Service).getObject("firelens-configs", "missing.conf");
         verify(containerBuilder, never()).newContainer(anyString());
         verify(lifecycleManager, never()).create(any());
-        verify(lifecycleManager, never()).createAndStart(any());
-        verify(lifecycleManager, never()).ensureVolume(anyString());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).ensureVolume(anyString(), any());
     }
 
     @Test
@@ -246,7 +247,7 @@ class EcsContainerManagerVolumesFromTest {
         assertThrows(IllegalArgumentException.class,
                 () -> manager.startTask(task(), taskDefinition(List.of(app)), List.of(), "us-east-1"));
 
-        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
     }
 
     @Test
@@ -259,7 +260,7 @@ class EcsContainerManagerVolumesFromTest {
         assertThrows(IllegalArgumentException.class,
                 () -> manager.startTask(task(), taskDefinition(List.of(app, source)), List.of(), "us-east-1"));
 
-        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
     }
 
     private static ContainerDefinition definition(String name, String image) {

@@ -37,14 +37,17 @@ import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.core.common.docker.UserDataPipeline;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
+import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.net.VpcNetworkManager;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -53,6 +56,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -71,6 +75,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -141,7 +146,7 @@ class Ec2ContainerManagerTest {
     private static final String TEST_LOG_STREAM_NAME = "yyyy/MM/dd/user-data";
     private static final String TEST_SSH_PUBLIC_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest test@floci";
 
-    @org.junit.jupiter.api.AfterEach
+    @AfterEach
     void resetBridgeIpPolling() {
         Ec2ContainerManager.containerBridgeIpAttempts = 30;
         Ec2ContainerManager.containerBridgeIpPollMillis = 500;
@@ -716,11 +721,11 @@ class Ec2ContainerManagerTest {
     }
 
     private static String gzipBase64(String plain) throws Exception {
-        java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
-        try (java.util.zip.GZIPOutputStream gzip = new java.util.zip.GZIPOutputStream(bytes)) {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(bytes)) {
             gzip.write(plain.getBytes(StandardCharsets.UTF_8));
         }
-        return java.util.Base64.getEncoder().encodeToString(bytes.toByteArray());
+        return Base64.getEncoder().encodeToString(bytes.toByteArray());
     }
 
     private static final String CLOUDINIT_MULTIPART = """
@@ -816,7 +821,7 @@ class Ec2ContainerManagerTest {
     @Test
     void userDataShellScriptsDecodesPlainBase64ShellScript() {
         String script = "#!/bin/bash\necho ready\n";
-        String encoded = java.util.Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
+        String encoded = Base64.getEncoder().encodeToString(script.getBytes(StandardCharsets.UTF_8));
 
         assertEquals(List.of(script), Ec2ContainerManager.userDataShellScripts(encoded));
     }
@@ -869,8 +874,8 @@ class Ec2ContainerManagerTest {
     void reachablePublicAddressIsNullBeforeAContainerExists() {
         Ec2ContainerManager manager = managerWithReachability(mock(ContainerNetworkReachability.class));
 
-        assertEquals(null, manager.reachablePublicAddress(new Instance()));
-        assertEquals(null, manager.reachablePublicAddress(null));
+        assertNull(manager.reachablePublicAddress(new Instance()));
+        assertNull(manager.reachablePublicAddress(null));
     }
 
     private static Ec2ContainerManager managerWithReachability(ContainerNetworkReachability reachability) {
@@ -1128,7 +1133,7 @@ class Ec2ContainerManagerTest {
     @Test
     void localAwsEnvironmentProvidesCliCredentialsAndFlociEndpoint() {
         assertEquals(
-                java.util.List.of(
+                List.of(
                         "AWS_EC2_METADATA_SERVICE_ENDPOINT=http://floci:9169",
                         "AWS_ENDPOINT_URL=http://floci:4566",
                         "AWS_DEFAULT_REGION=us-west-2",
@@ -1180,6 +1185,7 @@ class Ec2ContainerManagerTest {
         when(inspect.exec()).thenReturn(withIp);
         harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
         Instance instance = instance("i-systemd");
+        instance.setUserData("#!/bin/sh\necho ready\n");
 
         harness.manager.launch(instance,
                 new ResolvedAmiImage("floci/ami-ubuntu:24.04-arm64", ResolvedAmiImage.SYSTEMD_RUNTIME, true,
@@ -1191,6 +1197,10 @@ class Ec2ContainerManagerTest {
         verify(harness.builder).withCmd(List.of("/sbin/init"));
         verify(harness.builder).withCgroupnsMode("host");
         verify(harness.builder).withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
+        // User data runs after the sshd step, so once it has started that step is settled.
+        awaitUntil(() -> commandIndex(harness.executedCommands, "/var/lib/user-data.sh") >= 0, Duration.ofSeconds(2));
+        assertEquals(-1, commandIndex(harness.executedCommands, "/usr/sbin/sshd"),
+                "a systemd guest's init starts sshd; Floci must not start a second one");
         verify(harness.lifecycleManager).create(any(ContainerSpec.class), eq("linux/arm64"));
     }
 
@@ -1448,6 +1458,62 @@ class Ec2ContainerManagerTest {
         verify(harness.portAllocator, timeout(2_000)).release(2201);
         verify(harness.lifecycleManager, never()).startCreated(eq(TEST_CONTAINER_ID), any(ContainerSpec.class));
         assertEquals("terminated", instance.getState().getName());
+    }
+
+    @Test
+    void launchPublishesThePublicAddressBeforeTheInstanceReportsRunning() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 2;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.10");
+        when(inspect.exec()).thenReturn(withIp);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        AtomicReference<String> addressWhenRunning = new AtomicReference<>("never running");
+        Instance instance = new Instance() {
+            @Override
+            public void setState(InstanceState state) {
+                if (state != null && "running".equals(state.getName())) {
+                    addressWhenRunning.set(String.valueOf(getPublicIpAddress()));
+                }
+                super.setState(state);
+            }
+        };
+        instance.setInstanceId("i-public-before-running");
+        instance.setAssociatePublicIp(true);
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+
+        // A poller that sees running, as Terraform's wait does, must already find the address.
+        assertEquals("127.0.0.1", addressWhenRunning.get());
+    }
+
+    @Test
+    void launchCancelledAfterItsAddressWasPublishedKeepsNoAddress() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 2;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.10");
+        when(inspect.exec()).thenReturn(withIp);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        Instance instance = instance("i-cancelled-with-address");
+        instance.setAssociatePublicIp(true);
+        // The launch is cancelled while the worker is between registering the container and
+        // publishing its address, so markRunning refuses and failLaunch runs.
+        doAnswer(invocation -> {
+            instance.setState(InstanceState.terminated());
+            return null;
+        }).when(harness.metadataServer).registerContainer(any(), any(), any());
+        harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
+
+        awaitUntil(() -> instance.getPublicIpAddress() == null && "terminated".equals(instance.getState().getName())
+                && instance.getDockerContainerId() == null, Duration.ofSeconds(2));
+        assertEquals("terminated", instance.getState().getName());
+        assertNull(instance.getPublicIpAddress());
+        assertNull(instance.getPublicDnsName());
     }
 
     @Test

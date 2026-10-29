@@ -167,7 +167,7 @@ public class PipesPoller implements Resettable {
     void pollSqs(Pipe pipe, String region) {
         String queueUrl = AwsArnUtils.arnToQueueUrl(pipe.getSource(), baseUrl);
         int batchSize = getBatchSize(pipe, "SqsQueueParameters");
-        List<Message> messages = sqsService.receiveMessage(queueUrl, batchSize, 30, 0, region);
+        List<Message> messages = sqsService.receiveMessage(queueUrl, Math.min(10, batchSize), 30, 0, region);
         if (messages.isEmpty()) {
             return;
         }

@@ -4,7 +4,7 @@
 **Endpoint:** `http://localhost:4566/`
 **Target prefix:** `X-Amz-Target: ElasticMapReduce.*`
 
-Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job flows), instance groups and fleets, steps, security configurations, and tags are tracked in Floci's storage backend so the AWS CLI and SDK clients can drive the full cluster lifecycle locally. EMR does not launch real Hadoop/Spark clusters. Clusters transition through their lifecycle states as a state machine. In the `docker` runner mode Spark steps run for real, each in a container of its own (see [Running Spark steps](#running-spark-steps)).
+Floci emulates the Amazon EMR (Elastic MapReduce) management API. Clusters (job flows), instance groups and fleets, steps, security configurations, and tags are tracked in Floci's storage backend so the AWS CLI and SDK clients can drive the full cluster lifecycle locally. EMR does not launch real Hadoop/Spark clusters. Clusters transition through their lifecycle states as a state machine. In the `docker` runner mode Spark steps, commands and scripts run for real, each in a container of its own (see [Running steps](#running-steps)).
 
 ## Supported Actions
 
@@ -105,25 +105,38 @@ still accepted.
 A state machine drives clusters and steps through the `elasticmapreduce:` integrations, `.sync`
 included; see [Step Functions: Amazon EMR tasks](step-functions.md#amazon-emr-tasks).
 
-## Running Spark steps
+## Running steps
 
-With `runner-mode` set to `docker` (`FLOCI_SERVICES_EMR_RUNNER_MODE=docker`), a Spark step runs. Floci
-starts one container per step from the cluster's release image, the one EMR Serverless's `docker` mode
-uses (`public.ecr.aws/emr-serverless/spark/<release>`), and runs `spark-submit` in local mode in it: the
-container holds the driver and its executors. The cluster itself gets no container, and goes through
-its lifecycle as in the `immediate` mode.
+With `runner-mode` set to `docker` (`FLOCI_SERVICES_EMR_RUNNER_MODE=docker`), a step runs. Floci starts
+one container per step from the cluster's release image, the one EMR Serverless's `docker` mode uses
+(`public.ecr.aws/emr-serverless/spark/<release>`), and runs the step in it: a Spark step's
+`spark-submit` in local mode, the container holding the driver and its executors, or a command or a
+script. The cluster itself gets no container, and goes through its lifecycle as in the `immediate` mode.
 
 * **Which steps run**: a `command-runner.jar` step whose first argument is `spark-submit`, the way the
   Management Guide writes Spark steps, runs the arguments after it, without its `--master` and
   `--deploy-mode`. A custom JAR step runs its `MainClass`, or else the one its manifest names, through
-  `spark-submit`, with the JAR and the step's `Args`. Any other step, such as Hive, Pig,
-  `script-runner.jar` or another `command-runner.jar` command, is `FAILED` without running.
-* **States**: a step is `RUNNING` from when it starts until its driver exits; `step-duration-seconds`
+  `spark-submit`, with the JAR and the step's `Args`. Any other `command-runner.jar` step runs its
+  command, its first argument, with the rest, and a `script-runner.jar` step (by name, or by its
+  `s3://<region>.elasticmapreduce/libs/script-runner/script-runner.jar` URI) its script, as the Release
+  Guide's "Run commands and scripts on an Amazon EMR cluster" describes them. `hive-script`,
+  `pig-script`, `hadoop-streaming`, `hadoop-lzo` and `s3-dist-cp`, which the image does not have, are
+  `FAILED` without running.
+* **Commands and scripts**: they run as the image's `hadoop` user in `/home/hadoop`, with `bash`, Python
+  3, Java, `curl` and the AWS CLI v2, which reaches Floci through `AWS_ENDPOINT_URL`. A
+  `script-runner.jar` step's script is fetched from S3 with the AWS CLI and the step's credentials, then
+  run with the step's other arguments; a path not in S3 is run as it is, a bare name from `/home/hadoop`
+  when a file there has it, though nothing a former step wrote is there, each step having a container of
+  its own. A `spark-submit` they start runs in local mode on Floci's S3 with the cluster's
+  `spark-defaults`, which Floci puts in a Spark configuration of its own, ahead of the image's EMR
+  Serverless master; its own `--master yarn` or `--deploy-mode cluster` fails, as there is no YARN.
+* **States**: a step is `RUNNING` from when it starts until its driver or command exits; `step-duration-seconds`
   does not apply. The first step of a release also waits while its image is pulled (3.5 to 4.3 GB
   unpacked; see [`floci.docker.image-pull-timeout-seconds`](../configuration/docker.md)). It is then
   `COMPLETED` on exit code 0, and `FAILED` otherwise. A `FAILED` step's `Status.FailureDetails` has the `Reason`
   "Unknown Error", which the API reference says EMR gives when it cannot find the root cause, and a
-  `Message` in Floci's own words, such as "The Spark driver exited with code 1.".
+  `Message` in Floci's own words, such as "The Spark driver exited with code 1." or "The step's command
+  exited with code 1.".
 * **ActionOnFailure**: a failed step's action is taken as the API reference and the Management Guide's
   termination protection table give it. `CONTINUE` runs the next step. `TERMINATE_CLUSTER` (or
   `TERMINATE_JOB_FLOW`) ends the cluster, unless it waits after its steps
@@ -205,7 +218,7 @@ its `STARTING` event, has its events sent after the rest of that call's.
 | `FLOCI_SERVICES_EMR_CLUSTER_STARTUP_DELAY_SECONDS` | `0` | Seconds a new cluster takes to be ready to run steps, the first half `STARTING` and the second `BOOTSTRAPPING`; `0` makes it ready as soon as it is created |
 | `FLOCI_SERVICES_EMR_STEP_DURATION_SECONDS` | `0` | Seconds a step stays `RUNNING` before it completes; `0` completes it as soon as it starts |
 | `FLOCI_SERVICES_EMR_CLUSTER_TERMINATION_DELAY_SECONDS` | `0` | Seconds a cluster stays `TERMINATING` before it is `TERMINATED`; `0` ends it at once |
-| `FLOCI_SERVICES_EMR_RUNNER_MODE` | `immediate` | `immediate` completes steps by time without running anything; `docker` runs each Spark step in a container (see [Running Spark steps](#running-spark-steps)) |
+| `FLOCI_SERVICES_EMR_RUNNER_MODE` | `immediate` | `immediate` completes steps by time without running anything; `docker` runs each step in a container (see [Running steps](#running-steps)) |
 | `FLOCI_SERVICES_EMR_DOCKER_NETWORK` | the global default | Docker network for step containers |
 | `FLOCI_SERVICES_EMR_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/spark/%s:latest`, or `spark4/` in place of `spark/` for an `emr-spark-*` release | Image for a `docker` step, `%s` standing for the cluster's release label |
 | `FLOCI_SERVICES_EMR_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | Remove the step drivers a previous run of this Floci left on the Docker daemon when the EMR service starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace |

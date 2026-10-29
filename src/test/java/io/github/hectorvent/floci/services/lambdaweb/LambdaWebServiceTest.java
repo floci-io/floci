@@ -15,6 +15,9 @@ import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunction;
 import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
@@ -30,6 +33,7 @@ import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -48,6 +52,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.startsWith;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -63,6 +68,8 @@ class LambdaWebServiceTest {
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
     private final ServiceCallAuthorizer serviceCalls = mock(ServiceCallAuthorizer.class);
     private final LambdaMicrovmsService microvms = new LambdaMicrovmsService(new RegionResolver(REGION, ACCOUNT_ID), null);
+    private final IamService iamService = new IamService(new MemoryStorageFactory(),
+            mock(EmulatorConfig.class, RETURNS_DEEP_STUBS), new RegionResolver(REGION, ACCOUNT_ID), Clock.systemUTC());
 
     @TempDir
     Path storageDir;
@@ -89,7 +96,7 @@ class LambdaWebServiceTest {
         when(config.effectiveBaseUrl()).thenReturn(baseUrl);
         LambdaWebService service = new LambdaWebService(new RegionResolver(REGION, ACCOUNT_ID), storage, config,
                 s3Service, new LambdaWebCode(storageDir.resolve("code")), mapper, null, executionRole, serviceCalls,
-                microvms);
+                microvms, new LambdaWebPolicyPrincipals(iamService));
         service.initializeStorage();
         return service;
     }
@@ -710,12 +717,14 @@ class LambdaWebServiceTest {
         assertEquals("The provided input'foo/bar'was invalid. Member must satisfy expression: [\\w+=,.@\\:-]*"
                 + " Please check your input and try again.", message(() -> service.putResourcePolicy(REGION, missing,
                 policy(members.formatted("{\"AWS\":\"foo/bar\"}", invoke, "\"" + resource + "\"")))));
+        iamService.createUser("alice", "/path/");
         assertEquals("ResourceNotFoundException", error(() -> service.putResourcePolicy(REGION, missing,
                 policy(members.formatted("{\"AWS\":\"arn:aws:iam::000000000000:user/path/alice\"}", invoke,
                         "\"" + resource + "\"")))).getErrorCode());
-        assertEquals("ValidationException", error(() -> service.putResourcePolicy(REGION, missing,
-                policy(members.formatted("{\"CanonicalUser\":\"arn:aws:iam::000000000000:foo/bar\"}", invoke,
-                        "\"" + resource + "\"")))).getErrorCode(), "only an AWS principal may carry a path");
+        assertEquals("The provided principal was invalid. Please check the principal and try again.",
+                message(() -> service.putResourcePolicy(REGION, missing,
+                        policy(members.formatted("{\"CanonicalUser\":\"arn:aws:iam::000000000000:foo/bar\"}", invoke,
+                                "\"" + resource + "\"")))), "a canonical user is never found, whatever its pattern");
         assertEquals("Lambda blocked the creation of this policy because it would grant public access to your function.",
                 message(() -> service.putResourcePolicy(REGION, missing, policy("{\"Statement\":[{\"Effect\":\"Allow\","
                         + "\"Principal\":{\"AWS\":[\"arn:aws:iam::000000000000:root\",\"*\"]},"
@@ -751,6 +760,226 @@ class LambdaWebServiceTest {
             assertEquals("ResourceNotFoundException",
                     error(() -> service.putResourcePolicy(REGION, missing, policy(accepted))).getErrorCode(), accepted);
         }
+    }
+
+    @Test
+    void theRolesAndUsersAPolicyNamesHaveToExist() {
+        LambdaWebService service = service();
+        String missing = "arn:aws:lambda:us-east-1:000000000000:web-function/missing";
+        String invalid = "The provided principal was invalid. Please check the principal and try again.";
+        String otherArn = "The principal arn provided does not match the actual principal arn."
+                + " Please check your input and try again.";
+        IamRole role = iamService.createRole("reader", "/team/", "{\"Version\":\"2012-10-17\",\"Statement\":["
+                + "{\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},"
+                + "\"Action\":\"sts:AssumeRole\"}]}", null, 3600, null);
+        IamUser user = iamService.createUser("writer", "/team/");
+
+        for (String exists : List.of("arn:aws:iam::000000000000:role/team/reader",
+                "arn:aws:iam::000000000000:user/team/writer", role.getRoleId(), user.getUserId(), "111122223333",
+                "arn:aws:iam::111122223333:root", "arn:aws:sts::000000000000:federated-user/bob")) {
+            assertEquals("ResourceNotFoundException", error(() -> service.putResourcePolicy(REGION, missing,
+                    policy(principalPolicy("Allow", "{\"AWS\":\"" + exists + "\"}", missing)))).getErrorCode(), exists);
+        }
+        for (String other : List.of("arn:aws:iam::000000000000:role/reader", "arn:aws:iam::000000000000:role/x/reader",
+                "arn:aws:iam::000000000000:user/writer")) {
+            assertEquals(otherArn, message(() -> service.putResourcePolicy(REGION, missing,
+                    policy(principalPolicy("Allow", "{\"AWS\":\"" + other + "\"}", missing)))), other);
+        }
+        for (String absent : List.of("{\"AWS\":\"arn:aws:iam::000000000000:role/gone\"}",
+                "{\"AWS\":\"arn:aws:iam::111122223333:role/reader\"}", "{\"AWS\":\"AROAGONE\"}",
+                "{\"AWS\":\"arn:aws-cn:iam::000000000000:root\"}",
+                "{\"AWS\":\"arn:aws:sts::000000000000:assumed-role/reader/s\"}",
+                "{\"AWS\":[\"arn:aws:iam::000000000000:role/team/reader\",\"arn:aws:iam::000000000000:role/gone\"]}",
+                "{\"CanonicalUser\":\"79a59df900b949e55d96a1e698fbacedfd6e09d98eacf8f8d5218e7cd47ef2be\"}")) {
+            assertEquals(invalid, message(() -> service.putResourcePolicy(REGION, missing,
+                    policy(principalPolicy("Allow", absent, missing)))), absent);
+        }
+        String gone = principalPolicy("Deny", "{\"AWS\":\"arn:aws:iam::000000000000:role/gone\"}", missing);
+        assertEquals(invalid, message(() -> service.putResourcePolicy(REGION, missing, policy(gone))));
+    }
+
+    @Test
+    void everyStatementPassesItsOwnChecksBeforeAnyPrincipalIsLookedUp() {
+        LambdaWebService service = service();
+        String missing = "arn:aws:lambda:us-east-1:000000000000:web-function/missing";
+        String gone = statement("Allow", "{\"AWS\":\"arn:aws:iam::000000000000:role/gone\"}", missing);
+        String badAction = "{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"000000000000\"},"
+                + "\"Action\":\"s3:GetObject\",\"Resource\":\"" + missing + "\"}";
+        String badPattern = statement("Allow", "{\"AWS\":\"bad!value\"}", missing);
+        String open = statement("Allow", "\"*\"", missing);
+
+        assertEquals("Policy has syntax errors.", message(() -> service.putResourcePolicy(REGION, missing,
+                policy("{\"Statement\":[" + gone + "," + badAction + "]}"))));
+        assertEquals("The provided input'bad!value'was invalid. Member must satisfy expression: [\\w+=,.@\\:-]*"
+                + " Please check your input and try again.", message(() -> service.putResourcePolicy(REGION, missing,
+                policy("{\"Statement\":[" + gone + "," + badPattern + "]}"))));
+        assertEquals("The provided principal was invalid. Please check the principal and try again.",
+                message(() -> service.putResourcePolicy(REGION, missing,
+                        policy("{\"Statement\":[" + open + "," + gone + "]}"))));
+    }
+
+    @Test
+    void aFederatedPrincipalIsPublicUnlessAConditionPinsTheCaller() {
+        LambdaWebService service = service();
+        String missing = "arn:aws:lambda:us-east-1:000000000000:web-function/missing";
+        String cognito = "{\"Federated\":\"cognito-identity.amazonaws.com\"}";
+        for (String federated : List.of(cognito, "{\"Federated\":\"bad!value\"}", "{\"Federated\":\"\"}",
+                "{\"Federated\":\"arn:aws:iam::000000000000:saml-provider/gone\"}",
+                "{\"Federated\":[\"cognito-identity.amazonaws.com\",\"accounts.google.com\"]}",
+                "{\"AWS\":\"000000000000\",\"Federated\":\"cognito-identity.amazonaws.com\"}")) {
+            assertEquals("Lambda blocked the creation of this policy because it would grant public access to your"
+                    + " function.", message(() -> service.putResourcePolicy(REGION, missing,
+                    policy(principalPolicy("Allow", federated, missing)))), federated);
+        }
+        for (String accepted : List.of(principalPolicy("Deny", cognito, missing),
+                principalPolicy("Deny", "{\"Federated\":\"a/b\"}", missing),
+                principalPolicy("Deny", "{\"Federated\":\"arn:aws:iam::000000000000:saml-provider/gone\"}", missing),
+                principalPolicy("Allow", "{\"Federated\":[\"*\",\"cognito-identity.amazonaws.com\"]}", missing),
+                federatedPolicy(missing, "{\"StringEquals\":{\"aws:PrincipalAccount\":\"000000000000\"}}"),
+                federatedPolicy(missing, "{\"Bool\":{\"aws:PrincipalIsAWSService\":\"true\"}}"))) {
+            assertEquals("ResourceNotFoundException",
+                    error(() -> service.putResourcePolicy(REGION, missing, policy(accepted))).getErrorCode(), accepted);
+        }
+        assertEquals("Lambda blocked the creation of this policy because it would grant public access to your function.",
+                message(() -> service.putResourcePolicy(REGION, missing, policy(federatedPolicy(missing,
+                        "{\"StringNotEquals\":{\"aws:PrincipalAccount\":\"000000000000\"}}")))));
+    }
+
+    private static String federatedPolicy(String functionArn, String condition) {
+        return "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"Federated\":\"cognito-identity.amazonaws.com\"},"
+                + "\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + functionArn + "/endpoint/*\","
+                + "\"Condition\":" + condition + "}]}";
+    }
+
+    @Test
+    void eachStatementCheckRunsOnEveryStatementBeforeTheNextOne() {
+        LambdaWebService service = service();
+        String missing = "arn:aws:lambda:us-east-1:000000000000:web-function/missing";
+        String account = "{\"AWS\":\"000000000000\"}";
+        String grant = "\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + missing + "/endpoint/*\"";
+        String maybe = "{\"Effect\":\"Maybe\",\"Principal\":" + account + "," + grant + "}";
+        String spaced = "{\"Effect\":\" Allow\",\"Principal\":" + account + "," + grant + "}";
+        String unknownKey = "{\"Effect\":\"Allow\",\"Principal\":" + account + "," + grant + ",\"Foo\":1}";
+        String noEffect = "{\"Principal\":" + account + "," + grant + "}";
+        String notPrincipal = "{\"Effect\":\"Allow\",\"Principal\":" + account + ",\"NotPrincipal\":" + account + ","
+                + grant + "}";
+        String badAction = "{\"Effect\":\"Allow\",\"Principal\":" + account + ",\"Action\":\"s3:GetObject\","
+                + "\"Resource\":\"" + missing + "\"}";
+        String textPrincipal = statement("Allow", "\"foo\"", missing);
+        String nullPrincipal = statement("Allow", "null", missing);
+        String badPattern = statement("Allow", "{\"AWS\":\"bad!value\"}", missing);
+        String emptyPrincipal = statement("Allow", "{\"AWS\":[]}", missing);
+        String gone = statement("Allow", "{\"AWS\":\"arn:aws:iam::000000000000:role/gone\"}", missing);
+        String open = statement("Allow", "\"*\"", missing);
+        String syntax = "Policy has syntax errors.";
+        String position = "Syntax error at position (-1,-1)";
+        String noEffectMessage = "Effect must be explicitly available for a statement";
+        String invalid = "The provided principal was invalid. Please check the principal and try again.";
+        String pattern = "The provided input'bad!value'was invalid. Member must satisfy expression: [\\w+=,.@\\:-]*"
+                + " Please check your input and try again.";
+
+        for (List<String> pair : List.of(
+                List.of(maybe, spaced, syntax),
+                List.of(badPattern, nullPrincipal, syntax),
+                List.of(badPattern, maybe, "Invalid effect: Maybe"),
+                List.of(textPrincipal, badPattern, position),
+                List.of(noEffect, unknownKey, position),
+                List.of(noEffect, badPattern, noEffectMessage),
+                List.of(noEffect, badAction, noEffectMessage),
+                List.of(badAction, badPattern, pattern),
+                List.of(emptyPrincipal, badPattern, pattern),
+                List.of(emptyPrincipal, badAction, invalid),
+                List.of(notPrincipal, emptyPrincipal, invalid),
+                List.of("\"x\"", open, syntax))) {
+            for (String statements : List.of(pair.get(0) + "," + pair.get(1), pair.get(1) + "," + pair.get(0))) {
+                assertEquals(pair.get(2), message(() -> service.putResourcePolicy(REGION, missing,
+                        policy("{\"Statement\":[" + statements + "]}"))), statements);
+            }
+        }
+        for (List<String> ordered : List.of(
+                List.of("[" + unknownKey + "," + maybe + "]", position),
+                List.of("[" + maybe + "," + unknownKey + "]", "Invalid effect: Maybe"),
+                List.of("[" + textPrincipal + "," + maybe + "]", position),
+                List.of("[" + maybe + "," + textPrincipal + "]", "Invalid effect: Maybe"),
+                List.of("[{\"Foo\":1,\"Effect\":\"Maybe\",\"Principal\":" + account + "," + grant + "}]",
+                        "Invalid effect: Maybe"),
+                List.of("[\"x\"," + gone + "]", invalid),
+                List.of("[\"x\"," + badPattern + "]", pattern),
+                List.of("[" + statement("", account, missing) + "]", "Invalid effect: "),
+                List.of("[" + statement("Allow", "1", missing) + "]", position),
+                List.of("[" + statement("Allow", "{\"Foo\":\"x\"}", missing) + "]", position),
+                List.of("[{\"Effect\":1,\"Principal\":" + account + "," + grant + "}]", position),
+                List.of("[{\"Effect\":\"Allow\",\"NotPrincipal\":{\"AWS\":\"bad!value\"}," + grant + "}]", pattern))) {
+            assertEquals(ordered.get(1), message(() -> service.putResourcePolicy(REGION, missing,
+                    policy("{\"Statement\":" + ordered.get(0) + "}"))), ordered.get(0));
+        }
+    }
+
+    @Test
+    void aPolicyResourceIsReadByItsServiceAndResourceOnly() {
+        LambdaWebService service = service();
+        String missing = "arn:aws:lambda:us-east-1:000000000000:web-function/missing";
+        String function = "web-function/missing";
+        for (String accepted : List.of("arn:aws-cn:lambda:us-east-1:000000000000:" + function,
+                "arn::lambda:us-east-1:000000000000:" + function, "xyz:aws:lambda:us-east-1:000000000000:" + function,
+                "ARN:aws:lambda:us-east-1:000000000000:" + function, "arn:aws:lambda:*:*:" + function,
+                "arn:aws:lambda:foo:000000000000:" + function, "arn:aws:lambda:us-west-2:111122223333:" + function,
+                "arn:aws:lambda:us-east-1::" + function, missing + "*", missing + "/", missing + "/endpoint/x:y",
+                missing + "//x")) {
+            assertEquals("ResourceNotFoundException", error(() -> service.putResourcePolicy(REGION, missing,
+                    policy(resourcePolicy("\"" + accepted + "\"")))).getErrorCode(), accepted);
+        }
+        for (String refused : List.of("arn:aws:lambda*:us-east-1:000000000000:" + function,
+                "arn:aws:LAMBDA:us-east-1:000000000000:" + function, "arn:aws:lambda:us-east-1:" + function,
+                "arn:aws:lambda:us-east-1:000000000000:Web-Function/missing", missing + ":1", missing + "**",
+                missing + "x", missing + "x*", missing + "*/endpoint/x", missing + "?",
+                "arn:aws:lambda:us-east-1:000000000000:web-function/miss*", "arn:aws:lambda:us-east-1:000000000000:*",
+                "*")) {
+            assertEquals("Policy has syntax errors.", message(() -> service.putResourcePolicy(REGION, missing,
+                    policy(resourcePolicy("\"" + refused + "\"")))), refused);
+        }
+        String other = "arn:aws:lambda:us-east-1:000000000000:web-function/other";
+        assertEquals("Policy has syntax errors.", message(() -> service.putResourcePolicy(REGION, missing,
+                policy(resourcePolicy("[\"" + missing + "\",\"" + other + "\"]")))));
+    }
+
+    private static String resourcePolicy(String resource) {
+        return grantPolicy("\"lambda:GetWebFunction\"", resource);
+    }
+
+    private static String grantPolicy(String action, String resource) {
+        return "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"000000000000\"},"
+                + "\"Action\":" + action + ",\"Resource\":" + resource + "}]}";
+    }
+
+    @Test
+    void aPolicyActionIsAStarOrALambdaActionInAnyCase() {
+        LambdaWebService service = service();
+        String missing = "arn:aws:lambda:us-east-1:000000000000:web-function/missing";
+        for (String accepted : List.of("\"*\"", "\"Lambda:GetWebFunction\"", "\"LAMBDA:GetWebFunction\"", "\"lambda:\"",
+                "\"lambda:*x\"", "\"lambda:Get?ebFunction\"", "\"lambda:a b!c\"", "[\"*\",\"s3:GetObject\"]",
+                "[\"s3:GetObject\",\"*\"]", "[\"*\",\"*\"]", "[\"*\",\"a.b:x\"]", "[\"*\",\"9:x\"]", "[\"*\",\"s3:\"]",
+                "[\"lambda:GetWebFunction\",\"Lambda:x\"]")) {
+            assertEquals("ResourceNotFoundException", error(() -> service.putResourcePolicy(REGION, missing,
+                    policy(grantPolicy(accepted, "\"" + missing + "\"")))).getErrorCode(), accepted);
+        }
+        for (String refused : List.of("\"lambda*\"", "\"*:*\"", "\"*:GetWebFunction\"", "\" lambda:GetWebFunction\"",
+                "\"lambda :GetWebFunction\"", "\"lambda\"", "\"**\"", "\"*x\"", "\"?\"", "\"lambda::x\"", "\"\"",
+                "\"s3:GetObject\"", "[\"lambda:GetWebFunction\",\"s3:GetObject\"]", "[\"lambda:*\",\"s3:GetObject\"]",
+                "[\"*\",\"garbage\"]", "[\"*\",\"\"]", "[\"*\",\"lambda::x\"]", "[\"*\",\"a_b:x\"]", "[\"*\",\"a+b:x\"]",
+                "[\"*\",\"l*:x\"]")) {
+            assertEquals("Policy has syntax errors.", message(() -> service.putResourcePolicy(REGION, missing,
+                    policy(grantPolicy(refused, "\"" + missing + "\"")))), refused);
+        }
+    }
+
+    private static String principalPolicy(String effect, String principal, String functionArn) {
+        return "{\"Statement\":[" + statement(effect, principal, functionArn) + "]}";
+    }
+
+    private static String statement(String effect, String principal, String functionArn) {
+        return "{\"Effect\":\"" + effect + "\",\"Principal\":" + principal
+                + ",\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + functionArn + "/endpoint/*\"}";
     }
 
     private ObjectNode policy(String document) {

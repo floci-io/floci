@@ -168,6 +168,18 @@ class PipesPollerTest {
     }
 
     @Test
+    void sqsPollingKeepsConfiguredLargeBatchesWithinTheReceiveLimit() throws Exception {
+        Pipe pipe = new Pipe();
+        pipe.setName("large-sqs-batch");
+        pipe.setSource("arn:aws:sqs:us-east-1:000000000000:src-queue");
+        pipe.setSourceParameters(MAPPER.readTree("{\"SqsQueueParameters\":{\"BatchSize\":25}}"));
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of());
+        poller.pollSqs(pipe, "us-east-1");
+        verify(sqsService).receiveMessage(anyString(), eq(10), anyInt(), anyInt(), eq("us-east-1"));
+    }
+
+    @Test
     void pollSqs_enrichmentToNonLambdaTargetForwardsRawResponse() throws Exception {
         // A non-Lambda target (here Step Functions) must receive the raw enrichment response, not a
         // one-element batch array — array-wrapping would start the execution with [{...}] instead of {...}.

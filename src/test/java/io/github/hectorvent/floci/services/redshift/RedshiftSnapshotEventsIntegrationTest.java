@@ -33,8 +33,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -98,7 +96,7 @@ class RedshiftSnapshotEventsIntegrationTest {
                             new TypeReference<Map<String, Cluster>>() { });
                     Instant due = clusters.getForAccount(OWNER, clusterId).orElseThrow()
                             .getAutomatedSnapshotAnchor().plusSeconds(3600);
-                    CompletableFuture.runAsync(() -> scheduler.tick(due)).get(20, TimeUnit.SECONDS);
+                    scheduler.tick(due);
 
                     List<Event> history = snapshotEvents(ownerWest.redshift(), clusterId);
                     assertEquals(List.of("REDSHIFT-EVENT-2009", terminalEvent), history.stream().map(Event::eventId).toList());

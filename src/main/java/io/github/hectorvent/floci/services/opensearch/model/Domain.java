@@ -23,6 +23,14 @@ public class Domain {
     @JsonProperty("ARN")
     private String arn;
 
+    /**
+     * The AWS region the domain was created in. Null on records persisted before domains were
+     * keyed by region, whose region comes from their ARN; also the marker that tells the
+     * container manager those records predate region-scoped data directories.
+     */
+    @JsonProperty("Region")
+    private String region;
+
     @JsonProperty("EngineVersion")
     private String engineVersion;
 
@@ -117,6 +125,14 @@ public class Domain {
 
     public void setArn(String arn) {
         this.arn = arn;
+    }
+
+    public String getRegion() {
+        return region;
+    }
+
+    public void setRegion(String region) {
+        this.region = region;
     }
 
     public String getEngineVersion() {

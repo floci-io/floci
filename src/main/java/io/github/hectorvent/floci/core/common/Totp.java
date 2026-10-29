@@ -9,6 +9,7 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.Locale;
+import java.util.OptionalLong;
 
 /**
  * Time-based one-time passwords as specified in RFC 6238: HMAC-SHA1 over the number of 30-second
@@ -80,16 +81,25 @@ public final class Totp {
      * between the authenticator and this process.
      */
     public static boolean matchesCode(String base32Secret, String code, int driftSteps, Instant now) {
+        return matchingStep(base32Secret, code, driftSteps, now).isPresent();
+    }
+
+    /**
+     * The step counter {@code code} was generated for, searched over the same window as
+     * {@link #matchesCode}, or empty when it matches none. A caller that must refuse a replayed
+     * code (RFC 6238 section 5.2) records this step and rejects any code at or before it.
+     */
+    public static OptionalLong matchingStep(String base32Secret, String code, int driftSteps, Instant now) {
         if (base32Secret == null || !isSixDigits(code)) {
-            return false;
+            return OptionalLong.empty();
         }
         long current = stepAt(now);
-        for (long counter = current - driftSteps; counter <= current + driftSteps; counter++) {
+        for (long counter = current + driftSteps; counter >= current - driftSteps; counter--) {
             if (codeEquals(codeAt(base32Secret, counter), code)) {
-                return true;
+                return OptionalLong.of(counter);
             }
         }
-        return false;
+        return OptionalLong.empty();
     }
 
     /** Whether the value has the shape of a code at all, before any secret is touched. */

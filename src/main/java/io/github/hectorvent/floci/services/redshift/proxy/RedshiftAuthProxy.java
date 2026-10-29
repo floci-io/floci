@@ -52,6 +52,7 @@ public class RedshiftAuthProxy {
     }
     private final int handshakeTimeoutMillis;
     private final int backendConnectTimeoutMillis;
+    private final int maxConnections;
     private final Semaphore connectionPermits;
 
     private volatile boolean running;
@@ -125,7 +126,13 @@ public class RedshiftAuthProxy {
         this.roleConfiguration = new RoleConfiguration(iamRoleArns, null);
         this.handshakeTimeoutMillis = handshakeTimeoutMillis;
         this.backendConnectTimeoutMillis = backendConnectTimeoutMillis;
-        this.connectionPermits = new Semaphore(Math.max(1, maxConnections));
+        this.maxConnections = Math.max(1, maxConnections);
+        this.connectionPermits = new Semaphore(this.maxConnections);
+    }
+
+    /** Client connections currently open on this proxy: each holds one permit from accept to close. */
+    public int activeConnections() {
+        return maxConnections - connectionPermits.availablePermits();
     }
 
     public void start(int proxyPort) throws IOException {

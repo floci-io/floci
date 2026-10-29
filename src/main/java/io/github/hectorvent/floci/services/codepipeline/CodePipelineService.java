@@ -1437,7 +1437,7 @@ public class CodePipelineService {
         ObjectNode item = mapper.createObjectNode();
         item.set("definition", webhook.deepCopy());
         item.put("url", "http://localhost:4566/codepipeline/webhooks/" + name);
-        item.put("arn", AwsArnUtils.Arn.of("codepipeline", region, account, "webhook/" + name).toString());
+        item.put("arn", AwsArnUtils.Arn.of("codepipeline", region, account, "webhook:" + name).toString());
         if (request.path("tags").isArray() && !request.path("tags").isEmpty()) {
             item.set("tags", request.path("tags").deepCopy());
         }

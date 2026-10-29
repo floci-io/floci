@@ -248,6 +248,23 @@ class KubernetesPodLauncherTest {
     }
 
     @Test
+    void launchPassesTheLoggingConfigToTheRuntime() {
+        markPodPhaseInBackground("floci-lambda-my-fn-", "Running");
+        LambdaFunction fn = function();
+        fn.setLogFormat("JSON");
+        fn.setApplicationLogLevel("DEBUG");
+
+        ContainerHandle handle = launcher.launch(fn);
+
+        Pod pod = client.pods().inNamespace("default").withName(handle.getContainerId()).get();
+        assertThat(pod.getSpec().getContainers().getFirst().getEnv())
+                .filteredOn(variable -> "AWS_LAMBDA_LOG_FORMAT".equals(variable.getName())
+                        || "AWS_LAMBDA_LOG_LEVEL".equals(variable.getName()))
+                .extracting(EnvVar::getValue)
+                .containsExactly("JSON", "DEBUG");
+    }
+
+    @Test
     void launchPassesTheFunctionsOwningAccountIntoTheBaselineAwsEnv() {
         // A pod-launched Lambda is subject to the same placeholder-credential bug as a
         // Docker-launched one: without the owning account it resolves to the emulator's

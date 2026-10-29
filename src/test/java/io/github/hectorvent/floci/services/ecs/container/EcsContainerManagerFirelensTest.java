@@ -50,9 +50,12 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -83,6 +86,7 @@ class EcsContainerManagerFirelensTest {
     private InputStream uploadStream;
     private byte[] uploadedArchive;
     private EcsContainerManager manager;
+    private EmulatorConfig config;
 
     @BeforeEach
     void setUp() {
@@ -95,7 +99,8 @@ class EcsContainerManagerFirelensTest {
         lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.resolveImageForLaunch(any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("app-id", Map.of()));
+        when(lifecycleManager.removeVolume(anyString())).thenReturn(true);
+        when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerInfo("app-id", Map.of()));
         when(lifecycleManager.create(any())).thenReturn("router-id");
         when(lifecycleManager.startCreated(anyString(), any())).thenReturn(new ContainerInfo("router-id", Map.of()));
 
@@ -120,7 +125,7 @@ class EcsContainerManagerFirelensTest {
         logStreamer = mock(ContainerLogStreamer.class);
         when(logStreamer.generateLogStreamName(anyString())).thenReturn("stream");
         ContainerDetector containerDetector = mock(ContainerDetector.class);
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         RegionResolver regionResolver = mock(RegionResolver.class);
         LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
         when(awsEnv.sdkBaselineEnv(any(), any())).thenReturn(List.of());
@@ -164,7 +169,7 @@ class EcsContainerManagerFirelensTest {
         InOrder order = inOrder(lifecycleManager);
         order.verify(lifecycleManager).create(any(ContainerSpec.class));
         order.verify(lifecycleManager).startCreated(anyString(), any());
-        order.verify(lifecycleManager).createAndStart(any(ContainerSpec.class));
+        order.verify(lifecycleManager).createAndStartEphemeral(any(ContainerSpec.class));
 
         ArgumentCaptor<LogConfig> logConfig = ArgumentCaptor.forClass(LogConfig.class);
         verify(builder).withLogConfig(logConfig.capture());
@@ -217,7 +222,7 @@ class EcsContainerManagerFirelensTest {
         InOrder order = inOrder(lifecycleManager);
         order.verify(lifecycleManager).create(any(ContainerSpec.class));
         order.verify(lifecycleManager).startCreated(anyString(), any());
-        order.verify(lifecycleManager).createAndStart(any(ContainerSpec.class));
+        order.verify(lifecycleManager).createAndStartEphemeral(any(ContainerSpec.class));
 
         ArgumentCaptor<LogConfig> logConfig = ArgumentCaptor.forClass(LogConfig.class);
         verify(builder).withLogConfig(logConfig.capture());
@@ -344,7 +349,7 @@ class EcsContainerManagerFirelensTest {
                 + "missing.conf from bucket firelens-configs: The specified key does not exist.",
                 failure.getMessage());
         verify(lifecycleManager, never()).create(any(ContainerSpec.class));
-        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
     }
 
     @Test
@@ -360,7 +365,7 @@ class EcsContainerManagerFirelensTest {
         assertEquals("ClientException", failure.getErrorCode());
         assertEquals("awsfirelens log driver requires a firelensConfiguration container",
                 failure.getMessage());
-        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
     }
 
     @Test
@@ -375,7 +380,7 @@ class EcsContainerManagerFirelensTest {
         assertEquals("ClientException", failure.getErrorCode());
         assertEquals("A task definition can have only one FireLens log router.", failure.getMessage());
         verify(lifecycleManager, never()).create(any(ContainerSpec.class));
-        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
     }
 
     @Test
@@ -462,7 +467,7 @@ class EcsContainerManagerFirelensTest {
         order.verify(lifecycleManager).create(any());
         order.verify(uploads.commands.get(1)).exec();
         order.verify(lifecycleManager).startCreated(eq("router-id"), any());
-        order.verify(lifecycleManager).createAndStart(any());
+        order.verify(lifecycleManager).createAndStartEphemeral(any());
         verify(lifecycleManager, never()).removeIfExists(anyString());
         if (external) {
             verify(s3Service).getObject("firelens-configs", "extra.conf");
@@ -509,9 +514,91 @@ class EcsContainerManagerFirelensTest {
         assertEquals(1, uploads.commands.size());
         assertEquals(1, uploads.completed.size());
         verify(lifecycleManager).startCreated(eq("router-id"), any());
-        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
         verify(lifecycleManager).removeIfExists("router-id");
         verifyFirelensVolumeRemoved();
+    }
+
+    @Test
+    void socketIdentityIncludesTheCompleteOwnerAndTask() {
+        String longNamespace = "firelens-" + "namespace".repeat(20);
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of(longNamespace));
+        String name = EcsContainerManager.firelensVolumeName(config, task().getTaskArn());
+        assertEquals(name, EcsContainerManager.firelensVolumeName(config, task().getTaskArn()));
+        assertTrue(name.length() <= 55);
+        assertNotEquals(name, EcsContainerManager.firelensVolumeName(config, task().getTaskArn() + "other"));
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of(longNamespace + "other"));
+        assertNotEquals(name, EcsContainerManager.firelensVolumeName(config, task().getTaskArn()));
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of(longNamespace));
+        when(config.port()).thenReturn(4567);
+        assertNotEquals(name, EcsContainerManager.firelensVolumeName(config, task().getTaskArn()));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "long", "multibyte"})
+    void invalidSocketMountpointIsCompensatedBeforeCreatingContainers(String mountpoint) {
+        String path = switch (mountpoint) {
+            case "long" -> "/" + "x".repeat(108);
+            case "multibyte" -> "/" + "é".repeat(54);
+            default -> mountpoint;
+        };
+        when(dockerClient.inspectVolumeCmd(anyString()).exec().getMountpoint()).thenReturn(path);
+        assertThrows(AwsException.class, () -> manager.startTask(
+                task(), retryTaskDefinition("fluentbit", false, ""), null, "us-east-1"));
+        verify(lifecycleManager, never()).create(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verifyFirelensVolumeRemoved();
+    }
+
+    @Test
+    void failedPreparationCleanupRetainsTheVolumeForRetry() {
+        when(dockerClient.inspectVolumeCmd(anyString()).exec().getMountpoint()).thenReturn(null);
+        when(lifecycleManager.removeVolume(anyString())).thenReturn(false, true);
+        EcsTaskLaunchException failure = assertThrows(EcsTaskLaunchException.class, () -> manager.startTask(
+                task(), retryTaskDefinition("fluentbit", false, ""), null, "us-east-1"));
+        assertTrue(failure.getHandle().hasTaskVolumes());
+        manager.cleanupStoppedTask(failure.getHandle());
+        assertFalse(failure.getHandle().hasTaskVolumes());
+    }
+
+    @Test
+    void socketVolumeKeepsFullOwnershipLabels() {
+        when(config.docker().resourceNamespace()).thenReturn(Optional.of("long-owner-namespace"));
+        when(config.port()).thenReturn(4566);
+        manager.startTask(task(), retryTaskDefinition("fluentbit", false, ""), null, "us-east-1");
+        ArgumentCaptor<Map<String, String>> labels = ArgumentCaptor.captor();
+        verify(lifecycleManager).ensureVolume(anyString(), labels.capture());
+        assertEquals("long-owner-namespace/4566", labels.getValue().get("io.floci.owner"));
+        assertEquals("ecs", labels.getValue().get("io.floci.service"));
+        assertTrue(labels.getValue().containsKey("io.floci.ecs.run"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"floci-aws-long-namespace-ecs-firelens-abc123",
+            "floci-aws-ecs-firelens-043ba6e4a0fd36cf98016b7b4e985125"})
+    void handleCleanupRetriesBothLegacyAndBoundedVolumeNames(String volumeName) {
+        EcsTaskHandle handle = new EcsTaskHandle(task().getTaskArn(), Map.of(), Map.of(),
+                volumeName, null, "us-east-1");
+        when(lifecycleManager.removeVolume(volumeName)).thenReturn(false, true);
+        manager.cleanupStoppedTask(handle);
+        assertTrue(handle.hasTaskVolumes());
+        manager.cleanupStoppedTask(handle);
+        assertFalse(handle.hasTaskVolumes());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"107,true", "108,false"})
+    void socketLengthChecksTheCompleteHostPath(int bytes, boolean accepted) {
+        String mountpoint = "/" + "x".repeat(bytes - 13);
+        when(dockerClient.inspectVolumeCmd(anyString()).exec().getMountpoint()).thenReturn(mountpoint);
+        if (accepted) {
+            manager.startTask(task(), retryTaskDefinition("fluentbit", false, ""), null, "us-east-1");
+        } else {
+            assertThrows(AwsException.class, () -> manager.startTask(
+                    task(), retryTaskDefinition("fluentbit", false, ""), null, "us-east-1"));
+            verify(lifecycleManager, never()).create(any());
+            verifyFirelensVolumeRemoved();
+        }
     }
 
     private DockerArchiveUploadFixture failingUploads() {
@@ -525,14 +612,14 @@ class EcsContainerManagerFirelensTest {
     private void verifyFailedLaunchCleanup() {
         verify(lifecycleManager).create(any());
         verify(lifecycleManager, never()).startCreated(anyString(), any());
-        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
         verify(lifecycleManager).removeIfExists("router-id");
         verifyFirelensVolumeRemoved();
     }
 
     private void verifyFirelensVolumeRemoved() {
         ArgumentCaptor<String> volumeName = ArgumentCaptor.forClass(String.class);
-        verify(lifecycleManager).ensureVolume(volumeName.capture());
+        verify(lifecycleManager).ensureVolume(volumeName.capture(), any());
         verify(lifecycleManager).removeVolume(volumeName.getValue());
     }
 

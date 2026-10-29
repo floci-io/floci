@@ -364,6 +364,60 @@ class RequestResourcesTest {
                 "{\"repositoryNames\":[\"${Account}\"]}")));
     }
 
+    /**
+     * A pipeline is the one its request's {@code pipeline.name} names; its {@code roleArn}, the role CodePipeline
+     * assumes, names none, even when it holds a pipeline's ARN. A webhook is the one {@code webhook.name} names, on
+     * the pipeline {@code webhook.targetPipeline} names, and its tags go on the webhook alone.
+     */
+    @Test
+    void aPipelineIsTheOneItsStructuresNameNames() {
+        String codePipeline = "arn:aws:codepipeline:us-east-1:000000000000:";
+        assertEquals(List.of(codePipeline + "b"), of("codepipeline:UpdatePipeline",
+                json("{\"pipeline\":{\"name\":\"b\",\"roleArn\":\"" + codePipeline + "a\"}}")));
+        assertEquals(List.of(codePipeline + "b"), of("codepipeline:CreatePipeline", form("Action=CreatePipeline"
+                + "&pipeline.name=b&pipeline.roleArn=" + codePipeline + "a")));
+        assertEquals(List.of(), of("codepipeline:UpdatePipeline", json("{\"pipeline\":{\"roleArn\":\"" + codePipeline
+                + "a\"}}")));
+        assertEquals(List.of(codePipeline + "webhook:w", codePipeline + "p"), of("codepipeline:PutWebhook",
+                json("{\"webhook\":{\"name\":\"w\",\"targetPipeline\":\"p\"}}")));
+        // A webhook's tags go on the webhook, not on the pipeline it connects to.
+        assertEquals(List.of(codePipeline + "webhook:w"), created("codepipeline:PutWebhook",
+                json("{\"webhook\":{\"name\":\"w\",\"targetPipeline\":\"p\"}}")));
+    }
+
+    /** A custom action type is {@code Custom}'s, the owner CodePipeline gives every one, which its request does not. */
+    @Test
+    void aCustomActionTypeIsCustoms() {
+        assertEquals(List.of("arn:aws:codepipeline:us-east-1:000000000000:actiontype:Custom/Build/MyProvider/1"),
+                of("codepipeline:CreateCustomActionType",
+                        json("{\"category\":\"Build\",\"provider\":\"MyProvider\",\"version\":\"1\"}")));
+        assertEquals(List.of("arn:aws:codepipeline:us-east-1:000000000000:actiontype:Custom/Build/MyProvider/1"),
+                of("codepipeline:DeleteCustomActionType",
+                        json("{\"category\":\"Build\",\"provider\":\"MyProvider\",\"version\":\"1\"}")));
+        assertEquals(List.of(), of("codepipeline:DeleteCustomActionType", json("{}")));
+    }
+
+    /**
+     * A Cloud Map service is created in the namespace {@code NamespaceId} names, or {@code DnsConfig.NamespaceId}
+     * when it names none or gives a JSON null, as the handler reads them, and tags go on the service it creates,
+     * not on the namespace.
+     */
+    @Test
+    void aServiceIsCreatedInTheNamespaceItsHandlerReads() {
+        String cloudMap = "arn:aws:servicediscovery:us-east-1:000000000000:";
+        assertEquals(List.of(cloudMap + "namespace/ns-a", cloudMap + "service/*"), of("servicediscovery:CreateService",
+                json("{\"Name\":\"s\",\"NamespaceId\":\"ns-a\"}")));
+        assertEquals(List.of(cloudMap + "namespace/ns-b", cloudMap + "service/*"), of("servicediscovery:CreateService",
+                json("{\"Name\":\"s\",\"DnsConfig\":{\"NamespaceId\":\"ns-b\"}}")));
+        assertEquals(List.of(cloudMap + "namespace/ns-a", cloudMap + "service/*"), of("servicediscovery:CreateService",
+                json("{\"Name\":\"s\",\"NamespaceId\":\"ns-a\",\"DnsConfig\":{\"NamespaceId\":\"ns-b\"}}")));
+        // A JSON null is no namespace, as the handler reads it, which then takes DnsConfig's.
+        assertEquals(List.of(cloudMap + "namespace/ns-b", cloudMap + "service/*"), of("servicediscovery:CreateService",
+                json("{\"Name\":\"s\",\"NamespaceId\":null,\"DnsConfig\":{\"NamespaceId\":\"ns-b\"}}")));
+        assertEquals(List.of(cloudMap + "service/*"), created("servicediscovery:CreateService",
+                json("{\"Name\":\"s\",\"NamespaceId\":\"ns-a\"}")));
+    }
+
     @Test
     void aRequestNamingNoResourceOrOfANamespaceTheTableDoesNotReadIsCheckedOnStar() {
         assertEquals(List.of(), of("ecr:DescribeRepositories", json("{}")));

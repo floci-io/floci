@@ -888,8 +888,7 @@ public class LambdaController {
         ObjectNode logging = node.putObject("LoggingConfig");
         logging.put("LogFormat", logFormat);
         if ("JSON".equals(logFormat)) {
-            logging.put("ApplicationLogLevel",
-                    fn.getApplicationLogLevel() != null ? fn.getApplicationLogLevel() : "INFO");
+            logging.put("ApplicationLogLevel", fn.applicationLogLevelOrDefault());
             logging.put("SystemLogLevel",
                     fn.getSystemLogLevel() != null ? fn.getSystemLogLevel() : "INFO");
         }

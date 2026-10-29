@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.bedrockagentcorecontrol;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -21,17 +21,17 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
     private final BedrockAgentCoreControlService runtimeService;
     private final BedrockAgentCoreGatewayService gatewayService;
     private final BedrockAgentCoreMemoryService memoryService;
-    private final EmulatorConfig config;
+    private final RegionResolver regionResolver;
 
     @Inject
     public BedrockAgentCoreTagHandler(BedrockAgentCoreControlService runtimeService,
                                       BedrockAgentCoreGatewayService gatewayService,
                                       BedrockAgentCoreMemoryService memoryService,
-                                      EmulatorConfig config) {
+                                      RegionResolver regionResolver) {
         this.runtimeService = runtimeService;
         this.gatewayService = gatewayService;
         this.memoryService = memoryService;
-        this.config = config;
+        this.regionResolver = regionResolver;
     }
 
     @Override
@@ -96,7 +96,7 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
      * validation error, so the response does not confirm what exists behind the foreign identity.
      */
     private void requireLocalIdentity(String region, String arn, String[] parts) {
-        if (!region.equals(parts[3]) || !config.defaultAccountId().equals(parts[4])) {
+        if (!region.equals(parts[3]) || !regionResolver.getAccountId().equals(parts[4])) {
             throw new AwsException("ResourceNotFoundException",
                     "AgentCore resource not found: " + arn, 404);
         }

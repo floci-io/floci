@@ -212,6 +212,7 @@ floci:
     redshift:
       enabled: true
       automated-snapshots-enabled: false
+      cloudwatch-metrics-enabled: true
       snapshot-sweep-interval-seconds: 60
       default-port: 5439
       image-version: postgres:15-alpine
@@ -250,6 +251,8 @@ floci:
       shutdown-timeout-seconds: 10
     redshift-serverless:
       enabled: true
+      scheduled-actions-enabled: false
+      scheduled-action-sweep-interval-seconds: 60
     neptune:
       enabled: true
       proxy-base-port: 8182

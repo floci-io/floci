@@ -1725,6 +1725,13 @@ public interface EmulatorConfig {
     interface RedshiftServiceConfig {
         @WithDefault("true")
         boolean automatedSnapshotsEnabled();
+
+        /**
+         * Publish the AWS/Redshift CloudWatch metrics of every available cluster once a minute.
+         * Env: FLOCI_SERVICES_REDSHIFT_CLOUDWATCH_METRICS_ENABLED
+         */
+        @WithDefault("true")
+        boolean cloudwatchMetricsEnabled();
         @WithDefault("60")
         long snapshotSweepIntervalSeconds();
         @WithDefault("true")
@@ -1901,6 +1908,12 @@ public interface EmulatorConfig {
     interface RedshiftServerlessServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("true")
+        boolean scheduledActionsEnabled();
+
+        @WithDefault("60")
+        int scheduledActionSweepIntervalSeconds();
     }
 
     interface NeptuneServiceConfig {
@@ -3014,7 +3027,7 @@ public interface EmulatorConfig {
         @WithDefault("public.ecr.aws") // partition-literal: configurable; ECR Public exists only in the commercial partition
         String ecrBaseUri();
 
-        /** Full image references for individual runtimes, keyed by Lambda runtime identifier. */
+        /** Full image references keyed by runtime, or runtime.os.arch for a selected Docker platform. */
         Map<String, String> runtimeImages();
 
         @WithDefault("128")

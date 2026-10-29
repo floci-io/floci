@@ -1166,7 +1166,7 @@ public class RedshiftServerlessService implements Resettable {
         }
     }
 
-    private static void validateSnapshotName(String snapshotName) {
+    static void validateSnapshotName(String snapshotName) {
         requireSnapshotName(snapshotName);
         if (snapshotName.length() < 3 || snapshotName.length() > 255 || !SNAPSHOT_NAME.matcher(snapshotName).matches()) {
             throw ServerlessSupport.validation("snapshotName must be 3-255 characters of lowercase letters, numbers, and hyphens.");

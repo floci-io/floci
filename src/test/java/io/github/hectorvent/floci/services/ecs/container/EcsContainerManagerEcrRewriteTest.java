@@ -68,7 +68,7 @@ class EcsContainerManagerEcrRewriteTest {
         lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.resolveImageForLaunch(any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(lifecycleManager.createAndStart(any()))
+        when(lifecycleManager.createAndStartEphemeral(any()))
                 .thenReturn(new ContainerInfo("docker-id", Map.of()));
 
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
@@ -145,6 +145,6 @@ class EcsContainerManagerEcrRewriteTest {
                 () -> manager.startTask(task, taskDef, List.of(), "us-east-1"));
 
         // The earlier "sidecar" container must never have been created.
-        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
     }
 }

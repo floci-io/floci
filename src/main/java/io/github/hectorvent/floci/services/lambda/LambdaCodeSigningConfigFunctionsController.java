@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambda;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.lambda.model.CodeSigningConfig;
@@ -20,8 +21,8 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
-import java.util.List;
 import java.util.regex.Pattern;
 
 /**
@@ -139,12 +140,17 @@ public class LambdaCodeSigningConfigFunctionsController {
     @GET
     @Path("/code-signing-configs")
     public Response listCodeSigningConfigs(@Context HttpHeaders headers,
-                                           @QueryParam("Marker") String marker,
+                                           @Context UriInfo uriInfo,
                                            @QueryParam("MaxItems") String maxItems) {
-        parseMaxItems(maxItems);
-        List<CodeSigningConfig> configs = service.list(regionResolver.resolveRegion(headers));
+        int limit = parseMaxItems(maxItems);
+        String region = regionResolver.resolveRegion(headers);
+        String marker = uriInfo.getQueryParameters().getFirst("Marker");
+        PaginatedResult<CodeSigningConfig> page = service.list(region, limit, marker);
         ObjectNode root = objectMapper.createObjectNode();
-        root.set("CodeSigningConfigs", objectMapper.valueToTree(configs));
+        root.set("CodeSigningConfigs", objectMapper.valueToTree(page.items()));
+        if (page.nextToken() != null) {
+            root.put("NextMarker", page.nextToken());
+        }
         return Response.ok(root).build();
     }
 
@@ -185,9 +191,9 @@ public class LambdaCodeSigningConfigFunctionsController {
         }
     }
 
-    private void parseMaxItems(String maxItems) {
+    private int parseMaxItems(String maxItems) {
         if (maxItems == null || maxItems.isBlank()) {
-            return;
+            return MAX_ITEMS_MAX;
         }
         int value;
         try {
@@ -202,5 +208,6 @@ public class LambdaCodeSigningConfigFunctionsController {
                     "Value '" + value + "' at 'maxItems' failed to satisfy constraint: "
                             + "Member must be between " + MAX_ITEMS_MIN + " and " + MAX_ITEMS_MAX, 400);
         }
+        return value;
     }
 }

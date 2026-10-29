@@ -19,6 +19,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -263,7 +264,8 @@ public class BackupController {
         List<BackupRule> rules = readRules(planNode.path("Rules"));
         String creatorRequestId = textOrNull(req, "CreatorRequestId");
 
-        BackupPlan plan = service.createBackupPlan(planName, rules, creatorRequestId, region);
+        BackupPlan plan = service.createBackupPlan(planName, rules, creatorRequestId,
+                readStringMap(req, "BackupPlanTags"), region);
 
         ObjectNode out = objectMapper.createObjectNode();
         out.put("BackupPlanId", plan.getBackupPlanId());
@@ -582,13 +584,19 @@ public class BackupController {
         return n.asText();
     }
 
-    @SuppressWarnings("unchecked")
     private Map<String, String> readStringMap(JsonNode node, String field) {
         JsonNode mapNode = node.path(field);
         if (mapNode.isMissingNode() || mapNode.isNull()) {
-            return new java.util.HashMap<>();
+            return new HashMap<>();
         }
-        return objectMapper.convertValue(mapNode, Map.class);
+        if (!mapNode.isObject() || mapNode.properties().stream()
+                .anyMatch(entry -> !entry.getValue().isTextual())) {
+            throw new AwsException("InvalidParameterValueException",
+                    field + " must be an object with string values", 400);
+        }
+        Map<String, String> result = new HashMap<>();
+        mapNode.properties().forEach(entry -> result.put(entry.getKey(), entry.getValue().textValue()));
+        return result;
     }
 
     private static List<String> readStringList(JsonNode node) {

@@ -1185,9 +1185,10 @@ public class EmrService implements Resettable {
      * Why a step whose driver ended this way, by itself or before it could start, failed, or null when it
      * did not. No source gives AWS's wording for these; they are Floci's.
      */
-    private static String failureOf(SparkJobRunner.Outcome outcome) {
+    private static String failureOf(SparkJobRunner.Job job, SparkJobRunner.Outcome outcome) {
         if (outcome.exitCode() != null) {
-            return outcome.exitCode() == 0 ? null : "The Spark driver exited with code " + outcome.exitCode() + ".";
+            String ended = job.command() != null ? "The step's command" : "The Spark driver";
+            return outcome.exitCode() == 0 ? null : ended + " exited with code " + outcome.exitCode() + ".";
         }
         return "The step could not start: " + outcome.failure();
     }
@@ -1211,11 +1212,13 @@ public class EmrService implements Resettable {
         public void start(EmrCluster cluster, EmrStep step, String region) {
             String accountId = regionResolver.getAccountId();
             List<String> application = EmrSparkSteps.application(step);
-            SparkJobRunner.Job job = application == null ? null : new SparkJobRunner.Job(SERVICE, step.getId(),
-                    accountId, region, cluster.getReleaseLabel(), imageTemplate, dockerNetwork,
-                    executionRole(cluster, step, accountId),
-                    EmrSparkSteps.sparkDefaults(cluster.getConfigurations(), SNAPSHOT_MAPPER), application,
-                    Duration.ZERO, EmrSparkSteps.logFolder(cluster, step), null);
+            List<String> command = application == null ? EmrSparkSteps.command(step) : null;
+            SparkJobRunner.Job job = application == null && command == null ? null
+                    : new SparkJobRunner.Job(SERVICE, step.getId(), accountId, region, cluster.getReleaseLabel(),
+                    imageTemplate, dockerNetwork, executionRole(cluster, step, accountId),
+                    EmrSparkSteps.sparkDefaults(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                    application != null ? application : List.of(), command, Duration.ZERO,
+                    EmrSparkSteps.logFolder(cluster, step), null);
             StepLaunch launch = new StepLaunch(accountId, region, cluster.getId(), step.getId(), generation);
             executing.add(stepKey(accountId, step.getId()));
             stepExecutor.execute(() -> runStep(job, launch));
@@ -1244,7 +1247,7 @@ public class EmrService implements Resettable {
                 RequestScopes.runAs(launch.accountId(), launch.region(), () -> run(() -> driverStopped(launch)));
                 return;
             }
-            failure = failureOf(outcome);
+            failure = failureOf(job, outcome);
         }
         RequestScopes.runAs(launch.accountId(), launch.region(), () -> run(() -> stepEnded(launch, failure)));
     }

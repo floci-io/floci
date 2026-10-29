@@ -139,10 +139,10 @@ class EcsContainerManagerVolumesTest {
     @ValueSource(booleans = {false, true})
     void failedLaunchRemovesItsEphemeralVolume(boolean firstContainerStarted) {
         if (firstContainerStarted) {
-            when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("docker-id", Map.of()))
+            when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerInfo("docker-id", Map.of()))
                     .thenThrow(new IllegalStateException("launch failed"));
         } else {
-            when(lifecycleManager.createAndStart(any())).thenThrow(new IllegalStateException("launch failed"));
+            when(lifecycleManager.createAndStartEphemeral(any())).thenThrow(new IllegalStateException("launch failed"));
         }
         assertThrows(IllegalStateException.class, () -> manager.startTask(task("000000000000", "us-east-1"),
                 ephemeralDefinition(new Volume("shared", null)), List.of(), "us-east-1"));
@@ -177,13 +177,13 @@ class EcsContainerManagerVolumesTest {
                 ephemeralDefinition(new Volume("shared", null)), List.of(), "us-east-1");
         String name = handle.getTaskVolumeNames().iterator().next();
         doThrow(new IllegalStateException("remove failed")).when(lifecycleManager)
-                .stopAndRemoveStrict("docker-id", null);
+                .stopAndRemoveStrict("docker-id", null, 5, true);
 
         manager.cleanupStoppedTask(handle);
         assertTrue(handle.hasTaskVolumes());
         verify(lifecycleManager, never()).removeVolume(name);
 
-        doNothing().when(lifecycleManager).stopAndRemoveStrict("docker-id", null);
+        doNothing().when(lifecycleManager).stopAndRemoveStrict("docker-id", null, 5, true);
         when(lifecycleManager.removeVolume(name)).thenReturn(true);
         manager.cleanupStoppedTask(handle);
         assertFalse(handle.hasTaskVolumes());
@@ -192,11 +192,11 @@ class EcsContainerManagerVolumesTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void failedLaunchPreservesResourcesWhenCleanupFails(boolean containerRemovalFails) {
-        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("docker-id", Map.of()))
+        when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerInfo("docker-id", Map.of()))
                 .thenThrow(new IllegalStateException("launch failed"));
         if (containerRemovalFails) {
             doThrow(new IllegalStateException("remove failed")).when(lifecycleManager)
-                    .stopAndRemoveStrict("docker-id", null);
+                    .stopAndRemoveStrict("docker-id", null, 5, true);
         } else {
             when(lifecycleManager.removeVolume(anyString())).thenReturn(false);
         }
@@ -208,7 +208,7 @@ class EcsContainerManagerVolumesTest {
         assertEquals(!containerRemovalFails, handle.allContainersRemoved());
         assertEquals("launch failed", failure.getMessage());
 
-        doNothing().when(lifecycleManager).stopAndRemoveStrict("docker-id", null);
+        doNothing().when(lifecycleManager).stopAndRemoveStrict("docker-id", null, 5, true);
         when(lifecycleManager.removeVolume(anyString())).thenReturn(true);
         manager.cleanupStoppedTask(handle);
         assertTrue(handle.allContainersRemoved());
@@ -262,7 +262,7 @@ class EcsContainerManagerVolumesTest {
         when(lifecycleManager.removeVolume(anyString())).thenReturn(true);
         when(lifecycleManager.resolveImageForLaunch(any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(lifecycleManager.createAndStart(any()))
+        when(lifecycleManager.createAndStartEphemeral(any()))
                 .thenReturn(new ContainerInfo("docker-id", Map.of()));
 
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
@@ -470,7 +470,7 @@ class EcsContainerManagerVolumesTest {
                 () -> managerWithEfs(efsFallbackConfig()).startTask(task("000000000000", "us-east-1"),
                         accessPointDefinition("fsap-test"), List.of(), "us-east-1"));
         assertEquals("ClientException", failure.getErrorCode());
-        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
     }
 
     @Test

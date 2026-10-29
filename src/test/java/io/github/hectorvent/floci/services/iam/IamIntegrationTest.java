@@ -1691,8 +1691,8 @@ class IamIntegrationTest {
             .when().post("/").then()
                 .statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-                .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value '" + name
-                        + "' at 'roleName' failed to satisfy constraint: " + entry.getValue()));
+                .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at"
+                        + " 'roleName' failed to satisfy constraint: " + entry.getValue()));
 
             given()
                 .formParam("Action", "GetRole")
@@ -1728,8 +1728,8 @@ class IamIntegrationTest {
         .when().post("/").then()
             .statusCode(400)
             .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value ''"
-                    + " at 'roleName' failed to satisfy constraint: Member must have length greater than or equal to 1"));
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at"
+                    + " 'roleName' failed to satisfy constraint: Member must have length greater than or equal to 1"));
 
         given()
             .formParam("Action", "CreateRole")
@@ -1744,7 +1744,7 @@ class IamIntegrationTest {
     @Order(87)
     void roleActionsRejectANameOutsideTheRoleNamePattern() {
         String name = "aws:ec2-instance";
-        String message = "1 validation error detected: Value '" + name + "' at 'roleName' failed to satisfy"
+        String message = "1 validation error detected: Value at 'roleName' failed to satisfy"
                 + " constraint: Member must satisfy regular expression pattern: [\\w+=,.@-]+";
         Map<String, Map<String, String>> actions = new LinkedHashMap<>();
         actions.put("GetRole", Map.of());

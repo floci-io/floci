@@ -198,7 +198,7 @@ public class SqsEventSourcePoller implements Resettable {
                 int wanted = Math.max(1, esm.getBatchSize() - alreadyBuffered);
 
                 List<Message> received = sqsService.receiveMessage(
-                        esm.getQueueUrl(), wanted, visibilityTimeout, 0, esm.getRegion());
+                        esm.getQueueUrl(), Math.min(10, wanted), visibilityTimeout, 0, esm.getRegion());
 
                 List<Message> messages;
                 if (window <= 0) {

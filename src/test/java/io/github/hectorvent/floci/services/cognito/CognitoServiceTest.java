@@ -5373,7 +5373,7 @@ class CognitoServiceTest {
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
-                        Map.of("USERNAME", "alice", "CHALLENGE_NAME", "SRP_A")));
+                        Map.of("USERNAME", "alice", "CHALLENGE_NAME", "SRP_A", "SRP_A", "ABCDEF1234567890")));
         assertEquals("InvalidUserPoolConfigurationException", ex.getErrorCode());
     }
 

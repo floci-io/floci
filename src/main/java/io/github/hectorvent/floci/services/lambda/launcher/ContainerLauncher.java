@@ -221,10 +221,11 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         Optional<SessionCreds> roleCredentials = Optional.empty();
         try {
 
-        // Resolve image
+        LambdaDockerFlags dockerFlags = configuredDockerFlags();
+        // Resolve the image for the same platform used by container creation.
         String image = "Image".equals(fn.getPackageType()) && fn.getImageUri() != null
                 ? fn.getImageUri()
-                : imageResolver.resolve(fn.getRuntime());
+                : imageResolver.resolve(fn.getRuntime(), requestedDockerPlatform(fn, dockerFlags).orElse(null));
 
         // If this is an AWS-shaped ECR URI, rewrite it to Floci's loopback registry
         image = ecrRegistryManager.rewriteImageUri(image);
@@ -244,19 +245,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                 + LambdaLogDestinations.logStreamSuffix(fn, shortId);
         String lambdaRegion = extractRegionFromArn(fn.getFunctionArn(), config.defaultRegion());
         String lambdaAccountId = AwsArnUtils.accountOrDefault(fn.getFunctionArn(), config.defaultAccountId());
-        LambdaDockerFlags dockerFlags = configuredDockerFlags();
 
-        // Build env vars
-        List<String> env = new ArrayList<>();
-        env.add("AWS_LAMBDA_RUNTIME_API=" + runtimeApiEndpoint);
-        env.add("AWS_LAMBDA_FUNCTION_NAME=" + fn.getFunctionName());
-        env.add("AWS_LAMBDA_FUNCTION_MEMORY_SIZE=" + fn.getMemorySize());
-        env.add("AWS_LAMBDA_FUNCTION_TIMEOUT=" + fn.getTimeout());
-        env.add("AWS_LAMBDA_LOG_GROUP_NAME=" + cwLogGroup);
-        env.add("AWS_LAMBDA_LOG_STREAM_NAME=" + cwLogStream);
-        if (fn.getHandler() != null && !fn.getHandler().isBlank()) {
-            env.add("_HANDLER=" + fn.getHandler());
-        }
+        List<String> env = LambdaRuntimeEnv.of(fn, runtimeApiEndpoint, cwLogGroup, cwLogStream);
         // Region, credentials and the Floci endpoint the SDK should target: the same baseline
         // Floci gives every launched container. When the host ~/.aws is mounted (awsConfigPath),
         // the SDK discovers credentials from /opt/aws-config instead of injected credentials.
@@ -551,19 +541,21 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         };
     }
 
-    private String createContainer(ContainerSpec spec, LambdaFunction fn, LambdaDockerFlags dockerFlags) {
+    private Optional<String> requestedDockerPlatform(LambdaFunction fn, LambdaDockerFlags dockerFlags) {
         if (dockerFlags.platform() != null) {
-            return lifecycleManager.create(spec, dockerFlags.platform());
+            return Optional.of(dockerFlags.platform());
         }
-        if (!config.services().lambda().honourArchitectures()) {
-            return lifecycleManager.create(spec);
-        }
-        Optional<String> platform = dockerPlatform(fn);
-        if (platform.isEmpty()) {
+        return config.services().lambda().honourArchitectures() ? dockerPlatform(fn) : Optional.empty();
+    }
+
+    private String createContainer(ContainerSpec spec, LambdaFunction fn, LambdaDockerFlags dockerFlags) {
+        Optional<String> platform = requestedDockerPlatform(fn, dockerFlags);
+        if (platform.isEmpty() && config.services().lambda().honourArchitectures()) {
             throw new IllegalStateException("Invalid persisted architectures "
                     + fn.getArchitectures() + " for function '" + fn.getFunctionName() + "'");
         }
-        return lifecycleManager.create(spec, platform.get());
+        return platform.map(value -> lifecycleManager.create(spec, value))
+                .orElseGet(() -> lifecycleManager.create(spec));
     }
 
     private LambdaDockerFlags configuredDockerFlags() {
@@ -1017,7 +1009,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         acquirePopulatePermit(fn.getFunctionName());
         String helperId = null;
         try {
-            helperId = createContainer(helperSpec, fn, LambdaDockerFlags.parse(null));
+            helperId = createContainer(helperSpec, fn, configuredDockerFlags());
             lifecycleManager.startCreated(helperId, helperSpec);
             copyDirToContainerStrict(lifecycleManager.getDockerClient(), helperId,
                     Path.of(fn.getCodeLocalPath()), TASK_DIR, fn.getFunctionName());

@@ -1020,8 +1020,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /**
      * A request that tags what it creates also needs the service's tagging action (see {@link TagOnCreate}),
      * checked as the caller for each set of tags, under any spelling a handler might read: on the resource a
-     * tag specification names, else on the resource a create makes under a parent its action acts on, else on the
-     * resources the operation is checked on, with the set's tags as {@code aws:RequestTag/<key>} and
+     * tag specification names, else on the resource a create makes, under a parent its action acts on or of the type
+     * it is named after where it names others too, else on the resources the operation is checked on, with the set's tags as {@code aws:RequestTag/<key>} and
      * {@code aws:TagKeys}, the operation as the namespace's {@code CreateAction} key where the tagging action
      * takes one, and the keys that say who is calling. Returns true when the request was aborted.
      */
@@ -1030,7 +1030,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                              String operation, TagOnCreate.Tagging tagging,
                                              String credentialScope, List<String> resources,
                                              String region, String accountId, String akid) {
-        // A create of a resource under a parent its action acts on tags the new one (see RequestResources).
+        // A create tags the resource it makes, not the parent it makes it in (see RequestResources.created).
         List<String> created = RequestResources.created(operation, ctx, AwsRegions.partitionFor(region), region,
                 accountId);
         List<String> made = created.isEmpty() ? resources : created;

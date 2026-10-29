@@ -16,7 +16,46 @@
     "GetPolicyVersion": "GetPolicyVersionRequest",
     "DeletePolicyVersion": "DeletePolicyVersionRequest",
     "SetDefaultPolicyVersion": "SetDefaultPolicyVersionRequest",
-    "GetAccountAuthorizationDetails": "GetAccountAuthorizationDetailsRequest"
+    "GetAccountAuthorizationDetails": "GetAccountAuthorizationDetailsRequest",
+    "GetGroup": "GetGroupRequest",
+    "ListAccessKeys": "ListAccessKeysRequest",
+    "ListAccountAliases": "ListAccountAliasesRequest",
+    "ListAttachedGroupPolicies": "ListAttachedGroupPoliciesRequest",
+    "ListAttachedRolePolicies": "ListAttachedRolePoliciesRequest",
+    "ListAttachedUserPolicies": "ListAttachedUserPoliciesRequest",
+    "ListDelegationRequests": "ListDelegationRequestsRequest",
+    "ListEntitiesForPolicy": "ListEntitiesForPolicyRequest",
+    "ListGroupPolicies": "ListGroupPoliciesRequest",
+    "ListGroups": "ListGroupsRequest",
+    "ListGroupsForUser": "ListGroupsForUserRequest",
+    "ListInstanceProfileTags": "ListInstanceProfileTagsRequest",
+    "ListInstanceProfiles": "ListInstanceProfilesRequest",
+    "ListInstanceProfilesForRole": "ListInstanceProfilesForRoleRequest",
+    "ListMFADeviceTags": "ListMFADeviceTagsRequest",
+    "ListMFADevices": "ListMFADevicesRequest",
+    "ListOpenIDConnectProviderTags": "ListOpenIDConnectProviderTagsRequest",
+    "ListPolicies": "ListPoliciesRequest",
+    "ListPolicyTags": "ListPolicyTagsRequest",
+    "ListPolicyVersions": "ListPolicyVersionsRequest",
+    "ListRolePolicies": "ListRolePoliciesRequest",
+    "ListRoleTags": "ListRoleTagsRequest",
+    "ListRoles": "ListRolesRequest",
+    "ListSAMLProviderTags": "ListSAMLProviderTagsRequest",
+    "ListSSHPublicKeys": "ListSSHPublicKeysRequest",
+    "ListServerCertificateTags": "ListServerCertificateTagsRequest",
+    "ListServerCertificates": "ListServerCertificatesRequest",
+    "ListServiceSpecificCredentials": "ListServiceSpecificCredentialsRequest",
+    "ListSigningCertificates": "ListSigningCertificatesRequest",
+    "ListUserPolicies": "ListUserPoliciesRequest",
+    "ListUserTags": "ListUserTagsRequest",
+    "ListUsers": "ListUsersRequest",
+    "ListVirtualMFADevices": "ListVirtualMFADevicesRequest",
+    "GetOrganizationsAccessReport": "GetOrganizationsAccessReportRequest",
+    "GetServiceLastAccessedDetails": "GetServiceLastAccessedDetailsRequest",
+    "GetServiceLastAccessedDetailsWithEntities": "GetServiceLastAccessedDetailsWithEntitiesRequest",
+    "ListPoliciesGrantingServiceAccess": "ListPoliciesGrantingServiceAccessRequest",
+    "SimulateCustomPolicy": "SimulateCustomPolicyRequest",
+    "SimulatePrincipalPolicy": "SimulatePrincipalPolicyRequest"
   },
   "shapes": {
     "AttachGroupPolicyRequest": {
@@ -135,6 +174,24 @@
         "Marker": "markerType"
       }
     },
+    "GetGroupRequest": {
+      "type": "structure",
+      "required": [
+        "GroupName"
+      ],
+      "members": {
+        "GroupName": "groupNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "GetOrganizationsAccessReportRequest": {
+      "type": "structure",
+      "members": {
+        "MaxItems": "maxItemsType",
+        "Marker": "markerType"
+      }
+    },
     "GetPolicyRequest": {
       "type": "structure",
       "required": [
@@ -155,6 +212,353 @@
         "VersionId": "policyVersionIdType"
       }
     },
+    "GetServiceLastAccessedDetailsRequest": {
+      "type": "structure",
+      "members": {
+        "MaxItems": "maxItemsType",
+        "Marker": "markerType"
+      }
+    },
+    "GetServiceLastAccessedDetailsWithEntitiesRequest": {
+      "type": "structure",
+      "members": {
+        "MaxItems": "maxItemsType",
+        "Marker": "markerType"
+      }
+    },
+    "ListAccessKeysRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListAccountAliasesRequest": {
+      "type": "structure",
+      "members": {
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListAttachedGroupPoliciesRequest": {
+      "type": "structure",
+      "required": [
+        "GroupName"
+      ],
+      "members": {
+        "GroupName": "groupNameType",
+        "PathPrefix": "policyPathType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListAttachedRolePoliciesRequest": {
+      "type": "structure",
+      "required": [
+        "RoleName"
+      ],
+      "members": {
+        "RoleName": "roleNameType",
+        "PathPrefix": "policyPathType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListAttachedUserPoliciesRequest": {
+      "type": "structure",
+      "required": [
+        "UserName"
+      ],
+      "members": {
+        "UserName": "userNameType",
+        "PathPrefix": "policyPathType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListDelegationRequestsRequest": {
+      "type": "structure",
+      "members": {
+        "OwnerId": "ownerIdType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListEntitiesForPolicyRequest": {
+      "type": "structure",
+      "required": [
+        "PolicyArn"
+      ],
+      "members": {
+        "PolicyArn": "arnType",
+        "EntityFilter": "EntityType",
+        "PathPrefix": "pathType",
+        "PolicyUsageFilter": "PolicyUsageType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListGroupPoliciesRequest": {
+      "type": "structure",
+      "required": [
+        "GroupName"
+      ],
+      "members": {
+        "GroupName": "groupNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListGroupsForUserRequest": {
+      "type": "structure",
+      "required": [
+        "UserName"
+      ],
+      "members": {
+        "UserName": "existingUserNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListGroupsRequest": {
+      "type": "structure",
+      "members": {
+        "PathPrefix": "pathPrefixType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListInstanceProfileTagsRequest": {
+      "type": "structure",
+      "required": [
+        "InstanceProfileName"
+      ],
+      "members": {
+        "InstanceProfileName": "instanceProfileNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListInstanceProfilesForRoleRequest": {
+      "type": "structure",
+      "required": [
+        "RoleName"
+      ],
+      "members": {
+        "RoleName": "roleNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListInstanceProfilesRequest": {
+      "type": "structure",
+      "members": {
+        "PathPrefix": "pathPrefixType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListMFADeviceTagsRequest": {
+      "type": "structure",
+      "required": [
+        "SerialNumber"
+      ],
+      "members": {
+        "SerialNumber": "serialNumberType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListMFADevicesRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListOpenIDConnectProviderTagsRequest": {
+      "type": "structure",
+      "required": [
+        "OpenIDConnectProviderArn"
+      ],
+      "members": {
+        "OpenIDConnectProviderArn": "arnType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListPoliciesGrantingServiceAccessRequest": {
+      "type": "structure",
+      "members": {
+        "Marker": "markerType"
+      }
+    },
+    "ListPoliciesRequest": {
+      "type": "structure",
+      "members": {
+        "Scope": "policyScopeType",
+        "OnlyAttached": "booleanType",
+        "PathPrefix": "policyPathType",
+        "PolicyUsageFilter": "PolicyUsageType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListPolicyTagsRequest": {
+      "type": "structure",
+      "required": [
+        "PolicyArn"
+      ],
+      "members": {
+        "PolicyArn": "arnType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListPolicyVersionsRequest": {
+      "type": "structure",
+      "required": [
+        "PolicyArn"
+      ],
+      "members": {
+        "PolicyArn": "arnType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListRolePoliciesRequest": {
+      "type": "structure",
+      "required": [
+        "RoleName"
+      ],
+      "members": {
+        "RoleName": "roleNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListRoleTagsRequest": {
+      "type": "structure",
+      "required": [
+        "RoleName"
+      ],
+      "members": {
+        "RoleName": "roleNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListRolesRequest": {
+      "type": "structure",
+      "members": {
+        "PathPrefix": "pathPrefixType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListSAMLProviderTagsRequest": {
+      "type": "structure",
+      "required": [
+        "SAMLProviderArn"
+      ],
+      "members": {
+        "SAMLProviderArn": "arnType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListSSHPublicKeysRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListServerCertificateTagsRequest": {
+      "type": "structure",
+      "required": [
+        "ServerCertificateName"
+      ],
+      "members": {
+        "ServerCertificateName": "serverCertificateNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListServerCertificatesRequest": {
+      "type": "structure",
+      "members": {
+        "PathPrefix": "pathPrefixType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListServiceSpecificCredentialsRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "userNameType",
+        "ServiceName": "serviceName",
+        "AllUsers": "allUsers",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListSigningCertificatesRequest": {
+      "type": "structure",
+      "members": {
+        "UserName": "existingUserNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListUserPoliciesRequest": {
+      "type": "structure",
+      "required": [
+        "UserName"
+      ],
+      "members": {
+        "UserName": "existingUserNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListUserTagsRequest": {
+      "type": "structure",
+      "required": [
+        "UserName"
+      ],
+      "members": {
+        "UserName": "existingUserNameType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListUsersRequest": {
+      "type": "structure",
+      "members": {
+        "PathPrefix": "pathPrefixType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "ListVirtualMFADevicesRequest": {
+      "type": "structure",
+      "members": {
+        "AssignmentStatus": "assignmentStatusType",
+        "Marker": "markerType",
+        "MaxItems": "maxItemsType"
+      }
+    },
+    "PolicyUsageType": {
+      "type": "string",
+      "enum": [
+        "PermissionsPolicy",
+        "PermissionsBoundary"
+      ]
+    },
     "SetDefaultPolicyVersionRequest": {
       "type": "structure",
       "required": [
@@ -166,10 +570,35 @@
         "VersionId": "policyVersionIdType"
       }
     },
+    "SimulateCustomPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "MaxItems": "maxItemsType",
+        "Marker": "markerType"
+      }
+    },
+    "SimulatePrincipalPolicyRequest": {
+      "type": "structure",
+      "members": {
+        "MaxItems": "maxItemsType",
+        "Marker": "markerType"
+      }
+    },
+    "allUsers": {
+      "type": "boolean"
+    },
     "arnType": {
       "type": "string",
       "min": 20,
       "max": 2048
+    },
+    "assignmentStatusType": {
+      "type": "string",
+      "enum": [
+        "Assigned",
+        "Unassigned",
+        "Any"
+      ]
     },
     "booleanType": {
       "type": "boolean"
@@ -178,7 +607,19 @@
       "type": "list",
       "member": "EntityType"
     },
+    "existingUserNameType": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[\\w+=,.@-]+"
+    },
     "groupNameType": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[\\w+=,.@-]+"
+    },
+    "instanceProfileNameType": {
       "type": "string",
       "min": 1,
       "max": 128,
@@ -195,11 +636,43 @@
       "min": 1,
       "max": 1000
     },
+    "ownerIdType": {
+      "type": "string",
+      "min": 20,
+      "max": 2048,
+      "pattern": "^[a-zA-Z0-9:/+=,.@_-]+$"
+    },
+    "pathPrefixType": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "\\u002F[\\u0021-\\u007F]*"
+    },
+    "pathType": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "(\\u002F)|(\\u002F[\\u0021-\\u007E]+\\u002F)"
+    },
     "policyDocumentType": {
       "type": "string",
       "min": 1,
       "max": 131072,
       "pattern": "[\\u0009\\u000A\\u000D\\u0020-\\u00FF]+"
+    },
+    "policyPathType": {
+      "type": "string",
+      "min": 1,
+      "max": 512,
+      "pattern": "((/[A-Za-z0-9\\.,\\+@=_-]+)*)/"
+    },
+    "policyScopeType": {
+      "type": "string",
+      "enum": [
+        "All",
+        "AWS",
+        "Local"
+      ]
     },
     "policyVersionIdType": {
       "type": "string",
@@ -210,6 +683,21 @@
       "min": 1,
       "max": 64,
       "pattern": "[\\w+=,.@-]+"
+    },
+    "serialNumberType": {
+      "type": "string",
+      "min": 9,
+      "max": 256,
+      "pattern": "[\\w+=/:,.@-]+"
+    },
+    "serverCertificateNameType": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[\\w+=,.@-]+"
+    },
+    "serviceName": {
+      "type": "string"
     },
     "userNameType": {
       "type": "string",

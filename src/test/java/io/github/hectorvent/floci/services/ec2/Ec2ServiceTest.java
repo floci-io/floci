@@ -93,6 +93,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -141,6 +142,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.CALLS_REAL_METHODS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -347,6 +349,84 @@ class Ec2ServiceTest {
         assertEquals(1, mockingDetails(service).getInvocations().stream()
                 .filter(invocation -> invocation.getMethod().getName().equals("instanceVolumeAttachments"))
                 .count());
+    }
+
+    @Test
+    void describeInstancesScansTheAddressesOnceWhateverTheInstanceCount() {
+        AccountAwareStorageBackend<Address> addressStore = spy(AccountAwareStorageBackend.<Address>inMemory("000000000000"));
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-addresses.json", addressStore)));
+        List<Instance> launched = service.runInstances("us-east-1", "ami-test", "t3.micro", 3, 3, null, List.of(),
+                null, null, List.of(), null, null).getInstances();
+        Address elastic = service.allocateAddress("us-east-1");
+        service.associateAddress("us-east-1", elastic.getAllocationId(), launched.get(1).getInstanceId());
+        Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
+                mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
+                mock(Ec2SnapshotBlockPublicAccessService.class), mock(Ec2IpamService.class),
+                new RegionResolver("us-east-1", "000000000000"));
+        // The first read settles the pending launches, which reads the addresses once per launch.
+        handler.handle("DescribeInstances", new MultivaluedHashMap<>(), "us-east-1");
+        clearInvocations(addressStore);
+
+        Response response = handler.handle("DescribeInstances", new MultivaluedHashMap<>(), "us-east-1");
+
+        assertEquals(200, response.getStatus());
+        String xml = response.getEntity().toString();
+        assertTrue(xml.contains("<association><publicIp>" + elastic.getPublicIp() + "</publicIp>"), xml);
+        verify(addressStore, times(1)).scan(any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"kept", "disassociated", "reassigned"})
+    void anIndexReadBeforeAnElasticIpMovedShowsItOnlyWhereItStillIs(String change) {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        List<Instance> launched = service.runInstances("us-east-1", "ami-test", "t3.micro", 2, 2, null, List.of(),
+                null, null, List.of(), null, null).getInstances();
+        String formerId = launched.get(0).getInstanceId();
+        String newOwnerId = launched.get(1).getInstanceId();
+        String allocationId = service.allocateAddress("us-east-1").getAllocationId();
+        String associationId = service.associateAddress("us-east-1", allocationId, formerId).getAssociationId();
+        Ec2Service.ElasticAddresses read = service.elasticAddresses("us-east-1");
+
+        if ("reassigned".equals(change)) {
+            service.associateAddress("us-east-1", allocationId, newOwnerId);
+        } else if ("disassociated".equals(change)) {
+            service.disassociateAddress("us-east-1", associationId);
+        }
+
+        Address live = service.describeAddresses("us-east-1", List.of(allocationId), Map.of()).getFirst();
+        Instance former = describedInstance(service, formerId);
+        NetworkInterfaceAssociation shown = service.instanceInterfaceAssociation(former,
+                former.getNetworkInterfaces().getFirst(), read);
+        if ("kept".equals(change)) {
+            assertNotNull(shown, "the instance still holding the Elastic IP shows no association");
+            assertEquals(allocationId, shown.getAllocationId());
+            assertEquals(associationId, shown.getAssociationId());
+            assertEquals(live.getPublicIp(), shown.getPublicIp());
+            return;
+        }
+        assertTrue(shown == null || !allocationId.equals(shown.getAllocationId()),
+                "the former instance still shows " + allocationId);
+        if ("reassigned".equals(change)) {
+            // Known limit: the index was read before the move, so the new owner is not found in it
+            // and shows its public address (the Elastic IP's) as an automatic one, owned by "amazon".
+            Instance newOwner = describedInstance(service, newOwnerId);
+            NetworkInterfaceAssociation moved = service.instanceInterfaceAssociation(newOwner,
+                    newOwner.getNetworkInterfaces().getFirst(), read);
+            assertNotNull(moved);
+            assertNull(moved.getAllocationId());
+            assertEquals("amazon", moved.getIpOwnerId());
+            assertEquals(live.getPublicIp(), moved.getPublicIp());
+            assertEquals(newOwner.getPublicIpAddress(), moved.getPublicIp());
+        }
+    }
+
+    private static Instance describedInstance(Ec2Service service, String instanceId) {
+        return service.describeInstances("us-east-1", List.of(instanceId), Map.of())
+                .getFirst().getInstances().getFirst();
     }
 
     @Test
@@ -7537,11 +7617,11 @@ class Ec2ServiceTest {
             Ec2Service service = prefixListService();
             String[] fixture = attachmentFixture(service);
             int threads = 6;
-            java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-            java.util.concurrent.ExecutorService pool =
-                    java.util.concurrent.Executors.newFixedThreadPool(threads);
-            List<String> created = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
-            List<String> errors = java.util.Collections.synchronizedList(new java.util.ArrayList<>());
+            CountDownLatch start = new CountDownLatch(1);
+            ExecutorService pool =
+                    Executors.newFixedThreadPool(threads);
+            List<String> created = Collections.synchronizedList(new ArrayList<>());
+            List<String> errors = Collections.synchronizedList(new ArrayList<>());
 
             for (int i = 0; i < threads; i++) {
                 pool.submit(() -> {
@@ -7559,7 +7639,7 @@ class Ec2ServiceTest {
             }
             start.countDown();
             pool.shutdown();
-            assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+            assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
 
             assertEquals(1, created.size(), "trial " + trial + ": exactly one create may win");
             assertEquals(threads - 1, errors.size(), "every loser is told the VPC is already attached");
@@ -7581,9 +7661,9 @@ class Ec2ServiceTest {
             for (int trial = 0; trial < 10; trial++) {
                 Ec2Service service = prefixListService();
                 String[] fixture = attachmentFixture(service);
-                java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-                java.util.concurrent.ExecutorService pool =
-                        java.util.concurrent.Executors.newFixedThreadPool(2);
+                CountDownLatch start = new CountDownLatch(1);
+                ExecutorService pool =
+                        Executors.newFixedThreadPool(2);
 
                 pool.submit(() -> {
                     try {
@@ -7609,7 +7689,7 @@ class Ec2ServiceTest {
                 });
                 start.countDown();
                 pool.shutdown();
-                assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+                assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
 
                 List<TransitGatewayVpcAttachment> attachments =
                         service.describeTransitGatewayVpcAttachments("us-east-1", List.of(), Map.of());
@@ -7646,9 +7726,9 @@ class Ec2ServiceTest {
                 if (!attachment) {
                     service.deleteTransitGatewayVpcAttachment("us-east-1", attachmentId);
                 }
-                java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-                java.util.concurrent.ExecutorService pool =
-                        java.util.concurrent.Executors.newFixedThreadPool(2);
+                CountDownLatch start = new CountDownLatch(1);
+                ExecutorService pool =
+                        Executors.newFixedThreadPool(2);
 
                 pool.submit(() -> {
                     try {
@@ -7672,7 +7752,7 @@ class Ec2ServiceTest {
                 });
                 start.countDown();
                 pool.shutdown();
-                assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+                assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
 
                 String what = attachment ? "attachment" : "gateway";
                 if (attachment) {
@@ -8140,9 +8220,9 @@ class Ec2ServiceTest {
             String[] fixture = attachmentFixture(service);
             String spare = service.createTransitGatewayRouteTable("us-east-1", fixture[0], List.of())
                     .getTransitGatewayRouteTableId();
-            java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
-            java.util.concurrent.ExecutorService pool =
-                    java.util.concurrent.Executors.newFixedThreadPool(2);
+            CountDownLatch start = new CountDownLatch(1);
+            ExecutorService pool =
+                    Executors.newFixedThreadPool(2);
 
             pool.submit(() -> {
                 try {
@@ -8165,7 +8245,7 @@ class Ec2ServiceTest {
             });
             start.countDown();
             pool.shutdown();
-            assertTrue(pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS));
+            assertTrue(pool.awaitTermination(30, TimeUnit.SECONDS));
 
             boolean tableExists = service.describeTransitGatewayRouteTables("us-east-1", List.of(), Map.of())
                     .stream().anyMatch(rt -> rt.getTransitGatewayRouteTableId().equals(spare));
@@ -8561,7 +8641,7 @@ class Ec2ServiceTest {
                 return (AccountAwareStorageBackend<V>) override;
             }
             AccountAwareStorageBackend<V> backend = requestContextInstance != null
-                    ? new AccountAwareStorageBackend<>(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>(),
+                    ? new AccountAwareStorageBackend<>(new InMemoryStorage<>(),
                             requestContextInstance, "000000000000")
                     : AccountAwareStorageBackend.inMemory("000000000000");
             created.add(backend);
@@ -8580,7 +8660,7 @@ class Ec2ServiceTest {
         private int putCount;
 
         private DetachedImageStorage() {
-            super(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>(), null, "000000000000");
+            super(new InMemoryStorage<>(), null, "000000000000");
         }
 
         @Override
@@ -8634,8 +8714,8 @@ class Ec2ServiceTest {
             copy.setCreationSourceInstanceId(source.getCreationSourceInstanceId());
             copy.setDockerImage(source.getDockerImage());
             copy.setBlockDeviceMappings(source.getBlockDeviceMappings() == null
-                    ? List.of() : new java.util.ArrayList<>(source.getBlockDeviceMappings()));
-            copy.setTags(source.getTags() == null ? List.of() : new java.util.ArrayList<>(source.getTags()));
+                    ? List.of() : new ArrayList<>(source.getBlockDeviceMappings()));
+            copy.setTags(source.getTags() == null ? List.of() : new ArrayList<>(source.getTags()));
             return copy;
         }
     }

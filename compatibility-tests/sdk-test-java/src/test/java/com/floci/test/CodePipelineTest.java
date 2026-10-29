@@ -85,7 +85,7 @@ class CodePipelineTest {
 
         PutWebhookResponse created = codepipeline.putWebhook(r -> r.webhook(definition));
         assertThat(created.webhook().definition()).isEqualTo(definition);
-        assertThat(created.webhook().arn()).endsWith(":webhook/sdk-webhook");
+        assertThat(created.webhook().arn()).endsWith(":webhook:sdk-webhook");
 
         ListWebhooksResponse listed = codepipeline.listWebhooks();
         assertThat(listed.webhooks()).singleElement()

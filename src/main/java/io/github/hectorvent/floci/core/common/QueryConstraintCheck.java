@@ -27,10 +27,11 @@ import java.util.regex.Pattern;
  * merged for a `ServiceSpecificCredentialId` breaking both its length and its pattern, and
  * `docs/services/iam.md` carries it.
  *
- * <p>The offending value is quoted, which is what {@link SmithyValidationErrors#lengthOutOfRange}
- * and this package's `validateRoleName` already answer. Whether current IAM quotes it at all is
- * what DRIFT-13 asks, and the point of reading the constraints here is that one capture would
- * change one helper rather than every message in the package.
+ * <p>Whether the offending value is quoted beside the member is the service's own, so the check is
+ * loaded with the form that service answers: IAM names the member and leaves the value out, STS
+ * quotes it. That is DRIFT-13's reading, taken from the captures in hand and recorded in
+ * {@code docs/services/iam.md}, and reading the constraints here is what makes it one object to
+ * change rather than every message in a package.
  *
  * <p>A member the request leaves out is absent, and only a required member is reported for one. A
  * member present and empty is a value: the protocol carries it, so it breaks its minimum length
@@ -62,11 +63,13 @@ public final class QueryConstraintCheck {
 
     private final JsonNode operations;
     private final JsonNode shapes;
+    private final SmithyValidationErrors.Violations messages;
     private final Map<String, Pattern> patterns = new HashMap<>();
 
-    private QueryConstraintCheck(JsonNode model) {
+    private QueryConstraintCheck(JsonNode model, SmithyValidationErrors.Violations messages) {
         this.operations = model.path("operations");
         this.shapes = model.path("shapes");
+        this.messages = messages;
         for (Map.Entry<String, JsonNode> shape : shapes.properties()) {
             if (shape.getValue().has("pattern")) {
                 patterns.put(shape.getKey(), Pattern.compile(shape.getValue().get("pattern").asText()));
@@ -77,14 +80,27 @@ public final class QueryConstraintCheck {
         }
     }
 
-    /** The vendored resource {@code name}; {@code description} names it in a failure. */
+    /**
+     * The vendored resource {@code name}, answering in the form most services do, with the
+     * offending value quoted; {@code description} names it in a failure.
+     */
     public static QueryConstraintCheck load(String name, String description) {
+        return load(name, description, SmithyValidationErrors.Violations.QUOTED);
+    }
+
+    /** The same, in the message form {@code messages} writes, which is the service's own. */
+    public static QueryConstraintCheck load(String name, String description,
+                                            SmithyValidationErrors.Violations messages) {
         return VendoredResources.read(name, description,
-                input -> new QueryConstraintCheck(MAPPER.readTree(input)));
+                input -> new QueryConstraintCheck(MAPPER.readTree(input), messages));
     }
 
     public static QueryConstraintCheck of(JsonNode model) {
-        return new QueryConstraintCheck(model);
+        return of(model, SmithyValidationErrors.Violations.QUOTED);
+    }
+
+    public static QueryConstraintCheck of(JsonNode model, SmithyValidationErrors.Violations messages) {
+        return new QueryConstraintCheck(model, messages);
     }
 
     private void requireReadableMembers(String operation, String inputShape) {
@@ -250,14 +266,14 @@ public final class QueryConstraintCheck {
             return List.of();
         }
         List<String> violations = new ArrayList<>();
-        String length = SmithyValidationErrors.lengthOutOfRange(path, value,
+        String length = messages.lengthOutOfRange(path, value,
                 shape.path("min").asInt(0), shape.path("max").asInt(Integer.MAX_VALUE));
         if (length != null) {
             violations.add(length);
         }
         Pattern pattern = patterns.get(shapeName);
         if (pattern != null && !pattern.matcher(value).matches()) {
-            violations.add(SmithyValidationErrors.pattern(path, value, pattern.pattern()));
+            violations.add(messages.pattern(path, value, pattern.pattern()));
         }
         violations.addAll(single(enumViolation(shape, value, path)));
         return violations;
@@ -277,7 +293,7 @@ public final class QueryConstraintCheck {
      * written as the number reads rather than as the request spelled it, a leading zero or plus
      * gone, which is what a parsed value already answered.
      */
-    private static String numberViolation(JsonNode shape, String value, String path) {
+    private String numberViolation(JsonNode shape, String value, String path) {
         String text = value.trim();
         if (!INTEGER.matcher(text).matches()) {
             // Not a number at all, so no range of the model's is what it breaks.
@@ -287,20 +303,20 @@ public final class QueryConstraintCheck {
         long min = shape.path("min").asLong(Long.MIN_VALUE);
         long max = shape.path("max").asLong(Long.MAX_VALUE);
         if (number.compareTo(BigInteger.valueOf(min)) < 0) {
-            return SmithyValidationErrors.valueTooSmall(path, number.toString(), min);
+            return messages.valueTooSmall(path, number.toString(), min);
         }
         if (number.compareTo(BigInteger.valueOf(max)) > 0) {
-            return SmithyValidationErrors.valueTooLarge(path, number.toString(), max);
+            return messages.valueTooLarge(path, number.toString(), max);
         }
         return null;
     }
 
-    private static String enumViolation(JsonNode shape, String value, String path) {
+    private String enumViolation(JsonNode shape, String value, String path) {
         if (!shape.has("enum")) {
             return null;
         }
         List<String> allowed = new ArrayList<>();
         shape.path("enum").forEach(choice -> allowed.add(choice.asText()));
-        return allowed.contains(value) ? null : SmithyValidationErrors.notInEnum(value, path, allowed);
+        return allowed.contains(value) ? null : messages.notInEnum(value, path, allowed);
     }
 }

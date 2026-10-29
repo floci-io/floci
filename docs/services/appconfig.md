@@ -35,7 +35,12 @@ The management plane allows you to create and manage applications, environments,
 `GetConfiguration` accepts application, environment and configuration profile names or IDs, and requires
 `client_id`. It returns the deployed version's content with its `Content-Type` and `Configuration-Version`;
 feature flags are resolved as on the [data plane](#data-plane), including Ion for a caller that accepts it.
-A `client_configuration_version` equal to the deployed version returns HTTP 200 with an empty body.
+An exact resource ID takes precedence over another resource's name. If multiple resources in the
+selected scope share a name, name lookup returns `BadRequestException`; use the intended resource's ID.
+This also applies to the management operations and `StartConfigurationSession` that use these lookups.
+A `client_configuration_version` equal to the deployed version returns HTTP 204 with an empty body
+and `Configuration-Version`, without `Content-Type` or `Content-Length`. An empty configuration
+that the caller has not received still returns HTTP 200 and its stored content type.
 A missing or undeployed environment returns `BadRequestException`; an unknown application or configuration profile
 returns `ResourceNotFoundException`.
 Only hosted configurations are served: a deployed version with no hosted configuration version behind it,

@@ -393,7 +393,7 @@ public class EventBridgeHandler {
                 entries.add(entry);
             }
         }
-        EventBridgeService.PutEventsResult result = eventBridgeService.putEvents(entries, region);
+        EventBridgeService.PutEventsResult result = eventBridgeService.putEventsFromRequest(entries, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("FailedEntryCount", result.failedCount());
         ArrayNode resultEntries = response.putArray("Entries");

@@ -19,14 +19,11 @@ arn-probe	src/main/java/io/github/hectorvent/floci/services/appsync/graphql/reso
 arn-probe	src/main/java/io/github/hectorvent/floci/services/batch/BatchService.java	4
 arn-probe	src/main/java/io/github/hectorvent/floci/services/bedrock/BedrockService.java	3
 arn-probe	src/main/java/io/github/hectorvent/floci/services/budgets/BudgetsService.java	1
-arn-probe	src/main/java/io/github/hectorvent/floci/services/cloudformation/CloudFormationService.java	4
-arn-probe	src/main/java/io/github/hectorvent/floci/services/cloudformation/provisioners/Ec2InstanceCfnProvisioner.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/services/cloudformation/provisioners/EcsCfnProvisioner.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/services/cloudfront/CloudFrontService.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/services/cloudtrail/CloudTrailService.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/services/cloudwatch/logs/CloudWatchLogsCrossAccountService.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/services/connect/ConnectService.java	1
-arn-probe	src/main/java/io/github/hectorvent/floci/services/docdb/DocDbService.java	3
 arn-probe	src/main/java/io/github/hectorvent/floci/services/dynamodb/DynamoDbService.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/services/dynamodb/DynamoDbTableNames.java	2
 arn-probe	src/main/java/io/github/hectorvent/floci/services/dynamodb/backend/DynamoDbLocalBackend.java	2
@@ -40,8 +37,6 @@ arn-probe	src/main/java/io/github/hectorvent/floci/services/lakeformation/LakeFo
 arn-probe	src/main/java/io/github/hectorvent/floci/services/lambda/LambdaArnUtils.java	2
 arn-probe	src/main/java/io/github/hectorvent/floci/services/lambda/LambdaService.java	4
 arn-probe	src/main/java/io/github/hectorvent/floci/services/lambdamicrovms/LambdaMicrovmsService.java	1
-arn-probe	src/main/java/io/github/hectorvent/floci/services/neptune/NeptuneService.java	3
-arn-probe	src/main/java/io/github/hectorvent/floci/services/rds/RdsService.java	7
 arn-probe	src/main/java/io/github/hectorvent/floci/services/redshift/RedshiftService.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/services/redshiftserverless/RedshiftServerlessService.java	1
 arn-probe	src/main/java/io/github/hectorvent/floci/services/resourcegroups/ResourceGroupsService.java	2
@@ -65,7 +60,6 @@ arn-split	src/main/java/io/github/hectorvent/floci/services/kms/KmsJsonHandler.j
 arn-split	src/main/java/io/github/hectorvent/floci/services/lambda/LambdaController.java	1
 arn-split	src/main/java/io/github/hectorvent/floci/services/lambda/LambdaTagController.java	1
 arn-split	src/main/java/io/github/hectorvent/floci/services/lambdamicrovms/LambdaMicrovmsController.java	1
-arn-split	src/main/java/io/github/hectorvent/floci/services/neptune/NeptuneQueryHandler.java	1
 arn-split	src/main/java/io/github/hectorvent/floci/services/ram/RamService.java	2
 arn-split	src/main/java/io/github/hectorvent/floci/services/redshift/RedshiftService.java	1
 arn-split	src/main/java/io/github/hectorvent/floci/services/resourcegroupstagging/ResourceGroupsTaggingService.java	1

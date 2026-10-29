@@ -19,6 +19,7 @@ import org.jboss.logging.Logger;
 import java.io.File;
 import java.net.HttpURLConnection;
 import java.net.URI;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Optional;
 
@@ -164,7 +165,7 @@ public class OpenSearchDomainManager {
                         resolveVolumeName(domain), CONTAINER_DATA_PATH);
             } else {
                 // Legacy host-path mode: host-persistent-path is an absolute path
-                Path dataPath = ContainerStorageHelper.hostResourcePath(config, "opensearch", domain.getDomainName());
+                Path dataPath = legacyCompatibleHostDataPath(domain);
                 if (!containerDetector.isRunningInContainer()) {
                     ContainerStorageHelper.ensureHostDir(dataPath.toString());
                 }
@@ -229,6 +230,24 @@ public class OpenSearchDomainManager {
             domain.setHostPort(null);
         }
         LOG.infov("Stopped OpenSearch container for domain {0}", domain.getDomainName());
+    }
+
+    /**
+     * The domain's host data directory, scoped by the account and region its ARN carries, so two
+     * domains sharing one name across regions or accounts never share a data directory: two
+     * OpenSearch nodes on one directory corrupt each other's cluster state. A record persisted
+     * before the region marker existed keeps the bare-name directory while that directory still
+     * exists, since that is where its data lives; a record carrying the marker never falls back.
+     */
+    private Path legacyCompatibleHostDataPath(Domain domain) {
+        Path legacyPath = ContainerStorageHelper.hostResourcePath(config, "opensearch", domain.getDomainName());
+        if (domain.getRegion() == null && Files.exists(legacyPath)) {
+            return legacyPath;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(domain.getArn());
+        return ContainerStorageHelper.hostResourcePath(config, "opensearch",
+                ContainerStorageHelper.dockerName(config,
+                        "opensearch-" + arn.accountId() + "-" + arn.region() + "-" + domain.getDomainName()));
     }
 
     /**

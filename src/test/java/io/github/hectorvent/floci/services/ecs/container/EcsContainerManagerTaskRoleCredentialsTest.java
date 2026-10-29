@@ -75,7 +75,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.resolveImageForLaunch(any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("docker-id", Map.of()));
+        when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerInfo("docker-id", Map.of()));
 
         config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().taskRoleCredentials().enabled()).thenReturn(true);
@@ -259,11 +259,11 @@ class EcsContainerManagerTaskRoleCredentialsTest {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.resolveImageForLaunch(any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("docker-id", Map.of()));
+        when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerInfo("docker-id", Map.of()));
         // The reconciler's cleanup path is the other way a task's containers come off, and Docker
         // can refuse a removal here just as it can on the stop path.
         doThrow(new IllegalStateException("in use"))
-                .when(lifecycleManager).stopAndRemoveStrict("docker-id", null);
+                .when(lifecycleManager).stopAndRemoveStrict("docker-id", null, 5, true);
         EcsContainerManager stopping = new EcsContainerManager(containerBuilder, lifecycleManager,
                 mock(ContainerLogStreamer.class), mock(ContainerDetector.class), config,
                 mock(RegionResolver.class), baselineAwsEnv(), mock(SsmService.class),
@@ -288,11 +288,11 @@ class EcsContainerManagerTaskRoleCredentialsTest {
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
         // The first container starts and the second does not, so the launch unwinds with one
         // container already up and holding an address.
-        when(failing.createAndStart(any()))
+        when(failing.createAndStartEphemeral(any()))
                 .thenReturn(new ContainerInfo("docker-id", Map.of()))
                 .thenThrow(new IllegalStateException("no daemon"));
         doThrow(new IllegalStateException("in use"))
-                .when(failing).stopAndRemoveStrict("docker-id", null);
+                .when(failing).stopAndRemoveStrict("docker-id", null, 5, true);
         EcsContainerManager failingManager = new EcsContainerManager(containerBuilder, failing,
                 mock(ContainerLogStreamer.class), mock(ContainerDetector.class), config,
                 mock(RegionResolver.class), baselineAwsEnv(), mock(SsmService.class),
@@ -363,7 +363,7 @@ class EcsContainerManagerTaskRoleCredentialsTest {
         ContainerLifecycleManager failing = mock(ContainerLifecycleManager.class);
         when(failing.resolveImageForLaunch(any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(failing.createAndStart(any())).thenThrow(new IllegalStateException("no daemon"));
+        when(failing.createAndStartEphemeral(any())).thenThrow(new IllegalStateException("no daemon"));
         EcsContainerManager failingManager = new EcsContainerManager(containerBuilder, failing,
                 mock(ContainerLogStreamer.class), mock(ContainerDetector.class), config,
                 mock(RegionResolver.class), mock(LaunchedContainerAwsEnv.class), mock(SsmService.class),

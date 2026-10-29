@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.model.Address;
@@ -35,6 +36,7 @@ import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -692,6 +694,113 @@ class Ec2ServicePersistenceTest {
         assertTrue(xml.contains("<keyType>rsa</keyType>"), xml);
         assertTrue(xml.contains("<keyType>ed25519</keyType>"), xml);
         assertFalse(xml.contains("<createTime>"), xml);
+    }
+
+    @Test
+    void volumeKmsKeyIdSurvivesRestart(@TempDir Path dir) {
+        String keyArn = "arn:aws:kms:us-east-1:000000000000:key/1234abcd-12ab-34cd-56ef-1234567890ab";
+        String created = query(newService(dir), "CreateVolume", "AvailabilityZone", "us-east-1a", "Size", "1",
+                "Encrypted", "true", "KmsKeyId", keyArn);
+        String volumeId = XmlParser.extractFirst(created, "volumeId", null);
+
+        String described = query(newService(dir), "DescribeVolumes", "VolumeId.1", volumeId);
+
+        assertEquals(List.of("true"), XmlParser.extractAll(described, "encrypted"), described);
+        assertEquals(List.of(keyArn), XmlParser.extractAll(described, "kmsKeyId"), described);
+    }
+
+    /**
+     * A volume store as Floci wrote it before a volume kept its KMS key: an encrypted volume
+     * attached to an instance and an unencrypted one. Both load as they were stored, and
+     * DescribeVolumes leaves {@code kmsKeyId} out: the key the encrypted one was created with was
+     * never recorded, and the region's default may have changed since.
+     */
+    @Test
+    void volumesSavedBeforeTheirKmsKeyWasKeptLoadWithoutOne(@TempDir Path dir) throws IOException {
+        String legacyJson = """
+                {
+                  "us-east-1::vol-0aaaaaaaaaaaaaaaa" : {
+                    "volumeId" : "vol-0aaaaaaaaaaaaaaaa",
+                    "volumeType" : "gp3",
+                    "size" : 20,
+                    "state" : "in-use",
+                    "availabilityZone" : "us-east-1a",
+                    "encrypted" : true,
+                    "iops" : 0,
+                    "throughput" : 125,
+                    "snapshotId" : null,
+                    "createTime" : "2026-10-20T01:38:17.105Z",
+                    "multiAttachEnabled" : null,
+                    "region" : "us-east-1",
+                    "tags" : [ {
+                      "key" : "Team",
+                      "value" : "blue"
+                    } ],
+                    "attachments" : [ {
+                      "instanceId" : "i-0aaaaaaaaaaaaaaaa",
+                      "device" : "/dev/sdf",
+                      "state" : "attached",
+                      "attachTime" : "2026-10-20T01:39:02.411Z",
+                      "deleteOnTermination" : false,
+                      "volumeId" : "vol-0aaaaaaaaaaaaaaaa"
+                    } ]
+                  },
+                  "us-east-1::vol-0bbbbbbbbbbbbbbbb" : {
+                    "volumeId" : "vol-0bbbbbbbbbbbbbbbb",
+                    "volumeType" : "gp2",
+                    "size" : 8,
+                    "state" : "available",
+                    "availabilityZone" : "us-east-1b",
+                    "encrypted" : false,
+                    "iops" : 0,
+                    "throughput" : null,
+                    "snapshotId" : null,
+                    "createTime" : "2026-10-20T01:38:17.112Z",
+                    "multiAttachEnabled" : null,
+                    "region" : "us-east-1",
+                    "tags" : [ ],
+                    "attachments" : [ ]
+                  }
+                }
+                """;
+        Files.writeString(dir.resolve("ec2-volumes.json"), legacyJson);
+
+        Ec2Service restarted = newService(dir);
+
+        Map<String, Volume> restored = new HashMap<>();
+        for (Volume volume : restarted.describeVolumes(REGION, List.of(), Map.of())) {
+            restored.put(volume.getVolumeId(), volume);
+        }
+        assertEquals(2, restored.size());
+        Volume encrypted = restored.get("vol-0aaaaaaaaaaaaaaaa");
+        assertTrue(encrypted.isEncrypted());
+        assertEquals(20, encrypted.getSize());
+        assertEquals(125, encrypted.getThroughput());
+        assertEquals("i-0aaaaaaaaaaaaaaaa", encrypted.getAttachments().getFirst().getInstanceId());
+        assertEquals("blue", encrypted.getTags().getFirst().getValue());
+        assertFalse(restored.get("vol-0bbbbbbbbbbbbbbbb").isEncrypted());
+
+        String described = query(restarted, "DescribeVolumes");
+        List<String> volumeIds = XmlParser.extractAll(described, "volumeId");
+        assertTrue(volumeIds.contains("vol-0aaaaaaaaaaaaaaaa"), described);
+        assertTrue(volumeIds.contains("vol-0bbbbbbbbbbbbbbbb"), described);
+        assertTrue(XmlParser.extractAll(described, "encrypted").contains("true"), described);
+        assertEquals(List.of(), XmlParser.extractAll(described, "kmsKeyId"), described);
+    }
+
+    private static String query(Ec2Service service, String action, String... params) {
+        MultivaluedHashMap<String, String> form = new MultivaluedHashMap<>();
+        for (int i = 0; i < params.length; i += 2) {
+            form.add(params[i], params[i + 1]);
+        }
+        Response response = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
+                mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
+                mock(Ec2SnapshotBlockPublicAccessService.class), mock(Ec2IpamService.class),
+                new RegionResolver(REGION, "000000000000"))
+                .handle(action, form, REGION);
+        String body = String.valueOf(response.getEntity());
+        assertEquals(200, response.getStatus(), action + ": " + body);
+        return body;
     }
 
     private static String jsonString(String value) {

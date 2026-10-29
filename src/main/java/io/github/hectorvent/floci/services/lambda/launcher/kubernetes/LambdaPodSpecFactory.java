@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Pattern;
 
 /**
  * Builds the Pod manifest for one Lambda execution environment, as a plain JSON tree (see
@@ -28,11 +29,11 @@ public class LambdaPodSpecFactory {
     private static final Logger LOG = Logger.getLogger(LambdaPodSpecFactory.class);
 
     /** Label key: optional DNS-subdomain prefix (dot-separated valid segments), then a 63-char-max name. */
-    private static final java.util.regex.Pattern LABEL_KEY =
-            java.util.regex.Pattern.compile("([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[a-zA-Z0-9]([-a-zA-Z0-9_.]{0,61}[a-zA-Z0-9])?");
+    private static final Pattern LABEL_KEY =
+            Pattern.compile("([a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?[a-zA-Z0-9]([-a-zA-Z0-9_.]{0,61}[a-zA-Z0-9])?");
     /** Label value: empty, or 63-char-max alphanumeric-bounded. */
-    private static final java.util.regex.Pattern LABEL_VALUE =
-            java.util.regex.Pattern.compile("([a-zA-Z0-9]([-a-zA-Z0-9_.]{0,61}[a-zA-Z0-9])?)?");
+    private static final Pattern LABEL_VALUE =
+            Pattern.compile("([a-zA-Z0-9]([-a-zA-Z0-9_.]{0,61}[a-zA-Z0-9])?)?");
 
     static final String MANAGED_BY_LABEL = "app.kubernetes.io/managed-by";
     static final String MANAGED_BY_VALUE = "floci";

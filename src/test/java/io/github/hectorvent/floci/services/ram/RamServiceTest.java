@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.ram.model.ResourceShare;
 import io.github.hectorvent.floci.services.ram.model.ResourceShareAssociation;
 import io.github.hectorvent.floci.services.ram.model.ResourceShareInvitation;
 import io.github.hectorvent.floci.services.ram.model.SharedResource;
+import io.github.hectorvent.floci.testing.ThreadStates;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -33,6 +34,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -570,6 +573,45 @@ class RamServiceTest {
     }
 
     @Test
+    void concurrentTagAndDisassociateDoNotLoseEitherMutation() throws Exception {
+        TestStorageFactory storage = new TestStorageFactory(false);
+        RamService concurrentService = new RamService(storage, null);
+        concurrentService.initializeStorage();
+        ResourceShare share = concurrentService.createResourceShare(
+                "concurrent-mutation", List.of(), List.of(TGW_ARN), false, "us-east-1", OWNER);
+        storage.armShareScans();
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        AtomicReference<Thread> tagThread = new AtomicReference<>();
+        try {
+            Future<?> disassociate = executor.submit(() -> concurrentService.disassociateResourceShare(
+                    share.getResourceShareArn(), List.of(TGW_ARN), List.of(), OWNER, "us-east-1"));
+            assertTrue(storage.awaitFirstShareScan(), "the disassociation must reach its share scan");
+            Future<?> tag = executor.submit(() -> {
+                tagThread.set(Thread.currentThread());
+                concurrentService.tagResource(share.getResourceShareArn(), Map.of("race", "preserve"),
+                        OWNER, "us-east-1");
+            });
+            ThreadStates.awaitBlockedOrDone(tagThread, tag);
+            assertTrue(tag.isDone() || storage.firstShareScanReleased()
+                            || tagThread.get() != null && tagThread.get().getState() == Thread.State.BLOCKED,
+                    "the tag worker must scan or block on the service lock");
+            storage.releaseFirstShareScan();
+            disassociate.get(15, TimeUnit.SECONDS);
+            tag.get(15, TimeUnit.SECONDS);
+        } finally {
+            storage.releaseFirstShareScan();
+            executor.shutdownNow();
+        }
+
+        ResourceShare stored = concurrentService.getResourceShares(OWNER, "SELF", "us-east-1").getFirst();
+        assertTrue(stored.getResourceArns().isEmpty(),
+                "the disassociation must survive the concurrent tag update");
+        assertEquals("preserve", stored.getTags().get("race"),
+                "the tag must survive the concurrent disassociation");
+    }
+
+    @Test
     void accountPrincipalWithoutOrganizationSharingCreatesPendingInvitation() {
         ResourceShare share = service.createResourceShare(
                 "direct-share", List.of(ACCEPTER), List.of(TGW_ARN), false, "us-east-1", OWNER);
@@ -877,12 +919,32 @@ class RamServiceTest {
         private void armShareReads() {
             rawStores.get("ram-resource-shares.json").armReads();
         }
+
+        private void armShareScans() {
+            rawStores.get("ram-resource-shares.json").armScans();
+        }
+
+        private boolean awaitFirstShareScan() throws InterruptedException {
+            return rawStores.get("ram-resource-shares.json").firstScanEntered.await(5, TimeUnit.SECONDS);
+        }
+
+        private void releaseFirstShareScan() {
+            rawStores.get("ram-resource-shares.json").releaseFirstScan.countDown();
+        }
+
+        private boolean firstShareScanReleased() {
+            return rawStores.get("ram-resource-shares.json").releaseFirstScan.getCount() == 0;
+        }
     }
 
     private static final class RawStorage extends InMemoryStorage<String, Object> {
         private final boolean coordinateReads;
         private final AtomicInteger coordinatedReads = new AtomicInteger();
         private volatile CountDownLatch readGate = new CountDownLatch(0);
+        private final AtomicInteger coordinatedScans = new AtomicInteger();
+        private volatile CountDownLatch firstScanEntered = new CountDownLatch(0);
+        private volatile CountDownLatch releaseFirstScan = new CountDownLatch(0);
+        private volatile boolean coordinateScans;
 
         private RawStorage(boolean coordinateReads) {
             this.coordinateReads = coordinateReads;
@@ -891,6 +953,35 @@ class RamServiceTest {
         private void armReads() {
             coordinatedReads.set(0);
             readGate = new CountDownLatch(2);
+        }
+
+        private void armScans() {
+            coordinatedScans.set(0);
+            firstScanEntered = new CountDownLatch(1);
+            releaseFirstScan = new CountDownLatch(1);
+            coordinateScans = true;
+        }
+
+        @Override
+        public List<Object> scan(Predicate<String> keyFilter) {
+            List<Object> snapshot = super.scan(keyFilter);
+            if (!coordinateScans) {
+                return snapshot;
+            }
+            int scanNumber = coordinatedScans.incrementAndGet();
+            if (scanNumber == 1) {
+                firstScanEntered.countDown();
+                try {
+                    assertTrue(releaseFirstScan.await(5, TimeUnit.SECONDS),
+                            "the first share scan must be released");
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError("share scan interrupted", e);
+                }
+            } else if (scanNumber == 2) {
+                releaseFirstScan.countDown();
+            }
+            return snapshot;
         }
 
         @Override

@@ -1027,6 +1027,37 @@ class EventBridgeServiceTest {
         assertEquals(1, result.failedCount());
     }
 
+    /**
+     * A request's entry for an event bus that does not exist is answered as published and dropped: it gets an
+     * event id, is not counted as failed and reaches no rule, the default bus's included. An entry that is not
+     * valid still fails, whatever bus it names.
+     */
+    @Test
+    void aRequestsEntryForANonExistentBusIsAnsweredAsPublishedAndDropped() {
+        service.putRule("on-my-app", null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                null, null, null, REGION);
+        Target target = new Target();
+        target.setId("t1");
+        target.setArn("arn:aws:sqs:us-east-1:000000000000:queue-1");
+        service.putTargets("on-my-app", null, List.of(target), REGION);
+
+        EventBridgeService.PutEventsResult result = service.putEventsFromRequest(List.of(
+                Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}", "EventBusName", "non-existent-bus"),
+                Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}"),
+                Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{", "EventBusName", "non-existent-bus")),
+                REGION);
+
+        assertEquals(1, result.failedCount());
+        assertEquals(3, result.entries().size());
+        assertNotNull(result.entries().get(0).get("EventId"));
+        assertNull(result.entries().get(0).get("ErrorCode"));
+        assertNotNull(result.entries().get(1).get("EventId"));
+        assertEquals("MalformedDetail", result.entries().get(2).get("ErrorCode"));
+        verify(dispatcherMock).dispatch(anyString(), any(Target.class),
+                contains("\"event-bus-name\":\"default\""), anyString(), any());
+        verify(dispatcherMock).dispatch(anyString(), any(Target.class), anyString(), anyString(), any());
+    }
+
     @Test
     void putEventsShouldInvokeLambdaTarget() {
         service.putRule("my-rule", null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,

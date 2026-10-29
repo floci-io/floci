@@ -2,9 +2,12 @@ package io.github.hectorvent.floci.core.common;
 
 import com.fasterxml.jackson.databind.JsonNode;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.util.Comparator;
 import java.util.List;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 /**
@@ -75,6 +78,33 @@ public final class Pagination {
                 prefix, Pagination::encodeToken);
     }
 
+    /** Paginates namespaced cursors that are invalid after the supplied lifetime. */
+    public static <T> PaginatedResult<T> paginateExpiring(List<T> all, Function<T, String> cursorOf,
+                                                           int limit, String nextToken, String namespace,
+                                                           Clock clock, Duration lifetime, SignedMarkers markers,
+                                                           Function<String, AwsException> invalidToken) {
+        return paginateExpiring(() -> all, cursorOf, limit, nextToken, namespace, clock, lifetime,
+                markers, invalidToken);
+    }
+
+    /** Decodes the token before loading items whose lookup can fail independently. */
+    public static <T> PaginatedResult<T> paginateExpiring(Supplier<List<T>> all, Function<T, String> cursorOf,
+                                                           int limit, String nextToken, String namespace,
+                                                           Clock clock, Duration lifetime, SignedMarkers markers,
+                                                           Function<String, AwsException> invalidToken) {
+        if (limit < 1) {
+            throw new IllegalArgumentException("limit must be at least 1, was " + limit);
+        }
+        if (lifetime.isNegative()) {
+            throw new IllegalArgumentException("lifetime must not be negative, was " + lifetime);
+        }
+        String prefix = namespace + ":";
+        long nowMillis = clock.millis();
+        String after = decodeExpiringCursor(nextToken, prefix, nowMillis, lifetime.toMillis(), markers, invalidToken);
+        String tokenPrefix = prefix + nowMillis + ":";
+        return slice(all.get(), cursorOf, limit, after, tokenPrefix, markers::issue);
+    }
+
     /** Paginates with instance-signed markers, optionally scoped by a prefix within the signed cursor. */
     public static <T> PaginatedResult<T> paginate(List<T> all, Function<T, String> cursorOf,
                                                   int limit, String marker, SignedMarkers markers,
@@ -98,14 +128,38 @@ public final class Pagination {
                                                   Integer maxResults, String nextToken,
                                                   int defaultPageSize, int maxResultsLimit, int maxTokenLength,
                                                   String errorCode, String namespace) {
+        validatePageSizeAndToken(maxResults, nextToken, maxResultsLimit, maxTokenLength, errorCode,
+                false, "Pagination token must not exceed " + maxTokenLength + " characters.");
+        return paginate(all, cursorOf, maxResults == null ? defaultPageSize : maxResults, nextToken, namespace,
+                token -> new AwsException(errorCode, "Invalid pagination token.", 400));
+    }
+
+    /**
+     * Paginates a list whose cursor is itself a valid API token. Unlike the namespaced overloads,
+     * this leaves the sorted cursor unencoded in the response, so an API whose resource name is
+     * also its token can resume after that resource has been removed.
+     */
+    public static <T> PaginatedResult<T> paginateUnencoded(List<T> all, Function<T, String> cursorOf,
+                                                            Integer maxResults, String nextToken,
+                                                            int defaultPageSize, int maxResultsLimit,
+                                                            int maxTokenLength, String errorCode) {
+        validatePageSizeAndToken(maxResults, nextToken, maxResultsLimit, maxTokenLength, errorCode,
+                true, "Pagination token must be between 1 and " + maxTokenLength + " characters.");
+        int limit = maxResults == null ? defaultPageSize : maxResults;
+        return slice(all, cursorOf, limit, nextToken, "", Function.identity());
+    }
+
+    private static void validatePageSizeAndToken(Integer maxResults, String nextToken,
+                                                  int maxResultsLimit, int maxTokenLength,
+                                                  String errorCode, boolean tokenMustBeNonEmpty,
+                                                  String tokenErrorMessage) {
         if (maxResults != null && (maxResults < 1 || maxResults > maxResultsLimit)) {
             throw new AwsException(errorCode, "Page size must be between 1 and " + maxResultsLimit + ".", 400);
         }
-        if (nextToken != null && nextToken.length() > maxTokenLength) {
-            throw new AwsException(errorCode, "Pagination token must not exceed " + maxTokenLength + " characters.", 400);
+        if (nextToken != null
+                && ((tokenMustBeNonEmpty && nextToken.isEmpty()) || nextToken.length() > maxTokenLength)) {
+            throw new AwsException(errorCode, tokenErrorMessage, 400);
         }
-        return paginate(all, cursorOf, maxResults == null ? defaultPageSize : maxResults, nextToken, namespace,
-                token -> new AwsException(errorCode, "Invalid pagination token.", 400));
     }
 
     /** Reads an optional JSON page size without coercing strings, fractions, or overflowing integers. */
@@ -195,6 +249,26 @@ public final class Pagination {
             throw invalidToken.apply(token);
         }
         return decoded.substring(prefix.length());
+    }
+
+    private static String decodeExpiringCursor(String token, String prefix, long nowMillis,
+                                               long lifetimeMillis, SignedMarkers markers,
+                                               Function<String, AwsException> invalidToken) {
+        if (token == null || token.isEmpty()) {
+            return null;
+        }
+        String decoded = markers.cursorOf(token);
+        if (decoded == null || !decoded.startsWith(prefix)) {
+            throw invalidToken.apply(token);
+        }
+        String issuedAndCursor = decoded.substring(prefix.length());
+        int separator = issuedAndCursor.indexOf(':');
+        long issuedMillis = Long.parseLong(issuedAndCursor.substring(0, separator));
+        long ageMillis = nowMillis - issuedMillis;
+        if (issuedMillis > nowMillis || ageMillis > lifetimeMillis) {
+            throw invalidToken.apply(token);
+        }
+        return issuedAndCursor.substring(separator + 1);
     }
 
     private static String decodeToken(String token) {

@@ -29,6 +29,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -493,6 +494,35 @@ class SqsEventSourcePollerTest {
         fn.setTimeout(10);
         when(functionStore.getForAccount("000000000000", "us-east-1", "throwfn")).thenReturn(Optional.of(fn));
         return fn;
+    }
+
+    @Test
+    void largeBatchesUseLegalReceiveCountsAndStillDeliverTheWholeBatch() throws Exception {
+        LambdaFunction fn = stubThrowFn();
+        EventSourceMapping esm = esm();
+        esm.setBatchSize(25);
+        esm.setMaximumBatchingWindowInSeconds(300);
+        poller.setClockForTest(() -> 0L);
+        List<Message> messages = new ArrayList<>();
+        for (int i = 0; i < 25; i++) {
+            messages.add(message("large-" + i));
+        }
+        AtomicInteger position = new AtomicInteger();
+        when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenAnswer(call -> {
+                    int count = call.getArgument(1);
+                    assertTrue(count >= 1 && count <= 10);
+                    int start = position.getAndAdd(count);
+                    return messages.subList(start, Math.min(start + count, messages.size()));
+                });
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+        for (int i = 0; i < 3; i++) {
+            awaitPoll(poller.pollAndInvoke(esm));
+        }
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService).invoke(eq(fn), payload.capture(), eq(InvocationType.RequestResponse));
+        assertEquals(25, OBJECT_MAPPER.readTree(payload.getValue()).path("Records").size());
     }
 
     private void stubReceive(EventSourceMapping esm, List<Message> messages) {

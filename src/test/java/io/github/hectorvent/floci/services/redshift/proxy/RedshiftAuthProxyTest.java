@@ -236,6 +236,33 @@ class RedshiftAuthProxyTest {
     }
 
     @Test
+    void activeConnectionsCountsOpenClientsAndFallsOnClose() throws Exception {
+        fakeBackend = new ServerSocket(0);
+        int proxyPort = FreePorts.anyInterfacePort();
+        proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
+                "admin", "Secret123", "dev",
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
+                mock(S3Service.class), mock(IamService.class), 5000, 5000, 5);
+        proxy.start(proxyPort);
+        assertEquals(0, proxy.activeConnections());
+
+        try (Socket first = new Socket("localhost", proxyPort); Socket second = new Socket("localhost", proxyPort)) {
+            awaitActiveConnections(2);
+            first.close();
+            awaitActiveConnections(1);
+        }
+        awaitActiveConnections(0);
+    }
+
+    private void awaitActiveConnections(int expected) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (proxy.activeConnections() != expected && System.nanoTime() < deadline) {
+            Thread.sleep(25);
+        }
+        assertEquals(expected, proxy.activeConnections());
+    }
+
+    @Test
     void startRetriesTheBindWhileThePortIsMomentarilyStillInUse() throws Exception {
         fakeBackend = new ServerSocket(0);
         int proxyPort = FreePorts.anyInterfacePort();

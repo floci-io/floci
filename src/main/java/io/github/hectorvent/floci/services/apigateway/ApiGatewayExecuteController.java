@@ -43,6 +43,7 @@ import io.github.hectorvent.floci.services.apigatewayv2.JwtSignatureVerifier;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
+import io.github.hectorvent.floci.services.apigatewayv2.proxy.CloudMapInstanceResolver;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.ConnectionInfo;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.WebSocketConnectionManager;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
@@ -91,6 +92,8 @@ import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 import java.util.stream.Collectors;
 
+// apigatewayv2.model.Integration (HTTP API) clashes with the imported REST Integration, so it is written in full.
+
 /**
  * Executes API Gateway stage requests, routing them through the configured
  * integration (AWS_PROXY, AWS, HTTP_PROXY, HTTP or MOCK).
@@ -107,6 +110,8 @@ public class ApiGatewayExecuteController {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayExecuteController.class);
     private static final TypeReference<Map<String, Object>> MAP_TYPE = new TypeReference<>() {};
+    private static final String DEFAULT_STAGE = "$default";
+    private static final int EXECUTE_API_PREFIX_SEGMENTS = 2;
     private static final Set<String> V2_TEXT_CONTENT_TYPES = Set.of(
             MediaType.TEXT_PLAIN,
             MediaType.TEXT_HTML,
@@ -135,6 +140,7 @@ public class ApiGatewayExecuteController {
     private final ExecuteApiSigV4Authorizer sigV4Authorizer;
     private final RestLambdaAuthorizer restLambdaAuthorizer;
     private final AuthorizerPolicyEvaluator authorizerPolicyEvaluator;
+    private final CloudMapInstanceResolver cloudMapInstanceResolver;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, CognitoUserPoolAuthorizer cognitoAuthorizer,
@@ -149,7 +155,8 @@ public class ApiGatewayExecuteController {
                                        JwtSignatureVerifier jwtSignatureVerifier,
                                        RequestContext requestContext,
                                        ExecuteApiSigV4Authorizer sigV4Authorizer, RestLambdaAuthorizer restLambdaAuthorizer,
-                                       AuthorizerPolicyEvaluator authorizerPolicyEvaluator) {
+                                       AuthorizerPolicyEvaluator authorizerPolicyEvaluator,
+                                       CloudMapInstanceResolver cloudMapInstanceResolver) {
         this.apiGatewayService = apiGatewayService;
         this.cognitoAuthorizer = cognitoAuthorizer;
         this.apiGatewayV2Service = apiGatewayV2Service;
@@ -171,6 +178,7 @@ public class ApiGatewayExecuteController {
         this.sigV4Authorizer = sigV4Authorizer;
         this.restLambdaAuthorizer = restLambdaAuthorizer;
         this.authorizerPolicyEvaluator = authorizerPolicyEvaluator;
+        this.cloudMapInstanceResolver = cloudMapInstanceResolver;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -791,27 +799,46 @@ public class ApiGatewayExecuteController {
                 connectionId = scope.stage().getVariables().get(stageVariable.group(1));
             }
         }
-        if (connectionId == null || connectionId.isBlank()) {
-            return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500,
-                    "VPC_LINK integration is missing a connectionId");
+        VpcLinkFailure failure = checkVpcLink(region, connectionId, true);
+        if (failure == null) {
+            return null;
         }
-        String status;
-        try {
-            status = apiGatewayService.getVpcLink(region, connectionId).getStatus();
-        } catch (AwsException e) {
+        if (failure.status() == 500) {
+            return gatewayResponse(scope, GatewayResponseType.API_CONFIGURATION_ERROR, 500, failure.message());
+        }
+        return httpApiError(failure.status(), failure.message());
+    }
+
+    private record VpcLinkFailure(int status, String message) {
+    }
+
+    /**
+     * The checks shared by the REST and HTTP API paths: the connection id is present, names an
+     * existing link ({@code includeRestLinks} also searches the REST API VPC links), and the link is
+     * {@code AVAILABLE}. Returns {@code null} when the request may proceed.
+     */
+    private VpcLinkFailure checkVpcLink(String region, String connectionId, boolean includeRestLinks) {
+        if (connectionId == null || connectionId.isBlank()) {
+            return new VpcLinkFailure(500, "VPC_LINK integration is missing a connectionId");
+        }
+        String status = null;
+        if (includeRestLinks) {
+            try {
+                status = apiGatewayService.getVpcLink(region, connectionId).getStatus();
+            } catch (AwsException ignored) {
+                // not a REST API VPC link: fall through to the HTTP API links
+            }
+        }
+        if (status == null) {
             try {
                 status = apiGatewayV2Service.getVpcLink(region, connectionId).getVpcLinkStatus();
-            } catch (AwsException ignored) {
+            } catch (AwsException e) {
                 LOG.warnv("VPC_LINK integration references unknown link {0} in {1}", connectionId, region);
-                return Response.status(502)
-                        .entity(jsonMessage("Invalid VPC link identifier specified: " + connectionId))
-                        .type(MediaType.APPLICATION_JSON).build();
+                return new VpcLinkFailure(502, "Invalid VPC link identifier specified: " + connectionId);
             }
         }
         if (!"AVAILABLE".equalsIgnoreCase(status)) {
-            return Response.status(502)
-                    .entity(jsonMessage("VPC link is not available: " + status))
-                    .type(MediaType.APPLICATION_JSON).build();
+            return new VpcLinkFailure(502, "VPC link is not available: " + status);
         }
         return null;
     }
@@ -2837,7 +2864,7 @@ public class ApiGatewayExecuteController {
 
         if ("HTTP_PROXY".equalsIgnoreCase(integrationType)) {
             return dispatchHttpProxyV2(integration, route, httpMethod, path, headers, uriInfo, body,
-                    apiId, stageName, jwtClaims);
+                    apiId, stageName, jwtClaims, lambdaAuthorizerContext, region);
         }
 
         String functionName = functionNameFromUri(integration.getIntegrationUri());
@@ -2890,7 +2917,9 @@ public class ApiGatewayExecuteController {
     private Response dispatchHttpProxyV2(io.github.hectorvent.floci.services.apigatewayv2.model.Integration integration,
                                           Route route, String httpMethod, String path,
                                           HttpHeaders headers, UriInfo uriInfo, byte[] body,
-                                          String apiId, String stageName, Map<String, String> jwtClaims) {
+                                          String apiId, String stageName, Map<String, String> jwtClaims,
+                                          ObjectNode lambdaAuthorizerContext,
+                                          String region) {
         // CDK HttpAlbIntegration sets integrationUri to an ALB listener ARN. Resolve it
         // to the listener's bound localhost port so HttpProxyInvoker (which assumes a
         // concrete http(s) URL) can forward through the listener's data plane.
@@ -2907,9 +2936,31 @@ public class ApiGatewayExecuteController {
                             .entity(jsonMessage("Bad Gateway: cannot resolve ALB listener: " + integrationUri))
                             .type(MediaType.APPLICATION_JSON).build();
                 }
-                String resolvedUrl = "http://127.0.0.1:" + listenerEndpoint.port() + path;
+                String resolvedUrl = "http://127.0.0.1:" + listenerEndpoint.port() + proxyTargetPath(path, uriInfo, stageName);
                 effective = withResolvedUriAndHost(integration, resolvedUrl, listenerEndpoint.host());
                 LOG.debugv("ALB integration: listener {0} → {1}", integrationUri, resolvedUrl);
+            } else if (isCloudMapIntegration(integration)) {
+                Response vpcLinkError = validateVpcLinkV2(region, integration);
+                if (vpcLinkError != null) {
+                    return vpcLinkError;
+                }
+                CloudMapInstanceResolver.Endpoint instance;
+                try {
+                    instance = cloudMapInstanceResolver.pickInstance(integrationUri).orElse(null);
+                } catch (AwsException e) {
+                    LOG.warnv("Cloud Map service unresolvable for v2 integration: {0}: {1}",
+                            integrationUri, e.getMessage());
+                    return Response.status(502)
+                            .entity(jsonMessage("Bad Gateway: cannot resolve Cloud Map service: " + integrationUri))
+                            .type(MediaType.APPLICATION_JSON).build();
+                }
+                if (instance == null) {
+                    LOG.debugv("Cloud Map service {0} has no healthy instance to route to", integrationUri);
+                    return httpApiError(503, "Service Unavailable");
+                }
+                String resolvedUrl = "http://" + instance.address() + ":" + instance.port() + proxyTargetPath(path, uriInfo, stageName);
+                effective = withResolvedUri(integration, resolvedUrl);
+                LOG.debugv("Cloud Map integration: {0} → {1}:{2}", integrationUri, instance.address(), instance.port());
             }
         }
 
@@ -2945,6 +2996,8 @@ public class ApiGatewayExecuteController {
         // would otherwise have $context.authorizer.claims.* resolve from the unverified header
         // token instead of the one the authorizer actually checked.
         Map<String, Object> claims = jwtClaims != null ? Map.copyOf(jwtClaims) : Map.of();
+        Map<String, Object> authorizerContext = lambdaAuthorizerContext == null
+                ? Map.of() : objectMapper.convertValue(lambdaAuthorizerContext, MAP_TYPE);
 
         String sourceIp = requestHeaders.getOrDefault("X-Forwarded-For", "127.0.0.1");
         io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext ctx =
@@ -2953,7 +3006,7 @@ public class ApiGatewayExecuteController {
                         pathParams.getOrDefault("proxy", ""), route.getRouteKey(),
                         UUID.randomUUID().toString(), sourceIp,
                         requestHeaders, queryParams, pathParams, body,
-                        claims, Map.of(), multiValueHeaders, multiValueQueryParams);
+                        claims, authorizerContext, multiValueHeaders, multiValueQueryParams);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → HTTP_PROXY {4}",
                 httpMethod, apiId, stageName, path, effective.getIntegrationUri());
@@ -2971,6 +3024,22 @@ public class ApiGatewayExecuteController {
             }
         }
         return rb.build();
+    }
+
+    private static boolean isCloudMapIntegration(
+            io.github.hectorvent.floci.services.apigatewayv2.model.Integration integration) {
+        return "VPC_LINK".equalsIgnoreCase(integration.getConnectionType())
+                && CloudMapInstanceResolver.isServiceArn(integration.getIntegrationUri());
+    }
+
+    /**
+     * The HTTP API counterpart of {@link #validateVpcLink}: a {@code VPC_LINK} integration must name
+     * a v2 VPC link that exists and is {@code AVAILABLE}, with the same statuses and messages.
+     */
+    private Response validateVpcLinkV2(String region,
+            io.github.hectorvent.floci.services.apigatewayv2.model.Integration integration) {
+        VpcLinkFailure failure = checkVpcLink(region, integration.getConnectionId(), false);
+        return failure == null ? null : httpApiError(failure.status(), failure.message());
     }
 
     /** Returns listener endpoint details, or null if the ARN is unknown or lookups fail. */
@@ -4269,6 +4338,33 @@ public class ApiGatewayExecuteController {
     }
 
     // ──────────────────────────── Path matching ────────────────────────────
+
+    /**
+     * The request path a private integration sends to its backend, as the caller encoded it. API Gateway keeps
+     * the stage segment in it, except for {@code $default}, which has none.
+     */
+    static String rawTargetPath(String normalizedPath, String rawRequestPath, String stageName) {
+        boolean defaultStage = DEFAULT_STAGE.equals(stageName);
+        if (rawRequestPath != null) {
+            int start = 0;
+            int segments = EXECUTE_API_PREFIX_SEGMENTS + (defaultStage ? 1 : 0);
+            for (int segment = 0; segment < segments && start >= 0; segment++) {
+                start = rawRequestPath.indexOf('/', start + 1);
+            }
+            if (start >= 0) {
+                return rawRequestPath.substring(start);
+            }
+            if (defaultStage && rawRequestPath.startsWith("/execute-api/")) {
+                return "/";
+            }
+        }
+        String path = preserveTrailingSlash(normalizedPath, rawRequestPath);
+        return defaultStage ? path : "/" + stageName + path;
+    }
+
+    private static String proxyTargetPath(String normalizedPath, UriInfo uriInfo, String stageName) {
+        return rawTargetPath(normalizedPath, uriInfo.getRequestUri().getRawPath(), stageName);
+    }
 
     /**
      * Re-appends a trailing slash that the JAX-RS {@code {proxy}} path-param binding strips.

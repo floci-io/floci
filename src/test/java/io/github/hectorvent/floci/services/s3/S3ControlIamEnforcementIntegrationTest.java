@@ -503,6 +503,74 @@ class S3ControlIamEnforcementIntegrationTest {
                 .body(containsString("<Code>NoSuchBucket</Code>"));
     }
 
+    /**
+     * TagResource is checked with the tags it sends as {@code aws:RequestTag/<key>} and
+     * {@code aws:TagKeys}, the condition keys the Service Authorization Reference lists for it.
+     */
+    @Test
+    void tagResourceIsCheckedAgainstTheTagsItsRequestSends() {
+        String bucket = bucketWithTags("control-request-tag");
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:TagResource","Resource":"arn:aws:s3:::%1$s",
+                   "Condition":{"StringEquals":{"aws:RequestTag/Owner":"team"}}}]}"""
+                .formatted(bucket));
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+                .contentType("application/xml")
+                .body("<Tagging><Tags><Tag><Key>Owner</Key><Value>team</Value></Tag></Tags></Tagging>")
+        .when()
+                .post("/v20180820/tags/arn:aws:s3:::" + bucket)
+        .then()
+                .statusCode(204);
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+                .contentType("application/xml")
+                .body("<Tagging><Tags><Tag><Key>Owner</Key><Value>other</Value></Tag></Tags></Tagging>")
+        .when()
+                .post("/v20180820/tags/arn:aws:s3:::" + bucket)
+        .then()
+                .statusCode(403)
+                .body(containsString("is not authorized to perform: s3:TagResource"));
+    }
+
+    /**
+     * UntagResource is checked with the keys it removes as {@code aws:TagKeys}, the condition key
+     * the Service Authorization Reference lists for it.
+     */
+    @Test
+    void untagResourceIsCheckedAgainstTheKeysItsRequestNames() {
+        String bucket = bucketWithTags("control-tag-keys");
+        String user = userWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:UntagResource","Resource":"arn:aws:s3:::%1$s",
+                   "Condition":{"ForAllValues:StringEquals":{"aws:TagKeys":["Env"]}}}]}"""
+                .formatted(bucket));
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+                .queryParam("tagKeys", "Env", "Owner")
+        .when()
+                .delete("/v20180820/tags/arn:aws:s3:::" + bucket)
+        .then()
+                .statusCode(403)
+                .body(containsString("is not authorized to perform: s3:UntagResource"));
+
+        given()
+                .header("Authorization", auth(user, "s3"))
+                .header("x-amz-account-id", ACCOUNT)
+                .queryParam("tagKeys", "Env")
+        .when()
+                .delete("/v20180820/tags/arn:aws:s3:::" + bucket)
+        .then()
+                .statusCode(204);
+    }
+
     /** A bucket created by the root stand-in, tagged through the data plane, as Terraform reads it. */
     private String bucketWithTags(String prefix) {
         String bucket = prefix + "-" + UUID.randomUUID().toString().substring(0, 8);

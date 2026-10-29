@@ -53,14 +53,18 @@ public interface SparkJobRunner {
      * the release's public EMR Serverless image, a null network the global default); the execution role
      * whose credentials it gets; the {@code spark-defaults} properties that apply to it;
      * {@code application}, what follows Floci's own settings on {@code spark-submit}'s command line (the
-     * run's options, then its application and that application's arguments); how long it may run
+     * run's options, then its application and that application's arguments); or {@code command}, when not
+     * null, what the container runs in place of {@code spark-submit}, where a {@code spark-submit} it starts
+     * gets Floci's settings and the {@code spark-defaults} as defaults (its {@code application} is then
+     * empty); how long it may run
      * ({@link Duration#ZERO} for no limit); the S3 folder its driver's {@code stdout.gz} and
      * {@code stderr.gz} go to once it ends, ending in a slash (null for none); and where in CloudWatch Logs
      * its driver's output goes while it runs (null for nowhere but Floci's log).
      */
     record Job(String service, String runId, String accountId, String region, String releaseLabel,
                String imageTemplate, String dockerNetwork, String executionRole, Map<String, String> sparkDefaults,
-               List<String> application, Duration timeout, String logFolder, CloudWatchLogs cloudWatchLogs) {
+               List<String> application, List<String> command, Duration timeout, String logFolder,
+               CloudWatchLogs cloudWatchLogs) {
     }
 
     /**

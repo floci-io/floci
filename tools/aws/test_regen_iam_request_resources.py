@@ -127,6 +127,22 @@ def test_an_arn_inside_a_structure_or_a_lists_structures_is_read_by_its_path():
     assert r.creates_for("svc:CreateThing", ["thing"], FORMATS, {"Parts[].ThingArn": "Parts[].ThingArn"}) == []
 
 
+def test_a_create_naming_others_marks_what_it_makes():
+    formats = {"webhook": "arn:${Partition}:svc:${Region}:${Account}:webhook:${WebhookName}",
+               "pipeline": "arn:${Partition}:svc:${Region}:${Account}:${PipelineName}",
+               "lb": FORMATS["lb"], "lb/app/": FORMATS["lb/app/"]}
+    webhook = {"type": "webhook", "fill": {"WebhookName": "webhook.name"}}
+    pipeline = {"type": "pipeline", "fill": {"PipelineName": "webhook.targetPipeline"}}
+    assert r.with_made([webhook, pipeline], "svc:PutWebhook", formats) == [dict(webhook, made=True), pipeline]
+    # A type made by its ARN format's leading resource word, so every load balancer type is made; with every
+    # resource made, or none, or for no create, nothing is marked.
+    classic = {"type": "lb", "fill": {"LoadBalancerName": "LoadBalancerName"}}
+    app = {"type": "lb/app/", "fill": {"LoadBalancerName": "Name"}}
+    assert r.with_made([classic, app], "svc:CreateLoadBalancer", formats) == [classic, app]
+    assert r.with_made([pipeline], "svc:PutWebhook", formats) == [pipeline]
+    assert r.with_made([webhook, pipeline], "svc:DescribeWebhook", formats) == [webhook, pipeline]
+
+
 def test_stems_drop_the_suffixes_names_carry():
     assert r.stem("TargetGroupArns") == "targetgroup"
     assert r.stem("DBInstanceIdentifier") == "dbinstance"
@@ -324,6 +340,12 @@ def test_a_well_formed_document_validates():
     document["operations"]["svc:B"]["resources"][0].update(
         fill={"GroupName": "Groups[].Name"}, absent={"Groups[].Name": "default"}, arnOf={"Groups[].Name": "thing"})
     assert r.validate(document) == []
+    # A field of a structure fills a variable, read as one value, and a variable no member fills may be fixed.
+    document = good_document()
+    document["operations"]["svc:B"]["resources"][0].update(
+        fill={"GroupName": "Group.Name"}, absent={"Group.Name": "default"}, fixed={"GroupId": "g-1"}, made=True)
+    document["operations"]["svc:A"]["resources"][0]["made"] = True
+    assert r.validate(document) == []
 
 
 def with_a_create() -> dict:
@@ -337,7 +359,16 @@ def with_a_create() -> dict:
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(types=["pool"]), "not resource types"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a.b.c"), "no member"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a[][]"), "no member"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="Group.Name"), "no variables"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="Group.Names[]"), "no variables"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="A.B.Name"), "no variables"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed={"Other": "x"}), "fixes"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed={"GroupName": "x"}), "fixes"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed={"GroupId": ""}), "fixes"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed={"GroupId": 1}), "fixes"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed=["GroupId"]), "fixes"),
+    (lambda d: d["operations"]["svc:A"]["resources"][0].update(fixed={"GroupId": "x"}), "neither an ARN member"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(made=False), "not true"),
+    (lambda d: d["operations"]["svc:A"]["resources"][0].update(made="true"), "not true"),
     (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="Groups[].Names[]"), "no variables"),
     (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupId="Groups[].Id"), "more than one list"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(absent={"Groups[].Name": "default"}), "absent members"),
@@ -413,8 +444,9 @@ def test_every_correction_is_the_vendored_entry_of_an_operation_the_file_reads()
     assert r.CORRECTIONS
     for operation, (resources, reason) in r.CORRECTIONS.items():
         assert operation in operations and reason, operation
-        # A resource's account and the ARNs its members may give are botocore's, on top of the correction.
-        assert [{key: value for key, value in resource.items() if key not in ("account", "arnOf")}
+        # A resource's account and the ARNs its members may give are botocore's, and whether a create makes it the
+        # rule's, on top of the correction.
+        assert [{key: value for key, value in resource.items() if key not in ("account", "arnOf", "made")}
                 for resource in operations[operation]["resources"]] == resources, operation
 
 

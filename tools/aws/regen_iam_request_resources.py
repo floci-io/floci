@@ -49,7 +49,10 @@ the ARN it gives: `PutEvents`' `Entries[].EventBusName`.
 An operation that creates a type its action does not act on names the new resource from the ARN of the
 parent it acts on, when the child's ARN format is the parent's with its resource type word replaced and
 one id appended (`CreateListener` acts on a load balancer and makes `listener/app/<lb>/<id>/*`); the
-tagging action a create's tags need is checked on it, as AWS checks it on the resource being tagged.
+tagging action a create's tags need is checked on it, as AWS checks it on the resource being tagged. A create
+that names another resource beside the one it makes, the pipeline a webhook connects to or the namespace a
+service is made in, marks the one it makes `made`, of a type, or with an ARN format's leading resource word,
+related to its name past the verb, so its tags are checked there alone.
 
 A type nothing names is not checked: an action lists the optional resources its requests may use
 (`RunInstances` lists `elastic-gpu`), and checking one a request does not name would refuse a grant
@@ -62,10 +65,13 @@ or not. `HAND_BUILT` are the namespaces `ResourceArnBuilder` builds resources fo
 `RequestResourceNamespacesIntegrationTest` fails for a served namespace in none of the three.
 `CORRECTIONS` gives an operation's resources where the rule gets them wrong, each with its reason; a
 resource there may apply only `when` a member has one of some values (`Type` picks the load balancer
-v2 `CreateLoadBalancer` creates), or `unless` it has, read as a value when it is `absent` (an
-EventBridge request naming no event bus names the default one), a variable may be filled from a field
+v2 `CreateLoadBalancer` creates), or `unless` it has, a member given a JSON null counting as absent
+(Cloud Map's handler then reads `DnsConfig.NamespaceId`), and a member read as a value when it is
+`absent` (an EventBridge request naming no event bus names the default one), a variable may be filled from a field
 of each element of a list of structures, one resource for each element and the `absent` value for an
-element lacking it (`PutEvents` publishes each entry to its bus), and an ARN member's value may be read
+element lacking it (`PutEvents` publishes each entry to its bus), or from a structure's field (`pipeline.name`),
+a variable no member gives may be `fixed` to the one value its handler uses (a CodePipeline custom action
+type's owner, `Custom`), and an ARN member's value may be read
 only up to a character `before` which its handler drops the rest (`StartExecution`'s
 `<stateMachineArn>#<test case>`). `CLIENTS_NOT_READ` are SDK clients the reference lists for a
 namespace's operations whose requests Floci does not serve, each with its reason.
@@ -111,7 +117,8 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 
 # The namespaces read, in batches: each moves here from NOT_COVERED with the tests that show its ARNs
 # are the ones its handlers mint.
-NAMESPACES = ("cognito-idp", "ecr", "elasticloadbalancing", "events", "states")
+NAMESPACES = ("acm", "codepipeline", "cognito-identity", "cognito-idp", "ecr", "elasticloadbalancing", "events",
+              "firehose", "servicediscovery", "states")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.
@@ -132,12 +139,15 @@ _REST = "REST: its requests name their resources in the path, which RequestResou
 NOT_COVERED: dict[str, str] = {
     "access-analyzer": _REST,
     "account": _REST,
-    "acm": _LATER,
     "airflow": _REST,
     "apigateway": _REST,
     "app-integrations": _REST,
     "appconfig": _REST,
-    "application-autoscaling": _LATER,
+    "application-autoscaling": "not read yet: a scalable target's ARN ends in an id the service mints, "
+                               "`scalable-target/<id>`, while its requests name the target by ServiceNamespace, "
+                               "ResourceId and ScalableDimension, so its resource is the stored ARN those three "
+                               "find, which RequestResources has no lookup for yet; read as a member, ResourceId "
+                               "would fill that id",
     "appsync": _REST,
     "aps": _REST,
     "athena": _LATER,
@@ -160,8 +170,6 @@ NOT_COVERED: dict[str, str] = {
     "codebuild": _LATER,
     "codedeploy": _LATER,
     "codeguru-reviewer": _REST,
-    "codepipeline": _LATER,
-    "cognito-identity": _LATER,
     "comprehend": _LATER,
     "config": _LATER,
     "connect": _REST,
@@ -181,7 +189,6 @@ NOT_COVERED: dict[str, str] = {
     "emr-serverless": _REST,
     "es": _REST,
     "execute-api": _REST,
-    "firehose": _LATER,
     "fis": _REST,
     "globalaccelerator": _LATER,
     "glue": _LATER,
@@ -214,7 +221,6 @@ NOT_COVERED: dict[str, str] = {
     "sagemaker": _LATER,
     "securityhub": _REST,
     "servicecatalog": _LATER,
-    "servicediscovery": _LATER,
     "servicequotas": _LATER,
     "ses": _LATER,
     "signin": _REST,
@@ -240,6 +246,38 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
         {"type": "loadbalancer/net/", "fill": {"LoadBalancerName": "Name"}, "when": {"Type": ["network"]}},
     ], "the classic API names its load balancer by LoadBalancerName; the v2 API by Name, its type by Type, "
        "an application load balancer when it gives none, which the rule cannot tell apart"),
+    **{f"codepipeline:{operation}": ([{"type": "pipeline", "fill": {"PipelineName": "pipeline.name"}}],
+                                     "the request names the pipeline by its pipeline structure's name, which the "
+                                     "rule does not read inside a structure; its roleArn is the role CodePipeline "
+                                     "assumes, an IAM role's ARN by botocore's pattern, never a pipeline's, so it "
+                                     "names no pipeline")
+       for operation in ("CreatePipeline", "UpdatePipeline")},
+    "codepipeline:PutWebhook": ([{"type": "webhook", "fill": {"WebhookName": "webhook.name"}},
+                                 {"type": "pipeline", "fill": {"PipelineName": "webhook.targetPipeline"}}],
+                                "the request names the webhook by its webhook structure's name and the pipeline it "
+                                "connects to by its targetPipeline ('The name of the pipeline you want to connect to "
+                                "the webhook'), which the rule does not read inside a structure"),
+    **{f"codepipeline:{operation}": ([{"type": "actiontype", "fill": {"Category": "category", "Provider": "provider",
+                                                                      "Version": "version"},
+                                       "fixed": {"Owner": "Custom"}}],
+                                     "a custom action type's owner is Custom, which the request does not give: the API "
+                                     "Reference's CreateCustomActionType example answers \"owner\": \"Custom\", and "
+                                     "PollForJobs is valid only for action types with Custom in the owner field")
+       for operation in ("CreateCustomActionType", "DeleteCustomActionType")},
+    "servicediscovery:CreateService": ([
+        {"type": "namespace", "fill": {"NamespaceId": "NamespaceId"}, "unless": {"NamespaceId": [None]}},
+        {"type": "namespace", "fill": {"NamespaceId": "DnsConfig.NamespaceId"}, "when": {"NamespaceId": [None]}},
+        {"type": "service", "fill": {}},
+    ], "the request names its namespace by NamespaceId or, when it gives none or a JSON null, by "
+       "DnsConfig.NamespaceId, which botocore keeps ('Use NamespaceId in Service instead') and Cloud Map's handler "
+       "reads then; the rule does not read a structure's member, and names the service the request creates with "
+       "every variable open"),
+    **{f"codepipeline:{operation}": ([{"type": "pipeline", "fill": {"PipelineName": "name"}}],
+                                     f"the request names the pipeline by a bare name, '{doc}' in botocore's model, "
+                                     "which the rule reads only for an operation named after the type")
+       for operation, doc in (("GetPipelineState", "The name of the pipeline about which you want to get "
+                                                   "information"),
+                              ("StartPipelineExecution", "The name of the pipeline to start"))},
     **{f"events:{operation}": ([
         {"type": "rule-on-default-event-bus", "fill": {"RuleName": rule}, "when": {"EventBusName": ["default"]},
          "absent": {"EventBusName": "default"}},
@@ -549,6 +587,28 @@ def resources_for(operation: str, types: list[str], formats: dict[str, str], mem
 RESOURCE_PART_RE = re.compile(r"^arn:\$\{Partition}:[^:]*:[^:]*:[^:]*:([A-Za-z][A-Za-z0-9-]*)(.*)$")
 
 
+def with_made(resources: list[dict], operation: str, formats: dict[str, str]) -> list[dict]:
+    """The resources, those a create makes marked `made` when it names others too (the pipeline a webhook connects
+    to, the namespace a service is created in), so that its tags are checked on what it makes alone: of a type, or
+    with an ARN format's leading resource word, related to the operation's name past its verb."""
+    name = operation.split(":", 1)[1]
+    if not CREATING_RE.match(name):
+        return resources
+    created = stem(CREATING_RE.sub("", name))
+
+    def makes(resource: dict) -> bool:
+        for kind in resource.get("types") or [resource.get("type")]:
+            word = RESOURCE_PART_RE.match(formats.get(kind, ""))
+            if related(created, stem(kind)) or (word is not None and related(created, stem(word.group(1)))):
+                return True
+        return False
+
+    made = [makes(resource) for resource in resources]
+    if all(made) or not any(made):
+        return resources
+    return [dict(resource, made=True) if is_made else resource for resource, is_made in zip(resources, made)]
+
+
 def child_id(child: str, parent: str) -> str | None:
     """The variable a child type's ARN format adds to its parent's: the parent's with its leading resource type word
     replaced and one id appended (`listener/app/.../${ListenerId}` for `loadbalancer/app/...`); None for any other."""
@@ -616,6 +676,7 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
         resources = resources_for(operation, types, formats, members)
     resources = with_account(resources, formats, account_members(models, operation.split(":", 1)[1]))
     resources = with_arn_of(resources, formats, name_or_arn_members(models, operation.split(":", 1)[1]))
+    resources = with_made(resources, operation, formats)
     entry = {"action": upstream["action"], "types": types, "resources": resources}
     creates = creates_for(operation, types, formats, members)
     if creates:
@@ -729,8 +790,9 @@ def render(document: dict) -> str:
 # Gates
 # --------------------------------------------------------------------------- #
 PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?$")
-# A member filling a variable may also be a field of each element of a list of structures, one value for each.
-FILL_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|\[]\.[A-Za-z][A-Za-z0-9_]*)?$")
+# A member filling a variable may also be a field of a structure, or of each element of a list of structures, one
+# value for each.
+FILL_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|\[]\.[A-Za-z][A-Za-z0-9_]*|\.[A-Za-z][A-Za-z0-9_]*)?$")
 # An ARN member's path may go one level into a structure or a list's structures.
 ARN_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_]*(\[])?)?$")
 # A format's resource that is a literal and one variable, at its end.
@@ -796,9 +858,12 @@ def validate(document: dict) -> list[str]:
 
 
 def _resource_problems(operation: str, resource: object, types: set[str], formats: dict[str, str]) -> list[str]:
-    if not isinstance(resource, dict) or not ({"types", "arn"} <= set(resource) <= {"types", "arn", "before"}
-                                              or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "absent", "arnOf", "account"}):
+    if not isinstance(resource, dict) or not ({"types", "arn"} <= set(resource) <= {"types", "arn", "before", "made"}
+                                              or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "absent", "arnOf", "account",
+                                                                                       "fixed", "made"}):
         return [f"{operation} names {resource!r}, which is neither an ARN member nor a type's variables"]
+    if resource.get("made", True) is not True:
+        return [f"{operation} marks {resource!r} made by {resource['made']!r}, which is not true"]
     kinds = resource.get("types") or [resource.get("type")]
     if not all(isinstance(kind, str) and kind in types and kind in formats for kind in kinds):
         return [f"{operation} names {kinds}, not resource types its action acts on with an ARN format"]
@@ -815,6 +880,10 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
         return [f"{operation} fills {fill!r}, which are no variables of {kinds[0]}'s ARN by members"]
     if sum("[]" in path for path in fill.values()) > 1:
         return [f"{operation} fills {kinds[0]} from more than one list"]
+    fixed = resource.get("fixed", {})
+    if not isinstance(fixed, dict) or set(fixed) - variables or set(fixed) & set(fill) or not all(
+            isinstance(value, str) and value for value in fixed.values()):
+        return [f"{operation} fixes {fixed!r}, which are no variables of {kinds[0]}'s ARN no member fills, or no values"]
     for key in ("when", "unless"):
         when = resource.get(key, {})
         if not isinstance(when, dict) or not all(
@@ -839,13 +908,13 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
 
 
 def _read_as_one(path: object, fill: dict) -> bool:
-    """Whether a member gives one value as it is read: a top-level one that is no list, or a field of each element
-    of a list of structures that fills a variable, one value for each element."""
+    """Whether a member gives one value as it is read: one that is no list, top-level or a field of a structure, or a
+    field of each element of a list of structures that fills a variable, one value for each element."""
     if not isinstance(path, str):
         return False
     if "[]." in path:
         return bool(FILL_PATH_RE.match(path)) and path in fill.values()
-    return bool(PATH_RE.match(path)) and not path.endswith("[]")
+    return bool(FILL_PATH_RE.match(path)) and not path.endswith("[]")
 
 
 def _created_problems(operation: str, created: object, types: set[str], formats: dict[str, str]) -> list[str]:

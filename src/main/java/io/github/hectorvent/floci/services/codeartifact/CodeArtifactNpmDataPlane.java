@@ -149,24 +149,28 @@ public class CodeArtifactNpmDataPlane {
         context.request().pause();
         String repoId = npmRepositoryId;
         AuthorizationTokenScope tokenScope = scope.get();
+        Optional<TarballDownloadRequest> tarballTarget = nativeTarballDownloadTarget(context.request().method(),
+                npmRequest.rest());
         Optional<PackageIdentity> unpublishTarget = nativeUnpublishTarget(context.request().method(),
                 npmRequest.rest());
-        vertx.<String>executeBlocking(promise -> promise.complete(ensureBackendReady(repoId, npmRequest)))
-                .onComplete(result -> {
-                    if (result.failed()) {
-                        context.request().resume();
-                        context.response().setStatusCode(503).end();
-                        return;
-                    }
-                    proxy(context, result.result(), npmRequest.rest() + querySuffix(context), status ->
-                            unpublishTarget.ifPresent(identity -> {
-                                if (status == 200 || status == 201) {
-                                    service.forgetContainerBackedPackage(tokenScope.region(), npmRequest.domain(),
-                                            tokenScope.owner(), npmRequest.repository(), "npm", identity.namespace(),
-                                            identity.packageName());
-                                }
-                            }));
-                });
+        vertx.<String>executeBlocking(promise -> {
+            tarballTarget.ifPresent(target -> blockIfArchived(tokenScope, npmRequest, repoId, target));
+            promise.complete(ensureBackendReady(repoId, npmRequest));
+        }).onComplete(result -> {
+            if (result.failed()) {
+                context.request().resume();
+                context.response().setStatusCode(result.cause() instanceof AwsException ? 404 : 503).end();
+                return;
+            }
+            proxy(context, result.result(), npmRequest.rest() + querySuffix(context), status ->
+                    unpublishTarget.ifPresent(identity -> {
+                        if (status == 200 || status == 201) {
+                            service.forgetContainerBackedPackage(tokenScope.region(), npmRequest.domain(),
+                                    tokenScope.owner(), npmRequest.repository(), "npm", identity.namespace(),
+                                    identity.packageName());
+                        }
+                    }));
+        });
     }
 
     /**
@@ -221,6 +225,69 @@ public class CodeArtifactNpmDataPlane {
             return Optional.empty();
         }
         return Optional.of(packageIdentityFromPath(rest.substring(0, revIndex)));
+    }
+
+    /**
+     * A real tarball download ({@code npm install}, or a direct link from Verdaccio's own web UI)
+     * is a {@code GET} to {@code <packagePath>/-/<filename>}, the exact shape {@code
+     * VerdaccioSidecarClient}'s own tarball requests already use: detected here the same way
+     * {@link #nativeUnpublishTarget} detects its own {@code /-rev/} marker. The version is not a
+     * separate path segment the way Maven's GAV or nuget's content route carry it, only embedded
+     * in {@code filename} itself, so {@link #blockIfArchived} resolves it for real against
+     * Verdaccio's own packument rather than this method guessing it from the filename's own text.
+     *
+     * <p>Raised by Greptile's review: an earlier version of this method assumed {@code filename}
+     * always has the {@code <packageName>-<version>.tgz} shape this emulator's own publish path
+     * happens to write, and stripped that known prefix/suffix to read the version straight out of
+     * it. Nothing in the real npm publish protocol requires a client-chosen {@code dist.tarball}
+     * name to follow that convention at all (a version {@code 1.0.0} can legitimately name its
+     * tarball {@code bundle.tgz}), so a filename that didn't fit the assumed shape skipped the
+     * Archived check entirely, and one that happened to fit it by coincidence (a real tarball
+     * literally named {@code <packageName>-release.tgz}) could resolve to the wrong, unrelated
+     * version {@code release}.
+     */
+    private static Optional<TarballDownloadRequest> nativeTarballDownloadTarget(HttpMethod method, String rest) {
+        if (method != HttpMethod.GET) {
+            return Optional.empty();
+        }
+        int marker = rest.indexOf("/-/");
+        if (marker < 1) {
+            return Optional.empty();
+        }
+        PackageIdentity identity = packageIdentityFromPath(rest.substring(0, marker));
+        String filename = rest.substring(marker + 3);
+        return Optional.of(new TarballDownloadRequest(identity, filename));
+    }
+
+    private record TarballDownloadRequest(PackageIdentity identity, String filename) {}
+
+    /**
+     * Blocks (by throwing {@link AwsException}) only when {@code target}'s own filename resolves
+     * to a version this repository currently has marked {@code Archived}. Checks whether this
+     * package has any status override at all first, a plain in-memory map read, before ever
+     * paying for a live Verdaccio packument fetch: the overwhelming common case, a package
+     * nothing has ever called {@code UpdatePackageVersionsStatus}/{@code DisposePackageVersions}
+     * on, costs nothing beyond that one check. {@link VerdaccioSidecarClient#versionForTarballFilename}
+     * resolves the real version, against the packument itself rather than the filename's own
+     * text, only once there is actually something in this repository worth checking against.
+     */
+    private void blockIfArchived(AuthorizationTokenScope tokenScope, NpmRequest npmRequest, String repoId,
+            TarballDownloadRequest target) {
+        Map<String, ?> overrides = service.containerBackedOverridesForPackage(tokenScope.owner(), tokenScope.region(),
+                npmRequest.domain(), npmRequest.repository(), "npm", target.identity().namespace(),
+                target.identity().packageName());
+        if (overrides.isEmpty()) {
+            return;
+        }
+        Optional<String> version = verdaccioClient.versionForTarballFilename(repoId, npmRequest.domain(),
+                npmRequest.repository(), target.identity().namespace(), target.identity().packageName(),
+                target.filename());
+        if (version.isEmpty()) {
+            return;
+        }
+        service.requireContainerBackedVersionDownloadable(tokenScope.owner(), tokenScope.region(),
+                npmRequest.domain(), npmRequest.repository(), "npm", target.identity().namespace(),
+                target.identity().packageName(), version.get(), repoId);
     }
 
     /**

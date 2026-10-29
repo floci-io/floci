@@ -778,7 +778,7 @@ class FirehoseServiceTest {
     private void createSourcedDeliveryStream(String deliveryStream, String sourceStream) {
         kinesisService.createStream(sourceStream, 1, "us-east-1");
         firehoseService.createDeliveryStream(deliveryStream, destination("arn:aws:s3:::sink", null),
-                java.util.List.of(), "KinesisStreamAsSource", kinesisSource(sourceStream));
+                List.of(), "KinesisStreamAsSource", kinesisSource(sourceStream));
     }
 
     private void closeSourceParent() {
@@ -897,7 +897,7 @@ class FirehoseServiceTest {
         ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
         verify(s3Service, Mockito.times(2)).putObject(anyString(), anyString(), body.capture(), anyString(),
                 anyMap(), any(PutObjectOptions.class));
-        assertEquals(java.util.List.of("first\n", "second\n"),
+        assertEquals(List.of("first\n", "second\n"),
                 body.getAllValues().stream().map(b -> new String(b, StandardCharsets.UTF_8)).toList());
     }
 
@@ -910,7 +910,7 @@ class FirehoseServiceTest {
         // delivery starts at DeliveryStartTimestamp.
         source.setDeliveryStartTimestamp(Instant.now().plusSeconds(3600));
         firehoseService.createDeliveryStream("sourced-stream", destination("arn:aws:s3:::sink", null),
-                java.util.List.of(), "KinesisStreamAsSource", source);
+                List.of(), "KinesisStreamAsSource", source);
 
         firehoseService.pollKinesisSources();
         firehoseService.flush("sourced-stream");
@@ -1138,7 +1138,7 @@ class FirehoseServiceTest {
     void aMissingSourceStreamDoesNotStopOtherStreamsFromPolling() {
         // No createStream for "gone-stream": describeStream throws ResourceNotFound.
         firehoseService.createDeliveryStream("broken-stream", destination("arn:aws:s3:::sink", null),
-                java.util.List.of(), "KinesisStreamAsSource", kinesisSource("gone-stream"));
+                List.of(), "KinesisStreamAsSource", kinesisSource("gone-stream"));
         createSourcedDeliveryStream("sourced-stream", "src-stream");
         kinesisService.putRecord("src-stream", "hello".getBytes(StandardCharsets.UTF_8), "pk", "us-east-1");
 

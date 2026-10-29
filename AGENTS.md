@@ -134,7 +134,9 @@ run `make partition-baseline` and commit the smaller baseline.
 - Mint ARNs through `AwsArnUtils.Arn.of(...)` / `RegionResolver.buildArn(...)`, recognise
   them with `AwsArnUtils.isArn` / `PARTITION_REGEX`, read their fields with
   `AwsArnUtils.parse(...)`, and derive hosts from the region's
-  DNS suffix (`AwsRegions.dnsSuffixFor`).
+  DNS suffix (`AwsRegions.dnsSuffixFor`). A parameter that takes a name or an ARN, where AWS
+  answers a malformed ARN with its own error, tells the two apart with
+  `AwsArnUtils.looksLikeArn` (any value starting `arn:`); `isArn` would treat that value as a name.
 - A regionless ARN (IAM, STS, CloudFront, Organizations, an S3 bucket) never goes through
   `Arn.of(service, "", ...)`, which silently means `aws`: use `RegionResolver.buildGlobalArn`
   for the request's partition, or `Arn.global(partition, ...)` with the resource's own

@@ -344,7 +344,7 @@ public class RedshiftServerlessAdminJsonHandler {
         return Response.ok(response).build();
     }
 
-    /** A one-off schedule reports its own time while it is ahead and within its active window on an enabled action; a cron schedule reports none, as Floci never computes them. */
+    /** Reports the next invocation inside the active window of an enabled action, for both schedule types. */
     private ObjectNode scheduledActionNode(ScheduledAction action) {
         ObjectNode node = objectMapper.createObjectNode();
         if (action.getEndTime() != null) {
@@ -352,13 +352,7 @@ public class RedshiftServerlessAdminJsonHandler {
         }
         node.put("namespaceName", action.getNamespaceName());
         ArrayNode invocations = node.putArray("nextInvocations");
-        if (action.getScheduleAt() != null
-                && !Boolean.FALSE.equals(action.getEnabled())
-                && action.getScheduleAt().isAfter(Instant.now())
-                && (action.getStartTime() == null || !action.getScheduleAt().isBefore(action.getStartTime()))
-                && (action.getEndTime() == null || !action.getScheduleAt().isAfter(action.getEndTime()))) {
-            invocations.add(epoch(action.getScheduleAt()));
-        }
+        RedshiftServerlessSchedule.next(action, Instant.now()).ifPresent(time -> invocations.add(epoch(time)));
         node.put("roleArn", action.getRoleArn());
         ObjectNode schedule = node.putObject("schedule");
         if (action.getScheduleAt() != null) {

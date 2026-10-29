@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolic
 import io.github.hectorvent.floci.services.cloudfront.model.StreamingDistribution;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.mockito.Mockito;
 
 import java.security.KeyPairGenerator;
@@ -326,6 +327,31 @@ class CloudFrontServiceTest {
         Distribution dist = china.createDistribution(new Distribution(), Map.of());
 
         assertEquals("arn:aws-cn:cloudfront::" + ACCOUNT + ":distribution/" + dist.getId(), dist.getArn());
+    }
+
+    @Test
+    void distributionTagsAreReadAndUpdatedByArn() {
+        CloudFrontService service = serviceWithDomainSuffix(DEFAULT_DOMAIN_SUFFIX);
+        Distribution dist = service.createDistribution(new Distribution(), Map.of("env", "dev"));
+
+        assertEquals(Map.of("env", "dev"), service.listTagsForResource(dist.getArn()));
+
+        service.tagResource(dist.getArn(), Map.of("team", "infra"));
+        assertEquals(Map.of("env", "dev", "team", "infra"), service.listTagsForResource(dist.getArn()));
+
+        service.untagResource(dist.getArn(), List.of("env"));
+        assertEquals(Map.of("team", "infra"), service.listTagsForResource(dist.getArn()));
+    }
+
+    @Test
+    void deletingDistributionRemovesTagsStoredUnderItsArn() {
+        CloudFrontService service = serviceWithDomainSuffix(DEFAULT_DOMAIN_SUFFIX);
+        Distribution dist = service.createDistribution(new Distribution(), Map.of());
+        service.tagResource(dist.getArn(), Map.of("env", "dev"));
+
+        service.deleteDistribution(dist.getId(), dist.getEtag());
+
+        assertEquals(Map.of(), service.listTagsForResource(dist.getArn()));
     }
 
     @Test
@@ -1740,7 +1766,7 @@ class CloudFrontServiceTest {
     }
 
     private static AwsException assertAws(
-            String code, org.junit.jupiter.api.function.Executable action) {
+            String code, Executable action) {
         AwsException error = assertThrows(AwsException.class, action);
         assertEquals(code, error.getErrorCode());
         return error;

@@ -363,7 +363,7 @@ class LambdaImageConfigTest {
             // of starting an empty container. This test covers cmd construction, so any real
             // directory will do.
             fn.setCodeLocalPath(codeDir.toString());
-            when(imageResolver.resolve("nodejs20.x")).thenReturn("public.ecr.aws/lambda/nodejs:20");
+            when(imageResolver.resolve("nodejs20.x", null)).thenReturn("public.ecr.aws/lambda/nodejs:20");
 
             launcher.launch(fn);
 

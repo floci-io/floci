@@ -54,7 +54,7 @@ class BuildV2ProxyEventMultiValueTest {
         controller = new ApiGatewayExecuteController(
                 null, null, null, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null, null, null);
     }
 
     enum Builder { INTEGRATION, AUTHORIZER }

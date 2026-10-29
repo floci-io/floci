@@ -10,6 +10,7 @@ import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -21,6 +22,7 @@ import java.net.URI;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -783,6 +785,43 @@ class RedshiftServerlessIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"));
         call("DeleteScheduledAction", "{\"scheduledActionName\":\"admin-sched\"}").statusCode(200);
+    }
+
+    @Inject
+    RedshiftServerlessScheduledActionService scheduledActions;
+
+    @Test
+    void scheduledActionTakesItsSnapshotOnASweepAndReportsTheNextInvocation() {
+        String namespace = "sweep-ns";
+        call("CreateNamespace", "{\"namespaceName\":\"" + namespace + "\",\"adminUsername\":\"admin\"}")
+                .statusCode(200);
+        cleanup.register(() -> call("DeleteNamespace", "{\"namespaceName\":\"" + namespace + "\"}"));
+        call("CreateScheduledAction", "{\"scheduledActionName\":\"sweep-sched\",\"namespaceName\":\"" + namespace + "\","
+                + "\"roleArn\":\"arn:aws:iam::000000000000:role/r\",\"schedule\":{\"cron\":\"0 * * * ? *\"},"
+                + "\"targetAction\":{\"createSnapshot\":{\"namespaceName\":\"" + namespace + "\","
+                + "\"snapshotNamePrefix\":\"sweep\",\"retentionPeriod\":3,"
+                + "\"tags\":[{\"key\":\"env\",\"value\":\"it\"}]}}}")
+                .statusCode(200)
+                .body("scheduledAction.nextInvocations", hasSize(1));
+        cleanup.register(() -> call("DeleteScheduledAction", "{\"scheduledActionName\":\"sweep-sched\"}"));
+        call("CreateScheduledAction", "{\"scheduledActionName\":\"too-often\",\"namespaceName\":\"" + namespace + "\","
+                + "\"roleArn\":\"arn:aws:iam::000000000000:role/r\",\"schedule\":{\"cron\":\"0,30 * * * ? *\"},"
+                + "\"targetAction\":{\"createSnapshot\":{\"namespaceName\":\"" + namespace + "\","
+                + "\"snapshotNamePrefix\":\"p\"}}}")
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+
+        Instant tick = Instant.now().plusSeconds(3 * 3600);
+        scheduledActions.runScheduledActions(tick);
+        String snapshot = RedshiftServerlessScheduledActionService.snapshotName("sweep",
+                tick.truncatedTo(ChronoUnit.HOURS));
+        cleanup.register(() -> call("DeleteSnapshot", "{\"snapshotName\":\"" + snapshot + "\"}"));
+
+        call("GetSnapshot", "{\"snapshotName\":\"" + snapshot + "\"}")
+                .statusCode(200)
+                .body("snapshot.namespaceName", equalTo(namespace))
+                .body("snapshot.status", equalTo("AVAILABLE"))
+                .body("snapshot.snapshotRetentionPeriod", equalTo(3));
     }
 
     private static ValidatableResponse call(String action, String body) {

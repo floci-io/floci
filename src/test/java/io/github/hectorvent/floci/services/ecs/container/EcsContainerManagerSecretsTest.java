@@ -61,7 +61,7 @@ class EcsContainerManagerSecretsTest {
         lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.resolveImageForLaunch(any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(lifecycleManager.createAndStart(any()))
+        when(lifecycleManager.createAndStartEphemeral(any()))
                 .thenReturn(new ContainerInfo("docker-id", Map.of()));
 
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
@@ -187,7 +187,7 @@ class EcsContainerManagerSecretsTest {
         assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
         assertTrue(thrown.getMessage().contains("/missing"));
         verify(containerBuilder, never()).newContainer(anyString());
-        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
     }
 
     @Test
@@ -207,7 +207,7 @@ class EcsContainerManagerSecretsTest {
         assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
         assertTrue(thrown.getMessage().contains(secretArn));
         verify(containerBuilder, never()).newContainer(anyString());
-        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
     }
 
     @Test
@@ -273,7 +273,7 @@ class EcsContainerManagerSecretsTest {
 
         assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
         assertTrue(thrown.getMessage().contains("did not contain json key token"));
-        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
     }
 
     @Test
@@ -305,7 +305,7 @@ class EcsContainerManagerSecretsTest {
         assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
         assertTrue(thrown.getMessage().contains(
                 "an invalid ARN format for the AWS Secrets Manager secret was specified"));
-        verify(lifecycleManager, never()).createAndStart(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
     }
 
     private static ContainerDefinition containerDef(String name, List<Secret> secrets) {

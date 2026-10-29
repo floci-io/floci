@@ -520,8 +520,31 @@ class LambdaWebIntegrationTest {
                 .then().statusCode(400)
                 .body("message", equalTo("Lambda blocked the creation of this policy because it would grant public"
                         + " access to your function."));
+        String federatedPolicy = publicPolicy.replace("\"*\",\"Action\"",
+                "{\"Federated\":\"cognito-identity.amazonaws.com\"},\"Action\"");
+        given().contentType("application/json").body(Map.of("Policy", federatedPolicy))
+                .when().put(policyPath)
+                .then().statusCode(400)
+                .body("message", equalTo("Lambda blocked the creation of this policy because it would grant public"
+                        + " access to your function."));
+        given().contentType("application/json")
+                .body(Map.of("Policy", publicPolicy.replace(ARN, "arn:aws:lambda:*:*:web-function/" + FN)))
+                .when().put(policyPath)
+                .then().statusCode(400)
+                .body("message", equalTo("Lambda blocked the creation of this policy because it would grant public"
+                        + " access to your function."));
+        given().contentType("application/json")
+                .body(Map.of("Policy", publicPolicy.replace("\"lambda:InvokeWebFunctionEndpoint\"", "\"*\"")))
+                .when().put(policyPath)
+                .then().statusCode(400)
+                .body("message", equalTo("Lambda blocked the creation of this policy because it would grant public"
+                        + " access to your function."));
+        given().contentType("application/json").body(Map.of("Policy", publicPolicy.replace("\"Allow\"", "\"Maybe\"")))
+                .when().put(policyPath)
+                .then().statusCode(400)
+                .body("message", equalTo("Invalid effect: Maybe"));
 
-        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":"
+        String policy ="{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":"
                 + "{\"AWS\":\"arn:aws:iam::000000000000:root\"},\"Action\":\"lambda:InvokeWebFunctionEndpoint\","
                 + "\"Resource\":\"" + ARN + "/endpoint/*\"}]}";
         String revisionId = given().contentType("application/json").body(Map.of("Policy", policy))
@@ -545,6 +568,32 @@ class LambdaWebIntegrationTest {
         given().when().delete(policyPath)
                 .then().statusCode(404)
                 .body("message", equalTo("The function does not have a policy."));
+
+        // The roles a policy names have to exist, under the path IAM holds them.
+        String reader = "web-it-reader-" + Long.toString(System.nanoTime(), 36);
+        iamService.createRole(reader, "/team/", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"Service\":\"lambda.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}", null, 3600, null);
+        String named = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":"
+                + "{\"AWS\":\"%s\"},\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + ARN
+                + "/endpoint/*\"}]}";
+        given().contentType("application/json")
+                .body(Map.of("Policy", named.formatted("arn:aws:iam::000000000000:role/" + reader)))
+                .when().put(policyPath)
+                .then().statusCode(400)
+                .body("message", equalTo("The principal arn provided does not match the actual principal arn."
+                        + " Please check your input and try again."));
+        given().contentType("application/json")
+                .body(Map.of("Policy", named.formatted("arn:aws:iam::000000000000:role/web-it-missing")))
+                .when().put(policyPath)
+                .then().statusCode(400)
+                .body("message", equalTo("The provided principal was invalid. Please check the principal and try again."));
+        given().contentType("application/json")
+                .body(Map.of("Policy", named.formatted("arn:aws:iam::000000000000:role/team/" + reader)))
+                .when().put(policyPath)
+                .then().statusCode(200);
+        given().when().delete(policyPath)
+                .then().statusCode(204);
+        iamService.deleteRole(reader);
     }
 
     @Test

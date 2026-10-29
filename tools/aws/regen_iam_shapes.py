@@ -35,17 +35,55 @@ GENERATOR = "tools/aws/regen_iam_shapes.py"
 # `GetAccountAuthorizationDetails` is the first operation read through the list walk. Its three
 # members are declared and none of them is read at all today: `Filter` is a list of an enum,
 # `MaxItems` a range and `Marker` a length and a pattern.
+#
+# The list operations follow it: every operation `aws/iam-paginators.json` pages, so `MaxItems`
+# (1 to 1000) and `Marker` (1 to 320 characters) are held to the model here and nowhere else.
 OPERATIONS = (
     "AttachGroupPolicy", "AttachRolePolicy", "AttachUserPolicy",
     "DetachGroupPolicy", "DetachRolePolicy", "DetachUserPolicy",
     "GetPolicy", "DeletePolicy",
     "CreatePolicyVersion", "GetPolicyVersion", "DeletePolicyVersion", "SetDefaultPolicyVersion",
     "GetAccountAuthorizationDetails",
+    "GetGroup",
+    "ListAccessKeys", "ListAccountAliases", "ListAttachedGroupPolicies", "ListAttachedRolePolicies",
+    "ListAttachedUserPolicies", "ListDelegationRequests", "ListEntitiesForPolicy",
+    "ListGroupPolicies", "ListGroups", "ListGroupsForUser", "ListInstanceProfileTags",
+    "ListInstanceProfiles", "ListInstanceProfilesForRole", "ListMFADeviceTags", "ListMFADevices",
+    "ListOpenIDConnectProviderTags", "ListPolicies",
+    "ListPolicyTags", "ListPolicyVersions", "ListRolePolicies", "ListRoleTags", "ListRoles",
+    "ListSAMLProviderTags", "ListSSHPublicKeys", "ListServerCertificateTags",
+    "ListServerCertificates", "ListServiceSpecificCredentials", "ListSigningCertificates",
+    "ListUserPolicies", "ListUserTags", "ListUsers", "ListVirtualMFADevices",
+)
+
+# Paged operations vendored with their paging members alone, so `MaxItems` and `Marker` are still
+# the model's while the rest of the request keeps the reading it has today.
+PAGING_MEMBERS = ("Marker", "MaxItems")
+PAGING_ONLY = (
+    # `JobId` is answered by hand as one fixed-length constraint ("length equal to 36"), which the
+    # walk would reword as a minimum; `SortKey` is held to its enum by hand too.
+    "GetOrganizationsAccessReport", "GetServiceLastAccessedDetails",
+    "GetServiceLastAccessedDetailsWithEntities",
+    # An empty `ServiceNamespaces` is answered by hand with `InvalidInput`, not the walk's null.
+    "ListPoliciesGrantingServiceAccess",
+    # `ContextEntries` nests a list inside a list of structures, which the walk refuses.
+    "SimulateCustomPolicy", "SimulatePrincipalPolicy",
 )
 
 
+def paging_only(model: dict) -> dict:
+    """`model` with each `PAGING_ONLY` request reduced to its paging members."""
+    shapes = dict(model["shapes"])
+    for operation in PAGING_ONLY:
+        name = model["operations"][operation]["input"]["shape"]
+        request = shapes[name]
+        shapes[name] = {"type": request["type"],
+                        "members": {k: v for k, v in request["members"].items() if k in PAGING_MEMBERS}}
+    return {**model, "shapes": shapes}
+
+
 def build(model: dict, provenance: str) -> dict:
-    return build_constraints(model, OPERATIONS, provenance, GENERATOR)
+    return build_constraints(paging_only(model), OPERATIONS + PAGING_ONLY, provenance, GENERATOR)
 
 
 def render(doc: dict) -> str:

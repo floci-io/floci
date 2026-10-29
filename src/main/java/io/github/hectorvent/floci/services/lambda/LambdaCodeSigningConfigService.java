@@ -3,6 +3,9 @@ package io.github.hectorvent.floci.services.lambda;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SignedMarkers;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.model.CodeSigningConfig;
@@ -36,6 +39,7 @@ public class LambdaCodeSigningConfigService {
     private static final int ID_LENGTH = 17;
     private static final int MAX_DESCRIPTION = 256;
     private static final int MAX_SIGNING_PROFILE_ARNS = 20;
+    private static final int LIST_PAGE_SIZE = 10000;
 
     /** The model documents Warn as the default when the request names no policy. */
     static final String DEFAULT_UNTRUSTED_ARTIFACT_POLICY = "Warn";
@@ -45,10 +49,13 @@ public class LambdaCodeSigningConfigService {
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSXXX").withZone(ZoneOffset.UTC);
 
     private final StorageBackend<String, CodeSigningConfig> store;
+    private final RegionResolver regionResolver;
+    private final SignedMarkers markers = new SignedMarkers();
     private final SecureRandom random = new SecureRandom();
 
     @Inject
-    public LambdaCodeSigningConfigService(StorageFactory storageFactory) {
+    public LambdaCodeSigningConfigService(StorageFactory storageFactory, RegionResolver regionResolver) {
+        this.regionResolver = regionResolver;
         this.store = storageFactory.create("lambda", "lambda-code-signing-configs.json",
                 new TypeReference<Map<String, CodeSigningConfig>>() {});
     }
@@ -125,6 +132,12 @@ public class LambdaCodeSigningConfigService {
         return store.scan(k -> k.startsWith(prefix)).stream()
                 .sorted(Comparator.comparing(CodeSigningConfig::getCodeSigningConfigId))
                 .toList();
+    }
+
+    public PaginatedResult<CodeSigningConfig> list(String region, int maxItems, String marker) {
+        String scope = regionResolver.getAccountId() + "\n" + region + "\n";
+        return LambdaPagination.paginate(list(region), CodeSigningConfig::getCodeSigningConfigId,
+                maxItems, LIST_PAGE_SIZE, marker, markers, scope);
     }
 
     private static AwsException notFound(String arn) {

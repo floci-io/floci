@@ -559,7 +559,7 @@ public class DocDbService {
      * name in one comparison, as the db-cluster-id filter already does.
      */
     public boolean hasResourceWithArn(String arn) {
-        if (arn == null || !arn.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(arn)) {
             return false;
         }
         return clusters.scan(k -> true).stream()
@@ -586,7 +586,7 @@ public class DocDbService {
             // full ARN against each cluster's stored ARN rather than reducing it to
             // the bare identifier, so a cross-account or cross-region ARN does not
             // resolve a same-named local cluster.
-            if (filterId.startsWith("arn:")) {
+            if (AwsArnUtils.looksLikeArn(filterId)) {
                 return inRegion(clusters, region, DocDbCluster::getDbClusterIdentifier).stream()
                         .map(c -> filled(c, region))
                         .filter(c -> filterId.equalsIgnoreCase(c.getDbClusterArn()))
@@ -746,7 +746,7 @@ public class DocDbService {
         if (filterId != null && !filterId.isBlank()) {
             // The db-instance-id filter accepts ARNs as well as identifiers; see
             // listDbClusters for why the match is against the stored ARN.
-            if (filterId.startsWith("arn:")) {
+            if (AwsArnUtils.looksLikeArn(filterId)) {
                 return inRegion(instances, region, DocDbInstance::getDbInstanceIdentifier).stream()
                         .map(i -> filled(i, region))
                         .filter(i -> filterId.equalsIgnoreCase(i.getDbInstanceArn()))

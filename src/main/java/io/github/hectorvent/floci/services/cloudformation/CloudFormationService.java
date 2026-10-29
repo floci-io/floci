@@ -1270,7 +1270,7 @@ public class CloudFormationService implements ResourceProvider {
     public void deleteChangeSet(String stackName, String changeSetName, String region) {
         String accountId = currentAccount();
         boolean byArnAlone = (stackName == null || stackName.isBlank())
-                && changeSetName != null && changeSetName.startsWith("arn:");
+                && AwsArnUtils.looksLikeArn(changeSetName);
         Stack stack = byArnAlone
                 ? findStackForChangeSetArn(changeSetName, region, accountId)
                 : getStackForChangeSet(stackName, changeSetName, region, accountId);
@@ -1306,7 +1306,7 @@ public class CloudFormationService implements ResourceProvider {
         purgeExpiredDeletedStacks();
         Stack stack = resolveStack(stackName, region, accountId);
         if (stack == null) {
-            if (stackName != null && stackName.startsWith("arn:")) {
+            if (AwsArnUtils.looksLikeArn(stackName)) {
                 try {
                     AwsArnUtils.Arn arn = AwsArnUtils.parse(stackName);
                     if (!accountId.equals(arn.accountId()) || !region.equals(arn.region())) {
@@ -4388,7 +4388,7 @@ public class CloudFormationService implements ResourceProvider {
      * when referencing a changeset by the ID returned from CreateChangeSet.
      */
     private String resolveChangeSetName(String changeSetNameOrArn, String region, String accountId) {
-        if (changeSetNameOrArn == null || !changeSetNameOrArn.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(changeSetNameOrArn)) {
             return changeSetNameOrArn;
         }
         try {
@@ -4415,7 +4415,7 @@ public class CloudFormationService implements ResourceProvider {
         if (stackNameOrArn != null && !stackNameOrArn.isBlank()) {
             return getStackOrThrow(stackNameOrArn, region, accountId);
         }
-        if (changeSetNameOrArn == null || !changeSetNameOrArn.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(changeSetNameOrArn)) {
             throw new AwsException("ValidationError", "StackName is required when ChangeSetName is not an ARN", 400);
         }
         Stack stack = findStackForChangeSetArn(changeSetNameOrArn, region, accountId);

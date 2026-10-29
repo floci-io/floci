@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.FlinkApplication;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.Snapshot;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -114,9 +116,12 @@ public class KinesisAnalyticsV2JsonHandler {
     }
 
     private Response handleListApplications(JsonNode request, String region) {
+        Integer limit = Pagination.parseMaxResults(request, "Limit", "InvalidRequestException");
+        String nextToken = Pagination.parseNextToken(request, "NextToken", "InvalidRequestException");
+        PaginatedResult<FlinkApplication> page = service.listApplications(region, limit, nextToken);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode summaries = response.putArray("ApplicationSummaries");
-        for (FlinkApplication app : service.listApplications(region)) {
+        for (FlinkApplication app : page.items()) {
             ObjectNode summary = summaries.addObject();
             summary.put("ApplicationName", app.getApplicationName());
             summary.put("ApplicationARN", app.getApplicationArn());
@@ -126,6 +131,9 @@ public class KinesisAnalyticsV2JsonHandler {
             if (app.getApplicationMode() != null) {
                 summary.put("ApplicationMode", app.getApplicationMode());
             }
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }

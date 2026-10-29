@@ -349,14 +349,15 @@ public class RamService {
         return result;
     }
 
-    public ResourceShare deleteResourceShare(String resourceShareArn, String callerAccountId, String region) {
+    public synchronized ResourceShare deleteResourceShare(String resourceShareArn, String callerAccountId,
+                                                          String region) {
         return putForOwner(
                 requireOwnedShare(resourceShareArn, callerAccountId, region).withStatus("DELETED"));
     }
 
-    public ResourceShare updateResourceShare(String resourceShareArn, String name,
-                                             Boolean allowExternalPrincipals, String callerAccountId,
-                                             String region) {
+    public synchronized ResourceShare updateResourceShare(String resourceShareArn, String name,
+                                                          Boolean allowExternalPrincipals, String callerAccountId,
+                                                          String region) {
         ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId, region);
         if (name != null) {
             share = share.withName(name);
@@ -386,9 +387,9 @@ public class RamService {
         }
     }
 
-    public ResourceShare disassociateResourceShare(String resourceShareArn, List<String> resourceArns,
-                                                    List<String> principals, String callerAccountId,
-                                                    String region) {
+    public synchronized ResourceShare disassociateResourceShare(String resourceShareArn,
+                                                                 List<String> resourceArns, List<String> principals,
+                                                                 String callerAccountId, String region) {
         ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId, region);
         ResourceShare updated = share.withPrincipalsAndResources(
                 withoutAll(share.getPrincipals(), principals),
@@ -529,16 +530,16 @@ public class RamService {
                 && parsed.resource().length() > RESOURCE_SHARE_PREFIX.length();
     }
 
-    public void tagResource(String resourceShareArn, Map<String, String> newTags, String callerAccountId,
-                            String region) {
+    public synchronized void tagResource(String resourceShareArn, Map<String, String> newTags,
+                                         String callerAccountId, String region) {
         ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId, region);
         Map<String, String> merged = new LinkedHashMap<>(share.getTags());
         merged.putAll(newTags);
         putForOwner(share.withTags(merged));
     }
 
-    public void untagResource(String resourceShareArn, List<String> tagKeys, String callerAccountId,
-                              String region) {
+    public synchronized void untagResource(String resourceShareArn, List<String> tagKeys,
+                                           String callerAccountId, String region) {
         ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId, region);
         Map<String, String> remaining = new LinkedHashMap<>(share.getTags());
         tagKeys.forEach(remaining::remove);

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -94,14 +95,14 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
                 .body("{\"authorizationType\":\"NONE\",\"apiKeyRequired\":true}")
                 .when().put("/restapis/" + apiId + "/resources/" + protectedResourceId + "/methods/GET")
                 .then().statusCode(201)
-                .body("apiKeyRequired", org.hamcrest.Matchers.is(true));
+                .body("apiKeyRequired", Matchers.is(true));
 
         given()
                 .contentType(ContentType.JSON)
                 .body("{\"authorizationType\":\"NONE\"}")
                 .when().put("/restapis/" + apiId + "/resources/" + openResourceId + "/methods/GET")
                 .then().statusCode(201)
-                .body("apiKeyRequired", org.hamcrest.Matchers.is(false));
+                .body("apiKeyRequired", Matchers.is(false));
 
         String uri = "arn:aws:apigateway:" + REGION + ":lambda:path/2015-03-31/functions/"
                 + "arn:aws:lambda:" + REGION + ":" + ACCOUNT + ":function:" + ECHO_FUNCTION + "/invocations";
@@ -169,7 +170,7 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
                 .when().get("/execute-api/" + apiId + "/prod/secret")
                 .then().statusCode(403)
                 .header("x-amzn-ErrorType", equalTo("ForbiddenException"))
-                .body("message", org.hamcrest.Matchers.is("Forbidden"));
+                .body("message", Matchers.is("Forbidden"));
     }
 
     @Test @Order(5)
@@ -179,7 +180,7 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
                 .when().get("/execute-api/" + apiId + "/prod/secret")
                 .then().statusCode(403)
                 .header("x-amzn-ErrorType", equalTo("ForbiddenException"))
-                .body("message", org.hamcrest.Matchers.is("Forbidden"));
+                .body("message", Matchers.is("Forbidden"));
     }
 
     @Test @Order(6)
@@ -188,7 +189,7 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
                 .header("x-api-key", keyValue)
                 .when().get("/execute-api/" + apiId + "/prod/secret")
                 .then().statusCode(200)
-                .body("ok", org.hamcrest.Matchers.is(true));
+                .body("ok", Matchers.is(true));
     }
 
     @Test @Order(7)
@@ -196,7 +197,7 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
         given()
                 .when().get("/execute-api/" + apiId + "/prod/public")
                 .then().statusCode(200)
-                .body("ok", org.hamcrest.Matchers.is(true));
+                .body("ok", Matchers.is(true));
     }
 
     @Test @Order(8)
@@ -242,7 +243,7 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
                         """)
                 .when().patch("/restapis/" + apiId + "/resources/" + protectedResourceId + "/methods/GET")
                 .then().statusCode(200)
-                .body("apiKeyRequired", org.hamcrest.Matchers.is(false));
+                .body("apiKeyRequired", Matchers.is(false));
 
         given()
                 .contentType(ContentType.JSON)
@@ -255,7 +256,7 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
                         """)
                 .when().patch("/restapis/" + apiId + "/resources/" + protectedResourceId + "/methods/GET")
                 .then().statusCode(200)
-                .body("apiKeyRequired", org.hamcrest.Matchers.is(true));
+                .body("apiKeyRequired", Matchers.is(true));
     }
 
     @Test @Order(11)

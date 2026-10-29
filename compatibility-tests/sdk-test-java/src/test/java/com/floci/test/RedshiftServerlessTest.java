@@ -504,6 +504,15 @@ class RedshiftServerlessTest {
                                 .build())).scheduledAction();
                 assertThat(action.state().toString()).isEqualTo("ACTIVE");
                 assertThat(action.schedule().cron()).isEqualTo("cron(0 3 * * ? *)");
+                assertThat(action.nextInvocations()).hasSize(1);
+                assertThatThrownBy(() -> client.createScheduledAction(request -> request
+                        .scheduledActionName("floci-compat-too-often").namespaceName(namespaceName)
+                        .roleArn("arn:aws:iam::000000000000:role/r")
+                        .schedule(Schedule.builder().cron("cron(0,30 * * * ? *)").build())
+                        .targetAction(TargetAction.builder().createSnapshot(CreateSnapshotScheduleActionParameters
+                                .builder().namespaceName(namespaceName).snapshotNamePrefix("nightly").build())
+                                .build())))
+                        .isInstanceOf(ValidationException.class);
                 client.deleteScheduledAction(request -> request.scheduledActionName("floci-compat-sched"));
             } finally {
                 deleteBestEffort(client, namespaceName);

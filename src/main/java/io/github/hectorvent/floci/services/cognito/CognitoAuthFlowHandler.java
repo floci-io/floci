@@ -20,6 +20,7 @@ import org.jboss.logging.Logger;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
@@ -33,6 +34,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
@@ -77,6 +79,7 @@ final class CognitoAuthFlowHandler {
     private final LambdaService lambdaService;
     private final RegionResolver regionResolver;
     private final Clock clock;
+    private final ConcurrentHashMap<String, PasswordChangeSession> passwordChangeSessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, SrpSession> srpSessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CustomAuthToken> customAuthSessions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, TotpSession> totpSessions = new ConcurrentHashMap<>();
@@ -93,6 +96,8 @@ final class CognitoAuthFlowHandler {
                               String aHex, String bHex, String bPublicHex,
                               String secretBlockBase64, Map<String, String> clientMetadata,
                               Instant expiresAt) {}
+
+    private record PasswordChangeSession(String userPoolId, String username, String clientId, Instant expiresAt) {}
 
     private enum TotpPhase { SETUP, ASSOCIATED, VERIFIED, CODE_REQUIRED }
 
@@ -127,6 +132,7 @@ final class CognitoAuthFlowHandler {
         Map<String, String> privateChallengeParameters;
         Map<String, String> clientMetadata = Map.of();
         String currentChallengeName;
+        SrpSession srpSession;
 
         CustomAuthSession(String userPoolId, String username, String clientId) {
             this.userPoolId = userPoolId;
@@ -444,13 +450,21 @@ final class CognitoAuthFlowHandler {
                 if (!state.secret().equals(user.getSoftwareTokenMfaSecret())) {
                     throw new AwsException("NotAuthorizedException", "Software token is not verified", 400);
                 }
-            } else if (!state.secret().equals(user.getSoftwareTokenMfaSecret())
-                    || !CognitoTotp.validCode(state.secret(),
-                    responses.get("SOFTWARE_TOKEN_MFA_CODE"), clock.instant())) {
-                if (state.failedAttempts().incrementAndGet() >= CognitoTotp.MAX_FAILED_ATTEMPTS) {
-                    totpSessions.remove(session, state);
+            } else {
+                OptionalLong step = state.secret().equals(user.getSoftwareTokenMfaSecret())
+                        ? CognitoTotp.matchingStep(state.secret(), responses.get("SOFTWARE_TOKEN_MFA_CODE"),
+                                clock.instant())
+                        : OptionalLong.empty();
+                if (step.isEmpty()) {
+                    countFailedTotpAttempt(session, state);
+                    throw new AwsException("CodeMismatchException",
+                            "Invalid verification code provided, please try again.", 400);
                 }
-                throw new AwsException("CodeMismatchException", "Invalid verification code provided, please try again.", 400);
+                if (!service.consumeSoftwareTokenStep(pool.getId(), user.getUsername(), step.getAsLong())) {
+                    countFailedTotpAttempt(session, state);
+                    throw new AwsException("ExpiredCodeException",
+                            "Your software token has already been used once.", 400);
+                }
             }
             if (!totpSessions.remove(session, state)) {
                 throw new AwsException("NotAuthorizedException", "Session not found", 400);
@@ -462,6 +476,12 @@ final class CognitoAuthFlowHandler {
         Map<String, String> metadata = clientMetadata != null && !clientMetadata.isEmpty()
                 ? clientMetadata : state.clientMetadata();
         return authenticationResult(pool, client, user, state.triggerSource(), metadata);
+    }
+
+    private void countFailedTotpAttempt(String session, TotpSession state) {
+        if (state.failedAttempts().incrementAndGet() >= CognitoTotp.MAX_FAILED_ATTEMPTS) {
+            totpSessions.remove(session, state);
+        }
     }
 
     private Map<String, Object> processChallenge(UserPool pool, UserPoolClient client, String challengeName,
@@ -506,26 +526,60 @@ final class CognitoAuthFlowHandler {
             return handleWebAuthnChallengeResponse(pool, client, session, responses, clientMetadata);
         }
         if ("NEW_PASSWORD_REQUIRED".equals(challengeName)) {
-            String username = responses.get("USERNAME");
-            String newPassword = responses.get("NEW_PASSWORD");
-            if (username == null || newPassword == null) {
-                throw new AwsException("InvalidParameterException", "USERNAME and NEW_PASSWORD are required", 400);
-            }
-            service.adminSetUserPassword(pool.getId(), username, newPassword, true);
-            // Apply any userAttributes.<name> updates the client provided.
-            Map<String, String> attrUpdates = new HashMap<>();
-            for (Map.Entry<String, String> e : responses.entrySet()) {
-                if (e.getKey() != null && e.getKey().startsWith("userAttributes.")) {
-                    attrUpdates.put(e.getKey().substring("userAttributes.".length()), e.getValue());
+            CustomAuthToken custom = session == null ? null : customAuthSessions.get(session);
+            if (custom != null) {
+                CustomAuthSession state = requireCustomSession(pool, client, session, challengeName);
+                synchronized (state) {
+                    requireCustomSession(pool, client, session, challengeName);
+                    validateCustomUsername(pool, client, state, responses);
+                    changePassword(pool, responses);
+                    consumeCustomSession(session, state);
+                    state.history.get(state.history.size() - 1).put("challengeResult", true);
                 }
+                CognitoUser user = applyNewPasswordAttributes(pool, responses);
+                return continueCustomSrpAuth(pool, client, user, session, state, clientMetadata);
             }
-            if (!attrUpdates.isEmpty()) {
-                service.adminUpdateUserAttributes(pool.getId(), username, attrUpdates);
+            PasswordChangeSession pending = session == null ? null : passwordChangeSessions.get(session);
+            if (pending == null || sessionExpired(pending.expiresAt())
+                    || !pool.getId().equals(pending.userPoolId()) || !client.getClientId().equals(pending.clientId())
+                    || !pending.username().equals(responses.get("USERNAME"))) {
+                throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
             }
-            CognitoUser user = service.adminGetUser(pool.getId(), username);
+            validateSecretHash(client, responses, pending.username());
+            synchronized (pending) {
+                if (passwordChangeSessions.get(session) != pending || sessionExpired(pending.expiresAt())) {
+                    throw new AwsException("NotAuthorizedException", "Session not found", 400);
+                }
+                changePassword(pool, responses);
+                passwordChangeSessions.remove(session, pending);
+            }
+            CognitoUser user = applyNewPasswordAttributes(pool, responses);
             return completePrimaryAuth(pool, client, user, "TokenGeneration_NewPasswordChallenge", clientMetadata);
         }
         throw new AwsException("InvalidParameterException", "Unsupported challenge: " + challengeName, 400);
+    }
+
+    private void changePassword(UserPool pool, Map<String, String> responses) {
+        String username = responses.get("USERNAME");
+        String newPassword = responses.get("NEW_PASSWORD");
+        if (username == null || newPassword == null) {
+            throw new AwsException("InvalidParameterException", "USERNAME and NEW_PASSWORD are required", 400);
+        }
+        service.adminSetUserPassword(pool.getId(), username, newPassword, true);
+    }
+
+    private CognitoUser applyNewPasswordAttributes(UserPool pool, Map<String, String> responses) {
+        String username = responses.get("USERNAME");
+        Map<String, String> attrUpdates = new HashMap<>();
+        for (Map.Entry<String, String> entry : responses.entrySet()) {
+            if (entry.getKey() != null && entry.getKey().startsWith("userAttributes.")) {
+                attrUpdates.put(entry.getKey().substring("userAttributes.".length()), entry.getValue());
+            }
+        }
+        if (!attrUpdates.isEmpty()) {
+            service.adminUpdateUserAttributes(pool.getId(), username, attrUpdates);
+        }
+        return service.adminGetUser(pool.getId(), username);
     }
 
     // ──────────────────────────── USER_PASSWORD / REFRESH ────────────────────────────
@@ -735,9 +789,17 @@ final class CognitoAuthFlowHandler {
 
     private Map<String, Object> buildNewPasswordRequiredChallenge(UserPool pool, UserPoolClient client, CognitoUser user) {
         String session = buildSessionToken(pool.getId(), user.getUsername(), client.getClientId());
+        purgeExpired(passwordChangeSessions, PasswordChangeSession::expiresAt);
+        passwordChangeSessions.put(session, new PasswordChangeSession(pool.getId(), user.getUsername(),
+                client.getClientId(), sessionExpiry(client, clock.instant())));
         Map<String, Object> result = new HashMap<>();
         result.put("ChallengeName", "NEW_PASSWORD_REQUIRED");
         result.put("Session", session);
+        result.put("ChallengeParameters", newPasswordChallengeParameters(user));
+        return result;
+    }
+
+    private static Map<String, String> newPasswordChallengeParameters(CognitoUser user) {
         Map<String, String> params = new HashMap<>();
         params.put("USER_ID_FOR_SRP", user.getUsername());
         params.put("requiredAttributes", "[]");
@@ -747,8 +809,7 @@ final class CognitoAuthFlowHandler {
         } catch (Exception e) {
             params.put("userAttributes", "{}");
         }
-        result.put("ChallengeParameters", params);
-        return result;
+        return params;
     }
 
     private static String buildSessionToken(String poolId, String username, String clientId) {
@@ -818,6 +879,13 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("NotAuthorizedException", "User does not support SRP auth", 400);
         }
 
+        return buildSrpChallenge(pool, client, user, aHex, clientMetadata, null);
+    }
+
+    private Map<String, Object> buildSrpChallenge(UserPool pool, UserPoolClient client, CognitoUser user,
+                                                  String aHex, Map<String, String> clientMetadata,
+                                                  CustomAuthSession custom) {
+        validateSrpPublicValue(aHex);
         String[] serverB = CognitoSrpHelper.generateServerB(user.getSrpVerifier());
         String bHex = serverB[0];
         String bPublicHex = serverB[1];
@@ -829,10 +897,17 @@ final class CognitoAuthFlowHandler {
         String secretBlockBase64 = Base64.getEncoder().encodeToString(secretBlock);
 
         purgeExpired(srpSessions, SrpSession::expiresAt);
-        srpSessions.put(sessionToken, new SrpSession(
-                pool.getId(), user.getUsername(), client.getClientId(),
+        SrpSession srp = new SrpSession(pool.getId(), user.getUsername(), client.getClientId(),
                 aHex, bHex, bPublicHex, secretBlockBase64,
-                clientMetadata == null ? Map.of() : clientMetadata, sessionExpiry(client, clock.instant())));
+                clientMetadata == null ? Map.of() : clientMetadata, sessionExpiry(client, clock.instant()));
+        if (custom == null) {
+            srpSessions.put(sessionToken, srp);
+        } else {
+            custom.srpSession = srp;
+            custom.currentChallengeName = "PASSWORD_VERIFIER";
+            custom.history.add(new HashMap<>(Map.of("challengeName", "PASSWORD_VERIFIER")));
+            issueCustomAuthToken(sessionToken, custom, client);
+        }
 
         Map<String, Object> result = new HashMap<>();
         result.put("ChallengeName", "PASSWORD_VERIFIER");
@@ -867,6 +942,35 @@ final class CognitoAuthFlowHandler {
             srpSessions.remove(session);
             throw sessionExpiredException();
         }
+        CognitoUser user = verifySrpProof(pool, client, srp, responses);
+
+        Map<String, String> effectiveMetadata = (clientMetadata != null && !clientMetadata.isEmpty())
+                ? clientMetadata : srp.clientMetadata();
+        srpSessions.remove(session);
+
+        if (user.isTemporaryPassword() || "FORCE_CHANGE_PASSWORD".equals(user.getUserStatus())) {
+            return buildNewPasswordRequiredChallenge(pool, client, user);
+        }
+
+        return completePrimaryAuth(pool, client, user, "TokenGeneration_Authentication", effectiveMetadata);
+    }
+
+    private static void validateSrpPublicValue(String aHex) {
+        if (aHex == null || aHex.isBlank()) {
+            throw new AwsException("InvalidParameterException", "SRP_A is required", 400);
+        }
+        try {
+            BigInteger publicA = new BigInteger(aHex, 16);
+            if (publicA.signum() <= 0 || publicA.mod(CognitoSrpHelper.N).signum() == 0) {
+                throw new NumberFormatException("Invalid SRP public value");
+            }
+        } catch (NumberFormatException invalid) {
+            throw new AwsException("InvalidParameterException", "Invalid SRP_A", 400);
+        }
+    }
+
+    private CognitoUser verifySrpProof(UserPool pool, UserPoolClient client, SrpSession srp,
+                                       Map<String, String> responses) {
         if (!pool.getId().equals(srp.userPoolId()) || !client.getClientId().equals(srp.clientId())) {
             throw new AwsException("NotAuthorizedException", "Session does not match client", 400);
         }
@@ -893,17 +997,10 @@ final class CognitoAuthFlowHandler {
         byte[] secretBlock = Base64.getDecoder().decode(srp.secretBlockBase64());
         boolean valid = CognitoSrpHelper.verifySignature(sessionKey, pool.getId(), user.getUsername(),
                 secretBlock, timestamp, claimSignature);
-        if (!valid) throw new AwsException("NotAuthorizedException", "Incorrect username or password", 400);
-
-        Map<String, String> effectiveMetadata = (clientMetadata != null && !clientMetadata.isEmpty())
-                ? clientMetadata : srp.clientMetadata();
-        srpSessions.remove(session);
-
-        if (user.isTemporaryPassword() || "FORCE_CHANGE_PASSWORD".equals(user.getUserStatus())) {
-            return buildNewPasswordRequiredChallenge(pool, client, user);
+        if (!valid || !srp.secretBlockBase64().equals(responses.get("PASSWORD_CLAIM_SECRET_BLOCK"))) {
+            throw new AwsException("NotAuthorizedException", "Incorrect username or password", 400);
         }
-
-        return completePrimaryAuth(pool, client, user, "TokenGeneration_Authentication", effectiveMetadata);
+        return user;
     }
 
     // ──────────────────────────── USER_AUTH (choice-based) ────────────────────────────
@@ -1399,6 +1496,16 @@ final class CognitoAuthFlowHandler {
         CustomAuthSession state =
                 new CustomAuthSession(pool.getId(), user.getUsername(), client.getClientId());
         state.clientMetadata = clientMetadata == null ? Map.of() : clientMetadata;
+        boolean srpAuth = "SRP_A".equals(authParameters.get("CHALLENGE_NAME"));
+        if (srpAuth) {
+            validateSecretHash(client, authParameters, username);
+            validateSrpPublicValue(authParameters.get("SRP_A"));
+            requireSignInEligible(user);
+            if (user.getSrpVerifier() == null) {
+                throw new AwsException("NotAuthorizedException", "User does not support SRP auth", 400);
+            }
+            state.history.add(new HashMap<>(Map.of("challengeName", "SRP_A", "challengeResult", true)));
+        }
 
         Map<String, Object> defineResp = defineAuthChallenge(pool, client, user, state);
         if (Boolean.TRUE.equals(defineResp.get("failAuthentication"))) {
@@ -1413,6 +1520,9 @@ final class CognitoAuthFlowHandler {
 
         String challengeName = (String) defineResp.getOrDefault("challengeName", "CUSTOM_CHALLENGE");
         state.currentChallengeName = challengeName;
+        if (srpAuth && "PASSWORD_VERIFIER".equals(challengeName)) {
+            return buildSrpChallenge(pool, client, user, authParameters.get("SRP_A"), state.clientMetadata, state);
+        }
 
         Map<String, String> publicParams = new HashMap<>();
         publicParams.put("USERNAME", user.getUsername());
@@ -1437,22 +1547,7 @@ final class CognitoAuthFlowHandler {
     private Map<String, Object> handleCustomChallenge(UserPool pool, UserPoolClient client,
                                                        String session, Map<String, String> responses,
                                                        Map<String, String> clientMetadata) {
-        if (session == null) throw new AwsException("InvalidParameterException", "Session is required", 400);
-        CustomAuthToken token = customAuthSessions.get(session);
-        if (token == null) {
-            throw new AwsException("NotAuthorizedException", "Session not found", 400);
-        }
-        if (sessionExpired(token.expiresAt())) {
-            customAuthSessions.remove(session);
-            throw sessionExpiredException();
-        }
-        CustomAuthSession state = token.state();
-        if (!state.userPoolId.equals(pool.getId()) || !state.clientId.equals(client.getClientId())) {
-            throw new AwsException("NotAuthorizedException", "Session does not match client", 400);
-        }
-        if (clientMetadata != null && !clientMetadata.isEmpty()) {
-            state.clientMetadata = clientMetadata;
-        }
+        CustomAuthSession state = requireCustomSession(pool, client, session, "CUSTOM_CHALLENGE");
 
         String answer = responses.get("ANSWER");
         if (answer == null) answer = responses.get("custom:ANSWER");
@@ -1468,9 +1563,16 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
         }
 
+        consumeCustomSession(session, state);
+        if (clientMetadata != null && !clientMetadata.isEmpty()) {
+            state.clientMetadata = clientMetadata;
+        }
         boolean answerCorrect = verifyAuthChallenge(pool, client, user, state, answer);
         if (!state.history.isEmpty()) {
             state.history.get(state.history.size() - 1).put("challengeResult", answerCorrect);
+        }
+        if (state.srpSession != null) {
+            return continueCustomSrpAuth(pool, client, user, session, state, clientMetadata);
         }
 
         Map<String, Object> defineResp = defineAuthChallenge(pool, client, user, state);
@@ -1509,11 +1611,15 @@ final class CognitoAuthFlowHandler {
                                                                 CustomAuthSession state,
                                                                 Map<String, String> responses,
                                                                 Map<String, String> clientMetadata) {
+        requireCustomSession(pool, client, session, "PASSWORD_VERIFIER");
+        if (state.srpSession != null) {
+            CognitoUser user = verifySrpProof(pool, client, state.srpSession, responses);
+            consumeCustomSession(session, state);
+            state.history.get(state.history.size() - 1).put("challengeResult", true);
+            return continueCustomSrpAuth(pool, client, user, session, state, clientMetadata);
+        }
         if (!state.userPoolId.equals(pool.getId()) || !state.clientId.equals(client.getClientId())) {
             throw new AwsException("NotAuthorizedException", "Session does not match client", 400);
-        }
-        if (clientMetadata != null && !clientMetadata.isEmpty()) {
-            state.clientMetadata = clientMetadata;
         }
 
         String password = responses.get("ANSWER");
@@ -1525,6 +1631,10 @@ final class CognitoAuthFlowHandler {
         CognitoUser user = service.adminGetUser(pool.getId(), state.username);
         boolean passwordOK = user.getPasswordHash() != null
                 && user.getPasswordHash().equals(service.hashPassword(password));
+        consumeCustomSession(session, state);
+        if (clientMetadata != null && !clientMetadata.isEmpty()) {
+            state.clientMetadata = clientMetadata;
+        }
         if (!state.history.isEmpty()) {
             state.history.get(state.history.size() - 1).put("challengeResult", passwordOK);
         }
@@ -1559,6 +1669,71 @@ final class CognitoAuthFlowHandler {
         result.put("Session", newSession);
         result.put("ChallengeParameters", publicParams);
         return result;
+    }
+
+    private CustomAuthSession requireCustomSession(UserPool pool, UserPoolClient client,
+                                                    String session, String challengeName) {
+        CustomAuthToken token = session == null ? null : customAuthSessions.get(session);
+        if (token == null) {
+            throw new AwsException("NotAuthorizedException", "Session not found", 400);
+        }
+        if (sessionExpired(token.expiresAt())) {
+            customAuthSessions.remove(session, token);
+            throw sessionExpiredException();
+        }
+        CustomAuthSession state = token.state();
+        if (!state.userPoolId.equals(pool.getId()) || !state.clientId.equals(client.getClientId())
+                || !challengeName.equals(state.currentChallengeName)) {
+            throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
+        }
+        return state;
+    }
+
+    private void consumeCustomSession(String session, CustomAuthSession state) {
+        CustomAuthToken token = customAuthSessions.get(session);
+        if (token == null || token.state() != state || !customAuthSessions.remove(session, token)) {
+            throw new AwsException("NotAuthorizedException", "Session not found", 400);
+        }
+    }
+
+    private void validateCustomUsername(UserPool pool, UserPoolClient client, CustomAuthSession state,
+                                          Map<String, String> responses) {
+        String supplied = responses.get("USERNAME");
+        if (!state.username.equals(resolveToCanonicalUsername(pool, supplied))) {
+            throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
+        }
+        validateSecretHash(client, responses, supplied);
+    }
+
+    private Map<String, Object> continueCustomSrpAuth(UserPool pool, UserPoolClient client, CognitoUser user,
+                                                       String session, CustomAuthSession state,
+                                                       Map<String, String> clientMetadata) {
+        if (clientMetadata != null && !clientMetadata.isEmpty()) {
+            state.clientMetadata = clientMetadata;
+        }
+        Map<String, Object> decision = defineAuthChallenge(pool, client, user, state);
+        customAuthSessions.remove(session);
+        if (Boolean.TRUE.equals(decision.get("failAuthentication"))) {
+            throw new AwsException("NotAuthorizedException", "Custom auth failed", 400);
+        }
+        boolean passwordChange = user.isTemporaryPassword() || "FORCE_CHANGE_PASSWORD".equals(user.getUserStatus());
+        if (!passwordChange && Boolean.TRUE.equals(decision.get("issueTokens"))) {
+            return completePrimaryAuth(pool, client, user, "TokenGeneration_Authentication", state.clientMetadata);
+        }
+        String challengeName = passwordChange ? "NEW_PASSWORD_REQUIRED"
+                : (String) decision.getOrDefault("challengeName", "CUSTOM_CHALLENGE");
+        if (!"CUSTOM_CHALLENGE".equals(challengeName) && !"NEW_PASSWORD_REQUIRED".equals(challengeName)) {
+            throw new AwsException("InvalidLambdaResponseException", "Unexpected custom SRP challenge", 400);
+        }
+        state.currentChallengeName = challengeName;
+        Map<String, String> params = "NEW_PASSWORD_REQUIRED".equals(challengeName)
+                ? newPasswordChallengeParameters(user) : new HashMap<>();
+        params.put("USERNAME", state.username);
+        applyCreateResponse(state, challengeName, "CUSTOM_CHALLENGE".equals(challengeName)
+                ? createAuthChallenge(pool, client, user, state, challengeName) : Map.of(), params);
+        String next = buildSessionToken(pool.getId(), state.username, client.getClientId());
+        issueCustomAuthToken(next, state, client);
+        return Map.of("ChallengeName", challengeName, "Session", next, "ChallengeParameters", params);
     }
 
     // ──────────────────────────── CUSTOM_AUTH triggers + helpers ────────────────────────────

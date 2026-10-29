@@ -93,6 +93,7 @@ the optional `filter` fields.
 | `FLOCI_SERVICES_ECR_REGISTRY_MAX_PORT` | `5199` | Last private loopback port for the backing registry |
 | `FLOCI_SERVICES_ECR_DATA_PATH` | `./data/ecr` | Bind-mount root for the registry data directory |
 | `FLOCI_SERVICES_ECR_KEEP_RUNNING_ON_SHUTDOWN` | `true` | Leave the registry container running so the next Floci start adopts it |
+| `FLOCI_SERVICES_ECR_DOCKER_NETWORK` | Inherit Floci's container network | Docker network shared by Floci and the backing registry when running in Docker |
 | `FLOCI_SERVICES_ECR_URI_STYLE` | `hostname` | `hostname` = `*.dkr.ecr.<region>.localhost`; `path` = `localhost:<port>/<account>/<region>/<repo>` |
 | `FLOCI_SERVICES_ECR_TLS_URI` | `false` | Report `localhost.floci.io` registry addresses and an HTTPS login endpoint when global `FLOCI_TLS_ENABLED` is also `true` |
 | `FLOCI_SERVICES_ECR_PREFER_LOCAL_IMAGES` | `true` | Use an AWS-shaped ECR image URI as-is when the Docker daemon already has that image, instead of rewriting it to the loopback registry |
@@ -284,6 +285,15 @@ The following ECR features are **not** implemented. Stored values for policies a
 **`Function.TimedOut` when invoking image-backed Lambdas on native Linux Docker.** Lambda containers reach Floci's Runtime API server via the docker bridge gateway. On Ubuntu / Pop!_OS / Debian with UFW enabled, the default `INPUT DROP` policy blocks this path. See [Quick Start → Lambda on native Linux Docker](../getting-started/quick-start.md#lambda-on-native-linux-docker-ufw) for the one-line `ufw allow in on docker0` fix.
 
 **`docker login` fails with TLS errors.** When TLS URI advertising is enabled, Docker must trust the Floci CA independently of the AWS CLI, and the server certificate must cover the returned registry hostname. Follow the trust steps above; setting only `AWS_CA_BUNDLE` is insufficient. Default loopback URIs remain usable over HTTP without additional Docker trust configuration.
+
+**Registry requests return `503 Service Unavailable`.** Floci could not start or connect to its
+backing registry. Errors detected by Floci include a Distribution `errors` array with a network configuration
+hint. Check Docker availability and the registry container's health. When Floci itself runs in
+Docker, attach Floci and its registry to the same user-defined network. Docker's default `bridge`
+does not resolve container names, which Floci uses to reach the registry. Create a network with
+`docker network create floci-net`, start Floci with `--network floci-net`, and set
+`FLOCI_SERVICES_ECR_DOCKER_NETWORK=floci-net` if selecting the registry network explicitly.
+See [Docker's bridge network documentation](https://docs.docker.com/engine/network/drivers/bridge/).
 
 **Disk not reclaimed after deleting images.** `BatchDeleteImage` removes manifests but blobs remain on disk until garbage collection runs. Trigger it with `curl -X POST http://localhost:4566/_floci/ecr/gc`. The endpoint runs `registry garbage-collect` inside the backing container and returns the reclaimed blob list. The operation is serialized — ECR API calls block for its duration (typically a few seconds).
 

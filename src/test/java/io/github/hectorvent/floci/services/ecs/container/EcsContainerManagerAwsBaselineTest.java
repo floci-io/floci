@@ -66,7 +66,7 @@ class EcsContainerManagerAwsBaselineTest {
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.resolveImageForLaunch(any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(lifecycleManager.createAndStart(any()))
+        when(lifecycleManager.createAndStartEphemeral(any()))
                 .thenReturn(new ContainerInfo("docker-id", Map.of()));
 
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);

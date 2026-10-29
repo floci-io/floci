@@ -141,6 +141,7 @@ import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -4225,7 +4226,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         inst.setRootDeviceName(rootDeviceName);
                         for (LaunchVolume planned : launchVolumes) {
                             Volume volume = newVolume(region, az, planned.volumeType(), planned.size(),
-                                    planned.encrypted(), planned.iops(), planned.throughput(), planned.snapshotId());
+                                    planned.encrypted(), planned.kmsKeyId(), planned.iops(), planned.throughput(),
+                                    planned.snapshotId());
                             volume.setState("in-use");
                             VolumeAttachment attachment = new VolumeAttachment();
                             attachment.setVolumeId(volume.getVolumeId());
@@ -5011,8 +5013,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * the primary interface it was associated through, or null.
      */
     private Address primaryElasticAddress(String region, Instance instance) {
+        return primaryElasticAddress(region, instance, elasticAddresses(region));
+    }
+
+    private Address primaryElasticAddress(String region, Instance instance, ElasticAddresses elastic) {
+        TreeSet<Integer> candidates = new TreeSet<>(
+                elastic.positions().getOrDefault(instance.getInstanceId(), List.of()));
         String primaryInterfaceId = primaryInterfaceId(instance);
-        for (Address address : addresses.scan(k -> k.startsWith(region + "::"))) {
+        if (primaryInterfaceId != null) {
+            candidates.addAll(elastic.positions().getOrDefault(primaryInterfaceId, List.of()));
+        }
+        for (int position : candidates) {
+            // The index keeps live addresses: one disassociated or moved since it was read no
+            // longer names this instance or its interface, so the owner is checked again here.
+            Address address = elastic.associated().get(position);
             boolean onInstance = instance.getInstanceId().equals(address.getInstanceId())
                     || primaryInterfaceId != null && primaryInterfaceId.equals(address.getNetworkInterfaceId());
             if (onInstance && address.getAssociationId() != null
@@ -5021,6 +5035,59 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
         return null;
+    }
+
+    /**
+     * A region's associated Elastic IPs in store order, each position listed under its instance id
+     * and its interface id, so a response rendering many instances reads the store once. An
+     * address associated with an instance after the index was read is not found for it.
+     */
+    record ElasticAddresses(List<Address> associated, Map<String, List<Integer>> positions) {}
+
+    ElasticAddresses elasticAddresses(String region) {
+        List<Address> associated = addresses.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(address -> address.getAssociationId() != null)
+                .toList();
+        Map<String, List<Integer>> positions = new HashMap<>();
+        for (int i = 0; i < associated.size(); i++) {
+            for (String owner : new String[] {associated.get(i).getInstanceId(),
+                    associated.get(i).getNetworkInterfaceId()}) {
+                if (owner != null) {
+                    positions.computeIfAbsent(owner, k -> new ArrayList<>()).add(i);
+                }
+            }
+        }
+        return new ElasticAddresses(associated, positions);
+    }
+
+    /**
+     * The association DescribeInstances shows on an instance's primary interface: the Elastic IP
+     * on its primary private address, owned by the interface owner exactly as
+     * DescribeNetworkInterfaces shows it, otherwise the automatic public address (owned by
+     * "amazon"), otherwise null. Other interfaces carry none.
+     */
+    NetworkInterfaceAssociation instanceInterfaceAssociation(Instance instance, InstanceNetworkInterface eni,
+                                                             ElasticAddresses elasticAddresses) {
+        if (eni.getDeviceIndex() != 0) {
+            return null;
+        }
+        Address elastic = primaryElasticAddress(instance.getRegion(), instance, elasticAddresses);
+        if (elastic != null) {
+            // Copied once and checked again: a disassociation between the lookup and the copy
+            // leaves no association id, and then the instance's own address is shown instead.
+            NetworkInterfaceAssociation association = networkInterfaceAssociation(elastic, eni.getOwnerId());
+            if (association.getAssociationId() != null && association.getPublicIp() != null) {
+                return association;
+            }
+        }
+        String publicIp = instance.getPublicIpAddress();
+        if (publicIp == null || publicIp.isBlank()) {
+            return null;
+        }
+        NetworkInterfaceAssociation association = new NetworkInterfaceAssociation();
+        association.setPublicIp(publicIp);
+        association.setIpOwnerId("amazon");
+        return association;
     }
 
     public String platformDetailsForInstance(Instance instance) {
@@ -7619,13 +7686,17 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     // ─── Security Groups ───────────────────────────────────────────────────────
 
-    public SecurityGroup createSecurityGroup(String region, String groupName, String description, String vpcId) {
+    /**
+     * The VPC a new security group goes into: the one {@code vpcId} names, or the region's default VPC
+     * when {@code vpcId} is absent or empty. Fails with InvalidVpcID.NotFound when that VPC does not exist.
+     */
+    public Vpc requireSecurityGroupVpc(String region, String vpcId) {
         ensureDefaultResources(region);
-        if (vpcId != null && !vpcId.isEmpty()) {
-            getRequiredVpc(region, vpcId);
-        } else {
-            vpcId = resolveDefaultVpcId(region);
-        }
+        return getRequiredVpc(region, vpcId != null && !vpcId.isEmpty() ? vpcId : resolveDefaultVpcId(region));
+    }
+
+    public SecurityGroup createSecurityGroup(String region, String groupName, String description, String vpcId) {
+        vpcId = requireSecurityGroupVpc(region, vpcId).getVpcId();
         // Check duplicate
         String finalVpcId = vpcId;
         boolean exists = securityGroups.scan(k -> true).stream()
@@ -8677,7 +8748,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /** One EBS volume a launch creates, settled before anything of the launch is stored. */
     private record LaunchVolume(String deviceName, String snapshotId, int size, String volumeType,
-                                int iops, Integer throughput, boolean encrypted, boolean deleteOnTermination) {}
+                                int iops, Integer throughput, boolean encrypted, String kmsKeyId,
+                                boolean deleteOnTermination) {}
 
     /**
      * The EBS volumes a launch creates, one per device: the AMI's block device mappings with the
@@ -8766,7 +8838,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             Integer throughput = "gp3".equals(volumeType) ? ebs.getThroughput() : null;
             planned.add(new LaunchVolume(mapping.getDeviceName(), snapshotId, size, volumeType, iops, throughput,
                     Boolean.TRUE.equals(ebs.getEncrypted()) || snapshot != null && snapshot.isEncrypted(),
-                    !Boolean.FALSE.equals(ebs.getDeleteOnTermination())));
+                    ebs.getKmsKeyId(), !Boolean.FALSE.equals(ebs.getDeleteOnTermination())));
         }
         return planned;
     }
@@ -10642,21 +10714,82 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
+    Instant capacityReservationNow() {
+        return Instant.now();
+    }
+
+    private void validateCapacityReservationSchedule(Instant start, Long duration, String delivery,
+            Instant end, Instant now) {
+        if (start == null) {
+            if (duration != null || delivery != null) {
+                throw new AwsException("InvalidParameterCombination",
+                        "CommitmentDuration and DeliveryPreference require StartDate.", 400);
+            }
+            return;
+        }
+        if (start.isBefore(now.plusSeconds(5 * 86400L)) || start.isAfter(now.plusSeconds(120 * 86400L))) {
+            throw new AwsException("InvalidParameterValue", "StartDate must be 5 to 120 days in the future.", 400);
+        }
+        if (duration == null || delivery == null) {
+            throw new AwsException("MissingParameter",
+                    "Future-dated reservations require CommitmentDuration and DeliveryPreference.", 400);
+        }
+        if (duration < 1 || duration > 200000000L || !"incremental".equals(delivery)) {
+            throw new AwsException("InvalidParameterValue",
+                    "CommitmentDuration must be 1 to 200000000 seconds and DeliveryPreference must be incremental.", 400);
+        }
+        if (end != null && end.isBefore(start.plusSeconds(duration))) {
+            throw new AwsException("InvalidParameterValue", "EndDate cannot precede the commitment end date.", 400);
+        }
+    }
+
+    private void validateFutureCapacityReservation(String instanceType, int count, String matching) {
+        if (!"targeted".equals(matching)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Future-dated Capacity Reservations require targeted instance matching criteria.", 400);
+        }
+        boolean supportedFamily = switch (instanceType.charAt(0)) {
+            case 'c', 'g', 'i', 'm', 'r', 't', 'u', 'x' -> !instanceType.startsWith("mac")
+                    && !instanceType.startsWith("inf") && !instanceType.startsWith("trn");
+            default -> false;
+        };
+        if (!supportedFamily) {
+            throw new AwsException("InvalidParameterValue",
+                    "Future-dated Capacity Reservations support only C, G, I, M, R, T, U and X instance families.", 400);
+        }
+        int vcpus = instanceTypeCatalog.defaultVcpus(instanceType)
+                .orElseThrow(() -> new AwsException("InvalidParameterValue",
+                        "Instance type '" + instanceType + "' is not supported for future-dated reservations.", 400));
+        if ((long) count * vcpus < 32) {
+            throw new AwsException("InvalidParameterValue",
+                    "Future-dated Capacity Reservations require at least 32 vCPUs per request.", 400);
+        }
+    }
+
     private void reconcileCapacityMembership(String region) {
+        Instant now = capacityReservationNow();
         List<CapacityReservation> reconciled = new ArrayList<>();
+        List<CapacityReservation> activatedReservations = new ArrayList<>();
         Map<String, CapacityReservation> changed = new LinkedHashMap<>();
         for (CapacityReservation stored : capacityReservations.scan(k -> k.startsWith(region + "::"))) {
             CapacityReservation updated = new CapacityReservation(stored);
             reconciled.add(updated);
+            boolean activated = "scheduled".equals(updated.getState()) && updated.getStartDate() != null
+                    && !updated.getStartDate().isAfter(now);
+            if (activated) {
+                activatedReservations.add(updated);
+                updated.setState("active");
+                updated.setAvailableInstanceCount(updated.getTotalInstanceCount());
+            }
             boolean expired = "active".equals(updated.getState()) && updated.getEndDate() != null
-                    && !updated.getEndDate().isAfter(Instant.now());
+                    && !updated.getEndDate().isAfter(now);
             if (expired) {
                 updated.setState("expired");
             }
             updated.getInstanceIds().removeIf(id -> !"active".equals(updated.getState())
                     || instances.get(key(region, id)).map(instance -> !holdsCapacity(instance)).orElse(true));
             int released = stored.getInstanceIds().size() - updated.getInstanceIds().size();
-            if (expired || released > 0) {
+            if (activated || expired || released > 0) {
                 updated.setAvailableInstanceCount("active".equals(updated.getState())
                         ? updated.getAvailableInstanceCount() + released : 0);
                 changed.put(key(region, updated.getCapacityReservationId()), updated);
@@ -10670,6 +10803,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             Set<String> associated = new HashSet<>();
             for (CapacityReservation reservation : reconciled) {
                 associated.addAll(reservation.getInstanceIds());
+            }
+            for (CapacityReservation reservation : activatedReservations) {
+                matchOpenCapacityInstances(region, reservation, associated);
             }
             Map<String, Set<String>> membersByGroup = new HashMap<>();
             for (Instance instance : groupInstances) {
@@ -10696,6 +10832,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         if (!changed.isEmpty()) {
             persistCapacityMembership(changed);
+        }
+    }
+
+    private void matchOpenCapacityInstances(String region, CapacityReservation reservation,
+            Set<String> associated) {
+        if (!"active".equals(reservation.getState()) || !"open".equals(reservation.getInstanceMatchCriteria())
+                || reservation.getAvailableInstanceCount() == 0) {
+            return;
+        }
+        for (Instance instance : instances.scan(k -> k.startsWith(region + "::"))) {
+            if (reservation.getAvailableInstanceCount() == 0) {
+                break;
+            }
+            if (instance.getState() != null && "running".equals(instance.getState().getName()) && !instance.isSpot()
+                    && "open".equals(instance.getCapacityReservationPreference())
+                    && instance.getCapacityReservationTarget() == null
+                    && instance.getCapacityReservationGroupArn() == null
+                    && !associated.contains(instance.getInstanceId())
+                    && matchesCapacityReservation(instance, reservation)) {
+                reservation.getInstanceIds().add(instance.getInstanceId());
+                reservation.setAvailableInstanceCount(reservation.getAvailableInstanceCount() - 1);
+                associated.add(instance.getInstanceId());
+            }
         }
     }
 
@@ -10842,76 +11001,137 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public CapacityReservation createCapacityReservation(String region, String instanceType,
             String instancePlatform, String availabilityZone, String availabilityZoneId, Integer instanceCount,
             String tenancy, Boolean ebsOptimized, Boolean ephemeralStorage, String endDateType,
-            java.time.Instant endDate, String instanceMatchCriteria, String outpostArn, String placementGroupArn) {
-        ensureDefaultResources(region);
-        if (instanceType == null || instanceType.isBlank()) {
-            throw new AwsException("MissingParameter",
-                    "The request must contain the parameter InstanceType.", 400);
+            Instant endDate, String instanceMatchCriteria, String outpostArn, String placementGroupArn) {
+        return createCapacityReservation(region, instanceType, instancePlatform, availabilityZone,
+                availabilityZoneId, instanceCount, tenancy, ebsOptimized, ephemeralStorage, endDateType,
+                endDate, instanceMatchCriteria, outpostArn, placementGroupArn, null, null, null, null);
+    }
+
+    public CapacityReservation createCapacityReservation(String region, String instanceType,
+            String instancePlatform, String availabilityZone, String availabilityZoneId, Integer instanceCount,
+            String tenancy, Boolean ebsOptimized, Boolean ephemeralStorage, String endDateType,
+            Instant endDate, String instanceMatchCriteria, String outpostArn, String placementGroupArn,
+            Instant startDate, Long commitmentDuration, String deliveryPreference, String clientToken) {
+        return createCapacityReservation(region, instanceType, instancePlatform, availabilityZone,
+                availabilityZoneId, instanceCount, tenancy, ebsOptimized, ephemeralStorage, endDateType,
+                endDate, instanceMatchCriteria, outpostArn, placementGroupArn, startDate, commitmentDuration,
+                deliveryPreference, clientToken, List.of());
+    }
+
+    public CapacityReservation createCapacityReservation(String region, String instanceType,
+            String instancePlatform, String availabilityZone, String availabilityZoneId, Integer instanceCount,
+            String tenancy, Boolean ebsOptimized, Boolean ephemeralStorage, String endDateType,
+            Instant endDate, String instanceMatchCriteria, String outpostArn, String placementGroupArn,
+            Instant startDate, Long commitmentDuration, String deliveryPreference, String clientToken,
+            List<Tag> resourceTags) {
+        validateNewResourceTags(resourceTags);
+        Map<String, String> requestTags = new LinkedHashMap<>();
+        for (Tag tag : resourceTags) {
+            requestTags.put(tag.getKey(), tag.getValue());
         }
-        if (instancePlatform == null || instancePlatform.isBlank()) {
-            throw new AwsException("MissingParameter",
-                    "The request must contain the parameter InstancePlatform.", 400);
-        }
-        if (instanceCount == null) {
-            throw new AwsException("MissingParameter",
-                    "The request must contain the parameter InstanceCount.", 400);
-        }
-        if ((availabilityZone == null || availabilityZone.isBlank())
-                && (availabilityZoneId == null || availabilityZoneId.isBlank())) {
-            throw new AwsException("MissingParameter",
-                    "The request must contain the parameter AvailabilityZone or AvailabilityZoneId.", 400);
-        }
-        int count = requirePositiveInstanceCount(instanceCount);
-        if (isSet(availabilityZoneId)) {
-            zoneNameForZoneId(region, availabilityZoneId);
-        }
-        CapacityReservation reservation = new CapacityReservation();
-        reservation.setCapacityReservationId("cr-" + randomHex(17));
-        String ownerAccountId = callerAccountId();
-        reservation.setOwnerId(ownerAccountId);
-        reservation.setRegion(region);
-        reservation.setCapacityReservationArn(
-                AwsArnUtils.Arn.of("ec2", region, ownerAccountId, "capacity-reservation/" + reservation.getCapacityReservationId()).toString());
-        reservation.setAvailabilityZone(availabilityZone);
-        reservation.setAvailabilityZoneId(availabilityZoneId);
-        reservation.setInstanceType(instanceType);
-        reservation.setInstancePlatform(instancePlatform);
-        reservation.setTenancy(tenancy != null ? tenancy : "default");
-        reservation.setTotalInstanceCount(count);
-        reservation.setAvailableInstanceCount(count);
-        reservation.setEbsOptimized(Boolean.TRUE.equals(ebsOptimized));
-        reservation.setEphemeralStorage(Boolean.TRUE.equals(ephemeralStorage));
-        reservation.setState("active");
-        reservation.setStartDate(Instant.now());
-        reservation.setCreateDate(Instant.now());
-        reservation.setEndDate(endDate);
-        reservation.setEndDateType(endDateType != null ? endDateType : "unlimited");
-        reservation.setInstanceMatchCriteria(instanceMatchCriteria != null ? instanceMatchCriteria : "open");
-        reservation.setOutpostArn(outpostArn);
-        reservation.setPlacementGroupArn(placementGroupArn);
         synchronized (capacityReservationLock) {
-            reconcileCapacityMembership(region);
-            if ("open".equals(reservation.getInstanceMatchCriteria())) {
-                Set<String> associated = capacityReservations.scan(k -> k.startsWith(region + "::")).stream()
-                        .flatMap(existing -> existing.getInstanceIds().stream()).collect(Collectors.toSet());
-                for (Instance instance : instances.scan(k -> k.startsWith(region + "::"))) {
-                    if (reservation.getAvailableInstanceCount() == 0) {
-                        break;
-                    }
-                    if ("running".equals(instance.getState().getName()) && !instance.isSpot()
-                            && "open".equals(instance.getCapacityReservationPreference())
-                            && instance.getCapacityReservationTarget() == null
-                            && instance.getCapacityReservationGroupArn() == null
-                            && !associated.contains(instance.getInstanceId())
-                            && matchesCapacityReservation(instance, reservation)) {
-                        reservation.getInstanceIds().add(instance.getInstanceId());
-                        reservation.setAvailableInstanceCount(reservation.getAvailableInstanceCount() - 1);
+            List<String> parameters = Arrays.asList(instanceType, instancePlatform, availabilityZone,
+                    availabilityZoneId, String.valueOf(instanceCount), tenancy, String.valueOf(ebsOptimized),
+                    String.valueOf(ephemeralStorage), endDateType, String.valueOf(endDate), instanceMatchCriteria,
+                    outpostArn, placementGroupArn, String.valueOf(startDate), String.valueOf(commitmentDuration),
+                    deliveryPreference);
+            if (isSet(clientToken)) {
+                for (CapacityReservation existing : capacityReservations.scan(k -> k.startsWith(region + "::"))) {
+                    if (clientToken.equals(existing.getClientToken()) && callerAccountId().equals(existing.getOwnerId())) {
+                        if (!parameters.equals(existing.getRequestParameters())
+                                || !requestTags.equals(existing.getRequestTags())) {
+                            throw new AwsException("IdempotentParameterMismatch",
+                                    "Parameters differ from the previous request with this ClientToken.", 400);
+                        }
+                        reconcileCapacityMembership(region);
+                        return new CapacityReservation(getRequiredCapacityReservation(region,
+                                existing.getCapacityReservationId()));
                     }
                 }
             }
-            capacityReservations.put(key(region, reservation.getCapacityReservationId()), reservation);
+            Instant now = capacityReservationNow();
+            validateCapacityReservationSchedule(startDate, commitmentDuration, deliveryPreference, endDate, now);
+            if (instanceType == null || instanceType.isBlank()) {
+                throw new AwsException("MissingParameter",
+                        "The request must contain the parameter InstanceType.", 400);
+            }
+            if (instancePlatform == null || instancePlatform.isBlank()) {
+                throw new AwsException("MissingParameter",
+                        "The request must contain the parameter InstancePlatform.", 400);
+            }
+            if (instanceCount == null) {
+                throw new AwsException("MissingParameter",
+                        "The request must contain the parameter InstanceCount.", 400);
+            }
+            if ((availabilityZone == null || availabilityZone.isBlank())
+                    && (availabilityZoneId == null || availabilityZoneId.isBlank())) {
+                throw new AwsException("MissingParameter",
+                        "The request must contain the parameter AvailabilityZone or AvailabilityZoneId.", 400);
+            }
+            int count = requirePositiveInstanceCount(instanceCount);
+            if (startDate != null) {
+                validateFutureCapacityReservation(instanceType, count, instanceMatchCriteria);
+            }
+            ensureDefaultResources(region);
+            if (isSet(availabilityZoneId)) {
+                zoneNameForZoneId(region, availabilityZoneId);
+            }
+            CapacityReservation reservation = new CapacityReservation();
+            reservation.setCapacityReservationId("cr-" + randomHex(17));
+            String ownerAccountId = callerAccountId();
+            reservation.setOwnerId(ownerAccountId);
+            reservation.setRegion(region);
+            reservation.setCapacityReservationArn(
+                    AwsArnUtils.Arn.of("ec2", region, ownerAccountId, "capacity-reservation/" + reservation.getCapacityReservationId()).toString());
+            reservation.setAvailabilityZone(availabilityZone);
+            reservation.setAvailabilityZoneId(availabilityZoneId);
+            reservation.setInstanceType(instanceType);
+            reservation.setInstancePlatform(instancePlatform);
+            reservation.setTenancy(tenancy != null ? tenancy : "default");
+            reservation.setTotalInstanceCount(count);
+            reservation.setAvailableInstanceCount(startDate == null ? count : 0);
+            reservation.setEbsOptimized(Boolean.TRUE.equals(ebsOptimized));
+            reservation.setEphemeralStorage(Boolean.TRUE.equals(ephemeralStorage));
+            reservation.setState(startDate == null ? "active" : "scheduled");
+            reservation.setStartDate(startDate == null ? now : startDate);
+            reservation.setCreateDate(now);
+            reservation.setClientToken(clientToken);
+            reservation.setRequestParameters(parameters);
+            reservation.setRequestTags(new LinkedHashMap<>(requestTags));
+            reservation.setTags(requestTags.entrySet().stream()
+                    .map(tag -> new Tag(tag.getKey(), tag.getValue())).collect(Collectors.toCollection(ArrayList::new)));
+            reservation.setDeliveryPreference(deliveryPreference);
+            if (startDate != null) {
+                reservation.setCommitmentDuration(commitmentDuration);
+                reservation.setCommitmentEndDate(startDate.plusSeconds(commitmentDuration));
+                reservation.setCommittedInstanceCount(count);
+            }
+            reservation.setEndDate(endDate);
+            reservation.setEndDateType(endDateType != null ? endDateType : "unlimited");
+            reservation.setInstanceMatchCriteria(instanceMatchCriteria != null ? instanceMatchCriteria : "open");
+            reservation.setOutpostArn(outpostArn);
+            reservation.setPlacementGroupArn(placementGroupArn);
+            reconcileCapacityMembership(region);
+            Set<String> associated = capacityReservations.scan(k -> k.startsWith(region + "::")).stream()
+                    .flatMap(existing -> existing.getInstanceIds().stream()).collect(Collectors.toSet());
+            matchOpenCapacityInstances(region, reservation, associated);
+            if (!reservation.getTags().isEmpty()) {
+                putTags(region, reservation.getCapacityReservationId(), new ArrayList<>(reservation.getTags()));
+            }
+            try {
+                capacityReservations.put(key(region, reservation.getCapacityReservationId()), reservation);
+            } catch (RuntimeException failure) {
+                try {
+                    removeTags(region, reservation.getCapacityReservationId());
+                } catch (RuntimeException cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                    LOG.warnv(cleanupFailure, "Could not remove creation tags for failed Capacity Reservation {0}",
+                            reservation.getCapacityReservationId());
+                }
+                throw failure;
+            }
+            return new CapacityReservation(reservation);
         }
-        return reservation;
     }
 
     public List<CapacityReservation> describeCapacityReservations(String region, List<String> ids,
@@ -10948,6 +11168,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             reconcileCapacityMembership(region);
             CapacityReservation reservation = new CapacityReservation(
                     getRequiredCapacityReservation(region, capacityReservationId));
+            if ("scheduled".equals(reservation.getState())) {
+                throw new AwsException("IncorrectState", "A scheduled Capacity Reservation cannot be modified.", 400);
+            }
+            if (reservation.getCommitmentEndDate() != null
+                    && capacityReservationNow().isBefore(reservation.getCommitmentEndDate())
+                    && (instanceCount != null && instanceCount < reservation.getCommittedInstanceCount()
+                        || endDate != null && endDate.isBefore(reservation.getCommitmentEndDate()))) {
+                throw new AwsException("InvalidParameterValue", "The modification violates the capacity commitment.", 400);
+            }
             if (instanceCount != null) {
                 int delta = requirePositiveInstanceCount(instanceCount) - reservation.getTotalInstanceCount();
                 if (reservation.getAvailableInstanceCount() + delta < 0) {
@@ -13009,6 +13238,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 case "vpc-id" -> matchesValue(values, subnet.getVpcId());
                 case "state" -> matchesValue(values, subnet.getState());
                 case "availabilityZone", "availability-zone" -> matchesValue(values, subnet.getAvailabilityZone());
+                case "default-for-az", "defaultForAz" -> matchesValue(values, String.valueOf(subnet.isDefaultForAz()));
                 case "cidr-block", "cidrBlock", "cidr" -> matchesValue(values, subnet.getCidrBlock());
                 default -> true;
             };
@@ -13376,11 +13606,36 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return ebsEncryptionService != null && ebsEncryptionService.getEbsEncryptionByDefault(region);
     }
 
+    /**
+     * The KMS key a volume encrypted without one gets: the region's default EBS key, read when the
+     * volume is created, so a later ModifyEbsDefaultKmsKeyId leaves the volume's key alone, as on AWS.
+     */
+    private String ebsDefaultKmsKeyId(String region) {
+        return ebsEncryptionService != null ? ebsEncryptionService.getEbsDefaultKmsKeyId(region)
+                : Ec2EbsEncryptionService.AWS_MANAGED_KEY_ALIAS;
+    }
+
+    /** Creates a volume without naming a KMS key, so an encrypted one gets the region's default. */
     public Volume createVolume(String region, String availabilityZone, String volumeType,
                                int size, boolean encrypted, int iops, Integer throughput,
                                String snapshotId, List<Tag> volumeTags) {
+        return createVolume(region, availabilityZone, volumeType, size, encrypted, null, iops, throughput,
+                snapshotId, volumeTags);
+    }
+
+    /**
+     * Creates a volume with the KMS key CreateVolume names. An encrypted volume keeps that key as
+     * given, a key id, key ARN, alias name or alias ARN, without checking it against KMS, as the
+     * region's default EBS key is not checked; AWS itself checks it only after answering. An
+     * encrypted volume that names no key gets the region's default, and a volume that is not
+     * encrypted has no key.
+     */
+    public Volume createVolume(String region, String availabilityZone, String volumeType,
+                               int size, boolean encrypted, String kmsKeyId, int iops, Integer throughput,
+                               String snapshotId, List<Tag> volumeTags) {
         ensureDefaultResources(region);
-        Volume vol = newVolume(region, availabilityZone, volumeType, size, encrypted, iops, throughput, snapshotId);
+        Volume vol = newVolume(region, availabilityZone, volumeType, size, encrypted, kmsKeyId, iops, throughput,
+                snapshotId);
         String volumeId = vol.getVolumeId();
         if (volumeTags != null) {
             vol.setTags(new ArrayList<>(volumeTags));
@@ -13396,10 +13651,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * A new, unattached volume record, not yet stored, with the defaults CreateVolume and a
-     * launch's block device mappings share.
+     * launch's block device mappings share. An encrypted volume keeps {@code kmsKeyId}, or gets
+     * the region's default key when it names none; a volume that is not encrypted has no key.
      */
     private Volume newVolume(String region, String availabilityZone, String volumeType, int size,
-                             boolean encrypted, int iops, Integer throughput, String snapshotId) {
+                             boolean encrypted, String kmsKeyId, int iops, Integer throughput,
+                             String snapshotId) {
         String effectiveType = volumeType != null ? volumeType : "gp2";
         Volume vol = new Volume();
         vol.setVolumeId("vol-" + randomHex(17));
@@ -13409,6 +13666,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // With encryption by default on, AWS encrypts every new volume and the Encrypted parameter
         // cannot opt out of it.
         vol.setEncrypted(encrypted || ebsEncryptionByDefault(region));
+        if (vol.isEncrypted()) {
+            vol.setKmsKeyId(kmsKeyId != null && !kmsKeyId.isBlank() ? kmsKeyId : ebsDefaultKmsKeyId(region));
+        }
         vol.setIops(iops > 0 ? iops : (volumeType != null && volumeType.startsWith("io") ? iops : 0));
         // Throughput is a gp3-only attribute; AWS reports 125 MiB/s by default for gp3.
         if ("gp3".equals(effectiveType)) {

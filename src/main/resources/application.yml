@@ -434,7 +434,7 @@ floci:
       # Extra Docker create flags for Lambda containers, for example: --env KEY=VALUE --volume /host:/container:ro
       docker-flags: ""
       ecr-base-uri: public.ecr.aws            # FLOCI_SERVICES_LAMBDA_ECR_BASE_URI — registry for Lambda runtime images (legacy: floci.ecr-base-uri / FLOCI_ECR_BASE_URI)
-      # runtime-images:                   # Optional full image references keyed by Lambda runtime
+      # runtime-images:                   # Optional full references keyed by runtime or runtime.os.arch
       #   "python3.12": "public.ecr.aws/lambda/python:3.12@sha256:<digest>"
       honour-architectures: false             # Select the Lambda architecture for Docker pull and create
       default-memory-mb: 128
@@ -534,6 +534,7 @@ floci:
     redshift:
       enabled: true
       automated-snapshots-enabled: true
+      cloudwatch-metrics-enabled: true
       snapshot-sweep-interval-seconds: 60
       default-port: 5439
       image-version: postgres:15-alpine
@@ -582,6 +583,8 @@ floci:
       shutdown-timeout-seconds: ${FLOCI_SERVICES_REDSHIFT_DATA_SHUTDOWN_TIMEOUT_SECONDS:10}
     redshift-serverless:
       enabled: true
+      scheduled-actions-enabled: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SCHEDULED_ACTIONS_ENABLED:true}
+      scheduled-action-sweep-interval-seconds: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SCHEDULED_ACTION_SWEEP_INTERVAL_SECONDS:60}
     neptune:
       enabled: true
       proxy-base-port: 8182

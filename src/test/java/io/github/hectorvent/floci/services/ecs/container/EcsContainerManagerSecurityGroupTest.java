@@ -77,7 +77,7 @@ class EcsContainerManagerSecurityGroupTest {
         lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.resolveImageForLaunch(any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("docker-id", Map.of()));
+        when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerInfo("docker-id", Map.of()));
         dockerClient = mock(DockerClient.class, RETURNS_DEEP_STUBS);
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
 
@@ -245,7 +245,7 @@ class EcsContainerManagerSecurityGroupTest {
         verify(firewallManager).createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any());
         verify(lifecycleManager).create(any());
         verify(lifecycleManager).startCreated(eq("router-id"), any());
-        verify(lifecycleManager).createAndStart(any());
+        verify(lifecycleManager).createAndStartEphemeral(any());
     }
 
     private static EcsTask awsvpcTask() {

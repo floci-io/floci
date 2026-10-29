@@ -345,8 +345,10 @@ class QueryConstraintCheckTest {
      */
     @Test
     void theVendoredIamFileLoadsAndCarriesTheOperationsTheseWavesClaim() {
-        QueryConstraintCheck iam =
-                QueryConstraintCheck.load("aws/iam-request-shapes.json", "IAM request shapes");
+        // Loaded in IAM's own form, naming the member with no value beside it, which is what
+        // IamRequestShapes passes and what DRIFT-13 settles.
+        QueryConstraintCheck iam = QueryConstraintCheck.load("aws/iam-request-shapes.json",
+                "IAM request shapes", SmithyValidationErrors.Violations.WITHOUT_VALUES);
 
         List<String> managedPolicyFamily = List.of("AttachGroupPolicy", "AttachRolePolicy",
                 "AttachUserPolicy", "DetachGroupPolicy", "DetachRolePolicy", "DetachUserPolicy",
@@ -360,13 +362,13 @@ class QueryConstraintCheckTest {
                     operation + " resolved to no required members, so its shape did not resolve");
         }
 
-        assertEquals(List.of("Value 'v1' at 'policyArn' failed to satisfy constraint: Member must"
+        assertEquals(List.of("Value at 'policyArn' failed to satisfy constraint: Member must"
                         + " have length greater than or equal to 20"),
                 iam.violations("GetPolicy", params("PolicyArn", "v1")));
 
         assertEquals(List.of(), iam.violations("GetAccountAuthorizationDetails", params()),
                 "every member of it is optional, so a request naming none of them breaks nothing");
-        assertEquals(List.of("Value 'Users' at 'filter.1.member' failed to satisfy constraint:"
+        assertEquals(List.of("Value at 'filter.1.member' failed to satisfy constraint:"
                         + " Member must satisfy enum value set:"
                         + " [User, Role, Group, LocalManagedPolicy, AWSManagedPolicy]"),
                 iam.violations("GetAccountAuthorizationDetails", params("Filter.member.1", "Users")),

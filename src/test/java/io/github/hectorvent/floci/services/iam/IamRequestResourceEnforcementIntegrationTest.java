@@ -18,7 +18,9 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.IOException;
 import java.net.URI;
+import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
@@ -487,6 +489,277 @@ class IamRequestResourceEnforcementIntegrationTest {
         refusedJson(user.json("ecr", "AmazonEC2ContainerRegistry_V20150921.TagResource", "1.1")
                 .body("{\"resourceArn\":\"" + protectedArn.replace(REGION, "eu-west-1")
                         + "\",\"tags\":[{\"Key\":\"a\",\"Value\":\"b\"}]}").post("/").then(), "ecr:TagResource");
+    }
+
+    @Test
+    void aDeliveryStreamIsCheckedOnTheArnItsNameGives() {
+        String name = "res-stream-" + suffix();
+        String arn = adminJson("firehose", "Firehose_20150804.CreateDeliveryStream")
+                .body("{\"DeliveryStreamName\":\"" + name + "\"}").post("/").then().statusCode(200)
+                .extract().path("DeliveryStreamARN");
+        cleanup.register(() -> adminJson("firehose", "Firehose_20150804.DeleteDeliveryStream")
+                .body("{\"DeliveryStreamName\":\"" + name + "\"}").post("/"));
+        assertEquals("arn:aws:firehose:" + REGION + ":" + ACCOUNT + ":deliverystream/" + name, arn);
+
+        User user = user("res-stream");
+        user.policy(allowOn("firehose:DescribeDeliveryStream", arn));
+        describeDeliveryStream(user, name).statusCode(200);
+        refusedJson(describeDeliveryStream(user, name + "-other"), "firehose:DescribeDeliveryStream");
+    }
+
+    /** An identity pool is checked on the ARN its id gives, the one Cognito tags it under. */
+    @Test
+    void anIdentityPoolIsCheckedOnTheArnItsIdGives() {
+        String id = adminJson("cognito-identity", "AWSCognitoIdentityService.CreateIdentityPool")
+                .body("{\"IdentityPoolName\":\"res pool " + suffix() + "\",\"AllowUnauthenticatedIdentities\":false}")
+                .post("/").then().statusCode(200).extract().path("IdentityPoolId");
+        cleanup.register(() -> adminJson("cognito-identity", "AWSCognitoIdentityService.DeleteIdentityPool")
+                .body("{\"IdentityPoolId\":\"" + id + "\"}").post("/"));
+        String arn = "arn:aws:cognito-identity:" + REGION + ":" + ACCOUNT + ":identitypool/" + id;
+        adminJson("cognito-identity", "AWSCognitoIdentityService.TagResource")
+                .body("{\"ResourceArn\":\"" + arn + "\",\"Tags\":{\"a\":\"b\"}}").post("/").then().statusCode(200);
+
+        User user = user("res-identity-pool");
+        user.policy(allowOn("cognito-identity:DescribeIdentityPool", arn));
+        describeIdentityPool(user, id).statusCode(200);
+        refusedJson(describeIdentityPool(user, REGION + ":" + UUID.randomUUID()), "cognito-identity:DescribeIdentityPool");
+    }
+
+    @Test
+    void aCloudMapNamespaceAndServiceAreCheckedOnTheArnsTheirIdsGive() {
+        String namespaceId = cloudMapNamespace("res-ns-" + suffix());
+        String namespaceArn = adminJson("servicediscovery", "Route53AutoNaming_v20170314.GetNamespace")
+                .body("{\"Id\":\"" + namespaceId + "\"}").post("/").then().statusCode(200).extract().path("Namespace.Arn");
+        assertEquals("arn:aws:servicediscovery:" + REGION + ":" + ACCOUNT + ":namespace/" + namespaceId, namespaceArn);
+        Map<String, String> service = adminJson("servicediscovery", "Route53AutoNaming_v20170314.CreateService")
+                .body("{\"Name\":\"res-svc\",\"NamespaceId\":\"" + namespaceId + "\"}").post("/").then().statusCode(200)
+                .extract().path("Service");
+        cleanup.register(() -> adminJson("servicediscovery", "Route53AutoNaming_v20170314.DeleteService")
+                .body("{\"Id\":\"" + service.get("Id") + "\"}").post("/"));
+        assertEquals("arn:aws:servicediscovery:" + REGION + ":" + ACCOUNT + ":service/" + service.get("Id"),
+                service.get("Arn"));
+
+        User user = user("res-cloud-map");
+        user.policy(allowOn("servicediscovery:GetNamespace", namespaceArn) + ","
+                + allowOn("servicediscovery:GetService", service.get("Arn")));
+        cloudMap(user, "GetNamespace", namespaceId).statusCode(200);
+        refusedJson(cloudMap(user, "GetNamespace", "ns-" + suffix()), "servicediscovery:GetNamespace");
+        cloudMap(user, "GetService", service.get("Id")).statusCode(200);
+        refusedJson(cloudMap(user, "GetService", "srv-" + suffix()), "servicediscovery:GetService");
+    }
+
+    @Test
+    void aCertificateIsCheckedOnItsArn() {
+        String arn = adminJson("acm", "CertificateManager.RequestCertificate")
+                .body("{\"DomainName\":\"res-" + suffix() + ".example.com\"}").post("/").then().statusCode(200)
+                .extract().path("CertificateArn");
+        cleanup.register(() -> adminJson("acm", "CertificateManager.DeleteCertificate")
+                .body("{\"CertificateArn\":\"" + arn + "\"}").post("/"));
+        assertTrue(arn.startsWith("arn:aws:acm:" + REGION + ":" + ACCOUNT + ":certificate/"), arn);
+
+        User user = user("res-certificate");
+        user.policy(allowOn("acm:DescribeCertificate", arn));
+        describeCertificate(user, arn).statusCode(200);
+        refusedJson(describeCertificate(user, "arn:aws:acm:" + REGION + ":" + ACCOUNT + ":certificate/" + UUID.randomUUID()),
+                "acm:DescribeCertificate");
+    }
+
+    /**
+     * A pipeline is checked on the ARN its name gives, a request naming it by a bare {@code name} too, and a webhook
+     * on {@code webhook:<name>}, the ARN CodePipeline gives it.
+     */
+    @Test
+    void aPipelineAndAWebhookAreCheckedOnTheArnsTheirNamesGive() {
+        String name = "res-pipeline-" + suffix();
+        adminJson("codepipeline", "CodePipeline_20150709.CreatePipeline").body(pipeline(name)).post("/")
+                .then().statusCode(200);
+        cleanup.register(() -> adminJson("codepipeline", "CodePipeline_20150709.DeletePipeline")
+                .body("{\"name\":\"" + name + "\"}").post("/"));
+        String pipelineArn = adminJson("codepipeline", "CodePipeline_20150709.GetPipeline")
+                .body("{\"name\":\"" + name + "\"}").post("/").then().statusCode(200).extract().path("metadata.pipelineArn");
+        assertEquals("arn:aws:codepipeline:" + REGION + ":" + ACCOUNT + ":" + name, pipelineArn);
+
+        User user = user("res-pipeline");
+        user.policy(allowOn("codepipeline:GetPipeline", pipelineArn) + ","
+                + allowOn("codepipeline:GetPipelineState", pipelineArn));
+        codePipeline(user, "GetPipeline", "{\"name\":\"" + name + "\"}").statusCode(200);
+        codePipeline(user, "GetPipelineState", "{\"name\":\"" + name + "\"}").statusCode(200);
+        refusedJson(codePipeline(user, "GetPipelineState", "{\"name\":\"" + name + "-other\"}"),
+                "codepipeline:GetPipelineState");
+
+        String hook = "res-hook-" + suffix();
+        String hookArn = adminJson("codepipeline", "CodePipeline_20150709.PutWebhook").body("{\"webhook\":{\"name\":\""
+                + hook + "\",\"targetPipeline\":\"" + name + "\",\"targetAction\":\"SourceAction\",\"filters\":"
+                + "[{\"jsonPath\":\"$.ref\",\"matchEquals\":\"refs/heads/main\"}],\"authentication\":\"UNAUTHENTICATED\"}}")
+                .post("/").then().statusCode(200).extract().path("webhook.arn");
+        assertEquals("arn:aws:codepipeline:" + REGION + ":" + ACCOUNT + ":webhook:" + hook, hookArn);
+        user.policy(allowOn("codepipeline:DeleteWebhook", hookArn));
+        refusedJson(codePipeline(user, "DeleteWebhook", "{\"name\":\"" + hook + "-other\"}"), "codepipeline:DeleteWebhook");
+        codePipeline(user, "DeleteWebhook", "{\"name\":\"" + hook + "\"}").statusCode(200);
+    }
+
+    /** {@code StartPipelineExecution} names its pipeline by a bare {@code name}, on which it is checked. */
+    @Test
+    void aPipelineExecutionIsCheckedOnThePipelineItsNameGives() {
+        String name = "res-pipeline-" + suffix();
+        User user = user("res-pipeline-start");
+        user.policy(allowOn("codepipeline:StartPipelineExecution",
+                "arn:aws:codepipeline:" + REGION + ":" + ACCOUNT + ":" + name));
+        codePipeline(user, "StartPipelineExecution", "{\"name\":\"" + name + "\"}").statusCode(400)
+                .body(containsString("PipelineNotFoundException"));
+        refusedJson(codePipeline(user, "StartPipelineExecution", "{\"name\":\"" + name + "-other\"}"),
+                "codepipeline:StartPipelineExecution");
+    }
+
+    /**
+     * An update is checked on the pipeline its {@code pipeline.name} names, which it changes, not on one its
+     * {@code roleArn} holds: a grant on one pipeline does not let a request naming another through by giving the
+     * first's ARN as its role.
+     */
+    @Test
+    void anUpdateIsCheckedOnThePipelineItNamesNotOneItsRoleHolds() {
+        String allowed = "res-pipeline-" + suffix();
+        String other = allowed + "-other";
+        for (String name : List.of(allowed, other)) {
+            adminJson("codepipeline", "CodePipeline_20150709.CreatePipeline").body(pipeline(name)).post("/")
+                    .then().statusCode(200);
+            cleanup.register(() -> adminJson("codepipeline", "CodePipeline_20150709.DeletePipeline")
+                    .body("{\"name\":\"" + name + "\"}").post("/"));
+        }
+        String allowedArn = "arn:aws:codepipeline:" + REGION + ":" + ACCOUNT + ":" + allowed;
+        User user = user("res-pipeline-update");
+        user.policy(allowOn("codepipeline:UpdatePipeline", allowedArn) + ","
+                + allowOn("iam:PassRole", "arn:aws:iam::" + ACCOUNT + ":role/codepipeline-role"));
+        refusedJson(codePipeline(user, "UpdatePipeline", pipeline(other).replace(
+                "arn:aws:iam::" + ACCOUNT + ":role/codepipeline-role", allowedArn)), "codepipeline:UpdatePipeline");
+        codePipeline(user, "UpdatePipeline", pipeline(allowed)).statusCode(200);
+    }
+
+    /** A webhook's tags are checked on the webhook, not on the pipeline it connects to, which they do not go on. */
+    @Test
+    void aWebhooksTagsAreCheckedOnTheWebhookNotItsPipeline() {
+        String name = "res-pipeline-" + suffix();
+        adminJson("codepipeline", "CodePipeline_20150709.CreatePipeline").body(pipeline(name)).post("/")
+                .then().statusCode(200);
+        cleanup.register(() -> adminJson("codepipeline", "CodePipeline_20150709.DeletePipeline")
+                .body("{\"name\":\"" + name + "\"}").post("/"));
+        String hook = "res-hook-" + suffix();
+        String codePipeline = "arn:aws:codepipeline:" + REGION + ":" + ACCOUNT + ":";
+        User user = user("res-webhook-tags");
+        user.policy(allowOn("codepipeline:PutWebhook", codePipeline + "webhook:" + hook) + ","
+                + allowOn("codepipeline:PutWebhook", codePipeline + name) + ","
+                + allowOn("codepipeline:TagResource", codePipeline + "webhook:*"));
+        codePipeline(user, "PutWebhook", "{\"webhook\":{\"name\":\"" + hook + "\",\"targetPipeline\":\"" + name
+                + "\",\"targetAction\":\"SourceAction\",\"filters\":[{\"jsonPath\":\"$.ref\",\"matchEquals\":"
+                + "\"refs/heads/main\"}],\"authentication\":\"UNAUTHENTICATED\"},\"tags\":[{\"key\":\"a\",\"value\":\"b\"}]}")
+                .statusCode(200);
+        cleanup.register(() -> adminJson("codepipeline", "CodePipeline_20150709.DeleteWebhook")
+                .body("{\"name\":\"" + hook + "\"}").post("/"));
+    }
+
+    /**
+     * A service is created in the namespace its {@code DnsConfig.NamespaceId} names when the request gives no
+     * {@code NamespaceId}, or a JSON null for it, as Cloud Map reads it, so a deny on that namespace holds.
+     */
+    @Test
+    void aServiceIsCheckedOnTheNamespaceItsDnsConfigNames() {
+        String namespaceId = cloudMapNamespace("res-ns-dns-" + suffix());
+        User user = user("res-cloud-map-dns");
+        user.policy(allowOn("servicediscovery:CreateService", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"servicediscovery:CreateService\",\"Resource\":\"arn:aws:servicediscovery:" + REGION + ":" + ACCOUNT
+                + ":namespace/" + namespaceId + "\"}");
+        String dnsConfig = "\"DnsConfig\":{\"NamespaceId\":\"" + namespaceId + "\",\"DnsRecords\":"
+                + "[{\"Type\":\"A\",\"TTL\":60}]}";
+        refusedJson(user.json("servicediscovery", "Route53AutoNaming_v20170314.CreateService", "1.1")
+                .body("{\"Name\":\"res-svc\"," + dnsConfig + "}").post("/").then(), "servicediscovery:CreateService");
+        refusedJson(user.json("servicediscovery", "Route53AutoNaming_v20170314.CreateService", "1.1")
+                .body("{\"Name\":\"res-svc\",\"NamespaceId\":null," + dnsConfig + "}").post("/").then(),
+                "servicediscovery:CreateService");
+    }
+
+    /** A service's tags are checked on the service it creates, not on the namespace it creates it in. */
+    @Test
+    void aServicesTagsAreCheckedOnTheServiceNotItsNamespace() {
+        String namespaceId = cloudMapNamespace("res-ns-tags-" + suffix());
+        String cloudMap = "arn:aws:servicediscovery:" + REGION + ":" + ACCOUNT + ":";
+        User user = user("res-cloud-map-tags");
+        user.policy(allowOn("servicediscovery:CreateService", cloudMap + "namespace/" + namespaceId) + ","
+                + allowOn("servicediscovery:CreateService", cloudMap + "service/*") + ","
+                + allowOn("servicediscovery:TagResource", cloudMap + "service/*"));
+        String serviceId = user.json("servicediscovery", "Route53AutoNaming_v20170314.CreateService", "1.1")
+                .body("{\"Name\":\"res-svc\",\"NamespaceId\":\"" + namespaceId + "\",\"Tags\":[{\"Key\":\"a\",\"Value\":\"b\"}]}")
+                .post("/").then().statusCode(200).extract().path("Service.Id");
+        cleanup.register(() -> adminJson("servicediscovery", "Route53AutoNaming_v20170314.DeleteService")
+                .body("{\"Id\":\"" + serviceId + "\"}").post("/"));
+    }
+
+    /**
+     * A custom action type is checked on {@code actiontype:Custom/...}, its owner being {@code Custom}, which the
+     * request does not give, so a grant on the ARN CodePipeline gives it allows creating and deleting it.
+     */
+    @Test
+    void aCustomActionTypeIsCheckedAsCustoms() {
+        String provider = "Res" + suffix();
+        String arn = "arn:aws:codepipeline:" + REGION + ":" + ACCOUNT + ":actiontype:Custom/Build/" + provider + "/1";
+        User user = user("res-action-type");
+        user.policy(allowOn("codepipeline:CreateCustomActionType", arn) + ","
+                + allowOn("codepipeline:DeleteCustomActionType", arn));
+        String type = "\"category\":\"Build\",\"provider\":\"" + provider + "\",\"version\":\"1\"";
+        codePipeline(user, "CreateCustomActionType", "{" + type + ",\"inputArtifactDetails\":{\"minimumCount\":0,"
+                + "\"maximumCount\":1},\"outputArtifactDetails\":{\"minimumCount\":0,\"maximumCount\":1}}")
+                .statusCode(200).body("actionType.id.owner", equalTo("Custom"));
+        refusedJson(codePipeline(user, "DeleteCustomActionType", "{" + type.replace(provider, provider + "x") + "}"),
+                "codepipeline:DeleteCustomActionType");
+        codePipeline(user, "DeleteCustomActionType", "{" + type + "}").statusCode(200);
+    }
+
+    /** A Cloud Map HTTP namespace, created for the test and deleted after it; its id. */
+    private String cloudMapNamespace(String name) {
+        adminJson("servicediscovery", "Route53AutoNaming_v20170314.CreateHttpNamespace")
+                .body("{\"Name\":\"" + name + "\"}").post("/").then().statusCode(200);
+        String id = adminJson("servicediscovery", "Route53AutoNaming_v20170314.ListNamespaces").body("{}")
+                .post("/").then().statusCode(200).extract().path("Namespaces.find { it.Name == '" + name + "' }.Id");
+        cleanup.register(() -> adminJson("servicediscovery", "Route53AutoNaming_v20170314.DeleteNamespace")
+                .body("{\"Id\":\"" + id + "\"}").post("/"));
+        return id;
+    }
+
+    private static RequestSpecification adminJson(String service, String target) {
+        return admin(service).header("X-Amz-Target", target).contentType("application/x-amz-json-1.1");
+    }
+
+    private static ValidatableResponse describeDeliveryStream(User user, String name) {
+        return user.json("firehose", "Firehose_20150804.DescribeDeliveryStream", "1.1")
+                .body("{\"DeliveryStreamName\":\"" + name + "\"}").post("/").then();
+    }
+
+    private static ValidatableResponse describeIdentityPool(User user, String id) {
+        return user.json("cognito-identity", "AWSCognitoIdentityService.DescribeIdentityPool", "1.1")
+                .body("{\"IdentityPoolId\":\"" + id + "\"}").post("/").then();
+    }
+
+    private static ValidatableResponse cloudMap(User user, String operation, String id) {
+        return user.json("servicediscovery", "Route53AutoNaming_v20170314." + operation, "1.1")
+                .body("{\"Id\":\"" + id + "\"}").post("/").then();
+    }
+
+    private static ValidatableResponse describeCertificate(User user, String arn) {
+        return user.json("acm", "CertificateManager.DescribeCertificate", "1.1")
+                .body("{\"CertificateArn\":\"" + arn + "\"}").post("/").then();
+    }
+
+    private static ValidatableResponse codePipeline(User user, String operation, String body) {
+        return user.json("codepipeline", "CodePipeline_20150709." + operation, "1.1").body(body).post("/").then();
+    }
+
+    /** A pipeline with a source and a build stage, the two stages CodePipeline requires. */
+    private static String pipeline(String name) {
+        return "{\"pipeline\":{\"name\":\"" + name + "\",\"roleArn\":\"arn:aws:iam::" + ACCOUNT + ":role/codepipeline-role\","
+                + "\"artifactStore\":{\"type\":\"S3\",\"location\":\"codepipeline-artifacts\"},\"stages\":["
+                + "{\"name\":\"Source\",\"actions\":[{\"name\":\"SourceAction\",\"actionTypeId\":{\"category\":\"Source\","
+                + "\"owner\":\"AWS\",\"provider\":\"S3\",\"version\":\"1\"},\"runOrder\":1}]},"
+                + "{\"name\":\"Build\",\"actions\":[{\"name\":\"BuildAction\",\"actionTypeId\":{\"category\":\"Build\","
+                + "\"owner\":\"AWS\",\"provider\":\"CodeBuild\",\"version\":\"1\"},\"runOrder\":1}]}]}}";
     }
 
     private static RequestSpecification tagged(RequestSpecification request) {

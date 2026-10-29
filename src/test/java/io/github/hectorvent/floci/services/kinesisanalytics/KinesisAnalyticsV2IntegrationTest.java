@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.kinesisanalytics;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.json.config.JsonPathConfig;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -14,6 +15,8 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
  * Drives the full JSON-1.1 dispatch path (AwsJson11Controller → ResolvedServiceCatalog →
@@ -134,6 +137,37 @@ class KinesisAnalyticsV2IntegrationTest {
         .then()
             .statusCode(200)
             .body("ApplicationSummaries.ApplicationName", hasItem("it-list"));
+    }
+
+    @Test
+    void listApplicationsPaginatesThroughJsonProtocol() {
+        createApplication("it-page-a-" + System.nanoTime());
+        createApplication("it-page-b-" + System.nanoTime());
+
+        Response firstPage = given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.ListApplications")
+            .contentType(CONTENT_TYPE)
+            .body("{\"Limit\":1}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ApplicationSummaries.size()", equalTo(1))
+            .extract().response();
+        String token = firstPage.path("NextToken");
+        assertNotNull(token);
+
+        String secondName = given()
+            .header("X-Amz-Target", "KinesisAnalytics_20180523.ListApplications")
+            .contentType(CONTENT_TYPE)
+            .body("{\"Limit\":1,\"NextToken\":\"" + token + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ApplicationSummaries.size()", equalTo(1))
+            .extract().path("ApplicationSummaries[0].ApplicationName");
+        assertNotEquals(firstPage.path("ApplicationSummaries[0].ApplicationName"), secondName);
     }
 
     @Test

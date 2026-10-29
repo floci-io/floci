@@ -89,6 +89,13 @@
 |---|---|---|---|
 | `GetSupportedResourceTypes` | `GET` | `/supported-resource-types` | List resource types supported for backup |
 
+## Plan Tags
+
+`CreateBackupPlan` stores `BackupPlanTags`. `TagResource`, `ListTags` and `UntagResource`
+accept the plan ARN returned at creation. Adding tags merges keys, an existing key's value
+is replaced, and removing absent keys is harmless. Tags survive plan updates and are stored
+with the plan in persistent modes. Plans stored before tag support start with an empty tag map.
+
 ## Job Lifecycle
 
 Backup jobs transition through states automatically after `StartBackupJob`:

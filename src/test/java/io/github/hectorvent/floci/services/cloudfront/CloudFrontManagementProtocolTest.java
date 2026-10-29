@@ -13,6 +13,7 @@ import java.util.UUID;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.xml.HasXPath.hasXPath;
 
 /** Verifies CloudFront REST XML payload roots against the AWS service model. */
@@ -47,6 +48,49 @@ class CloudFrontManagementProtocolTest {
             .body(hasXPath("local-name(/*)", equalTo(expectedRoot)))
             .body(hasXPath("namespace-uri(/*)", equalTo(
                     "http://cloudfront.amazonaws.com/doc/2020-05-31/")));
+    }
+
+    @Test
+    void distributionCreatedWithTagsReturnsThemByArn() {
+        String body = """
+                <DistributionConfigWithTags xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <DistributionConfig>
+                    <CallerReference>%s</CallerReference>
+                    <Enabled>false</Enabled>
+                    <Origins><Quantity>1</Quantity><Items><Origin>
+                      <Id>origin</Id><DomainName>example.com</DomainName>
+                      <CustomOriginConfig>
+                        <HTTPPort>80</HTTPPort><HTTPSPort>443</HTTPSPort>
+                        <OriginProtocolPolicy>http-only</OriginProtocolPolicy>
+                      </CustomOriginConfig>
+                    </Origin></Items></Origins>
+                    <DefaultCacheBehavior>
+                      <TargetOriginId>origin</TargetOriginId>
+                      <ViewerProtocolPolicy>allow-all</ViewerProtocolPolicy>
+                    </DefaultCacheBehavior>
+                  </DistributionConfig>
+                  <Tags><Items><Tag><Key>env</Key><Value>dev</Value></Tag></Items></Tags>
+                </DistributionConfigWithTags>
+                """.formatted(UUID.randomUUID());
+
+        Response created = given().contentType("application/xml").body(body)
+                .when().post(API + "distribution?WithTags");
+        created.then().statusCode(201);
+        String xml = created.asString();
+        String arn = XmlParser.extractFirst(xml, "ARN", null);
+        String id = XmlParser.extractFirst(xml, "Id", null);
+
+        try {
+            given().queryParam("Resource", arn)
+                    .when().get(API + "tagging")
+                    .then().statusCode(200)
+                    .body(hasXPath("//*[local-name()='Tag']/*[local-name()='Key']/text()", equalTo("env")))
+                    .body(hasXPath("//*[local-name()='Tag']/*[local-name()='Value']/text()", equalTo("dev")));
+        } finally {
+            given().header("If-Match", created.header("ETag"))
+                    .when().delete(API + "distribution/" + id)
+                    .then().statusCode(204);
+        }
     }
 
     @ParameterizedTest(name = "{0} omits unmodeled Marker and IsTruncated members")
@@ -220,6 +264,42 @@ class CloudFrontManagementProtocolTest {
             .delete(API + "function/" + name)
         .then()
             .statusCode(204);
+    }
+
+    @Test
+    void updateFunctionReturnsTheHeaderNameModeledByAwsSdks() {
+        String name = "update-header-" + UUID.randomUUID();
+        String createBody = """
+                <CreateFunctionRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <Name>%s</Name>
+                  <FunctionConfig><Comment>first</Comment><Runtime>cloudfront-js-2.0</Runtime></FunctionConfig>
+                  <FunctionCode>YWJj</FunctionCode>
+                </CreateFunctionRequest>
+                """.formatted(name);
+        String updateBody = """
+                <UpdateFunctionRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <FunctionConfig><Comment>second</Comment><Runtime>cloudfront-js-2.0</Runtime></FunctionConfig>
+                  <FunctionCode>ZGVm</FunctionCode>
+                </UpdateFunctionRequest>
+                """;
+
+        String createdEtag = given().contentType("application/xml").body(createBody)
+                .when().post(API + "function")
+                .then().statusCode(201).extract().header("ETag");
+
+        String updatedEtag = given().contentType("application/xml")
+                .header("If-Match", createdEtag).body(updateBody)
+                .when().put(API + "function/" + name)
+                .then().statusCode(200).header("ETtag", notNullValue())
+                .extract().header("ETtag");
+
+        given().queryParam("Stage", "DEVELOPMENT")
+                .when().get(API + "function/" + name + "/describe")
+                .then().statusCode(200).header("ETag", equalTo(updatedEtag));
+
+        given().header("If-Match", updatedEtag)
+                .when().delete(API + "function/" + name)
+                .then().statusCode(204);
     }
 
     @Test

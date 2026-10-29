@@ -205,6 +205,17 @@ public class LambdaFunction {
     public String getApplicationLogLevel() { return applicationLogLevel; }
     public void setApplicationLogLevel(String applicationLogLevel) { this.applicationLogLevel = applicationLogLevel; }
 
+    /**
+     * The level a JSON-format function logs at: its own, else INFO, as Lambda reports it. None under
+     * Text, where log levels are refused.
+     */
+    public String applicationLogLevelOrDefault() {
+        if (applicationLogLevel != null) {
+            return applicationLogLevel;
+        }
+        return "JSON".equals(logFormat) ? "INFO" : null;
+    }
+
     public String getSystemLogLevel() { return systemLogLevel; }
     public void setSystemLogLevel(String systemLogLevel) { this.systemLogLevel = systemLogLevel; }
 

@@ -6,6 +6,8 @@ import com.github.dockerjava.api.command.StopContainerCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.exception.NotModifiedException;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.Closeable;
 import java.util.ArrayList;
@@ -26,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -33,6 +36,35 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ContainerLifecycleManagerTeardownTest {
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void strictRemovalRetainsLogStreamForRetryWithOptionalAnonymousVolumeCleanup(boolean removeAnonymousVolumes)
+            throws Exception {
+        DockerClient docker = mock(DockerClient.class);
+        ContainerLifecycleManager manager = new ContainerLifecycleManager(docker, null, null, null);
+        StopContainerCmd stop = mock(StopContainerCmd.class);
+        when(docker.stopContainerCmd("retry")).thenReturn(stop);
+        when(stop.withTimeout(5)).thenReturn(stop);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class);
+        when(docker.removeContainerCmd("retry")).thenReturn(remove);
+        when(remove.withForce(true)).thenReturn(remove);
+        doThrow(new IllegalStateException("daemon refused removal")).doNothing().when(remove).exec();
+        Closeable logStream = mock(Closeable.class);
+        Runnable teardown = removeAnonymousVolumes
+                ? () -> manager.stopAndRemoveStrict("retry", logStream, 5, true)
+                : () -> manager.stopAndRemoveStrict("retry", logStream);
+
+        assertThrows(IllegalStateException.class, teardown::run);
+        verify(logStream, never()).close();
+        if (removeAnonymousVolumes) {
+            verify(remove).withRemoveVolumes(true);
+        } else {
+            verify(remove, never()).withRemoveVolumes(true);
+        }
+        teardown.run();
+        verify(logStream).close();
+    }
 
     @Test
     void interruptedWaitersStillCleanUpWithoutReleasingAnotherOwnersSlot() throws Exception {

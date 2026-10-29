@@ -86,7 +86,7 @@ class EcsContainerManagerPortMappingsTest {
         lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.resolveImageForLaunch(any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(lifecycleManager.createAndStart(any()))
+        when(lifecycleManager.createAndStartEphemeral(any()))
                 .thenReturn(new ContainerInfo("docker-id", Map.of()));
         // resolveNetworkBindings() inspects the container after launch; deep stubs
         // make the empty-binding readback (Map.get(...) -> null) NPE-free.

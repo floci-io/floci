@@ -73,7 +73,14 @@ public final class RequestResources {
         }
         Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
         JsonNode body = form.isEmpty() ? PassedRoles.jsonBody(ctx) : null;
-        Map<String, RequestResourceMembers.ArnFormat> formats = formats(table, operation);
+        return named(resources, formats(table, operation), form, body, partition, region, accountId, stored);
+    }
+
+    /** The ARNs of the resources the request names, as {@link #of} reads them. */
+    private static List<String> named(List<RequestResourceMembers.Resource> resources,
+                                      Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
+                                      JsonNode body, String partition, String region, String accountId,
+                                      StoredResourceArns stored) {
         Set<String> arns = new LinkedHashSet<>();
         for (RequestResourceMembers.Resource resource : resources) {
             if (!applies(resource, form, body, formats)) {
@@ -95,20 +102,28 @@ public final class RequestResources {
 
     /**
      * The ARNs of the resources a create makes under a parent its action acts on, from the parent's ARN in the
-     * request, read as the operation's own resource reads that member, their ids open; empty when it makes none,
-     * so its tags go where the operation is checked. The operation is the one the request is dispatched as, as for
-     * {@link #of}.
+     * request, read as the operation's own resource reads that member, their ids open; for a create making none
+     * that way, the ones its request names that the table marks {@code made}, beside others it names (a webhook,
+     * not the pipeline it connects to; Cloud Map's {@code service/*}, not the namespace it is created in); empty
+     * when it makes neither, so its tags go where the operation is checked. The operation is the one the request
+     * is dispatched as, as for {@link #of}.
      */
     public static List<String> created(String operation, ContainerRequestContext ctx, String partition, String region,
                                        String accountId) {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         List<RequestResourceMembers.Created> creates = operation == null ? null : table.creates().get(operation);
-        if (creates == null) {
+        List<RequestResourceMembers.Resource> made = operation == null || creates != null ? List.of()
+                : table.operations().getOrDefault(operation, List.of()).stream()
+                        .filter(RequestResourceMembers.Resource::made).toList();
+        if (creates == null && made.isEmpty()) {
             return List.of();
         }
         Map<String, String> form = IamConditionContextResolver.formParameters(ctx);
         JsonNode body = form.isEmpty() ? PassedRoles.jsonBody(ctx) : null;
         Map<String, RequestResourceMembers.ArnFormat> formats = formats(table, operation);
+        if (creates == null) {
+            return named(made, formats, form, body, partition, region, accountId, null);
+        }
         Set<String> arns = new LinkedHashSet<>();
         for (RequestResourceMembers.Created created : creates) {
             String separator = table.operations().getOrDefault(operation, List.of()).stream()
@@ -138,7 +153,8 @@ public final class RequestResources {
 
     /**
      * Whether each member the resource is named {@code when} has one of its values and no member it is named
-     * {@code unless} has one of those, an empty one for absent.
+     * {@code unless} has one of those, an empty one for absent, or given a JSON null that the resource reads as no
+     * value of its own, as a handler reading it with {@code asText(null)} does (Cloud Map's {@code NamespaceId}).
      */
     private static boolean applies(RequestResourceMembers.Resource resource, Map<String, String> form, JsonNode body,
                                    Map<String, RequestResourceMembers.ArnFormat> formats) {
@@ -157,7 +173,11 @@ public final class RequestResources {
 
     private static String first(RequestResourceMembers.Resource resource, Map<String, String> form, JsonNode body,
                                 String member, Map<String, RequestResourceMembers.ArnFormat> formats) {
-        List<String> given = given(resource, form, body, new RequestResourceMembers.Member(member, false), formats);
+        RequestResourceMembers.Member read = new RequestResourceMembers.Member(member, false);
+        if (!resource.absent().containsKey(member) && isNull(body, read)) {
+            return "";
+        }
+        List<String> given = given(resource, form, body, read, formats);
         return given.isEmpty() ? "" : given.getFirst();
     }
 
@@ -253,12 +273,14 @@ public final class RequestResources {
             account = given.isEmpty() ? accountId : given.getFirst();
         }
         AwsArnUtils.Arn fromRequest = arnGiven(resource, form, body, formats);
-        List<Filling> fillings = new ArrayList<>(List.of(new Filling(Map.of(), fromRequest)));
+        List<Filling> fillings = new ArrayList<>(List.of(new Filling(resource.fixed(), fromRequest)));
+        boolean given = false;
         for (Map.Entry<String, RequestResourceMembers.Member> variable : resource.fill().entrySet()) {
             List<String> values = read(resource, form, body, variable.getValue());
             if (values.isEmpty()) {
                 continue;
             }
+            given = true;
             RequestResourceMembers.ArnFormat named = arnOf(resource, variable.getValue().path(), formats);
             if (resource.fill().size() == 1 && fromRequest == null && values.stream().allMatch(value ->
                     !isArnOf(named, value) && format.pattern().matcher(value).matches())) {
@@ -275,7 +297,7 @@ public final class RequestResources {
             }
             fillings = next;
         }
-        if (!resource.fill().isEmpty() && fillings.getFirst().variables().isEmpty()) {
+        if (!resource.fill().isEmpty() && !given) {
             return;
         }
         for (Filling filling : fillings) {

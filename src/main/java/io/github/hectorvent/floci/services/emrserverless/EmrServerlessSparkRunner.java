@@ -54,6 +54,21 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
 
     private static final Logger LOG = Logger.getLogger(EmrServerlessSparkRunner.class);
     private static final String SPARK_SUBMIT = "/usr/lib/spark/bin/spark-submit";
+    private static final String SPARK_DEFAULTS_VARIABLE = "FLOCI_SPARK_DEFAULTS";
+    // A command runs after this sets up a Spark configuration of its own, so a spark-submit it starts runs
+    // locally on Floci's S3: the image's spark-defaults.conf names EMR Serverless's resource manager as its
+    // master, which a system property cannot override, so its master and that manager's lines give way to
+    // local mode, Floci's settings and the job's spark-defaults, passed in SPARK_DEFAULTS_VARIABLE.
+    private static final String COMMAND_WRAPPER = String.join("\n",
+            "conf=/tmp/floci-spark-conf",
+            "mkdir -p \"$conf\"",
+            "cp -r /usr/lib/spark/conf/. \"$conf\" 2>/dev/null",
+            "touch \"$conf/spark-defaults.conf\"",
+            "sed -i -e '/^spark\\.master[[:space:]]/d' -e '/^spark\\.submit\\.deployMode[[:space:]]/d'"
+                    + " -e '/^spark\\.submit\\.customResourceManager/d' \"$conf/spark-defaults.conf\"",
+            "printf '%s\\n' \"$" + SPARK_DEFAULTS_VARIABLE + "\" >> \"$conf/spark-defaults.conf\"",
+            "export SPARK_CONF_DIR=\"$conf\"",
+            "exec \"$@\"");
     private static final String DEFAULT_IMAGE =
             "public.ecr.aws/emr-serverless/spark/%s:latest"; // partition-literal: ECR Public's registry host, where AWS publishes the base images; image-template overrides it
     // The AWS runtime for Apache Spark (emr-spark-8.0.0 on) publishes its images under spark4/ instead.
@@ -125,11 +140,19 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             // The deployment that started the driver, which removeLeftoverDrivers() goes by.
             labels.put(ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config));
             String endpoint = awsEnv.flociEndpoint();
-            ContainerSpec spec = containerBuilder.newContainer(image(job.imageTemplate(), job.releaseLabel()))
+            ContainerBuilder.Builder container = containerBuilder.newContainer(
+                            image(job.imageTemplate(), job.releaseLabel()))
                     .withName(ContainerStorageHelper.dockerName(config, job.service() + "-" + job.runId()))
-                    .withEntrypoint(List.of(SPARK_SUBMIT))
-                    .withCmd(sparkSubmitArguments(job, endpoint))
-                    .withEnv(awsEnv.sdkBaselineEnv(job.region(), Optional.empty(), credentials, job.accountId()))
+                    .withEnv(awsEnv.sdkBaselineEnv(job.region(), Optional.empty(), credentials, job.accountId()));
+            if (job.command() == null) {
+                container.withEntrypoint(List.of(SPARK_SUBMIT)).withCmd(sparkSubmitArguments(job, endpoint));
+            } else {
+                // bash -c's script gets "floci" as its $0, and the command as its arguments, "$@".
+                container.withEntrypoint(List.of("/bin/bash", "-c", COMMAND_WRAPPER, "floci"))
+                        .withCmd(job.command())
+                        .withEnv(SPARK_DEFAULTS_VARIABLE, sparkDefaultsFile(job, endpoint));
+            }
+            ContainerSpec spec = container
                     .withDockerNetwork(Optional.ofNullable(job.dockerNetwork()))
                     .withHostDockerInternalOnLinux()
                     .withEmbeddedDns()
@@ -276,17 +299,62 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
      */
     static List<String> sparkSubmitArguments(Job job, String flociEndpoint) {
         List<String> arguments = new ArrayList<>(List.of("--master", "local[*]"));
-        conf(arguments, "spark.hadoop.fs.s3a.endpoint", flociEndpoint);
-        conf(arguments, "spark.hadoop.fs.s3a.endpoint.region", job.region());
-        conf(arguments, "spark.hadoop.fs.s3a.path.style.access", "true");
-        conf(arguments, "spark.hadoop.fs.s3a.committer.magic.track.commits.in.memory.enabled", "true");
-        conf(arguments, "spark.hadoop.fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem");
-        conf(arguments, "spark.hadoop.fs.AbstractFileSystem.s3.impl", "org.apache.hadoop.fs.s3a.S3A");
-        conf(arguments, "spark.hadoop.aws.glue.endpoint", flociEndpoint);
-        conf(arguments, "spark.hadoop.aws.region", job.region());
-        job.sparkDefaults().forEach((key, value) -> conf(arguments, key, value));
+        for (SparkSetting setting : sparkSettings(job, flociEndpoint)) {
+            conf(arguments, setting.key(), setting.value());
+        }
         arguments.addAll(job.application());
         return arguments;
+    }
+
+    /**
+     * The {@code spark-defaults.conf} lines a command's own {@code spark-submit} runs with: local mode, then
+     * the settings {@link #sparkSubmitArguments} passes, a later line winning over an earlier one, and the
+     * submit's own options over them all. Spark reads the file as a {@code Properties} file, so each
+     * key and value is escaped for it, to reach Spark as the job gave it.
+     */
+    static String sparkDefaultsFile(Job job, String flociEndpoint) {
+        StringBuilder file = new StringBuilder("spark.master local[*]");
+        for (SparkSetting setting : sparkSettings(job, flociEndpoint)) {
+            file.append('\n').append(propertiesEscaped(setting.key(), true)).append(' ')
+                    .append(propertiesEscaped(String.valueOf(setting.value()), false));
+        }
+        return file.toString();
+    }
+
+    // A backslash starts an escape and a line break ends a setting; in a key, whitespace, '=' and ':' end it,
+    // and a leading '#' or '!' makes the line a comment.
+    private static String propertiesEscaped(String text, boolean key) {
+        StringBuilder escaped = new StringBuilder();
+        for (char c : text.toCharArray()) {
+            switch (c) {
+                case '\\' -> escaped.append("\\\\");
+                case '\n' -> escaped.append("\\n");
+                case '\r' -> escaped.append("\\r");
+                case '\t' -> escaped.append("\\t");
+                case '\f' -> escaped.append("\\f");
+                case ' ', '=', ':', '#', '!' -> escaped.append(key ? "\\" : "").append(c);
+                default -> escaped.append(c);
+            }
+        }
+        return escaped.toString();
+    }
+
+    // Floci's settings, then the job's spark-defaults, in the order a later one wins.
+    private static List<SparkSetting> sparkSettings(Job job, String flociEndpoint) {
+        List<SparkSetting> settings = new ArrayList<>(List.of(
+                new SparkSetting("spark.hadoop.fs.s3a.endpoint", flociEndpoint),
+                new SparkSetting("spark.hadoop.fs.s3a.endpoint.region", job.region()),
+                new SparkSetting("spark.hadoop.fs.s3a.path.style.access", "true"),
+                new SparkSetting("spark.hadoop.fs.s3a.committer.magic.track.commits.in.memory.enabled", "true"),
+                new SparkSetting("spark.hadoop.fs.s3.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem"),
+                new SparkSetting("spark.hadoop.fs.AbstractFileSystem.s3.impl", "org.apache.hadoop.fs.s3a.S3A"),
+                new SparkSetting("spark.hadoop.aws.glue.endpoint", flociEndpoint),
+                new SparkSetting("spark.hadoop.aws.region", job.region())));
+        job.sparkDefaults().forEach((key, value) -> settings.add(new SparkSetting(key, value)));
+        return settings;
+    }
+
+    private record SparkSetting(String key, String value) {
     }
 
     /**

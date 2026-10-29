@@ -19,6 +19,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.time.Clock;
@@ -33,6 +34,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiPredicate;
 
@@ -65,6 +67,44 @@ class RedshiftEventServiceTest {
     private MutableClock clock;
     private RedshiftEventService service;
     private StorageFactory factory;
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void tagRequestsApplyToTheLatestCloudFormationTags(boolean delete) throws Exception {
+        create("watcher", null, List.of(), List.of(), null);
+        service.replaceSubscriptionTags("watcher", Map.of("phase", "initial", "remove", "initial"));
+        RedshiftService redshift = new RedshiftService(factory, null, null,
+                new RegionResolver("us-east-1", "000000000000"), null, null, null, null,
+                objectMapper, null, null, service);
+        String arn = "arn:aws:redshift:us-east-1:000000000000:eventsubscription:watcher";
+        CountDownLatch started = new CountDownLatch(1);
+        AtomicReference<Thread> taggingThread = new AtomicReference<>();
+
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<?> tagging;
+            synchronized (service) {
+                tagging = executor.submit(() -> {
+                    taggingThread.set(Thread.currentThread());
+                    started.countDown();
+                    if (delete) {
+                        redshift.deleteTags(arn, List.of("remove"));
+                    } else {
+                        redshift.createTags(arn, Map.of("api", "added"));
+                    }
+                });
+                assertTrue(started.await(5, TimeUnit.SECONDS));
+                assertThrows(TimeoutException.class, () -> tagging.get(300, TimeUnit.MILLISECONDS));
+                assertEquals(Thread.State.BLOCKED, taggingThread.get().getState());
+                redshift.reconcileEventSubscription("watcher", TOPIC, null, List.of(), List.of(), null, true,
+                        Map.of("phase", "updated", "remove", "updated"));
+            }
+            tagging.get(5, TimeUnit.SECONDS);
+        }
+
+        Map<String, String> expected = delete ? Map.of("phase", "updated")
+                : Map.of("phase", "updated", "remove", "updated", "api", "added");
+        assertEquals(expected, redshift.listTagsForResource(arn));
+    }
 
     @ParameterizedTest
     @CsvSource({"success,active", "NotFound,topic-not-exist", "AuthorizationError,no-permission"})

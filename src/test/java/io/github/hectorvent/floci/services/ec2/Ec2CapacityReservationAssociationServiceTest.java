@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.CapacityReservation;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.resourcegroups.ResourceGroupsService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -18,6 +19,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
@@ -34,6 +36,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -59,6 +62,308 @@ class Ec2CapacityReservationAssociationServiceTest {
 
     @TempDir
     Path directory;
+
+    @ParameterizedTest
+    @ValueSource(strings = {"default", "open", "targeted"})
+    void futureMatchingRequiresExplicitTargetedBeforePublication(String matching) {
+        try (Fixture fixture = new Fixture("memory", directory)) {
+            String criteria = "default".equals(matching) ? null : matching;
+            if ("targeted".equals(matching)) {
+                assertEquals("scheduled", fixture.future("m5.xlarge", 8, criteria).getState());
+            } else {
+                AwsException error = assertThrows(AwsException.class,
+                        () -> fixture.future("m5.xlarge", 8, criteria));
+                assertEquals("InvalidParameterValue", error.getErrorCode());
+                assertTrue(error.getMessage().contains("targeted"));
+                verify(fixture.store, never()).put(any(), any());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"m5.xlarge", "t3.micro"})
+    void futureMinimumUsesCatalogVcpusAndRejectedTokenCanBeRetried(String type) {
+        try (Fixture fixture = new Fixture("memory", directory)) {
+            int minimum = "m5.xlarge".equals(type) ? 8 : 16;
+            AwsException error = assertThrows(AwsException.class,
+                    () -> fixture.future(type, minimum - 1, "targeted"));
+            assertEquals("InvalidParameterValue", error.getErrorCode());
+            assertTrue(error.getMessage().contains("32 vCPUs"));
+            verify(fixture.store, never()).put(any(), any());
+            assertEquals("scheduled", fixture.future(type, minimum, "targeted").getState());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"p5.48xlarge", "a1.4xlarge", "d3.8xlarge", "hpc7a.96xlarge",
+            "inf2.48xlarge", "trn1.32xlarge", "mac2.metal", "z1d.12xlarge"})
+    void futureUnsupportedFamiliesAreRejectedBeforePublication(String type) {
+        try (Fixture fixture = new Fixture("memory", directory)) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> fixture.future(type, 32, "targeted"));
+            assertEquals("InvalidParameterValue", error.getErrorCode());
+            assertTrue(error.getMessage().contains("instance families"));
+            verify(fixture.store, never()).put(any(), any());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"c5.4xlarge", "g4dn.4xlarge", "im4gn.4xlarge", "m5.4xlarge",
+            "r5.4xlarge", "t3.micro", "u-6tb1.56xlarge", "x2idn.16xlarge"})
+    void futureSupportedFamiliesUseCatalogIncludingAcceleratedAndHighMemory(String type) {
+        try (Fixture fixture = new Fixture("memory", directory)) {
+            assertEquals("scheduled", fixture.future(type, 32, "targeted").getState());
+        }
+    }
+
+    @Test
+    void immediateCapacityKeepsOpenAndSmallRequestBehavior() {
+        try (Fixture fixture = new Fixture("memory", directory)) {
+            assertEquals("active", fixture.create(1).getState());
+        }
+    }
+
+    @Test
+    void scheduledReservationActivatesOnlyAtItsStartAndReplaysAfterActivation() {
+        try (Fixture fixture = new Fixture("memory", directory)) {
+            Instant now = Instant.parse("2026-10-01T00:00:00Z");
+            Instant start = now.plus(Duration.ofDays(7));
+            doReturn(now).when(fixture.service).capacityReservationNow();
+            CapacityReservation scheduled = fixture.schedule(start, 86400L, "incremental", "scheduled-token");
+            assertEquals("scheduled", scheduled.getState());
+            assertEquals(0, scheduled.getAvailableInstanceCount());
+            assertEquals(start, scheduled.getStartDate());
+            assertEquals(start.plusSeconds(86400), scheduled.getCommitmentEndDate());
+            assertEquals(16, scheduled.getCommittedInstanceCount());
+            Instance unreserved = fixture.launch();
+            fixture.service.describeInstances(REGION, List.of(unreserved.getInstanceId()), Map.of());
+            assertEquals(null, fixture.service.instanceCapacityReservationId(unreserved));
+            assertThrows(AwsException.class, () -> fixture.launch(scheduled.getCapacityReservationId()));
+            assertTrue(fixture.describe(scheduled).getInstanceIds().isEmpty());
+            doReturn(start.minusSeconds(1)).when(fixture.service).capacityReservationNow();
+            assertEquals("scheduled", fixture.describe(scheduled).getState());
+            doReturn(start).when(fixture.service).capacityReservationNow();
+            CapacityReservation active = fixture.describe(scheduled);
+            assertEquals("active", active.getState());
+            assertEquals(16, active.getAvailableInstanceCount());
+            assertTrue(active.getInstanceIds().isEmpty());
+            Instance reserved = fixture.launch(scheduled.getCapacityReservationId());
+            assertEquals(scheduled.getCapacityReservationId(), fixture.service.instanceCapacityReservationId(reserved));
+            CapacityReservation replay = fixture.schedule(start, 86400L, "incremental", "scheduled-token");
+            assertEquals(scheduled.getCapacityReservationId(), replay.getCapacityReservationId());
+            assertEquals("active", replay.getState());
+            assertEquals(15, replay.getAvailableInstanceCount());
+            assertEquals(1, fixture.service.describeCapacityReservations(REGION, List.of(), Map.of()).size());
+        }
+    }
+
+    @Test
+    void activatingTargetedCapacityDoesNotAdoptRunningInstances() {
+        try (Fixture fixture = new Fixture("memory", directory)) {
+            Instant now = Instant.parse("2026-10-01T00:00:00Z");
+            Instant start = now.plus(Duration.ofDays(7));
+            doReturn(now).when(fixture.service).capacityReservationNow();
+            CapacityReservation occupied = fixture.create(1);
+            Instance assigned = fixture.launch();
+            Instance optedOut = fixture.launchWithPreference("none");
+            Instance eligible = fixture.launch();
+            fixture.service.describeInstances(REGION,
+                    List.of(assigned.getInstanceId(), optedOut.getInstanceId(), eligible.getInstanceId()), Map.of());
+            CapacityReservation first = fixture.schedule(start, 86400L, "incremental", "first");
+            CapacityReservation second = fixture.schedule(start, 86400L, "incremental", "second");
+            doReturn(start).when(fixture.service).capacityReservationNow();
+            Map<String, String> associations = fixture.service.capacityReservationAssociations(REGION);
+            assertEquals(occupied.getCapacityReservationId(), associations.get(assigned.getInstanceId()));
+            assertFalse(associations.containsKey(optedOut.getInstanceId()));
+            assertFalse(associations.containsKey(eligible.getInstanceId()));
+            assertEquals(32, fixture.describe(first).getAvailableInstanceCount()
+                    + fixture.describe(second).getAvailableInstanceCount());
+            assertEquals(associations, fixture.service.capacityReservationAssociations(REGION));
+        }
+    }
+
+    @Test
+    void failedTargetedActivationRollsBackStateBeforeRetry() {
+        try (Fixture fixture = new Fixture("memory", directory)) {
+            Instant now = Instant.parse("2026-10-01T00:00:00Z");
+            Instant start = now.plus(Duration.ofDays(7));
+            doReturn(now).when(fixture.service).capacityReservationNow();
+            CapacityReservation reservation = fixture.schedule(start, 86400L, "incremental", "failure");
+            Instance instance = fixture.launch();
+            fixture.service.describeInstances(REGION, List.of(instance.getInstanceId()), Map.of());
+            doReturn(start).when(fixture.service).capacityReservationNow();
+            doThrow(new IllegalStateException("activation storage failure"))
+                    .when(fixture.store).putAllAtomically(any());
+            assertThrows(AwsException.class, () -> fixture.describe(reservation));
+            CapacityReservation stored = fixture.store.get(REGION + "::" + reservation.getCapacityReservationId())
+                    .orElseThrow();
+            assertEquals("scheduled", stored.getState());
+            assertTrue(stored.getInstanceIds().isEmpty());
+            reset(fixture.store);
+            assertTrue(fixture.describe(reservation).getInstanceIds().isEmpty());
+            assertEquals(16, fixture.describe(reservation).getAvailableInstanceCount());
+        }
+    }
+
+    @Test
+    void failedReservationPublicationDoesNotLeaveCreationTags() {
+        try (Fixture fixture = new Fixture("memory", directory)) {
+            doThrow(new IllegalStateException("creation storage failure")).when(fixture.store).put(any(), any());
+            assertThrows(IllegalStateException.class, () -> fixture.scheduleWithTags(
+                    Instant.now().plus(Duration.ofDays(7)), List.of(new Tag("Name", "not-published"))));
+            assertTrue(fixture.service.describeCapacityReservations(REGION, List.of(), Map.of()).isEmpty());
+            assertTrue(fixture.service.describeTags(REGION, Map.of("value", List.of("not-published"))).isEmpty());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"memory", "persistent", "hybrid", "wal"})
+    void creationTagSnapshotSurvivesEditsAndReplay(String mode) {
+        Instant start = Instant.now().plus(Duration.ofDays(7));
+        String id;
+        try (Fixture fixture = new Fixture(mode, directory)) {
+            CapacityReservation reservation = fixture.scheduleWithTags(start,
+                    List.of(new Tag("Name", "original"), new Tag("team", "one")));
+            id = reservation.getCapacityReservationId();
+            assertEquals(Map.of("Name", "original", "team", "one"), reservation.getRequestTags());
+            assertEquals(2, fixture.service.describeTags(REGION, Map.of("resource-id", List.of(id))).size());
+            fixture.service.createTags(REGION, List.of(id), List.of(new Tag("Name", "edited")));
+            CapacityReservation replay = fixture.scheduleWithTags(start,
+                    List.of(new Tag("team", "one"), new Tag("Name", "original")));
+            assertEquals(id, replay.getCapacityReservationId());
+            assertTrue(replay.getTags().stream()
+                    .anyMatch(tag -> "Name".equals(tag.getKey()) && "edited".equals(tag.getValue())));
+            assertEquals("IdempotentParameterMismatch", assertThrows(AwsException.class,
+                    () -> fixture.scheduleWithTags(start, List.of(new Tag("Name", "different")))).getErrorCode());
+        }
+        if (!"memory".equals(mode)) {
+            try (Fixture fixture = new Fixture(mode, directory)) {
+                CapacityReservation replay = fixture.scheduleWithTags(start,
+                        List.of(new Tag("Name", "original"), new Tag("team", "one")));
+                assertEquals(id, replay.getCapacityReservationId());
+                assertTrue(replay.getTags().stream()
+                        .anyMatch(tag -> "Name".equals(tag.getKey()) && "edited".equals(tag.getValue())));
+                assertEquals("IdempotentParameterMismatch", assertThrows(AwsException.class,
+                        () -> fixture.scheduleWithTags(start, List.of())).getErrorCode());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void scheduledMetadataAndReplaySurviveStorageReload(String mode) {
+        Instant start = Instant.now().plus(Duration.ofDays(7));
+        String id;
+        try (Fixture fixture = new Fixture(mode, directory)) {
+            id = fixture.schedule(start, 86400L, "incremental", "reload").getCapacityReservationId();
+        }
+        try (Fixture fixture = new Fixture(mode, directory)) {
+            CapacityReservation replay = fixture.schedule(start, 86400L, "incremental", "reload");
+            assertEquals(id, replay.getCapacityReservationId());
+            assertEquals("scheduled", replay.getState());
+            assertEquals(start, replay.getStartDate());
+            assertEquals(86400L, replay.getCommitmentDuration());
+            assertEquals("incremental", replay.getDeliveryPreference());
+            assertEquals(16, replay.getCommittedInstanceCount());
+            assertEquals(start.plusSeconds(86400), replay.getCommitmentEndDate());
+            assertEquals(0, replay.getAvailableInstanceCount());
+        }
+    }
+
+    @Test
+    void scheduledValidationAndMismatchedReplayPreserveStoredCapacity() {
+        try (Fixture fixture = new Fixture("memory", directory)) {
+            Instant now = Instant.parse("2026-10-01T00:00:00Z");
+            doReturn(now).when(fixture.service).capacityReservationNow();
+            Instant start = now.plus(Duration.ofDays(7));
+            for (Instant invalid : List.of(now.plus(Duration.ofDays(4)), now.plus(Duration.ofDays(121)))) {
+                assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                        () -> fixture.schedule(invalid, 86400L, "incremental", null)).getErrorCode());
+            }
+            assertEquals("MissingParameter", assertThrows(AwsException.class,
+                    () -> fixture.schedule(start, null, "incremental", null)).getErrorCode());
+            assertEquals("MissingParameter", assertThrows(AwsException.class,
+                    () -> fixture.schedule(start, 86400L, null, null)).getErrorCode());
+            for (long invalid : new long[]{0, 200000001L}) {
+                assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                        () -> fixture.schedule(start, invalid, "incremental", null)).getErrorCode());
+            }
+            assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                    () -> fixture.schedule(start, 86400L, "fixed", null)).getErrorCode());
+            assertEquals("InvalidParameterCombination", assertThrows(AwsException.class,
+                    () -> fixture.schedule(null, 86400L, "incremental", null)).getErrorCode());
+            assertTrue(fixture.service.describeCapacityReservations(REGION, List.of(), Map.of()).isEmpty());
+            CapacityReservation scheduled = fixture.schedule(start, 86400L, "incremental", "same-token");
+            assertEquals("IdempotentParameterMismatch", assertThrows(AwsException.class,
+                    () -> fixture.schedule(start.plusSeconds(1), 86400L, "incremental", "same-token")).getErrorCode());
+            assertEquals("IncorrectState", assertThrows(AwsException.class,
+                    () -> fixture.service.modifyCapacityReservation(REGION, scheduled.getCapacityReservationId(),
+                            3, null, null, null)).getErrorCode());
+            assertEquals(16, fixture.describe(scheduled).getTotalInstanceCount());
+            assertEquals(scheduled.getCapacityReservationId(), fixture.schedule(start, 86400L,
+                    "incremental", "same-token").getCapacityReservationId());
+        }
+    }
+
+    @Test
+    void failedActivationRetainsScheduledCapacityForRetry() {
+        try (Fixture fixture = new Fixture("memory", directory)) {
+            Instant now = Instant.parse("2026-10-01T00:00:00Z");
+            Instant start = now.plus(Duration.ofDays(7));
+            doReturn(now).when(fixture.service).capacityReservationNow();
+            CapacityReservation reservation = fixture.schedule(start, 86400L, "incremental", "retry");
+            doReturn(start).when(fixture.service).capacityReservationNow();
+            doThrow(new IllegalStateException("storage failed")).when(fixture.store).putAllAtomically(any());
+            assertEquals("InternalError", assertThrows(AwsException.class,
+                    () -> fixture.describe(reservation)).getErrorCode());
+            assertEquals("scheduled", fixture.store.get(REGION + "::" + reservation.getCapacityReservationId())
+                    .orElseThrow().getState());
+            reset(fixture.store);
+            assertEquals("active", fixture.describe(reservation).getState());
+            assertEquals(16, fixture.describe(reservation).getAvailableInstanceCount());
+        }
+    }
+
+    @Test
+    void cancellationCannotBeReactivatedAndActiveCommitmentRestrictsModification() {
+        try (Fixture fixture = new Fixture("memory", directory)) {
+            Instant now = Instant.parse("2026-10-01T00:00:00Z");
+            Instant start = now.plus(Duration.ofDays(7));
+            doReturn(now).when(fixture.service).capacityReservationNow();
+            CapacityReservation cancelled = fixture.schedule(start, 86400L, "incremental", "cancelled");
+            fixture.service.cancelCapacityReservation(REGION, cancelled.getCapacityReservationId());
+            CapacityReservation reservation = fixture.schedule(start, 86400L, "incremental", "active");
+            doReturn(start).when(fixture.service).capacityReservationNow();
+            assertEquals("cancelled", fixture.describe(cancelled).getState());
+            assertEquals(0, fixture.describe(cancelled).getAvailableInstanceCount());
+            assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                    () -> fixture.service.modifyCapacityReservation(REGION, reservation.getCapacityReservationId(),
+                            1, null, null, null)).getErrorCode());
+            assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                    () -> fixture.service.modifyCapacityReservation(REGION, reservation.getCapacityReservationId(),
+                            null, start.plusSeconds(1), "limited", null)).getErrorCode());
+            assertEquals(16, fixture.describe(reservation).getTotalInstanceCount());
+            doReturn(start.plusSeconds(86400)).when(fixture.service).capacityReservationNow();
+            assertEquals(1, fixture.service.modifyCapacityReservation(REGION, reservation.getCapacityReservationId(),
+                    1, null, null, null).getTotalInstanceCount());
+        }
+    }
+
+    @Test
+    void schedulingBoundariesAndImmediateReservationsRemainDistinct() {
+        try (Fixture fixture = new Fixture("memory", directory)) {
+            Instant now = Instant.parse("2026-10-01T00:00:00Z");
+            doReturn(now).when(fixture.service).capacityReservationNow();
+            assertEquals("scheduled", fixture.schedule(now.plus(Duration.ofDays(5)), 1L,
+                    "incremental", null).getState());
+            assertEquals("scheduled", fixture.schedule(now.plus(Duration.ofDays(120)), 200000000L,
+                    "incremental", null).getState());
+            CapacityReservation immediate = fixture.create(2);
+            assertEquals("active", immediate.getState());
+            assertEquals(2, immediate.getAvailableInstanceCount());
+            assertEquals(null, immediate.getCommitmentDuration());
+        }
+    }
 
     @Test
     void unknownZoneIdIsRejectedBeforeReservationPublication() {
@@ -776,6 +1081,24 @@ class Ec2CapacityReservationAssociationServiceTest {
             return service.runInstances(REGION, "ami-test", "t3.micro", 1, 1, null, List.of(), null, null,
                     List.of(), null, null, null, null, 0, null, null, null, null, false, null, null, null,
                     false, null, specification).getInstances().getFirst();
+        }
+
+        private CapacityReservation future(String type, int count, String matching) {
+            return service.createCapacityReservation(REGION, type, "Linux/UNIX", REGION + "a",
+                    null, count, null, null, null, null, null, matching, null, null,
+                    Instant.now().plus(Duration.ofDays(7)), 1209600L, "incremental", "validation-token");
+        }
+
+        private CapacityReservation schedule(Instant start, Long duration, String delivery, String token) {
+            return service.createCapacityReservation(REGION, "t3.micro", "Linux/UNIX", REGION + "a",
+                    null, 16, null, null, null, null, null, "targeted", null, null,
+                    start, duration, delivery, token);
+        }
+
+        private CapacityReservation scheduleWithTags(Instant start, List<Tag> tags) {
+            return service.createCapacityReservation(REGION, "t3.micro", "Linux/UNIX", REGION + "a",
+                    null, 16, null, null, null, null, null, "targeted", null, null,
+                    start, 86400L, "incremental", "tag-token", tags);
         }
 
         private CapacityReservation create(int count) {

@@ -63,9 +63,20 @@ public class AthenaJsonHandler {
                 yield Response.ok(Map.of("ResultSet", results)).build();
             }
             case "ListQueryExecutions" -> {
-                yield Response.ok(Map.of("QueryExecutionIds",
-                        athenaService.listQueryExecutions().stream()
-                                .map(QueryExecution::getQueryExecutionId).toList())).build();
+                Integer maxResults = Pagination.parseMaxResults(request, "MaxResults", "InvalidRequestException");
+                String nextToken = Pagination.parseNextToken(request, "NextToken", "InvalidRequestException");
+                JsonNode workGroup = request.get("WorkGroup");
+                if (workGroup != null && !workGroup.isNull() && !workGroup.isTextual()) {
+                    throw new AwsException("InvalidRequestException", "WorkGroup must be a string.", 400);
+                }
+                PaginatedResult<QueryExecution> page = athenaService.listQueryExecutionsPage(
+                        region, text(request, "WorkGroup"), maxResults, nextToken);
+                Map<String, Object> response = new LinkedHashMap<>();
+                response.put("QueryExecutionIds", page.items().stream().map(QueryExecution::getQueryExecutionId).toList());
+                if (page.nextToken() != null) {
+                    response.put("NextToken", page.nextToken());
+                }
+                yield Response.ok(response).build();
             }
             case "StopQueryExecution" -> {
                 athenaService.stopQueryExecution(request.get("QueryExecutionId").asText());

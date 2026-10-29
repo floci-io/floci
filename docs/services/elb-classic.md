@@ -64,6 +64,10 @@ opened and no traffic is forwarded. Only the control plane and health checking a
 
 ## Behavior Notes
 
+- An omitted `InstanceProtocol` defaults to `HTTP` for HTTP/HTTPS listeners and
+  `TCP` for TCP/SSL listeners. Explicit backend protocols remain unchanged.
+  Creation, listener additions, persisted readback and identical listener retries
+  use the same effective value.
 - Load balancer state is persisted through Floci storage, and on startup health checking is
   restarted for the load balancers of every account.
 - A new load balancer gets AWS's default health check (`TCP:80`, interval 30, timeout 5,

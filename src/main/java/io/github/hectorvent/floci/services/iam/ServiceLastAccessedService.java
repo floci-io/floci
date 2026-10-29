@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.ServiceLastAccessedEntity;
@@ -54,10 +53,8 @@ public class ServiceLastAccessedService {
      */
     public static void validateGranularity(String granularity) {
         if (granularity != null && !GRANULARITIES.contains(granularity)) {
-            throw SmithyValidationErrors.validationError(
-                    "Value '" + granularity + "' at 'granularity' "
-                            + "failed to satisfy constraint: Member must satisfy enum value set: "
-                            + "[SERVICE_LEVEL, ACTION_LEVEL]");
+            throw IamValidationErrors.validationError("granularity", granularity,
+                    "Member must satisfy enum value set: [SERVICE_LEVEL, ACTION_LEVEL]");
         }
     }
 

@@ -59,6 +59,8 @@ public class CloudMapService {
     private static final String ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789";
     /** Route 53 answers a service discovery query with at most eight records. */
     private static final int MAX_DNS_ANSWERS = 8;
+    /** FailureThreshold is no longer supported: AWS always sets it to 1. */
+    private static final String HEALTH_CHECK_CUSTOM_CONFIG = "{\"FailureThreshold\":1}";
 
     private final SecureRandom random = new SecureRandom();
 
@@ -227,7 +229,7 @@ public class CloudMapService {
         service.setDescription(description);
         service.setDnsConfig(dnsConfig);
         service.setHealthCheckConfig(healthCheckConfig);
-        service.setHealthCheckCustomConfig(healthCheckCustomConfig);
+        service.setHealthCheckCustomConfig(healthCheckCustomConfig == null ? null : HEALTH_CHECK_CUSTOM_CONFIG);
         service.setType(resolveServiceType(type, dnsConfig));
         service.setCreatorRequestId(creatorRequestId != null ? creatorRequestId : UUID.randomUUID().toString());
         service.setCreateDate(Instant.now());
@@ -394,18 +396,27 @@ public class CloudMapService {
                                             String healthFilter, Map<String, String> queryParameters,
                                             Integer maxResults, String region) {
         Service service = resolveService(namespaceName, serviceName, region);
-        List<Instance> all = scanInstances(service.getId());
-        List<Instance> filtered = applyHealthFilter(all, healthFilter);
-        if (queryParameters != null && !queryParameters.isEmpty()) {
-            filtered = filtered.stream()
-                    .filter(i -> queryParameters.entrySet().stream()
-                            .allMatch(e -> e.getValue().equals(i.getAttributes().get(e.getKey()))))
-                    .toList();
-        }
+        List<Instance> filtered = filterInstances(service.getId(), healthFilter, queryParameters);
         if (maxResults != null && maxResults > 0 && filtered.size() > maxResults) {
             filtered = filtered.subList(0, maxResults);
         }
         return new DiscoverResult(filtered, service.getRevision());
+    }
+
+    public List<Instance> filterInstances(String serviceId, String healthFilter,
+                                          Map<String, String> queryParameters) {
+        List<Instance> filtered = applyHealthFilter(listInstances(serviceId), healthFilter);
+        if (queryParameters != null && !queryParameters.isEmpty()) {
+            filtered = filtered.stream()
+                    .filter(i -> queryParameters.entrySet().stream()
+                            .allMatch(e -> e.getValue().equals(attributesOf(i).get(e.getKey()))))
+                    .toList();
+        }
+        return filtered;
+    }
+
+    private static Map<String, String> attributesOf(Instance instance) {
+        return instance.getAttributes() != null ? instance.getAttributes() : Map.of();
     }
 
     public long discoverInstancesRevision(String namespaceName, String serviceName, String region) {

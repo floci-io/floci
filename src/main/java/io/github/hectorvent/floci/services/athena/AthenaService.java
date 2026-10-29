@@ -221,6 +221,26 @@ public class AthenaService {
         return queryStore.scan(k -> true);
     }
 
+    public PaginatedResult<QueryExecution> listQueryExecutionsPage(String region, String workGroup,
+                                                                   Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 0 || maxResults > 50)) {
+            throw new AwsException("InvalidRequestException", "MaxResults must be between 0 and 50.", 400);
+        }
+        if (nextToken != null && (nextToken.isEmpty() || nextToken.length() > 1024)) {
+            throw new AwsException("InvalidRequestException", "NextToken must contain 1 to 1024 characters.", 400);
+        }
+        String group = workGroup == null ? DEFAULT_WORKGROUP : workGroup;
+        validateWorkGroupName(group);
+        getWorkGroup(group, region);
+        List<QueryExecution> executions = listQueryExecutions().stream()
+                .filter(execution -> group.equals(Objects.requireNonNullElse(execution.getWorkGroup(), DEFAULT_WORKGROUP)))
+                .toList();
+        int limit = maxResults == null || maxResults == 0 ? 50 : maxResults;
+        return Pagination.paginate(executions, QueryExecution::getQueryExecutionId, limit, nextToken,
+                "ListQueryExecutions:" + regionResolver.getAccountId() + ":" + region + ":" + group,
+                token -> new AwsException("InvalidRequestException", "Invalid NextToken.", 400));
+    }
+
     public void stopQueryExecution(String id) {
         QueryExecution execution = getQueryExecution(id);
         synchronized (execution) {

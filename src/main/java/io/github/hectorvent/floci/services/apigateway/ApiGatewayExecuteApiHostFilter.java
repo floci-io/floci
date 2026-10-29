@@ -23,6 +23,7 @@ import org.jboss.logging.Logger;
 import java.net.URI;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -33,6 +34,8 @@ import java.util.regex.Pattern;
 public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayExecuteApiHostFilter.class);
+    public static final String NOT_FOUND_BODY = "{\"message\":\"Not Found\"}";
+    private static final String DEFAULT_STAGE = "$default";
     private static final Pattern EXECUTE_API_PREFIX = Pattern.compile("^([a-z0-9-]+)\\.execute-api\\.(.+)$",
             Pattern.CASE_INSENSITIVE);
 
@@ -44,6 +47,7 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
 
     @Inject
     public ApiGatewayExecuteApiHostFilter(ApiGatewayV2Service apiGatewayV2Service,
+                                          ApiGatewayService apiGatewayService,
                                           RegionResolver regionResolver,
                                           ApiGatewayExecuteRouteContext routeContext,
                                           EmulatorConfig config,
@@ -52,6 +56,11 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
             @Override
             public Optional<ApiGatewayV2Service.ApiOwner> findApiOwner(String apiId) {
                 return apiGatewayV2Service.findApiOwner(apiId);
+            }
+
+            @Override
+            public Optional<String> findRestApiRegion(String apiId) {
+                return apiGatewayService.findRestApiOwner(apiId).map(ApiGatewayService.ApiOwner::region);
             }
 
             @Override
@@ -103,24 +112,73 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
     @Override
     public void filter(ContainerRequestContext requestContext) {
         String host = RequestHost.of(requestContext);
-        if (host == null) {
-            return;
+        URI originalUri = requestContext.getUriInfo().getRequestUri();
+        String originalPath = originalUri.getRawPath();
+
+        RouteDecision decision = decide(host, originalPath, requestContext.getHeaderString("Authorization"));
+        if (this.requestContext != null) {
+            if (decision.owner() != null) {
+                this.requestContext.setAccountId(decision.owner().accountId());
+                this.requestContext.setRegion(decision.owner().region());
+            }
         }
 
+        switch (decision.kind()) {
+            case NONE -> { }
+            case DISABLED -> requestContext.abortWith(notFoundResponse());
+            case REST_API -> routeToRestApi(requestContext, originalUri, originalPath, decision.apiId());
+            case HTTP_API -> routeToHttpApi(requestContext, host, originalUri, originalPath, decision);
+        }
+    }
+
+    /**
+     * Whether a request for this execute-api host and raw path would be rewritten onto an API by
+     * {@link #filter}. False when the host names no API, the region label is not the API's region,
+     * the API is not invokable on this path (WebSocket, disabled endpoint, no stage), or the path is
+     * already an internal {@code /execute-api/} path.
+     */
+    public boolean routes(String host, String originalPath) {
+        try {
+            RouteDecision decision = decide(host, originalPath, null);
+            Optional<String> apiRegion = switch (decision.kind()) {
+                case HTTP_API -> Optional.of(decision.region());
+                case REST_API -> apiGatewayLookup.findRestApiRegion(decision.apiId());
+                case NONE, DISABLED -> Optional.empty();
+            };
+            String hostRegion = regionResolver.resolveRegionFromHost(host);
+            return apiRegion.isPresent() && (hostRegion == null || hostRegion.equals(apiRegion.get()));
+        } catch (AwsException e) {
+            LOG.debugv(e, "Execute API host did not resolve to one API: apiId={0}", extractApiId(host, baseHostname));
+            return false;
+        }
+    }
+
+    private static Response notFoundResponse() {
+        return Response.status(Response.Status.NOT_FOUND)
+                .entity(NOT_FOUND_BODY)
+                .type(MediaType.APPLICATION_JSON)
+                .build();
+    }
+
+    /**
+     * Decides what {@link #filter} does for a host and raw path, without touching the request. The
+     * lookups run under the account of the API's owner, and the caller's account and region are
+     * restored afterwards.
+     */
+    RouteDecision decide(String host, String originalPath, String authorization) {
         String apiId = extractApiId(host, baseHostname);
         if (apiId == null) {
-            return;
+            return RouteDecision.none(null);
         }
-        Optional<ApiGatewayV2Service.ApiOwner> owner = apiGatewayLookup.findApiOwner(apiId);
-        String region;
-        if (owner.isPresent()) {
-            ApiGatewayV2Service.ApiOwner apiOwner = owner.get();
-            if (this.requestContext != null) {
-                this.requestContext.setAccountId(apiOwner.accountId());
-                this.requestContext.setRegion(apiOwner.region());
-            }
-            region = apiOwner.region();
-        } else {
+        ApiGatewayV2Service.ApiOwner owner = apiGatewayLookup.findApiOwner(apiId).orElse(null);
+        // Host matching alone cannot tell whether this request was already rewritten: the Host
+        // header still names the execute-api subdomain afterwards. Rewriting twice would produce
+        // /execute-api/{apiId}/execute-api/{apiId}/... and a 404, so bail out if another
+        // execute-api filter got here first.
+        if (originalPath != null && originalPath.startsWith("/execute-api/")) {
+            return RouteDecision.none(owner);
+        }
+        if (owner == null) {
             // Region: the host label when it is a real AWS region (…execute-api.{region}.…), else
             // the SigV4 credential scope. The cross-region apiId scan (resolveApiRegion) is the
             // final fallback so an API created outside the default region still resolves —
@@ -128,21 +186,15 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
             String hostRegion = regionResolver.resolveRegionFromHost(host);
             String preferredRegion = hostRegion != null
                     ? hostRegion
-                    : regionResolver.resolveRegionFromAuth(requestContext.getHeaderString("Authorization"));
-            region = apiGatewayLookup.resolveApiRegion(preferredRegion, apiId);
+                    : regionResolver.resolveRegionFromAuth(authorization);
+            return decideInRegion(apiId, apiGatewayLookup.resolveApiRegion(preferredRegion, apiId),
+                    originalPath, owner);
         }
+        return underAccountOf(owner, () -> decideInRegion(apiId, owner.region(), originalPath, owner));
+    }
 
-        URI originalUri = requestContext.getUriInfo().getRequestUri();
-        String originalPath = originalUri.getRawPath();
-
-        // Host matching alone cannot tell whether this request was already rewritten: the Host
-        // header still names the execute-api subdomain afterwards. Rewriting twice would produce
-        // /execute-api/{apiId}/execute-api/{apiId}/... and a 404, so bail out if another
-        // execute-api filter got here first.
-        if (originalPath != null && originalPath.startsWith("/execute-api/")) {
-            return;
-        }
-
+    private RouteDecision decideInRegion(String apiId, String region, String originalPath,
+                                         ApiGatewayV2Service.ApiOwner owner) {
         try {
             String protocolType = apiGatewayLookup.protocolType(region, apiId);
             // HTTP APIs route all their invoke traffic through this filter. WEBSOCKET APIs route
@@ -151,49 +203,61 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
             boolean routable = "HTTP".equals(protocolType)
                     || ("WEBSOCKET".equals(protocolType) && isConnectionsManagementPath(originalPath));
             if (!routable) {
-                return;
+                return RouteDecision.none(owner);
             }
             if (apiGatewayLookup.executeApiEndpointDisabled(region, apiId)) {
-                requestContext.abortWith(Response.status(Response.Status.NOT_FOUND)
-                        .entity("{\"message\":\"Not Found\"}")
-                        .type(MediaType.APPLICATION_JSON)
-                        .build());
-                return;
+                return RouteDecision.disabled(owner);
             }
         } catch (AwsException e) {
             // The v2 owner lookup is account-independent. When it found no owner, let the
             // REST execute controller resolve the API after account context is established.
-            if (owner.isEmpty()) {
-                routeToRestApi(requestContext, originalUri, originalPath, apiId);
-                return;
+            if (owner == null) {
+                return RouteDecision.restApi(apiId);
             }
             LOG.debugv(e, "Execute API host did not resolve to a routable API: apiId={0}, region={1}",
                     apiId, region);
-            return;
+            return RouteDecision.none(owner);
         }
 
         String path = originalPath == null ? "" : stripLeadingSlash(originalPath);
         String firstSegment = firstSegment(path);
-
-        String stageName = "$default";
-        String remainingPath = path;
         if (!firstSegment.isEmpty() && stageExists(region, apiId, firstSegment)) {
-            stageName = firstSegment;
-            remainingPath = stripFirstSegment(path);
-        } else if (!stageExists(region, apiId, stageName)) {
-            return;
+            return RouteDecision.httpApi(apiId, region, owner, firstSegment, stripFirstSegment(path));
         }
+        if (!stageExists(region, apiId, DEFAULT_STAGE)) {
+            return RouteDecision.none(owner);
+        }
+        return RouteDecision.httpApi(apiId, region, owner, DEFAULT_STAGE, path);
+    }
 
-        String newPath = "/execute-api/" + apiId + "/" + stageName + "/";
-        if (!remainingPath.isEmpty()) {
-            newPath += remainingPath;
+    private <T> T underAccountOf(ApiGatewayV2Service.ApiOwner owner, Supplier<T> action) {
+        if (requestContext == null) {
+            return action.get();
+        }
+        String callerAccount = requestContext.getAccountId();
+        String callerRegion = requestContext.getRegion();
+        requestContext.setAccountId(owner.accountId());
+        requestContext.setRegion(owner.region());
+        try {
+            return action.get();
+        } finally {
+            requestContext.setAccountId(callerAccount);
+            requestContext.setRegion(callerRegion);
+        }
+    }
+
+    private void routeToHttpApi(ContainerRequestContext requestContext, String host, URI originalUri,
+                                String originalPath, RouteDecision decision) {
+        String newPath = "/execute-api/" + decision.apiId() + "/" + decision.stage() + "/";
+        if (!decision.remainingPath().isEmpty()) {
+            newPath += decision.remainingPath();
         }
 
         URI newUri = UriBuilder.fromUri(originalUri)
                 .replacePath(newPath)
                 .buildFromEncoded();
         LOG.debugv("Execute API host routing: {0}{1} -> {2}", host, originalPath, newUri.getRawPath());
-        routeContext.routeToHttpApi(region);
+        routeContext.routeToHttpApi(decision.region());
         // AWS_IAM dispatch rebuilds the caller's canonical request, which covers the path they
         // signed: the virtual-host path, not the /execute-api/... form this rewrite produces.
         routeContext.recordSignedRequestPath(originalPath);
@@ -223,8 +287,39 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
         }
     }
 
+    enum RouteKind { NONE, DISABLED, REST_API, HTTP_API }
+
+    /**
+     * The outcome of the routing decision. {@code owner} is the HTTP or WebSocket API owner found for
+     * the host, whatever the outcome, so that {@link #filter} can switch to its account, or null.
+     */
+    record RouteDecision(RouteKind kind, String apiId, ApiGatewayV2Service.ApiOwner owner,
+                         String region, String stage, String remainingPath) {
+
+        static RouteDecision none(ApiGatewayV2Service.ApiOwner owner) {
+            return new RouteDecision(RouteKind.NONE, null, owner, null, null, null);
+        }
+
+        static RouteDecision disabled(ApiGatewayV2Service.ApiOwner owner) {
+            return new RouteDecision(RouteKind.DISABLED, null, owner, null, null, null);
+        }
+
+        static RouteDecision restApi(String apiId) {
+            return new RouteDecision(RouteKind.REST_API, apiId, null, null, null, null);
+        }
+
+        static RouteDecision httpApi(String apiId, String region, ApiGatewayV2Service.ApiOwner owner,
+                                     String stage, String remainingPath) {
+            return new RouteDecision(RouteKind.HTTP_API, apiId, owner, region, stage, remainingPath);
+        }
+    }
+
     interface ApiGatewayLookup {
         default Optional<ApiGatewayV2Service.ApiOwner> findApiOwner(String apiId) {
+            return Optional.empty();
+        }
+
+        default Optional<String> findRestApiRegion(String apiId) {
             return Optional.empty();
         }
 
