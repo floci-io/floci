@@ -89,6 +89,9 @@ class LambdaWebAuthTypeConditionKeysIntegrationTest {
                 .then().statusCode(403)
                 .header("X-Amzn-Errortype", "AccessDeniedException");
         signed(session).when().get(endpoints + "/iam").then().statusCode(200);
+        signed(session).when().get(BASE + "/arn:bad/endpoints/dev")
+                .then().statusCode(400)
+                .header("X-Amzn-Errortype", "ValidationException");
         signed(session).when().get(endpoints + "/missing")
                 .then().statusCode(404)
                 .body("message", equalTo("The endpoint missing does not exist."));

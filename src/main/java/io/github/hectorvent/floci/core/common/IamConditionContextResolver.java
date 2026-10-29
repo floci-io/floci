@@ -334,29 +334,14 @@ public class IamConditionContextResolver {
     /** The authType a web function endpoint request names, and the one the endpoint has before it. */
     private Map<String, List<String>> lambdaConditionContext(String action, ContainerRequestContext ctx) {
         Map<String, List<String>> conditions = new LinkedHashMap<>();
-        switch (action) {
-            case "lambda:CreateWebFunction" -> putIfPresent(conditions, REQUEST_AUTH_TYPE,
-                    requestAuthType(PassedRoles.jsonBody(ctx), "endpointConfig"));
-            case "lambda:CreateWebFunctionEndpoint" -> putIfPresent(conditions, REQUEST_AUTH_TYPE,
-                    requestAuthType(PassedRoles.jsonBody(ctx), null));
-            case "lambda:UpdateWebFunctionEndpoint" -> {
-                putIfPresent(conditions, REQUEST_AUTH_TYPE, requestAuthType(PassedRoles.jsonBody(ctx), null));
-                putIfPresent(conditions, RESOURCE_AUTH_TYPE, storedAuthType(ctx));
-            }
-            case "lambda:GetWebFunctionEndpoint", "lambda:DeleteWebFunctionEndpoint" ->
-                    putIfPresent(conditions, RESOURCE_AUTH_TYPE, storedAuthType(ctx));
-            default -> {
-                return null;
-            }
+        for (String member : LambdaWebConditionKeys.members(action, REQUEST_AUTH_TYPE)) {
+            PassedRoles.values(PassedRoles.jsonBody(ctx), member.split("\\."))
+                    .forEach(value -> putIfPresent(conditions, REQUEST_AUTH_TYPE, value));
+        }
+        if (LambdaWebConditionKeys.takes(action, RESOURCE_AUTH_TYPE)) {
+            putIfPresent(conditions, RESOURCE_AUTH_TYPE, storedAuthType(ctx));
         }
         return conditions.isEmpty() ? null : conditions;
-    }
-
-    private static String requestAuthType(JsonNode body, String member) {
-        if (body == null) {
-            return null;
-        }
-        return (member == null ? body : body.path(member)).path("authType").textValue();
     }
 
     private String storedAuthType(ContainerRequestContext ctx) {
@@ -367,6 +352,9 @@ public class IamConditionContextResolver {
         String endpointArn = ResourceArnBuilder.webFunctionArn(ctx.getUriInfo().getPath(), region,
                 requestContext.getAccountId());
         int child = endpointArn.lastIndexOf("/endpoint/");
+        if (child < 0) {
+            return null;
+        }
         try {
             return lambdaWebService.get().getEndpoint(region, endpointArn.substring(0, child),
                     endpointArn.substring(child + "/endpoint/".length())).authType;

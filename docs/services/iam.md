@@ -2441,6 +2441,9 @@ floci populates:
   request, for `GetWebFunctionEndpoint`, `UpdateWebFunctionEndpoint` and
   `DeleteWebFunctionEndpoint`, absent when the endpoint does not exist, as on AWS. An
   `IamAuth` endpoint request carries it too (see [Lambda Web Functions](lambda-web-functions.md)).
+  The actions and request members come from `lambda-web-condition-keys.json`, which
+  `tools/aws/regen_lambda_web_condition_keys.py` generates from the Service Reference and pinned
+  botocore. Regenerate with `make lambda-web-condition-keys-sync`.
 
 **Any other condition key is absent from the request context.** A positive scalar operator
 without `IfExists` on an absent key makes the whole statement *not apply*: it neither matches nor

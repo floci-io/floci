@@ -437,6 +437,9 @@ IAM_CONDITION_KEYS_PATHS := src/main/resources/aws/iam-condition-keys.json \
 S3CONTROL_TAG_CONDITION_KEYS_PATHS := src/main/resources/aws/s3control-tag-condition-keys.json \
 	tools/aws/regen_s3control_tag_condition_keys.py tools/aws/test_regen_s3control_tag_condition_keys.py \
 	tools/aws/regen_iam_tag_on_create.py $(IAM_PASSED_ROLES_GENERATOR)
+LAMBDA_WEB_CONDITION_KEYS_PATHS := src/main/resources/aws/lambda-web-condition-keys.json \
+	tools/aws/regen_lambda_web_condition_keys.py tools/aws/test_regen_lambda_web_condition_keys.py \
+	tools/aws/regen_partitions.py tools/aws/regen_query_services.py
 IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json \
 	tools/aws/regen_iam_request_resources.py $(IAM_PASSED_ROLES_GENERATOR) \
 	tools/aws/test_regen_iam_request_resources.py
@@ -445,7 +448,7 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 	@# Every check runs even when an earlier one fails, so one file's drift cannot hide another's
 	@# state. Sequential steps in CI stop at the first failure, which once left the action
 	@# resource gate unexercised while the namespace list was stale.
-	@namespaces=0; actions=0; authorized=0; passed=0; connectors=0; tagged=0; requested=0; dynamodb=0; conditionkeys=0; s3control=0; \
+	@namespaces=0; actions=0; authorized=0; passed=0; connectors=0; tagged=0; requested=0; dynamodb=0; conditionkeys=0; s3control=0; lambdaweb=0; \
 	covers() { \
 		[ -z "$(strip $(CHANGED))" ] && return 0; \
 		for path in $(CHANGED); do case " $$1 " in *" $$path "*) return 0;; esac; done; \
@@ -482,9 +485,12 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 	if covers "$(S3CONTROL_TAG_CONDITION_KEYS_PATHS)" "the S3 Control tag condition key table"; then \
 		$(MAKE) --no-print-directory s3control-tag-condition-keys-verify || s3control=$$?; \
 	fi; \
+	if covers "$(LAMBDA_WEB_CONDITION_KEYS_PATHS)" "the Lambda Web condition key table"; then \
+		$(MAKE) --no-print-directory lambda-web-condition-keys-verify || lambdaweb=$$?; \
+	fi; \
 	if [ $$namespaces -ne 0 ] || [ $$actions -ne 0 ] || [ $$authorized -ne 0 ] || [ $$passed -ne 0 ] \
 			|| [ $$connectors -ne 0 ] || [ $$tagged -ne 0 ] || [ $$requested -ne 0 ] || [ $$dynamodb -ne 0 ] \
-			|| [ $$conditionkeys -ne 0 ] || [ $$s3control -ne 0 ]; then \
+			|| [ $$conditionkeys -ne 0 ] || [ $$s3control -ne 0 ] || [ $$lambdaweb -ne 0 ]; then \
 		echo ""; \
 		echo "error: vendored IAM data does not match upstream:"; \
 		if [ $$namespaces -ne 0 ]; then \
@@ -511,6 +517,7 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 		if [ $$dynamodb -ne 0 ]; then echo "       the DynamoDB condition key table"; fi; \
 		if [ $$conditionkeys -ne 0 ]; then echo "       the IAM condition key table"; fi; \
 		if [ $$s3control -ne 0 ]; then echo "       the S3 Control tag condition key table"; fi; \
+		if [ $$lambdaweb -ne 0 ]; then echo "       the Lambda Web condition key table"; fi; \
 		exit 1; \
 	fi
 
@@ -704,3 +711,11 @@ s3control-tag-condition-keys-check: ## Check the S3 Control tag condition reques
 	$(PYTHON) tools/aws/regen_s3control_tag_condition_keys.py --check
 s3control-tag-condition-keys-verify: ## Check the S3 Control tag condition action keys against AWS
 	$(PYTHON) tools/aws/regen_s3control_tag_condition_keys.py --verify
+
+.PHONY: lambda-web-condition-keys-sync lambda-web-condition-keys-check lambda-web-condition-keys-verify
+lambda-web-condition-keys-sync: ## Regenerate the Lambda Web condition keys from AWS and botocore
+	$(PYTHON) tools/aws/regen_lambda_web_condition_keys.py
+lambda-web-condition-keys-check: ## Check the Lambda Web condition request members against pinned botocore
+	$(PYTHON) tools/aws/regen_lambda_web_condition_keys.py --check
+lambda-web-condition-keys-verify: ## Check the Lambda Web condition action keys against AWS
+	$(PYTHON) tools/aws/regen_lambda_web_condition_keys.py --verify

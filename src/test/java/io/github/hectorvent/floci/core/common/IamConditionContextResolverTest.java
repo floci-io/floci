@@ -149,6 +149,8 @@ class IamConditionContextResolverTest {
             assertNull(resolver.resolve("lambda", action,
                     webRequest("/2025-03-07/web-functions/app/endpoints/gone", "")), "a missing endpoint has none");
         }
+        assertNull(resolver.resolve("lambda", "lambda:GetWebFunctionEndpoint",
+                webRequest("/2025-03-07/web-functions/arn:bad/endpoints/dev", "")), "a malformed ARN has none");
         assertNull(resolver.resolve("lambda", "lambda:GetWebFunction",
                 webRequest("/2025-03-07/web-functions/app", "")));
         assertNull(resolver.resolve("lambda", "lambda:ListWebFunctionEndpoints",
