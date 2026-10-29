@@ -300,7 +300,7 @@ public class EcsResponseWriter {
                 ObjectNode mpNode = objectMapper.createObjectNode();
                 mpNode.put("sourceVolume", mp.sourceVolume());
                 mpNode.put("containerPath", mp.containerPath());
-                mpNode.put("readOnly", mp.readOnly());
+                if (mp.readOnly() != null) { mpNode.put("readOnly", mp.readOnly()); }
                 mps.add(mpNode);
             }
             n.set("mountPoints", mps);
@@ -310,7 +310,7 @@ public class EcsResponseWriter {
             for (VolumeFrom volumeFrom : def.getVolumesFrom()) {
                 ObjectNode volumeFromNode = objectMapper.createObjectNode();
                 volumeFromNode.put("sourceContainer", volumeFrom.sourceContainer());
-                volumeFromNode.put("readOnly", volumeFrom.readOnly());
+                if (volumeFrom.readOnly() != null) { volumeFromNode.put("readOnly", volumeFrom.readOnly()); }
                 volumesFrom.add(volumeFromNode);
             }
             n.set("volumesFrom", volumesFrom);

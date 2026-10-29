@@ -1383,7 +1383,7 @@ public class EcsJsonHandler {
         for (JsonNode item : node) {
             result.add(new VolumeFrom(
                     item.path("sourceContainer").asText(),
-                    item.path("readOnly").asBoolean(false)));
+                    item.hasNonNull("readOnly") ? item.get("readOnly").asBoolean() : null));
         }
         return result;
     }
@@ -1561,7 +1561,7 @@ public class EcsJsonHandler {
             result.add(new MountPoint(
                     item.path("sourceVolume").asText(),
                     item.path("containerPath").asText(),
-                    item.path("readOnly").asBoolean(false)));
+                    item.hasNonNull("readOnly") ? item.get("readOnly").asBoolean() : null));
         }
         return result;
     }

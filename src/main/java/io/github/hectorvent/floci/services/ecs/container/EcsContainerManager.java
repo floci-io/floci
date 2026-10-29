@@ -521,7 +521,7 @@ public class EcsContainerManager {
                             // rejection is not swallowed, it propagates out of startTask and is
                             // surfaced by EcsService as the task's stoppedReason.
                             hostVolumePolicy.validate(sourcePath);
-                            if (mp.readOnly()) {
+                            if (Boolean.TRUE.equals(mp.readOnly())) {
                                 specBuilder.withReadOnlyBind(sourcePath, mp.containerPath());
                             } else {
                                 specBuilder.withBind(sourcePath, mp.containerPath());
@@ -534,7 +534,8 @@ public class EcsContainerManager {
                                 labels.put(ContainerStorageHelper.SERVICE_LABEL, "ecs");
                                 lifecycleManager.ensureVolume(ephemeralVolume, labels);
                             }
-                            specBuilder.withNamedVolume(ephemeralVolume, mp.containerPath(), mp.readOnly());
+                            specBuilder.withNamedVolume(ephemeralVolume, mp.containerPath(),
+                                    Boolean.TRUE.equals(mp.readOnly()));
                         } else {
                             LOG.warnv("Skipping mountPoint with unresolved volume {0} on container {1}",
                                     mp.sourceVolume(), def.getName());
@@ -549,7 +550,8 @@ public class EcsContainerManager {
                             throw new IllegalStateException("ECS volumesFrom source container "
                                     + volumeFrom.sourceContainer() + " has not started");
                         }
-                        specBuilder.withVolumesFrom(sourceContainerId, volumeFrom.readOnly());
+                        specBuilder.withVolumesFrom(sourceContainerId,
+                                Boolean.TRUE.equals(volumeFrom.readOnly()));
                     }
                 }
 
@@ -2365,7 +2367,7 @@ public class EcsContainerManager {
             lifecycleManager.ensureSharedVolume(efsVolumeName,
                     efsCfg.ownerUid(), efsCfg.ownerGid(), efsCfg.rootPermissions(), efsCfg.initImage());
         }
-        specBuilder.withNamedVolume(efsVolumeName, mp.containerPath(), mp.readOnly());
+        specBuilder.withNamedVolume(efsVolumeName, mp.containerPath(), Boolean.TRUE.equals(mp.readOnly()));
         PosixUser posixUser = accessPoint != null ? accessPoint.getPosixUser() : null;
         if (posixUser != null) {
             if (posixUser.getUid() == null || posixUser.getGid() == null) {
