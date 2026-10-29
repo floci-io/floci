@@ -58,7 +58,6 @@ public class StsQueryHandler {
     private static final String ROOT_TASK_POLICY_PATH = "/root-task/";
     /** "the maximum session duration of 900 seconds (15 minutes)", which is also the default here. */
     private static final int MAX_ROOT_SESSION_SECONDS = 900;
-    private static final int MAX_SESSION_TOKEN_SIZE = 4096;
     /** "If not specified, the default duration is 300 seconds (5 minutes)." */
     private static final int DEFAULT_TOKEN_SECONDS = 300;
     private static final String STS_AUDIENCE = "sts.amazonaws.com"; // partition-literal: web-identity audience; no source outside the commercial partition (P9)
@@ -151,13 +150,13 @@ public class StsQueryHandler {
     }
 
     private Response handleAssumeRole(MultivaluedMap<String, String> params) {
-        Response validation = validateRequired(params, "RoleArn", "RoleSessionName");
+        Response integerMembers = validateIntegerMembers(params, "DurationSeconds", "MinimumSessionTokenSize");
+        if (integerMembers != null) {
+            return integerMembers;
+        }
+        Response validation = validateDeclaredConstraints("AssumeRole", params);
         if (validation != null) {
             return validation;
-        }
-        Response durationValidation = validateDurationSeconds(params, 900, 43200);
-        if (durationValidation != null) {
-            return durationValidation;
         }
         String roleArn = getParam(params, "RoleArn");
         String sessionName = getParam(params, "RoleSessionName");
@@ -339,17 +338,17 @@ public class StsQueryHandler {
     }
 
     private Response handleAssumeRoleWithWebIdentity(MultivaluedMap<String, String> params) {
-        Response validation = validateRequired(params, "RoleArn", "RoleSessionName", "WebIdentityToken");
+        Response integerMembers = validateIntegerMembers(params, "DurationSeconds", "MinimumSessionTokenSize");
+        if (integerMembers != null) {
+            return integerMembers;
+        }
+        Response validation = validateDeclaredConstraints("AssumeRoleWithWebIdentity", params);
         if (validation != null) {
             return validation;
         }
-        validation = validateIamRoleArn(getParam(params, "RoleArn"));
-        if (validation != null) {
-            return validation;
-        }
-        Response durationValidation = validateDurationSeconds(params, 900, 43200);
-        if (durationValidation != null) {
-            return durationValidation;
+        Response roleArnShape = validateIamRoleArn(getParam(params, "RoleArn"));
+        if (roleArnShape != null) {
+            return roleArnShape;
         }
         String roleArn = getParam(params, "RoleArn");
         String sessionName = getParam(params, "RoleSessionName");
@@ -529,13 +528,13 @@ public class StsQueryHandler {
     }
 
     private Response handleAssumeRoleWithSAML(MultivaluedMap<String, String> params) {
-        Response validation = validateRequired(params, "RoleArn", "PrincipalArn", "SAMLAssertion");
+        Response integerMembers = validateIntegerMembers(params, "DurationSeconds", "MinimumSessionTokenSize");
+        if (integerMembers != null) {
+            return integerMembers;
+        }
+        Response validation = validateDeclaredConstraints("AssumeRoleWithSAML", params);
         if (validation != null) {
             return validation;
-        }
-        Response durationValidation = validateDurationSeconds(params, 900, 43200);
-        if (durationValidation != null) {
-            return durationValidation;
         }
         String roleArn = getParam(params, "RoleArn");
         String principalArn = getParam(params, "PrincipalArn");
@@ -610,13 +609,13 @@ public class StsQueryHandler {
             return AwsQueryResponse.error("AccessDenied", IamService.FEDERATION_TOKEN_SESSION_MESSAGE,
                     AwsNamespaces.STS, 403);
         }
-        Response validation = validateRequired(params, "Name");
+        Response integerMembers = validateIntegerMembers(params, "DurationSeconds", "MinimumSessionTokenSize");
+        if (integerMembers != null) {
+            return integerMembers;
+        }
+        Response validation = validateDeclaredConstraints("GetFederationToken", params);
         if (validation != null) {
             return validation;
-        }
-        Response durationValidation = validateDurationSeconds(params, 900, 129600);
-        if (durationValidation != null) {
-            return durationValidation;
         }
         String name = getParam(params, "Name");
         int durationSeconds = getIntParam(params, "DurationSeconds", 43200);
@@ -664,7 +663,7 @@ public class StsQueryHandler {
      * not populated for this operation.
      */
     private Response handleGetDelegatedAccessToken(MultivaluedMap<String, String> params) {
-        Response validation = validateRequired(params, "TradeInToken");
+        Response validation = validateDeclaredConstraints("GetDelegatedAccessToken", params);
         if (validation != null) {
             return validation;
         }
@@ -726,24 +725,15 @@ public class StsQueryHandler {
                     + " AssumeRoot. You must send this request to a Regional AWS STS endpoint.",
                     AwsNamespaces.STS, 400);
         }
-        Response validation = validateRequired(params, "TargetPrincipal", "TaskPolicyArn.arn");
+        Response integerMembers = validateIntegerMembers(params, "DurationSeconds", "MinimumSessionTokenSize");
+        if (integerMembers != null) {
+            return integerMembers;
+        }
+        Response validation = validateDeclaredConstraints("AssumeRoot", params);
         if (validation != null) {
             return validation;
         }
         String targetPrincipal = getParam(params, "TargetPrincipal");
-        Response principalLength = violation(
-                SmithyValidationErrors.lengthOutOfRange("targetPrincipal", targetPrincipal, 12, 2048));
-        if (principalLength != null) {
-            return principalLength;
-        }
-        Response durationValidation = validateDurationSeconds(params, 0, 900);
-        if (durationValidation != null) {
-            return durationValidation;
-        }
-        Response tokenSizeValidation = validateMinimumSessionTokenSize(params);
-        if (tokenSizeValidation != null) {
-            return tokenSizeValidation;
-        }
         String callerAccountId = regionResolver.getAccountId();
         Response rootCaller = refuseRootCredentials(callerAccountId);
         if (rootCaller != null) {
@@ -803,28 +793,6 @@ public class StsQueryHandler {
         return AwsArnUtils.parse(arn).resource().startsWith("policy" + ROOT_TASK_POLICY_PATH);
     }
 
-    /**
-     * {@code MinimumSessionTokenSize} is 0 to 4096 in the model, "The value must not exceed 4,096
-     * bytes", and the size it asks for is materialized, so the bound is enforced rather than
-     * clamped: a value outside it is the same {@code ValidationError} every other member violation
-     * answers, and one that is no integer at all the same {@code InvalidParameterValue}
-     * {@code DurationSeconds} gives.
-     */
-    private Response validateMinimumSessionTokenSize(MultivaluedMap<String, String> params) {
-        String value = params.getFirst("MinimumSessionTokenSize");
-        if (value == null) {
-            return null;
-        }
-        int size;
-        try {
-            size = Integer.parseInt(value);
-        } catch (NumberFormatException e) {
-            return notANumber("MinimumSessionTokenSize", value);
-        }
-        return violation(SmithyValidationErrors.outOfRange("minimumSessionTokenSize", size, 0,
-                MAX_SESSION_TOKEN_SIZE));
-    }
-
     /** The account a {@code TargetPrincipal} names, whether it is an account id or a principal ARN. */
     private static String accountOf(String targetPrincipal) {
         if (targetPrincipal.matches("\\d{12}")) {
@@ -864,25 +832,13 @@ public class StsQueryHandler {
     }
 
     private Response handleDecodeAuthorizationMessage(MultivaluedMap<String, String> params) {
-        Response validation = validateRequired(params, "EncodedMessage");
+        Response validation = validateDeclaredConstraints("DecodeAuthorizationMessage", params);
         if (validation != null) {
             return validation;
         }
         String encodedMessage = getParam(params, "EncodedMessage");
         String result = new XmlBuilder().elem("DecodedMessage", encodedMessage).build();
         return Response.ok(AwsQueryResponse.envelope("DecodeAuthorizationMessage", AwsNamespaces.STS, result)).build();
-    }
-
-    private Response validateRequired(MultivaluedMap<String, String> params, String... names) {
-        for (String name : names) {
-            String value = params.getFirst(name);
-            if (value == null || value.isBlank()) {
-                return AwsQueryResponse.error("ValidationError",
-                        SmithyValidationErrors.message(List.of(SmithyValidationErrors.notNull(name))),
-                        AwsNamespaces.STS, 400);
-            }
-        }
-        return null;
     }
 
     /**
@@ -950,26 +906,6 @@ public class StsQueryHandler {
     private static Response notANumber(String name, String value) {
         return AwsQueryResponse.error("InvalidParameterValue", "Value " + value + " for parameter "
                 + name + " is invalid. Reason: Must be an integer.", AwsNamespaces.STS, 400);
-    }
-
-    /**
-     * Validates the optional {@code DurationSeconds} parameter against {@code minSeconds}/{@code maxSeconds}.
-     * Returns {@code null} when the parameter is absent or valid; otherwise a {@code ValidationError} (out of
-     * range) or {@code InvalidParameterValue} (not an integer) response, matching AWS's own wire behavior.
-     */
-    private Response validateDurationSeconds(MultivaluedMap<String, String> params, int minSeconds, int maxSeconds) {
-        String value = params.getFirst("DurationSeconds");
-        if (value == null) {
-            return null;
-        }
-        int durationSeconds;
-        try {
-            durationSeconds = Integer.parseInt(value);
-        } catch (NumberFormatException e) {
-            return notANumber("DurationSeconds", value);
-        }
-        return violation(SmithyValidationErrors.outOfRange("durationSeconds", durationSeconds,
-                minSeconds, maxSeconds));
     }
 
     /**

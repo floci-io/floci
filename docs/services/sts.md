@@ -20,9 +20,10 @@
 
 ## Request Constraints
 
-Three operations are held to the constraints their model declares rather than to a check written
-by hand, `tools/aws/regen_sts_shapes.py` vendoring them for `GetAccessKeyInfo`, `GetSessionToken`
-and `GetWebIdentityToken` and the walk being the one IAM reads its own file with. One word of the
+Every operation that models a constraint is held to the one its model declares rather than to a
+check written by hand, which is all ten that carry a member: `tools/aws/regen_sts_shapes.py`
+vendors them and the walk is the one IAM reads its own file with. `GetCallerIdentity` models no
+member at all, so there is nothing to read for it. One word of the
 message differs between the two: STS quotes the offending value, `Value 'x' at 'serialNumber'`,
 where IAM names the member and leaves it out, which is what each service's own captures carry (see
 the [IAM service doc](iam.md)). Every violation
@@ -49,10 +50,29 @@ the constraints, while a digit string is held to the range whatever width it ove
 of `99999999999` breaks the maximum rather than being called no integer. The whitespace around a
 number is not part of it, both where the range is read and where the duration is then used, so a
 `DurationSeconds` of ` 3600 ` is an hour rather than the default a raw parse would have fallen back
-to, which is how IAM reads its own `maxItems`. Every other operation
-that takes a member answers an absent one from a check of its own, which names the parameter as
-the request writes it, `RoleArn` rather than `roleArn`, and reads a blank value as an absent one.
-Those are drifts of their own, and taking those operations over is what settles them.
+to, which is how IAM reads its own `maxItems`.
+
+The seven operations read last answered an absent member from a check of their own, which named the
+parameter as the request writes it, `RoleArn` rather than `roleArn`, and read a blank value as an
+absent one. Both of those move onto the form above, so a request missing `RoleSessionName` is
+answered `Value null at 'roleSessionName' failed to satisfy constraint: Member must not be null`,
+and one sending it empty breaks its minimum length instead, which is the reading the model gives
+and the one the rest of this package already answers. What those seven gain is every bound the
+model declares beside the required members: `RoleArn` at 20 to 2048 characters,
+`RoleSessionName` at 2 to 64 of `[\w+=,.@-]`, `ExternalId`, `SourceIdentity`, `Policy`,
+`PolicyArns`, `Tags`, `TransitiveTagKeys` and `ProvidedContexts` on `AssumeRole`, `SAMLAssertion`
+at 4 to 100000 on `AssumeRoleWithSAML`, `WebIdentityToken` at 4 to 20000 and `ProviderId` at 4 to
+2048 on `AssumeRoleWithWebIdentity`, `Name` at 2 to 32 on `GetFederationToken`, `EncodedMessage` at
+1 to 10240 on `DecodeAuthorizationMessage`, and `TargetPrincipal` at 12 to 2048 on `AssumeRoot`,
+whose own length check said the same thing by hand. Each operation keeps the refusals it answers
+ahead of the constraints: `GetFederationToken` and `GetSessionToken` still turn away session
+credentials first, and `AssumeRoot` still refuses the global endpoint first.
+
+One reading is Floci's own. `TradeInToken` on `GetDelegatedAccessToken` is required and carries no
+length at all, so a request sending it empty is a request that carries it: it reaches the lookup
+and is answered `ExpiredTradeInTokenException`, the refusal any token that cannot be redeemed gets,
+where the check it replaces called it absent. Nothing published says what AWS answers an empty
+trade-in token, and the model is what is in hand, so the blank is read as the value it is.
 
 ## Privileged Root Sessions
 

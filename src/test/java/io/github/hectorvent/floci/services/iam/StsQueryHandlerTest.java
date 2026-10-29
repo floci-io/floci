@@ -789,8 +789,8 @@ class StsQueryHandlerTest {
         role.setAssumeRolePolicyDocument("{}");
         when(iamService.findRole("000000000000", "web-role")).thenReturn(Optional.of(role));
         WebIdentityTokenVerifier verifier = mock(WebIdentityTokenVerifier.class);
-        when(verifier.peekIssuer("jwt")).thenReturn(Optional.of(issuer));
-        when(verifier.verify(eq("jwt"), any(), eq(issuer), anyString()))
+        when(verifier.peekIssuer("jwt0")).thenReturn(Optional.of(issuer));
+        when(verifier.verify(eq("jwt0"), any(), eq(issuer), anyString()))
                 .thenReturn(new WebIdentityToken(issuer, "system:serviceaccount:default:app",
                         List.of("sts.amazonaws.com")));
         OidcIssuerKeyLookup keys = mock(OidcIssuerKeyLookup.class);
@@ -806,7 +806,7 @@ class StsQueryHandlerTest {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", requestedRoleArn);
         params.putSingle("RoleSessionName", "app");
-        params.putSingle("WebIdentityToken", "jwt");
+        params.putSingle("WebIdentityToken", "jwt0");
 
         Response response = handler.handle("AssumeRoleWithWebIdentity", params);
 
@@ -821,7 +821,7 @@ class StsQueryHandlerTest {
     void assumeRoleMintsTheSessionInTheRolesPartition() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/commercial-role");
-        params.putSingle("RoleSessionName", "s");
+        params.putSingle("RoleSessionName", "sx");
         IamRole role = new IamRole();
         role.setRoleName("commercial-role");
         role.setArn("arn:aws:iam::000000000000:role/commercial-role");
@@ -830,7 +830,7 @@ class StsQueryHandlerTest {
                 .handle("AssumeRole", params);
 
         assertEquals(200, response.getStatus());
-        assertEquals("arn:aws:sts::000000000000:assumed-role/commercial-role/s",
+        assertEquals("arn:aws:sts::000000000000:assumed-role/commercial-role/sx",
                 extract(ARN, (String) response.getEntity()));
     }
 
@@ -875,7 +875,7 @@ class StsQueryHandlerTest {
 
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", role.getArn());
-        params.putSingle("RoleSessionName", "s");
+        params.putSingle("RoleSessionName", "sx");
         params.putSingle("DurationSeconds", "900");
 
         Response response = handler.handle("AssumeRole", params);
@@ -884,7 +884,7 @@ class StsQueryHandlerTest {
         assertEquals(expected, extract(EXPIRATION, (String) response.getEntity()));
         ArgumentCaptor<Instant> sessionExpiration = ArgumentCaptor.forClass(Instant.class);
         verify(iamService).registerSession(anyString(), anyString(), anyString(), eq(role.getArn()),
-                sessionExpiration.capture(), isNull(), eq("000000000000"), eq("s"), anyString());
+                sessionExpiration.capture(), isNull(), eq("000000000000"), eq("sx"), anyString());
         assertEquals(expiration, sessionExpiration.getValue());
     }
 

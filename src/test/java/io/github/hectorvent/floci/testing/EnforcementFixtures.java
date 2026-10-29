@@ -37,6 +37,13 @@ import static io.restassured.RestAssured.given;
  */
 public final class EnforcementFixtures {
 
+    /**
+     * The name {@link #assumeRole} opens its session under, which a caller asserting on the
+     * session's ARN or on {@code aws:userid} reads from here rather than spelling again. Two
+     * characters because the model declares {@code roleSessionNameType} as 2 to 64.
+     */
+    public static final String SESSION_NAME = "sx";
+
     private static final DateTimeFormatter AMZ_DATE =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
 
@@ -157,12 +164,13 @@ public final class EnforcementFixtures {
     }
 
     /**
-     * Assumes {@code roleArn} as {@code callerAccessKeyId}, in a session named {@code s}, and returns
-     * the session's credentials. The role's trust policy has to admit the caller.
+     * Assumes {@code roleArn} as {@code callerAccessKeyId}, in a session named
+     * {@link #SESSION_NAME}, and returns the session's credentials. The role's trust policy has to
+     * admit the caller.
      */
     public static Session assumeRole(int port, String callerAccessKeyId, String roleArn) {
         XmlPath credentials = query(port, auth(callerAccessKeyId, "sts"), "AssumeRole",
-                "RoleArn", roleArn, "RoleSessionName", "s")
+                "RoleArn", roleArn, "RoleSessionName", SESSION_NAME)
                 .statusCode(200).extract().xmlPath();
         return new Session(
                 credentials.getString("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId"),
