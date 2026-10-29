@@ -349,15 +349,8 @@ public class LambdaWebCfnProvisioner implements CfnResourceProvisioner {
     }
 
     @Override
-    public JsonNode attributeValue(String resourceType, String attributeName, String value) {
-        if (ENDPOINT.equals(resourceType) && "RegionalEndpoints".equals(attributeName)) {
-            try {
-                return MAPPER.readTree(value);
-            } catch (JsonProcessingException e) {
-                throw new IllegalStateException("Invalid stored web function endpoint attribute " + attributeName, e);
-            }
-        }
-        return CfnResourceProvisioner.super.attributeValue(resourceType, attributeName, value);
+    public Map<String, Set<String>> jsonAttributes() {
+        return Map.of(ENDPOINT, Set.of("RegionalEndpoints"));
     }
 
     private static String regionalEndpoints(WebFunctionEndpoint endpoint) {
