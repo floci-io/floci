@@ -1343,7 +1343,7 @@ public class RedshiftDataService implements Resettable {
         return offset;
     }
 
-    private static double epochSeconds(Instant instant) {
+    static double epochSeconds(Instant instant) {
         return instant.toEpochMilli() / 1000.0;
     }
 

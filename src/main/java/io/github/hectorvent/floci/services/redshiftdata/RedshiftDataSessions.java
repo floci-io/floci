@@ -281,7 +281,7 @@ class RedshiftDataSessions implements AutoCloseable {
     }
 
     List<SessionInfo> snapshots() {
-        sweep();
+        sweepSafely();
         ConcurrentHashMap<String, SessionInfo> result = new ConcurrentHashMap<>();
         for (Session session : sessions.values()) {
             synchronized (session) {

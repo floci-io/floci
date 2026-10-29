@@ -12,11 +12,12 @@ import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataSessions.Scope;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataSessions.SessionInfo;
 
-import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
+
+import static io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService.epochSeconds;
 
 final class RedshiftDataSessionListing {
     private static final Pattern CLUSTER = Pattern.compile("[a-z][a-z0-9]*(-[a-z0-9]+)*");
@@ -141,10 +142,6 @@ final class RedshiftDataSessionListing {
             throw validation(field + " must be a string.");
         }
         return value.textValue();
-    }
-
-    private static double epochSeconds(Instant instant) {
-        return instant.getEpochSecond() + instant.getNano() / 1_000_000_000.0;
     }
 
     private static AwsException validation(String message) {

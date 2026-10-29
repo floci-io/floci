@@ -8,15 +8,15 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.testing.ManualClock;
 import org.h2.Driver;
 import org.junit.jupiter.api.Test;
 
+import java.sql.Connection;
 import java.sql.DriverManager;
-import java.time.Clock;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.HashSet;
 import java.util.Optional;
 import java.util.Set;
@@ -30,6 +30,40 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 class RedshiftDataListSessionsServiceTest {
+    @Test
+    void sessionTimestampsUseMillisecondPrecision() throws Exception {
+        try (Fixture fixture = new Fixture()) {
+            fixture.clock.advance(Duration.ofNanos(123_456_789));
+            fixture.create("warehouse");
+            JsonNode session = fixture.list().path("Sessions").get(0);
+
+            assertEquals(1_793_232_000.123, session.path("CreatedAt").asDouble());
+            assertEquals(1_793_232_000.123, session.path("UpdatedAt").asDouble());
+            assertEquals(1_793_232_060.123, session.path("SessionTtl").asDouble());
+        }
+    }
+
+    @Test
+    void anotherCallersExpiredConnectionCleanupFailureDoesNotFailListing() throws Exception {
+        try (Fixture fixture = new Fixture(); Connection broken = spy(DriverManager.getConnection(fixture.url))) {
+            when(fixture.factory.open(any())).thenReturn(broken)
+                    .thenAnswer(invocation -> DriverManager.getConnection(fixture.url));
+            fixture.context.setAccessKeyId("other");
+            fixture.create("broken");
+            doThrow(new SQLException("close failed", "08006")).doCallRealMethod().when(broken).close();
+            fixture.clock.advance(Duration.ofSeconds(30));
+            fixture.context.setAccessKeyId("owner");
+            String healthy = fixture.create("warehouse");
+            fixture.clock.advance(Duration.ofSeconds(30));
+
+            ObjectNode listed = fixture.list();
+
+            assertEquals(1, listed.path("Sessions").size());
+            assertEquals(healthy, listed.path("Sessions").get(0).path("SessionId").asText());
+            verify(broken).close();
+        }
+    }
+
     @Test
     void listsAvailableAndClosedSessionsWithLifecycleMetadata() throws Exception {
         try (Fixture fixture = new Fixture()) {
@@ -203,7 +237,7 @@ class RedshiftDataListSessionsServiceTest {
 
     private static final class Fixture implements AutoCloseable {
         private final ObjectMapper mapper = new ObjectMapper();
-        private final MutableClock clock = new MutableClock();
+        private final ManualClock clock = new ManualClock(Instant.parse("2026-10-29T00:00:00Z"));
         private final RequestContext context = new RequestContext();
         private final IamService iam = mock(IamService.class);
         private final RedshiftDataConnectionFactory factory = mock(RedshiftDataConnectionFactory.class);
@@ -265,26 +299,4 @@ class RedshiftDataListSessionsServiceTest {
         }
     }
 
-    private static final class MutableClock extends Clock {
-        private volatile Instant now = Instant.parse("2026-10-29T00:00:00Z");
-
-        private void advance(Duration duration) {
-            now = now.plus(duration);
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return now;
-        }
-    }
 }

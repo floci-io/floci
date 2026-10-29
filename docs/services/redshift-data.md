@@ -114,7 +114,8 @@ lists sessions for the caller's IAM role across assumed-role sessions. False lim
 results to the current caller session. Unresolved credentials are isolated by access
 key; Floci does not model Identity Center identity-enhanced session restrictions.
 
-`CreatedAt`, `UpdatedAt` and `SessionTtl` are epoch-second timestamps.
+`CreatedAt`, `UpdatedAt` and `SessionTtl` are epoch-second timestamps with the same
+millisecond precision as statement timestamps.
 `CurrentStatementId` appears only while the session is `BUSY`, including admitted
 work waiting for a worker. `SessionAliveSeconds` reports the selected keep-alive.
 Closed history contains metadata only, does not consume the 500-live-session quota,
@@ -125,7 +126,8 @@ choices have not been compared with live AWS.
 
 Unexpected synchronous connection-cleanup failures are reported to the affected operation.
 Reset still attempts to close the remaining sessions and clear statement and receipt state before
-reporting cleanup errors. Background expiration failures are logged without stopping later sweeps.
+reporting cleanup errors. Opportunistic expiration during `ListSessions` logs cleanup failures
+without failing the listing. Background expiration failures are logged without stopping later sweeps.
 An already-closed connection (`SQLSTATE 08003`) is a benign cleanup outcome.
 
 ```python
