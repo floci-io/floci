@@ -127,6 +127,9 @@ public class S3Controller {
     static final DateTimeFormatter RFC_822 = DateTimeFormatter
             .ofPattern("EEE, dd MMM yyyy HH:mm:ss z", Locale.US)
             .withZone(ZoneId.of("GMT"));
+    private static final String[] DAY_NAMES = {"Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"};
+    private static final String[] MONTH_NAMES = {
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private final S3Service s3Service;
@@ -1148,7 +1151,7 @@ public class S3Controller {
 
                 emitCloudTrailEvent("GetObject", bucket, key, 0L, obj.getSize(), null, null);
                 bodyHandedOff = true;
-                return fullObjectResponse(obj, read.body(), overrides, includeChecksum);
+                return fullObjectResponse(read, overrides, includeChecksum);
             } finally {
                 if (!bodyHandedOff) {
                     closeQuietly(read);
@@ -1165,6 +1168,14 @@ public class S3Controller {
             }
             return withDeleteMarkerHeaders(xmlErrorResponse(e, bucket), e);
         }
+    }
+
+    private Response fullObjectResponse(S3Service.ObjectRead read, ResponseHeaderOverrides overrides,
+                                        boolean includeChecksum) {
+        if (read.bytes() == null) {
+            return fullObjectResponse(read.object(), read.body(), overrides, includeChecksum);
+        }
+        return objectResponseHeaders(Response.ok(read.bytes()), read.object(), overrides, includeChecksum).build();
     }
 
     /** Streams {@code body}, opened together with {@code obj} by {@link S3Service#openObject}, and closes it. */
@@ -1206,7 +1217,7 @@ public class S3Controller {
         resp.header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
                 .header("Content-Length", contentLength)
                 .header("ETag", obj.getETag())
-                .header("Last-Modified", RFC_822.format(obj.getLastModified()))
+                .header("Last-Modified", rfc822(obj.getLastModified()))
                 .header("Accept-Ranges", "bytes");
         if (obj.getVersionId() != null) {
             resp.header("x-amz-version-id", obj.getVersionId());
@@ -1326,7 +1337,7 @@ public class S3Controller {
     }
 
     private Response websiteObjectResponse(S3Service.ObjectRead read, ResponseHeaderOverrides overrides) {
-        return fullObjectResponse(read.object(), read.body(), overrides, false);
+        return fullObjectResponse(read, overrides, false);
     }
 
     private static void closeQuietly(Closeable closeable) {
@@ -2887,7 +2898,7 @@ public class S3Controller {
                     .type(MediaType.APPLICATION_OCTET_STREAM)
                     .header("Content-Length", payload.length)
                     .header("ETag", annotation.getETag())
-                    .header("Last-Modified", RFC_822.format(annotation.getLastModified()));
+                    .header("Last-Modified", rfc822(annotation.getLastModified()));
             // No Accept-Ranges: range requests are not honored on annotation payloads.
             if (annotation.getVersionId() != null) {
                 response.header("x-amz-object-version-id", annotation.getVersionId());
@@ -3418,7 +3429,7 @@ public class S3Controller {
 
         Response.ResponseBuilder response = Response.ok(xml.build()).type(MediaType.APPLICATION_XML);
         if (result.getLastModified() != null) {
-            response.header("Last-Modified", RFC_822.format(result.getLastModified()));
+            response.header("Last-Modified", rfc822(result.getLastModified()));
         }
         if (result.getVersionId() != null) {
             response.header("x-amz-version-id", result.getVersionId());
@@ -3619,6 +3630,27 @@ public class S3Controller {
             }
         }
         return null;
+    }
+
+    static String rfc822(Instant instant) {
+        LocalDateTime time = LocalDateTime.ofEpochSecond(instant.getEpochSecond(), 0, ZoneOffset.UTC);
+        int year = time.getYear();
+        if (year < 1000 || year > 9999) {
+            return RFC_822.format(instant);
+        }
+        StringBuilder sb = new StringBuilder(29);
+        sb.append(DAY_NAMES[time.getDayOfWeek().getValue() - 1]).append(", ");
+        appendTwoDigits(sb, time.getDayOfMonth());
+        sb.append(' ').append(MONTH_NAMES[time.getMonthValue() - 1]).append(' ');
+        appendTwoDigits(sb, year / 100);
+        appendTwoDigits(sb, year % 100);
+        sb.append(' ');
+        appendTwoDigits(sb, time.getHour());
+        sb.append(':');
+        appendTwoDigits(sb, time.getMinute());
+        sb.append(':');
+        appendTwoDigits(sb, time.getSecond());
+        return sb.append(" GMT").toString();
     }
 
     static String isoSeconds(Instant instant) {
@@ -3984,7 +4016,7 @@ public class S3Controller {
     private Response notModifiedResponse(String eTag, Instant lastModified) {
         return Response.notModified()
                 .header("ETag", eTag)
-                .header("Last-Modified", RFC_822.format(lastModified))
+                .header("Last-Modified", rfc822(lastModified))
                 .build();
     }
 

@@ -1114,7 +1114,7 @@ public class S3Service implements Resettable, ResourceProvider {
             // Annotation readers share this bucket monitor, so they cannot observe the
             // replacement with the old annotations while cleanup is pending.
             deleteArchivedNullVersion(bucketOwnerAccount, bucketName, key, false);
-            deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
+            deleteAllAnnotationsFor(bucketName, key, null);
             LOG.debugv("Put object: {0}/{1} ({2} bytes)", bucketName, key, body.size());
         }
         return object;
@@ -2008,7 +2008,7 @@ public class S3Service implements Resettable, ResourceProvider {
         // (the recheck disagreeing with getObjectMetadata about where this key lives) fails loudly
         // with a clear error instead of spinning forever re-reading the file and exhausting the heap.
         for (int attempt = 0; attempt < 10_000; attempt++) {
-            S3Object obj = getObjectMetadata(bucketName, key, versionId);
+            S3Object obj = getObjectMetadata(ownedBucket, bucketName, key, versionId);
             if (obj.getVersionId() == null && bucket.getVersioningStatus() != null) {
                 synchronized (bucket) {
                     S3Object current = resolveObjectForAccount(bucketOwnerAccount, storeKey).orElse(null);
@@ -2052,8 +2052,15 @@ public class S3Service implements Resettable, ResourceProvider {
                         + "metadata/data resolution paths disagree about where this key lives");
     }
 
-    /** An object's metadata and an open stream over the body that matches it. */
-    public record ObjectRead(S3Object object, InputStream body) implements Closeable {
+    /**
+     * An object's metadata and an open stream over the body that matches it. {@code bytes} is the whole
+     * body when it is already in memory, else null.
+     */
+    public record ObjectRead(S3Object object, InputStream body, byte[] bytes) implements Closeable {
+        public ObjectRead(S3Object object, InputStream body) {
+            this(object, body, null);
+        }
+
         @Override
         public void close() throws IOException {
             body.close();
@@ -2069,7 +2076,7 @@ public class S3Service implements Resettable, ResourceProvider {
     public ObjectRead openObject(String bucketName, String key, String versionId) {
         if (inMemory) {
             S3Object obj = getObject(bucketName, key, versionId);
-            return new ObjectRead(obj, new ByteArrayInputStream(obj.getData()));
+            return new ObjectRead(obj, new ByteArrayInputStream(obj.getData()), obj.getData());
         }
         if ("null".equals(versionId)) {
             Snapshot<FileChannel> snapshot = readNullVersionSnapshot(bucketName, key,
@@ -2192,6 +2199,11 @@ public class S3Service implements Resettable, ResourceProvider {
         return copyObject(getStoredObject(bucketName, key, versionId));
     }
 
+    private S3Object getObjectMetadata(AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket,
+                                       String bucketName, String key, String versionId) {
+        return copyObject(requireStoredObject(ownedBucket, bucketName, key, versionId));
+    }
+
     public GetObjectAttributesResult getObjectAttributes(String bucketName, String key, String versionId,
                                                          Set<ObjectAttributeName> attributes,
                                                          Integer maxParts, Integer partNumberMarker) {
@@ -2235,12 +2247,18 @@ public class S3Service implements Resettable, ResourceProvider {
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
 
+        return new AccountAwareStorageBackend.OwnedEntry<>(ownedBucket.account(),
+                requireStoredObject(ownedBucket, bucketName, key, versionId));
+    }
+
+    private S3Object requireStoredObject(AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket,
+                                         String bucketName, String key, String versionId) {
         S3Object object = findStoredObject(ownedBucket, bucketName, key, versionId)
                 .orElseThrow(() -> versionId != null ? noSuchVersion(key, versionId) : noSuchKey(key));
         if (object.isDeleteMarker()) {
             throw new S3DeleteMarkerException(object);
         }
-        return new AccountAwareStorageBackend.OwnedEntry<>(ownedBucket.account(), object);
+        return object;
     }
 
     private static AwsException noSuchKey(String key) {
@@ -2370,6 +2388,13 @@ public class S3Service implements Resettable, ResourceProvider {
         // annotation subresource writes, which hold the same monitor (storeObjectInternal
         // already runs under it via storeObject). The precondition is checked under it too,
         // so a concurrent overwrite cannot land between the check and the delete.
+        if (objectStore instanceof AccountAwareStorageBackend<?> aware
+                && ownedBucket.account().equals(aware.accountId())) {
+            synchronized (bucket) {
+                checkDeletePrecondition(bucketName, key, ifMatch);
+                return deleteObjectLocked(bucket, bucketName, key, versionId, bypassGovernance, OBJECT_REMOVED_EVENT);
+            }
+        }
         return RequestScopes.callAs(ownedBucket.account(), () -> {
             synchronized (bucket) {
                 checkDeletePrecondition(bucketName, key, ifMatch);
@@ -2572,7 +2597,7 @@ public class S3Service implements Resettable, ResourceProvider {
             deleteArchivedNullVersion(ownerId(), bucketName, key, true);
             objectStore.delete(objectKey(bucketName, key));
             deleteFile(bucketName, key);
-            deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
+            deleteAllAnnotationsFor(bucketName, key, null);
             LOG.debugv("Deleted object: {0}/{1}", bucketName, key);
             fireNotifications(bucketName, key, removalEvent + ":Delete", null);
             return null;
@@ -3589,8 +3614,18 @@ public class S3Service implements Resettable, ResourceProvider {
         return "null".equals(versionId) ? null : versionId;
     }
 
+    private void deleteAllAnnotationsFor(String bucketName, String key, String versionId) {
+        if (annotationStore.isEmpty()) {
+            return;
+        }
+        deleteAllAnnotationsFor(annotationParentKey(bucketName, key, versionId));
+    }
+
     /** Removes every annotation attached to one object version (metadata + payload). */
     private void deleteAllAnnotationsFor(String parentKey) {
+        if (annotationStore.isEmpty()) {
+            return;
+        }
         for (ObjectAnnotation annotation : annotationStore.scan(k -> k.startsWith(parentKey + ANNOTATION_SEPARATOR))) {
             annotationStore.delete(annotationStoreKey(parentKey, annotation.getAnnotationName()));
             deleteAnnotationPayload(annotation);
@@ -8076,7 +8111,7 @@ public class S3Service implements Resettable, ResourceProvider {
         deleteObjectForAccount(accountId, storeKey);
         deleteVersionedFile(accountId, bucketName, key, "null");
         if (deleteAnnotations) {
-            deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
+            deleteAllAnnotationsFor(bucketName, key, null);
         }
     }
 
