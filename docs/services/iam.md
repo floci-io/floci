@@ -1595,9 +1595,9 @@ SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge Schedul
 Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs, Secrets Manager and STS. For Elastic Load Balancing, ECR,
 Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
-AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract and Amazon Translate they come from a
-table generated from AWS's Service
-Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
+AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator and Amazon
+Timestream for InfluxDB they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. A member holding
@@ -1631,7 +1631,23 @@ project, which its id names before its `:` (`<project>:<id>`), as CodeBuild auth
 `BatchGetBuilds`, `StopBuild`, `RetryBuild` and `BatchDeleteBuilds`. `CreateBudget` and `UpdateBudget`
 are checked on the budget their `Budget.BudgetName` or `NewBudget.BudgetName` names, and Cost and Usage
 Reports' `PutReportDefinition` and `ModifyReportDefinition` on the report their `ReportDefinition.ReportName`
-or `ReportName` names, not on the billing view ARN each may carry, which names no budget or report. An EventBridge rule is on the event bus
+or `ReportName` names, not on the billing view ARN each may carry, which names no budget or report. An Athena request
+naming no workgroup is checked on `workgroup/primary`, where `StartQueryExecution` runs its query,
+`ListQueryExecutions` and `ListNamedQueries` list, and `GetWorkGroup` answers. Athena's
+`ListDatabases`, `ListTableMetadata` and `GetTableMetadata` are checked on the catalog their
+`CatalogName` names and on `datacatalog/AwsDataCatalog`, the Glue Data Catalog Floci reads whichever
+catalog they name. Cost Explorer's cost and usage reads are checked on `*`, not on the billing view
+their `BillingViewArn` gives: Floci serves no billing views and answers the account's costs whichever
+one is named. Data Exports' `CreateExport` is not checked on the
+ARN its `Export.ExportArn` gives, which is the new export's own. CloudTrail's `StartLogging`,
+`StopLogging` and `GetTrailStatus` are checked on the trail their bare `Name` names, by name or by
+ARN, its tag operations on the resource whose ARN their `ResourceId` gives, and its dashboard
+operations on the dashboard their `DashboardId` names, by name or by ARN.
+Cost Explorer's `GetAnomalyMonitors` and `GetAnomalySubscriptions` are checked on each ARN their
+`MonitorArnList` or `SubscriptionArnList` gives, and Timestream for InfluxDB's `RebootDbCluster` on the
+cluster and on each member instance its `instanceIds` names. Global
+Accelerator's `ListCustomRoutingPortMappings` is checked on its accelerator alone, not on the
+endpoint group its `EndpointGroupArn` gives, whose ARN extends the accelerator's. An EventBridge rule is on the event bus
 its request's `EventBusName` names, by name or by ARN, and on the default bus when it names none
 or gives a null, whose rules are `rule/<name>`, with no bus; a bus ARN of another account, the
 default bus's included, names that account's rule, checked as given and as the caller's own, which
