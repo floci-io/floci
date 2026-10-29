@@ -9,10 +9,12 @@ import software.amazon.awssdk.services.sesv2.model.BadRequestException;
 import software.amazon.awssdk.services.sesv2.model.ListRecommendationsFilterKey;
 import software.amazon.awssdk.services.sesv2.model.ListRecommendationsResponse;
 import software.amazon.awssdk.services.sesv2.model.NotFoundException;
+import software.amazon.awssdk.services.sesv2.model.PutAccountVdmAttributesRequest;
 import software.amazon.awssdk.services.sesv2.model.Recommendation;
 import software.amazon.awssdk.services.sesv2.model.RecommendationImpact;
 import software.amazon.awssdk.services.sesv2.model.RecommendationStatus;
 import software.amazon.awssdk.services.sesv2.model.RecommendationType;
+import software.amazon.awssdk.services.sesv2.model.VdmAttributes;
 
 import java.util.List;
 import java.util.Map;
@@ -21,8 +23,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * SDK compatibility test for SES v2 ListRecommendations. A verified domain without DMARC or BIMI
- * records gets a recommendation for each, described by SES's code rather than a sentence.
+ * SDK compatibility test for SES v2 ListRecommendations. With Virtual Deliverability Manager enabled, a
+ * verified domain without DMARC or BIMI records gets a recommendation for each, described by SES's code
+ * rather than a sentence.
  */
 @DisplayName("SES v2 Recommendations")
 class SesRecommendationTest {
@@ -30,10 +33,13 @@ class SesRecommendationTest {
     private static final String DOMAIN = TestFixtures.uniqueName("compat-advisor") + ".example.com";
 
     private static SesV2Client sesV2;
+    private static VdmAttributes originalVdm;
 
     @BeforeAll
     static void setup() {
         sesV2 = TestFixtures.sesV2Client();
+        originalVdm = sesV2.getAccount(b -> { }).vdmAttributes();
+        setVdmEnabled(true);
         TestFixtures.verifySesDomainIdentityViaRoute53(sesV2, DOMAIN);
     }
 
@@ -46,7 +52,27 @@ class SesRecommendationTest {
             sesV2.deleteEmailIdentity(b -> b.emailIdentity(DOMAIN));
         } catch (NotFoundException expected) {
             // Setup failed before the identity existed; anything else (auth, connectivity) must surface.
+        } finally {
+            restoreVdm();
         }
+    }
+
+    private static void setVdmEnabled(boolean enabled) {
+        sesV2.putAccountVdmAttributes(PutAccountVdmAttributesRequest.builder()
+                .vdmAttributes(VdmAttributes.builder()
+                        .vdmEnabled(enabled ? "ENABLED" : "DISABLED")
+                        .build())
+                .build());
+    }
+
+    private static void restoreVdm() {
+        if (originalVdm == null || originalVdm.vdmEnabled() == null) {
+            setVdmEnabled(false);
+            return;
+        }
+        sesV2.putAccountVdmAttributes(PutAccountVdmAttributesRequest.builder()
+                .vdmAttributes(originalVdm)
+                .build());
     }
 
     private static List<Recommendation> forDomain(ListRecommendationsResponse response) {

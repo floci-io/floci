@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.route53.Route53Service;
 import io.github.hectorvent.floci.services.route53.model.HostedZone;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
+import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
@@ -76,7 +77,10 @@ class SesIdentityRoute53ScanTest {
     @Test
     void recommendationsReadNoZonesWithoutAVerifiedDomain() {
         identities.save(new Identity("alice@example.com", "EmailAddress"), REGION);
-        SesRecommendationService recommendations = new SesRecommendationService(identities,
+        SesAccountService accounts =
+                new SesAccountService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        accounts.putAccountVdmAttributes(REGION, new AccountVdmAttributes(true, false, false));
+        SesRecommendationService recommendations = new SesRecommendationService(identities, accounts,
                 new RegionResolver(REGION, "000000000000"), new MutableClock());
 
         assertEquals(List.of(), recommendations.list(Map.of(), null, null, REGION).items());

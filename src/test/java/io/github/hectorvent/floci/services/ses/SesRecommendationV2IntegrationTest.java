@@ -19,8 +19,8 @@ import static org.hamcrest.Matchers.nullValue;
 
 /**
  * Integration tests for SES v2 ListRecommendations, derived from the verified domains of the region
- * and the TXT records their Route53 zones hold. The region is one no other test uses, and Virtual
- * Deliverability Manager is never enabled in it: the operation has no VDM gate.
+ * and the TXT records their Route53 zones hold. The region is one no other test uses, so Virtual
+ * Deliverability Manager is off in it until a test enables it.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -70,7 +70,7 @@ class SesRecommendationV2IntegrationTest {
 
     @Test
     @Order(1)
-    void emptyWithoutIdentitiesAndWithoutAVdmGate() {
+    void emptyWithoutIdentities() {
         v2().body("{}")
                 .when().post(PATH).then().statusCode(200)
                 .body("Recommendations", empty())
@@ -88,8 +88,11 @@ class SesRecommendationV2IntegrationTest {
 
     @Test
     @Order(3)
-    void verifiedDomainWithoutRecordsGetsBimiAndDmarc() {
+    void verifiedDomainWithoutRecordsGetsBimiAndDmarcOnceVdmIsEnabled() {
         zoneId = SesDomainIdentityTestHelper.createVerified(DOMAIN, AUTH);
+        v2().body("{}").when().post(PATH).then().statusCode(200).body("Recommendations", empty());
+        v2().body("{\"VdmAttributes\":{\"VdmEnabled\":\"ENABLED\"}}")
+                .when().put("/v2/email/account/vdm").then().statusCode(200);
         v2().body("{}")
                 .when().post(PATH).then().statusCode(200)
                 .body("Recommendations.Description", contains("BIMI1", "DMARC1"))
@@ -157,6 +160,10 @@ class SesRecommendationV2IntegrationTest {
         assertBadRequest("{\"Filter\":{\"RESOURCE_ARN\":\"not-an-arn\"}}", "Filter resource is invalid");
         assertBadRequest("{\"Filter\":{\"RESOURCE_ARN\":\"arn:aws:ses:" + REGION + ":111111111111:identity/x.test\"}}",
                 "Provided resource ARN does not match the caller account");
+        assertBadRequest("{\"Filter\":{\"RESOURCE_ARN\":\"" + "a".repeat(513) + "\"}}",
+                "1 validation error detected: Value at 'filter' failed to satisfy constraint: Map value must "
+                        + "satisfy constraint: [Member must have length less than or equal to 512, "
+                        + "Member must have length greater than or equal to 1]");
         assertBadRequest("{\"PageSize\":0}", "The PageSize should be between 1 and 1000");
         assertBadRequest("{\"NextToken\":\"garbage\"}", "Failed to deserialize token.");
     }

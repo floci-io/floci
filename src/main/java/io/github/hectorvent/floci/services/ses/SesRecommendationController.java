@@ -37,6 +37,7 @@ public class SesRecommendationController {
     /** In the model's order. */
     private static final List<String> FILTER_KEYS = List.of("TYPE", "IMPACT", "STATUS", "RESOURCE_ARN");
     private static final int FILTER_MAX_KEYS = 2;
+    private static final int FILTER_VALUE_MAX = 512;
 
     private final SesRecommendationService recommendationService;
     private final RegionResolver regionResolver;
@@ -62,7 +63,7 @@ public class SesRecommendationController {
                 throw SmithyValidationErrors.badRequest(violation);
             }
         }
-        Map<String, String> filter = filterValues(requested, FILTER_KEYS);
+        Map<String, String> filter = filterValues(requested, FILTER_KEYS, FILTER_VALUE_MAX);
         Integer pageSize = intMemberOrAbsent(request, "PageSize");
         String nextToken = stringMemberOrAbsent(request, "NextToken");
         PaginatedResult<Recommendation> page = recommendationService.list(filter, pageSize, nextToken, region);

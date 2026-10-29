@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.SesRecommendationService.Recommendation;
+import io.github.hectorvent.floci.services.ses.model.AccountVdmAttributes;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
@@ -28,6 +29,7 @@ class SesRecommendationServiceTest {
 
     private MutableClock clock;
     private SesIdentityService identities;
+    private SesAccountService accounts;
     private SesRecommendationService service;
 
     @BeforeEach
@@ -35,7 +37,9 @@ class SesRecommendationServiceTest {
         clock = new MutableClock();
         // No Route53, so no domain has DMARC or BIMI records.
         identities = new SesIdentityService(new InMemoryStorage<>(), null, clock);
-        service = new SesRecommendationService(identities, new RegionResolver(REGION, ACCOUNT), clock);
+        accounts = new SesAccountService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        accounts.putAccountVdmAttributes(REGION, new AccountVdmAttributes(true, false, false));
+        service = new SesRecommendationService(identities, accounts, new RegionResolver(REGION, ACCOUNT), clock);
     }
 
     private Identity saveDomain(String domain, boolean signing, Instant created) {
@@ -81,6 +85,20 @@ class SesRecommendationServiceTest {
         assertEquals(created, recommendation.createdTimestamp());
         // MutableClock ticks a millisecond per read, so the list's own read comes after this one.
         assertTrue(recommendation.lastUpdatedTimestamp().isAfter(before));
+    }
+
+    @Test
+    void emptyWithoutVdm() {
+        saveDomain("example.com", false, clock.instant());
+        accounts.putAccountVdmAttributes(REGION, new AccountVdmAttributes(false, false, false));
+        assertEquals(List.of(), list(Map.of()));
+        assertEquals(List.of(), service.list(Map.of(), null, null, "eu-west-3").items());
+    }
+
+    @Test
+    void filterIsValidatedWithoutVdm() {
+        accounts.putAccountVdmAttributes(REGION, new AccountVdmAttributes(false, false, false));
+        assertMessage("Invalid recommendation TYPE specified", Map.of("TYPE", "ENGAGEMENT"));
     }
 
     @Test

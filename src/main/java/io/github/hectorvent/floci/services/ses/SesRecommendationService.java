@@ -20,9 +20,10 @@ import java.util.function.Predicate;
 
 /**
  * SES v2 ListRecommendations, derived on every call from the region's verified domains (see
- * {@link SesRecommendations}). Probe-confirmed against real SES (2026-10-27): the operation has no
- * Virtual Deliverability Manager gate, a region without VDM answering an empty list; recommendations
- * come newest first; and a TYPE filter makes SES ignore an IMPACT filter sent with it.
+ * {@link SesRecommendations}). Probe-confirmed against real SES: a region without Virtual Deliverability
+ * Manager answers an empty list rather than an error, verified domains notwithstanding (2026-10-29);
+ * recommendations come newest first; and a TYPE filter makes SES ignore an IMPACT filter sent with it
+ * (2026-10-27).
  *
  * <p>Nothing is stored, so every recommendation is OPEN: a finding that clears disappears rather than
  * turning FIXED. A recommendation is dated from its identity's creation and reports the time of the
@@ -38,6 +39,7 @@ public class SesRecommendationService {
     private static final String OPEN = "OPEN";
 
     private final SesIdentityService identityService;
+    private final SesAccountService accountService;
     private final RegionResolver regionResolver;
     private final Clock clock;
 
@@ -45,23 +47,27 @@ public class SesRecommendationService {
                                  Instant createdTimestamp, Instant lastUpdatedTimestamp, String impact) {}
 
     @Inject
-    public SesRecommendationService(SesIdentityService identityService, RegionResolver regionResolver,
-                                    Clock clock) {
+    public SesRecommendationService(SesIdentityService identityService, SesAccountService accountService,
+                                    RegionResolver regionResolver, Clock clock) {
         this.identityService = identityService;
+        this.accountService = accountService;
         this.regionResolver = regionResolver;
         this.clock = clock;
     }
 
     /**
      * The controller has already checked the filter's size and keys. The page size and an empty token
-     * come next, then the filter values in key order, and last the token.
+     * come next, then the filter values in key order, and last the token. Without VDM the request is
+     * still validated, the order of the gate against the validation being unprobed.
      */
     public PaginatedResult<Recommendation> list(Map<String, String> filter, Integer pageSize, String nextToken,
                                                 String region) {
         SesListPaging paging = SesListPaging.V2_LIST_RECOMMENDATIONS;
         paging.checkRequest(pageSize, nextToken);
         Predicate<Recommendation> matches = filterPredicate(filter);
-        List<Recommendation> recommendations = derive(region).stream().filter(matches).toList();
+        List<Recommendation> recommendations = accountService.isVdmEnabled(region)
+                ? derive(region).stream().filter(matches).toList()
+                : List.of();
         return paging.page(region, scope(filter), recommendations,
                 r -> SesListPaging.newestFirst(r.createdTimestamp(), r.resourceArn() + "#" + r.description()),
                 pageSize, nextToken);

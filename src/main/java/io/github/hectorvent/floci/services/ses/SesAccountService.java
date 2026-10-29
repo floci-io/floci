@@ -86,6 +86,10 @@ public class SesAccountService {
         LOG.infov("Updated account VDM attributes for region {0}: enabled={1}", region, vdm.vdmEnabled());
     }
 
+    public boolean isVdmEnabled(String region) {
+        return findAccountVdmAttributes(region).map(AccountVdmAttributes::vdmEnabled).orElse(false);
+    }
+
     /** The probe-confirmed gate the VDM-only operations check before reading the request. */
     public void requireVdmEnabled(String region) {
         requireVdmEnabled(region, "NotFoundException", 404);
@@ -97,8 +101,7 @@ public class SesAccountService {
      * the identical sentence, all probe-confirmed.
      */
     public void requireVdmEnabled(String region, String errorCode, int status) {
-        Optional<AccountVdmAttributes> vdm = findAccountVdmAttributes(region);
-        if (vdm.isEmpty() || !vdm.get().vdmEnabled()) {
+        if (!isVdmEnabled(region)) {
             throw new AwsException(errorCode,
                     "To use this feature you must enable Virtual Deliverability Manager", status);
         }
