@@ -421,7 +421,10 @@ public class AutoScalingReconciler {
         return false;
     }
 
-    /** Whether EC2 has no record of the instance at all, whatever state a record would be in. */
+    /**
+     * Whether EC2 has no record of the instance at all, whatever state a record would be in. Any EC2 error other than
+     * {@code InvalidInstanceID.NotFound} counts as a record, so the instance is not given up on.
+     */
     private boolean hasNoEc2Record(AutoScalingGroup asg, String instanceId) {
         return isMissingOrTerminalEc2Instance(asg, instanceId, Set.of());
     }
