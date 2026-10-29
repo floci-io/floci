@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.redshiftdata;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.testing.ManualClock;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -12,8 +13,6 @@ import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -189,7 +188,7 @@ class RedshiftDataSessionsTest {
 
     @Test
     void idleDeadlineStartsAfterCompletionAndUnspecifiedTimeoutIsRetained() throws Exception {
-        MutableClock clock = new MutableClock();
+        ManualClock clock = new ManualClock(Instant.parse("2026-10-24T00:00:00Z"));
         try (RedshiftDataSessions sessions = new RedshiftDataSessions(clock)) {
             Connection connection = mock(Connection.class);
             RedshiftDataConnectionFactory factory = mock(RedshiftDataConnectionFactory.class);
@@ -218,7 +217,7 @@ class RedshiftDataSessionsTest {
 
     @Test
     void busySessionsRejectNewWorkAndFailedAdmissionDoesNotExtendIdleTime() throws Exception {
-        MutableClock clock = new MutableClock();
+        ManualClock clock = new ManualClock(Instant.parse("2026-10-24T00:00:00Z"));
         try (RedshiftDataSessions sessions = new RedshiftDataSessions(clock)) {
             RedshiftDataConnectionFactory factory = mock(RedshiftDataConnectionFactory.class);
             when(factory.open(any())).thenReturn(mock(Connection.class));
@@ -273,7 +272,7 @@ class RedshiftDataSessionsTest {
 
     @Test
     void absoluteDeadlineClosesAnActiveConnectionAndCannotBeExtended() throws Exception {
-        MutableClock clock = new MutableClock();
+        ManualClock clock = new ManualClock(Instant.parse("2026-10-24T00:00:00Z"));
         try (RedshiftDataSessions sessions = new RedshiftDataSessions(clock)) {
             Connection connection = mock(Connection.class);
             RedshiftDataConnectionFactory factory = mock(RedshiftDataConnectionFactory.class);
@@ -329,29 +328,6 @@ class RedshiftDataSessionsTest {
             next.abort();
             sessions.clear();
             assertTrue(sessions.snapshots().isEmpty());
-        }
-    }
-
-    private static final class MutableClock extends Clock {
-        private Instant now = Instant.parse("2026-10-24T00:00:00Z");
-
-        void advance(Duration duration) {
-            now = now.plus(duration);
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return now;
         }
     }
 }
