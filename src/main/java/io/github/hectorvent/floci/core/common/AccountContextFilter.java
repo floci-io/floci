@@ -12,6 +12,7 @@ import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.ResourceInfo;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
@@ -104,9 +105,10 @@ public class AccountContextFilter implements ContainerRequestFilter {
             applyRegion(regionResolver.resolveRegionFromAuth(null));
             return;
         }
-        String sessionToken = extractSessionToken(ctx);
+        MultivaluedMap<String, String> query = ctx.getUriInfo().getQueryParameters();
+        String sessionToken = extractSessionToken(ctx, query);
         String auth = ctx.getHeaderString("Authorization");
-        if (rejectAmbiguousRegion(ctx, auth)) {
+        if (rejectAmbiguousRegion(ctx, auth, query)) {
             return;
         }
         String akid = resourceInfo != null && catalog().byResourceClass(resourceInfo.getResourceClass())
@@ -132,19 +134,19 @@ public class AccountContextFilter implements ContainerRequestFilter {
             // must not let the query string pick an account that IAM then never checks.
             boolean hasAuthHeader = auth != null && !auth.isBlank();
             String credential = hasAuthHeader
-                    ? null : ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
+                    ? null : query.getFirst("X-Amz-Credential");
             if (credential != null && !credential.isEmpty()
-                    && ctx.getUriInfo().getQueryParameters().containsKey("X-Amz-Algorithm")) {
+                    && query.containsKey("X-Amz-Algorithm")) {
                 String presignedAkid = accountResolver.extractPresignedAccessKeyId(credential);
                 requestContext.setAccountId(
                         resolveAccount(presignedAkid, accountResolver.resolveFromPresignedCredential(credential)));
                 requestContext.setAccessKeyId(presignedAkid);
                 requestContext.setSessionToken(sessionToken);
                 boolean sigV4a = SigV4aSignature.ALGORITHM.equals(
-                        ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Algorithm"));
+                        query.getFirst("X-Amz-Algorithm"));
                 String region = sigV4a
                         ? regionResolver.resolveRegionFromRegionSet(
-                                ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Region-Set"))
+                                query.getFirst("X-Amz-Region-Set"))
                         : regionResolver.resolveRegionFromPresignedCredential(credential);
                 applyRegion(region);
                 if (rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceNameFromCredential(credential))) {
@@ -161,12 +163,12 @@ public class AccountContextFilter implements ContainerRequestFilter {
         }
     }
 
-    private String extractSessionToken(ContainerRequestContext ctx) {
+    private String extractSessionToken(ContainerRequestContext ctx, MultivaluedMap<String, String> query) {
         String token = ctx.getHeaderString("X-Amz-Security-Token");
         if (token != null && !token.isBlank()) {
             return token.trim();
         }
-        token = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Security-Token");
+        token = query.getFirst("X-Amz-Security-Token");
         if (token != null && !token.isBlank()) {
             return token.trim();
         }
@@ -184,11 +186,12 @@ public class AccountContextFilter implements ContainerRequestFilter {
     }
 
     /** Refuses delimiters in region interpretations used by request context or downstream dispatch. */
-    private boolean rejectAmbiguousRegion(ContainerRequestContext ctx, String authorization) {
+    private boolean rejectAmbiguousRegion(ContainerRequestContext ctx, String authorization,
+                                          MultivaluedMap<String, String> query) {
         String queryCredential = authorization == null || authorization.isBlank()
-                ? ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential") : null;
+                ? query.getFirst("X-Amz-Credential") : null;
         String parsedAuthorization = queryCredential == null ? authorization
-                : IamEnforcementFilter.requestAuthorization(null, ctx.getUriInfo().getQueryParameters());
+                : IamEnforcementFilter.requestAuthorization(null, query);
         // Some Query routes synthesize this header even without X-Amz-Algorithm. Inspect the
         // same region they use, in addition to the split credential used by request context.
         String region = regionResolver.resolveRegionFromAuthOrNull(parsedAuthorization);
