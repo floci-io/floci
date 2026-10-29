@@ -3,8 +3,6 @@ package io.github.hectorvent.floci.services.elasticache.proxy;
 import io.github.hectorvent.floci.core.common.ListenBacklog;
 import org.jboss.logging.Logger;
 
-import java.io.BufferedInputStream;
-import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -13,12 +11,9 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Set;
-import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.LinkedBlockingQueue;
 
 /**
  * Shared TCP auth-proxy skeleton for the Redis (RESP) wire protocol. Intercepts the
@@ -368,7 +363,7 @@ public abstract class AbstractRedisAuthProxy {
             }
             client.setSoTimeout(0);
             handshakingClients.remove(client);
-            bridge(client, input, backend, command != null);
+            bridge(client, input, backend);
         } catch (IOException e) {
             closeQuietly(backend);
             throw e;
@@ -385,17 +380,13 @@ public abstract class AbstractRedisAuthProxy {
      * from {@code handleConnection} blocks in {@code join} here; scheduling nested virtual-thread
      * relays under load can stall delivery of backend responses (e.g. PING/PONG) to the client.
      */
-    private void bridge(Socket client, InputStream clientInput, Socket backend, boolean commandForwarded) throws IOException {
+    private void bridge(Socket client, InputStream clientInput, Socket backend) throws IOException {
+        InputStream backendInput = backend.getInputStream();
         CountDownLatch firstRelayDone = new CountDownLatch(1);
-        BlockingQueue<ReplyAction> replyQueue = new LinkedBlockingQueue<>();
-        if (commandForwarded) {
-            replyQueue.add(ReplyAction.backend());
-        }
         Thread t1 = Thread.ofPlatform().daemon(true).name(threadPrefix + "-relay-c2b-" + resourceId)
                 .start(() -> {
                     try {
-                        // Bug #4502: Frame client RESP commands to intercept re-authentication on live connections
-                        relayClientToBackend(client, clientInput, backend, replyQueue);
+                        relay(clientInput, backend);
                     } finally {
                         firstRelayDone.countDown();
                     }
@@ -403,7 +394,7 @@ public abstract class AbstractRedisAuthProxy {
         Thread t2 = Thread.ofPlatform().daemon(true).name(threadPrefix + "-relay-b2c-" + resourceId)
                 .start(() -> {
                     try {
-                        relayRepliesToClient(backend, client, replyQueue);
+                        relay(backendInput, client);
                     } finally {
                         firstRelayDone.countDown();
                     }
@@ -420,386 +411,21 @@ public abstract class AbstractRedisAuthProxy {
         }
     }
 
-    private void relayClientToBackend(Socket client, InputStream clientInput, Socket backend, BlockingQueue<ReplyAction> replyQueue) {
-        byte[] transferBuf = new byte[8192];
+    private static void relay(InputStream in, Socket to) {
+        byte[] buf = new byte[8192];
         try {
-            BufferedInputStream in = (clientInput instanceof BufferedInputStream bis)
-                    ? bis : new BufferedInputStream(clientInput, 8192);
-            OutputStream out = backend.getOutputStream();
-            while (running) {
-                int first = in.read();
-                if (first == -1) {
-                    break;
-                }
-                if (first == '*') {
-                    String countLine = readAsciiLine(in);
-                    if (countLine == null || countLine.isEmpty()) {
-                        break;
-                    }
-                    int argCount = Integer.parseInt(countLine);
-                    if (argCount <= 0) {
-                        continue;
-                    }
-                    String bulkHdr0 = readAsciiLine(in);
-                    if (bulkHdr0 == null || !bulkHdr0.startsWith("$")) {
-                        break;
-                    }
-                    int len0 = Integer.parseInt(bulkHdr0.substring(1));
-                    byte[] arg0Bytes = in.readNBytes(len0);
-                    in.readNBytes(2); // consume \r\n
-                    String cmd0 = new String(arg0Bytes, StandardCharsets.US_ASCII);
-
-                    if ("AUTH".equalsIgnoreCase(cmd0)) {
-                        String[] authArgs = new String[argCount - 1];
-                        for (int i = 0; i < argCount - 1; i++) {
-                            String bulkHdr = readAsciiLine(in);
-                            int len = Integer.parseInt(bulkHdr.substring(1));
-                            byte[] data = in.readNBytes(len);
-                            in.readNBytes(2);
-                            authArgs[i] = new String(data, StandardCharsets.UTF_8);
-                        }
-                        String username = (authArgs.length == 2) ? authArgs[0] : null;
-                        String password = (authArgs.length == 2) ? authArgs[1] : (authArgs.length == 1 ? authArgs[0] : null);
-                        boolean ok = (password != null) && authenticate(username, password);
-                        replyQueue.put(ReplyAction.local(ok ? OK_RESPONSE : WRONGPASS_RESPONSE));
-                        continue;
-                    }
-                    if ("HELLO".equalsIgnoreCase(cmd0)) {
-                        String[] helloArgs = new String[argCount - 1];
-                        for (int i = 0; i < argCount - 1; i++) {
-                            String bulkHdr = readAsciiLine(in);
-                            int len = Integer.parseInt(bulkHdr.substring(1));
-                            byte[] data = in.readNBytes(len);
-                            in.readNBytes(2);
-                            helloArgs[i] = new String(data, StandardCharsets.UTF_8);
-                        }
-                        int optionIndex = 0;
-                        if (optionIndex < helloArgs.length
-                                && !helloArgs[optionIndex].equalsIgnoreCase("AUTH")
-                                && !helloArgs[optionIndex].equalsIgnoreCase("SETNAME")) {
-                            optionIndex++;
-                        }
-                        int authIdx = -1;
-                        while (optionIndex < helloArgs.length) {
-                            String opt = helloArgs[optionIndex];
-                            if (opt.equalsIgnoreCase("AUTH") && optionIndex + 2 < helloArgs.length) {
-                                authIdx = optionIndex;
-                                optionIndex += 3;
-                            } else if (opt.equalsIgnoreCase("SETNAME") && optionIndex + 1 < helloArgs.length) {
-                                optionIndex += 2;
-                            } else {
-                                optionIndex++;
-                            }
-                        }
-                        if (authIdx != -1 && authIdx + 2 < helloArgs.length) {
-                            String username = helloArgs[authIdx + 1];
-                            String password = helloArgs[authIdx + 2];
-                            if (!authenticate(username, password)) {
-                                replyQueue.put(ReplyAction.local(WRONGPASS_RESPONSE));
-                                continue;
-                            }
-                            List<String> forwarded = new ArrayList<>();
-                            forwarded.add(cmd0);
-                            for (int i = 0; i < helloArgs.length; i++) {
-                                if (i == authIdx) {
-                                    i += 2; // skip AUTH user pass
-                                } else {
-                                    forwarded.add(helloArgs[i]);
-                                }
-                            }
-                            resendCommand(forwarded.toArray(String[]::new), out);
-                            replyQueue.put(ReplyAction.backend());
-                            continue;
-                        }
-                        List<String> forwarded = new ArrayList<>();
-                        forwarded.add(cmd0);
-                        forwarded.addAll(List.of(helloArgs));
-                        resendCommand(forwarded.toArray(String[]::new), out);
-                        replyQueue.put(ReplyAction.backend());
-                        continue;
-                    }
-
-                    // Stream all other commands directly to preserve binary payloads
-                    out.write(('*' + String.valueOf(argCount) + "\r\n").getBytes(StandardCharsets.US_ASCII));
-                    out.write(('$' + String.valueOf(len0) + "\r\n").getBytes(StandardCharsets.US_ASCII));
-                    out.write(arg0Bytes);
-                    out.write("\r\n".getBytes(StandardCharsets.US_ASCII));
-                    for (int i = 1; i < argCount; i++) {
-                        String bulkHdr = readAsciiLine(in);
-                        int len = Integer.parseInt(bulkHdr.substring(1));
-                        out.write(('$' + String.valueOf(len) + "\r\n").getBytes(StandardCharsets.US_ASCII));
-                        int remaining = len;
-                        while (remaining > 0) {
-                            int toRead = Math.min(transferBuf.length, remaining);
-                            int r = in.read(transferBuf, 0, toRead);
-                            if (r == -1) {
-                                throw new IOException("Unexpected EOF in RESP bulk string");
-                            }
-                            out.write(transferBuf, 0, r);
-                            remaining -= r;
-                        }
-                        in.readNBytes(2); // trailing \r\n
-                        out.write("\r\n".getBytes(StandardCharsets.US_ASCII));
-                    }
-                    out.flush();
-                    replyQueue.put(ReplyAction.backend());
-                } else {
-                    // Inline command fallback
-                    String line = (char) first + readAsciiLine(in);
-                    if (line.trim().isEmpty()) {
-                        continue;
-                    }
-                    if (line.toUpperCase(Locale.ROOT).startsWith("AUTH ")) {
-                        String[] parts = line.trim().split("\\s+");
-                        String username = parts.length == 3 ? parts[1] : null;
-                        String password = parts.length == 3 ? parts[2] : (parts.length == 2 ? parts[1] : null);
-                        boolean ok = (password != null) && authenticate(username, password);
-                        replyQueue.put(ReplyAction.local(ok ? OK_RESPONSE : WRONGPASS_RESPONSE));
-                        continue;
-                    }
-                    out.write((line + "\r\n").getBytes(StandardCharsets.US_ASCII));
-                    out.flush();
-                    replyQueue.put(ReplyAction.backend());
-                }
+            OutputStream out = to.getOutputStream();
+            int n;
+            while ((n = in.read(buf)) != -1) {
+                out.write(buf, 0, n);
+                out.flush();
             }
-        } catch (IOException e) {
-            // Expected when client disconnects or connection closes
-            log.debugv("Client relay connection closed for {0}: {1}", resourceId, e.getMessage());
-        } catch (Exception e) {
-            log.warnv(e, "Unexpected error in client relay for {0}: {1}", resourceId, e.getMessage());
+        } catch (IOException ignored) {
+            // Normal when either side closes the connection
         } finally {
-            try {
-                replyQueue.put(ReplyAction.eof());
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            }
-            shutdownOutput(backend);
+            shutdownOutput(to);
         }
     }
-
-    private void relayRepliesToClient(Socket backend, Socket client, BlockingQueue<ReplyAction> replyQueue) {
-        byte[] transferBuf = new byte[8192];
-        try {
-            InputStream in = new BufferedInputStream(backend.getInputStream(), 8192);
-            OutputStream out = client.getOutputStream();
-            while (running) {
-                ReplyAction action;
-                try {
-                    action = replyQueue.take();
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    break;
-                }
-                if (action.isEof()) {
-                    break;
-                }
-                if (action.isLocal()) {
-                    out.write(action.localResponse());
-                    out.flush();
-                } else {
-                    transferRespFrame(in, out, transferBuf);
-                    out.flush();
-                }
-            }
-        } catch (EOFException e) {
-            // Expected when backend closes connection
-            log.debugv("Backend connection closed for {0}: {1}", resourceId, e.getMessage());
-        } catch (IOException e) {
-            // Expected when either side closes the socket
-            log.debugv("Relay reply stream closed for {0}: {1}", resourceId, e.getMessage());
-        } catch (Exception e) {
-            log.warnv(e, "Unexpected error in backend reply relay for {0}: {1}", resourceId, e.getMessage());
-        } finally {
-            shutdownOutput(client);
-        }
-    }
-
-    private static void transferRespFrame(InputStream in, OutputStream out, byte[] transferBuf) throws IOException {
-        int type = in.read();
-        if (type == -1) {
-            throw new EOFException("Unexpected EOF from backend while expecting RESP frame");
-        }
-        out.write(type);
-        switch (type) {
-            case '+': // Simple String
-            case '-': // Simple Error
-            case ':': // Integer
-            case '_': // RESP3 Null
-            case '#': // RESP3 Boolean
-            case ',': // RESP3 Double
-            case '(': // RESP3 BigNumber
-                transferLine(in, out);
-                break;
-            case '$': // Bulk String
-            case '!': // RESP3 Bulk Error
-            case '=': // RESP3 Verbatim String
-                transferBulk(in, out, transferBuf);
-                break;
-            case '*': // Array
-            case '~': // RESP3 Set
-            case '>': // RESP3 Push
-                transferAggregate(in, out, transferBuf, 1);
-                break;
-            case '%': // RESP3 Map
-                transferAggregate(in, out, transferBuf, 2);
-                break;
-            default:
-                // Non-standard response (e.g. raw text from mock backend in tests or inline response)
-                transferNonStandard(in, out, transferBuf);
-                break;
-        }
-    }
-
-    private static void transferLine(InputStream in, OutputStream out) throws IOException {
-        int c;
-        while ((c = in.read()) != -1) {
-            out.write(c);
-            if (c == '\r') {
-                int next = in.read();
-                if (next == -1) {
-                    throw new EOFException("Unexpected EOF after \r");
-                }
-                out.write(next);
-                if (next == '\n') {
-                    return;
-                }
-            }
-        }
-        throw new EOFException("Unexpected EOF while reading RESP line");
-    }
-
-    private static void transferBulk(InputStream in, OutputStream out, byte[] transferBuf) throws IOException {
-        String lenStr = readAsciiLineAndEcho(in, out);
-        long len = Long.parseLong(lenStr);
-        if (len < 0) {
-            return;
-        }
-        long remaining = len;
-        while (remaining > 0) {
-            int toRead = (int) Math.min(transferBuf.length, remaining);
-            int r = in.read(transferBuf, 0, toRead);
-            if (r == -1) {
-                throw new EOFException("Unexpected EOF in RESP bulk string payload");
-            }
-            out.write(transferBuf, 0, r);
-            remaining -= r;
-        }
-        int r1 = in.read();
-        if (r1 == -1) {
-            throw new EOFException("Unexpected EOF before \r in RESP bulk string");
-        }
-        out.write(r1);
-        int r2 = in.read();
-        if (r2 == -1) {
-            throw new EOFException("Unexpected EOF before \n in RESP bulk string");
-        }
-        out.write(r2);
-        if (r1 != '\r' || r2 != '\n') {
-            throw new IOException("Expected \r\n after bulk string payload");
-        }
-    }
-
-    private static void transferAggregate(InputStream in, OutputStream out, byte[] transferBuf, int multiplier) throws IOException {
-        String countStr = readAsciiLineAndEcho(in, out);
-        long count = Long.parseLong(countStr);
-        if (count <= 0) {
-            return;
-        }
-        long totalItems = count * multiplier;
-        for (long i = 0; i < totalItems; i++) {
-            transferRespFrame(in, out, transferBuf);
-        }
-    }
-
-    private static void transferNonStandard(InputStream in, OutputStream out, byte[] transferBuf) throws IOException {
-        int avail = in.available();
-        if (avail > 0) {
-            int toRead = Math.min(transferBuf.length, avail);
-            int r = in.read(transferBuf, 0, toRead);
-            if (r != -1) {
-                out.write(transferBuf, 0, r);
-            }
-        }
-    }
-
-    private static String readAsciiLineAndEcho(InputStream in, OutputStream out) throws IOException {
-        StringBuilder sb = new StringBuilder();
-        int c;
-        while ((c = in.read()) != -1) {
-            out.write(c);
-            if (c == '\r') {
-                int next = in.read();
-                if (next == -1) {
-                    throw new EOFException("Unexpected EOF after \r");
-                }
-                out.write(next);
-                if (next == '\n') {
-                    return sb.toString();
-                }
-                sb.append((char) c);
-                sb.append((char) next);
-                continue;
-            }
-            sb.append((char) c);
-        }
-        throw new EOFException("Unexpected EOF while reading RESP line");
-    }
-
-    private static final class ReplyAction {
-        enum Type { BACKEND, LOCAL, EOF }
-
-        private final Type type;
-        private final byte[] localResponse;
-
-        private ReplyAction(Type type, byte[] localResponse) {
-            this.type = type;
-            this.localResponse = localResponse;
-        }
-
-        static ReplyAction backend() {
-            return new ReplyAction(Type.BACKEND, null);
-        }
-
-        static ReplyAction local(byte[] response) {
-            return new ReplyAction(Type.LOCAL, response);
-        }
-
-        static ReplyAction eof() {
-            return new ReplyAction(Type.EOF, null);
-        }
-
-        boolean isLocal() {
-            return type == Type.LOCAL;
-        }
-
-        boolean isEof() {
-            return type == Type.EOF;
-        }
-
-        byte[] localResponse() {
-            return localResponse;
-        }
-    }
-
-    private static String readAsciiLine(InputStream in) throws IOException {
-        StringBuilder sb = new StringBuilder();
-        int c;
-        while ((c = in.read()) != -1) {
-            if (c == '\r') {
-                int next = in.read();
-                if (next != '\n') {
-                    throw new IOException("Expected \n after \r in RESP");
-                }
-                break;
-            }
-            sb.append((char) c);
-        }
-        if (c == -1 && sb.length() == 0) {
-            return null;
-        }
-        return sb.toString();
-    }
-
 
     private static void shutdownOutput(Socket socket) {
         try {

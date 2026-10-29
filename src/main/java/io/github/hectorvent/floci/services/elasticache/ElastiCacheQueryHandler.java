@@ -1285,8 +1285,8 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                   .elem("PasswordCount", (long) pwCount)
                 .end("Authentication")
                 .elem("Engine", u.getEngine())
-                // Bug #4502: AWS requires 7.0 for IAM users, 6.0 otherwise
-                .elem("MinimumEngineVersion", u.getAuthMode() == AuthMode.IAM ? "7.0" : "6.0")
+                // MinimumEngineVersion: the only value AWS documents; no valkey-specific one is published.
+                .elem("MinimumEngineVersion", "6.0")
                 .raw(memberListXml("UserGroupIds", service.userGroupIdsContaining(u.getUserId())))
                 .elem("ARN", userArn(u))
                 .build();
