@@ -129,7 +129,7 @@ class RedshiftIntegrationEventPublisher {
     }
 
     private void publish(Queued event) {
-        if (!registry.isServiceEnabled("eventbridge")) {
+        if (!registry.isServiceEnabled("events")) {
             LOG.debugv("EventBridge is disabled; dropping the {0} event for {1}", event.detailType(),
                     event.resourceArn());
             return;

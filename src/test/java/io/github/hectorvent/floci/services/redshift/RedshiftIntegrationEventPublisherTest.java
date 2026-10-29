@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.redshift;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ResolvedServiceCatalog;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.redshift.RedshiftIntegrationEventPublisher.IntegrationEvent;
@@ -20,6 +22,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -40,7 +43,7 @@ class RedshiftIntegrationEventPublisherTest {
     void setUp() {
         events = mock(EventBridgeService.class);
         registry = mock(ServiceRegistry.class);
-        when(registry.isServiceEnabled("eventbridge")).thenReturn(true);
+        when(registry.isServiceEnabled("events")).thenReturn(true);
         publisher = new RedshiftIntegrationEventPublisher(events, mapper,
                 new RegionResolver("us-east-1", "111111111111"), registry);
     }
@@ -106,7 +109,11 @@ class RedshiftIntegrationEventPublisherTest {
 
     @Test
     void aDisabledEventBridgeDropsTheEventWithoutFailing() {
-        when(registry.isServiceEnabled("eventbridge")).thenReturn(false);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().eventbridge().enabled()).thenReturn(false);
+        ServiceRegistry disabledRegistry = new ServiceRegistry(new ResolvedServiceCatalog(config));
+        publisher = new RedshiftIntegrationEventPublisher(events, mapper,
+                new RegionResolver("us-east-1", "111111111111"), disabledRegistry);
 
         publisher.queue(IntegrationEvent.ACTIVE, integration(), "eu-west-1", AT);
         publisher.publishQueued();
