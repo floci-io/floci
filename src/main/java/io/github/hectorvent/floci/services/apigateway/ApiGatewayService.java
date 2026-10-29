@@ -2232,6 +2232,17 @@ public class ApiGatewayService implements ResourceProvider {
         String domainName = (String) request.get("domainName");
         if (domainName == null) throw new AwsException("BadRequestException", "domainName is required", 400);
         String endpointType = endpointTypeOf(request);
+        if (endpointType == null) {
+            // EDGE is AWS's default for a REST domain: terraform-provider-aws v6.70.0
+            // internal/service/apigateway/domain_name_test.go (acceptance test against AWS) creates one
+            // with only certificate_body/certificate_name and asserts a CloudFront domain and zone.
+            // A regional certificate => REGIONAL is NOT verified against AWS; it keeps Floci's previous
+            // behaviour, as does REGIONAL in a partition without edge.
+            boolean regionalCertificate = request.get("regionalCertificateArn") != null
+                    || request.get("regionalCertificateName") != null;
+            boolean edgeAvailable = EDGE_OPTIMIZED_PARTITIONS.contains(AwsPartitions.forRegionOrCommercial(region).id());
+            endpointType = !regionalCertificate && edgeAvailable ? "EDGE" : "REGIONAL";
+        }
         if (!"REGIONAL".equals(endpointType) && !"EDGE".equals(endpointType)) {
             // Private custom domains are not emulated; anything else would be a domain that is
             // neither regional nor edge-optimized, which nothing here could route or describe.
@@ -2309,8 +2320,7 @@ public class ApiGatewayService implements ResourceProvider {
 
     /**
      * Reads the endpoint type from either spelling: REST passes {@code endpointConfiguration.types},
-     * HTTP APIs pass a single {@code endpointType}. REGIONAL is the default an emulated domain gets,
-     * since nothing here fronts it with an edge distribution.
+     * HTTP APIs pass a single {@code endpointType}. Null when the request names neither.
      */
     private static String endpointTypeOf(Map<String, Object> request) {
         Object endpointType = request.get("endpointType");
@@ -2322,7 +2332,7 @@ public class ApiGatewayService implements ResourceProvider {
                 && types.getFirst() instanceof String type && !type.isBlank()) {
             return type;
         }
-        return "REGIONAL";
+        return null;
     }
 
     public CustomDomain getDomainName(String region, String domainName) {

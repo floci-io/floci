@@ -142,7 +142,7 @@ public class ApiGatewayV2Service {
         Object targetValue = request.get("target");
         String target = targetValue != null ? String.valueOf(targetValue) : null;
         if ("HTTP".equals(protocolType) && target != null && !target.isBlank()) {
-            boolean isLambdaTarget = target.startsWith("arn:");
+            boolean isLambdaTarget = AwsArnUtils.looksLikeArn(target);
             Integration integration = createIntegration(region, apiId, Map.of(
                     "integrationType", isLambdaTarget ? "AWS_PROXY" : "HTTP_PROXY",
                     "integrationUri", target,

@@ -242,7 +242,7 @@ class Ec2PortForwardManagerTest {
     }
 
     @Test
-    void publishedForwardDisablesNagleOnBothSocatSockets() {
+    void publishedForwardDisablesNagleAndBindsABurstTolerantAcceptBacklog() {
         DockerClient dockerClient = mock(DockerClient.class);
         when(dockerClient.inspectContainerCmd(anyString())).thenThrow(new RuntimeException("docker down"));
         PortAllocator portAllocator = mock(PortAllocator.class);
@@ -274,8 +274,8 @@ class Ec2PortForwardManagerTest {
         verify(lifecycleManager).create(spec.capture());
         assertEquals("alpine/socat", spec.getValue().image());
         assertEquals(List.of("socat"), spec.getValue().entrypoint());
-        assertEquals(List.of("TCP-LISTEN:80,fork,reuseaddr,nodelay", "TCP:172.17.0.3:80,nodelay"),
-                spec.getValue().cmd());
+        assertEquals(List.of("TCP-LISTEN:80,fork,reuseaddr,nodelay,backlog=4096",
+                "TCP:172.17.0.3:80,nodelay"), spec.getValue().cmd());
         assertEquals(Map.of(80, 30000), spec.getValue().portBindings());
     }
 

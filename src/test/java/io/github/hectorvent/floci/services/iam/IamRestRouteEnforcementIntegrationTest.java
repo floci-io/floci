@@ -358,6 +358,19 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
+    void lambdaCodeSigningNamespacedFunctionIsCheckedAgainstItsTarget() {
+        String user = user("route-lambda-code-signing-namespace");
+        String name = "route-protected-" + suffix();
+        String function = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":function:" + name;
+        String path = "/2020-06-30/functions/function:" + name + "/code-signing-config";
+
+        policy(user, allow("lambda:GetFunctionCodeSigningConfig", function + "-other"));
+        refused(send(user, "GET", path), "lambda:GetFunctionCodeSigningConfig");
+        policy(user, allow("lambda:GetFunctionCodeSigningConfig", function));
+        send(user, "GET", path).statusCode(not(403));
+    }
+
+    @Test
     void lambdaMappingConfigAndLayerRoutesAreCheckedAgainstWhatTheyName() {
         // A grant on the same resource in another account does not cover the caller's own.
         String user = user("route-lambda-resources");

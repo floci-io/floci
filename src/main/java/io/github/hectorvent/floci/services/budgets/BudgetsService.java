@@ -814,7 +814,7 @@ public class BudgetsService implements Resettable {
     private ResourceRef parseResourceArn(String arn) {
         String marker = ":budgets::";
         int service = arn.indexOf(marker);
-        if (!arn.startsWith("arn:") || service < 0) {
+        if (!AwsArnUtils.looksLikeArn(arn) || service < 0) {
             throw invalid("ResourceARN is not a valid Budgets ARN.");
         }
         int resourceStart = service + marker.length();

@@ -3529,6 +3529,7 @@ public class NativeDynamoDbJsonHandler {
                 .limit(request.has("Limit") ? request.get("Limit").asInt() : null)
                 .nextToken(request.has("NextToken") ? request.get("NextToken").asText() : null)
                 .consistentRead(request.path("ConsistentRead").asBoolean(false))
+                .returnValuesOnConditionCheckFailure(request.path("ReturnValuesOnConditionCheckFailure").asText("NONE"))
                 .tokenBinding(partiQLHandler.tokenBinding(statement, parameters));
         DynamoDbPartiQLHandler.Result result = partiQLHandler.execute(stmt, ctx, region);
         ObjectNode response = result.body();
@@ -3569,7 +3570,10 @@ public class NativeDynamoDbJsonHandler {
             List<DynamoDbPartiQLHandler.TransactMember> members = new ArrayList<>();
             for (int i = 0; i < statements.size(); i++) {
                 DynamoDbPartiQLParser.Stmt stmt = statements.get(i);
-                members.add(inTransactStatement(i, () -> partiQLHandler.toTransactItem(stmt, region)));
+                String returnValuesOnConditionCheckFailure =
+                        stmts.get(i).path("ReturnValuesOnConditionCheckFailure").asText("NONE");
+                members.add(inTransactStatement(i,
+                        () -> partiQLHandler.toTransactItem(stmt, returnValuesOnConditionCheckFailure, region)));
             }
             List<JsonNode> transactItems = cancelOnMemberReasons(members);
             DynamoDbService.TransactWriteResult result = dynamoDbService.transactWriteItems(transactItems, region,
@@ -3694,7 +3698,9 @@ public class NativeDynamoDbJsonHandler {
                 requireBatchSelectReadsByKey(select, region);
             }
             DynamoDbPartiQLHandler.Result result = partiQLHandler.execute(stmt, PartiQLExecuteContext.builder()
-                    .consistentRead(statement.path("ConsistentRead").asBoolean(false)), region);
+                    .consistentRead(statement.path("ConsistentRead").asBoolean(false))
+                    .returnValuesOnConditionCheckFailure(
+                            statement.path("ReturnValuesOnConditionCheckFailure").asText("NONE")), region);
             JsonNode firstItem = result.body().path("Items").path(0);
             if (!firstItem.isMissingNode()) {
                 slot.set("Item", firstItem);
@@ -3705,6 +3711,9 @@ public class NativeDynamoDbJsonHandler {
             ObjectNode err = objectMapper.createObjectNode();
             err.put("Code", batchMemberErrorCode(e.getErrorCode()));
             err.put("Message", e.getMessage());
+            if (e instanceof ConditionalCheckFailedException failed && failed.getItem() != null) {
+                err.set("Item", failed.getItem());
+            }
             slot.set("Error", err);
             if (tableName != null && batchMemberReachedItsTable(e)) {
                 slot.put("TableName", tableName);

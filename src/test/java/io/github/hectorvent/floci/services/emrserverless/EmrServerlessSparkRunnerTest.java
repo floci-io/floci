@@ -20,9 +20,9 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
-import java.io.ByteArrayInputStream;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -121,6 +121,9 @@ class EmrServerlessSparkRunnerTest {
                 EmrServerlessSparkRunner.image(null, "emr-spark-8.1.0"));
         assertEquals("registry.internal/emr-serverless/spark/emr-7.5.0:20250425",
                 EmrServerlessSparkRunner.image("registry.internal/emr-serverless/spark/%s:20250425", "emr-7.5.0"));
+        // The image a cluster's bootstrap left, which its steps get by id.
+        String bootstrapped = "sha256:" + "2".repeat(64);
+        assertEquals(bootstrapped, EmrServerlessSparkRunner.image(bootstrapped, "emr-7.5.0"));
     }
 
     @Test
@@ -359,7 +362,8 @@ class EmrServerlessSparkRunnerTest {
         InOrder order = inOrder(lifecycle, docker, s3);
         order.verify(lifecycle).stop("driver", 0);
         order.verify(docker).logContainerCmd("driver");
-        order.verify(s3).putObject(eq("logs"), eq("emr/j-1/steps/s-1/stdout.gz"), any(), anyString(), anyMap());
+        order.verify(s3).putObjectFromStream(eq("logs"), eq("emr/j-1/steps/s-1/stdout.gz"), any(), anyString(),
+                anyMap());
         order.verify(lifecycle).stopAndRemove("driver", null, 0);
     }
 
@@ -382,7 +386,7 @@ class EmrServerlessSparkRunnerTest {
 
             assertEquals(0, outcome.exitCode());
             verify(stream).close();
-            verify(s3, never()).putObject(anyString(), anyString(), any(), anyString(), anyMap());
+            verify(s3, never()).putObjectFromStream(anyString(), anyString(), any(), anyString(), anyMap());
         } finally {
             assertTrue(Thread.interrupted());
         }
@@ -392,7 +396,7 @@ class EmrServerlessSparkRunnerTest {
     void logsThatCannotBeWrittenLeaveTheRunAsItEnded() {
         EmrServerlessSparkRunner runner = runner();
         driverWrote(new Frame(StreamType.STDOUT, bytes("done\n")));
-        when(s3.putObject(anyString(), anyString(), any(), anyString(), anyMap()))
+        when(s3.putObjectFromStream(anyString(), anyString(), any(), anyString(), anyMap()))
                 .thenThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
 
         SparkJobRunner.Outcome outcome = runner.run(job("s3://missing/emr/j-1/steps/s-1/"), progress);
@@ -413,7 +417,7 @@ class EmrServerlessSparkRunnerTest {
 
         assertTrue(outcome.stopped());
         verify(docker, never()).logContainerCmd(anyString());
-        verify(s3, never()).putObject(anyString(), anyString(), any(), anyString(), anyMap());
+        verify(s3, never()).putObjectFromStream(anyString(), anyString(), any(), anyString(), anyMap());
     }
 
     @Test
@@ -499,9 +503,9 @@ class EmrServerlessSparkRunnerTest {
 
     // The object the runner put at key, gunzipped.
     private String written(String bucket, String key) throws IOException {
-        ArgumentCaptor<byte[]> data = ArgumentCaptor.forClass(byte[].class);
-        verify(s3).putObject(eq(bucket), eq(key), data.capture(), eq("application/x-gzip"), eq(Map.of()));
-        try (GZIPInputStream gunzip = new GZIPInputStream(new ByteArrayInputStream(data.getValue()))) {
+        ArgumentCaptor<InputStream> data = ArgumentCaptor.forClass(InputStream.class);
+        verify(s3).putObjectFromStream(eq(bucket), eq(key), data.capture(), eq("application/x-gzip"), eq(Map.of()));
+        try (GZIPInputStream gunzip = new GZIPInputStream(data.getValue())) {
             return new String(gunzip.readAllBytes(), StandardCharsets.UTF_8);
         }
     }

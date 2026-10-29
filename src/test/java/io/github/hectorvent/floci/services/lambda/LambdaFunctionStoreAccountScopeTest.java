@@ -32,6 +32,18 @@ class LambdaFunctionStoreAccountScopeTest {
     }
 
     @Test
+    void listForAccountStaysWithinTheRequestedPartition() {
+        LambdaFunctionStore store = accountAwareStore();
+        store.saveForAccount(DEFAULT_ACCOUNT, REGION, function("default-fn", DEFAULT_ACCOUNT));
+        store.saveForAccount(OTHER_ACCOUNT, REGION, function("other-fn", OTHER_ACCOUNT));
+
+        assertEquals(List.of("default-fn"), store.listForAccount(DEFAULT_ACCOUNT, REGION).stream()
+                .map(LambdaFunction::getFunctionName).toList());
+        assertEquals(List.of("other-fn"), store.listForAccount(OTHER_ACCOUNT, REGION).stream()
+                .map(LambdaFunction::getFunctionName).toList());
+    }
+
+    @Test
     void listAllAccountsKeepsTheRegionAndLatestFilter() {
         LambdaFunctionStore store = accountAwareStore();
         store.saveForAccount(OTHER_ACCOUNT, REGION, function("latest-fn", OTHER_ACCOUNT));

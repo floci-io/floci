@@ -437,11 +437,14 @@ public class ResourceGroupsTaggingService implements Resettable {
     // Region and account come from the ARN (arn:<partition>:svc:region:acct:resource), and a string
     // that is not an ARN, or an ARN without a region, stays visible as it always has.
     private static boolean isVisible(String arn, String region, String accountId) {
-        String[] parts = arn.split(":", 6);
-        if (parts.length >= 4 && !parts[3].isEmpty() && !parts[3].equals(region)) {
+        if (!AwsArnUtils.isArn(arn)) {
+            return true;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!parsed.region().isEmpty() && !parsed.region().equals(region)) {
             return false;
         }
-        return accountId == null || parts.length < 5 || parts[4].isEmpty() || parts[4].equals(accountId);
+        return accountId == null || parsed.accountId().isEmpty() || parsed.accountId().equals(accountId);
     }
 
     // A provider resource's region is its ARN's, else the owner's region for it. Null means it has none,

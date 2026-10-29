@@ -161,21 +161,37 @@ public final class QueryConstraintCheck {
 
     /** The violations {@code params} carries for {@code operation}, in the model's member order. */
     public List<String> violations(String operation, MultivaluedMap<String, String> params) {
+        return violations(operation, params, Map.of());
+    }
+
+    /**
+     * The same, with each violation of {@code documented} reported in its own member's place: a
+     * constraint the service documents where the model declares none, keyed by the member's name as
+     * the model spells it. It is a reading rather than a published shape, so it is reported where
+     * that member's own violations would sit, and only for a member the request carries that breaks
+     * none of the constraints the model declares. A value a declared constraint already refuses is
+     * not read against a documented set as well, which is how the hand-written checks these waves
+     * replace answered one, and a member that never arrived has no value to read against anything.
+     */
+    public List<String> violations(String operation, MultivaluedMap<String, String> params,
+                                   Map<String, String> documented) {
         JsonNode shape = shapes.path(operations.path(operation).asText());
         if (!shape.hasNonNull("members")) {
             return List.of();
         }
-        return structureViolations(shape, "", "", params);
+        return structureViolations(shape, "", "", params, documented);
     }
 
     /**
      * The violations the members of {@code structure} carry, in the order the model lists them.
      * {@code prefix} is what the request names them under and {@code path} what a message calls
      * them: both are empty at the top level, and name the member above inside a structure or inside
-     * a list's member.
+     * a list's member. {@code documented} carries the violations the service documents rather than
+     * declares, which only the operation's own members have: a nested walk is handed none.
      */
     private List<String> structureViolations(JsonNode structure, String prefix, String path,
-                                             MultivaluedMap<String, String> params) {
+                                             MultivaluedMap<String, String> params,
+                                             Map<String, String> documented) {
         Set<String> required = new LinkedHashSet<>();
         structure.path("required").forEach(name -> required.add(name.asText()));
         List<String> violations = new ArrayList<>();
@@ -186,22 +202,41 @@ public final class QueryConstraintCheck {
             String param = prefix + name;
             boolean mandatory = required.contains(name);
             JsonNode shape = shapes.path(shapeName);
-            switch (shape.path("type").asText()) {
-                case "list" -> violations.addAll(listViolations(shape, param, memberPath, mandatory, params));
-                case "structure" -> violations.addAll(nestedViolations(shape, param, memberPath, mandatory, params));
-                default -> {
-                    String value = params == null ? null : params.getFirst(param);
-                    if (value == null) {
-                        if (mandatory) {
-                            violations.add(SmithyValidationErrors.notNull(memberPath));
-                        }
-                    } else {
-                        violations.addAll(violations(shapeName, value, memberPath));
-                    }
-                }
+            List<String> own = switch (shape.path("type").asText()) {
+                case "list" -> listViolations(shape, param, memberPath, mandatory, params);
+                case "structure" -> nestedViolations(shape, param, memberPath, mandatory, params);
+                default -> scalarViolations(shapeName, param, memberPath, mandatory, params);
+            };
+            violations.addAll(own);
+            if (own.isEmpty() && documented.containsKey(name) && carries(params, param)) {
+                violations.add(documented.get(name));
             }
         }
         return violations;
+    }
+
+    /**
+     * True when the request names {@code param} itself or anything under it, whatever kind of
+     * member it is: a scalar at its own name, a list numbered under it, a structure's fields below
+     * it. An absent member is answered for being required or for nothing at all, so it is not also
+     * answered for a constraint read off a value it never sent.
+     */
+    private static boolean carries(MultivaluedMap<String, String> params, String param) {
+        return params != null && (params.containsKey(param)
+                || params.keySet().stream().anyMatch(key -> key.startsWith(param + ".")));
+    }
+
+    /**
+     * A member one parameter carries. A request naming it at all carries a value, so only one it
+     * names nowhere is absent, and a required member is what an absent one is reported for.
+     */
+    private List<String> scalarViolations(String shapeName, String param, String path,
+                                         boolean required, MultivaluedMap<String, String> params) {
+        String value = params == null ? null : params.getFirst(param);
+        if (value == null) {
+            return required ? List.of(SmithyValidationErrors.notNull(path)) : List.of();
+        }
+        return violations(shapeName, value, path);
     }
 
     /**
@@ -226,7 +261,7 @@ public final class QueryConstraintCheck {
             String memberPath = path + "." + member.index() + ".member";
             if (structure) {
                 violations.addAll(structureViolations(shapes.path(elementShape),
-                        member.prefix() + ".", memberPath + ".", params));
+                        member.prefix() + ".", memberPath + ".", params, Map.of()));
             } else {
                 String value = params.getFirst(member.prefix());
                 violations.addAll(violations(elementShape, value == null ? "" : value, memberPath));
@@ -246,7 +281,7 @@ public final class QueryConstraintCheck {
         if (!present) {
             return required ? List.of(SmithyValidationErrors.notNull(path)) : List.of();
         }
-        return structureViolations(shape, param + ".", path + ".", params);
+        return structureViolations(shape, param + ".", path + ".", params, Map.of());
     }
 
     /** The member's name as a validation message spells it, which is the request's with a lower
@@ -284,6 +319,16 @@ public final class QueryConstraintCheck {
     }
 
     /**
+     * True when {@code value} is a number as the protocol writes one, of any width: the model's
+     * bounds are what hold it, so a digit string that overflows a {@code long} is a number all the
+     * same. An operation answering a value that is no number at all asks this rather than keeping a
+     * reading of its own, since the same answer decides whether a range applies.
+     */
+    public static boolean isInteger(String value) {
+        return value != null && INTEGER.matcher(value.trim()).matches();
+    }
+
+    /**
      * A value that is no number is left to the operation: this package answers one with
      * {@code InvalidParameterValue} rather than with a constraint violation, and which member
      * reports it that way is the operation's own reading.
@@ -295,7 +340,7 @@ public final class QueryConstraintCheck {
      */
     private String numberViolation(JsonNode shape, String value, String path) {
         String text = value.trim();
-        if (!INTEGER.matcher(text).matches()) {
+        if (!isInteger(text)) {
             // Not a number at all, so no range of the model's is what it breaks.
             return null;
         }

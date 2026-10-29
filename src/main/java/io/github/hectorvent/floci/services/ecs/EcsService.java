@@ -709,7 +709,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             if (cluster != null) {
                 result.add(cluster);
             } else {
-                failures.add(Failure.missing(id != null && id.startsWith("arn:")
+                failures.add(Failure.missing(AwsArnUtils.looksLikeArn(id)
                         ? id : regionResolver.buildArn("ecs", region, "cluster/" + id)));
             }
         }
@@ -1407,7 +1407,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         if (ref == null) {
             return false;
         }
-        String tail = ref.startsWith("arn:") ? ref.substring(ref.lastIndexOf('/') + 1) : ref;
+        String tail = AwsArnUtils.looksLikeArn(ref) ? ref.substring(ref.lastIndexOf('/') + 1) : ref;
         int colon = tail.lastIndexOf(':');
         if (colon < 0) {
             return false;
@@ -2371,7 +2371,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             if (task != null) {
                 result.add(task);
             } else {
-                failures.add(Failure.missing(ref != null && ref.startsWith("arn:")
+                failures.add(Failure.missing(AwsArnUtils.looksLikeArn(ref)
                         ? ref
                         : regionResolver.buildArn("ecs", region,
                                 "task/" + cluster.getClusterName() + "/" + ref)));
@@ -3063,7 +3063,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
 
     /** Echoes an ARN the caller supplied, otherwise builds the ARN the service would have had. */
     private String missingServiceArn(EcsCluster cluster, String serviceRef, String region) {
-        if (serviceRef != null && serviceRef.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(serviceRef)) {
             return serviceRef;
         }
         return regionResolver.buildArn("ecs", region,
@@ -3593,7 +3593,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             if (instance != null) {
                 result.add(instance);
             } else {
-                failures.add(Failure.missing(ref.startsWith("arn:") ? ref
+                failures.add(Failure.missing(AwsArnUtils.looksLikeArn(ref) ? ref
                         : containerInstanceArnFor(cluster, ref, region)));
             }
         }
@@ -3666,7 +3666,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         for (String ref : instanceRefs) {
             ContainerInstance instance = resolveContainerInstance(cluster.getClusterArn(), ref);
             if (instance == null) {
-                failures.add(Failure.missing(ref.startsWith("arn:") ? ref
+                failures.add(Failure.missing(AwsArnUtils.looksLikeArn(ref) ? ref
                         : containerInstanceArnFor(cluster, ref, region)));
                 continue;
             }
@@ -3791,7 +3791,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                                 .findFirst().orElse(null));
             };
             if (cp == null) {
-                failures.add(Failure.missing(ref.startsWith("arn:") ? ref
+                failures.add(Failure.missing(AwsArnUtils.looksLikeArn(ref) ? ref
                         : regionResolver.buildArn("ecs", region, "capacity-provider/" + ref)));
                 continue;
             }
@@ -4073,7 +4073,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             if (match != null) {
                 found.add(match);
             } else {
-                failures.add(Failure.missing(ref.startsWith("arn:") ? ref
+                failures.add(Failure.missing(AwsArnUtils.looksLikeArn(ref) ? ref
                         : regionResolver.buildArn("ecs", region, "task-set/"
                                 + cluster.getClusterName() + "/" + svc.getServiceName() + "/" + ref)));
             }
@@ -5230,7 +5230,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      */
     private String resolvedTaskDefinitionArn(EcsServiceModel svc, String region) {
         String ref = svc.getTaskDefinition();
-        if (ref == null || ref.startsWith("arn:")) {
+        if (ref == null || AwsArnUtils.looksLikeArn(ref)) {
             return ref;
         }
         try {

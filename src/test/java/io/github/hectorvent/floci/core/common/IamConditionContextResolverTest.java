@@ -13,6 +13,11 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.IamUser;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebService;
+import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -60,6 +65,8 @@ class IamConditionContextResolverTest {
     private Ec2Service ec2Service;
     private S3Service s3Service;
     private CloudWatchLogsService logsService;
+    private IamService iamService;
+    private LambdaWebService lambdaWebService;
     private RequestContext requestContext;
     private EmulatorConfig config;
     private IamConditionContextResolver resolver;
@@ -86,7 +93,16 @@ class IamConditionContextResolverTest {
         Instance<CloudWatchLogsService> logsServiceInstance = mock(Instance.class);
         when(logsServiceInstance.isResolvable()).thenReturn(true);
         when(logsServiceInstance.get()).thenReturn(logsService);
+        iamService = mock(IamService.class);
+        Instance<IamService> iamServiceInstance = mock(Instance.class);
+        when(iamServiceInstance.isResolvable()).thenReturn(true);
+        when(iamServiceInstance.get()).thenReturn(iamService);
+        lambdaWebService = mock(LambdaWebService.class);
+        Instance<LambdaWebService> lambdaWebServiceInstance = mock(Instance.class);
+        when(lambdaWebServiceInstance.isResolvable()).thenReturn(true);
+        when(lambdaWebServiceInstance.get()).thenReturn(lambdaWebService);
         requestContext = new RequestContext();
+        requestContext.setAccountId("123456789012");
         requestContext.setRegion("us-east-1");
         config = mock(EmulatorConfig.class);
         when(config.defaultRegion()).thenReturn("us-east-1");
@@ -98,8 +114,47 @@ class IamConditionContextResolverTest {
         ServiceCatalog catalog = new ServiceCatalog(List.of(dynamo));
         when(serviceCatalog.matchTarget(any())).thenAnswer(call -> catalog.matchTarget(call.getArgument(0)));
         resolver = new IamConditionContextResolver(
-                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance, requestContext, config,
+                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance, iamServiceInstance,
+                lambdaWebServiceInstance,
+                requestContext, config,
                 null, serviceCatalog);
+    }
+
+    @Test
+    void aWebFunctionEndpointRequestCarriesTheAuthTypeItNamesAndTheOneItHas() throws Exception {
+        String function = "arn:aws:lambda:us-east-1:123456789012:web-function/app";
+        WebFunctionEndpoint stored = new WebFunctionEndpoint();
+        stored.authType = "ApplicationManaged";
+        when(lambdaWebService.getEndpoint("us-east-1", function, "dev")).thenReturn(stored);
+        when(lambdaWebService.getEndpoint("us-east-1", function, "gone"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "The endpoint gone does not exist.", 404));
+        String request = "lambda:Request/WebFunctionAuthType";
+        String resource = "lambda:Resource/WebFunctionAuthType";
+
+        assertEquals(Map.of(request, List.of("IamAuth")), resolver.resolve("lambda", "lambda:CreateWebFunction",
+                webRequest("/2025-03-07/web-functions", "{\"endpointConfig\":{\"authType\":\"IamAuth\"}}")));
+        assertEquals(Map.of(request, List.of("IamAuth")), resolver.resolve("lambda",
+                "lambda:CreateWebFunctionEndpoint", webRequest("/2025-03-07/web-functions/app/endpoints",
+                        "{\"authType\":\"IamAuth\"}")));
+        assertEquals(Map.of(request, List.of("IamAuth"), resource, List.of("ApplicationManaged")),
+                resolver.resolve("lambda", "lambda:UpdateWebFunctionEndpoint",
+                        webRequest("/2025-03-07/web-functions/app/endpoints/dev", "{\"authType\":\"IamAuth\"}")));
+        assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda",
+                "lambda:UpdateWebFunctionEndpoint", webRequest("/2025-03-07/web-functions/app/endpoints/dev",
+                        "{\"description\":\"d\"}")), "an update without authType names none");
+        for (String action : List.of("lambda:GetWebFunctionEndpoint", "lambda:DeleteWebFunctionEndpoint")) {
+            assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda", action,
+                    webRequest("/2025-03-07/web-functions/" + function + "/endpoints/" + function + "/endpoint/dev",
+                            "")));
+            assertNull(resolver.resolve("lambda", action,
+                    webRequest("/2025-03-07/web-functions/app/endpoints/gone", "")), "a missing endpoint has none");
+        }
+        assertNull(resolver.resolve("lambda", "lambda:GetWebFunctionEndpoint",
+                webRequest("/2025-03-07/web-functions/arn:bad/endpoints/dev", "")), "a malformed ARN has none");
+        assertNull(resolver.resolve("lambda", "lambda:GetWebFunction",
+                webRequest("/2025-03-07/web-functions/app", "")));
+        assertNull(resolver.resolve("lambda", "lambda:ListWebFunctionEndpoints",
+                webRequest("/2025-03-07/web-functions/app/list-endpoints", "{}")));
     }
 
     @Test
@@ -148,6 +203,16 @@ class IamConditionContextResolverTest {
                 .thenReturn(MediaType.valueOf("application/x-www-form-urlencoded"));
         when(containerRequest.getEntityStream())
                 .thenAnswer(invocation -> new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
+        return containerRequest;
+    }
+
+    private ContainerRequestContext webRequest(String path, String body) throws Exception {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(containerRequest.getUriInfo()).thenReturn(uriInfo);
+        when(uriInfo.getPath()).thenReturn(path);
+        when(containerRequest.getProperty("floci.bufferedJsonBody"))
+                .thenReturn(body.isEmpty() ? null : mapper.readTree(body));
         return containerRequest;
     }
 
@@ -212,6 +277,47 @@ class IamConditionContextResolverTest {
             assertNull(resolver.resolve("iam", action, formRequest("RoleName=r&UserName=u")), action);
         }
         assertNull(resolver.resolve("iam", "iam:GetRole", formRequest("PermissionsBoundary=example")));
+    }
+
+    @Test
+    void iamPermissionsBoundaryOfAnExistingRoleOrUserIsTheBoundaryStoredOnIt() {
+        IamRole bounded = new IamRole();
+        bounded.setPermissionsBoundaryArn("arn:aws:iam::123456789012:policy/Boundary");
+        IamUser boundedUser = new IamUser();
+        boundedUser.setPermissionsBoundaryArn("arn:aws:iam::123456789012:policy/UserBoundary");
+        when(iamService.findRole("123456789012", "bounded")).thenReturn(Optional.of(bounded));
+        when(iamService.findRole("123456789012", "open")).thenReturn(Optional.of(new IamRole()));
+        when(iamService.findUser("123456789012", "bounded")).thenReturn(Optional.of(boundedUser));
+        for (String action : List.of("iam:AttachRolePolicy", "iam:DeleteRole", "iam:DeleteRolePermissionsBoundary",
+                "iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:GetRole", "iam:PutRolePolicy",
+                "iam:UpdateAssumeRolePolicy", "iam:UpdateRole", "iam:UpdateRoleDescription")) {
+            assertEquals(List.of("arn:aws:iam::123456789012:policy/Boundary"),
+                    resolver.resolve("iam", action, formRequest("RoleName=bounded")).get("iam:PermissionsBoundary"),
+                    action);
+            assertNull(resolver.resolve("iam", action, formRequest("RoleName=open")), action);
+            assertNull(resolver.resolve("iam", action, formRequest("RoleName=missing")), action);
+        }
+        for (String action : List.of("iam:AttachUserPolicy", "iam:DeleteUserPermissionsBoundary",
+                "iam:DeleteUserPolicy", "iam:DetachUserPolicy", "iam:PutUserPolicy")) {
+            assertEquals(List.of("arn:aws:iam::123456789012:policy/UserBoundary"),
+                    resolver.resolve("iam", action, formRequest("UserName=bounded")).get("iam:PermissionsBoundary"),
+                    action);
+            assertNull(resolver.resolve("iam", action, formRequest("UserName=missing")), action);
+        }
+    }
+
+    @Test
+    void iamPermissionsBoundaryOnAPutBoundaryIsTheRequestedOneAndAttachKeepsItsPolicyArn() {
+        IamRole bounded = new IamRole();
+        bounded.setPermissionsBoundaryArn("arn:aws:iam::123456789012:policy/Old");
+        when(iamService.findRole("123456789012", "bounded")).thenReturn(Optional.of(bounded));
+        assertEquals(Map.of("iam:PermissionsBoundary", List.of("arn:aws:iam::123456789012:policy/New")),
+                resolver.resolve("iam", "iam:PutRolePermissionsBoundary", formRequest(
+                        "RoleName=bounded&PermissionsBoundary=arn%3Aaws%3Aiam%3A%3A123456789012%3Apolicy%2FNew")));
+        assertEquals(Map.of("iam:PolicyARN", List.of("arn:aws:iam::aws:policy/ReadOnlyAccess"),
+                        "iam:PermissionsBoundary", List.of("arn:aws:iam::123456789012:policy/Old")),
+                resolver.resolve("iam", "iam:AttachRolePolicy", formRequest(
+                        "RoleName=bounded&PolicyArn=arn%3Aaws%3Aiam%3A%3Aaws%3Apolicy%2FReadOnlyAccess")));
     }
 
     @Test
@@ -499,7 +605,8 @@ class IamConditionContextResolverTest {
     @SuppressWarnings("unchecked")
     private IamConditionContextResolver resolverAt(Instant now) {
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                mock(Instance.class), requestContext, config, null, serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
+                mock(Instance.class), mock(Instance.class), mock(Instance.class), requestContext, config, null,
+                serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
     }
 
     @Test

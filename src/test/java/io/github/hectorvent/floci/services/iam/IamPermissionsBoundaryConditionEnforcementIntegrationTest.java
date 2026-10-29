@@ -25,7 +25,8 @@ import static org.hamcrest.Matchers.containsString;
  * an allow conditioned on {@code StringEquals} {@code iam:PermissionsBoundary}. The Service
  * Authorization Reference lists the key on {@code CreateRole}, {@code CreateUser},
  * {@code PutRolePermissionsBoundary} and {@code PutUserPermissionsBoundary}, which carry the boundary
- * in their {@code PermissionsBoundary} parameter.
+ * in their {@code PermissionsBoundary} parameter. On actions on an existing role or user, such as
+ * {@code AttachRolePolicy} and {@code PutUserPolicy}, the key is the boundary stored on it.
  */
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -91,6 +92,46 @@ class IamPermissionsBoundaryConditionEnforcementIntegrationTest {
                 .formParam("PermissionsBoundary", other).post("/").then(), "iam:PutRolePermissionsBoundary");
         iam(delegated.accessKeyId(), "PutRolePermissionsBoundary").formParam("RoleName", role)
                 .formParam("PermissionsBoundary", boundary).post("/").then().statusCode(200);
+    }
+
+    @Test
+    void attachRolePolicyIsAllowedOnlyOnARoleThatHasTheBoundary() {
+        String boundary = boundaryPolicy("boundary");
+        String policy = boundaryPolicy("attached");
+        UserCredentials delegated = delegatedAdmin(boundary, "iam:AttachRolePolicy");
+        String bounded = "bounded-" + suffix();
+        String open = "open-" + suffix();
+        cleanup.register(() -> EnforcementFixtures.removeRole(baseUri.getPort(), auth(ADMIN, "iam"), bounded));
+        cleanup.register(() -> EnforcementFixtures.removeRole(baseUri.getPort(), auth(ADMIN, "iam"), open));
+        createRole(ADMIN, bounded).formParam("PermissionsBoundary", boundary).post("/").then().statusCode(200);
+        createRole(ADMIN, open).post("/").then().statusCode(200);
+
+        denied(iam(delegated.accessKeyId(), "AttachRolePolicy").formParam("RoleName", open)
+                .formParam("PolicyArn", policy).post("/").then(), "iam:AttachRolePolicy");
+        iam(delegated.accessKeyId(), "AttachRolePolicy").formParam("RoleName", bounded)
+                .formParam("PolicyArn", policy).post("/").then().statusCode(200);
+    }
+
+    @Test
+    void putUserPolicyIsAllowedOnlyOnAUserThatHasTheBoundary() {
+        String boundary = boundaryPolicy("boundary");
+        UserCredentials delegated = delegatedAdmin(boundary, "iam:PutUserPolicy");
+        String bounded = "bounded-" + suffix();
+        String open = "open-" + suffix();
+        cleanup.register(() -> EnforcementFixtures.removeUser(baseUri.getPort(), auth(ADMIN, "iam"), bounded));
+        cleanup.register(() -> EnforcementFixtures.removeUser(baseUri.getPort(), auth(ADMIN, "iam"), open));
+        iam(ADMIN, "CreateUser").formParam("UserName", bounded).formParam("PermissionsBoundary", boundary)
+                .post("/").then().statusCode(200);
+        iam(ADMIN, "CreateUser").formParam("UserName", open).post("/").then().statusCode(200);
+        String document = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}""";
+
+        denied(iam(delegated.accessKeyId(), "PutUserPolicy").formParam("UserName", open)
+                .formParam("PolicyName", "inline").formParam("PolicyDocument", document).post("/").then(),
+                "iam:PutUserPolicy");
+        iam(delegated.accessKeyId(), "PutUserPolicy").formParam("UserName", bounded)
+                .formParam("PolicyName", "inline").formParam("PolicyDocument", document).post("/").then()
+                .statusCode(200);
     }
 
     private String boundaryPolicy(String name) {

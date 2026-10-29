@@ -1,0 +1,121 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_sts_shapes.py",
+    "botocore": "botocore 1.43.113 (installed package)"
+  },
+  "operations": {
+    "GetAccessKeyInfo": "GetAccessKeyInfoRequest",
+    "GetSessionToken": "GetSessionTokenRequest",
+    "GetWebIdentityToken": "GetWebIdentityTokenRequest"
+  },
+  "shapes": {
+    "GetAccessKeyInfoRequest": {
+      "type": "structure",
+      "required": [
+        "AccessKeyId"
+      ],
+      "members": {
+        "AccessKeyId": "accessKeyIdType"
+      }
+    },
+    "GetSessionTokenRequest": {
+      "type": "structure",
+      "members": {
+        "DurationSeconds": "durationSecondsType",
+        "SerialNumber": "serialNumberType",
+        "TokenCode": "tokenCodeType",
+        "MinimumSessionTokenSize": "minimumSessionTokenSizeType"
+      }
+    },
+    "GetWebIdentityTokenRequest": {
+      "type": "structure",
+      "required": [
+        "Audience",
+        "SigningAlgorithm"
+      ],
+      "members": {
+        "Audience": "webIdentityTokenAudienceListType",
+        "DurationSeconds": "webIdentityTokenDurationSecondsType",
+        "SigningAlgorithm": "jwtAlgorithmType",
+        "Tags": "tagListType"
+      }
+    },
+    "Tag": {
+      "type": "structure",
+      "required": [
+        "Key",
+        "Value"
+      ],
+      "members": {
+        "Key": "tagKeyType",
+        "Value": "tagValueType"
+      }
+    },
+    "accessKeyIdType": {
+      "type": "string",
+      "min": 16,
+      "max": 128,
+      "pattern": "[\\w]*"
+    },
+    "durationSecondsType": {
+      "type": "integer",
+      "min": 900,
+      "max": 129600
+    },
+    "jwtAlgorithmType": {
+      "type": "string",
+      "min": 5,
+      "max": 5
+    },
+    "minimumSessionTokenSizeType": {
+      "type": "integer",
+      "min": 0,
+      "max": 4096
+    },
+    "serialNumberType": {
+      "type": "string",
+      "min": 9,
+      "max": 256,
+      "pattern": "[\\w+=/:,.@-]*"
+    },
+    "tagKeyType": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]+"
+    },
+    "tagListType": {
+      "type": "list",
+      "max": 50,
+      "member": "Tag"
+    },
+    "tagValueType": {
+      "type": "string",
+      "min": 0,
+      "max": 256,
+      "pattern": "[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*"
+    },
+    "tokenCodeType": {
+      "type": "string",
+      "min": 6,
+      "max": 6,
+      "pattern": "[\\d]*"
+    },
+    "webIdentityTokenAudienceListType": {
+      "type": "list",
+      "min": 1,
+      "max": 10,
+      "member": "webIdentityTokenAudienceStringType"
+    },
+    "webIdentityTokenAudienceStringType": {
+      "type": "string",
+      "min": 1,
+      "max": 1000
+    },
+    "webIdentityTokenDurationSecondsType": {
+      "type": "integer",
+      "min": 60,
+      "max": 3600
+    }
+  }
+}

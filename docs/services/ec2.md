@@ -143,7 +143,7 @@ With `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED=true`, Floci prepares a s
 
 Security-group permissions on a host-published port use the source visible inside Docker. Docker Desktop may replace the original external-client address. The legacy socat application publisher is disabled while enforcement is enabled because it obscures that source. SSH is published directly by the protected namespace. Application host ports remain available through the legacy publisher only when enforcement is explicitly disabled. Direct managed container traffic uses the logical ENI identity.
 
-When enforcement is disabled, an instance's security groups can open a TCP port to a CIDR source and Floci publishes that port on the host so you can reach the app from `localhost`. For each opened port Floci starts a small `alpine/socat` sidecar container that binds an allocated host port (default range 30000–30999) and forwards it to the instance container's IP, with `TCP_NODELAY` on both sockets so a request the client sends as two small writes is not held for the first write's delayed ACK (about 40 ms per round trip otherwise). This works both for rules present at launch and for rules added later with `authorize-security-group-ingress`; revoking the rule removes the forward. The mapping (`app port -> host port`) is written to the logs:
+When enforcement is disabled, an instance's security groups can open a TCP port to a CIDR source and Floci publishes that port on the host so you can reach the app from `localhost`. For each opened port Floci starts a small `alpine/socat` sidecar container that binds an allocated host port (default range 30000–30999) and forwards it to the instance container's IP, with `TCP_NODELAY` on both sockets so a request the client sends as two small writes is not held for the first write's delayed ACK (about 40 ms per round trip otherwise). The listen socket also takes a `backlog` of 4096 (socat's default is 5), so a burst of connections is queued rather than silently dropped from a full accept queue; the kernel caps the backlog at `net.core.somaxconn`. This works both for rules present at launch and for rules added later with `authorize-security-group-ingress`; revoking the rule removes the forward. The mapping (`app port -> host port`) is written to the logs:
 
 ```
 Published EC2 instance i-0abc... app port 80 on host port 30000 (socat -> 172.17.0.3:80)
@@ -334,7 +334,7 @@ private gateway lifecycles are not modelled.
 | DeleteSecurityGroup | Deletes a security group from the local EC2 store. |
 | AuthorizeSecurityGroupIngress | Adds inbound permissions. Sources may be IPv4 ranges, IPv6 ranges, or another security group (`UserIdGroupPairs`, sent on the wire as `Groups`); prefix list sources are not stored. One rule is stored per source, each carrying its own description. |
 | AuthorizeSecurityGroupEgress | Adds outbound permissions, with the same source types as the inbound call. |
-| RevokeSecurityGroupIngress | Removes inbound permissions. Matches on protocol and port range only, so it removes every permission on that port regardless of source. |
+| RevokeSecurityGroupIngress | Removes inbound permissions. Matches on protocol and port range only, so it removes every permission on that port regardless of source. Protocol numbers and names match each other (`6` is `tcp`), and an all-traffic (`-1`) permission matches whatever ports the request names, as on AWS (Terraform revokes the default egress rule as `-1` with ports `0`). |
 | RevokeSecurityGroupEgress | Removes outbound permissions, matched the same way as the inbound call. |
 | GetSecurityGroupsForVpc | Lists the security groups belonging to one VPC, with the same filters as the describe call. |
 | DescribeSecurityGroupRules | Lists stored security group rules. |
@@ -1149,7 +1149,7 @@ Validation matches AWS behavior:
 
 | Action | Description |
 |--------|-------------|
-| CreateFlowLogs | Creates flow logs for the given resources; returns one flow log id per resource. |
+| CreateFlowLogs | Creates flow logs for the given resources; returns one flow log id per resource. A `vpc-flow-log` `TagSpecification` tags each one, and `DescribeFlowLogs` returns the tags. |
 | DescribeFlowLogs | Lists stored flow logs, optionally filtered by id. |
 | DeleteFlowLogs | Deletes the named flow logs. |
 

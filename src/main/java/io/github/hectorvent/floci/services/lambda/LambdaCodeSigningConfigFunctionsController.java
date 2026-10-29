@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.lambda.model.CodeSigningConfig;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -23,8 +22,6 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 
-import java.util.regex.Pattern;
-
 /**
  * The code signing configuration resource, all under /2020-04-22/code-signing-configs.
  *
@@ -35,11 +32,9 @@ import java.util.regex.Pattern;
  * instead of matching here.</p>
  *
  * <p>Create, Get, Update, Delete and List manage the configuration itself.
- * ListFunctionsByCodeSigningConfig reports which functions carry one, and always reports none:
- * attaching a configuration to a function is PutFunctionCodeSigningConfig, which is not
- * implemented, so nothing can be attached. It answers a configuration that does not exist with a
- * 404 rather than an empty list, because an empty list would say the configuration exists and
- * simply has no functions.</p>
+ * ListFunctionsByCodeSigningConfig derives its results from the function records carrying the
+ * configuration ARN. It answers a configuration that does not exist with a 404 rather than an
+ * empty list, because an empty list would say the configuration exists and simply has no functions.</p>
  *
  * <p>Nothing here verifies a signature. Lambda's own code signing checks are not emulated, so a
  * configuration never gates a deployment.</p>
@@ -49,29 +44,21 @@ import java.util.regex.Pattern;
 @Consumes(MediaType.APPLICATION_JSON)
 public class LambdaCodeSigningConfigFunctionsController {
 
-    /**
-     * botocore's {@code CodeSigningConfigArn} shape pattern, verbatim. Applied with
-     * {@link String#matches(String)} so it is anchored whole-string, which is the
-     * right semantics for an ARN; the shape's {@code max: 200} is checked separately
-     * because the pattern itself does not bound the partition suffix.
-     */
-    private static final Pattern CODE_SIGNING_CONFIG_ARN = Pattern.compile(
-            "arn:(aws[a-zA-Z-]*)?:lambda:(eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\\d{1}"
-                    + ":\\d{12}:code-signing-config:csc-[a-z0-9]{17}");
-
-    private static final int ARN_MAX_LENGTH = 200;
     private static final int MAX_ITEMS_MIN = 1;
     private static final int MAX_ITEMS_MAX = 10000;
 
     private final LambdaCodeSigningConfigService service;
+    private final LambdaService lambdaService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
     public LambdaCodeSigningConfigFunctionsController(LambdaCodeSigningConfigService service,
+                                                      LambdaService lambdaService,
                                                       RegionResolver regionResolver,
                                                       ObjectMapper objectMapper) {
         this.service = service;
+        this.lambdaService = lambdaService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
@@ -88,15 +75,19 @@ public class LambdaCodeSigningConfigFunctionsController {
             @PathParam("codeSigningConfigArn") String codeSigningConfigArn,
             @QueryParam("Marker") String marker,
             @QueryParam("MaxItems") String maxItems) {
-        requireValidArn(codeSigningConfigArn);
-        parseMaxItems(maxItems);
-        // Resolving the config is what turns an unknown ARN into the 404. A known one has no
-        // functions, since PutFunctionCodeSigningConfig is not implemented, so Marker addresses a
-        // page past the end and NextMarker is never emitted.
-        service.get(regionResolver.resolveRegion(headers), codeSigningConfigArn);
+        LambdaCodeSigningConfigService.validateArn(codeSigningConfigArn);
+        Integer requested = maxItems == null || maxItems.isBlank() ? null : parseMaxItems(maxItems);
+        String region = regionResolver.resolveRegion(headers);
+        String accountId = regionResolver.getAccountId();
+        service.get(region, accountId, codeSigningConfigArn);
+        PaginatedResult<String> page = lambdaService.listFunctionsByCodeSigningConfig(
+                region, accountId, codeSigningConfigArn, requested, marker);
 
         ObjectNode root = objectMapper.createObjectNode();
-        root.putArray("FunctionArns");
+        root.set("FunctionArns", objectMapper.valueToTree(page.items()));
+        if (page.nextToken() != null) {
+            root.put("NextMarker", page.nextToken());
+        }
         return Response.ok(root).build();
     }
 
@@ -113,8 +104,9 @@ public class LambdaCodeSigningConfigFunctionsController {
     @Path("/code-signing-configs/{codeSigningConfigArn}")
     public Response getCodeSigningConfig(@Context HttpHeaders headers,
                                          @PathParam("codeSigningConfigArn") String codeSigningConfigArn) {
-        requireValidArn(codeSigningConfigArn);
-        return Response.ok(wrap(service.get(regionResolver.resolveRegion(headers), codeSigningConfigArn))).build();
+        LambdaCodeSigningConfigService.validateArn(codeSigningConfigArn);
+        String region = regionResolver.resolveRegion(headers);
+        return Response.ok(wrap(service.get(region, regionResolver.getAccountId(), codeSigningConfigArn))).build();
     }
 
     @PUT
@@ -122,19 +114,34 @@ public class LambdaCodeSigningConfigFunctionsController {
     public Response updateCodeSigningConfig(@Context HttpHeaders headers,
                                             @PathParam("codeSigningConfigArn") String codeSigningConfigArn,
                                             ObjectNode body) {
-        requireValidArn(codeSigningConfigArn);
-        CodeSigningConfig config = service.update(regionResolver.resolveRegion(headers), codeSigningConfigArn,
-                text(body, "Description"), allowedPublishers(body), policies(body));
-        return Response.ok(wrap(config)).build();
+        LambdaCodeSigningConfigService.validateArn(codeSigningConfigArn);
+        String region = regionResolver.resolveRegion(headers);
+        return service.withConfigLock(codeSigningConfigArn, () -> {
+            service.get(region, regionResolver.getAccountId(), codeSigningConfigArn);
+            CodeSigningConfig config = service.update(region, codeSigningConfigArn,
+                    text(body, "Description"), allowedPublishers(body), policies(body));
+            return Response.ok(wrap(config)).build();
+        });
     }
 
     @DELETE
     @Path("/code-signing-configs/{codeSigningConfigArn}")
     public Response deleteCodeSigningConfig(@Context HttpHeaders headers,
                                             @PathParam("codeSigningConfigArn") String codeSigningConfigArn) {
-        requireValidArn(codeSigningConfigArn);
-        service.delete(regionResolver.resolveRegion(headers), codeSigningConfigArn);
-        return Response.noContent().build();
+        LambdaCodeSigningConfigService.validateArn(codeSigningConfigArn);
+        String region = regionResolver.resolveRegion(headers);
+        String accountId = regionResolver.getAccountId();
+        return service.withConfigLock(codeSigningConfigArn, () -> {
+            service.get(region, accountId, codeSigningConfigArn);
+            PaginatedResult<String> attached = lambdaService.listFunctionsByCodeSigningConfig(
+                    region, accountId, codeSigningConfigArn, 1, null);
+            if (!attached.items().isEmpty()) {
+                throw new AwsException("ResourceConflictException",
+                        "The code signing configuration is still attached to a function.", 409);
+            }
+            service.delete(region, codeSigningConfigArn);
+            return Response.noContent().build();
+        });
     }
 
     @GET
@@ -178,17 +185,6 @@ public class LambdaCodeSigningConfigFunctionsController {
         }
         return objectMapper.convertValue(body.get("CodeSigningPolicies"),
                 CodeSigningConfig.CodeSigningPolicies.class);
-    }
-
-    private void requireValidArn(String arn) {
-        if (arn == null || arn.isBlank()
-                || arn.length() > ARN_MAX_LENGTH
-                || !CODE_SIGNING_CONFIG_ARN.matcher(arn).matches()) {
-            throw SmithyValidationErrors.exception("InvalidParameterValueException",
-                    "Value '" + arn + "' at 'codeSigningConfigArn' "
-                            + "failed to satisfy constraint: Member must satisfy regular expression pattern: "
-                            + CODE_SIGNING_CONFIG_ARN.pattern());
-        }
     }
 
     private int parseMaxItems(String maxItems) {

@@ -464,8 +464,7 @@ public class LambdaMicrovmsController {
      * cannot name a different region than the resource it describes.
      */
     private static String regionOf(String arn) {
-        String[] parts = arn.split(":", 5);
-        return parts.length > 3 ? parts[3] : "";
+        return AwsArnUtils.regionOrDefault(arn, "");
     }
 
     /**

@@ -69,6 +69,8 @@ public class LambdaFunction {
     private String logGroup;
     private List<LambdaFileSystemConfig> fileSystemConfigs = new ArrayList<>();
     private String codeSha256;
+    /** ARN of the code signing configuration attached to this function's $LATEST, if any. */
+    private String codeSigningConfigArn;
     /** Non-null only for durable functions: AWS requires ExecutionTimeout whenever DurableConfig is given. */
     private Integer durableExecutionTimeout;
     private Integer durableRetentionPeriodInDays;
@@ -229,6 +231,11 @@ public class LambdaFunction {
 
     public String getCodeSha256() { return codeSha256; }
     public void setCodeSha256(String codeSha256) { this.codeSha256 = codeSha256; }
+
+    public String getCodeSigningConfigArn() { return codeSigningConfigArn; }
+    public void setCodeSigningConfigArn(String codeSigningConfigArn) {
+        this.codeSigningConfigArn = codeSigningConfigArn;
+    }
 
     public Integer getDurableExecutionTimeout() { return durableExecutionTimeout; }
     public void setDurableExecutionTimeout(Integer durableExecutionTimeout) {

@@ -14,6 +14,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.io.Closeable;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -44,6 +47,27 @@ class ContainerLogStreamerTest {
 
     private static byte[] utf8(String s) {
         return s.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static void write(OutputStream stream, String text) {
+        try {
+            stream.write(utf8(text));
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static void close(OutputStream stream) {
+        try {
+            stream.close();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    // The container lines that records logged, without their prefix.
+    private static List<Object> loggedLines(List<LogRecord> records) {
+        return records.stream().map(record -> record.getParameters()[1]).toList();
     }
 
     @Test
@@ -206,6 +230,22 @@ class ContainerLogStreamerTest {
                 argThat(events ->
                         events.size() == 1 && "audit event".equals(events.getFirst().get("message"))),
                 eq("us-east-1"));
+    }
+
+    @Test
+    void consoleLinesLogsEachLineAsItArrivesAndALastOneWithoutANewlineWhenClosed() {
+        OutputStream console = ContainerLogStreamer.consoleLines("emr:j-1:bootstrap-action-1");
+
+        List<LogRecord> asWritten = LogCapture.capture(ContainerLogStreamer.class, () -> {
+            write(console, "Collecting pan");
+            write(console, "das\n\nInstalled pandas\nDone");
+        });
+        List<LogRecord> asClosed = LogCapture.capture(ContainerLogStreamer.class, () -> close(console));
+
+        // A blank line is dropped, as the attach methods drop one.
+        assertEquals(List.of("Collecting pandas", "Installed pandas"), loggedLines(asWritten));
+        assertEquals(List.of("Done"), loggedLines(asClosed));
+        assertEquals("emr:j-1:bootstrap-action-1", asClosed.getFirst().getParameters()[0]);
     }
 
     @Test

@@ -24,6 +24,7 @@ public class RedshiftDataJsonHandler {
             case "GetStatementResult" -> Response.ok(service.getStatementResult(request)).build();
             case "GetStatementResultV2" -> Response.ok(service.getStatementResultV2(request)).build();
             case "ListStatements" -> Response.ok(service.listStatements(request)).build();
+            case "ListSessions" -> Response.ok(service.listSessions(request, region)).build();
             case "CancelStatement" -> Response.ok(service.cancelStatement(request)).build();
             case "ListDatabases" -> Response.ok(service.listDatabases(request, region)).build();
             case "ListSchemas" -> Response.ok(service.listSchemas(request, region)).build();

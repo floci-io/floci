@@ -41,7 +41,7 @@ public class LakeFormationService {
         if (request.getResourceArn() == null) {
             throw new AwsException("InvalidInputException", "ResourceArn is required", 400);
         }
-        if (!request.getResourceArn().startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(request.getResourceArn())) {
             throw new AwsException("InvalidInputException", "ResourceArn must be a valid ARN", 400);
         }
         if (storage.describeResource(region, request.getResourceArn()).isPresent()) {

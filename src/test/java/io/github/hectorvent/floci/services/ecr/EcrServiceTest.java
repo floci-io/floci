@@ -4,11 +4,13 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ecr.model.AuthorizationData;
+import io.github.hectorvent.floci.services.ecr.model.Image;
 import io.github.hectorvent.floci.services.ecr.model.ImageDetail;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
 import io.github.hectorvent.floci.services.ecr.model.ImageMetadata;
@@ -26,13 +28,18 @@ import org.mockito.Mockito;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.net.ConnectException;
 import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -40,6 +47,8 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -805,6 +814,412 @@ class EcrServiceTest {
         }
     }
 
+    // ------------------------------------------------------------
+    // BatchDeleteImage
+    // ------------------------------------------------------------
+
+    private static final String DELETE_MANIFEST = """
+            {
+              "schemaVersion": 2,
+              "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+              "config": {"mediaType": "application/vnd.docker.container.image.v1+json", "size": 1, "digest": "sha256:c"},
+              "layers": []
+            }
+            """;
+    private static final String DELETE_DIGEST = "sha256:"
+            + Digests.sha256Hex(DELETE_MANIFEST.getBytes(StandardCharsets.UTF_8));
+
+    @Test
+    void batchDeleteImageByTagKeepsTheSharedManifestForTheSurvivingTags() throws Exception {
+        String repositoryName = "batch-delete/shared-manifest";
+        String internal = ACCOUNT + "/" + REGION + "/" + repositoryName;
+        try (MultiTagRegistryServer registry = new MultiTagRegistryServer(
+                internal, DELETE_DIGEST, DELETE_MANIFEST, "release", "stable")) {
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+            EcrService.BatchDeleteImageResult result = service.batchDeleteImage(
+                    repositoryName, List.of(new ImageIdentifier("release", null)), null, REGION);
+
+            assertTrue(result.failures().isEmpty(), () -> "unexpected failures: " + result.failures());
+            assertEquals(1, result.imageIds().size());
+            assertEquals("release", result.imageIds().get(0).getImageTag());
+            assertEquals(DELETE_DIGEST, result.imageIds().get(0).getImageDigest());
+            assertEquals(List.of(DELETE_DIGEST), registry.deletedManifests());
+            assertEquals(List.of("stable"), registry.putTags());
+
+            List<ImageIdentifier> remaining = service.listImages(repositoryName, null, REGION, null, null).items();
+            assertEquals(1, remaining.size());
+            assertEquals("stable", remaining.get(0).getImageTag());
+            assertEquals(DELETE_DIGEST, remaining.get(0).getImageDigest());
+
+            EcrService.BatchGetImageResult got = service.batchGetImage(
+                    repositoryName, List.of(new ImageIdentifier("stable", null)), null, null, REGION);
+            assertTrue(got.failures().isEmpty(), () -> "unexpected failures: " + got.failures());
+            assertEquals(1, got.images().size());
+            assertEquals(DELETE_DIGEST, got.images().get(0).getImageId().getImageDigest());
+
+            EcrService.DescribeImagesResult described = service.describeImages(
+                    repositoryName, List.of(new ImageIdentifier("stable", null)), null, REGION);
+            assertTrue(described.failures().isEmpty(), () -> "unexpected failures: " + described.failures());
+            assertEquals(1, described.imageDetails().size());
+            assertEquals(DELETE_DIGEST, described.imageDetails().get(0).getImageDigest());
+            assertEquals(List.of("stable"), described.imageDetails().get(0).getImageTags());
+        }
+    }
+
+    @Test
+    void batchDeleteImageByTagKeepsTheImagePushedAtOfTheSurvivingTag() throws Exception {
+        String repositoryName = "batch-delete/pushed-at";
+        String internal = ACCOUNT + "/" + REGION + "/" + repositoryName;
+        InMemoryStorage<String, ImageMetadata> metaStore = new InMemoryStorage<>();
+        EcrService withMeta = new EcrService(new InMemoryStorage<>(), metaStore, pullThroughCacheRuleStore,
+                registryManager, Mockito.mock(EmulatorConfig.class), new RegionResolver(REGION, ACCOUNT));
+        try (MultiTagRegistryServer registry = new MultiTagRegistryServer(
+                internal, DELETE_DIGEST, DELETE_MANIFEST, "release", "stable")) {
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+            withMeta.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+            withMeta.describeImages(repositoryName, List.of(new ImageIdentifier("stable", null)), null, REGION);
+            ImageMetadata before = metaStore.scan(k -> k.endsWith(DELETE_DIGEST)).get(0);
+
+            withMeta.batchDeleteImage(repositoryName, List.of(new ImageIdentifier("release", null)), null, REGION);
+
+            List<ImageMetadata> after = metaStore.scan(k -> k.endsWith(DELETE_DIGEST));
+            assertEquals(1, after.size());
+            assertEquals(before.getPushedAt(), after.get(0).getPushedAt());
+        }
+    }
+
+    @Test
+    void batchDeleteImageByTagDeletesTheManifestWhenTheLastTagGoes() throws Exception {
+        String repositoryName = "batch-delete/last-tag";
+        String internal = ACCOUNT + "/" + REGION + "/" + repositoryName;
+        try (MultiTagRegistryServer registry = new MultiTagRegistryServer(
+                internal, DELETE_DIGEST, DELETE_MANIFEST, "v1")) {
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+            EcrService.BatchDeleteImageResult result = service.batchDeleteImage(
+                    repositoryName, List.of(new ImageIdentifier("v1", null)), null, REGION);
+
+            assertTrue(result.failures().isEmpty(), () -> "unexpected failures: " + result.failures());
+            assertEquals(1, result.imageIds().size());
+            assertEquals("v1", result.imageIds().get(0).getImageTag());
+            assertEquals(DELETE_DIGEST, result.imageIds().get(0).getImageDigest());
+            assertEquals(List.of(DELETE_DIGEST), registry.deletedManifests());
+            assertTrue(registry.putTags().isEmpty());
+            assertTrue(service.listImages(repositoryName, null, REGION, null, null).items().isEmpty());
+        }
+    }
+
+    @Test
+    void batchDeleteImageByDigestDeletesTheManifestAndAllItsTags() throws Exception {
+        String repositoryName = "batch-delete/by-digest";
+        String internal = ACCOUNT + "/" + REGION + "/" + repositoryName;
+        try (MultiTagRegistryServer registry = new MultiTagRegistryServer(
+                internal, DELETE_DIGEST, DELETE_MANIFEST, "release", "stable")) {
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+            EcrService.BatchDeleteImageResult result = service.batchDeleteImage(
+                    repositoryName, List.of(new ImageIdentifier(null, DELETE_DIGEST)), null, REGION);
+
+            assertTrue(result.failures().isEmpty(), () -> "unexpected failures: " + result.failures());
+            assertEquals(2, result.imageIds().size());
+            List<String> reportedTags = result.imageIds().stream().map(ImageIdentifier::getImageTag).toList();
+            assertTrue(reportedTags.contains("release"), "imageIds must report tag release");
+            assertTrue(reportedTags.contains("stable"), "imageIds must report tag stable");
+            for (ImageIdentifier id : result.imageIds()) {
+                assertEquals(DELETE_DIGEST, id.getImageDigest());
+            }
+            assertEquals(List.of(DELETE_DIGEST), registry.deletedManifests());
+            assertTrue(registry.tags().isEmpty());
+            assertTrue(service.listImages(repositoryName, null, REGION, null, null).items().isEmpty());
+        }
+    }
+
+    @Test
+    void batchDeleteImageReportsAnUnknownTagAsAnImageFailure() throws Exception {
+        String repositoryName = "batch-delete/unknown-tag";
+        String internal = ACCOUNT + "/" + REGION + "/" + repositoryName;
+        try (MultiTagRegistryServer registry = new MultiTagRegistryServer(
+                internal, DELETE_DIGEST, DELETE_MANIFEST, "release", "stable")) {
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+            EcrService.BatchDeleteImageResult result = service.batchDeleteImage(repositoryName,
+                    List.of(new ImageIdentifier("nope", null), new ImageIdentifier("release", null)),
+                    null, REGION);
+
+            assertEquals(1, result.imageIds().size());
+            assertEquals("release", result.imageIds().get(0).getImageTag());
+            assertEquals(1, result.failures().size());
+            assertEquals("nope", result.failures().get(0).getImageId().getImageTag());
+            assertEquals("ImageNotFound", result.failures().get(0).getFailureCode());
+            assertEquals(List.of("stable"), registry.tags());
+        }
+    }
+
+    @Test
+    void batchDeleteImageRefusesTheDeleteWhenTheTagListingFails() throws Exception {
+        String repositoryName = "batch-delete/listing-fails";
+        RegistryHttpClient http = Mockito.mock(RegistryHttpClient.class);
+        when(registryManager.httpClient()).thenReturn(http);
+        when(http.headManifestDigest(anyString(), anyString(), any())).thenReturn(DELETE_DIGEST);
+        when(http.listTagsStrict(anyString())).thenThrow(new ConnectException("Connection refused"));
+        service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+        EcrService.BatchDeleteImageResult result = service.batchDeleteImage(
+                repositoryName, List.of(new ImageIdentifier("release", null)), null, REGION);
+
+        assertTrue(result.imageIds().isEmpty());
+        assertEquals(1, result.failures().size());
+        assertEquals("ServerException", result.failures().get(0).getFailureCode());
+        verify(http, never()).deleteManifest(anyString(), anyString());
+    }
+
+    @Test
+    void batchDeleteByTagHoldsTheRepositoryWriteLockFromTheDeleteThroughTheRestore() throws Exception {
+        String repositoryName = "batch-delete/lock-held";
+        String internal = ACCOUNT + "/" + REGION + "/" + repositoryName;
+        CountDownLatch deleteArrived = new CountDownLatch(1);
+        CountDownLatch deleteMayProceed = new CountDownLatch(1);
+        CountDownLatch restoreArrived = new CountDownLatch(1);
+        CountDownLatch restoreMayProceed = new CountDownLatch(1);
+        try (PausableRegistryServer registry = new PausableRegistryServer(
+                internal, DELETE_DIGEST, DELETE_MANIFEST,
+                deleteArrived, deleteMayProceed, restoreArrived, restoreMayProceed, "release", "stable")) {
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                Future<EcrService.BatchDeleteImageResult> batch = executor.submit(
+                        () -> service.batchDeleteImage(
+                                repositoryName, List.of(new ImageIdentifier("release", null)), null, REGION));
+
+                assertTrue(deleteArrived.await(5, TimeUnit.SECONDS),
+                        "the shared manifest delete reached the registry");
+                assertTrue(repositoryWriteLockHeld(internal),
+                        "the delete must hold the repository write lock while the manifest is dropped");
+                deleteMayProceed.countDown();
+
+                assertTrue(restoreArrived.await(5, TimeUnit.SECONDS),
+                        "the surviving tag's manifest reached the registry again");
+                assertTrue(repositoryWriteLockHeld(internal),
+                        "the delete must hold the repository write lock while surviving tags are restored");
+                restoreMayProceed.countDown();
+
+                EcrService.BatchDeleteImageResult result = batch.get(5, TimeUnit.SECONDS);
+                assertTrue(result.failures().isEmpty(), () -> "unexpected failures: " + result.failures());
+                assertEquals(1, result.imageIds().size());
+                assertEquals("release", result.imageIds().get(0).getImageTag());
+                assertEquals(List.of("stable"), registry.putTags());
+                assertEquals(DELETE_DIGEST, registry.digestOf("stable"));
+
+                assertTrue(service.tryLockRepositoryWrites(internal),
+                        "the repository write lock must be free after the delete");
+                service.unlockRepositoryWrites(internal);
+            } finally {
+                deleteMayProceed.countDown();
+                restoreMayProceed.countDown();
+                executor.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    void putImageHoldsTheRepositoryWriteLockForItsManifestWrite() throws Exception {
+        String repositoryName = "put-image/lock-held";
+        String internal = ACCOUNT + "/" + REGION + "/" + repositoryName;
+        String replacement = DELETE_MANIFEST.replace("\"size\": 1", "\"size\": 2");
+        String replacementDigest = "sha256:" + Digests.sha256Hex(replacement.getBytes(StandardCharsets.UTF_8));
+        CountDownLatch putArrived = new CountDownLatch(1);
+        CountDownLatch putMayProceed = new CountDownLatch(1);
+        try (PausableRegistryServer registry = new PausableRegistryServer(
+                internal, DELETE_DIGEST, DELETE_MANIFEST, null, null, putArrived, putMayProceed, "v1")) {
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                Future<Image> push = executor.submit(
+                        () -> service.putImage(repositoryName, replacement, null, "v1", null, null, REGION));
+
+                assertTrue(putArrived.await(5, TimeUnit.SECONDS),
+                        "the replacement manifest reached the registry");
+                assertTrue(repositoryWriteLockHeld(internal),
+                        "PutImage must hold the repository write lock while it writes the manifest");
+                putMayProceed.countDown();
+
+                Image image = push.get(5, TimeUnit.SECONDS);
+                assertEquals(replacementDigest, image.getImageId().getImageDigest());
+                assertEquals(replacementDigest, registry.digestOf("v1"));
+
+                assertTrue(service.tryLockRepositoryWrites(internal),
+                        "the repository write lock must be free after the push");
+                service.unlockRepositoryWrites(internal);
+            } finally {
+                putMayProceed.countDown();
+                executor.shutdownNow();
+            }
+        }
+    }
+
+    @Test
+    void batchDeleteByTagHoldsTheRegistryManagerMonitorAcrossTheSwap() throws Exception {
+        String repositoryName = "batch-delete/monitor-held";
+        RegistryHttpClient http = Mockito.mock(RegistryHttpClient.class);
+        when(registryManager.httpClient()).thenReturn(http);
+        when(http.headManifestDigest(anyString(), anyString(), any())).thenReturn(DELETE_DIGEST);
+        when(http.headManifestDigestStrict(anyString(), anyString(), any())).thenReturn(DELETE_DIGEST);
+        when(http.listTagsStrict(anyString())).thenReturn(List.of("stable"));
+        when(http.getManifest(anyString(), anyString(), any())).thenReturn(new RegistryHttpClient.ManifestResult(
+                DELETE_DIGEST, DELETE_MANIFEST, "application/vnd.docker.distribution.manifest.v2+json"));
+        AtomicBoolean holdsAtDrop = new AtomicBoolean();
+        AtomicBoolean holdsAtRestore = new AtomicBoolean();
+        when(http.deleteManifest(anyString(), anyString())).thenAnswer(inv -> {
+            holdsAtDrop.set(Thread.holdsLock(registryManager));
+            return true;
+        });
+        when(http.putManifest(anyString(), anyString(), anyString(), any())).thenAnswer(inv -> {
+            holdsAtRestore.set(Thread.holdsLock(registryManager));
+            return DELETE_DIGEST;
+        });
+        service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+        EcrService.BatchDeleteImageResult result = service.batchDeleteImage(
+                repositoryName, List.of(new ImageIdentifier("release", null)), null, REGION);
+
+        assertTrue(result.failures().isEmpty(), () -> "unexpected failures: " + result.failures());
+        assertEquals(1, result.imageIds().size());
+        assertTrue(holdsAtDrop.get(),
+                "the drop must run under the registry manager's monitor, which /_floci/ecr/gc holds");
+        assertTrue(holdsAtRestore.get(),
+                "the restore must run under the same monitor hold the drop opened");
+    }
+
+    /** Probes the repository write lock without taking it: true when another writer holds it. */    private boolean repositoryWriteLockHeld(String storageRepositoryName) {
+        boolean acquired = service.tryLockRepositoryWrites(storageRepositoryName);
+        if (acquired) {
+            service.unlockRepositoryWrites(storageRepositoryName);
+        }
+        return !acquired;
+    }
+
+    @Test
+    void repositoryWriteLockEntriesAreCollectedOnceTheirWritersAreDone() {
+        String internal = ACCOUNT + "/" + REGION + "/write-locks/collected";
+        assertTrue(service.tryLockRepositoryWrites(internal));
+        assertEquals(1, service.liveRepositoryWriteLocks(), "a held lock keeps its entry");
+        service.unlockRepositoryWrites(internal);
+        assertEquals(0, service.liveRepositoryWriteLocks(),
+                "the entry is collected once its writer is done");
+
+        String missing = ACCOUNT + "/" + REGION + "/no-such/repository";
+        assertTrue(service.tryLockRepositoryWrites(missing),
+                "a registry write to a repository that does not exist takes the lock all the same");
+        service.unlockRepositoryWrites(missing);
+        assertEquals(0, service.liveRepositoryWriteLocks(),
+                "a missing repository's lock entry must not stay in memory");
+    }
+
+    /**
+     * A writer waiting on a held lock keeps the entry in the map, so a writer arriving later
+     * meets the same lock instance and stays mutual-excluded with it: were the entry removed
+     * at the release, the later writer would take a fresh instance while the waiter still
+     * queues on the old one, and both would believe they hold the repository's write lock.
+     */
+    @Test
+    void aWaitingWriterKeepsTheLockEntrySharedWithLaterArrivals() throws Exception {
+        String internal = ACCOUNT + "/" + REGION + "/write-locks/waiting";
+        assertTrue(service.tryLockRepositoryWrites(internal), "the test holds the lock first");
+
+        AtomicReference<Thread> waiterThread = new AtomicReference<>();
+        CountDownLatch waiterStarted = new CountDownLatch(1);
+        CountDownLatch waiterHeld = new CountDownLatch(1);
+        CountDownLatch waiterMayRelease = new CountDownLatch(1);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> waiter = executor.submit(() -> {
+                waiterThread.set(Thread.currentThread());
+                waiterStarted.countDown();
+                service.lockRepositoryWrites(internal);
+                waiterHeld.countDown();
+                waiterMayRelease.await();
+                service.unlockRepositoryWrites(internal);
+                return null;
+            });
+            assertTrue(waiterStarted.await(5, TimeUnit.SECONDS));
+            awaitParkedOnTheLock(waiterThread.get());
+
+            service.unlockRepositoryWrites(internal);
+            assertTrue(waiterHeld.await(5, TimeUnit.SECONDS),
+                    "the waiting writer takes the lock once the holder releases it");
+            assertFalse(service.tryLockRepositoryWrites(internal),
+                    "a later writer must be mutual-excluded by the writer waiting on the same entry");
+
+            waiterMayRelease.countDown();
+            waiter.get(5, TimeUnit.SECONDS);
+            assertTrue(service.tryLockRepositoryWrites(internal),
+                    "the lock is free again once its last writer is done");
+            service.unlockRepositoryWrites(internal);
+            assertEquals(0, service.liveRepositoryWriteLocks(),
+                    "the entry is collected once its last writer is done");
+        } finally {
+            waiterMayRelease.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void anInterruptedLockWaiterLeavesNoEntryBehind() throws Exception {
+        String internal = ACCOUNT + "/" + REGION + "/write-locks/interrupted";
+        service.lockRepositoryWrites(internal);
+
+        AtomicReference<Thread> waiterThread = new AtomicReference<>();
+        CountDownLatch waiterStarted = new CountDownLatch(1);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> waiter = executor.submit(() -> {
+                waiterThread.set(Thread.currentThread());
+                waiterStarted.countDown();
+                service.lockRepositoryWrites(internal);
+                return null;
+            });
+            assertTrue(waiterStarted.await(5, TimeUnit.SECONDS));
+            awaitParkedOnTheLock(waiterThread.get());
+
+            waiterThread.get().interrupt();
+            ExecutionException failed = assertThrows(ExecutionException.class,
+                    () -> waiter.get(5, TimeUnit.SECONDS),
+                    "the interrupted waiter fails instead of taking the lock");
+            assertEquals("ServerException", ((AwsException) failed.getCause()).getErrorCode());
+
+            service.unlockRepositoryWrites(internal);
+            assertEquals(0, service.liveRepositoryWriteLocks(),
+                    "the interrupted waiter's entry is collected once the holder is done");
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    /** Polls until the waiter is parked on the lock's semaphore, so it holds the entry. */
+    private static void awaitParkedOnTheLock(Thread waiter) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (waiter.getState() != Thread.State.WAITING) {
+            assertTrue(System.currentTimeMillis() < deadline,
+                    "the waiting writer never parked on the lock");
+            Thread.sleep(5);
+        }
+    }
+
     @Test
     void bareEntryClaimedByOtherAccountIsNotResolvedForThisScope() throws Exception {
         // Both accounts have metadata for the same repo name in the same region;
@@ -1319,6 +1734,289 @@ class EcrServiceTest {
             }
             exchange.sendResponseHeaders(404, -1);
             exchange.close();
+        }
+
+        private static void sendJson(HttpExchange exchange, int status, String body) throws IOException {
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            send(exchange, status, body);
+        }
+
+        private static void send(HttpExchange exchange, int status, String body) throws IOException {
+            byte[] bytes = body.getBytes();
+            exchange.sendResponseHeaders(status, bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
+            }
+        }
+
+        @Override
+        public void close() {
+            server.stop(0);
+        }
+    }
+
+    /** Registry fake holding several tags over one shared manifest, following registry:2's answers. */
+    private static final class MultiTagRegistryServer implements AutoCloseable {
+        private final HttpServer server;
+        private final String repository;
+        private final String digest;
+        private final String manifest;
+        private final List<String> tags = new ArrayList<>();
+        private final List<String> deletedManifests = new ArrayList<>();
+        private final List<String> putTags = new ArrayList<>();
+        private boolean manifestGone;
+
+        private MultiTagRegistryServer(String repository, String digest, String manifest, String... tags)
+                throws IOException {
+            this.repository = repository;
+            this.digest = digest;
+            this.manifest = manifest;
+            this.tags.addAll(List.of(tags));
+            this.server = HttpServer.create(new InetSocketAddress(0), 0);
+            this.server.createContext("/v2/", this::handle);
+            this.server.start();
+        }
+
+        private int port() {
+            return server.getAddress().getPort();
+        }
+
+        private List<String> tags() {
+            return List.copyOf(tags);
+        }
+
+        private List<String> deletedManifests() {
+            return List.copyOf(deletedManifests);
+        }
+
+        private List<String> putTags() {
+            return List.copyOf(putTags);
+        }
+
+        private void handle(HttpExchange exchange) throws IOException {
+            String path = exchange.getRequestURI().getPath();
+            String method = exchange.getRequestMethod();
+            if ("/v2/".equals(path) && "GET".equals(method)) {
+                send(exchange, 200, "");
+                return;
+            }
+            if ("/v2/_catalog".equals(path) && "GET".equals(method)) {
+                sendJson(exchange, 200, "{\"repositories\":[\"" + repository + "\"]}");
+                return;
+            }
+            String manifestsPrefix = "/v2/" + repository + "/manifests/";
+            if ((path.equals("/v2/" + repository + "/tags/list")) && "GET".equals(method)) {
+                String listed = tags.isEmpty()
+                        ? "null"
+                        : "[" + tags.stream().map(t -> "\"" + t + "\"")
+                                .reduce((a, b) -> a + "," + b).orElse("") + "]";
+                sendJson(exchange, 200, "{\"name\":\"" + repository + "\",\"tags\":" + listed + "}");
+                return;
+            }
+            if (path.startsWith(manifestsPrefix)) {
+                String reference = path.substring(manifestsPrefix.length());
+                if ("DELETE".equals(method)) {
+                    if (digest.equals(reference) && !manifestGone) {
+                        deletedManifests.add(reference);
+                        manifestGone = true;
+                        tags.clear();
+                        exchange.sendResponseHeaders(202, -1);
+                        exchange.close();
+                        return;
+                    }
+                    exchange.sendResponseHeaders(404, -1);
+                    exchange.close();
+                    return;
+                }
+                if ("PUT".equals(method)) {
+                    String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                    if (manifest.equals(body)) {
+                        if (manifestGone) {
+                            manifestGone = false;
+                        }
+                        if (!tags.contains(reference)) {
+                            tags.add(reference);
+                        }
+                        putTags.add(reference);
+                        exchange.getResponseHeaders().add("Docker-Content-Digest", digest);
+                        exchange.sendResponseHeaders(201, -1);
+                        exchange.close();
+                        return;
+                    }
+                    sendJson(exchange, 400, "{\"errors\":[{\"code\":\"DIGEST_INVALID\"}]}");
+                    return;
+                }
+                boolean byDigest = digest.equals(reference);
+                boolean byTag = !byDigest && tags.contains(reference);
+                if ((byDigest || byTag) && !manifestGone && ("GET".equals(method) || "HEAD".equals(method))) {
+                    exchange.getResponseHeaders().add("Docker-Content-Digest", digest);
+                    if ("HEAD".equals(method)) {
+                        exchange.sendResponseHeaders(200, -1);
+                        exchange.close();
+                        return;
+                    }
+                    exchange.getResponseHeaders().add("Content-Type",
+                            "application/vnd.docker.distribution.manifest.v2+json");
+                    send(exchange, 200, manifest);
+                    return;
+                }
+            }
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        }
+
+        private static void sendJson(HttpExchange exchange, int status, String body) throws IOException {
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            send(exchange, status, body);
+        }
+
+        private static void send(HttpExchange exchange, int status, String body) throws IOException {
+            byte[] bytes = body.getBytes();
+            exchange.sendResponseHeaders(status, bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
+            }
+        }
+
+        @Override
+        public void close() {
+            server.stop(0);
+        }
+    }
+
+    /**
+     * Registry fake over tags and manifests the way registry:2 holds them, which parks the
+     * digest delete and the manifest PUT of a test's choosing until the test lets them continue,
+     * so the test can observe what the service holds while a write is in flight.
+     */
+    private static final class PausableRegistryServer implements AutoCloseable {
+        private static final String MANIFEST_MEDIA_TYPE = "application/vnd.docker.distribution.manifest.v2+json";
+
+        private final HttpServer server;
+        private final String repository;
+        private final Map<String, String> manifests = new ConcurrentHashMap<>();
+        private final Map<String, String> mediaTypes = new ConcurrentHashMap<>();
+        private final Map<String, String> tags = new ConcurrentHashMap<>();
+        private final List<String> putTags = Collections.synchronizedList(new ArrayList<>());
+        private final CountDownLatch deleteArrived;
+        private final CountDownLatch deleteMayProceed;
+        private final CountDownLatch putArrived;
+        private final CountDownLatch putMayProceed;
+
+        private PausableRegistryServer(String repository, String digest, String manifest,
+                                       CountDownLatch deleteArrived, CountDownLatch deleteMayProceed,
+                                       CountDownLatch putArrived, CountDownLatch putMayProceed,
+                                       String... tags) throws IOException {
+            this.repository = repository;
+            this.deleteArrived = deleteArrived;
+            this.deleteMayProceed = deleteMayProceed;
+            this.putArrived = putArrived;
+            this.putMayProceed = putMayProceed;
+            this.manifests.put(digest, manifest);
+            this.mediaTypes.put(digest, MANIFEST_MEDIA_TYPE);
+            for (String tag : tags) {
+                this.tags.put(tag, digest);
+            }
+            this.server = HttpServer.create(new InetSocketAddress(0), 0);
+            this.server.createContext("/v2/", this::handle);
+            this.server.start();
+        }
+
+        private int port() {
+            return server.getAddress().getPort();
+        }
+
+        private List<String> putTags() {
+            synchronized (putTags) {
+                return List.copyOf(putTags);
+            }
+        }
+
+        private String digestOf(String tag) {
+            return tags.get(tag);
+        }
+
+        private void handle(HttpExchange exchange) throws IOException {
+            String path = exchange.getRequestURI().getPath();
+            String method = exchange.getRequestMethod();
+            if ("/v2/".equals(path) && "GET".equals(method)) {
+                send(exchange, 200, "");
+                return;
+            }
+            if ("/v2/_catalog".equals(path) && "GET".equals(method)) {
+                sendJson(exchange, 200, "{\"repositories\":[\"" + repository + "\"]}");
+                return;
+            }
+            String manifestsPrefix = "/v2/" + repository + "/manifests/";
+            if (path.equals("/v2/" + repository + "/tags/list") && "GET".equals(method)) {
+                String listed = tags.isEmpty()
+                        ? "null"
+                        : "[" + tags.keySet().stream().map(t -> "\"" + t + "\"")
+                                .reduce((a, b) -> a + "," + b).orElse("") + "]";
+                sendJson(exchange, 200, "{\"name\":\"" + repository + "\",\"tags\":" + listed + "}");
+                return;
+            }
+            if (path.startsWith(manifestsPrefix)) {
+                String reference = path.substring(manifestsPrefix.length());
+                if ("DELETE".equals(method)) {
+                    park(deleteArrived, deleteMayProceed);
+                    if (manifests.remove(reference) == null) {
+                        exchange.sendResponseHeaders(404, -1);
+                        exchange.close();
+                        return;
+                    }
+                    tags.values().removeAll(List.of(reference));
+                    exchange.sendResponseHeaders(202, -1);
+                    exchange.close();
+                    return;
+                }
+                if ("PUT".equals(method)) {
+                    String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
+                    park(putArrived, putMayProceed);
+                    String digest = "sha256:" + Digests.sha256Hex(body.getBytes(StandardCharsets.UTF_8));
+                    manifests.put(digest, body);
+                    String mediaType = exchange.getRequestHeaders().getFirst("Content-Type");
+                    mediaTypes.put(digest, mediaType == null ? MANIFEST_MEDIA_TYPE : mediaType);
+                    if (!digest.equals(reference)) {
+                        tags.put(reference, digest);
+                        putTags.add(reference);
+                    }
+                    exchange.getResponseHeaders().add("Docker-Content-Digest", digest);
+                    exchange.sendResponseHeaders(201, -1);
+                    exchange.close();
+                    return;
+                }
+                String digest = tags.containsKey(reference) ? tags.get(reference) : reference;
+                if (manifests.containsKey(digest) && ("GET".equals(method) || "HEAD".equals(method))) {
+                    exchange.getResponseHeaders().add("Docker-Content-Digest", digest);
+                    if ("HEAD".equals(method)) {
+                        exchange.sendResponseHeaders(200, -1);
+                        exchange.close();
+                        return;
+                    }
+                    exchange.getResponseHeaders().add("Content-Type",
+                            mediaTypes.getOrDefault(digest, MANIFEST_MEDIA_TYPE));
+                    send(exchange, 200, manifests.get(digest));
+                    return;
+                }
+            }
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        }
+
+        private void park(CountDownLatch arrived, CountDownLatch mayProceed) throws IOException {
+            if (arrived == null || mayProceed == null) {
+                return;
+            }
+            arrived.countDown();
+            try {
+                if (!mayProceed.await(30, TimeUnit.SECONDS)) {
+                    throw new IOException("parked registry write was never continued");
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("parked registry write was interrupted", e);
+            }
         }
 
         private static void sendJson(HttpExchange exchange, int status, String body) throws IOException {

@@ -201,7 +201,7 @@ public class LambdaMicrovmsService {
      * ids/names through — CloudFormation physical ids stay name-based.
      */
     private static String unwrap(String identifier) {
-        if (identifier != null && identifier.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(identifier)) {
             return identifier.substring(identifier.lastIndexOf(':') + 1);
         }
         return identifier;

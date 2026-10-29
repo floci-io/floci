@@ -150,9 +150,14 @@ class RequestResourceMembersTest {
         assertEquals(List.of(new Resource(List.of("thing"), new Member("A", true, new Member("ThingArns", true)), Map.of(),
                 Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of(), false)), parseUnchecked(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].ThingArns[]\"}"))
                 .operations().get("a:Op"));
-        // An ARN read before more than one character.
+        // A member read before more than one character, holding an ARN or filling a variable.
         assertThrows(IllegalStateException.class, () -> parse(document(formats,
                 "{\"types\":[\"thing\"],\"arn\":\"ThingArn\",\"before\":\"##\"}")));
+        assertThrows(IllegalStateException.class, () -> parse(document(formats,
+                "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Id\"},\"before\":\"##\"}")));
+        // A member filling a variable read up to a character, as a CodeBuild build id names its project.
+        assertEquals(":", parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Id\"},"
+                + "\"before\":\":\"}")).operations().get("a:Op").getFirst().before());
         // An account from a list, or for a type whose format has no account.
         assertThrows(IllegalStateException.class, () -> parse(document(formats,
                 "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},\"account\":\"Ids[]\"}")));

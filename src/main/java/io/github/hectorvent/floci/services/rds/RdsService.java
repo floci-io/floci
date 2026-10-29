@@ -1713,11 +1713,11 @@ public class RdsService implements Resettable, ResourceProvider {
         String sourceId = sourceRef;
         if (AwsArnUtils.looksLikeArn(sourceRef)) {
             // A source in another Region is named by ARN; the replica lands in the request Region.
-            String[] parts = sourceRef.split(":", 7);
-            if (parts.length == 7 && "rds".equals(parts[2]) && "db".equals(parts[5])
-                    && accountId.equals(parts[4])) {
-                region = parts[3].isBlank() ? requestRegion : parts[3];
-                sourceId = parts[6];
+            AwsArnUtils.Arn arn = AwsArnUtils.isArn(sourceRef) ? AwsArnUtils.parse(sourceRef) : null;
+            if (arn != null && "rds".equals(arn.service()) && arn.resource().startsWith("db:")
+                    && accountId.equals(arn.accountId())) {
+                region = arn.region().isBlank() ? requestRegion : arn.region();
+                sourceId = arn.resource().substring("db:".length());
             } else {
                 throw new AwsException("DBInstanceNotFound",
                         "DB instance " + sourceRef + " not found.", 404);

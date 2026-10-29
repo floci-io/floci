@@ -24,7 +24,7 @@
 | `ListImages` | Enumerate paginated tags and digests in a repository |
 | `DescribeImages` | Image metadata: digest, size, push timestamp, manifest media type |
 | `BatchGetImage` | Fetch image manifests, honoring `acceptedMediaTypes` |
-| `BatchDeleteImage` | Delete images by tag or digest |
+| `BatchDeleteImage` | Delete images by tag or digest; a tag delete removes only that tag |
 | `PutImage` | Write an image manifest under a tag, or under its digest, into the backing registry |
 | `BatchCheckLayerAvailability` | Report which layers a repository holds, with their sizes |
 | `GetDownloadUrlForLayer` | Return the layer's address on Floci's registry endpoint |
@@ -40,6 +40,16 @@
 | `PutRegistryPolicy` / `GetRegistryPolicy` / `DeleteRegistryPolicy` | Registry policy round-trip (stored, not enforced) |
 | `PutReplicationConfiguration` / `DescribeRegistry` | Store the registry's replication rules and return them with the registry ID (stored, not acted on) |
 | `PutRegistryScanningConfiguration` / `GetRegistryScanningConfiguration` | Store the registry's scan type and scanning rules (stored, not acted on) |
+| `GetAccountSetting` / `PutAccountSetting` | Read and store account settings for the registry (stored, not acted on) |
+
+`GetAccountSetting` and `PutAccountSetting` keep values per account and Region.
+Supported names are `BASIC_SCAN_TYPE_VERSION` (`AWS_NATIVE`), `REGISTRY_POLICY_SCOPE`
+(`V2`), and `BLOB_MOUNTING` (`ENABLED` or `DISABLED`). Floci defaults to `AWS_NATIVE`,
+`V2`, and `DISABLED`, respectively. Unsupported setting names and values return
+`ValidationException`. Requests are checked against the vendored ECR model: missing
+or non-string members and names outside 1-64 characters return `InvalidParameterException`.
+These settings are metadata only: they do not start scanning, enforce registry policies,
+or change the registry's blob upload behavior.
 
 `ListImages` accepts `maxResults` from 1 to 1000 (default 100) and returns `nextToken`
 when another page remains. Tokens are scoped to the region, registry, and repository;
@@ -66,6 +76,7 @@ the optional `filter` fields.
   - Upload sessions live in memory: a restart ends them, and one left idle for a day is dropped.
   - `GetDownloadUrlForLayer` returns `<scheme>://<repository URI host>/v2/<repo>/blobs/<digest>`, served by Floci's registry endpoint without credentials, in place of AWS's pre-signed S3 URL.
   - `BatchCheckLayerAvailability` lists held layers as `AVAILABLE`, and a layer the repository does not hold under `failures` as `MissingLayerDigest`.
+- **Image deletion.** `BatchDeleteImage` follows the AWS rules. Deleting by `imageTag` removes only that tag: when other tags reference the same manifest they keep serving the shared digest, so `docker pull`, `batch-get-image` and `describe-images` by a surviving tag still find the image. The manifest is deleted once the last tag referencing it goes. Deleting by `imageDigest` removes the image together with all of its tags, and the response reports one `imageIds` entry per removed tag, as the API reference's example does. Unknown tags come back per entry under `failures` as `ImageNotFound`. A manifest write to the repository, a `docker push`, a `crane delete` or a `PutImage`, is coordinated with the delete that rewrites a shared manifest under its surviving tags, so a push that arrives during the delete is never overwritten by the restore; it waits and lands after it.
 - **Authorization.** `GetAuthorizationToken` returns `Base64("AWS:floci")` plus a proxy endpoint. The backing `registry:2` runs without auth, so any `aws ecr get-login-password | docker login` succeeds.
 - **Pull through cache rule configuration.** Pull-through cache rule actions persist AWS-compatible rule metadata with account and Region isolation. `UpdatePullThroughCacheRule` preserves fields omitted by the request and refreshes `updatedAt`. `ValidatePullThroughCacheRule` checks that the rule exists and reports it as valid; Floci does not contact the upstream registry or validate credentials. Rules do not proxy or cache images from the configured upstream registry.
 - **Registry settings.** The registry policy, replication configuration and scanning configuration are kept per account and Region and returned as written. Floci does not replicate or scan images, or evaluate the registry policy.
@@ -295,6 +306,6 @@ does not resolve container names, which Floci uses to reach the registry. Create
 `FLOCI_SERVICES_ECR_DOCKER_NETWORK=floci-net` if selecting the registry network explicitly.
 See [Docker's bridge network documentation](https://docs.docker.com/engine/network/drivers/bridge/).
 
-**Disk not reclaimed after deleting images.** `BatchDeleteImage` removes manifests but blobs remain on disk until garbage collection runs. Trigger it with `curl -X POST http://localhost:4566/_floci/ecr/gc`. The endpoint runs `registry garbage-collect` inside the backing container and returns the reclaimed blob list. The operation is serialized — ECR API calls block for its duration (typically a few seconds).
+**Disk not reclaimed after deleting images.** Deleting the last tag of an image, or deleting by digest, removes its manifest, but blobs remain on disk until garbage collection runs. Trigger it with `curl -X POST http://localhost:4566/_floci/ecr/gc`. The endpoint runs `registry garbage-collect` inside the backing container and returns the reclaimed blob list. The operation is serialized: ECR API calls block for its duration (typically a few seconds).
 
 **`*.localhost` does not resolve to loopback on this platform.** Set `floci.services.ecr.uri-style: path` to fall back to `localhost:<port>/<account>/<region>/<repo>` URIs.

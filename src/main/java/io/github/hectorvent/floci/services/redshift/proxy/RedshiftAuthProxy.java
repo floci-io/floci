@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.proxy;
 
+import io.github.hectorvent.floci.core.common.ListenBacklog;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.rds.proxy.PostgresProtocolHandler;
@@ -154,17 +155,10 @@ public class RedshiftAuthProxy {
     private ServerSocket bindListener(int proxyPort) throws IOException {
         BindException lastFailure = null;
         for (int attempt = 0; attempt < 40; attempt++) {
-            ServerSocket socket = new ServerSocket();
             try {
-                socket.setReuseAddress(true);
-                socket.bind(new InetSocketAddress(proxyPort));
-                return socket;
+                return listenSocket(proxyPort, ListenBacklog.ACCEPT);
             } catch (BindException e) {
-                closeQuietly(socket);
                 lastFailure = e;
-            } catch (IOException e) {
-                closeQuietly(socket);
-                throw e;
             }
             try {
                 Thread.sleep(25);
@@ -174,6 +168,14 @@ public class RedshiftAuthProxy {
             }
         }
         throw lastFailure;
+    }
+
+    /**
+     * Binds one listener attempt. A seam so a test can pin the accept backlog: a bound
+     * {@code ServerSocket} does not report the backlog it was created with.
+     */
+    ServerSocket listenSocket(int proxyPort, int backlog) throws IOException {
+        return ListenBacklog.acceptSocket(proxyPort, backlog);
     }
 
     private static void closeQuietly(ServerSocket s) {

@@ -27,6 +27,7 @@ import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -349,7 +350,21 @@ public class EmrServerlessService {
 
     /** Whether the application exists and has not been deleted, which leaves it TERMINATED. */
     public synchronized boolean isLive(String applicationId) {
-        return storage.get(applicationId).filter(app -> !"TERMINATED".equals(app.getState())).isPresent();
+        return live(applicationId).isPresent();
+    }
+
+    /**
+     * Runs {@code use} on the application when it exists and has not been deleted, under this service's
+     * lock, so that it cannot be deleted meanwhile, as with {@link #admitJobRun}; returns whether it ran.
+     */
+    public synchronized boolean whileLive(String applicationId, Consumer<Application> use) {
+        Optional<Application> app = live(applicationId);
+        app.ifPresent(use);
+        return app.isPresent();
+    }
+
+    private Optional<Application> live(String applicationId) {
+        return storage.get(applicationId).filter(app -> !"TERMINATED".equals(app.getState()));
     }
 
     static AwsException resourceNotFound(String arn) {

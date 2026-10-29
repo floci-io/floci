@@ -249,13 +249,16 @@ public final class RequestResources {
 
     /**
      * The ARNs of a type the request names through the variables it fills: one for each value of a list member,
-     * none when it gives none of them. A value that is itself an ARN of the type names that resource. They are in
-     * the account the resource's account member gives, which its handler acts in, and none when that member holds
-     * no account id; in the request's without one, or with a JSON null for it. An ARN given for a name puts the
+     * none when it gives none of them. A value that is itself an ARN of the type names that resource, and the others
+     * in the same list their own, as a handler taking a name or an ARN for each reads them (CodeBuild's
+     * {@code BatchGetProjects}). They are in the account the resource's account member gives, which its handler
+     * acts in, and none when that member holds no account id; in the request's without one, or with a JSON null for
+     * it. An ARN given for a name puts the
      * resource in that ARN's account and Region, the caller's and the request's where it leaves them empty, as its
      * handler then acts on the caller's resource of that name, and it is named as an ARN the request gives is; for
      * a member naming one resource for each of a list's structures, each in the account and Region of the ARN its
-     * structure gives, the request's for a name (a {@code PutEvents} entry, on the bus it names). A type
+     * structure gives, the request's for a name (a {@code PutEvents} entry, on the bus it names). Each value is read
+     * up to the resource's {@code before} character, when it has one (a CodeBuild build id's project). A type
      * whose service mints an id after its name is the caller's resource {@code stored} finds under that name, or
      * else has that id open.
      */
@@ -276,16 +279,21 @@ public final class RequestResources {
         List<Filling> fillings = new ArrayList<>(List.of(new Filling(resource.fixed(), fromRequest)));
         boolean given = false;
         for (Map.Entry<String, RequestResourceMembers.Member> variable : resource.fill().entrySet()) {
-            List<String> values = read(resource, form, body, variable.getValue());
+            List<String> values = read(resource, form, body, variable.getValue()).stream()
+                    .map(value -> before(value, resource.before())).toList();
             if (values.isEmpty()) {
                 continue;
             }
             given = true;
             RequestResourceMembers.ArnFormat named = arnOf(resource, variable.getValue().path(), formats);
-            if (resource.fill().size() == 1 && fromRequest == null && values.stream().allMatch(value ->
-                    !isArnOf(named, value) && format.pattern().matcher(value).matches())) {
-                values.forEach(value -> addNamed(arns, format.checked(value), partition, region, accountId));
-                return;
+            if (resource.fill().size() == 1 && fromRequest == null) {
+                List<String> asArns = values.stream()
+                        .filter(value -> !isArnOf(named, value) && format.pattern().matcher(value).matches()).toList();
+                asArns.forEach(value -> addNamed(arns, format.checked(value), partition, region, accountId));
+                values = values.stream().filter(value -> !asArns.contains(value)).toList();
+                if (values.isEmpty()) {
+                    return;
+                }
             }
             List<Filling> next = new ArrayList<>();
             for (Filling filling : fillings) {

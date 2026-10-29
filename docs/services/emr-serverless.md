@@ -87,11 +87,19 @@ runner mode a Spark run executes; see [Running Spark job runs](#running-spark-jo
   state in the order the filter names them. A state or mode that does not exist, or more than 8
   states, is refused with `ValidationException`. An unknown application has no runs. A `nextToken`
   resumes only the listing it came from, with the same application and filters.
-* **Attempts**: no run is retried, and in the `immediate` mode none fails: every run is a single attempt,
-  number 1. `GetJobRun`, `ListJobRuns` and `ListJobRunAttempts` report it, with the run's own
-  creation and update times. `GetJobRun` with `attempt` 1, or without one, returns the run; an
-  `attempt` of 2 or more answers `ResourceNotFoundException`, and one below 1 or not an integer
-  `ValidationException`.
+* **Attempts**: a run starts as attempt 1, and in the `immediate` mode, where none fails, it stays its
+  only one. In the `docker` mode a run whose driver fails is tried again on release 7.1.0 or later, as
+  the user guide's "Job resiliency" gives it: a `BATCH` run until it has made `retryPolicy.maxAttempts`
+  attempts (1 by default, no retry), and a `STREAMING` run until it has failed
+  `maxFailedAttemptsPerHour` times within an hour (5 by default). Either outside 1 to 10, the user
+  guide's "Accepted values", is refused with `ValidationException`, and either not an integer with
+  `SerializationException`. Each new attempt is `SCHEDULED` again
+  and runs its driver from the beginning; a cancelled run, one past its timeout, and one Floci's own
+  shutdown stopped are not tried again. `GetJobRun` without `attempt` returns the latest attempt, with
+  `attempt` an earlier one as it ended (`FAILED`, with its `stateDetails`), and an attempt the run never
+  made answers `ResourceNotFoundException`; one below 1 or not an integer is `ValidationException`.
+  `ListJobRunAttempts` lists every attempt, oldest first, each with its own creation and update times.
+  No source says whether a run's timeout spans its attempts; Floci applies it to each.
 * `createdBy` is the caller's ARN, as `GetCallerIdentity` reports it. `releaseLabel` and
   `networkConfiguration` come from the application.
 
@@ -131,15 +139,15 @@ publishes for customizing EMR Serverless images (`public.ecr.aws/emr-serverless/
 * **Output**: the driver's output goes to Floci's log, prefixed `emr-serverless:<jobRunId>`. With an S3
   log destination, the run's `s3MonitoringConfiguration` or else the application's, its standard output
   and error also go to Floci's S3 once the run ends, gzipped, as `stdout.gz` and `stderr.gz` under
-  `<logUri>/applications/<applicationId>/jobs/<jobRunId>/SPARK_DRIVER/`, with `attempts/1/` before
+  `<logUri>/applications/<applicationId>/jobs/<jobRunId>/SPARK_DRIVER/`, with `attempts/<n>/` before
   `SPARK_DRIVER/` for a `STREAMING` run, or a `BATCH` run whose `retryPolicy` allows more than one
-  attempt, on release 7.1.0 or later. A cancelled run's logs hold what its driver wrote until it was
+  attempt, on release 7.1.0 or later, each attempt's logs under its own number. A cancelled run's logs hold what its driver wrote until it was
   stopped. Logs that cannot be written, to a bucket that does not exist say, leave the run as it
   ended.
 * **CloudWatch Logs**: with CloudWatch logging enabled, the run's `cloudWatchLoggingConfiguration` or
   else the application's (`"enabled": false` at the run turns it off), the driver's standard output and
   error go line by line, while it runs, to the log streams `<prefix>/applications/<applicationId>/jobs/<jobRunId>/SPARK_DRIVER/stdout`
-  and `.../stderr` in Floci's CloudWatch Logs, with `attempts/1/` before `SPARK_DRIVER` as for S3. The log
+  and `.../stderr` in Floci's CloudWatch Logs, with `attempts/<n>/` before `SPARK_DRIVER` as for S3. The log
   group is `logGroupName`, `/aws/emr-serverless` by default, and `<prefix>` the `logStreamNamePrefix`, if
   any; both are created as needed, in the run's account and Region. A `logTypes` sends only the driver's
   types it names, and none of the driver's output when it names only `SPARK_EXECUTOR`.
@@ -151,6 +159,6 @@ publishes for customizing EMR Serverless images (`public.ecr.aws/emr-serverless/
 * **Jobs do not execute by default**: in the `immediate` runner mode `StartJobRun` records a job run and moves it through its states, but nothing runs. In the `docker` mode a Spark run executes in local mode in one container, so worker counts and sizes, initial and maximum capacity are not applied; a Hive run is `FAILED` without running, in Floci's own wording, as is a driver's failure. Of the monitoring configuration, the S3 log destination gets the driver's `stdout.gz` and `stderr.gz` once a run ends (no event logs, rotated files or uploads while it runs), and CloudWatch Logs the driver's output while it runs (there are no executor logs, local mode having no executors, and `encryptionKeyArn` is ignored), and Floci's CA is not in the job's Java truststore, so a job reaches Floci over its HTTP endpoint only.
 * **Unsourced errors**: AWS documents neither the error for a run submitted to an application whose auto-start is off nor the one for a run on a terminated application; Floci answers both with `ValidationException`. The same holds for a `BATCH` timeout outside 1 to 10080 minutes on `emr-7.11.0` or later (`ValidationException`) and for `GetJobRun` naming an attempt a run never made (`ResourceNotFoundException`), both in Floci's own wording. A run needs a `jobDriver`, as every `JobRun` carries one, and `jobDriver` is a union, so a run without a driver, or with one that sets both `sparkSubmit` and `hive` or neither, is refused with `ValidationException` too, in Floci's own wording.
 * **StopApplication with running jobs**: AWS requires running jobs to finish or be cancelled before an application stops. Floci does not enforce it; with the default duration of `0` no `BATCH` run is ever running.
-* **Not emulated**: retries (`retryPolicy` is stored and returned, but no run is retried), queuing (`QUEUED`), `totalResourceUtilization` and `billedResourceUtilization`, and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).
+* **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, queuing (`QUEUED`), `totalResourceUtilization` and `billedResourceUtilization`, and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).
 * **Instant Start/Stop**: Floci marks the application `STARTED` or `STOPPED` immediately without provisioning actual compute capacity in the background.
 * **Data Plane**: Floci does not implement the data-plane API, such as interactive sessions.

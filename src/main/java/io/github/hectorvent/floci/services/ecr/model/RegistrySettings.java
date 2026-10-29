@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ecr.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * A registry's own settings, one record per account and Region: the registry policy, the
@@ -32,6 +33,7 @@ public class RegistrySettings {
     private List<ReplicationRule> replicationRules;
     private String scanType;
     private List<ScanningRule> scanningRules;
+    private Map<String, String> accountSettings;
 
     public RegistrySettings() {}
 
@@ -46,4 +48,7 @@ public class RegistrySettings {
 
     public List<ScanningRule> getScanningRules() { return scanningRules; }
     public void setScanningRules(List<ScanningRule> scanningRules) { this.scanningRules = scanningRules; }
+
+    public Map<String, String> getAccountSettings() { return accountSettings; }
+    public void setAccountSettings(Map<String, String> accountSettings) { this.accountSettings = accountSettings; }
 }

@@ -1527,7 +1527,8 @@ A request is checked against the resources it names. Floci builds their ARNs its
 SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge Scheduler, EventBridge
 Pipes, Aurora DSQL, EKS, CloudWatch Logs, Secrets Manager and STS. For Elastic Load Balancing, ECR,
 Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
-Map, ACM and CodePipeline they come from a table generated from AWS's Service
+Map, ACM, CodePipeline, CodeBuild and Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2)
+they come from a table generated from AWS's Service
 Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
@@ -1557,7 +1558,9 @@ connects to by `webhook.targetPipeline`. A CodePipeline webhook is `webhook:<nam
 gives it, and a custom action type `actiontype:Custom/<category>/<provider>/<version>`, its owner
 being `Custom`, which the request does not give. Cloud Map's `CreateService` is checked on the
 namespace its `NamespaceId` names or, when it gives none or a JSON null, the one its
-`DnsConfig.NamespaceId` names, as Cloud Map reads them, and on the service it creates. An EventBridge rule is on the event bus
+`DnsConfig.NamespaceId` names, as Cloud Map reads them, and on the service it creates. A CodeBuild build is checked on its
+project, which its id names before its `:` (`<project>:<id>`), as CodeBuild authorizes
+`BatchGetBuilds`, `StopBuild`, `RetryBuild` and `BatchDeleteBuilds`. An EventBridge rule is on the event bus
 its request's `EventBusName` names, by name or by ARN, and on the default bus when it names none
 or gives a null, whose rules are `rule/<name>`, with no bus; a bus ARN of another account, the
 default bus's included, names that account's rule, checked as given and as the caller's own, which
@@ -2313,10 +2316,15 @@ floci populates:
   - `iam:OrganizationsPolicyId` from `OrganizationsPolicyId` on
     `GenerateOrganizationsAccessReport`.
 
+  The table's `fromTarget` entries read `iam:PermissionsBoundary` from the role or user the
+  request names in `RoleName` or `UserName`: its stored boundary, on the 15 actions on an
+  existing role or user, such as `AttachRolePolicy`, `PutUserPolicy`, `GetRole` and
+  `DeleteRolePermissionsBoundary`. A role or user without a boundary, or one that does not
+  exist, carries no value for the key.
+
   A request without the parameter carries no value for the key, and the target remains the
   authorized resource. Every other pair the reference lists is in the table's `notRead` with
-  its reason, such as the actions where `iam:PermissionsBoundary` is the target's current
-  boundary. Regenerate with `make iam-condition-keys-sync`.
+  its reason. Regenerate with `make iam-condition-keys-sync`.
 - `s3:prefix`, `s3:delimiter`, `s3:max-keys`: from the S3 request parameters.
 - `aws:RequestTag/<key>`: the tags named in the request itself, before they are applied, for
   `ec2:RunInstances` (`TagSpecification.N`), `ec2:CreateTags` (`Tag.N`) and
@@ -2427,6 +2435,15 @@ floci populates:
   when they are requested together; `NONE` plus `ALL_OLD` needs only `ALL_OLD`. Omitted or
   null parameters use the execution default. Read and batch operations do not acquire this
   key from unrelated fields. Transaction failure-image context is described below.
+- `lambda:Request/WebFunctionAuthType`: the `authType` a `CreateWebFunction`,
+  `CreateWebFunctionEndpoint` or `UpdateWebFunctionEndpoint` request names, absent from an update
+  that names none. `lambda:Resource/WebFunctionAuthType`: the endpoint's `authType` before the
+  request, for `GetWebFunctionEndpoint`, `UpdateWebFunctionEndpoint` and
+  `DeleteWebFunctionEndpoint`, absent when the endpoint does not exist, as on AWS. An
+  `IamAuth` endpoint request carries it too (see [Lambda Web Functions](lambda-web-functions.md)).
+  The actions and request members come from `lambda-web-condition-keys.json`, which
+  `tools/aws/regen_lambda_web_condition_keys.py` generates from the Service Reference and pinned
+  botocore. Regenerate with `make lambda-web-condition-keys-sync`.
 
 **Any other condition key is absent from the request context.** A positive scalar operator
 without `IfExists` on an absent key makes the whole statement *not apply*: it neither matches nor

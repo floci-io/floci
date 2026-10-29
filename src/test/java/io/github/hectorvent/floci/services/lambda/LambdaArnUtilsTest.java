@@ -57,6 +57,20 @@ class LambdaArnUtilsTest {
         assertEquals(emptyToNull(expectedAccount), ref.account());
     }
 
+    @Test
+    void resolveNamespacedFunctionNameUsesTheAttachmentTargetAcrossPrefixes() {
+        LambdaArnUtils.ResolvedFunctionRef namespaced =
+                LambdaArnUtils.resolveNamespacedFunctionName("function:protected:$LATEST");
+        assertEquals("protected", namespaced.name());
+        assertEquals("$LATEST", namespaced.qualifier());
+
+        LambdaArnUtils.ResolvedFunctionRef partial =
+                LambdaArnUtils.resolveNamespacedFunctionName("us-east-1:111111111111:protected");
+        assertEquals("protected", partial.name());
+        assertEquals("us-east-1", partial.region());
+        assertEquals("111111111111", partial.account());
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {
             "",

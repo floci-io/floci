@@ -227,22 +227,6 @@ public class LambdaController {
         return Response.noContent().build();
     }
 
-    // ──────────────────────────── GetFunctionCodeSigningConfig ────────────────────────────
-
-    @GET
-    @Path("/functions/{functionName}/code-signing-config")
-    public Response getFunctionCodeSigningConfig(@Context HttpHeaders headers,
-                                                  @PathParam("functionName") String functionName) {
-        String region = regionResolver.resolveRegion(headers);
-        // Verify the function exists
-        lambdaService.getFunction(region, functionName);
-        // Return empty code signing config — floci does not enforce code signing
-        ObjectNode root = objectMapper.createObjectNode();
-        root.put("CodeSigningConfigArn", "");
-        root.put("FunctionName", functionName);
-        return Response.ok(root).build();
-    }
-
     // ──────────────────────────── Invoke ────────────────────────────
 
     private static final int SYNC_REQUEST_LIMIT  = 6 * 1024 * 1024;
@@ -905,11 +889,7 @@ public class LambdaController {
     }
 
     private String runtimeVersionArn(LambdaFunction fn) {
-        String region = regionResolver.getDefaultRegion();
-        String[] arnParts = fn.getFunctionArn() != null ? fn.getFunctionArn().split(":") : new String[0];
-        if (arnParts.length > 3 && !arnParts[3].isBlank()) {
-            region = arnParts[3];
-        }
+        String region = AwsArnUtils.regionOrDefault(fn.getFunctionArn(), regionResolver.getDefaultRegion());
         return AwsArnUtils.Arn.of("lambda", region, "", "runtime:" + runtimeVersionId(fn.getRuntime())).toString();
     }
 

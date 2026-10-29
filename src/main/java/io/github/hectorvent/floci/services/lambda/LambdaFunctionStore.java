@@ -146,6 +146,18 @@ public class LambdaFunctionStore implements Resettable {
         return backend.scan(key -> key.startsWith(prefix) && key.endsWith("::$LATEST"));
     }
 
+    /** Lists the caller's {@code $LATEST} functions without relying on request context. */
+    public List<LambdaFunction> listForAccount(String accountId, String region) {
+        String prefix = "lambda::" + region + "::";
+        if (backend instanceof AccountAwareStorageBackend<LambdaFunction> aware) {
+            return aware.scanForAccount(accountId,
+                    key -> key.startsWith(prefix) && key.endsWith("::$LATEST"));
+        }
+        return list(region).stream()
+                .filter(function -> belongsToAccount(function, accountId))
+                .toList();
+    }
+
     public List<LambdaFunction> listVersions(String region, String functionName) {
         String prefix = "lambda::" + region + "::" + functionName + "::";
         List<LambdaFunction> versions = new ArrayList<>(backend.scan(key -> key.startsWith(prefix)));

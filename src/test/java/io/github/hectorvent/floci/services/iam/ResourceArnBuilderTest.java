@@ -1654,6 +1654,14 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void lambdaCodeSigningUsesTheNamespacedFunctionTarget() {
+        when(uriInfo.getPath()).thenReturn(
+                "/2020-06-30/functions/function:protected/code-signing-config");
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:protected",
+                builder.build("lambda", ctx, "us-east-1", ACCOUNT));
+    }
+
+    @Test
     void lambdaInvokeKeepsTheQualifierItRuns() {
         when(uriInfo.getPath()).thenReturn(
                 "/2015-03-31/functions/arn:aws:lambda:us-east-1:111122223333:function:my-function:live/invocations");

@@ -579,6 +579,7 @@ class RedshiftServiceTest {
     private SecretsManagerService secretsManagerService;
     private RedshiftEventService events;
     private final Set<String> existingStreams = new HashSet<>();
+    private RedshiftIntegrationEventPublisher integrationEvents;
     private RedshiftService service;
 
     @BeforeEach
@@ -642,9 +643,113 @@ class RedshiftServiceTest {
                     Map.of());
         };
 
+        integrationEvents = mock(RedshiftIntegrationEventPublisher.class);
         service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver,
                 credentialBroker, secretsManagerService, mapper,
-                new DynamoDbApiStreamReader(streams, CheckpointLifetime.PROCESS), null, events);
+                new DynamoDbApiStreamReader(streams, CheckpointLifetime.PROCESS), null, events, integrationEvents);
+    }
+
+    @Test
+    void createIntegrationQueuesSynchronizingAndPublishesAfterTheChange() {
+        String streamArn = "arn:aws:dynamodb:us-east-1:111111111111:table/orders/stream/2026-09-18T00:00:00.000";
+        existingStreams.add(streamArn);
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("warehouse");
+        when(clusterBackend.get("warehouse")).thenReturn(Optional.of(cluster));
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        Integration integration = service.createIntegration("orders-to-warehouse", streamArn,
+                "arn:aws:redshift:us-east-1:111111111111:cluster:warehouse", null, null, Map.of(), Map.of(),
+                "us-east-1");
+
+        InOrder order = inOrder(integrationEvents);
+        order.verify(integrationEvents).queue(eq(RedshiftIntegrationEventPublisher.IntegrationEvent.SYNCHRONIZING),
+                eq(integration), eq("us-east-1"), any());
+        order.verify(integrationEvents).publishQueued();
+    }
+
+    @Test
+    void integrationStatusChangesQueueTheMatchingEventOnce() {
+        String integrationArn = "arn:aws:redshift:us-east-1:111111111111:integration:one";
+        Integration integration = new Integration();
+        integration.setIntegrationArn(integrationArn);
+        integration.setStatus("syncing");
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(Set.of("one"));
+        when(integrationBackend.getForAccount("111111111111", "one")).thenReturn(Optional.of(integration));
+
+        service.updateIntegrationBackfillProgress("111111111111", integrationArn, null, true);
+        service.updateIntegrationBackfillProgress("111111111111", integrationArn, null, true);
+        service.updateIntegrationRuntime("111111111111", integrationArn, Map.of(), false, "boom");
+        service.updateIntegrationRuntime("111111111111", integrationArn, Map.of(), false, "boom");
+        service.updateIntegrationRuntime("111111111111", integrationArn, Map.of(), true, null);
+
+        InOrder order = inOrder(integrationEvents);
+        order.verify(integrationEvents).queue(eq(RedshiftIntegrationEventPublisher.IntegrationEvent.CREATED_ACTIVE),
+                eq(integration), eq("us-east-1"), any());
+        order.verify(integrationEvents).queue(eq(RedshiftIntegrationEventPublisher.IntegrationEvent.FAILED),
+                eq(integration), eq("us-east-1"), any());
+        order.verify(integrationEvents).queue(eq(RedshiftIntegrationEventPublisher.IntegrationEvent.ACTIVE),
+                eq(integration), eq("us-east-1"), any());
+        verify(integrationEvents, times(3)).queue(any(), any(), any(), any());
+    }
+
+    @Test
+    void backfillCompletionQueuesActiveAndAFurtherBatchQueuesNothing() {
+        String integrationArn = "arn:aws:redshift:us-east-1:111111111111:integration:one";
+        Integration integration = new Integration();
+        integration.setIntegrationArn(integrationArn);
+        integration.setStatus("syncing");
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(Set.of("one"));
+        when(integrationBackend.getForAccount("111111111111", "one")).thenReturn(Optional.of(integration));
+
+        service.updateIntegrationBackfillProgress("111111111111", integrationArn, "{\"id\":{\"S\":\"1\"}}", false);
+        verify(integrationEvents, never()).queue(any(), any(), any(), any());
+
+        service.updateIntegrationBackfillProgress("111111111111", integrationArn, null, true);
+        verify(integrationEvents).queue(eq(RedshiftIntegrationEventPublisher.IntegrationEvent.CREATED_ACTIVE),
+                eq(integration), eq("us-east-1"), any());
+    }
+
+    @Test
+    void backfillCompletionAfterFailureStillQueuesCreatedActive() {
+        String integrationArn = "arn:aws:redshift:us-east-1:111111111111:integration:one";
+        Integration integration = new Integration();
+        integration.setIntegrationArn(integrationArn);
+        integration.setStatus("syncing");
+        when(integrationBackend.keysForAccount("111111111111")).thenReturn(Set.of("one"));
+        when(integrationBackend.getForAccount("111111111111", "one")).thenReturn(Optional.of(integration));
+
+        service.updateIntegrationRuntime("111111111111", integrationArn, Map.of(), false, "boom");
+        assertEquals("failed", integration.getStatus());
+
+        service.updateIntegrationBackfillProgress("111111111111", integrationArn, null, true);
+
+        InOrder order = inOrder(integrationEvents);
+        order.verify(integrationEvents).queue(eq(RedshiftIntegrationEventPublisher.IntegrationEvent.FAILED),
+                eq(integration), eq("us-east-1"), any());
+        order.verify(integrationEvents).queue(eq(RedshiftIntegrationEventPublisher.IntegrationEvent.CREATED_ACTIVE),
+                eq(integration), eq("us-east-1"), any());
+        verify(integrationEvents, never()).queue(eq(RedshiftIntegrationEventPublisher.IntegrationEvent.ACTIVE),
+                any(), any(), any());
+    }
+
+    @Test
+    void deleteIntegrationQueuesDeletionStartThenEnd() {
+        String integrationArn = "arn:aws:redshift:us-east-1:111111111111:integration:one";
+        Integration integration = new Integration();
+        integration.setIntegrationArn(integrationArn);
+        when(integrationBackend.keys()).thenReturn(Set.of("one"));
+        when(integrationBackend.get("one")).thenReturn(Optional.of(integration));
+
+        service.deleteIntegration(integrationArn);
+
+        InOrder order = inOrder(integrationEvents);
+        order.verify(integrationEvents).queue(
+                eq(RedshiftIntegrationEventPublisher.IntegrationEvent.DELETION_INITIATED), eq(integration),
+                eq("us-east-1"), any());
+        order.verify(integrationEvents).queue(eq(RedshiftIntegrationEventPublisher.IntegrationEvent.DELETED),
+                eq(integration), eq("us-east-1"), any());
+        order.verify(integrationEvents).publishQueued();
     }
 
     @Test

@@ -63,7 +63,7 @@ public final class SecurityGroupPolicy {
         return true;
     }
 
-    private static String normalizeProtocol(String protocol) {
+    static String normalizeProtocol(String protocol) {
         if (protocol == null) {
             return null;
         }

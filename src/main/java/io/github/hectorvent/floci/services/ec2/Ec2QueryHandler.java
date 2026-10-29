@@ -1994,9 +1994,13 @@ public class Ec2QueryHandler {
                 .start("CreateFlowLogsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("flowLogIdSet");
+        List<Tag> flowLogTags = parseTagsForResource(p, "vpc-flow-log");
         for (String resourceId : resourceIds) {
             FlowLog fl = flowLogService.createFlowLog(region, resourceId, resourceType, trafficType,
                     logDestinationType, logDestination, deliverLogsPermissionArn, logFormat, maxAgg);
+            if (!flowLogTags.isEmpty()) {
+                service.createTags(region, List.of(fl.getFlowLogId()), flowLogTags);
+            }
             xml.elem("item", fl.getFlowLogId());
         }
         xml.end("flowLogIdSet")
@@ -2029,6 +2033,7 @@ public class Ec2QueryHandler {
                     .elem("deliverLogsStatus", fl.getDeliverLogsStatus())
                     .elem("maxAggregationInterval", String.valueOf(fl.getMaxAggregationInterval()))
                     .elem("creationTime", ISO_FMT.format(fl.getCreationTime()))
+                    .raw(tagSetXml(service.resourceTags(region, fl.getFlowLogId())))
                     .end("item");
         }
         xml.end("flowLogSet").end("DescribeFlowLogsResponse");

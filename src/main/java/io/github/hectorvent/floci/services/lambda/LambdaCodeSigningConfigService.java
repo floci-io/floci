@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SignedMarkers;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.model.CodeSigningConfig;
@@ -16,9 +17,12 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
+import java.util.regex.Pattern;
 
 /**
  * Code signing configurations, the resource CreateCodeSigningConfig manages.
@@ -40,6 +44,10 @@ public class LambdaCodeSigningConfigService {
     private static final int MAX_DESCRIPTION = 256;
     private static final int MAX_SIGNING_PROFILE_ARNS = 20;
     private static final int LIST_PAGE_SIZE = 10000;
+    private static final Pattern CODE_SIGNING_CONFIG_ARN = Pattern.compile(
+            "arn:(aws[a-zA-Z-]*)?:lambda:(eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\\d{1}"
+                    + ":\\d{12}:code-signing-config:csc-[a-z0-9]{17}");
+    private static final int ARN_MAX_LENGTH = 200;
 
     /** The model documents Warn as the default when the request names no policy. */
     static final String DEFAULT_UNTRUSTED_ARTIFACT_POLICY = "Warn";
@@ -52,12 +60,21 @@ public class LambdaCodeSigningConfigService {
     private final RegionResolver regionResolver;
     private final SignedMarkers markers = new SignedMarkers();
     private final SecureRandom random = new SecureRandom();
+    private final Object[] configLocks = new Object[64];
 
     @Inject
     public LambdaCodeSigningConfigService(StorageFactory storageFactory, RegionResolver regionResolver) {
         this.regionResolver = regionResolver;
         this.store = storageFactory.create("lambda", "lambda-code-signing-configs.json",
                 new TypeReference<Map<String, CodeSigningConfig>>() {});
+        Arrays.setAll(configLocks, ignored -> new Object());
+    }
+
+    /** Serializes attachment and config deletion so neither can commit against stale state. */
+    public <T> T withConfigLock(String arn, Supplier<T> operation) {
+        synchronized (configLocks[Math.floorMod(arn.hashCode(), configLocks.length)]) {
+            return operation.get();
+        }
     }
 
     public CodeSigningConfig create(String region, String accountId, String description,
@@ -83,6 +100,38 @@ public class LambdaCodeSigningConfigService {
     public CodeSigningConfig get(String region, String arn) {
         return store.get(key(region, idFromArn(arn)))
                 .orElseThrow(() -> notFound(arn));
+    }
+
+    /**
+     * Resolves a configuration for an API request and rejects an ARN from another account or
+     * region, even when its trailing id happens to match a local record.
+     */
+    public CodeSigningConfig get(String region, String accountId, String arn) {
+        CodeSigningConfig config = get(region, arn);
+        AwsArnUtils.Arn requested = AwsArnUtils.parse(arn);
+        if (!region.equals(requested.region())
+                || !accountId.equals(requested.accountId())
+                || !arn.equals(config.getCodeSigningConfigArn())) {
+            throw notFound(arn);
+        }
+        return config;
+    }
+
+    /**
+     * Validates and resolves a configuration named by a function attachment request. The Lambda
+     * APIs use a distinct error code when the requested configuration does not exist, while the
+     * configuration resource APIs keep {@code ResourceNotFoundException}.
+     */
+    public CodeSigningConfig requireForAttachment(String region, String accountId, String arn) {
+        validateArn(arn);
+        try {
+            return get(region, accountId, arn);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            throw new AwsException("CodeSigningConfigNotFoundException", e.getMessage(), 404);
+        }
     }
 
     /**
@@ -198,6 +247,15 @@ public class LambdaCodeSigningConfigService {
         }
         int colon = arn.lastIndexOf(':');
         return colon < 0 ? arn : arn.substring(colon + 1);
+    }
+
+    static void validateArn(String arn) {
+        if (arn == null || arn.isBlank()
+                || arn.length() > ARN_MAX_LENGTH
+                || !CODE_SIGNING_CONFIG_ARN.matcher(arn).matches()) {
+            throw SmithyValidationErrors.exception("InvalidParameterValueException",
+                    SmithyValidationErrors.pattern("codeSigningConfigArn", arn, CODE_SIGNING_CONFIG_ARN.pattern()));
+        }
     }
 
     private static String key(String region, String id) {

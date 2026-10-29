@@ -91,4 +91,13 @@ class ApiGatewayEdgeDomainPartitionTest {
 
         assertEquals("BadRequestException", error.getErrorCode());
     }
+
+    /** Without a type the domain is edge-optimized only where the partition has edge. */
+    @Test
+    void aDomainWithoutATypeStaysRegionalWhereThePartitionHasNoCloudFront() {
+        CustomDomain domain = service.createDomainName(GOV_REGION, Map.of("domainName", "default.example.com",
+                "certificateArn", "arn:aws-us-gov:acm:us-gov-west-1:000000000000:certificate/d"));
+
+        assertEquals("REGIONAL", domain.getEndpointConfigurationType());
+    }
 }

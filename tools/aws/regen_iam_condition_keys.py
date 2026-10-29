@@ -6,10 +6,12 @@ For each such action and key, pinned botocore says whether the request carries t
 operation of the same name has a top-level string member named after the key, ignoring case
 (iam:PolicyARN is PolicyArn), and the key's type is String or ARN. BY_HAND names the member for a
 pair whose value sits in a member under another name; its type has to fit the key's. Those pairs
-are read; every other pair the reference lists is notRead, with the reason. An operation that has the member but
-whose action does not list the key is left out, as AWS does not set the key for it.
+are read. A FROM_TARGET key the request does not carry is the stored role's or user's value, and its
+pair goes in fromTarget with the member that names the target. Every other pair the reference lists
+is notRead, with the reason. An operation that has the member but whose action does not list the key
+is left out, as AWS does not set the key for it.
 
---check re-derives read and notRead offline from the pairs in the file and pinned botocore, so a
+--check re-derives read, fromTarget and notRead offline from the pairs in the file and pinned botocore, so a
 hand-edited entry fails, as does a BY_HAND member botocore no longer has or a BY_HAND pair the
 file does not list. --verify compares every pair and key type with the live reference and
 fails on any difference, added pairs included: a key missing from the context stops a
@@ -39,6 +41,11 @@ BY_HAND = {
 }
 # The botocore types a BY_HAND member may have for each key type; the context value is the member's text.
 BY_HAND_TYPES = {"String": {"string", "integer"}, "ARN": {"string"}, "Numeric": {"integer", "long"}}
+# Keys whose value, on an action without the member, is the stored target's: the IAM User Guide's
+# iam:PermissionsBoundary "checks that the specified policy is attached as permissions boundary on the
+# IAM principal resource". The target is the role or user the request names.
+FROM_TARGET = {"iam:PermissionsBoundary"}
+TARGET_MEMBERS = ("RoleName", "UserName")
 # Keys whose value, on an action without the member, does not come from the request.
 NOT_IN_REQUEST = {
     "iam:AccountPropertyNamespaces": "the value is the namespaces of the properties read or written",
@@ -46,7 +53,6 @@ NOT_IN_REQUEST = {
     "iam:FIDO-FIPS-140-2-certification": "the value comes from the FIDO Alliance Metadata Service",
     "iam:FIDO-FIPS-140-3-certification": "the value comes from the FIDO Alliance Metadata Service",
     "iam:FIDO-certification": "the value comes from the FIDO Alliance Metadata Service",
-    "iam:PermissionsBoundary": "the value is the target's current permissions boundary",
     "iam:RegisterSecurityKey": "the value is the MFA device's registration state",
     "iam:RoleTemplateARN": "the value is the role template a service acquires the role from",
     "iam:ServiceSpecificCredentialServiceName": "the value is the named credential's service",
@@ -79,8 +85,8 @@ def member_type(model, operation, path):
 
 
 def classify(pairs, types, model):
-    """The read entries and the notRead entries for the reference's pairs."""
-    read, not_read = [], []
+    """The read, fromTarget and notRead entries for the reference's pairs."""
+    read, from_target, not_read = [], [], []
     for action, key in sorted(pairs):
         operation = model["operations"].get(action.split(":", 1)[1])
         if (action, key) in BY_HAND:
@@ -98,6 +104,12 @@ def classify(pairs, types, model):
         member = next((m for m in sorted(members) if m.lower() == local.lower()), None)
         if operation is None:
             reason = "no SDK operation of this name"
+        elif member is None and key in FROM_TARGET:
+            target = next((m for m in TARGET_MEMBERS if m in members), None)
+            if target is None:
+                raise ValueError(f"{action}: no member names the role or user {key} is read from")
+            from_target.append({"action": action, "key": key, "target": target})
+            continue
         elif member is None:
             reason = NOT_IN_REQUEST.get(key, "no member named after the key")
         elif not set(types.get(key, [])) <= READ_TYPES:
@@ -108,7 +120,7 @@ def classify(pairs, types, model):
             read.append({"action": action, "key": key, "member": member})
             continue
         not_read.append({"action": action, "key": key, "reason": reason})
-    return read, not_read
+    return read, from_target, not_read
 
 
 def require_by_hand_listed(pairs):
@@ -118,7 +130,8 @@ def require_by_hand_listed(pairs):
 
 
 def pairs_of(document):
-    return sorted((e["action"], e["key"]) for e in document["read"] + document["notRead"])
+    return sorted((e["action"], e["key"])
+                  for e in document["read"] + document["fromTarget"] + document["notRead"])
 
 
 def render(document):
@@ -126,7 +139,7 @@ def render(document):
     lines = ["{"]
     for key in ("source", "botocore", "types"):
         lines.append(f'  "{key}": {json.dumps(document[key])},')
-    for section, tail in (("read", ","), ("notRead", "")):
+    for section, tail in (("read", ","), ("fromTarget", ","), ("notRead", "")):
         entries = document[section]
         lines.append(f'  "{section}": [')
         lines += [f"    {json.dumps(e)}{',' if i < len(entries) - 1 else ''}" for i, e in enumerate(entries)]
@@ -149,7 +162,8 @@ def main(argv=None):
             raise ValueError("an IAM condition key pair is listed twice")
         require_by_hand_listed(pairs)
         model = load_model(latest_model_dir(resolve_botocore_data(args.botocore_data)[0], "iam"))
-        if classify(pairs, document["types"], model) != (document["read"], document["notRead"]):
+        if classify(pairs, document["types"], model) != (
+                document["read"], document["fromTarget"], document["notRead"]):
             raise ValueError("IAM condition key members differ from pinned botocore")
         return 0
     try:
@@ -174,9 +188,9 @@ def main(argv=None):
         return 0
     require_by_hand_listed(pairs)
     data, provenance = resolve_botocore_data(args.botocore_data)
-    read, not_read = classify(pairs, types, load_model(latest_model_dir(data, "iam")))
+    read, from_target, not_read = classify(pairs, types, load_model(latest_model_dir(data, "iam")))
     OUTPUT.write_text(render({"source": URL, "botocore": provenance, "types": types,
-                              "read": read, "notRead": not_read}))
+                              "read": read, "fromTarget": from_target, "notRead": not_read}))
     return 0
 
 

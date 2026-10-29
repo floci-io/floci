@@ -7,6 +7,7 @@ import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -125,7 +126,26 @@ class AbstractRedisAuthProxyRelayTest {
         }
     }
 
-    private static final class TestProxy extends AbstractRedisAuthProxy {
+    @Test
+    void bindsWithABurstTolerantAcceptBacklog() throws Exception {
+        AtomicInteger acceptBacklog = new AtomicInteger();
+        TestProxy proxy = new TestProxy("127.0.0.1", 1) {
+            @Override
+            ServerSocket listenSocket(int proxyPort, int backlog) throws IOException {
+                acceptBacklog.set(backlog);
+                return super.listenSocket(proxyPort, backlog);
+            }
+        };
+        proxy.start(0);
+        try {
+            assertEquals(4096, acceptBacklog.get(),
+                    "a connection burst must not overflow the proxy's accept queue");
+        } finally {
+            proxy.stop();
+        }
+    }
+
+    private static class TestProxy extends AbstractRedisAuthProxy {
         private TestProxy(String backendHost, int backendPort) {
             super(org.jboss.logging.Logger.getLogger(TestProxy.class), "test", "test", "relay",
                     backendHost, backendPort);

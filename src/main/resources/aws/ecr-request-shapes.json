@@ -4,6 +4,8 @@
     "botocore": "botocore 1.43.113 (installed package)"
   },
   "operations": {
+    "GetAccountSetting": "GetAccountSettingRequest",
+    "PutAccountSetting": "PutAccountSettingRequest",
     "PutRegistryPolicy": "PutRegistryPolicyRequest",
     "GetRegistryPolicy": "GetRegistryPolicyRequest",
     "DeleteRegistryPolicy": "DeleteRegistryPolicyRequest",
@@ -18,6 +20,14 @@
     "DeleteRepositoryCreationTemplate": "DeleteRepositoryCreationTemplateRequest"
   },
   "shapes": {
+    "AccountSettingName": {
+      "type": "string",
+      "min": 1,
+      "max": 64
+    },
+    "AccountSettingValue": {
+      "type": "string"
+    },
     "BatchGetRepositoryScanningConfigurationRequest": {
       "type": "structure",
       "required": [
@@ -93,6 +103,15 @@
         "KMS_DSSE"
       ]
     },
+    "GetAccountSettingRequest": {
+      "type": "structure",
+      "required": [
+        "name"
+      ],
+      "members": {
+        "name": "AccountSettingName"
+      }
+    },
     "GetRegistryPolicyRequest": {
       "type": "structure",
       "members": {}
@@ -167,6 +186,17 @@
     "PrefixList": {
       "type": "list",
       "member": "Prefix"
+    },
+    "PutAccountSettingRequest": {
+      "type": "structure",
+      "required": [
+        "name",
+        "value"
+      ],
+      "members": {
+        "name": "AccountSettingName",
+        "value": "AccountSettingValue"
+      }
     },
     "PutRegistryPolicyRequest": {
       "type": "structure",

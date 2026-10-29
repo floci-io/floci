@@ -32,8 +32,10 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `AddPermission` | Add a resource-policy statement |
 | `GetPolicy` | Get the function resource policy |
 | `RemovePermission` | Remove a resource-policy statement |
-| `GetFunctionCodeSigningConfig` | Return code-signing config (always empty) |
-| `ListFunctionsByCodeSigningConfig` | List functions carrying a config. Always empty, since nothing can attach one |
+| `GetFunctionCodeSigningConfig` | Return the code-signing config attached to `$LATEST` (or an empty ARN) |
+| `PutFunctionCodeSigningConfig` | Attach or replace a code-signing config on `$LATEST` |
+| `DeleteFunctionCodeSigningConfig` | Detach the code-signing config from `$LATEST` |
+| `ListFunctionsByCodeSigningConfig` | List functions carrying a config, with marker pagination |
 | `CreateCodeSigningConfig` | Create a code signing configuration |
 | `GetCodeSigningConfig` | Read a code signing configuration |
 | `UpdateCodeSigningConfig` | Update the members the request names |
@@ -586,13 +588,14 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 
 - Layer permissions (`AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
 - `InvokeWithResponseStream`
-- Code signing enforcement. A configuration is created, read, updated, deleted and listed, and
-  nothing verifies a signature against it, so it never gates a deployment. Attaching one to a
-  function is not wired either: there is no `PutFunctionCodeSigningConfig`, so
-  `GetFunctionCodeSigningConfig` still reports an empty ARN and `ListFunctionsByCodeSigningConfig`
-  always reports no functions. An unknown configuration is `ResourceNotFoundException`, and a
-  malformed ARN or an out-of-range `MaxItems` is rejected with `InvalidParameterValueException`
-  first
+
+Code signing enforcement is not emulated: an attached configuration never gates a deployment.
+The attachment lifecycle is supported for `$LATEST`: `PutFunctionCodeSigningConfig` attaches or
+replaces a configuration, `GetFunctionCodeSigningConfig` reads it,
+`DeleteFunctionCodeSigningConfig` detaches it, and `ListFunctionsByCodeSigningConfig` returns
+attached functions with marker pagination. An unknown configuration is
+`ResourceNotFoundException`; a malformed ARN or out-of-range `MaxItems` is rejected with
+`InvalidParameterValueException` first.
 
 ## Configuration
 

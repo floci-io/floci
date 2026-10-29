@@ -1,4 +1,9 @@
-"""Tests for regen_iam_shapes.
+"""Tests for regen_iam_shapes: what this generator does that the shared one does not.
+
+The driver, the staleness check and the file contract every constraints generator must hold are
+`request_shapes.main`'s and are tested in test_request_shapes. What is IAM's own is the paging
+reduction: an operation vendored for its `MaxItems` and `Marker` alone, with the rest of its
+request left to the reading it has today.
 
 Run with: pytest tools/aws -q  (or: make aws-data-test)
 """
@@ -6,57 +11,8 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 import regen_iam_shapes as r
-
-
-MODEL = {
-    "operations": {
-        "GetPolicy": {"input": {"shape": "GetPolicyRequest"}, "output": {"shape": "GetPolicyResponse"}},
-        "ListPolicies": {"input": {"shape": "ListPoliciesRequest"}},
-    },
-    "shapes": {
-        "GetPolicyRequest": {"type": "structure", "required": ["PolicyArn"], "members": {
-            "PolicyArn": {"shape": "arnType"},
-        }},
-        "GetPolicyResponse": {"type": "structure", "members": {"Policy": {"shape": "arnType"}}},
-        "ListPoliciesRequest": {"type": "structure", "members": {"MaxItems": {"shape": "maxItemsType"}}},
-        "arnType": {"type": "string", "min": 20, "max": 2048},
-        "maxItemsType": {"type": "integer", "min": 1, "max": 1000},
-    },
-}
-
-
-def test_keeps_only_the_listed_operations_with_their_constraints(monkeypatch):
-    monkeypatch.setattr(r, "OPERATIONS", ("GetPolicy",))
-    monkeypatch.setattr(r, "PAGING_ONLY", ())
-
-    doc = r.build(MODEL, "botocore test")
-
-    assert doc["_source"] == {"generator": "tools/aws/regen_iam_shapes.py", "botocore": "botocore test"}
-    assert doc["operations"] == {"GetPolicy": "GetPolicyRequest"}
-    assert "GetPolicyResponse" not in doc["shapes"]
-    assert "maxItemsType" not in doc["shapes"]
-    assert doc["shapes"]["GetPolicyRequest"] == {
-        "type": "structure", "required": ["PolicyArn"], "members": {"PolicyArn": "arnType"}}
-    assert doc["shapes"]["arnType"] == {"type": "string", "min": 20, "max": 2048}
-
-
-def test_a_misspelled_operation_is_refused_rather_than_skipped(monkeypatch):
-    monkeypatch.setattr(r, "OPERATIONS", ("GetPolciy",))
-    monkeypatch.setattr(r, "PAGING_ONLY", ())
-
-    with pytest.raises(KeyError):
-        r.build(MODEL, "botocore test")
-
-
-def test_the_vendored_file_carries_every_listed_operation():
-    doc = json.loads(r.OUTPUT.read_text(encoding="utf-8"))
-
-    assert sorted(doc["operations"]) == sorted(r.OPERATIONS + r.PAGING_ONLY)
-    for operation, shape in doc["operations"].items():
-        assert shape in doc["shapes"], operation
+from request_shapes import build_constraints
 
 
 def test_every_paged_operation_is_held_to_the_model():
@@ -64,10 +20,23 @@ def test_every_paged_operation_is_held_to_the_model():
     # table pages and this wave leaves out would take any limit and any marker length.
     paged = json.loads((r.OUTPUT.parent / "iam-paginators.json").read_text(encoding="utf-8"))["operations"]
 
-    assert sorted(set(paged) - set(r.OPERATIONS + r.PAGING_ONLY)) == []
+    assert sorted(set(paged) - set(r.VENDORED)) == []
 
 
-def test_a_paging_only_operation_keeps_its_paging_members_alone(monkeypatch):
+def test_the_vendored_file_carries_every_paged_request_reduced():
+    # What says the reduction is wired into the generation rather than only tested on its own: a
+    # driver that never ran it would vendor these requests whole, with the members this wave leaves
+    # to the reading they have today.
+    doc = json.loads(r.OUTPUT.read_text(encoding="utf-8"))
+
+    for operation in r.PAGING_ONLY:
+        members = doc["shapes"][doc["operations"][operation]]["members"]
+        # `ListPoliciesGrantingServiceAccess` pages on a `Marker` alone, so what holds for all of
+        # them is that nothing but a paging member is left, and that one of them is.
+        assert members and set(members) <= set(r.PAGING_MEMBERS), operation
+
+
+def test_a_paging_only_operation_keeps_its_paging_members_alone():
     model = {
         "operations": {"ListThings": {"input": {"shape": "ListThingsRequest"}}},
         "shapes": {
@@ -80,45 +49,23 @@ def test_a_paging_only_operation_keeps_its_paging_members_alone(monkeypatch):
             "maxItemsType": {"type": "integer", "min": 1, "max": 1000},
         },
     }
-    monkeypatch.setattr(r, "OPERATIONS", ())
-    monkeypatch.setattr(r, "PAGING_ONLY", ("ListThings",))
 
-    doc = r.build(model, "botocore test")
+    # The composition the generator hands the shared driver: the reduced model and the full list.
+    doc = build_constraints(r.paging_only(model, ("ListThings",)), ("ListThings",), "botocore test",
+                            "tools/aws/regen_iam_shapes.py")
 
     assert doc["shapes"]["ListThingsRequest"] == {
         "type": "structure", "members": {"Marker": "markerType", "MaxItems": "maxItemsType"}}
     assert "jobIDType" not in doc["shapes"]
 
 
-def test_check_ignores_provenance(tmp_path, monkeypatch):
-    monkeypatch.setattr(r, "OPERATIONS", ("GetPolicy",))
-    monkeypatch.setattr(r, "PAGING_ONLY", ())
-    output = tmp_path / "shapes.json"
-    output.write_text(r.render(r.build(MODEL, "botocore 0.0.1 (local/aws/botocore)")), encoding="utf-8")
-    monkeypatch.setattr(r, "resolve_botocore_data", lambda explicit: (tmp_path, "--botocore-data /elsewhere"))
-    monkeypatch.setattr(r, "load_model", lambda data, model: MODEL)
+def test_the_paging_reduction_leaves_every_other_operation_whole():
+    model = {
+        "operations": {"GetThing": {"input": {"shape": "GetThingRequest"}}},
+        "shapes": {
+            "GetThingRequest": {"type": "structure", "members": {"JobId": {"shape": "jobIDType"}}},
+            "jobIDType": {"type": "string", "min": 36, "max": 36},
+        },
+    }
 
-    assert r.main(["--check", "--output", str(output)]) == 0
-
-
-def test_check_reports_a_changed_constraint(tmp_path, monkeypatch):
-    monkeypatch.setattr(r, "OPERATIONS", ("GetPolicy",))
-    monkeypatch.setattr(r, "PAGING_ONLY", ())
-    output = tmp_path / "shapes.json"
-    changed = {**MODEL, "shapes": {**MODEL["shapes"], "arnType": {"type": "string", "min": 1, "max": 2048}}}
-    output.write_text(r.render(r.build(changed, "botocore test")), encoding="utf-8")
-    monkeypatch.setattr(r, "resolve_botocore_data", lambda explicit: (tmp_path, "botocore test"))
-    monkeypatch.setattr(r, "load_model", lambda data, model: MODEL)
-
-    assert r.main(["--check", "--output", str(output)]) == 1
-
-
-def test_output_is_stable(monkeypatch):
-    monkeypatch.setattr(r, "OPERATIONS", ("GetPolicy", "ListPolicies"))
-    monkeypatch.setattr(r, "PAGING_ONLY", ())
-
-    first = r.render(r.build(MODEL, "botocore test"))
-    second = r.render(r.build(MODEL, "botocore test"))
-
-    assert first == second
-    assert first.endswith("\n")
+    assert r.paging_only(model, ()) == model

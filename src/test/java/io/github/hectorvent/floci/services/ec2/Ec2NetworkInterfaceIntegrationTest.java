@@ -578,4 +578,60 @@ class Ec2NetworkInterfaceIntegrationTest {
 
         Assertions.assertTrue(replacement.startsWith("i-"));
     }
+
+    @Test
+    @Order(19)
+    void anExplicitAddressAnotherInterfaceHoldsIsRefused() {
+        String holder = given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", subnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+        String held = given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("NetworkInterfaceId.1", holder)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.privateIpAddress");
+
+        given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", subnetId)
+            .formParam("PrivateIpAddress", held)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidIPAddress.InUse"))
+            .body("Response.Errors.Error.Message", equalTo("Address " + held + " is in use."));
+
+        given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("Filter.1.Name", "private-ip-address")
+            .formParam("Filter.1.Value.1", held)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.networkInterfaceId",
+                    equalTo(holder));
+
+        given()
+            .formParam("Action", "DeleteNetworkInterface")
+            .formParam("NetworkInterfaceId", holder)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
 }

@@ -982,6 +982,38 @@ public class ContainerLifecycleManager {
         }
     }
 
+    /**
+     * Commits {@code containerId}, stopped or running, as the image {@code repository}:{@code tag}, run as
+     * {@code user} and labelled {@code labels}, and returns its id. The image takes the container's own
+     * configuration wherever the commit sets none, its environment, entrypoint and command among them.
+     */
+    public String commit(String containerId, String repository, String tag, String user, Map<String, String> labels) {
+        return dockerClient.commitCmd(containerId)
+                .withRepository(repository)
+                .withTag(tag)
+                .withUser(user)
+                .withLabels(labels)
+                .exec();
+    }
+
+    /**
+     * Removes {@code image}, forcibly. True when it is gone, removed now or already absent; false when the
+     * daemon refused, which is logged, so a caller that must find it again keeps its reference.
+     */
+    public boolean removeImage(String image) {
+        try {
+            dockerClient.removeImageCmd(image).withForce(true).exec();
+            LOG.infov("Removed Docker image {0}", image);
+            return true;
+        } catch (NotFoundException e) {
+            LOG.debugv("Docker image {0} was already absent", image);
+            return true;
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not remove Docker image {0}: {1}", image, e.getMessage());
+            return false;
+        }
+    }
+
     /** Whether a container exists and is running — distinguishing "gone" from "cannot tell". */
     public enum ContainerPresence {
         /** The container exists and is running. */
