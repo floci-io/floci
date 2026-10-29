@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.Cond;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.PVal;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.PartiQLType;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.Path;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.Seg;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser.Stmt;
@@ -253,6 +254,84 @@ class DynamoDbPartiQLParserTest {
         Cond.Missing missing = assertInstanceOf(Cond.Missing.class, firstCond(SELECT + predicate));
 
         assertEquals(negated, missing.negated());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "IS BOOL,                 BOOLEAN, false",
+            "is boolean,              BOOLEAN, false",
+            "IS NOT STRING,           STRING,  true",
+            "'IS NUMERIC(5, +2)',     NUMERIC, false",
+            "IS BLOB,                 BLOB,    false",
+            "IS TUPLE,                TUPLE,   false",
+            "IS LIST,                 LIST,    false",
+            "IS NULL,                 NULL,    false"
+    })
+    void parsesATypeTestWithItsNegation(String predicate, PartiQLType type, boolean negated) {
+        Cond.IsType isType = assertInstanceOf(Cond.IsType.class, firstCond(SELECT + predicate));
+
+        assertEquals(type, isType.type());
+        assertEquals(negated, isType.negated());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "INT,                    IntegerType",
+            "BIGINT,                 Integer8Type",
+            "double  precision,      DoublePrecisionType",
+            "CHAR VARYING(5),        CharacterVaryingType",
+            "TIME(3) WITH TIME ZONE, TimeWithTimeZoneType",
+            "'DECIMAL(5, 2)',        DecimalType"
+    })
+    void refusesATypeDynamoDbCannotTest(String type, String className) {
+        AwsException e = assertThrows(AwsException.class, () -> firstCond(SELECT + "IS " + type));
+
+        assertEquals("ValidationException", e.getErrorCode());
+        assertEquals("Unsupported data type for IS operator: " + className + ". Supported data types are "
+                + "[MISSING, NULL, BOOLEAN, BLOB, STRING, NUMERIC, STRUCT, TUPLE, LIST] at 1:26:3", e.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"NUMBER", "MAP", "DOUBLE", "DOUBLE FOO", "'BOOL'", "\"BOOL\"", "?", ""})
+    void refusesANameThatIsNotAType(String type) {
+        AwsException e = assertThrows(AwsException.class, () -> firstCond(SELECT + "IS " + type));
+
+        assertEquals("Statement wasn't well formed, can't be processed: Expected type name", e.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "IS INT(5)                       | is type argument integer must have arity of 0..0",
+            "IS NOT DEC(1, 2, 3)             | is_not type argument decimal must have arity of 0..2",
+            "IS CHAR VARYING(1, 2)           | is type argument character_varying must have arity of 0..1",
+            "IS TIME(1, 2) WITH TIME ZONE    | is type argument time must have arity of 0..1",
+            "IS NUMERIC(a, 1, 2)             | is type argument numeric must have arity of 0..2",
+            "IS NUMERIC(-1)                  | Type parameter must be an unsigned integer literal",
+            "IS NUMERIC(5.5)                 | Type parameter must be an unsigned integer literal",
+            "IS NUMERIC(9223372036854775808) | Type parameter must be an unsigned integer literal",
+            "IS NUMERIC(2147483648)          | Type parameter exceeded maximum value",
+            "IS NUMERIC()                    | Unexpected term",
+            "IS NUMERIC(5 5)                 | Expected RIGHT_PAREN",
+            "IS TIME ZONE                    | Expected WITH keyword",
+            "IS TIME WITH                    | Expected TIME keyword",
+            "IS TIME WITH TIME               | Expected ZONE keyword"
+    })
+    void refusesAMalformedTypeName(String predicate, String message) {
+        AwsException e = assertThrows(AwsException.class, () -> firstCond(SELECT + predicate));
+
+        assertEquals("Statement wasn't well formed, can't be processed: " + message, e.getMessage());
+    }
+
+    @Test
+    void refusesTheFirstUnsupportedTypeOnceTheWholeStatementParses() {
+        AwsException parseError = assertThrows(AwsException.class,
+                () -> firstCond(SELECT + "IS INT AND x IS FOO"));
+        AwsException e = assertThrows(AwsException.class,
+                () -> firstCond("SELECT pk FROM \"t\" WHERE x = 1 AND\n  \"val\".a IS INT OR val IS DECIMAL"));
+
+        assertEquals("Statement wasn't well formed, can't be processed: Expected type name", parseError.getMessage());
+        assertEquals("Unsupported data type for IS operator: IntegerType. Supported data types are "
+                + "[MISSING, NULL, BOOLEAN, BLOB, STRING, NUMERIC, STRUCT, TUPLE, LIST] at 2:3:5", e.getMessage());
     }
 
     @Test

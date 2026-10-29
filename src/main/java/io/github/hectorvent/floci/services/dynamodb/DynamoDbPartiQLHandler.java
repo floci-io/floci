@@ -454,8 +454,8 @@ class DynamoDbPartiQLHandler {
                 "attribute_type(" + ean.alias(at.path()) + ", " + eav.add(toTypedNode(at.type())) + ")";
             case Cond.SizeCmp sc ->
                 "size(" + ean.alias(sc.path()) + ") " + sc.op() + " " + eav.add(toTypedNode(sc.val()));
-            case Cond.IsNull isNull -> (isNull.negated() ? "NOT " : "") + "attribute_type(" + ean.alias(isNull.path())
-                    + ", " + eav.add(mapper.createObjectNode().put("S", "NULL")) + ")";
+            case Cond.IsType isType -> (isType.negated() ? "NOT " : "") + "attribute_type(" + ean.alias(isType.path())
+                    + ", " + eav.add(mapper.createObjectNode().put("S", isType.type().attributeType())) + ")";
             case Cond.And and -> joinOperands(and.operands(), " AND ", eav, ean);
             case Cond.Or or   -> joinOperands(or.operands(), " OR ", eav, ean);
             case Cond.Not not -> "NOT (" + buildCondExpr(not.operand(), eav, ean) + ")";

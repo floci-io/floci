@@ -394,6 +394,34 @@ class DynamoDbPartiQLIntegrationTest {
             .body("CancellationReasons[2].Item", nullValue());
     }
 
+    @Test
+    @Order(22)
+    void isTestsTheTypeOfAnAttribute() {
+        putItem("is-type", "\"flag\":{\"BOOL\":true},\"s\":{\"S\":\"str\"},\"n\":{\"N\":\"5\"},"
+                + "\"l\":{\"L\":[]},\"m\":{\"M\":{}},\"ss\":{\"SS\":[\"a\"]}");
+
+        statement("SELECT pk FROM \"" + TABLE + "\" WHERE pk = 'is-type' AND flag IS BOOL AND s IS STRING"
+                + " AND n IS NUMERIC(5, 2) AND l IS LIST AND m IS STRUCT AND ss IS NOT STRING AND nope IS NOT LIST")
+            .statusCode(200)
+            .body("Items.size()", equalTo(1));
+        statement("SELECT pk FROM \"" + TABLE + "\" WHERE pk = 'is-type' AND s IS BOOL")
+            .statusCode(200)
+            .body("Items.size()", equalTo(0));
+        statement("UPDATE \"" + TABLE + "\" SET touched = 'yes' WHERE pk = 'is-type' AND n IS STRING")
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"));
+        statement("UPDATE \"" + TABLE + "\" SET touched = 'yes' WHERE pk = 'is-type' AND n IS NUMERIC")
+            .statusCode(200);
+
+        String unsupported = "SELECT pk FROM \"" + TABLE + "\" WHERE pk = 'is-type' AND n IS DECIMAL";
+        statement(unsupported)
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Unsupported data type for IS operator: DecimalType. Supported data types are "
+                    + "[MISSING, NULL, BOOLEAN, BLOB, STRING, NUMERIC, STRUCT, TUPLE, LIST] at 1:"
+                    + (unsupported.indexOf("n IS") + 1) + ":1"));
+    }
+
     private static void putItem(String pk, String attributes) {
         request("DynamoDB_20120810.PutItem", """
                 {"TableName":"%s","Item":{"pk":{"S":"%s"},%s}}

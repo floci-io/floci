@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.*;
 import java.util.stream.Stream;
 
@@ -184,7 +185,7 @@ public class DynamoDbPartiQLParser {
         }
 
         sealed interface Leaf extends Cond permits Eq, Cmp, Between, BeginsWith, In, Missing,
-                Contains, AttributeType, SizeCmp, IsNull {
+                Contains, AttributeType, SizeCmp, IsType {
             Path path();
 
             @Override
@@ -202,10 +203,43 @@ public class DynamoDbPartiQLParser {
         record Contains(Path path, PVal operand)                implements Leaf {}
         record AttributeType(Path path, PVal type)              implements Leaf {}
         record SizeCmp(Path path, String op, PVal val)          implements Leaf {}
-        record IsNull(Path path, boolean negated)               implements Leaf {}
+        record IsType(Path path, PartiQLType type, boolean negated) implements Leaf {}
         record And(List<Cond> operands)                         implements Cond {}
         record Or(List<Cond> operands)                          implements Cond {}
         record Not(Cond operand)                                implements Cond {}
+    }
+
+    enum PartiQLType {
+        MISSING(0, null), NULL(0, "NULL"), BOOLEAN(0, "BOOL"), SMALLINT(0, null), INTEGER(0, null),
+        INTEGER4(0, null), INTEGER8(0, null), FLOAT(1, null), REAL(0, null), DOUBLE_PRECISION(0, null),
+        DECIMAL(2, null), NUMERIC(2, "N"), CHARACTER(1, null), CHARACTER_VARYING(1, null), STRING(0, "S"),
+        SYMBOL(0, null), CLOB(0, null), BLOB(0, "B"), STRUCT(0, "M"), TUPLE(0, "M"), LIST(0, "L"),
+        SEXP(0, null), BAG(0, null), DATE(0, null), TIME(1, null), TIME_WITH_TIME_ZONE(1, null),
+        TIMESTAMP(0, null), ANY(0, null);
+
+        private final int maxArity;
+        private final String attributeType;
+
+        PartiQLType(int maxArity, String attributeType) {
+            this.maxArity = maxArity;
+            this.attributeType = attributeType;
+        }
+
+        String attributeType() {
+            return attributeType;
+        }
+
+        boolean supported() {
+            return this == MISSING || attributeType != null;
+        }
+
+        String className() {
+            StringBuilder name = new StringBuilder();
+            for (String word : name().split("_")) {
+                name.append(word.charAt(0)).append(word.substring(1).toLowerCase(Locale.ROOT));
+            }
+            return name.append("Type").toString();
+        }
     }
 
     sealed interface Operand permits Operand.Value, Operand.Attribute, Operand.ListAppend {
@@ -411,6 +445,7 @@ public class DynamoDbPartiQLParser {
     private int pos = 0;
     private int paramIdx = 0;
     private int literalDepth = 0;
+    private String unsupportedIsType;
 
     private DynamoDbPartiQLParser(String statement, List<JsonNode> parameters) {
         this.statement = statement;
@@ -427,6 +462,9 @@ public class DynamoDbPartiQLParser {
         }
         if (parser.peek().type() != TType.EOF) {
             throw validationEx("Statement wasn't well formed, can't be processed: Unexpected token after expression");
+        }
+        if (parser.unsupportedIsType != null) {
+            throw validationEx(parser.unsupportedIsType);
         }
         stmt.where().stream()
                 .flatMap(DynamoDbPartiQLParser::leaves)
@@ -846,6 +884,7 @@ public class DynamoDbPartiQLParser {
             }
             return new Cond.SizeCmp(path, op, val);
         }
+        Token operand = peek();
         Path path = parsePath();
         if (peek().type() == TType.BETWEEN) {
             advance();
@@ -874,12 +913,13 @@ public class DynamoDbPartiQLParser {
             if (negated) {
                 advance();
             }
-            if (peek().type() == TType.NULL) {
-                advance();
-                return new Cond.IsNull(path, negated);
+            PartiQLType type = parseTypeName(negated);
+            if (!type.supported() && unsupportedIsType == null) {
+                unsupportedIsType = "Unsupported data type for IS operator: " + type.className()
+                        + ". Supported data types are [MISSING, NULL, BOOLEAN, BLOB, STRING, NUMERIC, STRUCT, TUPLE,"
+                        + " LIST] at " + position(operand);
             }
-            consume(TType.MISSING);
-            return new Cond.Missing(path, negated);
+            return type == PartiQLType.MISSING ? new Cond.Missing(path, negated) : new Cond.IsType(path, type, negated);
         }
         String op = parseOp();
         PVal val = parseValue();
@@ -895,6 +935,111 @@ public class DynamoDbPartiQLParser {
     private boolean peekFunction(String name) {
         return peek().type() == TType.IDENT && name.equalsIgnoreCase(peek().value())
                 && tokens.get(pos + 1).type() == TType.LPAREN;
+    }
+
+    private static final Map<String, PartiQLType> TYPE_NAMES = Map.ofEntries(
+            Map.entry("MISSING", PartiQLType.MISSING), Map.entry("NULL", PartiQLType.NULL),
+            Map.entry("BOOL", PartiQLType.BOOLEAN), Map.entry("BOOLEAN", PartiQLType.BOOLEAN),
+            Map.entry("SMALLINT", PartiQLType.SMALLINT), Map.entry("INT2", PartiQLType.SMALLINT),
+            Map.entry("INTEGER2", PartiQLType.SMALLINT), Map.entry("INT", PartiQLType.INTEGER),
+            Map.entry("INTEGER", PartiQLType.INTEGER), Map.entry("INT4", PartiQLType.INTEGER4),
+            Map.entry("INTEGER4", PartiQLType.INTEGER4), Map.entry("INT8", PartiQLType.INTEGER8),
+            Map.entry("INTEGER8", PartiQLType.INTEGER8), Map.entry("BIGINT", PartiQLType.INTEGER8),
+            Map.entry("FLOAT", PartiQLType.FLOAT), Map.entry("REAL", PartiQLType.REAL),
+            Map.entry("DECIMAL", PartiQLType.DECIMAL), Map.entry("DEC", PartiQLType.DECIMAL),
+            Map.entry("NUMERIC", PartiQLType.NUMERIC), Map.entry("CHAR", PartiQLType.CHARACTER),
+            Map.entry("CHARACTER", PartiQLType.CHARACTER), Map.entry("VARCHAR", PartiQLType.CHARACTER_VARYING),
+            Map.entry("STRING", PartiQLType.STRING), Map.entry("SYMBOL", PartiQLType.SYMBOL),
+            Map.entry("CLOB", PartiQLType.CLOB), Map.entry("BLOB", PartiQLType.BLOB),
+            Map.entry("STRUCT", PartiQLType.STRUCT), Map.entry("TUPLE", PartiQLType.TUPLE),
+            Map.entry("LIST", PartiQLType.LIST), Map.entry("SEXP", PartiQLType.SEXP),
+            Map.entry("BAG", PartiQLType.BAG), Map.entry("DATE", PartiQLType.DATE),
+            Map.entry("TIME", PartiQLType.TIME), Map.entry("TIMESTAMP", PartiQLType.TIMESTAMP),
+            Map.entry("ANY", PartiQLType.ANY));
+
+    private PartiQLType parseTypeName(boolean negated) {
+        Token name = advance();
+        PartiQLType type = TYPE_NAMES.get(name.value().toUpperCase(Locale.ROOT));
+        if (type == null && isWord(name, "DOUBLE") && isWord(peek(), "PRECISION")) {
+            advance();
+            type = PartiQLType.DOUBLE_PRECISION;
+        } else if (type == null || !isBareWord(name)) {
+            throw validationEx(NOT_WELL_FORMED + "Expected type name");
+        }
+        if (type == PartiQLType.CHARACTER && isWord(peek(), "VARYING")) {
+            advance();
+            type = PartiQLType.CHARACTER_VARYING;
+        }
+        List<Token> parameters = parseTypeParameters();
+        if (parameters.size() > type.maxArity) {
+            throw validationEx(NOT_WELL_FORMED + (negated ? "is_not" : "is") + " type argument "
+                    + type.name().toLowerCase(Locale.ROOT) + " must have arity of 0.." + type.maxArity);
+        }
+        parameters.forEach(DynamoDbPartiQLParser::requireTypeParameter);
+        if (type == PartiQLType.TIME && Stream.of("WITH", "TIME", "ZONE").anyMatch(word -> isWord(peek(), word))) {
+            expectWord("WITH");
+            expectWord("TIME");
+            expectWord("ZONE");
+            type = PartiQLType.TIME_WITH_TIME_ZONE;
+        }
+        return type;
+    }
+
+    private List<Token> parseTypeParameters() {
+        List<Token> parameters = new ArrayList<>();
+        if (peek().type() != TType.LPAREN) {
+            return parameters;
+        }
+        advance();
+        parameters.add(parseTypeParameter());
+        while (peek().type() == TType.COMMA) {
+            advance();
+            parameters.add(parseTypeParameter());
+        }
+        if (advance().type() != TType.RPAREN) {
+            throw validationEx(NOT_WELL_FORMED + "Expected RIGHT_PAREN");
+        }
+        return parameters;
+    }
+
+    private Token parseTypeParameter() {
+        Token sign = peek().type() == TType.PLUS || peek().type() == TType.MINUS ? advance() : null;
+        Token term = advance();
+        if (term.type() == TType.RPAREN || term.type() == TType.COMMA || term.type() == TType.EOF) {
+            throw validationEx(NOT_WELL_FORMED + "Unexpected term");
+        }
+        return sign == null || sign.type() == TType.PLUS ? term : sign;
+    }
+
+    // A literal too large for a long is not read as an integer.
+    private static void requireTypeParameter(Token parameter) {
+        boolean integer = parameter.type() == TType.NUMBER
+                && parameter.value().chars().allMatch(c -> '0' <= c && c <= '9');
+        int bits = integer ? new BigInteger(parameter.value()).bitLength() : Long.SIZE;
+        if (bits >= Long.SIZE) {
+            throw validationEx(NOT_WELL_FORMED + "Type parameter must be an unsigned integer literal");
+        }
+        if (bits >= Integer.SIZE) {
+            throw validationEx(NOT_WELL_FORMED + "Type parameter exceeded maximum value");
+        }
+    }
+
+    private void expectWord(String word) {
+        if (!isWord(advance(), word)) {
+            throw validationEx(NOT_WELL_FORMED + "Expected " + word + " keyword");
+        }
+    }
+
+    private boolean isWord(Token token, String word) {
+        return word.equalsIgnoreCase(token.value()) && isBareWord(token);
+    }
+
+    private boolean isBareWord(Token token) {
+        return switch (token.type()) {
+            case NULL, MISSING -> true;
+            case IDENT -> statement.charAt(token.start()) != '"';
+            default -> false;
+        };
     }
 
     private static final Set<String> SET_TYPES = Set.of("SS", "NS", "BS");
