@@ -270,6 +270,27 @@ class RedshiftDataSessionsTest {
         return MAPPER.createObjectNode().put("ClusterIdentifier", "warehouse").put("Database", "dev").put("DbUser", "admin");
     }
 
+    @Test
+    void failedAdmissionCreatesNoHistoryAndClosedHistoryDoesNotConsumeCapacity() {
+        try (RedshiftDataSessions sessions = new RedshiftDataSessions(Clock.systemUTC())) {
+            RedshiftDataSessions.Reservation rejected = sessions.reserve(OWNER, request().put("SessionKeepAliveSeconds", 60), TARGET);
+            rejected.abort();
+            assertTrue(sessions.snapshots().isEmpty());
+            for (int n = 0; n < 501; n++) {
+                RedshiftDataSessions.Reservation reservation = sessions.reserve(OWNER,
+                        request().put("SessionKeepAliveSeconds", 60), TARGET);
+                reservation.admitted();
+                reservation.finish();
+            }
+            assertEquals(501, sessions.snapshots().size());
+            assertTrue(sessions.snapshots().stream().allMatch(info -> "CLOSED".equals(info.status())));
+            RedshiftDataSessions.Reservation next = sessions.reserve(OWNER, request().put("SessionKeepAliveSeconds", 60), TARGET);
+            next.abort();
+            sessions.clear();
+            assertTrue(sessions.snapshots().isEmpty());
+        }
+    }
+
     private static final class MutableClock extends Clock {
         private Instant now = Instant.parse("2026-10-24T00:00:00Z");
 
