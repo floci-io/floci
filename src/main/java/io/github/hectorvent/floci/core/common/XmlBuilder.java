@@ -19,7 +19,15 @@ package io.github.hectorvent.floci.core.common;
  */
 public final class XmlBuilder {
 
-    private final StringBuilder sb = new StringBuilder();
+    private final StringBuilder sb;
+
+    public XmlBuilder() {
+        this.sb = new StringBuilder();
+    }
+
+    public XmlBuilder(int expectedLength) {
+        this.sb = new StringBuilder(expectedLength);
+    }
 
     /** Opens {@code <element xmlns="xmlns">}. Omits the xmlns attribute when {@code xmlns} is null. */
     public XmlBuilder start(String element, String xmlns) {

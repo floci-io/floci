@@ -71,7 +71,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     @Override
     public void put(String key, V value) {
         String account = prefix();
-        delegate.put(account + "/" + key, value);
+        delegate.put(rawKey(account, key), value);
         trackOwner(account);
     }
 
@@ -327,7 +327,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     public Optional<V> getForAccount(String accountId, String key) {
-        return delegate.get(accountId + "/" + key);
+        return delegate.get(rawKey(accountId, key));
     }
 
     /**
@@ -357,7 +357,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         if (legacy.isEmpty()) {
             return Optional.empty();
         }
-        delegate.put(accountId + "/" + key, legacy.get());
+        delegate.put(rawKey(accountId, key), legacy.get());
         trackOwner(accountId);
         delegate.delete(key);
         return legacy;
@@ -434,7 +434,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     public void putForAccount(String accountId, String key, V value) {
-        delegate.put(accountId + "/" + key, value);
+        delegate.put(rawKey(accountId, key), value);
         trackOwner(accountId);
     }
 
@@ -446,7 +446,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     public void deleteForAccount(String accountId, String key) {
-        delegate.delete(accountId + "/" + key);
+        delegate.delete(rawKey(accountId, key));
     }
 
     @Override
@@ -505,6 +505,19 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     public List<V> scanForAccount(String accountId, Predicate<String> keyFilter) {
         String prefix = accountId + "/";
         return delegate.scan(k -> k.startsWith(prefix) && keyFilter.test(k.substring(prefix.length())));
+    }
+
+    /**
+     * Scans with a filter that sees the stored key, {@code accountId + "/" + relativeKey}, so a prefix
+     * test can run without building the relative key. The filter must check the {@code accountId + "/"}
+     * prefix itself to keep the result to one account.
+     */
+    public List<V> scanRaw(Predicate<String> rawKeyFilter) {
+        return delegate.scan(rawKeyFilter);
+    }
+
+    public static String rawKey(String accountId, String key) {
+        return accountId + "/" + key;
     }
 
     /** Returns unprefixed pre-account values that satisfy an ownership predicate. */
@@ -626,7 +639,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     private String prefixed(String key) {
-        return prefix() + "/" + key;
+        return rawKey(prefix(), key);
     }
 
     /** Whether {@code key} starts with a 12-digit account id and a slash, as account-scoped keys do. */

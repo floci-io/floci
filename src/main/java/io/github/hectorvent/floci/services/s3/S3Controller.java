@@ -68,7 +68,9 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
@@ -119,7 +121,7 @@ public class S3Controller {
             Pattern.compile("[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}");
 
     private static final Logger LOG = Logger.getLogger(S3Controller.class);
-    private static final DateTimeFormatter ISO_FORMAT = DateTimeFormatter
+    static final DateTimeFormatter ISO_FORMAT = DateTimeFormatter
             .ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
             .withZone(ZoneId.of("UTC"));
     static final DateTimeFormatter RFC_822 = DateTimeFormatter
@@ -608,49 +610,50 @@ public class S3Controller {
                                 @Context UriInfo uriInfo,
                                 @Context HttpHeaders httpHeaders) {
         try {
+            S3QueryParams params = new S3QueryParams(uriInfo);
             validateRawUri();
             S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
-            if (hasQueryParam(uriInfo, "uploads")) {
+            if (params.has("uploads")) {
                 s3Service.authorizeBucketRead(bucket, "s3:ListBucketMultipartUploads", authorization);
                 return handleListMultipartUploads(bucket, uriInfo);
             }
-            if (hasQueryParam(uriInfo, "notification")) {
+            if (params.has("notification")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketNotification", authorization);
                 return handleGetBucketNotification(bucket);
             }
-            if (hasQueryParam(uriInfo, "versioning")) {
+            if (params.has("versioning")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketVersioning", authorization);
                 return handleGetBucketVersioning(bucket);
             }
-            if (hasQueryParam(uriInfo, "versions")) {
+            if (params.has("versions")) {
                 s3Service.authorizeBucketRead(bucket, "s3:ListBucketVersions", authorization);
                 return handleListObjectVersions(bucket, prefix, delimiter, maxKeys, keyMarker, versionIdMarker,
                         encodingType);
             }
-            if (hasQueryParam(uriInfo, "location")) {
+            if (params.has("location")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketLocation", authorization);
                 return handleGetBucketLocation(bucket);
             }
-            if (hasQueryParam(uriInfo, "tagging")) {
+            if (params.has("tagging")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketTagging", authorization);
                 return handleGetBucketTagging(bucket);
             }
-            if (hasQueryParam(uriInfo, "object-lock")) {
+            if (params.has("object-lock")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketObjectLockConfiguration", authorization);
                 return handleGetObjectLockConfiguration(bucket);
             }
-            if (hasQueryParam(uriInfo, "website")) {
+            if (params.has("website")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketWebsite", authorization);
                 return handleGetBucketWebsite(bucket);
             }
-            if (hasQueryParam(uriInfo, "logging")) {
+            if (params.has("logging")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketLogging", authorization);
                 return Response.ok(s3Service.getBucketLogging(bucket))
                         .type("application/xml")
                         .build();
             }
-            if (hasQueryParam(uriInfo, "policyStatus")) {
+            if (params.has("policyStatus")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketPolicyStatus", authorization);
                 XmlBuilder xml = new XmlBuilder()
                         .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
@@ -659,54 +662,54 @@ public class S3Controller {
                         .end("PolicyStatus");
                 return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
             }
-            if (hasQueryParam(uriInfo, "policy")) {
+            if (params.has("policy")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketPolicy", authorization);
                 return Response.ok(s3Service.getBucketPolicy(bucket)).build();
             }
-            if (hasQueryParam(uriInfo, "cors")) {
+            if (params.has("cors")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketCORS", authorization);
                 return Response.ok(s3Service.getBucketCors(bucket)).build();
             }
-            if (hasQueryParam(uriInfo, "lifecycle")) {
+            if (params.has("lifecycle")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetLifecycleConfiguration", authorization);
                 S3Service.LifecycleConfigurationResult lc = s3Service.getBucketLifecycle(bucket);
                 return Response.ok(lc.xml())
                         .header("x-amz-transition-default-minimum-object-size", lc.transitionDefaultMinimumObjectSize())
                         .build();
             }
-            if (hasQueryParam(uriInfo, "acl")) {
+            if (params.has("acl")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketAcl", authorization);
                 return Response.ok(s3Service.getBucketAcl(bucket)).build();
             }
-            if (hasQueryParam(uriInfo, "encryption")) {
+            if (params.has("encryption")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetEncryptionConfiguration", authorization);
                 return Response.ok(s3Service.getBucketEncryption(bucket)).build();
             }
-            if (hasQueryParam(uriInfo, "publicAccessBlock")) {
+            if (params.has("publicAccessBlock")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketPublicAccessBlock", authorization);
                 return Response.ok(s3Service.getPublicAccessBlock(bucket)).build();
             }
-            if (hasQueryParam(uriInfo, "ownershipControls")) {
+            if (params.has("ownershipControls")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketOwnershipControls", authorization);
                 return Response.ok(s3Service.getBucketOwnershipControls(bucket)).build();
             }
-            if (hasQueryParam(uriInfo, "requestPayment")) {
+            if (params.has("requestPayment")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketRequestPayment", authorization);
                 return Response.ok(s3Service.getBucketRequestPayment(bucket)).build();
             }
-            if (hasQueryParam(uriInfo, "accelerate")) {
+            if (params.has("accelerate")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetAccelerateConfiguration", authorization);
                 return Response.ok(s3Service.getBucketAccelerateConfiguration(bucket)).build();
             }
-            if (hasQueryParam(uriInfo, "replication")) {
+            if (params.has("replication")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetReplicationConfiguration", authorization);
                 return Response.ok(s3Service.getBucketReplication(bucket)).build();
             }
             // GetBucketMetricsConfiguration and ListBucketMetricsConfigurations share ?metrics and
             // are told apart by the id, which only the single-configuration read carries.
-            if (hasQueryParam(uriInfo, "metrics")) {
+            if (params.has("metrics")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetMetricsConfiguration", authorization);
-                String id = uriInfo.getQueryParameters().getFirst("id");
+                String id = params.first("id");
                 String xml = id != null
                         ? s3Service.getBucketMetricsConfiguration(bucket, id)
                         : s3Service.listBucketMetricsConfigurations(bucket);
@@ -715,9 +718,9 @@ public class S3Controller {
             // GetBucketIntelligentTieringConfiguration and ListBucketIntelligentTieringConfigurations
             // share ?intelligent-tiering and are told apart by the id, which only the
             // single-configuration read carries.
-            if (hasQueryParam(uriInfo, "intelligent-tiering")) {
+            if (params.has("intelligent-tiering")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetIntelligentTieringConfiguration", authorization);
-                String id = uriInfo.getQueryParameters().getFirst("id");
+                String id = params.first("id");
                 String xml = id != null
                         ? s3Service.getBucketIntelligentTieringConfiguration(bucket, id)
                         : s3Service.listBucketIntelligentTieringConfigurations(bucket);
@@ -726,9 +729,9 @@ public class S3Controller {
             // GetBucketAnalyticsConfiguration and ListBucketAnalyticsConfigurations share
             // ?analytics and are told apart by the id, which only the single-configuration read
             // carries.
-            if (hasQueryParam(uriInfo, "analytics")) {
+            if (params.has("analytics")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetAnalyticsConfiguration", authorization);
-                String id = uriInfo.getQueryParameters().getFirst("id");
+                String id = params.first("id");
                 String xml = id != null
                         ? s3Service.getBucketAnalyticsConfiguration(bucket, id)
                         : s3Service.listBucketAnalyticsConfigurations(bucket);
@@ -736,9 +739,9 @@ public class S3Controller {
             }
             // GetBucketInventoryConfiguration and ListBucketInventoryConfigurations share
             // ?inventory and are told apart the same way.
-            if (hasQueryParam(uriInfo, "inventory")) {
+            if (params.has("inventory")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetInventoryConfiguration", authorization);
-                String id = uriInfo.getQueryParameters().getFirst("id");
+                String id = params.first("id");
                 String xml = id != null
                         ? s3Service.getBucketInventoryConfiguration(bucket, id)
                         : s3Service.listBucketInventoryConfigurations(bucket);
@@ -772,7 +775,7 @@ public class S3Controller {
                     ? s3Service.getBucketOwnerAccountId(bucket) : null;
             boolean ownershipEnforced = bucketOwnerAccount != null && s3Service.bucketOwnershipIsEnforced(bucket);
 
-            XmlBuilder xml = new XmlBuilder()
+            XmlBuilder xml = new XmlBuilder(512 + 256 * (objects.size() + commonPrefixes.size()))
                     .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                     .start("ListBucketResult", AwsNamespaces.S3)
                     .elem("Name", bucket)
@@ -786,7 +789,7 @@ public class S3Controller {
             for (S3Object obj : objects) {
                 xml.start("Contents")
                    .elem("Key", maybeEncode(obj.getKey(), encodingType))
-                   .elem("LastModified", ISO_FORMAT.format(obj.getLastModified()))
+                   .elem("LastModified", isoSeconds(obj.getLastModified()))
                    .elem("ETag", obj.getETag())
                    .elem("Size", obj.getSize())
                    .elem("StorageClass", obj.getStorageClass());
@@ -852,6 +855,7 @@ public class S3Controller {
                               @Context HttpHeaders httpHeaders,
                               InputStream body) {
         try {
+            S3QueryParams params = new S3QueryParams(uriInfo);
             key = extractObjectKey(uriInfo, bucket, key);
             S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
@@ -859,16 +863,16 @@ public class S3Controller {
             // The sub-resource actions are checked as IAM checks them: as their version counterpart
             // when the request names a version, and offered the tags or Object Lock settings the
             // body sets.
-            String versionId = uriInfo.getQueryParameters().getFirst("versionId");
-            if (hasQueryParam(uriInfo, "tagging")) {
-                checkVersionId(bucket, uriInfo);
+            String versionId = params.first("versionId");
+            if (params.has("tagging")) {
+                checkVersionId(bucket, params);
                 byte[] tags = readWholeBody(body);
                 s3Service.authorizeObjectWrite(bucket, key, versionId, "s3:PutObjectTagging", authorization,
                         S3ObjectActions.taggingBodyConditions(new String(tags, StandardCharsets.UTF_8)));
                 return handlePutObjectTagging(bucket, key, versionId, tags);
             }
-            if (hasQueryParam(uriInfo, "retention")) {
-                checkVersionId(bucket, uriInfo);
+            if (params.has("retention")) {
+                checkVersionId(bucket, params);
                 String retention = new String(readWholeBody(body), StandardCharsets.UTF_8);
                 s3Service.authorizeObjectWrite(bucket, key, null, "s3:PutObjectRetention", authorization,
                         S3ObjectActions.retentionBodyConditions(retention, clock.instant()));
@@ -882,16 +886,16 @@ public class S3Controller {
                 }
                 return handlePutObjectRetention(bucket, key, versionId, retention, effectiveBypass(bypass, overrides));
             }
-            if (hasQueryParam(uriInfo, "legal-hold")) {
-                checkVersionId(bucket, uriInfo);
+            if (params.has("legal-hold")) {
+                checkVersionId(bucket, params);
                 byte[] legalHold = readWholeBody(body);
                 s3Service.authorizeObjectWrite(bucket, key, null, "s3:PutObjectLegalHold", authorization,
                         S3ObjectActions.legalHoldBodyConditions(
                                 new String(legalHold, StandardCharsets.UTF_8), clock.instant()));
                 return handlePutObjectLegalHold(bucket, key, versionId, legalHold);
             }
-            if (hasQueryParam(uriInfo, "acl")) {
-                checkVersionId(bucket, uriInfo);
+            if (params.has("acl")) {
+                checkVersionId(bucket, params);
                 s3Service.authorizeObjectWrite(bucket, key, versionId, "s3:PutObjectAcl", authorization, null);
                 s3Service.putObjectAcl(bucket, key, versionId,
                         new String(readWholeBody(body), StandardCharsets.UTF_8),
@@ -904,8 +908,8 @@ public class S3Controller {
                 return Response.ok().build();
             }
 
-            if (hasQueryParam(uriInfo, "annotation")) {
-                checkVersionId(bucket, uriInfo);
+            if (params.has("annotation")) {
+                checkVersionId(bucket, params);
                 s3Service.authorizeObjectWrite(bucket, key, versionId, "s3:PutObjectAnnotation", authorization, null);
                 return handlePutObjectAnnotation(bucket, key, readWholeBody(body), uriInfo, httpHeaders);
             }
@@ -1032,6 +1036,7 @@ public class S3Controller {
                               @Context HttpHeaders httpHeaders) {
         S3Service.RequestAuthorization authorization = S3Service.RequestAuthorization.unsigned();
         try {
+            S3QueryParams params = new S3QueryParams(uriInfo);
             key = extractObjectKey(uriInfo, bucket, key);
             authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
@@ -1048,13 +1053,13 @@ public class S3Controller {
                 return handleListParts(bucket, key, uploadId, maxPartsQuery, partNumberMarkerQuery);
             }
 
-            checkVersionId(bucket, uriInfo);
-            if (hasQueryParam(uriInfo, "tagging")) {
+            checkVersionId(bucket, params);
+            if (params.has("tagging")) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectTagging", authorization);
                 return handleGetObjectTagging(bucket, key, versionId);
             }
-            if (hasQueryParam(uriInfo, "annotation")) {
-                String annotationNameParam = uriInfo.getQueryParameters().getFirst("annotationName");
+            if (params.has("annotation")) {
+                String annotationNameParam = params.first("annotationName");
                 // An empty annotationName is not a Get request for the empty name: it falls
                 // through to ListObjectAnnotations, matching the blank-name put semantics.
                 if (annotationNameParam != null && !annotationNameParam.isEmpty()) {
@@ -1064,15 +1069,15 @@ public class S3Controller {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:ListObjectAnnotations", authorization);
                 return handleListObjectAnnotations(bucket, key, uriInfo);
             }
-            if (hasQueryParam(uriInfo, "retention")) {
+            if (params.has("retention")) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectRetention", authorization);
                 return handleGetObjectRetention(bucket, key, versionId);
             }
-            if (hasQueryParam(uriInfo, "legal-hold")) {
+            if (params.has("legal-hold")) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectLegalHold", authorization);
                 return handleGetObjectLegalHold(bucket, key, versionId);
             }
-            if (hasQueryParam(uriInfo, "acl")) {
+            if (params.has("acl")) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectAcl", authorization);
                 try {
                     String aclXml = s3Service.getObjectAcl(bucket, key, versionId);
@@ -1084,7 +1089,7 @@ public class S3Controller {
                     return xmlErrorResponse(e, bucket);
                 }
             }
-            if (hasQueryParam(uriInfo, "attributes")) {
+            if (params.has("attributes")) {
                 // GetObjectAttributes needs the read beside its own action, as IAM checks it.
                 s3Service.authorizeGetObject(bucket, key, versionId, authorization);
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectAttributes", authorization);
@@ -1126,7 +1131,7 @@ public class S3Controller {
                 }
 
                 boolean includeChecksum = "ENABLED".equalsIgnoreCase(resolveHeaderOrQueryParam(checksumMode, uriInfo, "x-amz-checksum-mode"));
-                String partNumber = uriInfo.getQueryParameters().getFirst("partNumber");
+                String partNumber = params.first("partNumber");
                 if (partNumber != null) {
                     Response partResponse = handlePartRequest("GetObject", bucket, key, obj, read.body(),
                             partNumber, rangeHeader, overrides, includeChecksum);
@@ -1385,6 +1390,7 @@ public class S3Controller {
                                @Context HttpHeaders httpHeaders) {
         S3Service.RequestAuthorization authorization = S3Service.RequestAuthorization.unsigned();
         try {
+            S3QueryParams params = new S3QueryParams(uriInfo);
             key = extractObjectKey(uriInfo, bucket, key);
             authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
@@ -1394,11 +1400,11 @@ public class S3Controller {
                     return headOnlyResponse(websiteResponse);
                 }
             }
-            checkVersionId(bucket, uriInfo);
+            checkVersionId(bucket, params);
             // HEAD honors the annotation subresource so a HEAD probe reports the same status and
             // annotation metadata a GET would, instead of falling through to the object's headers.
-            if (hasQueryParam(uriInfo, "annotation")) {
-                String annotationNameParam = uriInfo.getQueryParameters().getFirst("annotationName");
+            if (params.has("annotation")) {
+                String annotationNameParam = params.first("annotationName");
                 // An empty annotationName is not a Get request for the empty name: it falls
                 // through to ListObjectAnnotations, matching the blank-name put semantics.
                 if (annotationNameParam != null && !annotationNameParam.isEmpty()) {
@@ -1429,7 +1435,7 @@ public class S3Controller {
             }
             boolean checksumMode = "ENABLED".equalsIgnoreCase(
                     resolveHeaderOrQueryParam(checksumModeHeader, uriInfo, "x-amz-checksum-mode"));
-            String partNumber = uriInfo.getQueryParameters().getFirst("partNumber");
+            String partNumber = params.first("partNumber");
             if (partNumber != null) {
                 return headOnlyResponse(handlePartRequest("HeadObject", bucket, key, obj, null, partNumber,
                         httpHeaders.getHeaderString("Range"), overrides, checksumMode));
@@ -1550,18 +1556,19 @@ public class S3Controller {
                                  @Context UriInfo uriInfo,
                                  @Context HttpHeaders httpHeaders) {
         try {
+            S3QueryParams params = new S3QueryParams(uriInfo);
             key = extractObjectKey(uriInfo, bucket, key);
             S3Service.RequestAuthorization authorization = S3RequestAuthorizationParser.parseIfRequired(
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
 
-            if (hasQueryParam(uriInfo, "tagging")) {
-                checkVersionId(bucket, uriInfo);
+            if (params.has("tagging")) {
+                checkVersionId(bucket, params);
                 s3Service.authorizeObjectWrite(bucket, key, versionId, "s3:DeleteObjectTagging", authorization, null);
                 return withVersionId(Response.noContent(), s3Service.deleteObjectTagging(bucket, key, versionId))
                         .build();
             }
-            if (hasQueryParam(uriInfo, "annotation")) {
-                checkVersionId(bucket, uriInfo);
+            if (params.has("annotation")) {
+                checkVersionId(bucket, params);
                 // The user guide: "The BypassGovernanceRetention permission does not apply to annotation
                 // operations", so the bypass header asks for no permission of its own here.
                 boolean bypass = "true".equalsIgnoreCase(
@@ -1575,7 +1582,7 @@ public class S3Controller {
                 s3Service.abortMultipartUpload(bucket, key, uploadId);
                 return Response.noContent().build();
             }
-            checkVersionId(bucket, uriInfo);
+            checkVersionId(bucket, params);
             boolean bypass = "true".equalsIgnoreCase(
                     httpHeaders.getHeaderString("x-amz-bypass-governance-retention"));
             String ifMatch = httpHeaders.getHeaderString("If-Match");
@@ -1711,7 +1718,7 @@ public class S3Controller {
             }
 
             if (hasQueryParam(uriInfo, "restore")) {
-                checkVersionId(bucket, uriInfo);
+                checkVersionId(bucket, uriInfo.getQueryParameters().getFirst("versionId"));
                 s3Service.authorizeObjectWrite(bucket, key, "s3:RestoreObject", authorization);
                 s3Service.restoreObject(bucket, key, versionId, new String(body, StandardCharsets.UTF_8));
                 return Response.accepted().build();
@@ -3614,12 +3621,40 @@ public class S3Controller {
         return null;
     }
 
+    static String isoSeconds(Instant instant) {
+        LocalDateTime time = LocalDateTime.ofEpochSecond(instant.getEpochSecond(), 0, ZoneOffset.UTC);
+        int year = time.getYear();
+        if (year < 1000 || year > 9999) {
+            return ISO_FORMAT.format(instant);
+        }
+        StringBuilder sb = new StringBuilder(20);
+        appendTwoDigits(sb, year / 100);
+        appendTwoDigits(sb, year % 100);
+        sb.append('-');
+        appendTwoDigits(sb, time.getMonthValue());
+        sb.append('-');
+        appendTwoDigits(sb, time.getDayOfMonth());
+        sb.append('T');
+        appendTwoDigits(sb, time.getHour());
+        sb.append(':');
+        appendTwoDigits(sb, time.getMinute());
+        sb.append(':');
+        appendTwoDigits(sb, time.getSecond());
+        return sb.append('Z').toString();
+    }
+
+    private static void appendTwoDigits(StringBuilder sb, int value) {
+        sb.append((char) ('0' + value / 10)).append((char) ('0' + value % 10));
+    }
+
     static boolean isWebsiteRequest(HttpHeaders httpHeaders, UriInfo uriInfo) {
         // HTTP/2 (RFC 9113) carries no Host header, so fall back to the request URI authority —
         // the same resolution S3VirtualHostFilter applies. Without this, a website bucket reached
         // over HTTP/2 would be served as an API (XML) response instead of website HTML.
-        String host = S3VirtualHostFilter.resolveHost(httpHeaders.getHeaderString("Host"),
-                httpHeaders.getHeaderString("X-Forwarded-Host"), uriInfo.getRequestUri());
+        String hostHeader = httpHeaders.getHeaderString("Host");
+        String host = S3VirtualHostFilter.resolveHost(hostHeader,
+                httpHeaders.getHeaderString("X-Forwarded-Host"),
+                hostHeader != null && !hostHeader.isBlank() ? null : uriInfo.getRequestUri());
         return host != null && host.contains("s3-website");
     }
 
@@ -3831,8 +3866,11 @@ public class S3Controller {
      * Floci mints every version id as a UUID, so it refuses any other value. The raw query keeps an empty
      * {@code versionId=}, which a {@code @QueryParam} reads as absent.
      */
-    private void checkVersionId(String bucket, UriInfo uriInfo) {
-        String versionId = uriInfo.getQueryParameters().getFirst("versionId");
+    private void checkVersionId(String bucket, S3QueryParams params) {
+        checkVersionId(bucket, params.first("versionId"));
+    }
+
+    private void checkVersionId(String bucket, String versionId) {
         if (versionId == null || "null".equals(versionId) || MINTED_VERSION_ID.matcher(versionId).matches()
                 || !s3Service.bucketExists(bucket)) {
             return;

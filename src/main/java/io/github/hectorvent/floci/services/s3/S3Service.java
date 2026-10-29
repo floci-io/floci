@@ -2617,16 +2617,32 @@ public class S3Service implements Resettable, ResourceProvider {
         String keyPrefix = bucketName + "/";
         String fullPrefix = prefix != null ? keyPrefix + prefix : keyPrefix;
 
-        // Filter out versioned entries (contain #v#) and delete markers
-        Predicate<String> keyFilter = key -> key.startsWith(fullPrefix)
-                && !key.contains("#v#")
-                && !key.startsWith(nullVersionPrefix(bucketName));
-        List<S3Object> storedObjects = scanObjectsForAccount(bucketOwnerAccount, keyFilter);
-        List<S3Object> allObjects = storedObjects
-                .stream()
-                .filter(obj -> !obj.isDeleteMarker())
-                .toList();
-        allObjects = new ArrayList<>(allObjects);
+        List<S3Object> storedObjects;
+        if (objectStore instanceof AccountAwareStorageBackend<?> aware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<S3Object> typed = (AccountAwareStorageBackend<S3Object>) aware;
+            String account = globalBucketNamespace ? bucketOwnerAccount : typed.accountId();
+            String rawPrefix = AccountAwareStorageBackend.rawKey(account, fullPrefix);
+            String rawNullPrefix = AccountAwareStorageBackend.rawKey(account, nullVersionPrefix(bucketName));
+            int keyStart = account.length() + 1;
+            storedObjects = typed.scanRaw(raw -> raw.startsWith(rawPrefix)
+                    && raw.indexOf("#v#", keyStart) < 0
+                    && !raw.startsWith(rawNullPrefix));
+        } else {
+            String nullPrefix = nullVersionPrefix(bucketName);
+            storedObjects = objectStore.scan(key -> key.startsWith(fullPrefix)
+                    && !key.contains("#v#")
+                    && !key.startsWith(nullPrefix));
+        }
+
+        // continuation-token takes precedence; it encodes the last key seen on a previous page.
+        String filterKey = continuationToken != null ? continuationToken : startAfter;
+        List<S3Object> allObjects = new ArrayList<>(storedObjects.size());
+        for (S3Object obj : storedObjects) {
+            if (!obj.isDeleteMarker() && (filterKey == null || obj.getKey().compareTo(filterKey) > 0)) {
+                allObjects.add(obj);
+            }
+        }
 
         // see https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-prefixes.html
         List<String> commonPrefixes = List.of();
@@ -2635,22 +2651,12 @@ public class S3Service implements Resettable, ResourceProvider {
             DelimiterGroups<S3Object> groups = groupByDelimiter(allObjects, prefix, delimiter, S3Object::getKey);
             allObjects = groups.direct();
             commonPrefixes = groups.commonPrefixes();
+            if (filterKey != null) {
+                commonPrefixes.removeIf(cp -> cp.compareTo(filterKey) <= 0);
+            }
         }
 
         allObjects.sort(Comparator.comparing(S3Object::getKey));
-
-        // Apply continuation-token / start-after filter.
-        // continuation-token takes precedence; it encodes the last key seen on a previous page.
-        String filterKey = continuationToken != null ? continuationToken : startAfter;
-        if (filterKey != null) {
-            final String fk = filterKey;
-            allObjects = allObjects.stream()
-                    .filter(o -> o.getKey().compareTo(fk) > 0)
-                    .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
-            commonPrefixes = commonPrefixes.stream()
-                    .filter(cp -> cp.compareTo(fk) > 0)
-                    .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
-        }
 
         // S3 counts both direct objects and common prefixes.
         // Each common prefix group (e.g. "docs/") uses one entry regardless of
@@ -7607,15 +7613,6 @@ public class S3Service implements Resettable, ResourceProvider {
                     .or(() -> typed.getLegacyForAccount(accountId, storeKey));
         }
         return objectStore.get(storeKey);
-    }
-
-    private List<S3Object> scanObjectsForAccount(String accountId, Predicate<String> keyFilter) {
-        if (globalBucketNamespace && objectStore instanceof AccountAwareStorageBackend<?> aware) {
-            @SuppressWarnings("unchecked")
-            AccountAwareStorageBackend<S3Object> typed = (AccountAwareStorageBackend<S3Object>) aware;
-            return typed.scanForAccount(accountId, keyFilter);
-        }
-        return objectStore.scan(keyFilter);
     }
 
     private void putObjectForAccount(String accountId, String storeKey, S3Object object) {
