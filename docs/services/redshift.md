@@ -14,6 +14,36 @@ Snapshot-dump and catalog-seed uploads retry transient Docker I/O failures for u
 
 For running SQL without a PostgreSQL wire connection (the way Lambda and Step Functions do), see the [Redshift Data API](redshift-data.md).
 
+## Pausing and resuming provisioned clusters
+
+`PauseCluster` accepts an `available` cluster and returns it as `paused`.
+It closes the auth proxy and stops PostgreSQL without removing the container or its
+data volume. Existing SQL connections are disconnected. `ResumeCluster` accepts a
+`paused` cluster, starts the same container, waits for PostgreSQL readiness, and
+restores the auth proxy with the same endpoint and authentication settings.
+Both operations complete synchronously in Floci. Repeating either operation in the
+wrong state returns `InvalidClusterState`; an unknown identifier returns `ClusterNotFound`.
+Clusters with automated snapshots disabled cannot be paused. Resume the cluster
+before modifying it, rebooting it, or creating a snapshot.
+
+Floci preserves the original container directly instead of creating an additional
+automated snapshot for pause. It retains all user tables and views, including
+no-backup tables, and does not simulate maintenance-version upgrades on resume.
+
+The proxy port remains reserved while paused, including after a Floci restart with
+persistent cluster metadata. Startup leaves paused clusters stopped. Resume requires
+the original container to still exist: if it was removed externally, Floci returns
+an error instead of creating an empty replacement database. A failed resume attempts
+to stop the container again so it can be retried. If that rollback also fails, the
+cluster is marked `unavailable` and its data-bearing container is retained.
+Delete a paused cluster with `SkipFinalClusterSnapshot=true`, or resume it before
+requesting a final snapshot.
+
+```bash
+aws --endpoint-url http://localhost:4566 redshift pause-cluster --cluster-identifier warehouse
+aws --endpoint-url http://localhost:4566 redshift resume-cluster --cluster-identifier warehouse
+```
+
 ## Events and notifications
 
 `DescribeEvents` returns the last hour by default, accepts `StartTime`, `EndTime`,
@@ -131,6 +161,8 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `DescribeLoggingStatus` | Return a cluster's stored audit-logging configuration |
 | `EnableLogging` | Store audit-logging configuration and deliver the selected connection, user, and user-activity audit records to CloudWatch Logs for provisioned clusters |
 | `DisableLogging` | Clear a cluster's audit-logging configuration |
+| `PauseCluster` | Stop a provisioned cluster and its auth proxy while retaining the container and data |
+| `ResumeCluster` | Restart a paused cluster and restore its auth proxy on the same endpoint |
 | `RebootCluster` | Restart a cluster's container |
 | `GetClusterCredentials` | Issue a short-lived DbUser / DbPassword pair the auth proxy and Data API accept for a non-master user |
 | `GetClusterCredentialsWithIAM` | Issue short-lived credentials with the DbUser derived from the caller's IAM identity |

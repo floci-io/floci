@@ -249,8 +249,15 @@ public class RedshiftService implements ManagedSecretRotator {
 
     // Recreate Docker containers for persisted clusters on app restart (across every account, not just default)
     void onStart(@Observes StartupEvent event) {
+        List<AccountAwareStorageBackend.AccountEntry<Cluster>> persistedClusters =
+                clusters.scanAllAccountEntries(k -> true);
+        for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : persistedClusters) {
+            if (entry.value().getProxyPort() > 0) {
+                usedPorts.add(entry.value().getProxyPort());
+            }
+        }
         List<AccountAwareStorageBackend.AccountEntry<Cluster>> availableClusters =
-                clusters.scanAllAccountEntries(k -> true).stream()
+                persistedClusters.stream()
                         .filter(entry -> "available".equals(entry.value().getClusterStatus()))
                         .toList();
         for (AccountAwareStorageBackend.AccountEntry<Cluster> entry : availableClusters) {
@@ -1004,6 +1011,7 @@ public class RedshiftService implements ManagedSecretRotator {
                                                Integer automatedRetention) {
         Cluster cluster = clusters.get(clusterIdentifier)
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+        rejectPausedCluster(cluster);
         validateAutomatedRetention(nodeType == null ? cluster.getNodeType() : nodeType,
                 automatedRetention == null ? cluster.getAutomatedSnapshotRetentionPeriod() : automatedRetention);
 
@@ -1314,6 +1322,116 @@ public class RedshiftService implements ManagedSecretRotator {
         return cluster;
     }
 
+    public Cluster pauseCluster(String clusterIdentifier) {
+        return mutateCluster(clusterIdentifier, () -> {
+            Cluster cluster = clusterInState(clusterIdentifier, "available");
+            if (cluster.getAutomatedSnapshotRetentionPeriod() == 0) {
+                throw new AwsException("InvalidClusterState",
+                        "Clusters with automated snapshots disabled cannot be paused", 400);
+            }
+            String accountId = clusters.accountId();
+            try {
+                proxyManager.stopProxy(relayKey(accountId, clusterIdentifier));
+            } catch (RuntimeException failure) {
+                LOG.warnv(failure, "Failed to stop auth proxy while pausing cluster {0}", clusterIdentifier);
+                throw new AwsException("InternalFailure", "Failed to stop auth proxy for cluster "
+                        + clusterIdentifier, 500);
+            }
+            try {
+                containerManager.pause(accountId, clusterIdentifier);
+                cluster.setClusterStatus("paused");
+                cluster.setContainerHost(null);
+                cluster.setContainerPort(0);
+                clusters.put(clusterIdentifier, cluster);
+                clusters.flush();
+                return cluster;
+            } catch (RuntimeException failure) {
+                try {
+                    RedshiftContainerHandle handle = containerManager.resume(accountId, clusterIdentifier,
+                            cluster.getMasterUsername(), CLUSTER_DB_NAME);
+                    startResumedProxy(accountId, cluster, handle);
+                    cluster.setClusterStatus("available");
+                } catch (RuntimeException rollbackFailure) {
+                    LOG.warnv(rollbackFailure, "Failed to restore cluster {0} after unsuccessful pause", clusterIdentifier);
+                    cluster.setClusterStatus("unavailable");
+                    cluster.setContainerHost(null);
+                    cluster.setContainerPort(0);
+                }
+                clusters.put(clusterIdentifier, cluster);
+                clusters.flush();
+                LOG.warnv(failure, "Failed to pause Redshift cluster {0}", clusterIdentifier);
+                throw new AwsException("InternalFailure", "Failed to pause cluster " + clusterIdentifier, 500);
+            }
+        });
+    }
+
+    public Cluster resumeCluster(String clusterIdentifier) {
+        return mutateCluster(clusterIdentifier, () -> {
+            Cluster cluster = clusterInState(clusterIdentifier, "paused");
+            String accountId = clusters.accountId();
+            try {
+                RedshiftContainerHandle handle = containerManager.resume(accountId, clusterIdentifier,
+                        cluster.getMasterUsername(), CLUSTER_DB_NAME);
+                startResumedProxy(accountId, cluster, handle);
+                cluster.setClusterStatus("available");
+                clusters.put(clusterIdentifier, cluster);
+                clusters.flush();
+                registerAuditLogging(accountId, cluster);
+                return cluster;
+            } catch (RuntimeException failure) {
+                cluster.setClusterStatus("paused");
+                try {
+                    proxyManager.stopProxy(relayKey(accountId, clusterIdentifier));
+                    containerManager.pause(accountId, clusterIdentifier);
+                } catch (RuntimeException rollbackFailure) {
+                    LOG.warnv(rollbackFailure, "Failed to return cluster {0} to paused state", clusterIdentifier);
+                    cluster.setClusterStatus("unavailable");
+                }
+                cluster.setContainerHost(null);
+                cluster.setContainerPort(0);
+                clusters.put(clusterIdentifier, cluster);
+                clusters.flush();
+                if (failure instanceof AwsException awsFailure) {
+                    throw awsFailure;
+                }
+                LOG.warnv(failure, "Failed to resume Redshift cluster {0}", clusterIdentifier);
+                throw new AwsException("InternalFailure", "Failed to resume cluster " + clusterIdentifier, 500);
+            }
+        });
+    }
+
+    private Cluster clusterInState(String identifier, String requiredState) {
+        Cluster cluster = clusters.get(identifier).orElseThrow(() ->
+                new AwsException("ClusterNotFound", "Cluster " + identifier + " not found", 404));
+        if (!requiredState.equals(cluster.getClusterStatus())) {
+            throw new AwsException("InvalidClusterState", "Cluster " + identifier
+                    + " must be " + requiredState + " for this operation", 400);
+        }
+        return cluster;
+    }
+
+    private static void rejectPausedCluster(Cluster cluster) {
+        if ("paused".equals(cluster.getClusterStatus())) {
+            throw new AwsException("InvalidClusterState", "Cluster " + cluster.getClusterIdentifier()
+                    + " must be resumed before this operation", 400);
+        }
+    }
+
+    private void startResumedProxy(String accountId, Cluster cluster, RedshiftContainerHandle handle) {
+        int port = cluster.getProxyPort() > 0 ? cluster.getProxyPort() : allocateProxyPort();
+        usedPorts.add(port);
+        cluster.setProxyPort(port);
+        Endpoint endpoint = cluster.getEndpoint() != null ? cluster.getEndpoint() : proxyEndpoint(port);
+        String password = cluster.getMasterPassword() != null ? cluster.getMasterPassword() : "admin";
+        proxyManager.startProxy(relayKey(accountId, cluster.getClusterIdentifier()), port,
+                handle.getHost(), handle.getPort(), endpoint.getAddress(), cluster.getMasterUsername(), password,
+                CLUSTER_DB_NAME, passwordValidatorFor(accountId, cluster.getClusterIdentifier()),
+                cluster.getIamRoleArns(), cluster.getDefaultIamRoleArn());
+        cluster.setContainerHost(handle.getHost());
+        cluster.setContainerPort(handle.getPort());
+        cluster.setEndpoint(endpoint);
+    }
+
     public Cluster rebootCluster(String clusterIdentifier) {
         return mutateCluster(clusterIdentifier, () -> rebootClusterLocked(clusterIdentifier));
     }
@@ -1321,6 +1439,7 @@ public class RedshiftService implements ManagedSecretRotator {
     private Cluster rebootClusterLocked(String clusterIdentifier) {
         Cluster cluster = clusters.get(clusterIdentifier)
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
+        rejectPausedCluster(cluster);
 
         // Replacement containers do not reattach the old anonymous volume, so a plain stop+recreate
         // would silently drop the cluster's data. Dump before stopping and
@@ -1473,6 +1592,7 @@ public class RedshiftService implements ManagedSecretRotator {
 
     private Snapshot createSnapshot(String accountId, String snapshotIdentifier, Cluster cluster,
                                      Integer retentionPeriod, Instant now, Instant scheduledTime) {
+        rejectPausedCluster(cluster);
         validateSnapshotIdentifier(snapshotIdentifier);
         String clusterIdentifier = cluster.getClusterIdentifier();
         if ((scheduledTime == null ? snapshots.get(snapshotIdentifier)

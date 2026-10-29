@@ -71,6 +71,181 @@ import static org.mockito.Mockito.*;
 
 class RedshiftServiceTest {
 
+    @Test
+    void pauseAndResumePreserveEndpointAndReservePort() {
+        Cluster cluster = lifecycleCluster("available");
+        Endpoint original = cluster.getEndpoint();
+        service.reserveProxyPort(7107);
+        when(cm.resume("111111111111", "warehouse", "admin", "dev"))
+                .thenReturn(new RedshiftContainerHandle("original", "warehouse", "backend", 5433));
+
+        assertSame(cluster, service.pauseCluster("warehouse"));
+        assertEquals("paused", cluster.getClusterStatus());
+        assertNull(cluster.getContainerHost());
+        assertEquals(0, cluster.getContainerPort());
+        assertFalse(service.reserveProxyPort(7107));
+        InOrder order = inOrder(proxyManager, cm);
+        order.verify(proxyManager).stopProxy("111111111111:warehouse");
+        order.verify(cm).pause("111111111111", "warehouse");
+
+        assertSame(cluster, service.resumeCluster("warehouse"));
+        assertEquals("available", cluster.getClusterStatus());
+        assertEquals(original.getAddress(), cluster.getEndpoint().getAddress());
+        assertEquals(original.getPort(), cluster.getEndpoint().getPort());
+        assertEquals(5433, cluster.getContainerPort());
+        order.verify(cm).resume("111111111111", "warehouse", "admin", "dev");
+        order.verify(proxyManager).startProxy(eq("111111111111:warehouse"), eq(7107),
+                eq("backend"), eq(5433), eq("localhost"), eq("admin"), eq("Secret123"), eq("dev"),
+                any(), anyList(), isNull());
+        verify(cm, never()).stop(anyString(), anyString());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"creating", "deleting", "failed", "unavailable", "pausing", "resuming"})
+    void pauseAndResumeRejectInvalidStates(String state) {
+        lifecycleCluster(state);
+        assertEquals("InvalidClusterState", assertThrows(AwsException.class,
+                () -> service.pauseCluster("warehouse")).getErrorCode());
+        assertEquals("InvalidClusterState", assertThrows(AwsException.class,
+                () -> service.resumeCluster("warehouse")).getErrorCode());
+        verifyNoInteractions(cm, proxyManager);
+    }
+
+    @Test
+    void pauseAndResumeRejectMissingClusterAndRepeatedOperations() {
+        assertEquals("ClusterNotFound", assertThrows(AwsException.class,
+                () -> service.pauseCluster("missing")).getErrorCode());
+        assertEquals("ClusterNotFound", assertThrows(AwsException.class,
+                () -> service.resumeCluster("missing")).getErrorCode());
+        Cluster cluster = lifecycleCluster("paused");
+        assertEquals("InvalidClusterState", assertThrows(AwsException.class,
+                () -> service.pauseCluster("warehouse")).getErrorCode());
+        cluster.setClusterStatus("available");
+        assertEquals("InvalidClusterState", assertThrows(AwsException.class,
+                () -> service.resumeCluster("warehouse")).getErrorCode());
+    }
+
+    @Test
+    void pauseProxyFailurePreservesDatabaseAndAvailableState() {
+        Cluster cluster = lifecycleCluster("available");
+        doThrow(new IllegalStateException("close failed")).when(proxyManager)
+                .stopProxy("111111111111:warehouse");
+        assertEquals("InternalFailure", assertThrows(AwsException.class,
+                () -> service.pauseCluster("warehouse")).getErrorCode());
+        assertEquals("available", cluster.getClusterStatus());
+        verifyNoInteractions(cm);
+    }
+
+    @Test
+    void pauseContainerFailureRestoresTheOriginalRuntime() {
+        Cluster cluster = lifecycleCluster("available");
+        doThrow(new IllegalStateException("stop failed")).when(cm).pause("111111111111", "warehouse");
+        when(cm.resume("111111111111", "warehouse", "admin", "dev"))
+                .thenReturn(new RedshiftContainerHandle("original", "warehouse", "backend", 5432));
+        assertThrows(AwsException.class, () -> service.pauseCluster("warehouse"));
+        assertEquals("available", cluster.getClusterStatus());
+        verify(proxyManager).startProxy(anyString(), eq(7107), eq("backend"), eq(5432), anyString(),
+                eq("admin"), eq("Secret123"), eq("dev"), any(), anyList(), isNull());
+        verify(cm, never()).stop(anyString(), anyString());
+    }
+
+    @Test
+    void failedPauseRestorationRetainsDataAndMarksUnavailable() {
+        Cluster cluster = lifecycleCluster("available");
+        doThrow(new IllegalStateException("stop failed")).when(cm).pause("111111111111", "warehouse");
+        when(cm.resume("111111111111", "warehouse", "admin", "dev"))
+                .thenThrow(new IllegalStateException("restart failed"));
+        assertThrows(AwsException.class, () -> service.pauseCluster("warehouse"));
+        assertEquals("unavailable", cluster.getClusterStatus());
+        assertNull(cluster.getContainerHost());
+        assertEquals(0, cluster.getContainerPort());
+        verify(cm, never()).stop(anyString(), anyString());
+    }
+
+    @Test
+    void failedResumeRollbackRetainsDataAndMarksUnavailable() {
+        Cluster cluster = lifecycleCluster("paused");
+        service.reserveProxyPort(7107);
+        when(cm.resume("111111111111", "warehouse", "admin", "dev"))
+                .thenThrow(new IllegalStateException("readiness failed"));
+        doThrow(new IllegalStateException("stop failed")).when(cm).pause("111111111111", "warehouse");
+        assertThrows(AwsException.class, () -> service.resumeCluster("warehouse"));
+        assertEquals("unavailable", cluster.getClusterStatus());
+        assertFalse(service.reserveProxyPort(7107));
+        verify(cm, never()).stop(anyString(), anyString());
+    }
+
+    @Test
+    void pauseRejectsClustersWithAutomatedSnapshotsDisabled() {
+        Cluster cluster = lifecycleCluster("available");
+        cluster.setAutomatedSnapshotRetentionPeriod(0);
+        assertEquals("InvalidClusterState", assertThrows(AwsException.class,
+                () -> service.pauseCluster("warehouse")).getErrorCode());
+        verifyNoInteractions(cm, proxyManager);
+    }
+
+    @Test
+    void failedResumeKeepsDataAndCanBeRetried() {
+        Cluster cluster = lifecycleCluster("paused");
+        when(cm.resume("111111111111", "warehouse", "admin", "dev"))
+                .thenReturn(new RedshiftContainerHandle("original", "warehouse", "backend", 5432));
+        doThrow(new IllegalStateException("bind failed")).doNothing().when(proxyManager).startProxy(
+                anyString(), anyInt(), anyString(), anyInt(), anyString(), anyString(), anyString(), anyString(),
+                any(), anyList(), isNull());
+        assertThrows(AwsException.class, () -> service.resumeCluster("warehouse"));
+        assertEquals("paused", cluster.getClusterStatus());
+        verify(cm).pause("111111111111", "warehouse");
+        verify(cm, never()).stop(anyString(), anyString());
+        assertEquals("available", service.resumeCluster("warehouse").getClusterStatus());
+    }
+
+    @Test
+    void startupReservesPausedPortsWithoutStartingTheirRuntime() {
+        Cluster cluster = lifecycleCluster("paused");
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "warehouse", cluster)));
+        service.onStart(null);
+        assertFalse(service.reserveProxyPort(7107));
+        assertEquals("paused", cluster.getClusterStatus());
+        verifyNoInteractions(cm, proxyManager);
+    }
+
+    @Test
+    void deletingAPausedClusterRemovesContainerAndReleasesPort() {
+        lifecycleCluster("paused");
+        service.reserveProxyPort(7107);
+        service.deleteCluster("warehouse");
+        verify(cm).stop("111111111111", "warehouse");
+        verify(clusterBackend).delete("warehouse");
+        assertTrue(service.reserveProxyPort(7107));
+    }
+
+    @Test
+    void pausedClusterCannotRebootOrCreateSnapshot() {
+        lifecycleCluster("paused");
+        assertEquals("InvalidClusterState", assertThrows(AwsException.class,
+                () -> service.rebootCluster("warehouse")).getErrorCode());
+        assertEquals("InvalidClusterState", assertThrows(AwsException.class,
+                () -> service.createSnapshot("paused-backup", "warehouse")).getErrorCode());
+        assertEquals("InvalidClusterState", assertThrows(AwsException.class,
+                () -> service.modifyCluster("warehouse", null, null, "Changed123", null, null)).getErrorCode());
+        verifyNoInteractions(cm);
+    }
+
+    private Cluster lifecycleCluster(String status) {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("warehouse");
+        cluster.setMasterUsername("admin");
+        cluster.setMasterPassword("Secret123");
+        cluster.setClusterStatus(status);
+        cluster.setProxyPort(7107);
+        cluster.setContainerHost("backend");
+        cluster.setContainerPort(5432);
+        cluster.setEndpoint(new Endpoint("localhost", 7107));
+        when(clusterBackend.get("warehouse")).thenReturn(Optional.of(cluster));
+        return cluster;
+    }
+
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void loggingDestinationRegionSurvivesStorageAndRestart(boolean refresh) throws Exception {
