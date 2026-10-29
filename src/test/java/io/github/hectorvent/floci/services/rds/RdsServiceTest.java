@@ -10157,6 +10157,19 @@ class RdsServiceTest {
     }
 
     @Test
+    void createReadReplicaFindsNoSourceForAnArnThatIsNotThisAccountsInstance() {
+        createPostgresSource("primary");
+
+        for (String source : List.of("arn:aws:rds:us-east-1:123456789012:db",
+                "arn:aws:rds:us-east-1:999999999999:db:primary",
+                "arn:aws:rds:us-east-1:123456789012:cluster:primary")) {
+            AwsException notFound = assertThrows(AwsException.class, () ->
+                    rdsService.createDbInstanceReadReplica(replicaRequest("r", source), null));
+            assertEquals("DBInstanceNotFound", notFound.getErrorCode(), source);
+        }
+    }
+
+    @Test
     void createReadReplicaRollsBackWhenTheCopyFails() {
         createPostgresSource("primary");
         when(containerManager.createPostgresSnapshot(any(), eq("admin"))).thenReturn("DUMP");
