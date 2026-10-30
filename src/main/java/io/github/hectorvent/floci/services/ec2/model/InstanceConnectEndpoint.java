@@ -31,6 +31,8 @@ public class InstanceConnectEndpoint {
     /** The endpoint's interface address in its subnet: the source instances see when the client IP is not preserved. */
     private String privateIpAddress;
     private String clientToken;
+    /** The tags the create request carried, compared on a ClientToken replay; later CreateTags calls do not change them. */
+    private List<Tag> creationTags = new ArrayList<>();
     private List<Tag> tags = new ArrayList<>();
 
     public InstanceConnectEndpoint() {}
@@ -55,6 +57,7 @@ public class InstanceConnectEndpoint {
         region = other.region;
         privateIpAddress = other.privateIpAddress;
         clientToken = other.clientToken;
+        creationTags = new ArrayList<>(other.creationTags);
         tags = new ArrayList<>(other.tags);
     }
 
@@ -111,6 +114,9 @@ public class InstanceConnectEndpoint {
 
     public String getClientToken() { return clientToken; }
     public void setClientToken(String clientToken) { this.clientToken = clientToken; }
+
+    public List<Tag> getCreationTags() { return creationTags; }
+    public void setCreationTags(List<Tag> creationTags) { this.creationTags = creationTags != null ? creationTags : new ArrayList<>(); }
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags != null ? tags : new ArrayList<>(); }

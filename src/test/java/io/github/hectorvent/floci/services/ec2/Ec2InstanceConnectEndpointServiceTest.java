@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -126,6 +127,38 @@ class Ec2InstanceConnectEndpointServiceTest {
         assertEquals("IdempotentParameterMismatch", assertThrows(AwsException.class, () -> service
                 .createInstanceConnectEndpoint(REGION, otherSubnet, List.of(), null, null, List.of(), "token-1"))
                 .getErrorCode());
+    }
+
+    @Test
+    void aReplayedClientTokenWithOtherParametersIsAMismatch() {
+        Ec2Service service = newService();
+        String vpcId = service.createVpc(REGION, "10.78.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.78.1.0/24", "us-east-1a").getSubnetId();
+        String group = service.createSecurityGroup(REGION, "eice", "x", vpcId).getGroupId();
+        List<Tag> tags = List.of(new Tag("Name", "kthw"));
+        String first = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(group), false, "ipv4", tags,
+                "token-78").getInstanceConnectEndpointId();
+
+        // Defaults applied the same way match: omitted PreserveClientIp and IpAddressType are false and ipv4.
+        assertEquals(first, service.createInstanceConnectEndpoint(REGION, subnetId, List.of(group), null, null,
+                tags, "token-78").getInstanceConnectEndpointId());
+        // A tag added after the create is not a creation parameter.
+        service.createTags(REGION, List.of(first), List.of(new Tag("Later", "x")));
+        assertEquals(first, service.createInstanceConnectEndpoint(REGION, subnetId, List.of(group), null, null,
+                tags, "token-78").getInstanceConnectEndpointId());
+
+        Map<String, Executable> retries = Map.of(
+                "security groups", () -> service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null,
+                        null, tags, "token-78"),
+                "tags", () -> service.createInstanceConnectEndpoint(REGION, subnetId, List.of(group), null, null,
+                        List.of(new Tag("Name", "other")), "token-78"),
+                "ip address type", () -> service.createInstanceConnectEndpoint(REGION, subnetId, List.of(group),
+                        null, "dualstack", tags, "token-78"),
+                "preserve client ip", () -> service.createInstanceConnectEndpoint(REGION, subnetId, List.of(group),
+                        true, null, tags, "token-78"));
+        retries.forEach((what, retry) -> assertEquals("IdempotentParameterMismatch",
+                assertThrows(AwsException.class, retry, what).getErrorCode(), what));
+        assertEquals(1, service.describeInstanceConnectEndpoints(REGION, List.of(), Map.of()).size());
     }
 
     @Test

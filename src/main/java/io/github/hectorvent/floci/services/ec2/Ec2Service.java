@@ -12563,8 +12563,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * AWS it takes a few minutes. The DNS names live under {@link #INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX},
      * which resolves to the loopback address where Floci's HTTPS listener is published, and which
      * Floci's wildcard server certificate covers. A replayed {@code clientToken} returns the endpoint
-     * the first call created; reused with another subnet it fails with
-     * {@code IdempotentParameterMismatch}.
+     * the first call created; reused with another subnet, security group set, IP address type,
+     * PreserveClientIp or tag set it fails with {@code IdempotentParameterMismatch}.
      */
     public InstanceConnectEndpoint createInstanceConnectEndpoint(String region, String subnetId,
                                                                  List<String> securityGroupIds,
@@ -12585,19 +12585,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                                       List<Tag> tagList, String clientToken) {
         if (subnetId == null || subnetId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter SubnetId", 400);
-        }
-        String token = clientToken != null && !clientToken.isBlank() ? clientToken : null;
-        if (token != null) {
-            // Only SubnetId is compared on a replay; the other parameters are taken on trust.
-            Optional<InstanceConnectEndpoint> replay = instanceConnectEndpoints.scan(k -> k.startsWith(region + "::"))
-                    .stream().filter(existing -> token.equals(existing.getClientToken())).findFirst();
-            if (replay.isPresent()) {
-                if (!subnetId.equals(replay.get().getSubnetId())) {
-                    throw new AwsException("IdempotentParameterMismatch",
-                            "The client token '" + token + "' was already used with different parameters", 400);
-                }
-                return withTags(replay.get());
-            }
         }
         Subnet subnet = requireSubnet(region, subnetId);
         String type = ipAddressType == null || ipAddressType.isBlank() ? "ipv4" : ipAddressType;
@@ -12626,6 +12613,25 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 groups.add(groupId);
             }
         }
+        String token = clientToken != null && !clientToken.isBlank() ? clientToken : null;
+        if (token != null) {
+            // Compared after defaults are applied, so a retry that omits a defaulted parameter the
+            // first call also omitted still matches.
+            Optional<InstanceConnectEndpoint> replay = instanceConnectEndpoints.scan(k -> k.startsWith(region + "::"))
+                    .stream().filter(existing -> token.equals(existing.getClientToken())).findFirst();
+            if (replay.isPresent()) {
+                InstanceConnectEndpoint first = replay.get();
+                if (!subnetId.equals(first.getSubnetId())
+                        || !new HashSet<>(groups).equals(new HashSet<>(first.getSecurityGroupIds()))
+                        || !type.equals(first.getIpAddressType())
+                        || Boolean.TRUE.equals(preserveClientIp) != first.isPreserveClientIp()
+                        || !tagMap(tagList).equals(tagMap(first.getCreationTags()))) {
+                    throw new AwsException("IdempotentParameterMismatch",
+                            "The client token '" + token + "' was already used with different parameters", 400);
+                }
+                return withTags(first);
+            }
+        }
 
         String id = "eice-" + randomHex(17);
         InstanceConnectEndpoint endpoint = new InstanceConnectEndpoint();
@@ -12647,6 +12653,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         endpoint.setIpAddressType(type);
         endpoint.setRegion(region);
         endpoint.setClientToken(token);
+        endpoint.setCreationTags(tagList == null ? new ArrayList<>() : new ArrayList<>(tagList));
         synchronized (privateIpAllocationLock) {
             endpoint.setPrivateIpAddress(assignPrivateIp(region, subnetId));
             instanceConnectEndpoints.put(key(region, id), endpoint);
