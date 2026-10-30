@@ -157,6 +157,7 @@ nav:
     - Redshift Serverless: services/redshift-serverless.md
     - Data Firehose: services/firehose.md
     - EventBridge: services/eventbridge.md
+    - EventBridge V2: services/eventbridgev2.md
     - EventBridge Pipes: services/pipes.md
     - EventBridge Scheduler: services/scheduler.md
     - CloudWatch: services/cloudwatch.md

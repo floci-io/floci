@@ -125,7 +125,8 @@ public class ResolvedServiceCatalog {
                     "s3express", "s3",
                     "iot-jobs-data", "iot",
                     "monitoring", "cloudwatch",
-                    "awsssoportal", "sso");
+                    "awsssoportal", "sso",
+                    "eventsv2", "events");
 
     private final ServiceCatalog catalog;
 
@@ -250,6 +251,12 @@ public class ResolvedServiceCatalog {
                         "eventbridge", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("AWSEvents."), Set.of("events"), Set.of(), Set.of()),
+                // Signs as events too, which stays EventBridge's scope: it is routed by its RPC v2 path alone,
+                // and its eventsv2 key aliases to the events IAM namespace its actions live under.
+                descriptor("eventsv2", "eventbridgev2", config.services().eventbridgev2().enabled(), true,
+                        "eventbridgev2", config.storage().mode(), 5000L, null, ServiceProtocol.CBOR,
+                        protocols(ServiceProtocol.CBOR),
+                        Set.of(), Set.of(), Set.of("AWSEventsV2"), Set.of()),
                 descriptor("servicediscovery", "cloudmap", config.services().cloudmap().enabled(), true,
                         "cloudmap", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),

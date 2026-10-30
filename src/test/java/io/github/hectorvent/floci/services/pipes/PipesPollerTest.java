@@ -741,7 +741,7 @@ class PipesPollerTest {
                   },
                   "FilterCriteria": {
                     "Filters": [
-                      {"Pattern": "{\\\"key\\\": [{\\\"exists\\\": false}]}"}
+                      {"Pattern": "{\\\"key\\\": [null]}"}
                     ]
                   }
                 }

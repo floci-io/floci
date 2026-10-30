@@ -28,6 +28,7 @@ aliases:
   sso: ssoadmin                         # descriptor("sso") is the Identity Center admin API; ssoadmin.md is its page
   sso-oidc: ssooidc                     # IAM Identity Center OIDC REST API
   events: eventbridge
+  eventsv2: eventbridgev2               # EventBridge V2's endpoint prefix is "eventsv2"
   servicediscovery: cloudmap            # Cloud Map's SigV4 signing name
   elasticmapreduce: emr                 # EMR's SigV4 signing name
   logs: cloudwatch                      # CloudWatch Logs facet, at cloudwatch.md

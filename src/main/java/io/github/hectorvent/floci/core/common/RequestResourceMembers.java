@@ -129,16 +129,19 @@ final class RequestResourceMembers {
      * it connects to). A type whose ARN is all an id its service mints is named instead by the members its service
      * finds it by, {@code find}, each one value, in the order its service reads them, filling none of its variables
      * and read no other way, in the caller's account (a scalable target by its service namespace, resource id and
-     * scalable dimension).
+     * scalable dimension). A resource with an {@code endpoint} applies only to a request the service of that endpoint
+     * prefix serves, where two APIs share the operation's name and nothing in a request tells them apart
+     * (EventBridge's {@code events} and EventBridge V2's {@code eventsv2}); null for every request.
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
-                    Member account, String before, Map<String, String> fixed, boolean made, List<Member> find) {
+                    Member account, String before, Map<String, String> fixed, boolean made, List<Member> find,
+                    String endpoint) {
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                  Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
-                 Member account, String before, Map<String, String> fixed, boolean made) {
-            this(types, arn, fill, when, unless, absent, arnOf, account, before, fixed, made, List.of());
+                 Member account, String before, Map<String, String> fixed, boolean made, String endpoint) {
+            this(types, arn, fill, when, unless, absent, arnOf, account, before, fixed, made, List.of(), endpoint);
         }
     }
 
@@ -247,6 +250,11 @@ final class RequestResourceMembers {
                     + resource.path("made") + ", which is not true");
         }
         boolean made = resource.has("made");
+        String endpoint = resource.has("endpoint") ? resource.path("endpoint").asText("") : null;
+        if (endpoint != null && endpoint.isEmpty()) {
+            throw new IllegalStateException(RESOURCE_NAME + " serves a resource of " + operation
+                    + " on no endpoint prefix");
+        }
         String before = resource.has("before") ? resource.path("before").asText("") : null;
         if (before != null && before.length() != 1) {
             throw new IllegalStateException(RESOURCE_NAME + " reads a member for " + operation
@@ -263,7 +271,7 @@ final class RequestResourceMembers {
                         + " and finds its resource by " + resource.path("find") + " too");
             }
             return new Resource(types, arnMember(operation, resource.path("arn").asText("")), Map.of(), Map.of(),
-                    Map.of(), Map.of(), Map.of(), null, before, Map.of(), made);
+                    Map.of(), Map.of(), Map.of(), null, before, Map.of(), made, endpoint);
         }
         String type = resource.path("type").asText("");
         ArnFormat format = formats.get(type);
@@ -330,7 +338,7 @@ final class RequestResourceMembers {
                     + " from " + account.name() + ", no member of one account or a type of none");
         }
         return new Resource(List.of(type), null, Map.copyOf(fill), when, unless, Map.copyOf(absent), Map.copyOf(arnOf),
-                account, before, Map.copyOf(fixed), made, List.copyOf(find));
+                account, before, Map.copyOf(fixed), made, List.copyOf(find), endpoint);
     }
 
     /** The values each member named in {@code when} or {@code unless} may have, an empty one for the member absent. */

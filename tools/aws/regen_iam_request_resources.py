@@ -75,7 +75,10 @@ element lacking it (`PutEvents` publishes each entry to its bus), or from a stru
 a variable no member gives may be `fixed` to the one value its handler uses (a CodePipeline custom action
 type's owner, `Custom`), and an ARN member's value may be read
 only up to a character `before` which its handler drops the rest (`StartExecution`'s
-`<stateMachineArn>#<test case>`). `CLIENTS_NOT_READ` are SDK clients the reference lists for a
+`<stateMachineArn>#<test case>`). A resource there may also apply only to the requests of the client whose
+`endpoint` prefix it names, where two clients give an operation of one name and nothing in a request tells them
+apart (EventBridge's `CreateEventBus` and EventBridge V2's); Floci reads that from the service serving the
+request, never from a member a caller could add. `CLIENTS_NOT_READ` are SDK clients the reference lists for a
 namespace's operations whose requests Floci does not serve, each with its reason.
 `UNQUALIFIED` are the resource types whose ARN a request may give with a qualifier, one more `:<name>`
 past its format, and whose service checks it without one: Step Functions checks a version or an alias
@@ -132,9 +135,6 @@ NAMESPACES = ("acm", "application-autoscaling", "athena", "bcm-data-exports", "b
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.
 CLIENTS_NOT_READ: dict[str, str] = {
-    "eventbridgev2": "EventBridge V2, the AWSEventsV2 target over Smithy RPC v2 CBOR on the eventsv2 endpoint, which "
-                     "Floci does not serve; its operations share EventBridge's names and name their resources by "
-                     "other members",
     "kinesisanalytics": "Kinesis Data Analytics v1, SQL applications on the KinesisAnalytics_20150814 target, which "
                         "Floci does not serve (it serves v2, kinesisanalyticsv2); its operations share v2's names and "
                         "name their resources by other members",
@@ -247,7 +247,10 @@ NOT_COVERED: dict[str, str] = {
 }
 
 # An operation's resources where the rule gets them wrong: the resources, and why. A resource's `when` names the
-# values of a member it applies for, null for the member absent.
+# values of a member it applies for, null for the member absent. Its `endpoint` names the endpoint prefix of the one
+# client whose requests it applies to, where two clients share the operation's name and nothing a request gives tells
+# them apart (EventBridge's `events` and EventBridge V2's `eventsv2`): Floci applies it only to a request the service
+# of that endpoint serves, never by a member a caller could add to a request of the other.
 CORRECTIONS: dict[str, tuple[list[dict], str]] = {
     "elasticloadbalancing:CreateLoadBalancer": ([
         {"type": "loadbalancer", "fill": {"LoadBalancerName": "LoadBalancerName"}},
@@ -316,15 +319,36 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
        for operation, rule in (("DeleteRule", "Name"), ("DescribeRule", "Name"), ("DisableRule", "Name"),
                                ("EnableRule", "Name"), ("ListTargetsByRule", "Rule"), ("PutRule", "Name"),
                                ("PutTargets", "Rule"), ("RemoveTargets", "Rule"))},
-    "events:DescribeEventBus": ([{"type": "event-bus", "fill": {"EventBusName": "Name"}, "absent": {"Name": "default"}}],
+    "events:DescribeEventBus": ([{"types": ["event-busv2"], "arn": "EventBusArn", "endpoint": "eventsv2"},
+                                 {"type": "event-bus", "fill": {"EventBusName": "Name"}, "absent": {"Name": "default"},
+                                  "endpoint": "events"}],
                                 "a request naming no event bus describes the default one ('If you omit this, the "
-                                "default event bus is displayed')"),
-    "events:PutEvents": ([{"type": "event-bus", "fill": {"EventBusName": "Entries[].EventBusName"},
-                           "absent": {"Entries[].EventBusName": "default"}}],
+                                "default event bus is displayed'); EventBridge V2's request names its bus by "
+                                "EventBusArn alone"),
+    "events:PutEvents": ([{"types": ["event-busv2"], "arn": "EventBusArn", "endpoint": "eventsv2"},
+                          {"type": "event-bus", "fill": {"EventBusName": "Entries[].EventBusName"},
+                           "absent": {"Entries[].EventBusName": "default"}, "endpoint": "events"}],
                          "each entry goes to the event bus its EventBusName names, the default one when it names "
                          "none ('If you omit this, the default event bus is used'), and publishing is authorized "
                          "against the bus for every entry in the request; the rule reads no member of a list's "
-                         "structures"),
+                         "structures. EventBridge V2's request names by EventBusArn the one bus every entry goes to"),
+    "events:CreateEventBus": ([{"types": ["event-bus", "event-busv2"], "arn": "DeadLetterConfig.Arn",
+                                "endpoint": "events"},
+                               {"type": "event-bus", "fill": {"EventBusName": "Name"}, "endpoint": "events"},
+                               {"type": "event-busv2", "fill": {"EventBusName": "Name"}, "endpoint": "eventsv2"}],
+                              "EventBridge's request and EventBridge V2's both name the bus they create by Name, and "
+                              "nothing a request gives tells them apart; the API serving it does, an event-bus "
+                              "for EventBridge and an event-busv2, whose id V2 mints, for V2"),
+    **{f"events:{operation}": ([*extra, {"types": [v2], "arn": arn, "endpoint": "eventsv2"},
+                                {"type": v1, "fill": {variable: "Name"}, "endpoint": "events"}],
+                               f"EventBridge's request names the {v1} by Name, EventBridge V2's by {arn}; the rule "
+                               "fills a type's variables only when no member holds its ARN, so with both clients "
+                               "read it drops EventBridge's Name")
+       for operation, v1, v2, variable, arn, extra in (
+           ("DeleteEventBus", "event-bus", "event-busv2", "EventBusName", "EventBusArn", []),
+           ("UpdateEventBus", "event-bus", "event-busv2", "EventBusName", "EventBusArn",
+            [{"types": ["event-bus", "event-busv2"], "arn": "DeadLetterConfig.Arn", "endpoint": "events"}]),
+           ("DescribeEventSource", "event-source", "event-sourcev2", "EventSourceName", "EventSourceArn", []))},
     **{f"states:{operation}": ([{"types": ["statemachine"], "arn": "stateMachineArn", "before": "#"}],
                               "Floci takes Step Functions Local's <stateMachineArn>#<test case> and runs the machine "
                               "the part before the # names, so that part is the one checked")
@@ -691,18 +715,20 @@ RESOURCE_PART_RE = re.compile(r"^arn:\$\{Partition}:[^:]*:[^:]*:[^:]*:([A-Za-z][
 def with_made(resources: list[dict], operation: str, formats: dict[str, str]) -> list[dict]:
     """The resources, those a create makes marked `made` when it names others too (the pipeline a webhook connects
     to, the namespace a service is created in), so that its tags are checked on what it makes alone: of a type, or
-    with an ARN format's leading resource word, related to the operation's name past its verb."""
+    with an ARN format's leading resource word, related to the operation's name past its verb. A member that may hold
+    an ARN of several types is made only when every one of them is: one that may name the parent too (a subscriber's
+    `EventBusArn`) names a resource the create does not make."""
     name = operation.split(":", 1)[1]
     if not CREATING_RE.match(name):
         return resources
     created = stem(CREATING_RE.sub("", name))
 
+    def is_created(kind: str) -> bool:
+        word = RESOURCE_PART_RE.match(formats.get(kind, ""))
+        return related(created, stem(kind)) or (word is not None and related(created, stem(word.group(1))))
+
     def makes(resource: dict) -> bool:
-        for kind in resource.get("types") or [resource.get("type")]:
-            word = RESOURCE_PART_RE.match(formats.get(kind, ""))
-            if related(created, stem(kind)) or (word is not None and related(created, stem(word.group(1)))):
-                return True
-        return False
+        return all(is_created(kind) for kind in resource.get("types") or [resource.get("type")])
 
     made = [makes(resource) for resource in resources]
     if all(made) or not any(made):
@@ -773,6 +799,11 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     members = request_members(models, operation.split(":", 1)[1])
     if operation in CORRECTIONS:
         resources = CORRECTIONS[operation][0]
+        endpoints = {model["metadata"]["endpointPrefix"] for model in models.values()}
+        unknown = {resource["endpoint"] for resource in resources if "endpoint" in resource} - endpoints
+        if unknown:
+            raise ValueError(f"CORRECTIONS serves {operation} on {sorted(unknown)}, no endpoint prefix of the clients "
+                             f"it reads ({sorted(endpoints)})")
     else:
         resources = with_found(resources_for(operation, types, formats, members), namespace_of(operation), members)
     resources = with_account(resources, formats, account_members(models, operation.split(":", 1)[1]))
@@ -976,10 +1007,13 @@ def validate(document: dict) -> list[str]:
 
 
 def _resource_problems(operation: str, resource: object, types: set[str], formats: dict[str, str]) -> list[str]:
-    if not isinstance(resource, dict) or not ({"types", "arn"} <= set(resource) <= {"types", "arn", "before", "made"}
+    if not isinstance(resource, dict) or not ({"types", "arn"} <= set(resource) <= {"types", "arn", "before", "made",
+                                                                                     "endpoint"}
                                               or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "absent", "arnOf", "account",
-                                                                                       "fixed", "made", "before", "find"}):
+                                                                                       "fixed", "made", "before", "find", "endpoint"}):
         return [f"{operation} names {resource!r}, which is neither an ARN member nor a type's variables"]
+    if "endpoint" in resource and not (isinstance(resource["endpoint"], str) and resource["endpoint"]):
+        return [f"{operation} serves {resource!r} on {resource['endpoint']!r}, which is no endpoint prefix"]
     if resource.get("made", True) is not True:
         return [f"{operation} marks {resource!r} made by {resource['made']!r}, which is not true"]
     before = resource.get("before", "#")

@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
 
@@ -13,6 +15,10 @@ import static org.junit.jupiter.api.Assertions.*;
 class PipesFilterMatcherTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final String EVENT = "{\"source\":\"com.shop\",\"detail-type\":\"Order Placed\","
+            + "\"resources\":[\"arn:aws:sqs:us-east-1:000000000000:a\",\"r2\"],"
+            + "\"detail\":{\"total\":750,\"status\":\"NEW\",\"customer\":{\"tier\":\"gold\"},\"note\":null,"
+            + "\"items\":[{\"sku\":\"A1\"},{\"sku\":\"B2\"}]}}";
     private PipesFilterMatcher matcher;
 
     @BeforeEach
@@ -200,6 +206,28 @@ class PipesFilterMatcherTest {
     }
 
     @Test
+    void nullMatch_doesNotMatchMissingField() throws Exception {
+        JsonNode record = MAPPER.readTree("{\"other\": \"value\"}");
+        assertFalse(matcher.matchesRecord(record, "{\"body\": [null]}"));
+    }
+
+    @Test
+    void booleanMatch() throws Exception {
+        JsonNode record = MAPPER.readTree("{\"flagged\": true}");
+        assertTrue(matcher.matchesRecord(record, "{\"flagged\": [true]}"));
+        assertFalse(matcher.matchesRecord(record, "{\"flagged\": [false]}"));
+    }
+
+    @Test
+    void orAcrossFields() throws Exception {
+        JsonNode record = MAPPER.readTree("{\"body\": \"{\\\"day\\\": \\\"Monday\\\"}\"}");
+        assertTrue(matcher.matchesRecord(record,
+                "{\"$or\": [{\"body\": {\"location\": [\"New York\"]}}, {\"body\": {\"day\": [\"Monday\"]}}]}"));
+        assertFalse(matcher.matchesRecord(record,
+                "{\"$or\": [{\"body\": {\"location\": [\"New York\"]}}, {\"body\": {\"day\": [\"Friday\"]}}]}"));
+    }
+
+    @Test
     void numericExactMatch() throws Exception {
         JsonNode record = MAPPER.readTree("{\"count\": 42}");
         assertTrue(matcher.matchesRecord(record, "{\"count\": [42]}"));
@@ -229,30 +257,30 @@ class PipesFilterMatcherTest {
     }
 
     @Test
-    void anythingBut_array_matchesMissingField() throws Exception {
+    void anythingBut_array_doesNotMatchMissingField() throws Exception {
         JsonNode record = MAPPER.readTree("{\"other\": \"value\"}");
-        assertTrue(matcher.matchesRecord(record,
+        assertFalse(matcher.matchesRecord(record,
                 "{\"eventSource\": [{\"anything-but\": [\"aws:sqs\"]}]}"));
     }
 
     @Test
-    void anythingBut_string_matchesMissingField() throws Exception {
+    void anythingBut_string_doesNotMatchMissingField() throws Exception {
         JsonNode record = MAPPER.readTree("{\"other\": \"value\"}");
-        assertTrue(matcher.matchesRecord(record,
+        assertFalse(matcher.matchesRecord(record,
                 "{\"eventSource\": [{\"anything-but\": \"aws:sqs\"}]}"));
     }
 
     @Test
-    void anythingButPrefix_matchesMissingField() throws Exception {
+    void anythingButPrefix_doesNotMatchMissingField() throws Exception {
         JsonNode record = MAPPER.readTree("{\"other\": \"value\"}");
-        assertTrue(matcher.matchesRecord(record,
+        assertFalse(matcher.matchesRecord(record,
                 "{\"eventSource\": [{\"anything-but\": {\"prefix\": \"aws:\"}}]}"));
     }
 
     @Test
-    void existsTrue_doesNotMatchNullValue() throws Exception {
+    void existsTrue_matchesNullValue() throws Exception {
         JsonNode record = MAPPER.readTree("{\"body\": null}");
-        assertFalse(matcher.matchesRecord(record, "{\"body\": [{\"exists\": true}]}"));
+        assertTrue(matcher.matchesRecord(record, "{\"body\": [{\"exists\": true}]}"));
     }
 
     @Test
@@ -262,8 +290,72 @@ class PipesFilterMatcherTest {
     }
 
     @Test
+    void invalidPattern_matchesNothing() throws Exception {
+        JsonNode record = MAPPER.readTree("{\"count\": 42}");
+        assertFalse(matcher.matchesRecord(record, "{\"count\": [{\"cidr\": \"10.0.0.0/24\"}]}"));
+        assertFalse(matcher.matchesRecord(record, "{\"count\": [{\"numeric\": [\">\"]}]}"));
+        assertFalse(matcher.matchesRecord(record, "not json"));
+    }
+
+    @Test
+    void invalidPattern_isLeftToTheCaller() throws Exception {
+        JsonNode record = MAPPER.readTree("{\"count\": 42}");
+        assertThrows(IllegalArgumentException.class,
+                () -> PipesFilterMatcher.matches(json("{\"count\": [{\"cidr\": \"10.0.0.0/24\"}]}"), record));
+        assertThrows(IllegalArgumentException.class,
+                () -> PipesFilterMatcher.matches(json("{\"count\": [{\"numeric\": [\">\", \"abc\"]}]}"), record));
+        assertThrows(IllegalArgumentException.class,
+                () -> PipesFilterMatcher.matches(json("{\"count\": 42}"), record));
+    }
+
+    @Test
+    void eventPattern_doesNotParseStringFields() throws Exception {
+        JsonNode record = MAPPER.readTree("{\"body\": \"{\\\"status\\\": \\\"active\\\"}\"}");
+        assertFalse(PipesFilterMatcher.matches(json("{\"body\": {\"status\": [\"active\"]}}"), record));
+    }
+
+    // ──────────────────────────── EventBridge event patterns ────────────────────────────
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "{\"source\":[\"com.shop\"]}|true",
+            "{\"source\":[\"com.other\",\"com.shop\"]}|true",
+            "{\"source\":[\"com.other\"]}|false",
+            "{\"detail\":{\"total\":[{\"numeric\":[\">\",500]}]}}|true",
+            "{\"detail\":{\"total\":[{\"numeric\":[\">\",500,\"<=\",750]}]}}|true",
+            "{\"detail\":{\"total\":[{\"numeric\":[\">\",750]}]}}|false",
+            "{\"detail\":{\"total\":[750.0]}}|true",
+            "{\"detail\":{\"status\":[{\"prefix\":\"NE\"}]}}|true",
+            "{\"detail\":{\"status\":[{\"suffix\":\"EW\"}]}}|true",
+            "{\"detail\":{\"status\":[{\"prefix\":{\"equals-ignore-case\":\"ne\"}}]}}|true",
+            "{\"detail\":{\"status\":[{\"equals-ignore-case\":\"new\"}]}}|true",
+            "{\"detail\":{\"status\":[{\"anything-but\":[\"OLD\",\"VOID\"]}]}}|true",
+            "{\"detail\":{\"status\":[{\"anything-but\":\"NEW\"}]}}|false",
+            "{\"detail\":{\"status\":[{\"anything-but\":{\"prefix\":\"N\"}}]}}|false",
+            "{\"detail\":{\"status\":[{\"anything-but\":{\"suffix\":\"EW\"}}]}}|false",
+            "{\"detail\":{\"status\":[{\"anything-but\":{\"equals-ignore-case\":[\"new\"]}}]}}|false",
+            "{\"detail\":{\"missing\":[{\"anything-but\":\"x\"}]}}|false",
+            "{\"detail\":{\"missing\":[{\"exists\":false}]}}|true",
+            "{\"detail\":{\"status\":[{\"exists\":false}]}}|false",
+            "{\"detail\":{\"note\":[null]}}|true",
+            "{\"detail\":{\"customer\":{\"tier\":[\"gold\"]}}}|true",
+            "{\"detail\":{\"customer\":{\"tier\":[\"silver\"]}}}|false",
+            "{\"detail\":{\"items\":{\"sku\":[\"B2\"]}}}|true",
+            "{\"resources\":[\"r2\"]}|true",
+            "{\"$or\":[{\"source\":[\"x\"]},{\"detail\":{\"status\":[\"NEW\"]}}]}|true",
+            "{\"$or\":[{\"source\":[\"x\"]},{\"detail\":{\"status\":[\"OLD\"]}}]}|false"
+    })
+    void eventPattern_matchesAsEventBridgeDefinesIt(String pattern, boolean matches) throws Exception {
+        assertEquals(matches, PipesFilterMatcher.matches(json(pattern), json(EVENT)), pattern);
+    }
+
+    @Test
     void numericFilter_withNonNumber_doesNotMatch() throws Exception {
         JsonNode record = MAPPER.readTree("{\"count\": \"not-a-number\"}");
         assertFalse(matcher.matchesRecord(record, "{\"count\": [{\"numeric\": [\"=\", 42]}]}"));
+    }
+
+    private static JsonNode json(String value) throws Exception {
+        return MAPPER.readTree(value);
     }
 }

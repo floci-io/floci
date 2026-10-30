@@ -141,6 +141,9 @@ def test_a_create_naming_others_marks_what_it_makes():
     assert r.with_made([classic, app], "svc:CreateLoadBalancer", formats) == [classic, app]
     assert r.with_made([pipeline], "svc:PutWebhook", formats) == [pipeline]
     assert r.with_made([webhook, pipeline], "svc:DescribeWebhook", formats) == [webhook, pipeline]
+    # A member that may hold the ARN of the parent too names no resource the create makes.
+    parent = {"types": ["pipeline", "webhook"], "arn": "PipelineArn"}
+    assert r.with_made([parent, webhook], "svc:PutWebhook", formats) == [parent, dict(webhook, made=True)]
 
 
 def test_stems_drop_the_suffixes_names_carry():
@@ -527,12 +530,34 @@ def test_the_vendored_file_is_well_formed():
         {"type": "rule-on-custom-event-bus", "fill": {"EventBusName": "EventBusName", "RuleName": "Name"},
          "unless": {"EventBusName": ["default"]}, "absent": {"EventBusName": "default"}, "arnOf": {"EventBusName": "event-bus"}}]
     assert operations["events:DescribeEventBus"]["resources"] == [
-        {"type": "event-bus", "fill": {"EventBusName": "Name"}, "absent": {"Name": "default"}, "arnOf": {"Name": "event-bus"}}]
-    # Each PutEvents entry is on the bus it names, by name or ARN, or the default one when it names none.
+        {"types": ["event-busv2"], "arn": "EventBusArn", "endpoint": "eventsv2"},
+        {"type": "event-bus", "fill": {"EventBusName": "Name"}, "absent": {"Name": "default"}, "endpoint": "events",
+         "arnOf": {"Name": "event-bus"}}]
+    # Each PutEvents entry is on the bus it names, by name or ARN, or the default one when it names none; an
+    # EventBridge V2 request is on the one bus its EventBusArn names.
     assert operations["events:PutEvents"]["resources"] == [
+        {"types": ["event-busv2"], "arn": "EventBusArn", "endpoint": "eventsv2"},
         {"type": "event-bus", "fill": {"EventBusName": "Entries[].EventBusName"},
-         "absent": {"Entries[].EventBusName": "default"}, "arnOf": {"Entries[].EventBusName": "event-bus"}}]
-    assert document["namespaces"]["events"] == ["events"] and "eventbridgev2" in document["clientsNotRead"]
+         "absent": {"Entries[].EventBusName": "default"}, "endpoint": "events",
+         "arnOf": {"Entries[].EventBusName": "event-bus"}}]
+    # EventBridge V2 is read beside EventBridge, and where both name an operation's resources, which one applies is
+    # the endpoint serving the request, never a member a caller could add.
+    assert document["namespaces"]["events"] == ["eventbridgev2", "events"]
+    assert "eventbridgev2" not in document["clientsNotRead"]
+    assert operations["events:DeleteSubscriber"]["resources"] == [{"types": ["subscriber"], "arn": "SubscriberArn"}]
+    assert operations["events:DeleteEventBus"]["resources"] == [
+        {"types": ["event-busv2"], "arn": "EventBusArn", "endpoint": "eventsv2"},
+        {"type": "event-bus", "fill": {"EventBusName": "Name"}, "endpoint": "events"}]
+    assert operations["events:CreateEventBus"]["resources"][1:] == [
+        {"type": "event-bus", "fill": {"EventBusName": "Name"}, "endpoint": "events", "made": True},
+        {"type": "event-busv2", "fill": {"EventBusName": "Name"}, "endpoint": "eventsv2"}]
+    # A create's tags are checked on what it makes: not a dead-letter target or the bus a subscriber is made on.
+    assert "made" not in operations["events:CreateEventBus"]["resources"][0]
+    assert [resource for resource in operations["events:CreateSubscriber"]["resources"] if resource.get("made")] == [
+        {"type": "subscriber", "fill": {"SubscriberName": "Name"}, "made": True}]
+    assert not any("when" in resource or "unless" in resource
+                   for operation, entry in operations.items() if operation.startswith("events:")
+                   and "endpoint" in json.dumps(entry) for resource in entry["resources"])
     # A state machine's version or alias is checked on the state machine.
     assert document["unqualified"] == {"states": ["statemachine"]}
     # A listener is made under a load balancer, and a rule under a listener.

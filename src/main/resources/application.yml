@@ -608,6 +608,8 @@ floci:
       default-neo4j-image: "neo4j:5-community"
     eventbridge:
       enabled: true
+    eventbridgev2:
+      enabled: true
     cloudmap:
       enabled: true
     emr:

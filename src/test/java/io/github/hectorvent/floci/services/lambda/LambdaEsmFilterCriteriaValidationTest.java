@@ -124,10 +124,19 @@ class LambdaEsmFilterCriteriaValidationTest {
         assertRejected(filtersReq("{\"body\":{\"inner\":[{\"numeric\":[\">\",\"abc\"]}]}}"));
     }
 
-    /** A boolean literal is not a match value the matcher compares, so it can never match. */
     @Test
-    void booleanLiteralMatchValueIsRejected() {
-        assertRejected(filtersReq("{\"value\":[true]}"));
+    void booleanLiteralAndOrAreAccepted() {
+        assertNotNull(LambdaService.parseFilterCriteria(filtersReq(
+                "{\"value\":[true],\"$or\":[{\"a\":[\"x\"]},{\"body\":{\"b\":[{\"prefix\":\"y\"}]}}]}"), MAPPER));
+    }
+
+    /** Each {@code $or} branch is a pattern, validated like the top level. */
+    @Test
+    void malformedOrIsRejected() {
+        assertRejected(filtersReq("{\"$or\":[]}"));
+        assertRejected(filtersReq("{\"$or\":{\"a\":[\"x\"]}}"));
+        assertRejected(filtersReq("{\"$or\":[\"x\"]}"));
+        assertRejected(filtersReq("{\"$or\":[{\"a\":[{\"numeric\":[\">\"]}]}]}"));
     }
 
     // ──────────── accepted ────────────

@@ -1316,28 +1316,26 @@ of `{}` or with an empty `Filters` array clears any existing filters.
 
 !!! note "Supported operators"
     Filtering reuses Floci's shared EventBridge matcher (the same one EventBridge
-    Pipes uses). It supports exact match on a string, number or `null`, plus
-    `prefix`, `suffix`, `equals-ignore-case`, `exists`, `anything-but` (a string,
-    a non-empty array of strings and numbers, or a nested `prefix`), and `numeric`
-    comparison/value pairs using `=`, `>`, `>=`, `<`, `<=`. Patterns using only
-    these behave as on AWS.
+    Pipes and EventBridge V2 use). It supports exact match on a string, number,
+    boolean or `null`, plus `prefix`, `suffix`, `equals-ignore-case`, `exists`,
+    `anything-but` (a string, a non-empty array of strings and numbers, or a nested
+    `prefix`), `numeric` comparison/value pairs using `=`, `>`, `>=`, `<`, `<=`,
+    and `$or`. Patterns using only these behave as on AWS. As on AWS, `[null]`
+    matches a field whose value is `null`, not a missing one (use
+    `[{"exists": false}]` for that), `anything-but` does not match a missing
+    field, and a record field that is an array matches when any element does.
 
     A pattern is validated at `CreateEventSourceMapping` and
     `UpdateEventSourceMapping` and rejected with `InvalidParameterValueException`
     when the matcher could not satisfy it: an unknown operator, an operator AWS
     documents that Floci does not implement (`cidr`, `wildcard`), more than one
-    operator in a single match element, a boolean literal, a wrong operand type,
+    operator in a single match element, a wrong operand type,
     or a malformed `numeric` sequence such as an odd-length array or a
     non-numeric value. This is stricter than AWS, which accepts several of these.
     The trade is deliberate: the pollers checkpoint past (Kinesis, DynamoDB) or
     delete (SQS) any record a pattern fails to match, so a pattern that cannot
     match destroys records rather than being inert, and create time is the last
     point at which the caller can still act on it.
-
-    One matcher deviation remains and is not a validation error, because it
-    depends on the record rather than the pattern: event-value array intersection,
-    where AWS matches when the record's own field is itself an array and any
-    element satisfies the pattern, and Floci does not.
 
 !!! warning "SAM event sources"
     CloudFormation `AWS::Lambda::EventSourceMapping` resources forward
