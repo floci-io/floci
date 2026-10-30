@@ -29,6 +29,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -160,6 +161,9 @@ class LambdaWebIamAuthTest {
                 "aws-global", "us-west-2;us-east-1", "us-east-1, us-west-2", "us-west-2,", ",us-west-2")) {
             assertFalse(LambdaWebIamAuth.regionSetCovers(other, "us-west-2"), other);
         }
+        String manyStars = "*".repeat(5000) + "Z";
+        assertFalse(assertTimeoutPreemptively(Duration.ofSeconds(1),
+                () -> LambdaWebIamAuth.regionSetCovers(manyStars, "us-west-2")));
     }
 
     @Test

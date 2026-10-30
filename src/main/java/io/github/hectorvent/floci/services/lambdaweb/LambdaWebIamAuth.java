@@ -41,8 +41,6 @@ import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 /**
  * The checks an {@code IamAuth} endpoint makes before a request reaches the function: a SigV4
@@ -265,9 +263,38 @@ public class LambdaWebIamAuth {
         if (entries.contains("")) {
             return false;
         }
-        return entries.stream().anyMatch(entry -> Pattern.compile(
-                Arrays.stream(entry.split("\\*", -1)).map(Pattern::quote).collect(Collectors.joining(".*")),
-                Pattern.CASE_INSENSITIVE).matcher(region).matches());
+        return entries.stream().anyMatch(entry -> wildcardMatches(entry, region));
+    }
+
+    /**
+     * Whether {@code pattern}, where {@code *} stands for any run of characters, matches all of
+     * {@code text} ignoring case. A star retries from the last one only, so the work stays within
+     * the product of the two lengths however many stars the caller sends.
+     */
+    private static boolean wildcardMatches(String pattern, String text) {
+        int p = 0;
+        int t = 0;
+        int star = -1;
+        int resume = 0;
+        while (t < text.length()) {
+            if (p < pattern.length() && pattern.charAt(p) == '*') {
+                star = p++;
+                resume = t;
+            } else if (p < pattern.length()
+                    && Character.toLowerCase(pattern.charAt(p)) == Character.toLowerCase(text.charAt(t))) {
+                p++;
+                t++;
+            } else if (star >= 0) {
+                p = star + 1;
+                t = ++resume;
+            } else {
+                return false;
+            }
+        }
+        while (p < pattern.length() && pattern.charAt(p) == '*') {
+            p++;
+        }
+        return p == pattern.length();
     }
 
     /**
