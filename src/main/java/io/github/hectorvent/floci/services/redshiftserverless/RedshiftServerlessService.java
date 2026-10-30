@@ -823,7 +823,8 @@ public class RedshiftServerlessService implements Resettable {
         }
         Path destinationDirectory = dumpDir(rule.accountId(), rule.destinationRegion());
         // Each copy gets its own file, so replacing an earlier copy never touches the dump it still points to.
-        String copyFileName = source.getSnapshotName() + "." + UUID.randomUUID();
+        // The name is left out: a 255-character snapshot name plus a suffix would exceed filesystem filename limits.
+        String copyFileName = UUID.randomUUID().toString();
         Path to = destinationDirectory.resolve(copyFileName + ".sql").normalize();
         Path staging = destinationDirectory.resolve(copyFileName + ".sql.copying").normalize();
         if (!to.startsWith(destinationDirectory) || !staging.startsWith(destinationDirectory)) {

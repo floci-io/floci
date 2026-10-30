@@ -248,6 +248,18 @@ class RedshiftServerlessSnapshotCopyEngineTest {
     }
 
     @Test
+    void copiesASnapshotWhoseNameIsAsLongAsAllowed() throws IOException {
+        String name = "a".repeat(220);
+        seed(ACCOUNT_ID, SOURCE, name, TAKEN, "-- long");
+
+        service.copySnapshots(NOW, List.of(rule(ACCOUNT_ID, null, null)));
+
+        assertEquals("-- long", Files.readString(Path.of(stored(ACCOUNT_ID, DESTINATION, name).getSqlDump())));
+        assertTrue(Path.of(stored(ACCOUNT_ID, DESTINATION, name).getSqlDump()).getFileName().toString()
+                .length() < 100);
+    }
+
+    @Test
     void keepsTheEarlierCopyUsableWhenSavingTheReplacementFails() throws IOException {
         seed(ACCOUNT_ID, SOURCE, "nightly", TAKEN, "-- old");
         service.copySnapshots(NOW, List.of(rule(ACCOUNT_ID, null, null)));
