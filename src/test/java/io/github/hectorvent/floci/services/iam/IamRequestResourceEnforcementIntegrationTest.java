@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -408,6 +409,60 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + "\"Resource\":\"" + EVENTS + "event-bus/" + bus + "\"}");
         refusedJson(putEvents(user, "", "", byArn), "events:PutEvents");
         putEvents(user, "", ",\"EventBusName\":null").statusCode(200).body("FailedEntryCount", equalTo(0));
+    }
+
+    /**
+     * EventBridge V2 is authorized as the same {@code events} actions, on the bus or subscriber its request's ARN
+     * names: a grant on one V2 bus publishes to it and to no other, the default bus never standing in for it, a deny
+     * on it holds, a subscriber is checked on its own ARN rather than {@code *}, and a new bus on its name.
+     */
+    @Test
+    void anEventBridgeV2RequestIsCheckedOnTheBusOrSubscriberItsArnNames() throws IOException {
+        String bus = createEventBusV2("res-v2-" + suffix());
+        String other = createEventBusV2("res-v2-other-" + suffix());
+        User user = user("res-v2");
+
+        user.policy(allowOn("events:PutEvents", bus));
+        eventsV2(user, "PutEvents", putEventsV2(bus)).statusCode(200).body(not(containsString("ErrorCode")));
+        refusedCbor(eventsV2(user, "PutEvents", putEventsV2(other)), "events:PutEvents");
+        user.policy(allowOn("events:PutEvents", EVENTS + "event-bus/default"));
+        refusedCbor(eventsV2(user, "PutEvents", putEventsV2(bus)), "events:PutEvents");
+        user.policy(allowOn("events:PutEvents", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"events:PutEvents\","
+                + "\"Resource\":\"" + bus + "\"}");
+        refusedCbor(eventsV2(user, "PutEvents", putEventsV2(bus)), "events:PutEvents");
+        eventsV2(user, "PutEvents", putEventsV2(other)).statusCode(200);
+
+        String subscriber = EVENTS + "subscriber/res-v2-sub/" + suffix();
+        user.policy(allowOn("events:DescribeSubscriber", subscriber));
+        eventsV2(user, "DescribeSubscriber", Map.of("SubscriberArn", subscriber)).statusCode(404)
+                .body(containsString("ResourceNotFoundException"));
+        refusedCbor(eventsV2(user, "DescribeSubscriber", Map.of("SubscriberArn", subscriber + "0")),
+                "events:DescribeSubscriber");
+
+        String created = "res-v2-new-" + suffix();
+        user.policy(allowOn("events:CreateEventBus", EVENTS + "event-busv2/" + created + "/*"));
+        refusedCbor(eventsV2(user, "CreateEventBus", Map.of("Name", created + "-other", "ClientToken", suffix())),
+                "events:CreateEventBus");
+        String createdArn = CBOR_MAPPER.readTree(eventsV2(user, "CreateEventBus",
+                Map.of("Name", created, "ClientToken", suffix())).statusCode(200).extract().asByteArray())
+                .path("EventBusArn").asText();
+        cleanup.register(() -> deleteEventBusV2(createdArn));
+        assertTrue(createdArn.startsWith(EVENTS + "event-busv2/" + created + "/"), createdArn);
+
+        // An EventBridge request adding the ARN of a V2 bus the caller may delete is still checked on its own bus.
+        String locked = "res-v1-locked-" + suffix();
+        admin("events").header("X-Amz-Target", "AWSEvents.CreateEventBus").contentType("application/x-amz-json-1.1")
+                .body("{\"Name\":\"" + locked + "\"}").post("/").then().statusCode(200);
+        cleanup.register(() -> admin("events").header("X-Amz-Target", "AWSEvents.DeleteEventBus")
+                .contentType("application/x-amz-json-1.1").body("{\"Name\":\"" + locked + "\"}").post("/"));
+        user.policy(allowOn("events:DeleteEventBus", bus) + "," + allowOn("events:DescribeEventBus", bus));
+        for (String operation : List.of("DeleteEventBus", "DescribeEventBus")) {
+            refusedJson(user.json("events", "AWSEvents." + operation, "1.1")
+                    .body("{\"Name\":\"" + locked + "\",\"EventBusArn\":\"" + bus + "\"}").post("/").then(),
+                    "events:" + operation);
+        }
+        admin("events").header("X-Amz-Target", "AWSEvents.DescribeEventBus").contentType("application/x-amz-json-1.1")
+                .body("{\"Name\":\"" + locked + "\"}").post("/").then().statusCode(200);
     }
 
     @Test
@@ -1018,6 +1073,44 @@ class IamRequestResourceEnforcementIntegrationTest {
         }
         return user.json("events", "AWSEvents.PutEvents", "1.1").body("{\"Entries\":[" + entries + "]}")
                 .post("/").then();
+    }
+
+    private String createEventBusV2(String name) throws IOException {
+        String arn = CBOR_MAPPER.readTree(admin("events").header("smithy-protocol", "rpc-v2-cbor")
+                .contentType("application/cbor").accept("application/cbor")
+                .body(CBOR_MAPPER.writeValueAsBytes(Map.of("Name", name)))
+                .post("/service/AWSEventsV2/operation/CreateEventBus").then().statusCode(200).extract().asByteArray())
+                .path("EventBusArn").asText();
+        cleanup.register(() -> deleteEventBusV2(arn));
+        return arn;
+    }
+
+    private static void deleteEventBusV2(String arn) {
+        try {
+            admin("events").header("smithy-protocol", "rpc-v2-cbor").contentType("application/cbor")
+                    .accept("application/cbor").body(CBOR_MAPPER.writeValueAsBytes(Map.of("EventBusArn", arn)))
+                    .post("/service/AWSEventsV2/operation/DeleteEventBus");
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /** One event published to the EventBridge V2 bus. */
+    private static Map<String, Object> putEventsV2(String bus) {
+        return Map.of("EventBusArn", bus, "Entries", List.of(Map.of("Source", "res.test", "DetailType", "t",
+                "Detail", "{}")));
+    }
+
+    private static ValidatableResponse eventsV2(User user, String operation, Map<String, ?> body) throws IOException {
+        return user.cbor("events").body(CBOR_MAPPER.writeValueAsBytes(body))
+                .post("/service/AWSEventsV2/operation/" + operation).then();
+    }
+
+    /** An RPC v2 CBOR service refuses with {@code AccessDeniedException}, a 403, naming the missing permission. */
+    private static void refusedCbor(ValidatableResponse response, String action) throws IOException {
+        JsonNode error = CBOR_MAPPER.readTree(response.statusCode(403).extract().asByteArray());
+        assertEquals("AccessDeniedException", error.path("__type").asText());
+        assertTrue(error.path("message").asText().contains(action), error.toString());
     }
 
     private static String publishVersion(String arn) {

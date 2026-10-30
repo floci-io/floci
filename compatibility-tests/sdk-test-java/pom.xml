@@ -257,6 +257,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>eventbridge</artifactId>
         </dependency>
+        <!-- EventBridge V2 client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>eventbridgev2</artifactId>
+        </dependency>
         <!-- CloudHSM v2 client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

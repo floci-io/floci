@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.PartitionMatrix;
 import io.github.hectorvent.floci.testing.PartitionMatrix.PartitionCase;
@@ -16,6 +18,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.Map;
 import java.util.Set;
 
 import static io.restassured.RestAssured.given;
@@ -43,7 +46,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "cloudfront", "cloudmap", "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito",
             "configservice", "connect", "controlcatalog", "controltower", "datasync", "dlm", "dms", "dsql", "dynamodb", "ec2",
             "ecr", "ecs", "efs", "eks", "elasticache", "elasticbeanstalk", "elbv2", "emr", "emrserverless",
-            "eventbridge", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "lambda",
+            "eventbridge", "eventbridgev2", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "lambda",
             "lambdamicrovms", "lambdaweb", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
             "pipes", "ram", "rds", "redshift", "redshiftserverless", "resourceexplorer2", "resourcegroups", "route53resolver",
             "s3tables", "s3vectors", "sagemaker", "scheduler", "secretsmanager", "servicequotas", "ses", "sns", "sqs",
@@ -991,6 +994,21 @@ class PartitionCrossServiceSmokeIntegrationTest {
         .when().post("/").then().statusCode(200)
             .extract().jsonPath().getString("Namespace.Arn");
         PartitionMatrix.assertArnIn(partitionCase, arn);
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void eventBridgeV2EventBusArn(PartitionCase partitionCase) throws Exception {
+        String region = offered(partitionCase, "events");
+        ObjectMapper cbor = new ObjectMapper(new CBORFactory());
+        byte[] body = signed(region, "events")
+            .header("smithy-protocol", "rpc-v2-cbor")
+            .contentType("application/cbor")
+            .accept("application/cbor")
+            .body(cbor.writeValueAsBytes(Map.of("Name", unique("smoke-busv2", partitionCase))))
+        .when().post("/service/AWSEventsV2/operation/CreateEventBus").then().statusCode(200)
+            .extract().asByteArray();
+        PartitionMatrix.assertArnIn(partitionCase, cbor.readTree(body).path("EventBusArn").asText());
     }
 
     @ParameterizedTest

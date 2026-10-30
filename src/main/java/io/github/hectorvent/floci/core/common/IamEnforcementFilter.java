@@ -1249,7 +1249,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 .filter(scope -> scope.equals(catalog.canonicalCredentialScope(scope)))
                 .sorted()
                 .findFirst()
-                .orElse(descriptor.externalKey());
+                .orElse(catalog.canonicalCredentialScope(descriptor.externalKey()));
     }
 
     /** The same contexts with every object-tag key removed, keeping the principal and global keys. */

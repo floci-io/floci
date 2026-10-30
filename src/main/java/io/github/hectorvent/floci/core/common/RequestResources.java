@@ -67,7 +67,8 @@ public final class RequestResources {
     public static List<String> of(String operation, ContainerRequestContext ctx, String partition, String region,
                                   String accountId, StoredResourceArns stored) {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
-        List<RequestResourceMembers.Resource> resources = operation == null ? null : table.operations().get(operation);
+        List<RequestResourceMembers.Resource> resources = operation == null ? null
+                : served(table.operations().get(operation), ctx);
         if (resources == null || resources.isEmpty()) {
             return List.of();
         }
@@ -113,7 +114,7 @@ public final class RequestResources {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         List<RequestResourceMembers.Created> creates = operation == null ? null : table.creates().get(operation);
         List<RequestResourceMembers.Resource> made = operation == null || creates != null ? List.of()
-                : table.operations().getOrDefault(operation, List.of()).stream()
+                : served(table.operations().getOrDefault(operation, List.of()), ctx).stream()
                         .filter(RequestResourceMembers.Resource::made).toList();
         if (creates == null && made.isEmpty()) {
             return List.of();
@@ -143,6 +144,23 @@ public final class RequestResources {
             }
         }
         return List.copyOf(arns);
+    }
+
+    /**
+     * The resources that apply to a request of the service serving it: one with an {@code endpoint} applies only to
+     * a request the service of that endpoint prefix serves, read from the claim of the service whose handler runs it
+     * and never from the request's members, which a caller could add to a request of the other API. A request no
+     * service is known to serve keeps them all, which can only check it on more.
+     */
+    private static List<RequestResourceMembers.Resource> served(List<RequestResourceMembers.Resource> resources,
+                                                                ContainerRequestContext ctx) {
+        String endpoint = ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
+                && claim.service() != null ? claim.service().externalKey() : null;
+        if (resources == null || endpoint == null) {
+            return resources;
+        }
+        return resources.stream().filter(resource -> resource.endpoint() == null
+                || resource.endpoint().equals(endpoint)).toList();
     }
 
     /** The value up to {@code separator}, which its handler drops the rest after; the whole value without one. */

@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import org.junit.jupiter.api.Test;
 
+import java.util.Set;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -99,6 +101,22 @@ class AwsJsonCborSerializerTest {
         assertEquals(CBOR_MAJOR_FLOAT, majorType(cbor[tagIndex + 1]),
                 "fractional epoch seconds must be encoded as a CBOR float");
         assertEquals(1700000000.5, cborMapper.readTree(cbor).path("Timestamp").asDouble());
+    }
+
+    @Test
+    void smithyRpcV2DeclaredTimestampMembersAreTaggedWhereverTheyAppear() throws Exception {
+        // EventBridge V2 names its timestamps CreationTime and LastModifiedTime, which the suffix heuristic misses.
+        JsonNode node = jsonMapper.readTree("{\"CreationTime\": 1700000000, \"Period\": 60,"
+                + " \"EventBuses\": [{\"LastModifiedTime\": 1700000001.5}]}");
+
+        assertEquals(0, countTag1(AwsJsonCborController.nodeToSmithyCbor(node)));
+        byte[] cbor = AwsJsonCborController.nodeToSmithyCbor(node, Set.of("CreationTime", "LastModifiedTime"));
+
+        assertEquals(2, countTag1(cbor), "each declared timestamp member must be tagged, and nothing else");
+        JsonNode decoded = cborMapper.readTree(cbor);
+        assertEquals(1700000000L, decoded.path("CreationTime").asLong());
+        assertEquals(1700000001.5, decoded.path("EventBuses").path(0).path("LastModifiedTime").asDouble());
+        assertEquals(60L, decoded.path("Period").asLong());
     }
 
     @Test

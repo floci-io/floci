@@ -124,11 +124,13 @@ final class RequestResourceMembers {
      * {@code before}, when there is one: Step Functions Local's handler drops a test case after {@code #}, and a
      * CodeBuild build id is {@code <project>:<id>}, a build being checked on its project. A create naming other
      * resources beside the one it makes marks that one {@code made}, where its tags go (a webhook, not the pipeline
-     * it connects to).
+     * it connects to). A resource with an {@code endpoint} applies only to a request the service of that endpoint
+     * prefix serves, where two APIs share the operation's name and nothing in a request tells them apart
+     * (EventBridge's {@code events} and EventBridge V2's {@code eventsv2}); null for every request.
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
-                    Member account, String before, Map<String, String> fixed, boolean made) {
+                    Member account, String before, Map<String, String> fixed, boolean made, String endpoint) {
     }
 
     /**
@@ -236,6 +238,11 @@ final class RequestResourceMembers {
                     + resource.path("made") + ", which is not true");
         }
         boolean made = resource.has("made");
+        String endpoint = resource.has("endpoint") ? resource.path("endpoint").asText("") : null;
+        if (endpoint != null && endpoint.isEmpty()) {
+            throw new IllegalStateException(RESOURCE_NAME + " serves a resource of " + operation
+                    + " on no endpoint prefix");
+        }
         String before = resource.has("before") ? resource.path("before").asText("") : null;
         if (before != null && before.length() != 1) {
             throw new IllegalStateException(RESOURCE_NAME + " reads a member for " + operation
@@ -248,7 +255,7 @@ final class RequestResourceMembers {
                         + " of types with no format: " + types);
             }
             return new Resource(types, arnMember(operation, resource.path("arn").asText("")), Map.of(), Map.of(),
-                    Map.of(), Map.of(), Map.of(), null, before, Map.of(), made);
+                    Map.of(), Map.of(), Map.of(), null, before, Map.of(), made, endpoint);
         }
         String type = resource.path("type").asText("");
         ArnFormat format = formats.get(type);
@@ -306,7 +313,7 @@ final class RequestResourceMembers {
                     + " from " + account.name() + ", no member of one account or a type of none");
         }
         return new Resource(List.of(type), null, Map.copyOf(fill), when, unless, Map.copyOf(absent), Map.copyOf(arnOf),
-                account, before, Map.copyOf(fixed), made);
+                account, before, Map.copyOf(fixed), made, endpoint);
     }
 
     /** The values each member named in {@code when} or {@code unless} may have, an empty one for the member absent. */
