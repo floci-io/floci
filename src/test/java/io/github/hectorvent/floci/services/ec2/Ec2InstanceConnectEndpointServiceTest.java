@@ -142,6 +142,12 @@ class Ec2InstanceConnectEndpointServiceTest {
         // Defaults applied the same way match: omitted PreserveClientIp and IpAddressType are false and ipv4.
         assertEquals(first, service.createInstanceConnectEndpoint(REGION, subnetId, List.of(group), null, null,
                 tags, "token-78").getInstanceConnectEndpointId());
+        // Security groups are a set: the same groups in another order are the same request.
+        String other = service.createSecurityGroup(REGION, "eice-2", "x", vpcId).getGroupId();
+        String ordered = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(group, other), null, null,
+                tags, "token-78-sets").getInstanceConnectEndpointId();
+        assertEquals(ordered, service.createInstanceConnectEndpoint(REGION, subnetId, List.of(other, group), null,
+                null, tags, "token-78-sets").getInstanceConnectEndpointId());
         // A tag added after the create is not a creation parameter.
         service.createTags(REGION, List.of(first), List.of(new Tag("Later", "x")));
         assertEquals(first, service.createInstanceConnectEndpoint(REGION, subnetId, List.of(group), null, null,
@@ -158,7 +164,7 @@ class Ec2InstanceConnectEndpointServiceTest {
                         true, null, tags, "token-78"));
         retries.forEach((what, retry) -> assertEquals("IdempotentParameterMismatch",
                 assertThrows(AwsException.class, retry, what).getErrorCode(), what));
-        assertEquals(1, service.describeInstanceConnectEndpoints(REGION, List.of(), Map.of()).size());
+        assertEquals(2, service.describeInstanceConnectEndpoints(REGION, List.of(), Map.of()).size());
     }
 
     @Test

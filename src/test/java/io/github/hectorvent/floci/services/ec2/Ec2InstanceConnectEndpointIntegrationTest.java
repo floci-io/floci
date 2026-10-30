@@ -159,6 +159,14 @@ class Ec2InstanceConnectEndpointIntegrationTest {
 
         assertError(ec2("DescribeInstanceConnectEndpoints", "test", "us-east-1").formParam("NextToken", "bogus"),
                 400, "InvalidParameterValue");
+        for (String outOfRange : List.of("0", "-1", "51")) {
+            assertError(ec2("DescribeInstanceConnectEndpoints", "test", "us-east-1")
+                    .formParam("MaxResults", outOfRange), 400, "InvalidMaxResults");
+        }
+        for (String inRange : List.of("1", "50")) {
+            ec2("DescribeInstanceConnectEndpoints", "test", "us-east-1").formParam("MaxResults", inRange)
+                    .post("/").then().statusCode(200);
+        }
 
         for (String id : created) {
             ec2("DeleteInstanceConnectEndpoint", "test", "us-east-1").formParam("InstanceConnectEndpointId", id)

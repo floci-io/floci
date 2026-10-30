@@ -12700,15 +12700,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * One page of {@link #describeInstanceConnectEndpoints}, in endpoint ID order. {@code maxResults}
-     * of null or below 1 returns every match; it is not range-checked against the model's 1-50.
+     * One page of {@link #describeInstanceConnectEndpoints}, in endpoint ID order. A null
+     * {@code maxResults} (omitted) returns every match; a value sent outside the model's 1 to 50
+     * (InstanceConnectEndpointMaxResults), zero and negatives included, is InvalidMaxResults, as
+     * DescribeTags refuses its own range.
      */
     public PaginatedResult<InstanceConnectEndpoint> describeInstanceConnectEndpoints(
             String region, List<String> ids, List<Map.Entry<String, List<String>>> filters,
             Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 1 || maxResults > 50)) {
+            throw new AwsException("InvalidMaxResults",
+                    "Value (" + maxResults + ") for parameter MaxResults is invalid. "
+                            + "Expecting a value between 1 and 50.", 400);
+        }
         return Pagination.paginate(describeInstanceConnectEndpoints(region, ids, filters),
                 InstanceConnectEndpoint::getInstanceConnectEndpointId,
-                maxResults == null || maxResults < 1 ? Integer.MAX_VALUE : maxResults, nextToken, "eice",
+                maxResults == null ? Integer.MAX_VALUE : maxResults, nextToken, "eice",
                 token -> new AwsException("InvalidParameterValue", "Invalid NextToken", 400));
     }
 

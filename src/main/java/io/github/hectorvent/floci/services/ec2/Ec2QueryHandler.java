@@ -4544,9 +4544,10 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeInstanceConnectEndpoints(MultivaluedMap<String, String> p, String region) {
-        int maxResults = parseIntParam(p, "MaxResults", 0);
+        String maxResults = p.getFirst("MaxResults");
         PaginatedResult<InstanceConnectEndpoint> page = service.describeInstanceConnectEndpoints(region,
-                getList(p, "InstanceConnectEndpointId"), getFiltersList(p), maxResults == 0 ? null : maxResults,
+                getList(p, "InstanceConnectEndpointId"), getFiltersList(p),
+                maxResults == null || maxResults.isEmpty() ? null : parseIntParam(p, "MaxResults", 0),
                 p.getFirst("NextToken"));
         // After the describe, so an unknown ID, filter or NextToken fails on its own error first.
         checkDryRun(p);
