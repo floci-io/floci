@@ -7067,7 +7067,8 @@ public class S3Service implements Resettable, ResourceProvider {
     private String notificationEventJson(ObjectNode event, String configurationId) throws JsonProcessingException {
         ObjectNode copy = event.deepCopy();
         if (copy.path("Records").path(0).path("s3") instanceof ObjectNode s3) {
-            s3.put("configurationId", configurationId == null ? "emulator" : configurationId);
+            s3.put("configurationId",
+                    configurationId == null || configurationId.isBlank() ? "emulator" : configurationId);
         }
         return objectMapper.writeValueAsString(copy);
     }

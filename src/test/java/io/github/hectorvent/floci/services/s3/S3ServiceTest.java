@@ -28,6 +28,7 @@ import org.junit.jupiter.api.condition.DisabledOnOs;
 import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayInputStream;
@@ -1015,6 +1016,23 @@ class S3ServiceTest {
         assertEquals(first.path("eventTime"), second.path("eventTime"));
         assertEquals(first.path("responseElements"), second.path("responseElements"));
         assertEquals(first.path("s3").path("object"), second.path("s3").path("object"));
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" \t "})
+    void missingLambdaNotificationRuleIdUsesEmulator(String id) throws IOException {
+        RecordingLambdaInvoker invoker = new RecordingLambdaInvoker();
+        S3Service service = bucketNotifyingOnCreation(invoker, "notification-missing-rule-id");
+        NotificationConfiguration config = new NotificationConfiguration();
+        config.getLambdaFunctionConfigurations().add(new LambdaNotification(
+                id, "arn:aws:lambda:us-east-1:000000000000:function:s3-notif-test",
+                List.of("s3:ObjectCreated:*"), List.of()));
+        service.putBucketNotificationConfiguration("test-bucket", config, true);
+
+        service.putObject("test-bucket", "original.txt", new byte[]{1}, "text/plain", null);
+
+        assertEquals("emulator", onlyRecordedS3Event(invoker).path("s3").path("configurationId").asText());
     }
 
     private S3Service bucketNotifyingOnCreation(RecordingLambdaInvoker lambdaInvoker, String dataDir) {
