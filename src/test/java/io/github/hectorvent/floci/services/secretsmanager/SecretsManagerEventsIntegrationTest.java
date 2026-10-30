@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.secretsmanager;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.cloudtrail.CloudTrailService;
 import io.github.hectorvent.floci.services.cloudtrail.model.EventSelector;
@@ -19,15 +20,25 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
+import software.amazon.awssdk.services.eventbridge.model.ApiDestinationHttpMethod;
+import software.amazon.awssdk.services.eventbridge.model.ConnectionAuthorizationType;
 import software.amazon.awssdk.services.eventbridge.model.Target;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.ResourceNotFoundException;
 
+import java.net.InetSocketAddress;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -134,6 +145,68 @@ class SecretsManagerEventsIntegrationTest {
             assertFalse(detail.path("responseElements").has("versionId"));
         } finally {
             secrets.deleteSecret(r -> r.secretId(other).forceDeleteWithoutRecovery(true));
+        }
+    }
+
+    @Test
+    void slowHttpTargetsDoNotDelaySdkWriteResponsesAndKeepRequestScope() throws Exception {
+        CountDownLatch arrived = new CountDownLatch(2);
+        CountDownLatch release = new CountDownLatch(1);
+        List<String> payloads = new CopyOnWriteArrayList<>();
+        ExecutorService httpWorkers = Executors.newVirtualThreadPerTaskExecutor();
+        ExecutorService callers = Executors.newVirtualThreadPerTaskExecutor();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.setExecutor(httpWorkers);
+        server.createContext("/hook", exchange -> {
+            try {
+                payloads.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+                arrived.countDown();
+                boolean released = release.await(10, TimeUnit.SECONDS);
+                exchange.sendResponseHeaders(released ? 200 : 504, -1);
+            } catch (InterruptedException expected) {
+                // Test teardown interrupts any handler still waiting for release.
+                Thread.currentThread().interrupt();
+            } finally {
+                exchange.close();
+            }
+        });
+        server.start();
+        try {
+            String connection = events.createConnection(r -> r.name(name)
+                    .authorizationType(ConnectionAuthorizationType.API_KEY)
+                    .authParameters(p -> p.apiKeyAuthParameters(k -> k.apiKeyName("example-key").apiKeyValue("example-value"))))
+                    .connectionArn();
+            String destination = events.createApiDestination(r -> r.name(name).connectionArn(connection)
+                    .httpMethod(ApiDestinationHttpMethod.POST).invocationRateLimitPerSecond(100)
+                    .invocationEndpoint("http://127.0.0.1:" + server.getAddress().getPort() + "/hook"))
+                    .apiDestinationArn();
+            events.putTargets(r -> r.rule(name).targets(Target.builder().id("blocked-http").arn(destination).build()));
+            RequestScopes.runAs(ACCOUNT, REGION, () -> trails.startLogging(REGION, name));
+
+            Future<?> put = callers.submit(() -> secrets.putSecretValue(r -> r.secretId(arn)
+                    .secretString("sensitive-async-put")));
+            Future<?> update = callers.submit(() -> secrets.updateSecret(r -> r.secretId(arn)
+                    .secretString("sensitive-async-update")));
+            put.get(2, TimeUnit.SECONDS);
+            update.get(2, TimeUnit.SECONDS);
+            assertTrue(arrived.await(3, TimeUnit.SECONDS), "both target deliveries must run after the SDK writes return");
+            assertEquals(1, release.getCount(), "HTTP targets are still waiting for a response");
+            for (String payload : payloads) {
+                JsonNode event = MAPPER.readTree(payload);
+                assertEquals(ACCOUNT, event.path("account").asText());
+                assertEquals(REGION, event.path("region").asText());
+                assertEquals(arn, event.path("detail").path("responseElements").path("arn").asText());
+                assertFalse(payload.contains("sensitive-"));
+            }
+        } finally {
+            release.countDown();
+            callers.shutdownNow();
+            callers.awaitTermination(5, TimeUnit.SECONDS);
+            server.stop(0);
+            httpWorkers.shutdownNow();
+            events.removeTargets(r -> r.rule(name).ids("blocked-http"));
+            events.deleteApiDestination(r -> r.name(name));
+            events.deleteConnection(r -> r.name(name));
         }
     }
 
