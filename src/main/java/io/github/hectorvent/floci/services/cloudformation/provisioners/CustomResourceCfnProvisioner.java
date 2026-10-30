@@ -323,7 +323,7 @@ public class CustomResourceCfnProvisioner implements CfnResourceProvisioner {
         try {
             ObjectNode event = objectMapper.createObjectNode();
             event.put("RequestType", requestType);
-            event.put("ResponseURL", reachableEndpoint.baseUrl() + "/cfn-response/" + token);
+            event.put("ResponseURL", reachableEndpoint.customResourceResponseBaseUrl() + "/cfn-response/" + token);
             event.put("StackId", stackId);
             event.put("RequestId", UUID.randomUUID().toString());
             event.put("ResourceType", resourceType);

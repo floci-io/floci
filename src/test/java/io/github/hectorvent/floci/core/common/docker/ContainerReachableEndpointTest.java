@@ -100,4 +100,25 @@ class ContainerReachableEndpointTest {
         assertEquals("http://172.18.0.2:4566", endpoint(4510).baseUrl());
         assertEquals("http://172.18.0.2:4566", endpoint(4510).baseUrl(false));
     }
+
+    @Test
+    void customResourceResponseUrlIsHttpsUnderTls() {
+        // TlsProxyServer serves https on floci.port, and a custom resource's handler PUTs to its
+        // ResponseURL with https, as it does to AWS's presigned S3 URL.
+        when(tls.enabled()).thenReturn(true);
+        when(config.port()).thenReturn(4566);
+        when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
+        when(dockerHostResolver.resolve()).thenReturn("172.18.0.2");
+
+        assertEquals("https://172.18.0.2:4566", endpoint(4510).customResourceResponseBaseUrl());
+    }
+
+    @Test
+    void customResourceResponseUrlIsHttpWithoutTls() {
+        hostMappedTo4811();
+        when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
+        when(dockerHostResolver.resolve()).thenReturn("172.18.0.2");
+
+        assertEquals("http://172.18.0.2:4566", endpoint.customResourceResponseBaseUrl());
+    }
 }
