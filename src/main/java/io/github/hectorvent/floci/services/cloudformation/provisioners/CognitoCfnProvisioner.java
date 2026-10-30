@@ -229,15 +229,15 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
             req.put("UserPoolTags", tags);
         }
 
+        boolean enabledMfasManaged = declaresEnabledMfas(props, ctx) || ctx.previouslyDeclared("EnabledMfas");
         UserPool pool;
         if (ctx.isUpdate()) {
             req.put("UserPoolId", ctx.priorPhysicalId());
             snapshot(r, cognitoService.userPoolSettings(ctx.priorPhysicalId()));
-            if (ctx.previouslyDeclared("EnabledMfas")) {
-                // SetUserPoolMfaConfig keeps a factor it is not given, so a factor the template no
-                // longer lists has to be cleared first. OFF drops them all; UpdateUserPool then
-                // restores the template's MfaConfiguration and applyEnabledMfas the listed factors.
-                cognitoService.setUserPoolMfaConfig(ctx.priorPhysicalId(), "OFF", null, null, null, null);
+            if (enabledMfasManaged) {
+                // The MFA mode goes out together with its factors in applyEnabledMfas, so the pool
+                // never pairs the new mode with the old factors.
+                req.remove("MfaConfiguration");
             }
             pool = cognitoService.updateUserPool(req, ctx.region());
         } else {
@@ -252,23 +252,27 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         // mints tokens with, so a template wiring it into a JWT authorizer validates locally.
         r.getAttributes().put("ProviderName", AwsEndpoints.host("cognito-idp", ctx.region()) + "/" + pool.getId());
         r.getAttributes().put("ProviderURL", cognitoService.getIssuer(pool.getId()));
-        applyEnabledMfas(pool.getId(), props, ctx);
+        if (enabledMfasManaged) {
+            applyEnabledMfas(pool.getId(), props, ctx);
+        }
+    }
+
+    private static boolean declaresEnabledMfas(JsonNode props, ProvisionContext ctx) {
+        JsonNode enabledMfas = props != null ? ctx.engine().resolveNode(props).path("EnabledMfas") : null;
+        return enabledMfas != null && enabledMfas.isArray() && !enabledMfas.isEmpty();
     }
 
     /**
      * EnabledMfas only exists in CloudFormation: CreateUserPool and UpdateUserPool have no such
-     * member, so CloudFormation turns it into SetUserPoolMfaConfig. SMS_MFA takes the pool's
+     * member, so CloudFormation turns it into SetUserPoolMfaConfig. The pool ends up with exactly
+     * the listed factors, together with the template's MfaConfiguration. SMS_MFA takes the pool's
      * SmsAuthenticationMessage and SmsConfiguration, EMAIL_OTP its EmailAuthenticationMessage and
      * EmailAuthenticationSubject.
      */
     private void applyEnabledMfas(String poolId, JsonNode props, ProvisionContext ctx) {
-        JsonNode resolved = props != null ? ctx.engine().resolveNode(props) : null;
-        JsonNode enabledMfas = resolved != null ? resolved.path("EnabledMfas") : null;
-        if (enabledMfas == null || !enabledMfas.isArray() || enabledMfas.isEmpty()) {
-            return;
-        }
+        JsonNode resolved = props != null ? ctx.engine().resolveNode(props) : MAPPER.createObjectNode();
         Set<String> factors = new HashSet<>();
-        enabledMfas.forEach(factor -> factors.add(factor.asText()));
+        resolved.path("EnabledMfas").forEach(factor -> factors.add(factor.asText()));
 
         Boolean softwareTokenEnabled = factors.contains("SOFTWARE_TOKEN_MFA") ? Boolean.TRUE : null;
         Map<String, Object> smsMfaConfiguration = null;
@@ -287,8 +291,8 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         }
         String mfaConfiguration = resolved.path("MfaConfiguration").isTextual()
                 ? resolved.path("MfaConfiguration").asText() : null;
-        cognitoService.setUserPoolMfaConfig(poolId, mfaConfiguration, softwareTokenEnabled,
-                smsMfaConfiguration, emailMfaConfiguration, null);
+        cognitoService.replaceUserPoolMfaConfig(poolId, mfaConfiguration, softwareTokenEnabled,
+                smsMfaConfiguration, emailMfaConfiguration);
     }
 
     private static void putIfText(Map<String, Object> target, String key, JsonNode value) {

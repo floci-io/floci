@@ -810,8 +810,37 @@ public class CognitoService implements ResourceProvider {
                                          Map<String, Object> smsMfaConfiguration,
                                          Map<String, Object> emailMfaConfiguration,
                                          WebAuthnConfiguration webAuthnConfiguration) {
-        boolean otherFactorConfigured = smsMfaConfiguration != null || emailMfaConfiguration != null;
         UserPool pool = describeUserPool(id);
+        applyMfaConfig(pool, mfaConfiguration, softwareTokenMfaEnabled, smsMfaConfiguration,
+                emailMfaConfiguration, webAuthnConfiguration, false);
+        poolStore.put(id, pool);
+        return pool;
+    }
+
+    /**
+     * SetUserPoolMfaConfig where a factor that is not given is turned off instead of kept, which is
+     * how CloudFormation applies a user pool's EnabledMfas. The settings are built on a copy and
+     * stored in one write, so a concurrent sign-in never reads the pool between its old and new
+     * MFA settings.
+     */
+    public UserPool replaceUserPoolMfaConfig(String id, String mfaConfiguration,
+                                             Boolean softwareTokenMfaEnabled,
+                                             Map<String, Object> smsMfaConfiguration,
+                                             Map<String, Object> emailMfaConfiguration) {
+        UserPool pool = MAPPER.convertValue(describeUserPool(id), UserPool.class);
+        applyMfaConfig(pool, mfaConfiguration, softwareTokenMfaEnabled, smsMfaConfiguration,
+                emailMfaConfiguration, null, true);
+        poolStore.put(id, pool);
+        return pool;
+    }
+
+    private void applyMfaConfig(UserPool pool, String mfaConfiguration,
+                                Boolean softwareTokenMfaEnabled,
+                                Map<String, Object> smsMfaConfiguration,
+                                Map<String, Object> emailMfaConfiguration,
+                                WebAuthnConfiguration webAuthnConfiguration,
+                                boolean replaceFactors) {
+        boolean otherFactorConfigured = smsMfaConfiguration != null || emailMfaConfiguration != null;
         if (webAuthnConfiguration != null) {
             validateWebAuthnConfiguration(webAuthnConfiguration);
         }
@@ -848,8 +877,11 @@ public class CognitoService implements ResourceProvider {
             pool.setSmsMfaConfiguration(null);
             pool.setEmailMfaConfiguration(null);
         } else {
-            if (softwareTokenMfaEnabled != null) {
+            if (softwareTokenMfaEnabled != null || replaceFactors) {
                 pool.setSoftwareTokenMfaEnabled(softwareTokenMfaEnabled);
+            }
+            if (smsMfaConfiguration == null && replaceFactors) {
+                pool.setSmsMfaConfiguration(null);
             }
             if (smsMfaConfiguration != null) {
                 pool.setSmsMfaConfiguration(new LinkedHashMap<>(smsMfaConfiguration));
@@ -862,15 +894,14 @@ public class CognitoService implements ResourceProvider {
                     pool.setSmsConfiguration(copy);
                 }
             }
-            if (emailMfaConfiguration != null) {
-                pool.setEmailMfaConfiguration(new LinkedHashMap<>(emailMfaConfiguration));
+            if (emailMfaConfiguration != null || replaceFactors) {
+                pool.setEmailMfaConfiguration(emailMfaConfiguration != null
+                        ? new LinkedHashMap<>(emailMfaConfiguration) : null);
             }
         }
         if (webAuthnConfiguration != null) {
             pool.setWebAuthnConfiguration(webAuthnConfiguration);
         }
-        poolStore.put(id, pool);
-        return pool;
     }
 
     private static void validateWebAuthnConfiguration(WebAuthnConfiguration configuration) {
