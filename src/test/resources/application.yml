@@ -260,6 +260,8 @@ floci:
       default-image: "tinkerpop/gremlin-server:3.7.3"
     eventbridge:
       enabled: true
+    eventbridgev2:
+      enabled: true
     cloudmap:
       enabled: true
     emr:

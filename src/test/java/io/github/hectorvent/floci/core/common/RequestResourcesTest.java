@@ -1,10 +1,14 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Optional;
@@ -16,6 +20,7 @@ import static org.mockito.Mockito.when;
 /** How {@link RequestResources} builds the ARNs of the resources a request names. */
 class RequestResourcesTest {
 
+    private static final ObjectMapper CBOR = new ObjectMapper(new CBORFactory());
     private static final String MACHINE = "arn:aws:states:us-east-1:000000000000:stateMachine:orders";
 
     @Test
@@ -325,6 +330,64 @@ class RequestResourcesTest {
     }
 
     /**
+     * An EventBridge V2 request, checked as the same {@code events} actions, names its bus or subscriber by ARN and
+     * never the default bus, and a create makes an {@code event-busv2}, whose id V2 mints. EventBridge's own requests
+     * still name their bus by Name.
+     */
+    @Test
+    void anEventBridgeV2RequestIsOnTheBusOrSubscriberItsArnNames() {
+        String events = "arn:aws:events:us-east-1:000000000000:";
+        String bus = events + "event-busv2/orders/a1b2c3d4";
+        String subscriber = events + "subscriber/audit/e5f6g7h8";
+        assertEquals(List.of(bus), of("events:PutEvents",
+                v2("{\"EventBusArn\":\"" + bus + "\",\"Entries\":[{\"Source\":\"s\",\"DetailType\":\"d\"}]}")));
+        assertEquals(List.of(bus), of("events:DescribeEventBus", v2("{\"EventBusArn\":\"" + bus + "\"}")));
+        assertEquals(List.of(bus), of("events:DeleteEventBus", v2("{\"EventBusArn\":\"" + bus + "\"}")));
+        assertEquals(List.of(subscriber), of("events:DescribeSubscriber",
+                v2("{\"SubscriberArn\":\"" + subscriber + "\"}")));
+        assertEquals(List.of(subscriber), of("events:UpdateSubscriber",
+                v2("{\"SubscriberArn\":\"" + subscriber + "\",\"State\":\"STOPPED\"}")));
+        assertEquals(List.of(subscriber), of("events:DeleteSubscriber",
+                v2("{\"SubscriberArn\":\"" + subscriber + "\"}")));
+        // A subscriber is made on the bus it names, its target and role naming neither.
+        assertEquals(List.of(bus, events + "subscriber/audit/*"), of("events:CreateSubscriber",
+                v2("{\"Name\":\"audit\",\"EventBusArn\":\"" + bus + "\",\"InvokeConfiguration\":{"
+                        + "\"TargetArn\":\"arn:aws:sqs:us-east-1:000000000000:q\","
+                        + "\"RoleArn\":\"arn:aws:iam::000000000000:role/r\"}}")));
+        assertEquals(List.of(events + "event-busv2/orders/*"), of("events:CreateEventBus",
+                v2("{\"Name\":\"orders\"}")));
+        assertEquals(List.of(), created("events:CreateEventBus", v2("{\"Name\":\"orders\"}")));
+
+        assertEquals(List.of(events + "event-bus/orders"), of("events:CreateEventBus", v1("{\"Name\":\"orders\"}")));
+        assertEquals(List.of(events + "event-bus/orders"), of("events:DeleteEventBus", v1("{\"Name\":\"orders\"}")));
+        assertEquals(List.of(events + "event-bus/orders"), of("events:UpdateEventBus",
+                v1("{\"Name\":\"orders\",\"Description\":\"d\"}")));
+        assertEquals(List.of("arn:aws:events:us-east-1::event-source/aws.partner/acme/orders"),
+                of("events:DescribeEventSource", v1("{\"Name\":\"aws.partner/acme/orders\"}")));
+    }
+
+    /**
+     * Which API's resources a request is checked on is the API serving it, never a member it gives: an EventBridge
+     * request naming a V2 bus's ARN beside its own bus, or giving V2's ClientToken, is checked on the bus its handler
+     * acts on, and a request no service is known to serve is checked on both.
+     */
+    @Test
+    void aMemberOfTheOtherApiDoesNotChooseTheResourceChecked() {
+        String events = "arn:aws:events:us-east-1:000000000000:";
+        String v2Bus = events + "event-busv2/open/a1b2c3d4";
+        String withV2Arn = "{\"Name\":\"locked\",\"EventBusArn\":\"" + v2Bus + "\"}";
+        for (String operation : List.of("events:DeleteEventBus", "events:DescribeEventBus", "events:UpdateEventBus")) {
+            assertEquals(List.of(events + "event-bus/locked"), of(operation, v1(withV2Arn)), operation);
+            assertEquals(List.of(v2Bus, events + "event-bus/locked"), of(operation, json(withV2Arn)), operation);
+        }
+        assertEquals(List.of(events + "event-bus/locked"), of("events:PutEvents", v1("{\"EventBusArn\":\"" + v2Bus
+                + "\",\"Entries\":[{\"EventBusName\":\"locked\",\"Source\":\"s\"}]}")));
+        assertEquals(List.of(events + "event-bus/locked"), of("events:CreateEventBus",
+                v1("{\"Name\":\"locked\",\"ClientToken\":\"t\"}")));
+        assertEquals(List.of(v2Bus), of("events:DeleteEventBus", v2(withV2Arn)));
+    }
+
+    /**
      * A connection or an API destination, whose ARN EventBridge follows with an id it mints after the name, is the
      * one stored under the name the request gives, and has that id open when none is or nothing looks it up.
      */
@@ -463,8 +526,26 @@ class RequestResourcesTest {
         return request("application/x-www-form-urlencoded", body);
     }
 
+    /** The JSON body as EventBridge's JSON 1.1 handler serves it. */
+    private static ContainerRequestContext v1(String body) {
+        return RequestResourceMembersTest.servedBy(json(body), "events");
+    }
+
+    /** The JSON body as EventBridge V2's SDKs send it, in CBOR to the RPC v2 handler that serves it. */
+    private static ContainerRequestContext v2(String body) {
+        try {
+            return RequestResourceMembersTest.servedBy(request("application/cbor",
+                    CBOR.writeValueAsBytes(new ObjectMapper().readTree(body))), "eventsv2");
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
     private static ContainerRequestContext request(String mediaType, String body) {
-        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+        return request(mediaType, body.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static ContainerRequestContext request(String mediaType, byte[] bytes) {
         ContainerRequestContext request = mock(ContainerRequestContext.class);
         when(request.getMethod()).thenReturn("POST");
         when(request.getMediaType()).thenReturn(MediaType.valueOf(mediaType));

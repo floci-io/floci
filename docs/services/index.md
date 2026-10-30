@@ -40,6 +40,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [CloudFormation](cloudformation.md) | `POST /` with `Action=` param | Query | 36 |
 | [Cloud Control API](cloudcontrol.md) | `POST /` + `X-Amz-Target: CloudApiService.*` | JSON 1.1 | 5 |
 | [EventBridge](eventbridge.md) | `POST /` + `X-Amz-Target: AmazonEventBridge.*` | JSON 1.1 | 40 |
+| [EventBridge V2](eventbridgev2.md) | `POST /service/AWSEventsV2/operation/*` | Smithy RPC v2 CBOR | 10 |
 | [EventBridge Scheduler](scheduler.md) | `/schedules/*`, `/schedule-groups/*`, `/tags/*` | REST JSON | 12 |
 | [EventBridge Pipes](pipes.md) | `/v1/pipes/*` | REST JSON | 7 |
 | [CloudWatch OAM](oam.md) | REST paths such as `POST /CreateSink` and `POST /CreateLink` | REST JSON | 15 |
