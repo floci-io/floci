@@ -261,6 +261,8 @@ public class AslExecutor {
     private final S3Service s3Service;
     private final EcsService ecsService;
     private final EcsJsonHandler ecsJsonHandler;
+    @Inject
+    Instance<SdkManagementTaskInvoker> sdkManagementTaskInvoker;
     private final EventBridgeHandler eventBridgeHandler;
     private final SchedulerService schedulerService;
     private final SchedulerController schedulerController;
@@ -1459,6 +1461,10 @@ public class AslExecutor {
             return invokeS3PutObject(input);
         }
 
+        if (SdkManagementTaskInvoker.supports(integration)) {
+            return sdkManagementTaskInvoker.get().invoke(integration, input, extractRegionFromArn(sm.getStateMachineArn()));
+        }
+
         // ECS optimized integration: arn:<partition>:states:::ecs:runTask (request-response, .sync, .waitForTaskToken).
         // The .waitForTaskToken suffix is already stripped by executeTaskState, so a waitForTaskToken
         // variant arrives here as the bare runTask resource and simply launches the task while the token
@@ -1674,7 +1680,7 @@ public class AslExecutor {
      * {@code Sfn.StateMachineDoesNotExistException}, while the StartExecution wire response names
      * that same error {@code StateMachineDoesNotExist}.
      */
-    private static String sdkExceptionName(String service, String errorCode) {
+    static String sdkExceptionName(String service, String errorCode) {
         return errorCode.endsWith("Exception")
                 ? service + "." + errorCode
                 : service + "." + errorCode + "Exception";
@@ -1690,7 +1696,7 @@ public class AslExecutor {
         return sdkExceptionName("StepFunctions", errorCode);
     }
 
-    private static String sdkTimestamp(double epochSeconds) {
+    static String sdkTimestamp(double epochSeconds) {
         return SDK_TIMESTAMP.format(Instant.ofEpochMilli(Math.round(epochSeconds * 1000)));
     }
 
