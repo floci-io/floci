@@ -496,6 +496,50 @@ class CognitoCfnIntegrationTest {
         CfnStackWaits.awaitStackDeleted(stack);
     }
 
+    /** An update leaves exactly the factors the new template lists, as CloudFormation does on AWS. */
+    @Test
+    void anUpdateDropsTheFactorsEnabledMfasNoLongerLists() throws Exception {
+        String stack = "cognito-cfn-enabled-mfas-update-it";
+        cloudFormation(stack, "CreateStack", enabledMfasTemplate(
+            "\"MfaConfiguration\": \"ON\", \"EnabledMfas\": [\"SOFTWARE_TOKEN_MFA\"]"));
+        String poolId = outputValue(describeStacks(stack, "CREATE_COMPLETE"), "PoolId");
+
+        cloudFormation(stack, "UpdateStack", enabledMfasTemplate(
+            "\"MfaConfiguration\": \"OPTIONAL\", \"EnabledMfas\": [\"SMS_MFA\"], "
+                + "\"SmsConfiguration\": {\"SnsCallerArn\": \"arn:aws:iam::000000000000:role/sms\"}"));
+        describeStacks(stack, "UPDATE_COMPLETE");
+        cognitoAction("GetUserPoolMfaConfig", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("MfaConfiguration", equalTo("OPTIONAL"))
+            .body("SoftwareTokenMfaConfiguration", nullValue())
+            .body("SmsMfaConfiguration.SmsConfiguration.SnsCallerArn", equalTo("arn:aws:iam::000000000000:role/sms"));
+
+        cloudFormation(stack, "UpdateStack", enabledMfasTemplate("\"MfaConfiguration\": \"OFF\""));
+        describeStacks(stack, "UPDATE_COMPLETE");
+        cognitoAction("GetUserPoolMfaConfig", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("MfaConfiguration", equalTo("OFF"))
+            .body("SoftwareTokenMfaConfiguration", nullValue())
+            .body("SmsMfaConfiguration", nullValue());
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    private static String enabledMfasTemplate(String mfaProperties) {
+        return """
+            {
+              "Resources": {
+                "Pool": {
+                  "Type": "AWS::Cognito::UserPool",
+                  "Properties": {"UserPoolName": "cognito-cfn-mfa-update-pool", %s}
+                }
+              },
+              "Outputs": {"PoolId": {"Value": {"Ref": "Pool"}}}
+            }
+            """.formatted(mfaProperties);
+    }
+
     private static String deletionProtectionTemplate(String deletionProtection) {
         return """
             {

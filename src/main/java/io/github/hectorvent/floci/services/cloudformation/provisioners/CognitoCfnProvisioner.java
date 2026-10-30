@@ -233,6 +233,12 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         if (ctx.isUpdate()) {
             req.put("UserPoolId", ctx.priorPhysicalId());
             snapshot(r, cognitoService.userPoolSettings(ctx.priorPhysicalId()));
+            if (ctx.previouslyDeclared("EnabledMfas")) {
+                // SetUserPoolMfaConfig keeps a factor it is not given, so a factor the template no
+                // longer lists has to be cleared first. OFF drops them all; UpdateUserPool then
+                // restores the template's MfaConfiguration and applyEnabledMfas the listed factors.
+                cognitoService.setUserPoolMfaConfig(ctx.priorPhysicalId(), "OFF", null, null, null, null);
+            }
             pool = cognitoService.updateUserPool(req, ctx.region());
         } else {
             pool = cognitoService.createUserPool(req, ctx.region());
