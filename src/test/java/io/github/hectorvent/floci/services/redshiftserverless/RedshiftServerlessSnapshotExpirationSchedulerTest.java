@@ -1,9 +1,15 @@
 package io.github.hectorvent.floci.services.redshiftserverless;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.quarkus.runtime.ShutdownEvent;
+import jakarta.annotation.Priority;
+import jakarta.interceptor.Interceptor;
 import org.junit.jupiter.api.Test;
 
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Method;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -41,6 +47,17 @@ class RedshiftServerlessSnapshotExpirationSchedulerTest {
         assertTrue(scheduler(true, true).active());
         assertFalse(scheduler(true, false).active());
         assertFalse(scheduler(false, true).active());
+    }
+
+    @Test
+    void shutdownObserverRunsBeforeStorageIsFlushedAndClosed() throws Exception {
+        Method onStop = RedshiftServerlessSnapshotExpirationScheduler.class
+                .getDeclaredMethod("onStop", ShutdownEvent.class);
+        Annotation priority = Arrays.stream(onStop.getParameterAnnotations()[0])
+                .filter(Priority.class::isInstance)
+                .findFirst()
+                .orElseThrow();
+        assertTrue(((Priority) priority).value() < Interceptor.Priority.APPLICATION);
     }
 
     @Test

@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
@@ -48,7 +49,8 @@ public class RedshiftServerlessSnapshotExpirationScheduler implements Resettable
         }
     }
 
-    void onStop(@Observes ShutdownEvent ignored) {
+    // Priority below APPLICATION (2000) so the worker drains before EmulatorLifecycle.onStop flushes storage.
+    void onStop(@Observes @Priority(1000) ShutdownEvent ignored) {
         if (executor != null) {
             executor.shutdownNow();
             try {
