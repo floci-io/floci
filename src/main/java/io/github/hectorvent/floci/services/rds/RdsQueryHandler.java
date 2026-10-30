@@ -1484,7 +1484,9 @@ public class RdsQueryHandler {
             DbCluster cluster = service.modifyDbCluster(id, newPassword, iamEnabled,
                     serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
                     manageMasterUserPassword, masterUserSecretKmsKeyId,
-                    params.getFirst("DBClusterParameterGroupName"), region);
+                    params.getFirst("DBClusterParameterGroupName"),
+                    Boolean.TRUE.equals(parseOptionalBoolean(params, "RotateMasterUserPassword")),
+                    Boolean.TRUE.equals(parseOptionalBoolean(params, "ApplyImmediately")), region);
             if (enableHttpEndpoint != null) {
                 cluster = service.setHttpEndpoint(region, id, enableHttpEndpoint);
             }
