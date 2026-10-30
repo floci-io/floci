@@ -49,7 +49,8 @@ const LAMBDA_TRUST = JSON.stringify({
   Version: '2012-10-17',
   Statement: [{ Effect: 'Allow', Principal: { Service: 'lambda.amazonaws.com' }, Action: 'sts:AssumeRole' }],
 });
-const WAIT = { maxWaitTime: 120 };
+// Stays under the 60 s test timeout so the waiter fails first with its own error.
+const WAIT = { maxWaitTime: 50 };
 
 function invokePolicy(principal: unknown, functionArn: string): string {
   return JSON.stringify({
@@ -211,6 +212,11 @@ describe('Lambda Web Functions', () => {
     await waitUntilWebFunctionEndpointUpdated({ client: web, ...WAIT }, { functionName: FUNCTION_NAME, endpointName: 'dev' });
     const endpoint = await web.send(new GetWebFunctionEndpointCommand({ functionName: FUNCTION_NAME, endpointName: 'dev' }));
     expect(endpoint.updateStatus).toBe('Successful');
+    expect(endpoint.revisionWeights).toHaveLength(2);
+    expect(endpoint.revisionWeights).toEqual(expect.arrayContaining([
+      expect.objectContaining({ revisionId: firstRevision, weight: 90 }),
+      expect.objectContaining({ revisionId: secondRevision, weight: 10 }),
+    ]));
 
     await expect(web.send(new DeleteWebFunctionRevisionCommand({ functionName: FUNCTION_NAME, revisionId: firstRevision })))
       .rejects.toMatchObject(refusal('ConflictException', 'the endpoints [dev] are using it'));
