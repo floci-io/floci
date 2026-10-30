@@ -1,17 +1,11 @@
 package io.github.hectorvent.floci.services.redshift;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.quarkus.runtime.ShutdownEvent;
-import jakarta.annotation.Priority;
-import jakarta.interceptor.Interceptor;
+import io.github.hectorvent.floci.testutil.ShutdownOrdering;
 import org.junit.jupiter.api.Test;
 
-import java.lang.annotation.Annotation;
-import java.lang.reflect.Method;
 import java.time.Instant;
-import java.util.Arrays;
 
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
@@ -40,11 +34,6 @@ class RedshiftSnapshotSchedulerTest {
 
     @Test
     void shutdownObserverRunsBeforeStorageIsFlushedAndClosed() throws Exception {
-        Method onStop = RedshiftSnapshotScheduler.class.getDeclaredMethod("onStop", ShutdownEvent.class);
-        Annotation priority = Arrays.stream(onStop.getParameterAnnotations()[0])
-                .filter(Priority.class::isInstance)
-                .findFirst()
-                .orElseThrow();
-        assertTrue(((Priority) priority).value() < Interceptor.Priority.APPLICATION);
+        ShutdownOrdering.assertStopsBeforeStorageCloses(RedshiftSnapshotScheduler.class);
     }
 }
