@@ -484,6 +484,11 @@ public class DynamoDbPartiQLParser {
                     throw validationEx("The IN operator is provided with too many operands; number of operands: "
                             + in.values().size());
                 });
+        if (stmt instanceof Stmt.Delete delete
+                && delete.returning() != Returning.NONE && delete.returning() != Returning.ALL_OLD) {
+            throw validationEx("Invalid returning clause: " + delete.returning().clause()
+                    + ". Only RETURNING ALL OLD * is allowed in DELETE statements.");
+        }
         return stmt;
     }
 
@@ -680,10 +685,6 @@ public class DynamoDbPartiQLParser {
         consume(TType.WHERE);
         List<Cond> where = parseConditions();
         Returning returning = parseReturning();
-        if (!literalErrorPending() && returning != Returning.NONE && returning != Returning.ALL_OLD) {
-            throw validationEx("Invalid returning clause: " + returning.clause()
-                    + ". Only RETURNING ALL OLD * is allowed in DELETE statements.");
-        }
         return new Stmt.Delete(target.table(), target.index(), where, returning);
     }
 

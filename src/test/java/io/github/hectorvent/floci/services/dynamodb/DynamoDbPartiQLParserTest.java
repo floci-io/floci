@@ -533,6 +533,7 @@ class DynamoDbPartiQLParserTest {
             SELECT * FROM "t"."i"."x" WHERE b < [1]                 | A path may contain at most 2 components in the FROM clause
             DELETE FROM "" WHERE pk = 1 RETURNING ALL NEW *         | Path component cannot be an empty string
             DELETE FROM "t" WHERE pk = 1e126 RETURNING ALL NEW *    | OVERFLOW
+            DELETE FROM "t" WHERE pk = 1 RETURNING ALL NEW * x      | LEFTOVER
             INSERT INTO "t" a VALUE {'pk': 1}                       | LEFTOVER
             INSERT INTO "t" {'pk': 1e126};                          | MULTIPLE_ITEMS
             INSERT INTO "t" AS a VALUE {'pk': 1}                    | NWF Unexpected term
