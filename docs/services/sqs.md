@@ -212,6 +212,13 @@ The region is the one the request was signed for, and the host carries that regi
 
 Under either setting every form is accepted as input. That covers the AWS URL, the Floci URL, any other host whose path ends in `/<account>/<queue-name>`, and the bare queue name. A queue is stored by account and name, so a base URL with a path of its own, such as `http://localhost:4566/sqs`, keeps the same queues under either setting. Existing queues, persisted ones included, are reported in the form the current setting and base URL give.
 
+## Storage write failures
+
+When the message backend reports a failed write, the queue retains its previously acknowledged
+live contents and delivery state. Stored message snapshots are detached from live messages, so a
+compaction cannot capture delivery changes that have not been saved. The queue preserves the
+backend's acknowledgement and flush policy. Moves between queues are not atomic.
+
 ## Persisted delivery state
 
 With file-backed storage, delayed messages keep their absolute delivery deadline across
