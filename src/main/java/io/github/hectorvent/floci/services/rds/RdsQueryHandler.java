@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryLists;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
+import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
@@ -65,6 +66,9 @@ import java.util.regex.Pattern;
  */
 @ApplicationScoped
 public class RdsQueryHandler {
+
+    // Route 53 resolves aliases by DNS name; use the captured us-east-1 zone when no regional fact exists.
+    private static final String UNSOURCED_RDS_HOSTED_ZONE_ID = "Z2R2ITUGPM61AM"; // partition-literal: RDS fallback for uncaptured regions
 
     private static final Logger LOG = Logger.getLogger(RdsQueryHandler.class);
 
@@ -3007,6 +3011,9 @@ public class RdsQueryHandler {
             xml.start("Endpoint")
                .elem("Address", ep.address())
                .elem("Port", ep.port())
+               .elem("HostedZoneId", AwsRegionFacts.rdsHostedZoneId(
+                       AwsArnUtils.regionOrDefault(i.getDbInstanceArn(), config.defaultRegion()))
+                       .orElse(UNSOURCED_RDS_HOSTED_ZONE_ID))
                .end("Endpoint");
         }
         RdsService.InstanceCertificate ca = service.instanceCertificate(i);
@@ -3243,6 +3250,9 @@ public class RdsQueryHandler {
             xml.elem("Endpoint", ep.address())
                .elem("Port", ep.port());
         }
+        xml.elem("HostedZoneId", AwsRegionFacts.rdsHostedZoneId(
+                AwsArnUtils.regionOrDefault(c.getDbClusterArn(), config.defaultRegion()))
+                .orElse(UNSOURCED_RDS_HOSTED_ZONE_ID));
         if (readerEp != null) {
             xml.elem("ReaderEndpoint", readerEp.address());
         }

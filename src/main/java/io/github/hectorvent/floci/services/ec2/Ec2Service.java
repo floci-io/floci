@@ -6039,16 +6039,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return false;
         }
         return switch (optionKey) {
-            case "domain-name-servers" -> values.size() <= 4 &&
-                    (values.equals(List.of("AmazonProvidedDNS")) || values.stream().allMatch(this::isLiteralIp));
+            case "domain-name-servers" -> values.stream()
+                    .allMatch(value -> "AmazonProvidedDNS".equals(value) || isLiteralIp(value))
+                    && withinDhcpAddressLimits(values);
             case "ntp-servers" -> values.size() <= 8 && values.stream().allMatch(this::isLiteralIp)
-                    && values.stream().filter(value -> !value.contains(":")).count() <= 4
-                    && values.stream().filter(value -> value.contains(":")).count() <= 4;
+                    && withinDhcpAddressLimits(values);
             case "netbios-name-servers" -> values.size() <= 4 && values.stream().allMatch(this::isLiteralIp);
             case "netbios-node-type" -> values.size() == 1 && Set.of("1", "2", "4", "8").contains(values.getFirst());
             case "ipv6-address-preferred-lease-time" -> values.size() == 1 && validIpv6LeaseTime(values.getFirst());
             default -> true;
         };
+    }
+
+    private static boolean withinDhcpAddressLimits(List<String> values) {
+        return values.stream().filter(value -> !value.contains(":")).count() <= 4
+                && values.stream().filter(value -> value.contains(":")).count() <= 4;
     }
 
     private boolean isLiteralIp(String value) {

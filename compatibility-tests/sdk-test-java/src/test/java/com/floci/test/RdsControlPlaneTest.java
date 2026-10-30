@@ -146,6 +146,7 @@ class RdsControlPlaneTest {
                         .minCapacity(0.0)
                         .maxCapacity(16.0)));
 
+        assertThat(created.dbCluster().hostedZoneId()).isEqualTo("Z2R2ITUGPM61AM");
         assertThat(created.dbCluster().engine()).isEqualTo("aurora-postgresql");
         assertThat(created.dbCluster().serverlessV2ScalingConfiguration().minCapacity())
                 .isEqualTo(0.0);
@@ -167,6 +168,7 @@ class RdsControlPlaneTest {
 
         DBCluster described = rds.describeDBClusters(b -> b
                 .dbClusterIdentifier(serverlessClusterName)).dbClusters().get(0);
+        assertThat(described.hostedZoneId()).isEqualTo("Z2R2ITUGPM61AM");
         assertThat(described.serverlessV2ScalingConfiguration().minCapacity()).isEqualTo(0.0);
         assertThat(described.serverlessV2ScalingConfiguration().maxCapacity()).isEqualTo(16.0);
         assertThat(described.serverlessV2ScalingConfiguration().secondsUntilAutoPause())

@@ -496,10 +496,6 @@ public class S3Service implements Resettable, ResourceProvider {
         if (!OBJECT_OWNERSHIP_VALUES.contains(ownership)) {
             throw new AwsException("InvalidArgument", "Invalid x-amz-object-ownership value: " + ownership, 400);
         }
-        if (!isBlank(cannedAcl) && (!isBlank(grantRead) || !isBlank(grantWrite)
-                || !isBlank(grantFullControl) || !isBlank(grantReadAcp) || !isBlank(grantWriteAcp))) {
-            throw new AwsException("InvalidRequest", "Specifying both Canned ACLs and Header Grants is not allowed", 400);
-        }
         String requestedAcl = resolveObjectAclXml(cannedAcl, grantRead, grantWrite,
                 grantFullControl, grantReadAcp, grantWriteAcp);
         if ("BucketOwnerEnforced".equals(ownership)
@@ -6582,10 +6578,10 @@ public class S3Service implements Resettable, ResourceProvider {
     /**
      * Resolves the ACL to store for an object/bucket from a canned ACL and/or the explicit
      * ACL grant headers (x-amz-grant-read, x-amz-grant-write, x-amz-grant-full-control,
-     * x-amz-grant-read-acp, x-amz-grant-write-acp). If both are somehow present, the canned ACL
-     * takes precedence - real S3 instead rejects that combination with 400 "Conflicting header
-     * values", but Floci doesn't model that validation yet. Returns null if neither is set, so
-     * callers can fall back to a pre-existing ACL (e.g. an explicit AccessControlPolicy XML body).
+     * x-amz-grant-read-acp, x-amz-grant-write-acp). A canned ACL together with any grant header is
+     * refused with 400 InvalidRequest, as S3 does; blank values count as absent. Returns null if
+     * neither is set, so callers can fall back to a pre-existing ACL (e.g. an explicit
+     * AccessControlPolicy XML body).
      */
     String resolveObjectAclXml(String cannedAcl, String grantRead, String grantWrite,
                                 String grantFullControl, String grantReadAcp, String grantWriteAcp) {
@@ -6597,11 +6593,15 @@ public class S3Service implements Resettable, ResourceProvider {
                                        String grantRead, String grantWrite,
                                        String grantFullControl, String grantReadAcp,
                                        String grantWriteAcp) {
-        if (cannedAcl != null && !cannedAcl.isBlank()) {
+        boolean hasGrants = !isBlank(grantRead) || !isBlank(grantWrite) || !isBlank(grantFullControl)
+                || !isBlank(grantReadAcp) || !isBlank(grantWriteAcp);
+        if (!isBlank(cannedAcl) && hasGrants) {
+            throw new AwsException("InvalidRequest", "Specifying both Canned ACLs and Header Grants is not allowed", 400);
+        }
+        if (!isBlank(cannedAcl)) {
             return cannedObjectAclXml(ownerAccount, cannedAcl);
         }
-        if (isBlank(grantRead) && isBlank(grantWrite) && isBlank(grantFullControl)
-                && isBlank(grantReadAcp) && isBlank(grantWriteAcp)) {
+        if (!hasGrants) {
             return null;
         }
         List<String> grants = new ArrayList<>();
@@ -6890,12 +6890,15 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         String region = bucket.getRegion();
-        String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region, bucket.isVersioningEnabled(),
-                sequencer);
+        String eventTime = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
+        String requestId = UUID.randomUUID().toString();
+        ObjectNode event = buildS3Event(bucketName, key, eventName, obj, region,
+                bucket.isVersioningEnabled(), sequencer, eventTime, requestId);
 
         for (QueueNotification qn : config.getQueueConfigurations()) {
             if (qn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && qn.matchesKey(key)) {
                 try {
+                    String eventJson = notificationEventJson(event, qn.id());
                     sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), eventJson, 0,
                             extractRegionFromArn(qn.queueArn()));
                     LOG.debugv("Fired S3 event {0} to SQS {1}", eventName, qn.queueArn());
@@ -6908,6 +6911,7 @@ public class S3Service implements Resettable, ResourceProvider {
         for (TopicNotification tn : config.getTopicConfigurations()) {
             if (tn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && tn.matchesKey(key)) {
                 try {
+                    String eventJson = notificationEventJson(event, tn.id());
                     snsService.publish(tn.topicArn(), null, eventJson, "Amazon S3 Notification",
                             extractRegionFromArn(tn.topicArn()));
                     LOG.debugv("Fired S3 event {0} to SNS {1}", eventName, tn.topicArn());
@@ -6927,6 +6931,7 @@ public class S3Service implements Resettable, ResourceProvider {
                             throw new AwsException("InvalidParameterValueException",
                                     "Invalid Lambda function ARN: " + ln.functionArn(), 400);
                         }
+                        String eventJson = notificationEventJson(event, ln.id());
                         invokeLambda(lambdaRegion, ln.functionArn(), eventJson.getBytes(StandardCharsets.UTF_8));
                         LOG.debugv("Fired S3 event {0} to Lambda {1}", eventName, ln.functionArn());
                     } catch (Exception e) {
@@ -7058,16 +7063,17 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    private String buildS3EventJson(String bucketName, String key, String eventName,
-                                    S3Object obj, String region, boolean isVersionEnabled, String sequencer) {
+    private ObjectNode buildS3Event(String bucketName, String key, String eventName,
+                                    S3Object obj, String region, boolean isVersionEnabled, String sequencer,
+                                    String eventTime, String requestId) {
         try {
-            String eventTime = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
             long size = obj != null ? obj.getSize() : 0;
             String eTag = obj != null && obj.getETag() != null ? obj.getETag().replace("\"", "") : "";
-            String requestId = UUID.randomUUID().toString();
-
             ObjectNode bucketNode = objectMapper.createObjectNode();
             bucketNode.put("name", bucketName);
+            String bucketOwner = resolveBucketEntry(bucketName)
+                    .map(AccountAwareStorageBackend.OwnedEntry::account).orElseGet(this::ownerId);
+            bucketNode.putObject("ownerIdentity").put("principalId", bucketOwner);
             bucketNode.put("arn", AwsArnUtils.Arn.global(bucketPartition(bucketName), "s3", "", bucketName).toString());
 
             ObjectNode objectNode = objectMapper.createObjectNode();
@@ -7096,15 +7102,29 @@ public class S3Service implements Resettable, ResourceProvider {
             record.putObject("userIdentity").put("principalId", lifecycle ? ServicePrincipals.of("s3") : "AWS:EMULATOR");
             record.putObject("requestParameters")
                     .put("sourceIPAddress", lifecycle ? ServicePrincipals.of("s3") : "127.0.0.1");
-            record.putObject("responseElements").put("x-amz-request-id", requestId);
+            record.putObject("responseElements")
+                    .put("x-amz-request-id", requestId)
+                    .put("x-amz-id-2", requestId);
             record.set("s3", s3Node);
 
             ObjectNode root = objectMapper.createObjectNode();
             root.putArray("Records").add(record);
-            return objectMapper.writeValueAsString(root);
+            return root;
         } catch (Exception e) {
-            return "{\"Records\":[]}";
+            LOG.warnv("Failed to build S3 event for {0}: {1}", bucketName, e.getMessage());
+            ObjectNode empty = objectMapper.createObjectNode();
+            empty.putArray("Records");
+            return empty;
         }
+    }
+
+    private String notificationEventJson(ObjectNode event, String configurationId) throws JsonProcessingException {
+        ObjectNode copy = event.deepCopy();
+        if (copy.path("Records").path(0).path("s3") instanceof ObjectNode s3) {
+            s3.put("configurationId",
+                    configurationId == null || configurationId.isBlank() ? "emulator" : configurationId);
+        }
+        return objectMapper.writeValueAsString(copy);
     }
 
     /**

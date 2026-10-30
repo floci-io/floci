@@ -44,6 +44,8 @@ existing failure path. The PostgreSQL restore SQL readiness retry policy is unch
 
 RDS Data API (`rds-data`) is documented separately because it uses REST JSON routes instead of the RDS Query protocol. See [RDS Data API](rds-data.md).
 
+RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all regions until regional values are captured. Floci Route 53 resolves aliases by DNS name and does not check this ID. The us-east-1 value is shown in the [AWS CLI RDS example](https://docs.aws.amazon.com/cli/v1/reference/rds/describe-db-instances.html).
+
 ## Supported Management Actions
 
 <!-- floci:actions:start -->

@@ -17,6 +17,11 @@ final class DynamoDbNumberUtils {
 
     private static final BigDecimal MAX_ABS = new BigDecimal("1E+126");
     private static final BigDecimal MIN_ABS_NONZERO = new BigDecimal("1E-130");
+    static final String NUMBER_OVERFLOW =
+            "Number overflow. Attempting to store a number with magnitude larger than supported range";
+    static final String NUMBER_UNDERFLOW =
+            "Number underflow. Attempting to store a number with magnitude smaller than supported range";
+    static final String TOO_MANY_DIGITS = "Attempting to store more than 38 significant digits in a Number";
 
     private DynamoDbNumberUtils() {}
 
@@ -104,16 +109,16 @@ final class DynamoDbNumberUtils {
         BigDecimal stripped = bd.stripTrailingZeros();
         if (stripped.precision() > 38) {
             throw new AwsException("ValidationException",
-                    prefix + "Attempting to store more than 38 significant digits in a Number", 400);
+                    prefix + TOO_MANY_DIGITS, 400);
         }
         BigDecimal abs = stripped.abs();
         if (abs.compareTo(MAX_ABS) >= 0) {
             throw new AwsException("ValidationException",
-                    prefix + "Number overflow. Attempting to store a number with magnitude larger than supported range", 400);
+                    prefix + NUMBER_OVERFLOW, 400);
         }
         if (abs.signum() > 0 && abs.compareTo(MIN_ABS_NONZERO) < 0) {
             throw new AwsException("ValidationException",
-                    prefix + "Number underflow. Attempting to store a number with magnitude smaller than supported range", 400);
+                    prefix + NUMBER_UNDERFLOW, 400);
         }
     }
 
@@ -124,8 +129,7 @@ final class DynamoDbNumberUtils {
         BigDecimal abs = stripped.abs();
         if (stripped.precision() > 38 || abs.compareTo(MAX_ABS) >= 0
                 || (abs.signum() > 0 && abs.compareTo(MIN_ABS_NONZERO) < 0)) {
-            throw new AwsException("ValidationException",
-                    "Number overflow. Attempting to store a number with magnitude larger than supported range", 400);
+            throw new AwsException("ValidationException", NUMBER_OVERFLOW, 400);
         }
     }
 
