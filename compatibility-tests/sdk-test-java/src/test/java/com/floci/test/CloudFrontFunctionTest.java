@@ -9,8 +9,7 @@ import software.amazon.awssdk.services.cloudfront.model.GetFunctionResponse;
 
 import java.nio.charset.StandardCharsets;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 
 class CloudFrontFunctionTest {
 
@@ -37,9 +36,9 @@ class CloudFrontFunctionTest {
             GetFunctionResponse function = cloudFront.getFunction(request -> request
                     .name(name)
                     .stage(FunctionStage.DEVELOPMENT));
-            assertArrayEquals(code, function.functionCode().asByteArray());
-            assertEquals(createEtag, function.eTag());
-            assertEquals("application/octet-stream", function.contentType());
+            assertThat(function.functionCode().asByteArray()).isEqualTo(code);
+            assertThat(function.eTag()).isEqualTo(createEtag);
+            assertThat(function.contentType()).isEqualTo("application/octet-stream");
 
             cloudFront.updateFunction(request -> request
                     .name(name)
@@ -53,8 +52,8 @@ class CloudFrontFunctionTest {
                     .name(name)
                     .stage(FunctionStage.DEVELOPMENT));
             updatedEtag = afterUpdate.eTag();
-            assertArrayEquals(updatedCode, afterUpdate.functionCode().asByteArray());
-            assertEquals("application/octet-stream", afterUpdate.contentType());
+            assertThat(afterUpdate.functionCode().asByteArray()).isEqualTo(updatedCode);
+            assertThat(afterUpdate.contentType()).isEqualTo("application/octet-stream");
         } finally {
             try (CloudFrontClient cloudFront = TestFixtures.cloudFrontClient()) {
                 String currentEtag = updatedEtag != null ? updatedEtag : etag;

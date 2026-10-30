@@ -310,6 +310,7 @@ class CloudFrontManagementProtocolTest {
         given().header("If-Match", updatedEtag)
                 .when().delete(API + "function/" + name)
                 .then().statusCode(204);
+    }
 
     @Test
     void getFunctionReturnsTheDecodedFunctionCodeAfterAnUpdate() {
