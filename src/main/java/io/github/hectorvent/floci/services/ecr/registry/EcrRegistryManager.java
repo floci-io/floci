@@ -68,13 +68,18 @@ public class EcrRegistryManager {
     private static final Pattern AWS_ECR_URI = Pattern.compile(
             "^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\." + AwsPartitions.dnsSuffixRegex() + "/(.+)$");
 
+    /** The host and port of a {@code repositoryUri} Floci's ECR hands out. */
+    private static final String FLOCI_REGISTRY_HOST = "localhost(?:\\.floci\\.io)?:[0-9]+";
+
     /**
-     * The Region of an image in an ECR repository: in {@code <account>.dkr.ecr.<region>.<host>/<repo>}, AWS's
-     * form and Floci's {@code repositoryUri} in the default URI style, or in
-     * {@code localhost:<port>/<account>/<region>/<repo>}, Floci's in the path style.
+     * The Region of an image in an ECR repository: in {@code <account>.dkr.ecr.<region>.<dnsSuffix>/<repo>}, AWS's
+     * form in any partition, or in {@code <account>.dkr.ecr.<region>.localhost:<port>/<repo>}, Floci's
+     * {@code repositoryUri} in the default URI style, or in {@code localhost:<port>/<account>/<region>/<repo>},
+     * Floci's in the path style.
      */
-    private static final Pattern ECR_IMAGE_REGION = Pattern.compile("^(?:[0-9]{12}\\.dkr\\.ecr\\.([a-z0-9-]+)\\.[^/]+"
-            + "|localhost(?:\\.floci\\.io)?:[0-9]+/[0-9]{12}/([a-z0-9-]+))/.+$");
+    private static final Pattern ECR_IMAGE_REGION = Pattern.compile("^(?:[0-9]{12}\\.dkr\\.ecr\\.([a-z0-9-]+)\\.(?:"
+            + AwsPartitions.dnsSuffixRegex() + "|" + FLOCI_REGISTRY_HOST + ")"
+            + "|" + FLOCI_REGISTRY_HOST + "/[0-9]{12}/([a-z0-9-]+))/.+$");
 
     /**
      * The container name actually in use. Differs from {@link #registryContainerName()} only when

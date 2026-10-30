@@ -197,6 +197,22 @@ class EmrServerlessSparkRunnerTest {
                         && file.endsWith("\nspark.executor.cores 4")));
         verify(spec, never()).withEntrypoint(List.of("/usr/lib/spark/bin/spark-submit"));
         verify(spec).withJavaTrustStore();
+        // The job's own variables, a cluster's spark-env exports, beside Floci's (none from this test's mock).
+        verify(spec).withEnv(List.of("PYSPARK_PYTHON=/usr/bin/python3.11"));
+    }
+
+    @Test
+    void aJobsVariablesFollowFlocisAndReplaceOneOfTheSameName() {
+        Map<String, String> jobs = new LinkedHashMap<>();
+        jobs.put("AWS_REGION", "us-east-1");
+        jobs.put("SPARK_DAEMON_JAVA_OPTS", "-Dkey=value -Xmx1g");
+
+        assertEquals(List.of("AWS_REGION=us-east-1", "AWS_ENDPOINT_URL=http://floci:4566",
+                        "SPARK_DAEMON_JAVA_OPTS=-Dkey=value -Xmx1g"),
+                EmrServerlessSparkRunner.environment(
+                        List.of("AWS_REGION=eu-west-1", "AWS_ENDPOINT_URL=http://floci:4566"), jobs));
+        assertEquals(List.of("AWS_REGION=eu-west-1"),
+                EmrServerlessSparkRunner.environment(List.of("AWS_REGION=eu-west-1"), Map.of()));
     }
 
     @Test
@@ -610,18 +626,18 @@ class EmrServerlessSparkRunnerTest {
                                           SparkJobRunner.CloudWatchLogs cloudWatchLogs) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 imageTemplate, null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults,
-                application, null, timeout, logFolder, cloudWatchLogs);
+                application, null, timeout, logFolder, cloudWatchLogs, Map.of());
     }
 
     private static SparkJobRunner.Job customImageJob(String customImage) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 null, customImage, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
-                List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null);
+                List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of());
     }
 
     private static SparkJobRunner.Job commandJob(List<String> command, Map<String, String> sparkDefaults) {
         return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults, List.of(), command,
-                Duration.ZERO, null, null);
+                Duration.ZERO, null, null, Map.of("PYSPARK_PYTHON", "/usr/bin/python3.11"));
     }
 }

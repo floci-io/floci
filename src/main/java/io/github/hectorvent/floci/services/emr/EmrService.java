@@ -1321,7 +1321,8 @@ public class EmrService implements Resettable {
                     dockerNetwork, executionRole(cluster, step, accountId),
                     EmrSparkSteps.sparkDefaults(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                     application != null ? application : List.of(), command, Duration.ZERO,
-                    EmrSparkSteps.logFolder(cluster, step), null);
+                    EmrSparkSteps.logFolder(cluster, step), null,
+                    EmrSparkSteps.sparkEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER));
             StepLaunch launch = new StepLaunch(accountId, region, cluster.getId(), step.getId(), generation);
             executing.add(stepKey(accountId, step.getId()));
             stepExecutor.execute(() -> runStep(job, launch));

@@ -145,7 +145,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             String endpoint = awsEnv.flociEndpoint();
             ContainerBuilder.Builder container = containerBuilder.newContainer(launchImage(job))
                     .withName(ContainerStorageHelper.dockerName(config, job.service() + "-" + job.runId()))
-                    .withEnv(awsEnv.sdkBaselineEnv(job.region(), Optional.empty(), credentials, job.accountId()));
+                    .withEnv(environment(
+                            awsEnv.sdkBaselineEnv(job.region(), Optional.empty(), credentials, job.accountId()),
+                            job.environment()));
             if (job.command() == null) {
                 container.withEntrypoint(List.of(SPARK_SUBMIT)).withCmd(sparkSubmitArguments(job, endpoint));
             } else {
@@ -306,6 +308,17 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         String template = imageTemplate != null ? imageTemplate
                 : releaseLabel.startsWith("emr-spark-") ? SPARK_RUNTIME_DEFAULT_IMAGE : DEFAULT_IMAGE;
         return template.formatted(releaseLabel);
+    }
+
+    /** A driver's environment: Floci's own variables, then the job's, one of which replaces Floci's of its name. */
+    static List<String> environment(List<String> flocis, Map<String, String> jobs) {
+        Map<String, String> byName = new LinkedHashMap<>();
+        for (String variable : flocis) {
+            int equals = variable.indexOf('=');
+            byName.put(equals < 0 ? variable : variable.substring(0, equals), variable);
+        }
+        jobs.forEach((name, value) -> byName.put(name, name + "=" + value));
+        return new ArrayList<>(byName.values());
     }
 
     /**

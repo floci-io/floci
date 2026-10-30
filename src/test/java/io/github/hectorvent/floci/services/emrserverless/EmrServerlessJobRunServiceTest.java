@@ -263,6 +263,7 @@ class EmrServerlessJobRunServiceTest {
         assertEquals(Duration.ZERO, runner.jobs.get(1).timeout());
         assertNull(job.logFolder());
         assertNull(job.cloudWatchLogs());
+        assertEquals(Map.of(), job.environment());
     }
 
     @Test
