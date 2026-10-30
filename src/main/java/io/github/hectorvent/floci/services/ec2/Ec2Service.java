@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -12696,6 +12697,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                 filter.getValue())))
                 .sorted(Comparator.comparing(InstanceConnectEndpoint::getInstanceConnectEndpointId))
                 .collect(Collectors.toList());
+    }
+
+    /**
+     * One page of {@link #describeInstanceConnectEndpoints}, in endpoint ID order. {@code maxResults}
+     * of null or below 1 returns every match; it is not range-checked against the model's 1-50.
+     */
+    public PaginatedResult<InstanceConnectEndpoint> describeInstanceConnectEndpoints(
+            String region, List<String> ids, List<Map.Entry<String, List<String>>> filters,
+            Integer maxResults, String nextToken) {
+        return Pagination.paginate(describeInstanceConnectEndpoints(region, ids, filters),
+                InstanceConnectEndpoint::getInstanceConnectEndpointId,
+                maxResults == null || maxResults < 1 ? Integer.MAX_VALUE : maxResults, nextToken, "eice",
+                token -> new AwsException("InvalidParameterValue", "Invalid NextToken", 400));
     }
 
     /** Deletes the endpoint and answers with it in {@code delete-in-progress}, as AWS does. */

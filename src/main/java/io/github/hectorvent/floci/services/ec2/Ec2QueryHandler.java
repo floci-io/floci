@@ -4544,18 +4544,24 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeInstanceConnectEndpoints(MultivaluedMap<String, String> p, String region) {
-        List<InstanceConnectEndpoint> endpoints = service.describeInstanceConnectEndpoints(region,
-                getList(p, "InstanceConnectEndpointId"), getFiltersList(p));
-        // After the describe, so an unknown ID or filter fails on its own error first.
+        int maxResults = parseIntParam(p, "MaxResults", 0);
+        PaginatedResult<InstanceConnectEndpoint> page = service.describeInstanceConnectEndpoints(region,
+                getList(p, "InstanceConnectEndpointId"), getFiltersList(p), maxResults == 0 ? null : maxResults,
+                p.getFirst("NextToken"));
+        // After the describe, so an unknown ID, filter or NextToken fails on its own error first.
         checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeInstanceConnectEndpointsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("instanceConnectEndpointSet");
-        for (InstanceConnectEndpoint endpoint : endpoints) {
+        for (InstanceConnectEndpoint endpoint : page.items()) {
             xml.start("item").raw(instanceConnectEndpointXml(endpoint)).end("item");
         }
-        xml.end("instanceConnectEndpointSet").end("DescribeInstanceConnectEndpointsResponse");
+        xml.end("instanceConnectEndpointSet");
+        if (page.nextToken() != null) {
+            xml.elem("nextToken", page.nextToken());
+        }
+        xml.end("DescribeInstanceConnectEndpointsResponse");
         return xmlResponse(xml.build());
     }
 

@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -11,6 +13,8 @@ import static io.github.hectorvent.floci.testing.Ec2Requests.ec2;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesPattern;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * CreateInstanceConnectEndpoint, DescribeInstanceConnectEndpoints and DeleteInstanceConnectEndpoint
@@ -119,6 +123,47 @@ class Ec2InstanceConnectEndpointIntegrationTest {
 
         ec2("DeleteInstanceConnectEndpoint", "test", "us-east-1").formParam("InstanceConnectEndpointId", id)
                 .post("/").then().statusCode(200);
+        deleteAll(List.of(), subnetId, vpcId);
+    }
+
+    @Test
+    void describePagesWithMaxResultsAndNextToken() {
+        String vpcId = createVpc("10.83.0.0/16");
+        String subnetId = createSubnet(vpcId, "10.83.1.0/24");
+        List<String> created = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            created.add(ec2("CreateInstanceConnectEndpoint", "test", "us-east-1").formParam("SubnetId", subnetId)
+                    .post("/").then().statusCode(200).extract().path(CREATED + ".instanceConnectEndpointId"));
+        }
+
+        List<String> seen = new ArrayList<>();
+        String token = null;
+        int pages = 0;
+        do {
+            RequestSpecification request = ec2("DescribeInstanceConnectEndpoints", "test", "us-east-1")
+                    .formParam("Filter.1.Name", "subnet-id").formParam("Filter.1.Value.1", subnetId)
+                    .formParam("MaxResults", "2");
+            if (token != null) {
+                request.formParam("NextToken", token);
+            }
+            XmlPath page = request.post("/").then().statusCode(200).extract().xmlPath();
+            List<String> ids = page.getList(ITEM + ".instanceConnectEndpointId", String.class);
+            assertTrue(ids.size() <= 2, ids.toString());
+            seen.addAll(ids);
+            token = page.getString("DescribeInstanceConnectEndpointsResponse.nextToken");
+            token = token == null || token.isEmpty() ? null : token;
+            pages++;
+        } while (token != null && pages < 5);
+        assertEquals(2, pages);
+        assertEquals(created.stream().sorted().toList(), seen);
+
+        assertError(ec2("DescribeInstanceConnectEndpoints", "test", "us-east-1").formParam("NextToken", "bogus"),
+                400, "InvalidParameterValue");
+
+        for (String id : created) {
+            ec2("DeleteInstanceConnectEndpoint", "test", "us-east-1").formParam("InstanceConnectEndpointId", id)
+                    .post("/").then().statusCode(200);
+        }
         deleteAll(List.of(), subnetId, vpcId);
     }
 
