@@ -22,6 +22,9 @@
 | `AddTagsToResource` | Tag a parameter |
 | `ListTagsForResource` | List tags on a parameter |
 | `RemoveTagsFromResource` | Remove tags from a parameter |
+| `PutResourcePolicy` | Attach or update the resource policy of an Advanced-tier parameter |
+| `GetResourcePolicies` | List the resource policy attached to a parameter |
+| `DeleteResourcePolicy` | Remove a parameter's resource policy |
 | `DescribePatchBaselines` | List AWS-owned predefined patch baselines (filter by `OWNER`, `OPERATING_SYSTEM`, `NAME_PREFIX`) |
 | `GetDefaultPatchBaseline` | Get the default patch baseline id for an operating system |
 
@@ -197,6 +200,21 @@ ARNs naming another account, region or partition never resolve to a same-name lo
 parameter. Cross-account shared parameters are not modeled. Secrets Manager
 references continue to use `/aws/reference/secretsmanager/<secret-id>`, not a
 parameter ARN.
+
+## Parameter Resource Policies
+
+`PutResourcePolicy`, `GetResourcePolicies` and `DeleteResourcePolicy` take the parameter ARN as
+`ResourceArn`. Only an Advanced-tier parameter can have a policy, and it has at most one; a
+`SecureString` encrypted with the default `aws/ssm` key cannot have one.
+`PutResourcePolicy` returns the policy's `PolicyId` and `PolicyHash`; updating or deleting the
+policy takes both, and a hash that is no longer current fails with
+`ResourcePolicyConflictException`. A policy over 1024 bytes fails with
+`ResourcePolicyLimitExceededException`, and a document that is not a JSON object with
+`MalformedResourcePolicyDocumentException`. An overwriting `PutParameter` keeps the policy, and
+is refused with `ResourcePolicyInvalidParameterException` when it would leave the policy on a
+parameter that could not take one; deleting the parameter removes it. With IAM enforcement on, the three actions are checked against
+the parameter `ResourceArn` names. Floci stores the policy but does not evaluate it against callers
+or create the AWS RAM resource share AWS makes for a shared parameter.
 
 ## Parameter Types
 
