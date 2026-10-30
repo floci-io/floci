@@ -60,6 +60,8 @@ public class StsQueryHandler {
     private static final int MAX_ROOT_SESSION_SECONDS = 900;
     /** "If not specified, the default duration is 300 seconds (5 minutes)." */
     private static final int DEFAULT_TOKEN_SECONDS = 300;
+    /** The session token this emulator has always minted, and the floor a request cannot go under. */
+    private static final int SESSION_TOKEN_LENGTH = 200;
     private static final String STS_AUDIENCE = "sts.amazonaws.com"; // partition-literal: web-identity audience; no source outside the commercial partition (P9)
 
     private final IamService iamService;
@@ -164,7 +166,7 @@ public class StsQueryHandler {
 
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
-        String sessionToken = randomSecret(200);
+        String sessionToken = sessionToken(params);
         Instant expiration = clock.instant().plusSeconds(durationSeconds);
 
         String roleName = roleArn != null && roleArn.contains("/")
@@ -343,7 +345,7 @@ public class StsQueryHandler {
         int durationSeconds = longTermTokenDuration(params);
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
-        String sessionToken = randomSecret(200);
+        String sessionToken = sessionToken(params);
         Instant expiration = clock.instant().plusSeconds(durationSeconds);
 
         String result = credentialsXml(accessKeyId, secretKey, sessionToken, expiration);
@@ -396,7 +398,7 @@ public class StsQueryHandler {
 
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
-        String sessionToken = randomSecret(200);
+        String sessionToken = sessionToken(params);
         Instant expiration = clock.instant().plusSeconds(durationSeconds);
 
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
@@ -602,7 +604,7 @@ public class StsQueryHandler {
         Instant expiration = verified.expiration().isBefore(requestedExpiration) ? verified.expiration() : requestedExpiration;
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
-        String sessionToken = randomSecret(200);
+        String sessionToken = sessionToken(params);
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
         String assumedRoleArn = assumedRoleArn(sessionRoleArn, accountId, roleName, sessionName);
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
@@ -650,7 +652,7 @@ public class StsQueryHandler {
 
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
-        String sessionToken = randomSecret(200);
+        String sessionToken = sessionToken(params);
         Instant expiration = clock.instant().plusSeconds(durationSeconds);
         String accountId = regionResolver.getAccountId();
         String federatedUserId = accountId + ":" + name;
@@ -701,7 +703,8 @@ public class StsQueryHandler {
 
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
-        String sessionToken = randomSecret(200);
+        // The operation models no size to ask for, so the token is the length this mints.
+        String sessionToken = randomSecret(SESSION_TOKEN_LENGTH);
         // The session acts in the customer's account as the identity that approved the request,
         // bounded by the rendered permission policy wherever the request carries one and by that
         // identity's own permissions either way. The account is the owner's: a request is visible
@@ -788,8 +791,7 @@ public class StsQueryHandler {
         Instant expiration = clock.instant().plusSeconds(durationSeconds);
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
-        String sessionToken = randomSecret(Math.max(200,
-                getIntParam(params, "MinimumSessionTokenSize", 0)));
+        String sessionToken = sessionToken(params);
         // The session is the member account's root user, bounded by the task policy. The origin is
         // the member account too: the privileged task is performed there, not where it was asked for.
         iamService.registerSession(accessKeyId, secretKey, sessionToken,
@@ -919,20 +921,6 @@ public class StsQueryHandler {
             }
         }
         return null;
-    }
-
-    /**
-     * One violation as this handler answers it, or null where {@code violation} is null. The
-     * wording comes from {@link SmithyValidationErrors} rather than from a sentence written here,
-     * so a member held to its shape by a check of this file's own reads the same as one the model
-     * holds.
-     */
-    private static Response violation(String violation) {
-        if (violation == null) {
-            return null;
-        }
-        return AwsQueryResponse.error("ValidationError",
-                SmithyValidationErrors.message(List.of(violation)), AwsNamespaces.STS, 400);
     }
 
     /**
@@ -1130,6 +1118,18 @@ public class StsQueryHandler {
             sb.append(upper.charAt(ThreadLocalRandom.current().nextInt(upper.length())));
         }
         return sb.toString();
+    }
+
+    /**
+     * The session token for a request: the length its {@code MinimumSessionTokenSize} asks for,
+     * never under the 200 characters this emulator mints by default. Every operation that models
+     * the member answers it from here, so the floor is written once, and the model holds the value
+     * to the 0 to 4096 it declares ahead of this. A request asking for less than the floor is
+     * answered with the floor, which is what "minimum" asks for.
+     */
+    private String sessionToken(MultivaluedMap<String, String> params) {
+        return randomSecret(Math.max(SESSION_TOKEN_LENGTH,
+                getIntParam(params, "MinimumSessionTokenSize", 0)));
     }
 
     private String randomSecret(int length) {

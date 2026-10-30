@@ -46,11 +46,25 @@ names one, `audience.1.member` and `tags.1.member.key`, under the index the requ
 What that adds is on `GetSessionToken`, whose `SerialNumber`, `TokenCode` and
 `MinimumSessionTokenSize` were accepted and ignored: each is now held to its shape, so a serial
 number under 9 characters, a token code that is not six digits or a token size past 4096 answers
-400 where it used to answer credentials. The size is still only validated: the session token stays
-the length this emulator mints whatever the request asks for, which is a gap rather than a reading.
+400 where it used to answer credentials. The size asked for is the size issued, on every operation
+that models the member rather than on `AssumeRoot` alone: each mints its token through one writer,
+which holds it to the 200 characters this emulator mints when a request asks for less, since that
+is what a minimum asks for.
 `GetAccessKeyInfo` and `GetWebIdentityToken` answer the messages they already answered, from the
 same bounds and the same patterns, and what moves there is that an access key ID breaking both its
 length and its pattern is answered for both where the check it replaces stopped at the first.
+
+A pattern is read in the dialect the model writes it in rather than in Java's, which is one
+thing on one shape. `arnType`'s pattern ends in a five-digit escape, the U+10000 to U+10FFFF range,
+where Java reads a backslash-u escape as exactly four digits and takes the rest as literals:
+compiled as written, that range became the character U+1000, a literal zero, a hyphen, U+10FF and
+two literal Fs, so the class gained a range from `0` to U+10FF. It refused every supplementary
+character the model admits and admitted the C1 controls it excludes, U+0081 among them, on every
+member the shape resolves to: `RoleArn` on the three assume-role operations, `PrincipalArn` on the
+SAML one, each entry of `PolicyArns` on those three and on `GetFederationToken`, `TaskPolicyArn` on
+`AssumeRoot` and the provided-context ARN on `AssumeRole`. Each such escape is read as the code
+point it spells now, for every vendored pattern on both protocols, and `arnType` is the only shape
+in any vendored file that carries one.
 
 The model says nothing about what counts as a number, so a `DurationSeconds` or a
 `MinimumSessionTokenSize` that is no number at all stays `InvalidParameterValue`, answered before
@@ -117,7 +131,9 @@ Four things are deviations rather than readings, since the operation models only
   region cannot tell the two apart, so there is nothing to refuse there.
 - `SessionTokenSize` is answered as the length of the token issued, and `MinimumSessionTokenSize`
   pads it to at least the size asked for, held to the 0 to 4096 the model declares, "The value must
-  not exceed 4,096 bytes", since the size asked for is the size materialized. Out of that range is
+  not exceed 4,096 bytes", since the size asked for is the size materialized. This was the first
+  operation to materialize it and is no longer the only one, the five others that model the member
+  reading it through the same writer. Out of that range is
   a `ValidationError` and a value that is no integer an `InvalidParameterValue`, the pair
   `DurationSeconds` already answers. `SessionTokenUtilization` is not answered: the model documents
   neither member, so only the one with an obvious meaning is filled.
