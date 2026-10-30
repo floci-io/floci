@@ -129,7 +129,8 @@ class CfnSchemaCoverageTest {
      * property of the type counts as read without a name appearing in the source. Explicit, one entry
      * per helper: {@code camelisedProperties} (AppSync), {@code lowerKeys} over the resolved node
      * (CodeBuild, CodePipeline), {@code jsonObjectToMap} over it (Cognito user pool), {@code
-     * toCamelCase} over it (Lambda web), {@code requestBody} (IoT domain configuration).
+     * toCamelCase} over it (Lambda web), {@code requestBody} (IoT domain configuration), {@code
+     * request} (EventBridge V2).
      */
     private static final Set<String> WHOLESALE_CALLS = Set.of(
             "camelisedProperties(props, ctx)",
@@ -137,7 +138,8 @@ class CfnSchemaCoverageTest {
             "jsonObjectToMap(ctx.engine().resolveNode(props))",
             "toCamelCase(ctx.engine().resolveNodeOmittingNoValue(props)",
             "toCamelCase(resolved,",
-            "requestBody(props, ctx)");
+            "requestBody(props, ctx)",
+            "request(props, ctx)");
     private static final String ALL_PROPERTIES = "*";
 
     /** What the registry schemas declare for one resource type, see {@link #schemaSurface}. */

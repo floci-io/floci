@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.eventbridgev2;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -47,6 +49,7 @@ class EventBridgeV2ServiceTest {
     private static final String ACCOUNT = "000000000000";
     private static final Instant NOW = Instant.parse("2026-10-28T12:00:00.123Z");
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper SNAPSHOTS = JsonMapper.builder().addModule(new JavaTimeModule()).build();
     private static final String QUEUE = "arn:aws:sqs:us-east-1:000000000000:orders";
     private static final String ROLE = "arn:aws:iam::000000000000:role/EventBusDelivery";
 
@@ -58,7 +61,7 @@ class EventBridgeV2ServiceTest {
         delivery = mock(EventBridgeV2Delivery.class);
         service = new EventBridgeV2Service(AccountAwareStorageBackend.inMemory(ACCOUNT),
                 AccountAwareStorageBackend.inMemory(ACCOUNT), new RegionResolver(REGION, ACCOUNT), delivery,
-                Clock.fixed(NOW, ZoneOffset.UTC));
+                Clock.fixed(NOW, ZoneOffset.UTC), true);
     }
 
     @Test
@@ -330,6 +333,82 @@ class EventBridgeV2ServiceTest {
         service.deleteSubscriber(subscriber.getArn(), REGION);
         service.deleteEventBus(bus, REGION);
         assertTrue(service.findEventBus(bus, REGION).isEmpty());
+    }
+
+    @Test
+    void restoreSubscriberPutsADeletedSubscriberBackUnderItsOwnArn() {
+        String bus = bus("orders");
+        SubscriberV2 created = service.createSubscriber(json(subscriberRequest("s", bus, ",\"Description\":\"d\"")),
+                REGION);
+        service.deleteSubscriber(created.getArn(), REGION);
+
+        service.restoreSubscriber(created, REGION);
+
+        SubscriberV2 restored = service.findSubscriber(created.getArn(), REGION).orElseThrow();
+        assertEquals("d", restored.getDescription());
+        assertEquals(created.getCreationTime(), restored.getCreationTime());
+        assertEquals(created.getArn(), service.restoreSubscriber(created, REGION).getArn(), "a repeat is a no-op");
+    }
+
+    @Test
+    void restoreSubscriberPutsBackSettingsAnUpdateChangedInPlace() throws Exception {
+        String bus = bus("orders");
+        SubscriberV2 created = service.createSubscriber(json(subscriberRequest("s", bus, ",\"Description\":\"old\"")),
+                REGION);
+        SubscriberV2 before = snapshot(created, SubscriberV2.class);
+        service.replaceSubscriberSettings(created.getArn(), json(subscriberRequest("s", bus,
+                ",\"Description\":\"new\"")), REGION);
+
+        service.restoreSubscriber(before, REGION);
+
+        assertEquals("old", service.findSubscriber(created.getArn(), REGION).orElseThrow().getDescription());
+    }
+
+    @Test
+    void restoreEventBusPutsBackSettingsAnUpdateChangedInPlace() throws Exception {
+        String bus = service.createEventBus(json("{\"Name\":\"orders\",\"Description\":\"old\","
+                + "\"Tags\":{\"team\":\"a\"}}"), REGION).getArn();
+        EventBusV2 before = snapshot(service.findEventBus(bus, REGION).orElseThrow(), EventBusV2.class);
+        service.replaceEventBusSettings(bus, json("{\"Name\":\"orders\",\"Description\":\"new\"}"), REGION);
+
+        service.restoreEventBus(before, REGION);
+
+        EventBusV2 restored = service.findEventBus(bus, REGION).orElseThrow();
+        assertEquals("old", restored.getDescription());
+        assertEquals(Map.of("team", "a"), restored.getTags());
+    }
+
+    @Test
+    void restoreEventBusKeepsTheSequenceNumbersPublishedSinceTheSnapshot() throws Exception {
+        String bus = bus("orders");
+        EventBusV2 before = snapshot(service.findEventBus(bus, REGION).orElseThrow(), EventBusV2.class);
+        String event = "{\"EventBusArn\":\"" + bus + "\",\"Entries\":[{\"Source\":\"a\",\"DetailType\":\"t\"}]}";
+        assertEquals("1", service.putEvents(json(event), REGION).getFirst().sequenceNumber());
+
+        service.restoreEventBus(before, REGION);
+
+        assertEquals("2", service.putEvents(json(event), REGION).getFirst().sequenceNumber());
+    }
+
+    @Test
+    void restoreEventBus_busGone_resourceNotFound() throws Exception {
+        String bus = bus("orders");
+        EventBusV2 before = snapshot(service.findEventBus(bus, REGION).orElseThrow(), EventBusV2.class);
+        service.deleteEventBus(bus, REGION);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.restoreEventBus(before, REGION));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void restoreSubscriber_nameTakenByAnotherSubscriber_resourceAlreadyExists() {
+        String bus = bus("orders");
+        SubscriberV2 deleted = service.createSubscriber(json(subscriberRequest("s", bus, "")), REGION);
+        service.deleteSubscriber(deleted.getArn(), REGION);
+        service.createSubscriber(json(subscriberRequest("s", bus, "")), REGION);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.restoreSubscriber(deleted, REGION));
+        assertEquals("ResourceAlreadyExistsException", e.getErrorCode());
     }
 
     @Test
@@ -629,6 +708,11 @@ class EventBridgeV2ServiceTest {
                 + "\"arn:aws:events:us-east-1:000000000000:event-busv2/none/abcdefghijklmnopqrstuvwxy\","
                 + "\"Entries\":[{\"Source\":\"a\",\"DetailType\":\"t\"}]}"), REGION));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    /** A copy of what the service stores, as a CloudFormation update snapshots it before changing it. */
+    private static <T> T snapshot(T resource, Class<T> type) throws Exception {
+        return SNAPSHOTS.readValue(SNAPSHOTS.writeValueAsString(resource), type);
     }
 
     private String bus(String name) {
