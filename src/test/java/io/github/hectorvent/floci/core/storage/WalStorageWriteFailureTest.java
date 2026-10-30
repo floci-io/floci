@@ -72,6 +72,36 @@ class WalStorageWriteFailureTest {
 
     @ParameterizedTest
     @EnumSource(Mutation.class)
+    void anUnwritableLogDoesNotPublishAndCanBeRetried(Mutation mutation) throws IOException {
+        WalStorage<String, String> store = store();
+        store.load();
+        Path log = directory.resolve("data.wal");
+        Path savedLog = directory.resolve("retained.wal");
+        try {
+            store.put("keep", "old");
+            Files.move(log, savedLog);
+            Files.createDirectory(log);
+            try {
+                assertThrows(UncheckedIOException.class, () -> mutate(store, mutation));
+                assertOldValue(store);
+            } finally {
+                Files.delete(log);
+                Files.move(savedLog, log);
+            }
+            mutate(store, mutation);
+            Map<String, String> replayed = WalStorage.readContents(directory.resolve("snapshot.json"), log, STRINGS);
+            if (mutation == Mutation.DELETE) {
+                assertTrue(replayed.isEmpty());
+            } else {
+                assertEquals("new", replayed.get("keep"));
+            }
+        } finally {
+            store.shutdown();
+        }
+    }
+
+    @ParameterizedTest
+    @EnumSource(Mutation.class)
     void aClosedWriterDoesNotPublishAndCanBeRetried(Mutation mutation) throws Exception {
         WalStorage<String, String> store = store();
         store.load();

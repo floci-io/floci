@@ -21,6 +21,7 @@ import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -326,7 +327,11 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
         ensureWriterOpen();
         long offset;
         try {
-            offset = Files.size(walPath);
+            BasicFileAttributes attributes = Files.readAttributes(walPath, BasicFileAttributes.class);
+            if (!attributes.isRegularFile()) {
+                throw new IOException("WAL path is not a regular file: " + walPath);
+            }
+            offset = attributes.size();
         } catch (IOException exception) {
             throw new UncheckedIOException("Failed to inspect WAL at " + walPath, exception);
         }
