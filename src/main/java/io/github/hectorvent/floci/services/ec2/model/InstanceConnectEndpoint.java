@@ -35,6 +35,29 @@ public class InstanceConnectEndpoint {
 
     public InstanceConnectEndpoint() {}
 
+    /** A copy whose lists are its own, so a caller can change it without touching the stored endpoint. */
+    public InstanceConnectEndpoint(InstanceConnectEndpoint other) {
+        instanceConnectEndpointId = other.instanceConnectEndpointId;
+        instanceConnectEndpointArn = other.instanceConnectEndpointArn;
+        ownerId = other.ownerId;
+        state = other.state;
+        dnsName = other.dnsName;
+        fipsDnsName = other.fipsDnsName;
+        networkInterfaceIds = new ArrayList<>(other.networkInterfaceIds);
+        vpcId = other.vpcId;
+        subnetId = other.subnetId;
+        availabilityZone = other.availabilityZone;
+        availabilityZoneId = other.availabilityZoneId;
+        createdAt = other.createdAt;
+        preserveClientIp = other.preserveClientIp;
+        securityGroupIds = new ArrayList<>(other.securityGroupIds);
+        ipAddressType = other.ipAddressType;
+        region = other.region;
+        privateIpAddress = other.privateIpAddress;
+        clientToken = other.clientToken;
+        tags = new ArrayList<>(other.tags);
+    }
+
     public String getInstanceConnectEndpointId() { return instanceConnectEndpointId; }
     public void setInstanceConnectEndpointId(String id) { this.instanceConnectEndpointId = id; }
 

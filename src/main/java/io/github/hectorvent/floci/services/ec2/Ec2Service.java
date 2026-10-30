@@ -12698,8 +12698,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 "The instance connect endpoint ID '" + id + "' does not exist", 400));
     }
 
-    private InstanceConnectEndpoint withTags(InstanceConnectEndpoint endpoint) {
-        endpoint.setTags(new ArrayList<>(resourceTags(endpoint.getRegion(), endpoint.getInstanceConnectEndpointId())));
+    /** A copy of the stored endpoint carrying its current tags; the stored object is never changed. */
+    private InstanceConnectEndpoint withTags(InstanceConnectEndpoint stored) {
+        InstanceConnectEndpoint endpoint = new InstanceConnectEndpoint(stored);
+        endpoint.setTags(new ArrayList<>(resourceTags(stored.getRegion(), stored.getInstanceConnectEndpointId())));
         return endpoint;
     }
 

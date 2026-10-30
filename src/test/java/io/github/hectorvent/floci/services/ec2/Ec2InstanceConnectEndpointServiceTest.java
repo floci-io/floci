@@ -123,6 +123,24 @@ class Ec2InstanceConnectEndpointServiceTest {
     }
 
     @Test
+    void changingAReturnedEndpointLeavesTheStoredOneAlone() {
+        Ec2Service service = newService();
+        String vpcId = service.createVpc(REGION, "10.76.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.76.1.0/24", "us-east-1a").getSubnetId();
+        InstanceConnectEndpoint created = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null,
+                null, List.of(new Tag("Name", "kthw")), null);
+        created.setState("bogus");
+        created.getSecurityGroupIds().clear();
+        InstanceConnectEndpoint described = service.describeInstanceConnectEndpoints(REGION, List.of(), Map.of()).get(0);
+        described.getTags().clear();
+
+        InstanceConnectEndpoint again = service.describeInstanceConnectEndpoints(REGION, List.of(), Map.of()).get(0);
+        assertEquals("create-complete", again.getState());
+        assertEquals(1, again.getSecurityGroupIds().size());
+        assertEquals(List.of("Name"), again.getTags().stream().map(Tag::getKey).toList());
+    }
+
+    @Test
     void concurrentCreatesWithOneClientTokenMakeOneEndpoint() throws Exception {
         ExecutorService pool = Executors.newFixedThreadPool(8);
         try {
