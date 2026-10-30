@@ -550,9 +550,13 @@ public final class TestFixtures {
     }
 
     public static RedshiftServerlessClient redshiftServerlessClient() {
+        return redshiftServerlessClient(REGION);
+    }
+
+    public static RedshiftServerlessClient redshiftServerlessClient(Region region) {
         return RedshiftServerlessClient.builder()
                 .endpointOverride(ENDPOINT)
-                .region(REGION)
+                .region(region)
                 .credentialsProvider(CREDENTIALS)
                 .build();
     }

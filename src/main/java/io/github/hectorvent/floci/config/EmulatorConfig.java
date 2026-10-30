@@ -1918,6 +1918,12 @@ public interface EmulatorConfig {
         int snapshotExpirationSweepIntervalSeconds();
 
         @WithDefault("true")
+        boolean snapshotCopyEnabled();
+
+        @WithDefault("60")
+        int snapshotCopySweepIntervalSeconds();
+
+        @WithDefault("true")
         boolean scheduledActionsEnabled();
 
         @WithDefault("60")

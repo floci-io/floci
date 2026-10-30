@@ -253,6 +253,8 @@ floci:
       enabled: true
       snapshot-expiration-enabled: false
       snapshot-expiration-sweep-interval-seconds: 60
+      snapshot-copy-enabled: false
+      snapshot-copy-sweep-interval-seconds: 60
       scheduled-actions-enabled: false
       scheduled-action-sweep-interval-seconds: 60
     neptune:
