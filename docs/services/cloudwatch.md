@@ -464,8 +464,8 @@ CloudWatch writes:
 `StateReasonData` lists under `triggeringAlarms` the children whose state agrees with the new one,
 the most recently changed first, each with its state and when it took it. After a child's change
 it lists only the children that changed state since the composite alarm last did. The list stops
-before the 4000 characters `StateReasonData` can hold. Floci keeps state times to the second, so
-the timestamps end in `.000`.
+before the 4000 characters `StateReasonData` can hold, counted in Unicode code points like the
+length checks. Floci keeps state times to the second, so the timestamps end in `.000`.
 
 Every alarm a rule names must exist, or `PutCompositeAlarm` fails with `ValidationError` and
 `Could not save the composite alarm as alarms [<ARN>] in the alarm rule do not exist`.

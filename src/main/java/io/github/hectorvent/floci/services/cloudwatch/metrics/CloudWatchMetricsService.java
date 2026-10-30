@@ -71,7 +71,7 @@ public class CloudWatchMetricsService {
     /** A child's transition time in a composite alarm's StateReason: "Monday 14 September, 2026 06:29:58 UTC". */
     private static final DateTimeFormatter REASON_TIME = DateTimeFormatter
             .ofPattern("EEEE dd MMMM, yyyy HH:mm:ss 'UTC'", Locale.ENGLISH).withZone(ZoneOffset.UTC);
-    /** The most an alarm's StateReasonData can hold. */
+    /** The most StateReasonData can hold, in Unicode code points as SetAlarmState's length check counts them. */
     private static final int MAX_STATE_REASON_DATA = 4000;
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .setSerializationInclusion(JsonInclude.Include.NON_NULL)
@@ -679,7 +679,8 @@ public class CloudWatchMetricsService {
             ObjectNode entry = list.addObject().put("arn", child.getAlarmArn());
             entry.putObject("state").put("value", child.getStateValue()).put("timestamp",
                     AlarmSnsNotifier.TIMESTAMP_FORMAT.format(Instant.ofEpochSecond(child.lastTransitionTimestamp())));
-            if (data.toString().length() > MAX_STATE_REASON_DATA) {
+            String serialized = data.toString();
+            if (serialized.codePointCount(0, serialized.length()) > MAX_STATE_REASON_DATA) {
                 list.remove(list.size() - 1);
                 break;
             }
@@ -784,7 +785,7 @@ public class CloudWatchMetricsService {
             throw SmithyValidationErrors.validationError(reasonViolation);
         }
         String dataViolation = stateReasonData == null ? null
-                : SmithyValidationErrors.lengthOutOfRange("stateReasonData", stateReasonData, 0, 4000);
+                : SmithyValidationErrors.lengthOutOfRange("stateReasonData", stateReasonData, 0, MAX_STATE_REASON_DATA);
         if (dataViolation != null) {
             throw SmithyValidationErrors.validationError(dataViolation);
         }

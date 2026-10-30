@@ -641,6 +641,29 @@ class CompositeAlarmServiceTest {
         assertEquals(prefix + "99 INSUFFICIENT_DATA", listed.getFirst());
     }
 
+    /**
+     * StateReasonData's 4000 is counted in Unicode code points, as its length check counts it. An emoji is one
+     * code point but two UTF-16 units, so each emoji child here adds 347 code points to the list, its comma
+     * included, but 547 units. The newest child's 17-character name brings 12 entries to exactly 4000 code
+     * points, which still fit; counted in units, only 7 entries would.
+     */
+    @Test
+    void stateReasonDataCountsCodePointsAsItsLengthLimitDoes() {
+        String emoji = "\uD83D\uDE00";
+        List<String> names = new ArrayList<>(IntStream.range(0, 15)
+                .mapToObj(index -> emoji.repeat(200) + String.format("-%02d", index)).toList());
+        names.add("exactly-4000-edge");
+        names.forEach(this::metric);
+        put("wide", names.stream().map(name -> "ALARM(\"" + name + "\")").collect(Collectors.joining(" OR ")));
+        List<String> listed = triggering("wide");
+        assertEquals(12, listed.size(), "children listed");
+        assertEquals("exactly-4000-edge INSUFFICIENT_DATA", listed.getFirst());
+        assertEquals(names.get(4) + " INSUFFICIENT_DATA", listed.getLast());
+        String data = alarm("wide").getStateReasonData();
+        assertEquals(4000, data.codePointCount(0, data.length()));
+        assertTrue(data.length() > 4000, data.length() + " UTF-16 units");
+    }
+
     private CompositeAlarm put(String name, String rule) {
         CompositeAlarm alarm = new CompositeAlarm();
         alarm.setAlarmName(name);
