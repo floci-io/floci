@@ -2,9 +2,7 @@ package io.github.hectorvent.floci.services.autoscaling;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
@@ -15,6 +13,7 @@ import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.elb.ElbClassicService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
+import io.github.hectorvent.floci.testing.StorageFactories;
 import io.restassured.path.xml.XmlPath;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
@@ -42,6 +41,7 @@ import static org.mockito.Mockito.*;
 class AutoScalingStandbyStorageTest {
 
     private static final String REGION = "us-east-1";
+    private static final String ACCOUNT = "000000000000";
     private static final String GROUP = "stored-standby";
     private static final String ACTIVITIES =
             "DescribeScalingActivitiesResponse.DescribeScalingActivitiesResult.Activities.member";
@@ -191,21 +191,10 @@ class AutoScalingStandbyStorageTest {
     }
 
     private AutoScalingService storedService(String mode) {
-        EmulatorConfig config = mock(EmulatorConfig.class);
-        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
-        EmulatorConfig.WalConfig wal = mock(EmulatorConfig.WalConfig.class);
-        when(config.storage()).thenReturn(storage);
-        when(config.defaultAccountId()).thenReturn("000000000000");
-        when(storage.persistentPath()).thenReturn(directory.toString());
-        when(storage.wal()).thenReturn(wal);
-        when(wal.compactionIntervalMs()).thenReturn(60000L);
-        ServiceConfigAccess access = mock(ServiceConfigAccess.class);
-        when(access.storageMode("autoscaling")).thenReturn(mode);
-        when(access.storageFlushInterval("autoscaling")).thenReturn(60000L);
-        StorageFactory factory = new StorageFactory(config, access);
+        StorageFactory factory = StorageFactories.open(directory, mode, ACCOUNT);
         factories.add(factory);
         AutoScalingService service = new AutoScalingService();
-        service.regionResolver = new RegionResolver(REGION, "000000000000");
+        service.regionResolver = new RegionResolver(REGION, ACCOUNT);
         service.storageFactory = factory;
         service.initializeStorage();
         return service;
