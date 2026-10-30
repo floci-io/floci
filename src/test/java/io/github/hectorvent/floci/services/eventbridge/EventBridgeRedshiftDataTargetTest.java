@@ -15,6 +15,8 @@ import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.MockMakers;
 import org.mockito.MockedStatic;
@@ -100,6 +102,30 @@ class EventBridgeRedshiftDataTargetTest {
         assertEquals("event-statement", request.getValue().path("StatementName").asText());
         assertEquals("select 42", request.getValue().path("Sql").asText());
         assertEquals("$.detail.database", parameters.getDatabase());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void resolvesSqlPathContainingSlash(boolean batch) {
+        Target target = target(CLUSTER_ARN);
+        RedshiftDataParameters parameters = parameters("dev");
+        if (batch) {
+            parameters.setSqls(List.of("$.detail.sql/query"));
+        } else {
+            parameters.setSql("$.detail.sql/query");
+        }
+        target.setRedshiftDataParameters(parameters);
+
+        invoker.invokeTarget(target, "{\"detail\":{\"sql/query\":\"select 1\"}}", "us-east-1");
+
+        ArgumentCaptor<JsonNode> request = ArgumentCaptor.forClass(JsonNode.class);
+        if (batch) {
+            verify(redshiftDataService).batchExecuteStatement(request.capture(), eq("us-east-1"), eq(ROLE_ARN));
+            assertEquals("select 1", request.getValue().path("Sqls").get(0).asText());
+        } else {
+            verify(redshiftDataService).executeStatement(request.capture(), eq("us-east-1"), eq(ROLE_ARN));
+            assertEquals("select 1", request.getValue().path("Sql").asText());
+        }
     }
 
     @Test
