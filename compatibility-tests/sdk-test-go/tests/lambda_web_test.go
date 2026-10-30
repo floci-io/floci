@@ -25,9 +25,8 @@ import (
 )
 
 const (
-	webFunctionName = "go-web-fn"
-	webWait         = 2 * time.Minute
-	webLambdaTrust  = `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}`
+	webWait        = 2 * time.Minute
+	webLambdaTrust = `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}`
 )
 
 // One function through its life. The subtests run in order and share it.
@@ -40,6 +39,7 @@ func TestLambdaWeb(t *testing.T) {
 	suffix := strconv.FormatInt(time.Now().UnixNano(), 36)
 	roleName := "go-web-role-" + suffix
 	bucket := "go-web-code-" + suffix
+	functionName := "go-web-fn-" + suffix
 
 	createdRole, err := iamClient.CreateRole(ctx, &iam.CreateRoleInput{
 		RoleName:                 aws.String(roleName),
@@ -82,7 +82,7 @@ func TestLambdaWeb(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Cleanup(func() {
-		_, err := web.DeleteWebFunction(ctx, &lambdaweb.DeleteWebFunctionInput{FunctionName: aws.String(webFunctionName)})
+		_, err := web.DeleteWebFunction(ctx, &lambdaweb.DeleteWebFunctionInput{FunctionName: aws.String(functionName)})
 		// The last subtest deletes the function itself.
 		var notFound *webtypes.ResourceNotFoundException
 		if err != nil && !errors.As(err, &notFound) {
@@ -96,12 +96,12 @@ func TestLambdaWeb(t *testing.T) {
 			RuntimeConfig: &webtypes.RuntimeConfig{Runtime: aws.String("nodejs24.x")},
 		}
 	}
-	devEndpoint := &lambdaweb.GetWebFunctionEndpointInput{FunctionName: aws.String(webFunctionName), EndpointName: aws.String("dev")}
+	devEndpoint := &lambdaweb.GetWebFunctionEndpointInput{FunctionName: aws.String(functionName), EndpointName: aws.String("dev")}
 	var functionArn, firstRevision, secondRevision string
 
 	t.Run("CreateWebFunctionReportsPendingChildren", func(t *testing.T) {
 		created, err := web.CreateWebFunction(ctx, &lambdaweb.CreateWebFunctionInput{
-			FunctionName: aws.String(webFunctionName),
+			FunctionName: aws.String(functionName),
 			RevisionConfig: &webtypes.RevisionConfig{
 				BuildConfig:   buildConfig(),
 				ServiceConfig: &webtypes.ServiceConfig{ExecutionRoleArn: aws.String(role)},
@@ -119,7 +119,7 @@ func TestLambdaWeb(t *testing.T) {
 		require.NotNil(t, created.Endpoint)
 		functionArn = aws.ToString(created.FunctionArn)
 		firstRevision = aws.ToString(created.Revision.RevisionId)
-		assert.True(t, strings.HasSuffix(functionArn, ":web-function/"+webFunctionName), functionArn)
+		assert.True(t, strings.HasSuffix(functionArn, ":web-function/"+functionName), functionArn)
 		assert.Equal(t, webtypes.FunctionStateActive, created.State)
 		assert.Equal(t, webtypes.RevisionStatePending, created.Revision.State)
 		assert.Equal(t, webtypes.EndpointStatePending, created.Endpoint.State)
@@ -138,14 +138,17 @@ func TestLambdaWeb(t *testing.T) {
 	t.Run("FunctionsAreAddressableByNameAndArn", func(t *testing.T) {
 		got, err := web.GetWebFunction(ctx, &lambdaweb.GetWebFunctionInput{FunctionName: aws.String(functionArn)})
 		require.NoError(t, err)
-		assert.Equal(t, webFunctionName, aws.ToString(got.FunctionName))
-		functions, err := web.ListWebFunctions(ctx, &lambdaweb.ListWebFunctionsInput{})
-		require.NoError(t, err)
+		assert.Equal(t, functionName, aws.ToString(got.FunctionName))
 		var names []string
-		for _, function := range functions.Functions {
-			names = append(names, aws.ToString(function.FunctionName))
+		pages := lambdaweb.NewListWebFunctionsPaginator(web, &lambdaweb.ListWebFunctionsInput{})
+		for pages.HasMorePages() {
+			page, err := pages.NextPage(ctx)
+			require.NoError(t, err)
+			for _, function := range page.Functions {
+				names = append(names, aws.ToString(function.FunctionName))
+			}
 		}
-		assert.Contains(t, names, webFunctionName)
+		assert.Contains(t, names, functionName)
 		settings, err := web.GetWebAccountSettings(ctx, &lambdaweb.GetWebAccountSettingsInput{})
 		require.NoError(t, err)
 		assert.Equal(t, int32(10), aws.ToInt32(settings.AccountQuotas.MaxEndpointsPerFunction))
@@ -164,7 +167,7 @@ func TestLambdaWeb(t *testing.T) {
 
 	t.Run("NewRevisionMovesLatestRevisionEndpoint", func(t *testing.T) {
 		revision, err := web.CreateWebFunctionRevision(ctx, &lambdaweb.CreateWebFunctionRevisionInput{
-			FunctionName: aws.String(webFunctionName),
+			FunctionName: aws.String(functionName),
 			Description:  aws.String("second"),
 			BuildConfig:  buildConfig(),
 			ServiceConfig: &webtypes.ServiceConfig{
@@ -178,13 +181,13 @@ func TestLambdaWeb(t *testing.T) {
 		assert.Equal(t, webtypes.RevisionStatePending, revision.State)
 		assert.Equal(t, int32(60), aws.ToInt32(revision.ServiceConfig.TimeoutSeconds))
 		assert.Equal(t, int32(64), aws.ToInt32(revision.ServiceConfig.MaxConcurrencyPerEnvironment))
-		assert.Equal(t, "/aws/lambda/web/"+webFunctionName, aws.ToString(revision.ServiceConfig.TelemetryConfig.LoggingConfig.LogGroup))
+		assert.Equal(t, "/aws/lambda/web/"+functionName, aws.ToString(revision.ServiceConfig.TelemetryConfig.LoggingConfig.LogGroup))
 
 		require.NoError(t, lambdaweb.NewWebFunctionRevisionActiveWaiter(web).Wait(ctx, &lambdaweb.GetWebFunctionRevisionInput{
-			FunctionName: aws.String(webFunctionName),
+			FunctionName: aws.String(functionName),
 			RevisionId:   aws.String(secondRevision),
 		}, webWait))
-		revisions, err := web.ListWebFunctionRevisions(ctx, &lambdaweb.ListWebFunctionRevisionsInput{FunctionName: aws.String(webFunctionName)})
+		revisions, err := web.ListWebFunctionRevisions(ctx, &lambdaweb.ListWebFunctionRevisionsInput{FunctionName: aws.String(functionName)})
 		require.NoError(t, err)
 		var revisionIds []string
 		for _, summary := range revisions.Revisions {
@@ -202,7 +205,7 @@ func TestLambdaWeb(t *testing.T) {
 			{RevisionId: aws.String(secondRevision), Weight: aws.Int32(10)},
 		}
 		update, err := web.UpdateWebFunctionEndpoint(ctx, &lambdaweb.UpdateWebFunctionEndpointInput{
-			FunctionName:       aws.String(webFunctionName),
+			FunctionName:       aws.String(functionName),
 			EndpointName:       aws.String("dev"),
 			AutoDeploymentMode: webtypes.AutoDeploymentModeDisabled,
 			RevisionWeights:    weights,
@@ -218,12 +221,12 @@ func TestLambdaWeb(t *testing.T) {
 		assert.ElementsMatch(t, weights, endpoint.RevisionWeights)
 
 		_, err = web.DeleteWebFunctionRevision(ctx, &lambdaweb.DeleteWebFunctionRevisionInput{
-			FunctionName: aws.String(webFunctionName),
+			FunctionName: aws.String(functionName),
 			RevisionId:   aws.String(firstRevision),
 		})
 		assertWebRefusal[*webtypes.ConflictException](t, err, "the endpoints [dev] are using it")
 		_, err = web.UpdateWebFunctionEndpoint(ctx, &lambdaweb.UpdateWebFunctionEndpointInput{
-			FunctionName:    aws.String(webFunctionName),
+			FunctionName:    aws.String(functionName),
 			EndpointName:    aws.String("dev"),
 			RevisionWeights: []webtypes.RevisionWeight{{RevisionId: aws.String("rev-zzzzz"), Weight: aws.Int32(100)}},
 		})
@@ -232,7 +235,7 @@ func TestLambdaWeb(t *testing.T) {
 
 	t.Run("ValidationErrorsUseTheAwsWording", func(t *testing.T) {
 		_, err := web.CreateWebFunctionRevision(ctx, &lambdaweb.CreateWebFunctionRevisionInput{
-			FunctionName:  aws.String(webFunctionName),
+			FunctionName:  aws.String(functionName),
 			BuildConfig:   buildConfig(),
 			ServiceConfig: &webtypes.ServiceConfig{ExecutionRoleArn: aws.String(role), TimeoutSeconds: aws.Int32(2)},
 		})
@@ -240,12 +243,12 @@ func TestLambdaWeb(t *testing.T) {
 			"1 validation error detected: Value '2' at 'serviceConfig.timeoutSeconds' failed to satisfy constraint:"+
 				" Member must have value greater than or equal to 3")
 		_, err = web.GetWebFunctionRevision(ctx, &lambdaweb.GetWebFunctionRevisionInput{
-			FunctionName: aws.String(webFunctionName),
+			FunctionName: aws.String(functionName),
 			RevisionId:   aws.String("nope"),
 		})
 		assertWebRefusal[*webtypes.ValidationException](t, err, "Invalid revision id or ARN 'nope'")
 		_, err = web.CreateWebFunctionEndpoint(ctx, &lambdaweb.CreateWebFunctionEndpointInput{
-			FunctionName: aws.String(webFunctionName),
+			FunctionName: aws.String(functionName),
 			EndpointName: aws.String("prod"),
 			EndpointType: webtypes.EndpointTypeHomeRegion,
 			AuthType:     webtypes.AuthTypeApplicationManaged,
@@ -255,7 +258,7 @@ func TestLambdaWeb(t *testing.T) {
 
 		missingRole := strings.Replace(role, roleName, roleName+"-missing", 1)
 		_, err = web.CreateWebFunctionRevision(ctx, &lambdaweb.CreateWebFunctionRevisionInput{
-			FunctionName:  aws.String(webFunctionName),
+			FunctionName:  aws.String(functionName),
 			BuildConfig:   buildConfig(),
 			ServiceConfig: &webtypes.ServiceConfig{ExecutionRoleArn: aws.String(missingRole)},
 		})
@@ -263,7 +266,7 @@ func TestLambdaWeb(t *testing.T) {
 			"The execution role "+missingRole+" cannot be assumed by lambda.amazonaws.com."+
 				" Verify its trust policy. If the role was just created, retry in a few seconds.")
 		_, err = web.CreateWebFunctionRevision(ctx, &lambdaweb.CreateWebFunctionRevisionInput{
-			FunctionName:  aws.String(webFunctionName),
+			FunctionName:  aws.String(functionName),
 			BuildConfig:   buildConfig(),
 			ServiceConfig: &webtypes.ServiceConfig{ExecutionRoleArn: aws.String("arn:aws:iam::111122223333:role/" + roleName)},
 		})
@@ -313,8 +316,8 @@ func TestLambdaWeb(t *testing.T) {
 	})
 
 	t.Run("DeleteRemovesTheFunction", func(t *testing.T) {
-		function := &lambdaweb.GetWebFunctionInput{FunctionName: aws.String(webFunctionName)}
-		_, err := web.DeleteWebFunction(ctx, &lambdaweb.DeleteWebFunctionInput{FunctionName: aws.String(webFunctionName)})
+		function := &lambdaweb.GetWebFunctionInput{FunctionName: aws.String(functionName)}
+		_, err := web.DeleteWebFunction(ctx, &lambdaweb.DeleteWebFunctionInput{FunctionName: aws.String(functionName)})
 		require.NoError(t, err)
 		require.NoError(t, lambdaweb.NewWebFunctionDeletedWaiter(web).Wait(ctx, function, webWait))
 		_, err = web.GetWebFunction(ctx, function)
