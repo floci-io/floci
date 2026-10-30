@@ -31,6 +31,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -564,9 +565,13 @@ public class RedshiftServerlessService implements Resettable {
 
     /** Absolute, normalised {@code <persistentPath>/redshift-serverless-dumps/<accountId>/<region>} directory. */
     private Path dumpDir(String region) {
+        return dumpDir(workgroups.accountId(), region);
+    }
+
+    private Path dumpDir(String accountId, String region) {
         return Paths.get(config.storage().persistentPath())
                 .resolve("redshift-serverless-dumps")
-                .resolve(workgroups.accountId())
+                .resolve(accountId)
                 .resolve(region)
                 .toAbsolutePath()
                 .normalize();
@@ -649,6 +654,7 @@ public class RedshiftServerlessService implements Resettable {
     public synchronized RedshiftServerlessSnapshot updateSnapshot(String snapshotName, Integer retentionPeriod,
                                                                   String region) {
         RedshiftServerlessSnapshot snapshot = new RedshiftServerlessSnapshot(getSnapshot(snapshotName, region));
+        requireAvailableSnapshot(snapshot);
         if (retentionPeriod != null) {
             snapshot.setRetentionPeriod(validateRetentionPeriod(retentionPeriod));
             snapshots.put(storageKey(region, snapshotName), snapshot);
@@ -658,9 +664,68 @@ public class RedshiftServerlessService implements Resettable {
 
     public synchronized RedshiftServerlessSnapshot deleteSnapshot(String snapshotName, String region) {
         RedshiftServerlessSnapshot deleted = getSnapshot(snapshotName, region);
+        requireAvailableSnapshot(deleted);
         snapshots.delete(storageKey(region, snapshotName));
         trustedDump(deleted, region).ifPresent(RedshiftServerlessService::deleteDumpQuietly);
         return deleted;
+    }
+
+    /** The monitor also protects restore, retention changes and snapshot creation from cleanup. */
+    synchronized void expireSnapshots(Instant now,
+            Consumer<AccountAwareStorageBackend.AccountEntry<RedshiftServerlessSnapshot>> deletePolicy) {
+        for (AccountAwareStorageBackend.AccountEntry<RedshiftServerlessSnapshot> entry
+                : snapshots.scanAllAccountEntries(key -> true)) {
+            try {
+                // The scan assigns unprefixed entries to the default account; never claim them for another account.
+                RedshiftServerlessSnapshot snapshot = snapshots.getForAccountMigratingLegacy(
+                        entry.accountId(), entry.key(), legacy -> snapshots
+                                .getLegacyForAccount(entry.accountId(), entry.key()).isPresent())
+                        .orElse(null);
+                if (snapshot == null || !isExpired(snapshot, now)) {
+                    continue;
+                }
+                RedshiftServerlessSnapshot deleting = new RedshiftServerlessSnapshot(snapshot);
+                deleting.setStatus("DELETING");
+                snapshots.putAllAtomicallyForAccount(entry.accountId(), Map.of(entry.key(), deleting));
+                deleteExpiredDump(deleting, entry.accountId(), regionOf(entry.key()));
+                deletePolicy.accept(new AccountAwareStorageBackend.AccountEntry<>(
+                        entry.accountId(), entry.key(), deleting));
+                snapshots.deleteAllAtomicallyForAccounts(Map.of(entry.accountId(), Set.of(entry.key())));
+            } catch (IOException | RuntimeException e) {
+                LOG.warnv(e, "Could not expire Redshift Serverless snapshot {0} for account {1}; will retry",
+                        entry.key(), entry.accountId());
+            }
+        }
+    }
+
+    private static boolean isExpired(RedshiftServerlessSnapshot snapshot, Instant now) {
+        if ("DELETING".equals(snapshot.getStatus())) {
+            return true;
+        }
+        Integer retention = snapshot.getRetentionPeriod();
+        return "AVAILABLE".equals(snapshot.getStatus()) && retention != null && retention > 0
+                && snapshot.getSnapshotCreateTime() != null
+                && !now.isBefore(snapshot.getSnapshotCreateTime().plus(retention, ChronoUnit.DAYS));
+    }
+
+    private void deleteExpiredDump(RedshiftServerlessSnapshot snapshot, String accountId, String region)
+            throws IOException {
+        String stored = snapshot.getSqlDump();
+        if (stored == null || stored.isBlank()) {
+            return;
+        }
+        Path dump = Paths.get(stored).toAbsolutePath().normalize();
+        Path directory = dumpDir(accountId, region);
+        if (!dump.startsWith(directory) || dump.equals(directory)) {
+            throw new IOException("Snapshot dump is outside its account and Region directory: " + dump);
+        }
+        Files.deleteIfExists(dump);
+    }
+
+    private static void requireAvailableSnapshot(RedshiftServerlessSnapshot snapshot) {
+        if (!"AVAILABLE".equals(snapshot.getStatus())) {
+            throw ServerlessSupport.conflict("The snapshot " + snapshot.getSnapshotName() + " is not available.");
+        }
     }
 
     /**
@@ -704,6 +769,7 @@ public class RedshiftServerlessService implements Resettable {
         validateManagedPassword(manageAdminPassword, null, adminPasswordSecretKmsKeyId);
         validateNamespaceName(namespaceName);
         RedshiftServerlessSnapshot snapshot = getSnapshot(snapshotName, region);
+        requireAvailableSnapshot(snapshot);
         if (ownerAccount != null && !ownerAccount.isBlank() && !ownerAccount.equals(snapshot.getOwnerAccount())) {
             throw snapshotNotFound(snapshotName);
         }

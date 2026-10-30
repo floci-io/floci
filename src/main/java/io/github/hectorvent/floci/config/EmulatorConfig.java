@@ -1910,6 +1910,12 @@ public interface EmulatorConfig {
         boolean enabled();
 
         @WithDefault("true")
+        boolean snapshotExpirationEnabled();
+
+        @WithDefault("60")
+        int snapshotExpirationSweepIntervalSeconds();
+
+        @WithDefault("true")
         boolean scheduledActionsEnabled();
 
         @WithDefault("60")

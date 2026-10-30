@@ -251,6 +251,8 @@ floci:
       shutdown-timeout-seconds: 10
     redshift-serverless:
       enabled: true
+      snapshot-expiration-enabled: false
+      snapshot-expiration-sweep-interval-seconds: 60
       scheduled-actions-enabled: false
       scheduled-action-sweep-interval-seconds: 60
     neptune:
