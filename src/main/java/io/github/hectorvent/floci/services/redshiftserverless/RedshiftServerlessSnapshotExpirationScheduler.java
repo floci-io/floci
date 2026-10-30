@@ -69,6 +69,11 @@ public class RedshiftServerlessSnapshotExpirationScheduler implements Resettable
         return executor != null;
     }
 
+    /** Threads waiting for the running sweep, which lets tests observe blocking without timing. */
+    int queuedSweeps() {
+        return sweepLock.getQueueLength();
+    }
+
     public void tick(Instant now) {
         sweepLock.lock();
         try {

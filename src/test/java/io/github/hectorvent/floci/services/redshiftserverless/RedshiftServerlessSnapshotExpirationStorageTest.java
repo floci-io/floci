@@ -54,7 +54,7 @@ class RedshiftServerlessSnapshotExpirationStorageTest {
             snapshot.setSqlDump(dump.toString());
             snapshots.put(REGION + "::retry-snap", snapshot);
             service(factory, config).expireSnapshots(Instant.EPOCH.plusSeconds(86400), entry -> { });
-            assertEquals("DELETING", snapshots.get(REGION + "::retry-snap").orElseThrow().getStatus());
+            assertEquals("DELETED", snapshots.get(REGION + "::retry-snap").orElseThrow().getStatus());
             if ("memory".equals(mode)) {
                 Files.delete(blocker);
                 service(factory, config).expireSnapshots(Instant.EPOCH, entry -> { });
@@ -69,7 +69,7 @@ class RedshiftServerlessSnapshotExpirationStorageTest {
         StorageFactory reloaded = new StorageFactory(config, access);
         try {
             RedshiftServerlessService service = service(reloaded, config);
-            assertEquals("DELETING", service.getSnapshot("retry-snap", REGION).getStatus());
+            assertEquals("DELETED", service.getSnapshot("retry-snap", REGION).getStatus());
             Files.delete(blocker);
             service.expireSnapshots(Instant.EPOCH, entry -> { });
             assertTrue(service.findSnapshot("retry-snap", REGION).isEmpty());

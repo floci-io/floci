@@ -685,7 +685,7 @@ public class RedshiftServerlessService implements Resettable {
                     continue;
                 }
                 RedshiftServerlessSnapshot deleting = new RedshiftServerlessSnapshot(snapshot);
-                deleting.setStatus("DELETING");
+                deleting.setStatus("DELETED");
                 snapshots.putAllAtomicallyForAccount(entry.accountId(), Map.of(entry.key(), deleting));
                 deleteExpiredDump(deleting, entry.accountId(), regionOf(entry.key()));
                 deletePolicy.accept(new AccountAwareStorageBackend.AccountEntry<>(
@@ -699,7 +699,7 @@ public class RedshiftServerlessService implements Resettable {
     }
 
     private static boolean isExpired(RedshiftServerlessSnapshot snapshot, Instant now) {
-        if ("DELETING".equals(snapshot.getStatus())) {
+        if ("DELETED".equals(snapshot.getStatus())) {
             return true;
         }
         Integer retention = snapshot.getRetentionPeriod();

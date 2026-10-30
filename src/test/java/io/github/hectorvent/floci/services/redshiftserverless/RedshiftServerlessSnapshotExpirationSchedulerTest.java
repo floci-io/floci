@@ -15,7 +15,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -81,7 +80,8 @@ class RedshiftServerlessSnapshotExpirationSchedulerTest {
             Future<?> sweep = executor.submit(() -> scheduler.tick(NOW));
             assertTrue(running.await(5, TimeUnit.SECONDS));
             Future<?> reset = executor.submit(scheduler::beforeReset);
-            assertThrows(TimeoutException.class, () -> reset.get(300, TimeUnit.MILLISECONDS));
+            awaitQueuedSweeps(scheduler, 1);
+            assertFalse(reset.isDone());
 
             release.countDown();
             reset.get(5, TimeUnit.SECONDS);
@@ -103,24 +103,42 @@ class RedshiftServerlessSnapshotExpirationSchedulerTest {
         RedshiftServerlessSnapshotExpirationScheduler scheduler = scheduler(true, false);
         AtomicInteger concurrent = new AtomicInteger();
         AtomicInteger peak = new AtomicInteger();
+        CountDownLatch running = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
         doAnswer(invocation -> {
             peak.accumulateAndGet(concurrent.incrementAndGet(), Math::max);
-            Thread.sleep(100);
+            running.countDown();
+            release.await(10, TimeUnit.SECONDS);
             concurrent.decrementAndGet();
             return null;
         }).when(service).expireSnapshots(eq(NOW), any());
         ExecutorService executor = Executors.newFixedThreadPool(3);
         try {
             Future<?> first = executor.submit(() -> scheduler.tick(NOW));
+            assertTrue(running.await(5, TimeUnit.SECONDS));
             Future<?> second = executor.submit(() -> scheduler.tick(NOW));
             Future<?> third = executor.submit(() -> scheduler.tick(NOW));
+            awaitQueuedSweeps(scheduler, 2);
+            assertEquals(1, concurrent.get());
+
+            release.countDown();
             first.get(5, TimeUnit.SECONDS);
             second.get(5, TimeUnit.SECONDS);
             third.get(5, TimeUnit.SECONDS);
         } finally {
+            release.countDown();
             executor.shutdownNow();
         }
         assertEquals(1, peak.get());
+    }
+
+    private static void awaitQueuedSweeps(RedshiftServerlessSnapshotExpirationScheduler scheduler, int expected)
+            throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (scheduler.queuedSweeps() < expected) {
+            assertTrue(System.nanoTime() < deadline, "Expected " + expected + " thread(s) waiting for the sweep");
+            Thread.onSpinWait();
+        }
     }
 
     @Test

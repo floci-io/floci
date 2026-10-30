@@ -181,7 +181,7 @@ class RedshiftServerlessServiceTest {
         Instant now = other.getSnapshotCreateTime().plusSeconds(86400);
 
         service.expireSnapshots(now, entry -> { });
-        assertEquals("DELETING", service.getSnapshot("failed-snap", REGION).getStatus());
+        assertEquals("DELETED", service.getSnapshot("failed-snap", REGION).getStatus());
         assertTrue(service.findSnapshot("other-snap", REGION).isEmpty());
         assertEquals("ConflictException", assertThrows(AwsException.class,
                 () -> service.updateSnapshot("failed-snap", -1, REGION)).getErrorCode());
@@ -199,7 +199,7 @@ class RedshiftServerlessServiceTest {
     void expirationRetriesPersistedDeletionAndPolicyFailures() {
         create("expiry-ns");
         RedshiftServerlessSnapshot snapshot = service.createSnapshot("retry-snap", "expiry-ns", null, null, REGION);
-        snapshot.setStatus("DELETING");
+        snapshot.setStatus("DELETED");
         service.expireSnapshots(Instant.EPOCH, entry -> {
             throw new IllegalStateException("policy store unavailable");
         });
@@ -263,7 +263,7 @@ class RedshiftServerlessServiceTest {
                 .when(snapshotStore).deleteAllAtomicallyForAccounts(any());
         Instant deadline = snapshot.getSnapshotCreateTime().plusSeconds(86400);
         service.expireSnapshots(deadline, entry -> { });
-        assertEquals("DELETING", service.getSnapshot("store-fail-snap", REGION).getStatus());
+        assertEquals("DELETED", service.getSnapshot("store-fail-snap", REGION).getStatus());
         service.expireSnapshots(deadline, entry -> { });
         assertTrue(service.findSnapshot("store-fail-snap", REGION).isEmpty());
     }
