@@ -246,7 +246,14 @@ public class S3Service implements Resettable, ResourceProvider {
     private final ConcurrentHashMap<String, Map<String, byte[]>> memoryMultipartStore = new ConcurrentHashMap<>();
     private record MultipartPosition(String bucket, String key, String ownerAccountId, Instant initiated) {}
 
-    private final ConcurrentHashMap<String, MultipartPosition> removedMultipartPositions = new ConcurrentHashMap<>();
+    private static final int REMOVED_MULTIPART_POSITION_LIMIT = 1000;
+    private final Map<String, MultipartPosition> removedMultipartPositions = Collections.synchronizedMap(
+            new LinkedHashMap<>(64, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, MultipartPosition> eldest) {
+                    return size() > REMOVED_MULTIPART_POSITION_LIMIT;
+                }
+            });
     private final ConcurrentHashMap<String, MultipartUpload> multipartUploads = new ConcurrentHashMap<>();
     // Account-level (S3 Control) Block Public Access config, one entry per AWS account.
     // Distinct from the bucket-level configuration held on each Bucket. Block Public Access is a
@@ -4633,6 +4640,7 @@ public class S3Service implements Resettable, ResourceProvider {
             SseCustomerKey customerKey = validateSseCustomerKey(sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
             rejectConflictingServerSideEncryption(normalizedServerSideEncryption, customerKey);
             MultipartUpload upload = new MultipartUpload(bucket, key, contentType);
+            upload.setUploadId(orderedMultipartUploadId(upload.getInitiated(), upload.getUploadId()));
             upload.setOwnerAccountId(getBucketOwnerAccountId(bucket));
             upload.setInitiatorAccountId(ownerId());
             if (metadata != null) {
@@ -5320,7 +5328,7 @@ public class S3Service implements Resettable, ResourceProvider {
             removedMarker = null;
         }
         Instant markerInitiated = markedUpload != null ? markedUpload.upload().getInitiated()
-                : removedMarker != null ? removedMarker.initiated() : null;
+                : removedMarker != null ? removedMarker.initiated() : multipartMarkerInitiated(uploadIdMarker);
         List<MultipartListingEntry> remaining = entries.stream().filter(entry -> {
             if (keyMarker == null) {
                 return true;
@@ -5338,6 +5346,36 @@ public class S3Service implements Resettable, ResourceProvider {
         MultipartListingEntry last = truncated ? page.getLast() : null;
         return new ListMultipartUploadsResult(page, truncated, last == null ? null : last.key(),
                 last == null ? null : last.upload() == null ? "" : last.upload().getUploadId());
+    }
+
+    // UUIDv8 custom fields retain the exact initiation time without changing the opaque UUID wire shape.
+    // This lets pagination survive history eviction. The remaining 54 bits are random.
+    private static String orderedMultipartUploadId(Instant initiated, String randomId) {
+        int subMillisecondNanos = initiated.getNano() % 1_000_000;
+        long most = (initiated.toEpochMilli() << 16) | 0x8000L | (subMillisecondNanos >>> 8);
+        long least = 0x8000_0000_0000_0000L | ((long) (subMillisecondNanos & 0xff) << 54)
+                | (UUID.fromString(randomId).getLeastSignificantBits() & 0x003f_ffff_ffff_ffffL);
+        return new UUID(most, least).toString();
+    }
+
+    private static Instant multipartMarkerInitiated(String uploadId) {
+        if (uploadId == null) {
+            return null;
+        }
+        try {
+            UUID id = UUID.fromString(uploadId);
+            if (id.version() != 8 || id.variant() != 2) {
+                return null;
+            }
+            int subMillisecondNanos = (int) (((id.getMostSignificantBits() & 0xfff) << 8)
+                    | ((id.getLeastSignificantBits() >>> 54) & 0xff));
+            if (subMillisecondNanos >= 1_000_000) {
+                return null;
+            }
+            return Instant.ofEpochMilli(id.getMostSignificantBits() >>> 16).plusNanos(subMillisecondNanos);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
     }
 
     private static int compareMultipartKeys(String left, String right) {
