@@ -510,6 +510,48 @@ class DynamoDbPartiQLParserTest {
                 .startsWith("Unsupported data type in Bag."));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            SELECT * FROM "t" a WHERE pk = 1                        | ALIASING
+            SELECT * FROM "t" AS "a"                                | ALIASING
+            SELECT * FROM "t"."i" AS a AT i BY b                    | ALIASING
+            SELECT * FROM "t" at i ORDER BY pk                      | ALIASING
+            UPDATE "t" a SET b = 1e126 WHERE pk = 1e126             | ALIASING
+            FROM "t" a WHERE pk = 1 SET b = 1                       | ALIASING
+            DELETE FROM "t" a WHERE pk = 1 RETURNING ALL NEW *      | ALIASING
+            EXISTS(SELECT * FROM "t" a WHERE pk = 1)                | ALIASING
+            SELECT * FROM ""."i"."x" a WHERE b < [1]                | ALIASING
+            SELECT * FROM "t" a WHERE pk =                          | NWF Missing right-hand side expression of infix operator
+            SELECT * FROM "t" AS WHERE pk = 1                       | NWF Expected identifier for AS-alias
+            SELECT * FROM "t" AS exists                             | NWF Expected identifier for AS-alias
+            SELECT * FROM "t" a AT                                  | NWF Expected identifier for AT-alias
+            SELECT * FROM "t" BY old                                | NWF Expected identifier for BY-alias
+            SELECT * FROM "t" a AS b                                | LEFTOVER
+            SELECT * FROM "t" size WHERE pk = 1                     | LEFTOVER
+            SELECT * FROM "t"."i"."x" WHERE pk =                    | NWF Missing right-hand side expression of infix operator
+            SELECT * FROM "t"."i"."" WHERE pk = 1e126               | Path component cannot be an empty string
+            SELECT * FROM "t"."i"."x" WHERE b < [1]                 | A path may contain at most 2 components in the FROM clause
+            DELETE FROM "" WHERE pk = 1 RETURNING ALL NEW *         | Path component cannot be an empty string
+            DELETE FROM "t" WHERE pk = 1e126 RETURNING ALL NEW *    | OVERFLOW
+            INSERT INTO "t" a VALUE {'pk': 1}                       | LEFTOVER
+            INSERT INTO "t" {'pk': 1e126};                          | MULTIPLE_ITEMS
+            INSERT INTO "t" AS a VALUE {'pk': 1}                    | NWF Unexpected term
+            SELECT * FROM "t" WHERE at = 1                          | NWF Unexpected term
+            UPDATE "t" SET as = 1 WHERE pk = 1                      | NWF Expected identifier for simple path
+            """)
+    void refusesATableAliasOnceTheStatementParses(String statement, String message) {
+        String expected = message
+                .replace("ALIASING", "Aliasing is not supported")
+                .replace("LEFTOVER", "NWF Unexpected token after expression")
+                .replace("NWF ", "Statement wasn't well formed, can't be processed: ")
+                .replace("OVERFLOW", "Number overflow. Attempting to store a number with magnitude larger than "
+                        + "supported range under root")
+                .replace("MULTIPLE_ITEMS", "Unsupported operation: Inserting multiple items in a single statement "
+                        + "is not supported, use \"INSERT INTO tableName VALUE item\" instead");
+
+        assertEquals(expected, refusal(statement));
+    }
+
     private static String refusal(String statement) {
         return assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, List.of())).getMessage();
     }
