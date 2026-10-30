@@ -569,6 +569,22 @@ class LambdaWebIntegrationTest {
                 .then().statusCode(404)
                 .body("message", equalTo("The function does not have a policy."));
 
+        // Lambda writes the policy back in its own form, and GetResourcePolicy names an account by its root.
+        String written = "{\"Statement\":{\"Resource\":[\"" + ARN + "/endpoint/*\"],\"Principal\":{\"AWS\":"
+                + "\"000000000000\"},\"Effect\":\"allow\",\"Action\":\"lambda:InvokeWebFunctionEndpoint\"}}";
+        String kept = "{\"Version\":\"2008-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":"
+                + "\"000000000000\"},\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + ARN
+                + "/endpoint/*\"}]}";
+        given().contentType("application/json").body(Map.of("Policy", written))
+                .when().put(policyPath)
+                .then().statusCode(200)
+                .body("Policy", equalTo(kept));
+        given().when().get(policyPath)
+                .then().statusCode(200)
+                .body("Policy", equalTo(kept.replace("\"000000000000\"", "\"arn:aws:iam::000000000000:root\"")));
+        given().when().delete(policyPath)
+                .then().statusCode(204);
+
         // The roles a policy names have to exist, under the path IAM holds them.
         String reader = "web-it-reader-" + Long.toString(System.nanoTime(), 36);
         iamService.createRole(reader, "/team/", "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
