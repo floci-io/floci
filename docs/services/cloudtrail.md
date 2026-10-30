@@ -3,8 +3,8 @@
 **Protocol:** JSON 1.1 (`X-Amz-Target: com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.*`)
 **Endpoint:** `POST http://localhost:4566/`
 
-Floci emulates a CloudTrail trail's full life cycle and emits S3 data
-events to the trail's destination bucket as gzipped JSON log files at the
+Floci emulates a CloudTrail trail's full life cycle and emits S3 data events
+and selected Secrets Manager management writes to the trail's destination bucket as gzipped JSON log files at the
 AWS-shaped key path:
 
 ```
@@ -63,6 +63,23 @@ refused for a permission it needs besides its own, such as
 `s3:PutObjectTagging` for an upload that sets tags, is recorded as the
 operation. A browser `POST` upload, whose credential is in its form fields, is
 recorded as `PostObject` when IAM refuses it.
+
+## Management Write Coverage
+
+Successful Secrets Manager `PutSecretValue` and `UpdateSecret` API calls produce management
+records when a logging trail selects them. New trails include management events by default.
+Basic selectors honor `IncludeManagementEvents`, `ReadWriteType`, and source exclusions.
+Advanced selectors evaluate `eventCategory`, `eventSource`, `eventName`, `readOnly`, `eventType`,
+and `userIdentity.arn`; unsupported fields do not match these records.
+
+Records have `eventCategory: Management`, `managementEvent: true`, and `readOnly: false`.
+Sensitive secret values are omitted. Buffers and background S3 delivery retain the originating
+account, including when different accounts use the same trail name. Multi-region trails cover
+regions within their own partition.
+
+These writes also reach EventBridge's default bus in the request's account and region. See
+[Secrets Manager event delivery](secrets-manager.md#secret-write-events) for prerequisites,
+the secret-specific event pattern, and the limits of this coverage.
 
 ## Configuration
 
