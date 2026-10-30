@@ -2053,19 +2053,19 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
      */
     private EcsTask stopTask(String clusterRef, String taskRef, String reason, String stopCode, String region) {
         EcsTask task = resolveTaskOrThrow(taskRef, region);
-        CompletableFuture<Void> running;
-        synchronized (task) {
-            running = taskStops.get(task.getTaskArn());
-            if (running == null) {
-                return stopTaskLocked(task, reason, stopCode, region, false);
+        while (true) {
+            CompletableFuture<Void> running;
+            synchronized (task) {
+                running = taskStops.get(task.getTaskArn());
+                if (running == null) {
+                    return stopTaskLocked(task, reason, stopCode, region, false);
+                }
             }
-        }
-        // The service scheduler is already stopping it. Waiting for that stop, outside the monitor
-        // it lands under, answers as a stop queued behind another always has: with the task
-        // STOPPED, or by retrying a stop that failed.
-        running.join();
-        synchronized (task) {
-            return stopTaskLocked(task, reason, stopCode, region, false);
+            // The service scheduler is already stopping it. Waiting for that stop, outside the
+            // monitor it lands under, answers as a stop queued behind another always has: with the
+            // task STOPPED, or by retrying a stop that failed. A stop that failed can be retried by
+            // a tick before this thread takes the monitor back, so that retry is waited for too.
+            running.join();
         }
     }
 

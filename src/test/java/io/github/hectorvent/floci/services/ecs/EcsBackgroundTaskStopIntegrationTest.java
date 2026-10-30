@@ -98,7 +98,13 @@ class EcsBackgroundTaskStopIntegrationTest {
 
         RequestScopes.runAs(ACCOUNT, () -> ecsService.updateService(cluster, service, null, 0, null, REGION));
         ecsService.reconcile();
-        await().atMost(Duration.ofSeconds(10)).until(() -> "STOPPED".equals(task.getLastStatus()));
+        // A stop lands whole under the task's monitor, so a STOPPED read there sees its exit codes
+        // and cluster count too.
+        await().atMost(Duration.ofSeconds(10)).until(() -> {
+            synchronized (task) {
+                return "STOPPED".equals(task.getLastStatus());
+            }
+        });
 
         assertTrue(stoppedOn.get().startsWith("ecs-task-stopper-"), "stopped on " + stoppedOn.get());
         assertEquals(137, task.getContainers().getFirst().getExitCode());

@@ -41,6 +41,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -281,6 +282,61 @@ class EcsGracefulStopConcurrencyServiceTest {
         assertEquals("STOPPED", stopped.getLastStatus());
         assertEquals(EcsService.STOP_CODE_SERVICE_SCHEDULER_INITIATED, stopped.getStopCode());
         verify(containerManager, times(1)).stopTaskAndCollectExitCodes(handleOf(task));
+    }
+
+    @Test
+    void stopTaskWaitsForATickRetryOfAStopThatFailedWhileItWaited() throws Exception {
+        EcsService service = newService();
+        createService(service, "flaky", 1);
+        tick(service);
+        EcsTask task = onlyRunningTask(service, "flaky");
+        CountDownLatch firstStopEntered = new CountDownLatch(1);
+        CountDownLatch failFirstStop = new CountDownLatch(1);
+        CountDownLatch retryEntered = new CountDownLatch(1);
+        CountDownLatch releaseRetry = new CountDownLatch(1);
+        AtomicInteger stops = new AtomicInteger();
+        doAnswer(invocation -> {
+            EcsTaskHandle handle = invocation.getArgument(0);
+            if (stops.incrementAndGet() == 1) {
+                firstStopEntered.countDown();
+                failFirstStop.await(30, TimeUnit.SECONDS);
+                throw new IllegalStateException("Cannot connect to the Docker daemon");
+            }
+            retryEntered.countDown();
+            releaseRetry.await(30, TimeUnit.SECONDS);
+            handle.getContainerIds().keySet().forEach(handle::recordContainerRemoved);
+            return Map.of("app", 137);
+        }).when(containerManager).stopTaskAndCollectExitCodes(handleOf(task));
+        service.updateService(CLUSTER, "flaky", null, 0, null, REGION);
+
+        tick(service);
+        CompletableFuture<EcsTask> userStop;
+        try {
+            assertTrue(firstStopEntered.await(5, TimeUnit.SECONDS), "the scale-in stop never started");
+            userStop = CompletableFuture.supplyAsync(() ->
+                    service.stopTask(CLUSTER, task.getTaskArn(), "user stop", REGION));
+            assertThrows(TimeoutException.class, () -> userStop.get(500, TimeUnit.MILLISECONDS),
+                    "StopTask waits for the stop already running");
+            // Holding the task's monitor while the first stop fails lets a tick retry it before
+            // StopTask, woken by the failure, can take the monitor back.
+            synchronized (task) {
+                failFirstStop.countDown();
+                for (int i = 0; i < 100 && !retryEntered.await(50, TimeUnit.MILLISECONDS); i++) {
+                    service.reconcile();
+                }
+                assertEquals(0, retryEntered.getCount(), "no tick retried the failed stop");
+            }
+            assertThrows(TimeoutException.class, () -> userStop.get(500, TimeUnit.MILLISECONDS),
+                    "StopTask answers once the retry has landed, not while it runs");
+        } finally {
+            failFirstStop.countDown();
+            releaseRetry.countDown();
+        }
+
+        EcsTask stopped = userStop.get(TICK_BUDGET.toMillis(), TimeUnit.MILLISECONDS);
+        assertEquals("STOPPED", stopped.getLastStatus());
+        assertEquals(137, stopped.getContainers().getFirst().getExitCode());
+        assertEquals(2, stops.get());
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
