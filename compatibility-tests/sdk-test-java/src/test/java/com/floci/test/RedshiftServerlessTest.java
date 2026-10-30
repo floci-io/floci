@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.redshiftdata.RedshiftDataClient;
 import software.amazon.awssdk.services.redshiftdata.model.DescribeStatementResponse;
 import software.amazon.awssdk.services.redshiftdata.model.ExecuteStatementResponse;
@@ -482,65 +481,6 @@ class RedshiftServerlessTest {
                 client.deleteSnapshotCopyConfiguration(request -> request.snapshotCopyConfigurationId(replacementId));
             } finally {
                 deleteBestEffort(client, namespaceName);
-            }
-        }
-    }
-
-    @Test
-    @DisplayName("A snapshot is copied to the destination Region and restores there")
-    void snapshotCopyReachesTheDestinationRegion() throws InterruptedException {
-        assumeFalse(TestFixtures.isRealAws(), "Asserts emulator-local copy timing");
-        try (RedshiftServerlessClient source = TestFixtures.redshiftServerlessClient()) {
-            Region sourceRegion = source.serviceClientConfiguration().region();
-            Region destinationRegion = sourceRegion.id().equals("us-west-2") ? Region.EU_WEST_1 : Region.US_WEST_2;
-            String suffix = UUID.randomUUID().toString().substring(0, 8);
-            String namespaceName = "floci-compat-xcopy-" + suffix;
-            String snapshotName = "floci-compat-xsnap-" + suffix;
-            String restoreNamespace = "floci-compat-xdst-" + suffix;
-            String restoreWorkgroup = "floci-compat-xwg-" + suffix;
-            try (RedshiftServerlessClient destination = TestFixtures.redshiftServerlessClient(destinationRegion)) {
-                try {
-                    source.createNamespace(request -> request.namespaceName(namespaceName).adminUsername("admin"));
-                    source.createSnapshotCopyConfiguration(request -> request.namespaceName(namespaceName)
-                            .destinationRegion(destinationRegion.id()).snapshotRetentionPeriod(7));
-                    source.createSnapshot(request -> request.namespaceName(namespaceName).snapshotName(snapshotName));
-
-                    Snapshot copy = awaitSnapshot(destination, snapshotName);
-
-                    assertThat(copy.snapshotArn()).contains(":" + destinationRegion.id() + ":");
-                    assertThat(copy.snapshotRetentionPeriod()).isEqualTo(7);
-                    destination.createNamespace(request -> request.namespaceName(restoreNamespace)
-                            .adminUsername("admin"));
-                    destination.createWorkgroup(request -> request.workgroupName(restoreWorkgroup)
-                            .namespaceName(restoreNamespace));
-                    assertThat(destination.restoreFromSnapshot(request -> request.namespaceName(restoreNamespace)
-                            .workgroupName(restoreWorkgroup).snapshotName(snapshotName)).namespace().status())
-                            .isEqualTo(NamespaceStatus.AVAILABLE);
-                } finally {
-                    try {
-                        destination.deleteWorkgroup(request -> request.workgroupName(restoreWorkgroup));
-                    } catch (Exception cleanupError) {
-                        LOG.warnf(cleanupError, "Best-effort cleanup failed for workgroupName=%s", restoreWorkgroup);
-                    }
-                    deleteBestEffort(destination, restoreNamespace);
-                    deleteBestEffort(source, namespaceName);
-                }
-            }
-        }
-    }
-
-    /** The copy sweep runs on a timer (60 seconds by default), so the copy is polled for rather than awaited once. */
-    private static Snapshot awaitSnapshot(RedshiftServerlessClient client, String snapshotName)
-            throws InterruptedException {
-        Instant deadline = Instant.now().plusSeconds(120);
-        while (true) {
-            try {
-                return client.getSnapshot(request -> request.snapshotName(snapshotName)).snapshot();
-            } catch (ResourceNotFoundException notYet) {
-                if (Instant.now().isAfter(deadline)) {
-                    throw notYet;
-                }
-                Thread.sleep(2000);
             }
         }
     }

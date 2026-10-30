@@ -21,6 +21,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -30,7 +31,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doCallRealMethod;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
 class RedshiftServerlessSnapshotCopyEngineTest {
@@ -57,7 +61,9 @@ class RedshiftServerlessSnapshotCopyEngineTest {
     void setUp() {
         StorageFactory storageFactory = mock(StorageFactory.class);
         for (String file : List.of("namespaces", "workgroups", "snapshots", "snapshotcopyconfigurations")) {
-            AccountAwareStorageBackend<?> store = AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
+            AccountAwareStorageBackend<?> store = file.equals("snapshots")
+                    ? spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID))
+                    : AccountAwareStorageBackend.inMemory(ACCOUNT_ID);
             if (file.equals("snapshots")) {
                 snapshots = (AccountAwareStorageBackend<RedshiftServerlessSnapshot>) store;
             }
@@ -113,8 +119,9 @@ class RedshiftServerlessSnapshotCopyEngineTest {
         assertEquals(source.getAdminUsername(), copy.getAdminUsername());
         assertEquals(Map.of("team", "data"), copy.getTags());
         assertEquals(NOW, copy.getSnapshotCreateTime());
-        assertEquals(dumpOf(ACCOUNT_ID, DESTINATION, "nightly").toString(), copy.getSqlDump());
-        assertEquals("-- data", Files.readString(dumpOf(ACCOUNT_ID, DESTINATION, "nightly")));
+        assertEquals(dumpOf(ACCOUNT_ID, DESTINATION, "nightly").getParent(),
+                Path.of(copy.getSqlDump()).getParent());
+        assertEquals("-- data", Files.readString(copiedDump(ACCOUNT_ID, "nightly")));
         assertTrue(Files.exists(dumpOf(ACCOUNT_ID, SOURCE, "nightly")), "the source dump stays");
         assertEquals(Set.of(DESTINATION), stored(ACCOUNT_ID, SOURCE, "nightly").getCopiedToRegions());
     }
@@ -123,14 +130,15 @@ class RedshiftServerlessSnapshotCopyEngineTest {
     void clearRemovesDumpsEvenWhenTheStoreWasEmptiedFirst() throws IOException {
         seed(ACCOUNT_ID, SOURCE, "nightly", TAKEN, "-- data");
         service.copySnapshots(NOW, List.of(rule(ACCOUNT_ID, null, null)));
-        assertTrue(Files.exists(dumpOf(ACCOUNT_ID, DESTINATION, "nightly")));
+        Path copiedFile = copiedDump(ACCOUNT_ID, "nightly");
+        assertTrue(Files.exists(copiedFile));
 
         // ResetAll empties every storage backend before it calls each service's clear().
         snapshots.clear();
         service.clear();
 
         assertFalse(Files.exists(dumpOf(ACCOUNT_ID, SOURCE, "nightly")));
-        assertFalse(Files.exists(dumpOf(ACCOUNT_ID, DESTINATION, "nightly")));
+        assertFalse(Files.exists(copiedFile));
     }
 
     @Test
@@ -193,12 +201,13 @@ class RedshiftServerlessSnapshotCopyEngineTest {
     void doesNotCopyAgainAfterTheCopyWasDeleted() throws IOException {
         seed(ACCOUNT_ID, SOURCE, "nightly", TAKEN, "-- data");
         service.copySnapshots(NOW, List.of(rule(ACCOUNT_ID, null, null)));
+        Path copiedFile = copiedDump(ACCOUNT_ID, "nightly");
 
         service.deleteSnapshot("nightly", DESTINATION);
         service.copySnapshots(NOW.plusSeconds(60), List.of(rule(ACCOUNT_ID, null, null)));
 
         assertTrue(snapshots.get(DESTINATION + "::nightly").isEmpty());
-        assertFalse(Files.exists(dumpOf(ACCOUNT_ID, DESTINATION, "nightly")));
+        assertFalse(Files.exists(copiedFile));
     }
 
     @Test
@@ -222,7 +231,8 @@ class RedshiftServerlessSnapshotCopyEngineTest {
     void replacesTheCopyOfAnEarlierSnapshotThatUsedTheSameName() throws IOException {
         seed(ACCOUNT_ID, SOURCE, "nightly", TAKEN, "-- old");
         service.copySnapshots(NOW, List.of(rule(ACCOUNT_ID, null, null)));
-        assertEquals("-- old", Files.readString(dumpOf(ACCOUNT_ID, DESTINATION, "nightly")));
+        Path oldCopyFile = copiedDump(ACCOUNT_ID, "nightly");
+        assertEquals("-- old", Files.readString(oldCopyFile));
 
         // Deleting a snapshot and taking another of the same name yields the same ARN.
         Instant retaken = TAKEN.plus(1, ChronoUnit.DAYS);
@@ -230,10 +240,30 @@ class RedshiftServerlessSnapshotCopyEngineTest {
         service.copySnapshots(NOW.plusSeconds(60), List.of(rule(ACCOUNT_ID, null, null)));
 
         RedshiftServerlessSnapshot copy = stored(ACCOUNT_ID, DESTINATION, "nightly");
-        assertEquals("-- new", Files.readString(dumpOf(ACCOUNT_ID, DESTINATION, "nightly")));
+        assertEquals("-- new", Files.readString(copiedDump(ACCOUNT_ID, "nightly")));
+        assertFalse(Files.exists(oldCopyFile), "the replaced copy's dump is removed once the new one is saved");
         assertEquals(retaken, copy.getCopiedFromSnapshotCreateTime());
         assertEquals(NOW.plusSeconds(60), copy.getSnapshotCreateTime());
         assertEquals(Set.of(DESTINATION), stored(ACCOUNT_ID, SOURCE, "nightly").getCopiedToRegions());
+    }
+
+    @Test
+    void keepsTheEarlierCopyUsableWhenSavingTheReplacementFails() throws IOException {
+        seed(ACCOUNT_ID, SOURCE, "nightly", TAKEN, "-- old");
+        service.copySnapshots(NOW, List.of(rule(ACCOUNT_ID, null, null)));
+        Path oldCopyFile = copiedDump(ACCOUNT_ID, "nightly");
+        seed(ACCOUNT_ID, SOURCE, "nightly", TAKEN.plus(1, ChronoUnit.DAYS), "-- new");
+
+        doThrow(new IllegalStateException("disk full")).when(snapshots)
+                .putAllAtomicallyForAccount(eq(ACCOUNT_ID), any());
+        service.copySnapshots(NOW.plusSeconds(60), List.of(rule(ACCOUNT_ID, null, null)));
+        doCallRealMethod().when(snapshots).putAllAtomicallyForAccount(eq(ACCOUNT_ID), any());
+
+        assertEquals("-- old", Files.readString(oldCopyFile));
+        assertEquals(oldCopyFile, copiedDump(ACCOUNT_ID, "nightly"));
+        try (Stream<Path> files = Files.list(oldCopyFile.getParent())) {
+            assertEquals(1, files.count(), "the failed replacement leaves no dump behind");
+        }
     }
 
     @Test
@@ -313,8 +343,8 @@ class RedshiftServerlessSnapshotCopyEngineTest {
         RedshiftServerlessSnapshot second = stored(OTHER_ACCOUNT_ID, DESTINATION, "nightly");
         assertNotEquals(first.getSnapshotArn(), second.getSnapshotArn());
         assertTrue(second.getSnapshotArn().contains(":" + OTHER_ACCOUNT_ID + ":"));
-        assertEquals("-- first", Files.readString(dumpOf(ACCOUNT_ID, DESTINATION, "nightly")));
-        assertEquals("-- second", Files.readString(dumpOf(OTHER_ACCOUNT_ID, DESTINATION, "nightly")));
+        assertEquals("-- first", Files.readString(copiedDump(ACCOUNT_ID, "nightly")));
+        assertEquals("-- second", Files.readString(copiedDump(OTHER_ACCOUNT_ID, "nightly")));
     }
 
     private static CopyRule rule(String accountId, String kmsKeyId, Integer retention) {
@@ -323,6 +353,10 @@ class RedshiftServerlessSnapshotCopyEngineTest {
 
     private RedshiftServerlessSnapshot stored(String accountId, String region, String name) {
         return snapshots.getForAccount(accountId, region + "::" + name).orElseThrow();
+    }
+
+    private Path copiedDump(String accountId, String name) {
+        return Path.of(stored(accountId, DESTINATION, name).getSqlDump());
     }
 
     private Path dumpOf(String accountId, String region, String name) {

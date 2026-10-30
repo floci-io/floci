@@ -791,7 +791,23 @@ public class RedshiftServerlessService implements Resettable {
             }
             throw e;
         }
+        if (existing != null) {
+            // Only now that the new record is saved is the replaced copy's dump unreferenced.
+            deleteReplacedDump(existing, rule, destinationDump);
+        }
         markCopied(rule, name);
+    }
+
+    /** Removes the dump of a replaced copy, if it still lies in the rule account's destination directory. */
+    private void deleteReplacedDump(RedshiftServerlessSnapshot replaced, CopyRule rule, Path keep) {
+        String stored = replaced.getSqlDump();
+        if (stored == null || stored.isBlank()) {
+            return;
+        }
+        Path old = Paths.get(stored).toAbsolutePath().normalize();
+        if (old.startsWith(dumpDir(rule.accountId(), rule.destinationRegion())) && !old.equals(keep)) {
+            deleteDumpQuietly(old);
+        }
     }
 
     /** Copies the source dump beside the destination snapshot, or returns {@code null} for a metadata-only snapshot. */
@@ -806,8 +822,10 @@ public class RedshiftServerlessService implements Resettable {
             throw new IOException("Snapshot dump is missing or outside its account and Region directory: " + from);
         }
         Path destinationDirectory = dumpDir(rule.accountId(), rule.destinationRegion());
-        Path to = destinationDirectory.resolve(source.getSnapshotName() + ".sql").normalize();
-        Path staging = destinationDirectory.resolve(source.getSnapshotName() + ".sql.copying").normalize();
+        // Each copy gets its own file, so replacing an earlier copy never touches the dump it still points to.
+        String copyFileName = source.getSnapshotName() + "." + UUID.randomUUID();
+        Path to = destinationDirectory.resolve(copyFileName + ".sql").normalize();
+        Path staging = destinationDirectory.resolve(copyFileName + ".sql.copying").normalize();
         if (!to.startsWith(destinationDirectory) || !staging.startsWith(destinationDirectory)) {
             throw new IOException("Invalid snapshot name: " + source.getSnapshotName());
         }
