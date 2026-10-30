@@ -14,6 +14,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.List;
 import java.util.stream.Collectors;
@@ -450,6 +451,61 @@ class DynamoDbPartiQLParserTest {
 
         assertEquals("ValidationException", e.getErrorCode());
         assertEquals("Statement wasn't well formed, can't be processed: ", e.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            SELECT * FROM "t" WHERE pk = 1e126                                        | OVERFLOW under root
+            SELECT * FROM "t" WHERE pk = -1e-131                                      | UNDERFLOW under root
+            SELECT * FROM "t" WHERE pk = 0e126                                        | OVERFLOW under root
+            SELECT * FROM "t" WHERE pk = 0e-131                                       | UNDERFLOW under root
+            SELECT * FROM "t" WHERE pk = 1e2147483646                                 | UNDERFLOW under root
+            SELECT * FROM "t" WHERE pk = 0.01e2147483647                              | OVERFLOW under root
+            SELECT * FROM "t" WHERE pk = 9.99999999999999999999999999999999999999e125 | OVERFLOW under root
+            SELECT * FROM "t" WHERE pk = 123456789012345678901234567890123456789      | DIGITS under root
+            SELECT * FROM "t" WHERE pk IN [1, 1e126]                                  | OVERFLOW under root
+            SELECT * FROM "t" WHERE a = [1, 1e126]                                    | OVERFLOW under root[1]
+            INSERT INTO "t" VALUE {'pk': 1, 'm': {'x': [1e126]}}                      | OVERFLOW under root.x[0]
+            INSERT INTO "t" VALUE {'pk': 1, 'l': [{'x': <<1e126>>}]}                  | OVERFLOW under root[0].x
+            SELECT * FROM "t" WHERE a = <<1e126, 1e126>>                              | OVERFLOW under root
+            SELECT * FROM "t" WHERE pk = 1e126 AND a = <<1, 1>>                       | OVERFLOW under root
+            SELECT * FROM "t" WHERE a = <<1, 1>> AND pk = 1e126                       | DUPLICATES
+            UPDATE "t" SET a = 1e126 WHERE pk = 1e-131                                | UNDERFLOW under root
+            UPDATE "t" SET a = <<1, 1>> WHERE pk = 1e126                              | OVERFLOW under root
+            SELECT * FROM "t" WHERE pk = 1e126 AND a = 1 AND                          | MISSING_RIGHT_HAND_SIDE
+            SELECT * FROM "t" WHERE a = <<1, 1>> AND                                  | MISSING_RIGHT_HAND_SIDE
+            """)
+    void refusesALiteralItCannotStoreOnceTheStatementParses(String statement, String message) {
+        String expected = message
+                .replace("UNDERFLOW", "Number underflow. Attempting to store a number with magnitude smaller than "
+                        + "supported range")
+                .replace("OVERFLOW", "Number overflow. Attempting to store a number with magnitude larger than "
+                        + "supported range")
+                .replace("DIGITS", "Attempting to store more than 38 significant digits in a Number")
+                .replace("DUPLICATES", "One or more parameter values were invalid: Input collection [1, 1] "
+                        + "contains duplicates! under root")
+                .replace("MISSING_RIGHT_HAND_SIDE", "Statement wasn't well formed, can't be processed: "
+                        + "Missing right-hand side expression of infix operator");
+
+        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, List.of()));
+
+        assertEquals("ValidationException", e.getErrorCode());
+        assertEquals(expected, e.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "0.123456789123456789123456789123456789125,  0.12345678912345678912345678912345678912",
+            "0.123456789123456789123456789123456789135,  0.12345678912345678912345678912345678914",
+            "12345678912345678912345678912345678917.5,   12345678912345678912345678912345678918",
+            "123456789123456789123456789123456789123.1,  123456789123456789123456789123456789120",
+            "-0.999999999999999999999999999999999999999, -1"
+    })
+    void roundsADecimalLiteralToThirtyEightDigits(String literal, String value) {
+        Cond cond = firstCond(SELECT + "= " + literal);
+
+        PVal val = assertInstanceOf(Cond.Eq.class, cond).val();
+        assertEquals(0, new BigDecimal(value).compareTo(new BigDecimal(assertInstanceOf(PVal.Num.class, val).v())));
     }
 
     @Test

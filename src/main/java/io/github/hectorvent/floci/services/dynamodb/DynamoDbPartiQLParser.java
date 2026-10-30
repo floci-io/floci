@@ -5,6 +5,8 @@ import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.MathContext;
+import java.math.RoundingMode;
 import java.util.*;
 import java.util.stream.Stream;
 
@@ -445,7 +447,8 @@ public class DynamoDbPartiQLParser {
     private int pos = 0;
     private int paramIdx = 0;
     private int literalDepth = 0;
-    private String unsupportedIsType;
+    // DynamoDB reports these only once the whole statement parses, and the first one in the statement wins.
+    private String deferredError;
 
     private DynamoDbPartiQLParser(String statement, List<JsonNode> parameters) {
         this.statement = statement;
@@ -463,8 +466,8 @@ public class DynamoDbPartiQLParser {
         if (parser.peek().type() != TType.EOF) {
             throw validationEx("Statement wasn't well formed, can't be processed: Unexpected token after expression");
         }
-        if (parser.unsupportedIsType != null) {
-            throw validationEx(parser.unsupportedIsType);
+        if (parser.deferredError != null) {
+            throw validationEx(parser.deferredError);
         }
         stmt.where().stream()
                 .flatMap(DynamoDbPartiQLParser::leaves)
@@ -617,8 +620,12 @@ public class DynamoDbPartiQLParser {
         String table = expectTableName();
         String index = parseIndexQualifier();
         Edits edits = parseEdits();
+        // DynamoDB checks the WHERE clause before the SET values.
+        String setError = deferredError;
+        deferredError = null;
         consume(TType.WHERE);
         List<Cond> where = parseConditions();
+        defer(setError);
         return new Stmt.Update(table, index, edits.sets(), edits.removes(), where, parseReturning());
     }
 
@@ -959,10 +966,10 @@ public class DynamoDbPartiQLParser {
                 advance();
             }
             PartiQLType type = parseTypeName(negated);
-            if (!type.supported() && unsupportedIsType == null) {
-                unsupportedIsType = "Unsupported data type for IS operator: " + type.className()
+            if (!type.supported()) {
+                defer("Unsupported data type for IS operator: " + type.className()
                         + ". Supported data types are [MISSING, NULL, BOOLEAN, BLOB, STRING, NUMERIC, STRUCT, TUPLE,"
-                        + " LIST] at " + position(operand);
+                        + " LIST] at " + position(operand));
             }
             return type == PartiQLType.MISSING ? new Cond.Missing(path, negated) : new Cond.IsType(path, type, negated);
         }
@@ -1276,27 +1283,66 @@ public class DynamoDbPartiQLParser {
 
     private PVal parseValue(String literalPath) {
         if (literalDepth == DynamoDbAttributeValueValidator.MAX_NESTING_LEVELS) {
-            throw validationEx(DynamoDbAttributeValueValidator.NESTING_EXCEEDED + " under " + literalPath);
+            throw validationEx(deferredError != null
+                    ? deferredError
+                    : DynamoDbAttributeValueValidator.NESTING_EXCEEDED + " under " + literalPath);
         }
         requireTermStart();
         Token t = advance();
         String nested = literalPath == null ? "root" : literalPath;
         return switch (t.type()) {
             case STRING   -> new PVal.Str(t.value());
-            case NUMBER   -> new PVal.Num(t.value());
+            case NUMBER   -> checkedNumber(new PVal.Num(t.value()), nested);
             case BOOL     -> new PVal.Bool(Boolean.parseBoolean(t.value()));
             case NULL     -> new PVal.Null();
             case QUESTION -> {
                 if (literalPath != null) {
-                    throw validationEx("Unsupported data type: Parameter under key " + literalPath + " at "
+                    defer("Unsupported data type: Parameter under key " + literalPath + " at "
                             + position(t.start(), 1));
                 }
                 yield resolveParam();
             }
             case LBRACKET, LBRACE, LBAG -> parseCollection(t, nested);
-            case PLUS, MINUS -> parseSignedNumber(t);
+            case PLUS, MINUS -> checkedNumber(parseSignedNumber(t), nested);
             default -> throw validationEx("Expected value literal or ?, got: " + t.value());
         };
+    }
+
+    private static final MathContext DECIMAL_LITERAL = new MathContext(38, RoundingMode.HALF_EVEN);
+
+    // DynamoDB rounds a literal written with a point or an exponent to 38 digits, and counts the
+    // digits of one written without them.
+    private PVal.Num checkedNumber(PVal.Num number, String literalPath) {
+        if (deferredError != null) {
+            return number;
+        }
+        BigDecimal value = new BigDecimal(number.v());
+        boolean decimal = number.v().chars().anyMatch(c -> c == '.' || c == 'e' || c == 'E');
+        if (decimal && DECIMAL_LITERAL.getPrecision() < value.precision()) {
+            value = value.round(DECIMAL_LITERAL);
+            number = new PVal.Num(value.toString());
+        }
+        String problem = numberLiteralProblem(value);
+        if (problem != null) {
+            defer(problem + " under " + literalPath);
+        }
+        return number;
+    }
+
+    // DynamoDB measures a literal in 32-bit arithmetic, so an exponent near the limit wraps around
+    // and reads as an underflow.
+    private static String numberLiteralProblem(BigDecimal number) {
+        int magnitude = number.precision() - number.scale() + 1;
+        if (127 < magnitude) {
+            return DynamoDbNumberUtils.NUMBER_OVERFLOW;
+        }
+        if (magnitude < -128) {
+            return DynamoDbNumberUtils.NUMBER_UNDERFLOW;
+        }
+        if (38 < number.stripTrailingZeros().precision()) {
+            return DynamoDbNumberUtils.TOO_MANY_DIGITS;
+        }
+        return null;
     }
 
     private PVal parseCollection(Token open, String literalPath) {
@@ -1345,19 +1391,26 @@ public class DynamoDbPartiQLParser {
         }
         consume(TType.RBAG);
         if (members.isEmpty()) {
-            throw validationEx("Empty bags are not supported");
+            defer("Empty bags are not supported");
+            return new PVal.Bag("SS", List.of());
         }
         String memberType = typeCode(members.getFirst());
         boolean uniform = members.stream().allMatch(m -> typeCode(m).equals(memberType));
         if (!uniform || !(memberType.equals("S") || memberType.equals("N"))) {
-            throw validationEx(
-                    "Unsupported data type in Bag. DynamoDB only supports either numbers or strings in bags");
+            defer("Unsupported data type in Bag. DynamoDB only supports either numbers or strings in bags");
+        } else if (deferredError == null) {
+            checkDistinctMembers(memberType, members);
         }
-        requireDistinctMembers(memberType, members);
         return new PVal.Bag(memberType + "S", List.copyOf(members));
     }
 
-    private static void requireDistinctMembers(String memberType, List<PVal> members) {
+    private void defer(String message) {
+        if (deferredError == null) {
+            deferredError = message;
+        }
+    }
+
+    private void checkDistinctMembers(String memberType, List<PVal> members) {
         boolean numbers = memberType.equals("N");
         List<String> texts = members.stream()
                 .map(member -> member instanceof PVal.Num n ? n.v() : ((PVal.Str) member).v())
@@ -1367,7 +1420,7 @@ public class DynamoDbPartiQLParser {
                 .distinct()
                 .count();
         if (distinct < texts.size()) {
-            throw validationEx("One or more parameter values were invalid: Input collection ["
+            defer("One or more parameter values were invalid: Input collection ["
                     + String.join(", ", texts) + "] contains duplicates" + (numbers ? "! under root" : "."));
         }
     }
