@@ -297,10 +297,14 @@ func TestLambdaWeb(t *testing.T) {
 		policy := webInvokePolicy(t, map[string]string{"AWS": "arn:aws:iam::" + account + ":root"}, functionArn)
 		put, err := web.PutResourcePolicy(ctx, &lambdaweb.PutResourcePolicyInput{ResourceArn: aws.String(functionArn), Policy: aws.String(policy)})
 		require.NoError(t, err)
-		assert.Equal(t, policy, aws.ToString(put.Policy))
+		// json.Marshal sorts the keys. Lambda writes them back in its own order.
+		kept := `{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::` + account + `:root"},` +
+			`"Action":"lambda:InvokeWebFunctionEndpoint","Resource":"` + functionArn + `/endpoint/*"}]}`
+		assert.Equal(t, kept, aws.ToString(put.Policy))
 		assert.Len(t, aws.ToString(put.RevisionId), 36)
 		got, err := web.GetResourcePolicy(ctx, &lambdaweb.GetResourcePolicyInput{ResourceArn: aws.String(functionArn)})
 		require.NoError(t, err)
+		assert.Equal(t, kept, aws.ToString(got.Policy))
 		assert.Equal(t, aws.ToString(put.RevisionId), aws.ToString(got.RevisionId))
 		_, err = web.DeleteResourcePolicy(ctx, &lambdaweb.DeleteResourcePolicyInput{ResourceArn: aws.String(functionArn), RevisionId: put.RevisionId})
 		require.NoError(t, err)
