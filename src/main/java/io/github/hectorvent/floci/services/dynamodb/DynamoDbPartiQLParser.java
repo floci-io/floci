@@ -857,8 +857,8 @@ public class DynamoDbPartiQLParser {
         };
     }
 
-    private static void requireOrdered(String op, PVal val) {
-        if (!ORDERED_TYPES.contains(typeCode(val))) {
+    private void requireOrdered(String op, PVal val) {
+        if (!literalErrorPending() && !ORDERED_TYPES.contains(typeCode(val))) {
             throw incorrectOperandType(op, val);
         }
     }
@@ -1139,7 +1139,10 @@ public class DynamoDbPartiQLParser {
     private static final List<String> ATTRIBUTE_TYPE_NAMES =
             List.of("N", "BS", "L", "B", "NULL", "M", "S", "SS", "NS", "BOOL");
 
-    private static void requireAttributeTypeName(PVal type) {
+    private void requireAttributeTypeName(PVal type) {
+        if (literalErrorPending()) {
+            return;
+        }
         if (!(type instanceof PVal.Str name)) {
             throw incorrectOperandType("attribute_type", type);
         }
@@ -1177,8 +1180,8 @@ public class DynamoDbPartiQLParser {
         return new Assign(path, left, null, null);
     }
 
-    private static void requireNumberLiteral(String op, Operand operand) {
-        if (operand instanceof Operand.Value value && !(value.val() instanceof PVal.Num)) {
+    private void requireNumberLiteral(String op, Operand operand) {
+        if (!literalErrorPending() && operand instanceof Operand.Value value && !(value.val() instanceof PVal.Num)) {
             throw incorrectOperandType(op, value.val());
         }
     }
@@ -1188,14 +1191,14 @@ public class DynamoDbPartiQLParser {
         String name = function.value().toUpperCase(Locale.ROOT);
         consume(TType.LPAREN);
         Token firstArgument = peek();
-        if (!parsePath().equals(target)) {
+        if (!parsePath().equals(target) && !literalErrorPending()) {
             throw validationEx("The first argument to " + name + " must equal the assignment value at "
                     + position(function));
         }
         consume(TType.COMMA);
         PVal bag = parseValue();
         consume(TType.RPAREN);
-        if (!SET_TYPES.contains(typeCode(bag))) {
+        if (!SET_TYPES.contains(typeCode(bag)) && !literalErrorPending()) {
             throw validationEx("The second argument to " + name + " must be a value with type SET at "
                     + position(firstArgument));
         }
@@ -1290,6 +1293,7 @@ public class DynamoDbPartiQLParser {
             requireTermStart();
             Token t = advance();
             String nested = path == null ? "root" : path;
+            OpenCollection parent = open.peek();
             PVal value = switch (t.type()) {
                 case STRING   -> new PVal.Str(t.value());
                 case NUMBER   -> checkedNumber(new PVal.Num(t.value()), nested);
@@ -1309,6 +1313,9 @@ public class DynamoDbPartiQLParser {
                 case PLUS, MINUS -> checkedNumber(parseSignedNumber(t), nested);
                 default -> throw validationEx("Expected value literal or ?, got: " + t.value());
             };
+            if (parent != null && parent.close == TType.RBAG) {
+                checkBagMember(parent, value);
+            }
             while (true) {
                 OpenCollection top = open.peek();
                 if (top == null) {
@@ -1338,6 +1345,8 @@ public class DynamoDbPartiQLParser {
         private final List<PVal> items = new ArrayList<>();
         private final Map<String, PVal> fields = new LinkedHashMap<>();
         private String key;
+        private String memberType;
+        private boolean invalid;
 
         OpenCollection(TType open, String path) {
             this.close = switch (open) {
@@ -1374,7 +1383,7 @@ public class DynamoDbPartiQLParser {
         return switch (collection.close) {
             case RBRACKET -> new PVal.ListOf(List.copyOf(collection.items));
             case RBRACE -> new PVal.Tuple(collection.fields);
-            default -> bagOf(collection.items);
+            default -> closedBag(collection);
         };
     }
 
@@ -1435,19 +1444,38 @@ public class DynamoDbPartiQLParser {
         return new PVal.Num(number.v().startsWith("-") ? number.v().substring(1) : "-" + number.v());
     }
 
-    private PVal.Bag bagOf(List<PVal> members) {
-        if (members.isEmpty()) {
-            defer("Empty bags are not supported");
-            return new PVal.Bag("SS", List.of());
+    // Stands in for a bag DynamoDB refuses, so the statement can be read to its end.
+    private static final PVal.Bag REFUSED_BAG = new PVal.Bag("SS", List.of());
+
+    // A collection member is refused before DynamoDB looks inside it.
+    private void checkBagMember(OpenCollection bag, PVal member) {
+        String type = member == null ? null : typeCode(member);
+        if (bag.items.isEmpty() && ("S".equals(type) || "N".equals(type))) {
+            bag.memberType = type;
         }
-        String memberType = typeCode(members.getFirst());
-        boolean uniform = members.stream().allMatch(m -> typeCode(m).equals(memberType));
-        if (!uniform || !(memberType.equals("S") || memberType.equals("N"))) {
+        if (type == null || !type.equals(bag.memberType)) {
+            bag.invalid = true;
             defer("Unsupported data type in Bag. DynamoDB only supports either numbers or strings in bags");
-        } else if (deferredError == null) {
-            checkDistinctMembers(memberType, members);
         }
-        return new PVal.Bag(memberType + "S", List.copyOf(members));
+    }
+
+    private PVal closedBag(OpenCollection bag) {
+        if (bag.items.isEmpty()) {
+            defer("Empty bags are not supported");
+            return REFUSED_BAG;
+        }
+        if (bag.invalid) {
+            return REFUSED_BAG;
+        }
+        if (!literalErrorPending()) {
+            checkDistinctMembers(bag.memberType, bag.items);
+        }
+        return new PVal.Bag(bag.memberType + "S", List.copyOf(bag.items));
+    }
+
+    // DynamoDB checks operand types only after every literal converts, so a literal error wins.
+    private boolean literalErrorPending() {
+        return deferredError != null;
     }
 
     private void defer(String message) {

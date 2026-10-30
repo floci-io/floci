@@ -472,6 +472,9 @@ class DynamoDbPartiQLParserTest {
             SELECT * FROM "t" WHERE a = <<1, 1>> AND pk = 1e126                       | DUPLICATES
             UPDATE "t" SET a = 1e126 WHERE pk = 1e-131                                | UNDERFLOW under root
             UPDATE "t" SET a = <<1, 1>> WHERE pk = 1e126                              | OVERFLOW under root
+            UPDATE "t" SET a = set_add(a, <<true>>) WHERE pk = 1e126                  | OVERFLOW under root
+            UPDATE "t" SET a = set_add(a, <<true>>) WHERE pk = 1 AND                  | MISSING_RIGHT_HAND_SIDE
+            SELECT * FROM "t" WHERE pk = 1e126 AND a < [1]                            | OVERFLOW under root
             SELECT * FROM "t" WHERE pk = 1e126 AND a = 1 AND                          | MISSING_RIGHT_HAND_SIDE
             SELECT * FROM "t" WHERE a = <<1, 1>> AND                                  | MISSING_RIGHT_HAND_SIDE
             """)
@@ -503,6 +506,8 @@ class DynamoDbPartiQLParserTest {
                 refusal("UPDATE \"t\" SET a = " + deep + " WHERE pk = 1e126"));
         assertEquals("Nesting Levels have exceeded supported limits under root" + "[0]".repeat(32),
                 refusal("SELECT * FROM \"t\" WHERE a = " + "[".repeat(100_000) + "1" + "]".repeat(100_000)));
+        assertTrue(refusal("SELECT * FROM \"t\" WHERE a = " + "<<".repeat(100_000) + "1" + ">>".repeat(100_000))
+                .startsWith("Unsupported data type in Bag."));
     }
 
     private static String refusal(String statement) {
