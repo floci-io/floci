@@ -446,7 +446,6 @@ public class DynamoDbPartiQLParser {
     private final List<JsonNode> parameters;
     private int pos = 0;
     private int paramIdx = 0;
-    private int literalDepth = 0;
     // DynamoDB reports these only once the whole statement parses, and the first one in the statement wins.
     private String deferredError;
 
@@ -595,16 +594,14 @@ public class DynamoDbPartiQLParser {
         consume(TType.VALUE);
         requireTermStart();
         consume(TType.LBRACE);
-        return new Stmt.Insert(table, parseTupleFields(null));
+        return new Stmt.Insert(table, parseTupleFields());
     }
 
-    private Map<String, PVal> parseTupleFields(String literalPath) {
+    private Map<String, PVal> parseTupleFields() {
         Map<String, PVal> fields = new LinkedHashMap<>();
         while (peek().type() != TType.RBRACE) {
-            requireTermStart();
-            String key = expectStringOrIdent();
-            consume(TType.COLON);
-            fields.put(key, parseValue(literalPath == null ? null : literalPath + "." + key));
+            String key = parseFieldName();
+            fields.put(key, parseValue(null));
             if (peek().type() == TType.COMMA) {
                 advance();
             }
@@ -1281,31 +1278,111 @@ public class DynamoDbPartiQLParser {
         return parseValue(null);
     }
 
+    // Reads a literal with a stack of its open collections instead of recursion, so a deep literal
+    // cannot exhaust the Java stack.
     private PVal parseValue(String literalPath) {
-        if (literalDepth == DynamoDbAttributeValueValidator.MAX_NESTING_LEVELS) {
-            throw validationEx(deferredError != null
-                    ? deferredError
-                    : DynamoDbAttributeValueValidator.NESTING_EXCEEDED + " under " + literalPath);
-        }
-        requireTermStart();
-        Token t = advance();
-        String nested = literalPath == null ? "root" : literalPath;
-        return switch (t.type()) {
-            case STRING   -> new PVal.Str(t.value());
-            case NUMBER   -> checkedNumber(new PVal.Num(t.value()), nested);
-            case BOOL     -> new PVal.Bool(Boolean.parseBoolean(t.value()));
-            case NULL     -> new PVal.Null();
-            case QUESTION -> {
-                if (literalPath != null) {
-                    defer("Unsupported data type: Parameter under key " + literalPath + " at "
-                            + position(t.start(), 1));
-                }
-                yield resolveParam();
+        Deque<OpenCollection> open = new ArrayDeque<>();
+        String path = literalPath;
+        while (true) {
+            if (open.size() == DynamoDbAttributeValueValidator.MAX_NESTING_LEVELS) {
+                defer(DynamoDbAttributeValueValidator.NESTING_EXCEEDED + " under " + path);
             }
-            case LBRACKET, LBRACE, LBAG -> parseCollection(t, nested);
-            case PLUS, MINUS -> checkedNumber(parseSignedNumber(t), nested);
-            default -> throw validationEx("Expected value literal or ?, got: " + t.value());
+            requireTermStart();
+            Token t = advance();
+            String nested = path == null ? "root" : path;
+            PVal value = switch (t.type()) {
+                case STRING   -> new PVal.Str(t.value());
+                case NUMBER   -> checkedNumber(new PVal.Num(t.value()), nested);
+                case BOOL     -> new PVal.Bool(Boolean.parseBoolean(t.value()));
+                case NULL     -> new PVal.Null();
+                case QUESTION -> {
+                    if (path != null) {
+                        defer("Unsupported data type: Parameter under key " + path + " at "
+                                + position(t.start(), 1));
+                    }
+                    yield resolveParam();
+                }
+                case LBRACKET, LBRACE, LBAG -> {
+                    open.push(new OpenCollection(t.type(), nested));
+                    yield null;
+                }
+                case PLUS, MINUS -> checkedNumber(parseSignedNumber(t), nested);
+                default -> throw validationEx("Expected value literal or ?, got: " + t.value());
+            };
+            while (true) {
+                OpenCollection top = open.peek();
+                if (top == null) {
+                    return value;
+                }
+                if (value != null) {
+                    top.add(value);
+                    if (peek().type() == TType.COMMA) {
+                        advance();
+                    }
+                }
+                if (peek().type() == top.close) {
+                    advance();
+                    open.pop();
+                    value = closed(top);
+                    continue;
+                }
+                path = nextPath(top, open.size());
+                break;
+            }
+        }
+    }
+
+    private static final class OpenCollection {
+        private final TType close;
+        private final String path;
+        private final List<PVal> items = new ArrayList<>();
+        private final Map<String, PVal> fields = new LinkedHashMap<>();
+        private String key;
+
+        OpenCollection(TType open, String path) {
+            this.close = switch (open) {
+                case LBRACKET -> TType.RBRACKET;
+                case LBRACE -> TType.RBRACE;
+                default -> TType.RBAG;
+            };
+            this.path = path;
+        }
+
+        void add(PVal value) {
+            if (close == TType.RBRACE) {
+                fields.put(key, value);
+            } else {
+                items.add(value);
+            }
+        }
+    }
+
+    // No message names a path below the deepest level DynamoDB allows, so paths stop growing there.
+    private String nextPath(OpenCollection collection, int depth) {
+        String step = switch (collection.close) {
+            case RBRACE -> {
+                collection.key = parseFieldName();
+                yield "." + collection.key;
+            }
+            case RBRACKET -> "[" + collection.items.size() + "]";
+            default -> "";
         };
+        return depth > DynamoDbAttributeValueValidator.MAX_NESTING_LEVELS ? collection.path : collection.path + step;
+    }
+
+    private PVal closed(OpenCollection collection) {
+        return switch (collection.close) {
+            case RBRACKET -> new PVal.ListOf(List.copyOf(collection.items));
+            case RBRACE -> new PVal.Tuple(collection.fields);
+            default -> bagOf(collection.items);
+        };
+    }
+
+    private String parseFieldName() {
+        requireTermStart();
+        String key = expectStringOrIdent();
+        consume(TType.COLON);
+        return key;
     }
 
     private static final MathContext DECIMAL_LITERAL = new MathContext(38, RoundingMode.HALF_EVEN);
@@ -1345,17 +1422,6 @@ public class DynamoDbPartiQLParser {
         return null;
     }
 
-    private PVal parseCollection(Token open, String literalPath) {
-        literalDepth++;
-        PVal collection = switch (open.type()) {
-            case LBRACKET -> new PVal.ListOf(parseListItems(literalPath));
-            case LBRACE -> new PVal.Tuple(parseTupleFields(literalPath));
-            default -> parseBag(literalPath);
-        };
-        literalDepth--;
-        return collection;
-    }
-
     private PVal.Num parseSignedNumber(Token sign) {
         Token operand = advance();
         PVal.Num number = switch (operand.type()) {
@@ -1369,27 +1435,7 @@ public class DynamoDbPartiQLParser {
         return new PVal.Num(number.v().startsWith("-") ? number.v().substring(1) : "-" + number.v());
     }
 
-    private List<PVal> parseListItems(String literalPath) {
-        List<PVal> items = new ArrayList<>();
-        while (peek().type() != TType.RBRACKET) {
-            items.add(parseValue(literalPath + "[" + items.size() + "]"));
-            if (peek().type() == TType.COMMA) {
-                advance();
-            }
-        }
-        consume(TType.RBRACKET);
-        return List.copyOf(items);
-    }
-
-    private PVal.Bag parseBag(String literalPath) {
-        List<PVal> members = new ArrayList<>();
-        while (peek().type() != TType.RBAG) {
-            members.add(parseValue(literalPath));
-            if (peek().type() == TType.COMMA) {
-                advance();
-            }
-        }
-        consume(TType.RBAG);
+    private PVal.Bag bagOf(List<PVal> members) {
         if (members.isEmpty()) {
             defer("Empty bags are not supported");
             return new PVal.Bag("SS", List.of());

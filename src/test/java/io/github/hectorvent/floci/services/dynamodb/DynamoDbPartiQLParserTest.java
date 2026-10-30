@@ -493,6 +493,22 @@ class DynamoDbPartiQLParserTest {
         assertEquals(expected, e.getMessage());
     }
 
+    @Test
+    void checksTheDepthOfALiteralOnceTheStatementParses() {
+        String deep = "[".repeat(40) + "1" + "]".repeat(40);
+
+        assertEquals("Statement wasn't well formed, can't be processed: Unexpected token after expression",
+                refusal("INSERT INTO \"t\" VALUE {'pk': 1, 'a': " + deep + "} foo"));
+        assertEquals("Number overflow. Attempting to store a number with magnitude larger than supported range under root",
+                refusal("UPDATE \"t\" SET a = " + deep + " WHERE pk = 1e126"));
+        assertEquals("Nesting Levels have exceeded supported limits under root" + "[0]".repeat(32),
+                refusal("SELECT * FROM \"t\" WHERE a = " + "[".repeat(100_000) + "1" + "]".repeat(100_000)));
+    }
+
+    private static String refusal(String statement) {
+        return assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, List.of())).getMessage();
+    }
+
     @ParameterizedTest
     @CsvSource({
             "0.123456789123456789123456789123456789125,  0.12345678912345678912345678912345678912",
