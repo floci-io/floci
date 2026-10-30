@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.model.InstanceConnectEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
@@ -31,6 +33,10 @@ class Ec2InstanceConnectEndpointServiceTest {
     private static final String REGION = "us-east-1";
 
     static Ec2Service newService() {
+        return newService(new InMemoryStorageFactory("000000000000"));
+    }
+
+    static Ec2Service newService(InMemoryStorageFactory storage) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.Ec2ServiceConfig ec2 = mock(EmulatorConfig.Ec2ServiceConfig.class);
@@ -40,7 +46,7 @@ class Ec2InstanceConnectEndpointServiceTest {
         when(ec2.mock()).thenReturn(true);
         return new Ec2Service(config, mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
-                new InMemoryStorageFactory("000000000000"));
+                storage);
     }
 
     @Test
@@ -138,6 +144,28 @@ class Ec2InstanceConnectEndpointServiceTest {
         assertEquals("create-complete", again.getState());
         assertEquals(1, again.getSecurityGroupIds().size());
         assertEquals(List.of("Name"), again.getTags().stream().map(Tag::getKey).toList());
+    }
+
+    @Test
+    void describeListsWhatTheClientTokenReplaySees() {
+        InMemoryStorageFactory storage = new InMemoryStorageFactory("000000000000");
+        Ec2Service service = newService(storage);
+        String vpcId = service.createVpc(REGION, "10.77.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.77.1.0/24", "us-east-1a").getSubnetId();
+        String id = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null, List.of(),
+                "token-77").getInstanceConnectEndpointId();
+        // Both scans pick a region's endpoints by store key; a record whose region field is unset
+        // (written before the field existed, say) is still in the region its key names.
+        StorageBackend<String, InstanceConnectEndpoint> store = storage.create("ec2",
+                "ec2-instance-connect-endpoints.json", new TypeReference<Map<String, InstanceConnectEndpoint>>() {});
+        InstanceConnectEndpoint stored = store.get(REGION + "::" + id).orElseThrow();
+        stored.setRegion(null);
+        store.put(REGION + "::" + id, stored);
+
+        assertEquals(id, service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null, List.of(),
+                "token-77").getInstanceConnectEndpointId());
+        assertEquals(List.of(id), service.describeInstanceConnectEndpoints(REGION, List.of(), Map.of()).stream()
+                .map(InstanceConnectEndpoint::getInstanceConnectEndpointId).toList());
     }
 
     @Test

@@ -12667,8 +12667,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         for (String id : ids) {
             requireInstanceConnectEndpoint(region, id);
         }
-        return instanceConnectEndpoints.scan(k -> true).stream()
-                .filter(endpoint -> region.equals(endpoint.getRegion()))
+        return instanceConnectEndpoints.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(endpoint -> ids.isEmpty() || ids.contains(endpoint.getInstanceConnectEndpointId()))
                 .map(this::withTags)
                 .filter(endpoint -> filters == null || filters.stream()
