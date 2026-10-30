@@ -146,23 +146,6 @@ public class EventBridgeInvoker {
     EventBridgeInvoker(LambdaService lambdaService,
                        SqsService sqsService,
                        SnsService snsService,
-                       BatchService batchService,
-                       FirehoseService firehoseService,
-                       EventBridgeService eventBridgeService,
-                       EcsService ecsService,
-                       EcsJsonHandler ecsJsonHandler,
-                       StepFunctionsService stepFunctionsService,
-                       RegionResolver regionResolver,
-                       ObjectMapper objectMapper,
-                       EmulatorConfig config,
-                       HttpClient httpClient) {
-        this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService, ecsService,
-                ecsJsonHandler, stepFunctionsService, null, null, regionResolver, objectMapper, config, httpClient);
-    }
-
-    EventBridgeInvoker(LambdaService lambdaService,
-                       SqsService sqsService,
-                       SnsService snsService,
                        ObjectMapper objectMapper,
                        EmulatorConfig config) {
         this(lambdaService, sqsService, snsService,
