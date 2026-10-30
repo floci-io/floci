@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.emrserverless;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.exception.InternalServerErrorException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
@@ -15,29 +16,45 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.lambda.launcher.BootstrapProcess;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.testing.MutableClock;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import java.io.ByteArrayInputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.StringReader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -213,6 +230,170 @@ class EmrServerlessSparkRunnerTest {
                         List.of("AWS_REGION=eu-west-1", "AWS_ENDPOINT_URL=http://floci:4566"), jobs));
         assertEquals(List.of("AWS_REGION=eu-west-1"),
                 EmrServerlessSparkRunner.environment(List.of("AWS_REGION=eu-west-1"), Map.of()));
+    }
+
+    @Test
+    void anArchiveInS3IsPutInTheContainerAndUnpackedIntoTheWorkingDirectoryBeforeTheDriverStarts() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        EmrServerlessSparkRunner runner = runner(builder);
+        CopyArchiveToContainerCmd copy = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(docker.copyArchiveToContainerCmd("driver")).thenReturn(copy);
+        Map<String, String> copied = copiedIn(copy);
+        inS3("bucket", "envs/pyspark_venv.tar.gz", "a virtual environment");
+        inS3("bucket", "libs/deps.zip", "some libraries");
+
+        runner.run(archiveJob(List.of("s3://bucket/envs/pyspark_venv.tar.gz#environment", "s3a://bucket/libs/deps.zip",
+                "file:///opt/local.tar.gz#local")), progress);
+
+        // The guide's virtual environment by the name after its "#", one without a "#" by its file's; Spark alone
+        // unpacks one outside S3.
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.subList(0, 2).equals(List.of("/bin/bash", "-c"))
+                && entrypoint.get(2).contains("tar -xf") && entrypoint.subList(3, entrypoint.size()).equals(List.of(
+                        "floci", "/tmp/floci-archives/1/pyspark_venv.tar.gz", "environment",
+                        "/tmp/floci-archives/2/deps.zip", "deps.zip", "--", "/usr/lib/spark/bin/spark-submit"))));
+        verify(spec).withCmd(argThat((List<String> cmd) -> "s3://bucket/jobs/app.jar".equals(cmd.getLast())));
+        // Each streamed into the created container, extracted at its root.
+        assertEquals(Map.of("tmp/floci-archives/1/pyspark_venv.tar.gz", "a virtual environment",
+                "tmp/floci-archives/2/deps.zip", "some libraries"), copied);
+        InOrder order = inOrder(lifecycle, copy);
+        order.verify(lifecycle).create(any());
+        order.verify(copy, times(2)).withRemotePath("/");
+        order.verify(lifecycle).startCreated(eq("driver"), any());
+    }
+
+    @Test
+    void anArchiveThatCannotBeReadFailsTheRunNamingItAndNeverStartsItsDriver() {
+        EmrServerlessSparkRunner runner = runner();
+        when(s3.headObject("bucket", "envs/missing.tar.gz"))
+                .thenThrow(new AwsException("NoSuchKey", "The specified key does not exist.", 404));
+
+        SparkJobRunner.Outcome outcome = runner.run(
+                archiveJob(List.of("s3://bucket/envs/missing.tar.gz#environment")), progress);
+
+        assertEquals("Could not read the archive s3://bucket/envs/missing.tar.gz: The specified key does not exist.",
+                outcome.failure());
+        verify(lifecycle, never()).startCreated(anyString(), any());
+        verify(lifecycle).stopAndRemove("driver", null, 0);
+    }
+
+    @Test
+    void aRunStoppedWhileItsImageIsPulledPutsInNoArchiveAndNeverStartsItsDriver() {
+        EmrServerlessSparkRunner runner = runner();
+        SparkJobRunner.Job job = archiveJob(List.of("s3://bucket/envs/pyspark_venv.tar.gz#environment"));
+        inS3("bucket", "envs/pyspark_venv.tar.gz", "a virtual environment");
+        when(lifecycle.create(any())).thenAnswer(pulling -> {
+            runner.stop(job.runId());
+            return "driver";
+        });
+
+        SparkJobRunner.Outcome outcome = runner.run(job, progress);
+
+        assertTrue(outcome.stopped());
+        verify(s3, never()).openObject(anyString(), anyString(), any());
+        verify(docker, never()).copyArchiveToContainerCmd(anyString());
+        verify(lifecycle, never()).startCreated(anyString(), any());
+        verify(lifecycle).stopAndRemove("driver", null, 0);
+    }
+
+    @Test
+    void aCancelWhileAnArchiveStreamsInEndsItsCopyAndPutsInNoOther() {
+        EmrServerlessSparkRunner runner = runner();
+        inS3("bucket", "libs/deps.zip", "some libraries");
+        // A 1 GiB archive, the run cancelled once its first bytes are read.
+        long size = 1L << 30;
+        AtomicLong served = new AtomicLong();
+        InputStream body = new InputStream() {
+            @Override
+            public int read() {
+                throw new UnsupportedOperationException();
+            }
+
+            @Override
+            public int read(byte[] buffer, int offset, int length) {
+                int read = (int) Math.min(length, size - served.get());
+                if (read == 0) {
+                    return -1;
+                }
+                served.addAndGet(read);
+                return read;
+            }
+        };
+        when(s3.openObject("bucket", "envs/large.tar.gz", null)).thenReturn(new S3Service.ObjectRead(
+                new S3Object("bucket", "envs/large.tar.gz", size, "application/gzip", null), body));
+        when(progress.cancelled()).thenAnswer(look -> served.get() > 0);
+        CopyArchiveToContainerCmd copy = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(docker.copyArchiveToContainerCmd("driver")).thenReturn(copy);
+        when(copy.withTarInputStream(any())).thenAnswer(streaming -> {
+            // Read to its end, as the daemon does.
+            streaming.<InputStream>getArgument(0).transferTo(OutputStream.nullOutputStream());
+            return copy;
+        });
+
+        SparkJobRunner.Outcome outcome = runner.run(
+                archiveJob(List.of("s3://bucket/envs/large.tar.gz#environment", "s3://bucket/libs/deps.zip")),
+                progress);
+
+        assertTrue(outcome.stopped());
+        assertTrue(served.get() < 16L << 20, served.get() + " bytes were read");
+        verify(s3, never()).openObject("bucket", "libs/deps.zip", null);
+        verify(lifecycle, never()).startCreated(anyString(), any());
+        verify(lifecycle).stopAndRemove("driver", null, 0);
+    }
+
+    @Test
+    void aJobWithoutArchivesInS3StartsSparkSubmitItself() {
+        assertEquals(List.of("/usr/lib/spark/bin/spark-submit"), EmrServerlessSparkRunner.unpackingFirst(
+                EmrServerlessSparkRunner.archives(archiveJob(List.of("https://example.com/env.tar.gz#environment"))),
+                List.of("/usr/lib/spark/bin/spark-submit")));
+    }
+
+    @Test
+    void theWrapperUnpacksEachArchiveAsSparkDoesThenRunsWhatFollows(@TempDir Path directory) throws Exception {
+        Path environment = directory.resolve("pyspark_venv.TAR.GZ");
+        try (TarArchiveOutputStream tar = new TarArchiveOutputStream(
+                new GZIPOutputStream(Files.newOutputStream(environment)))) {
+            byte[] python = bytes("#!/bin/sh\necho python\n");
+            TarArchiveEntry entry = new TarArchiveEntry("bin/python");
+            entry.setSize(python.length);
+            entry.setMode(0755);
+            tar.putArchiveEntry(entry);
+            tar.write(python);
+            tar.closeArchiveEntry();
+        }
+        Path libraries = directory.resolve("deps.zip");
+        try (ZipOutputStream zip = new ZipOutputStream(Files.newOutputStream(libraries))) {
+            zip.putNextEntry(new ZipEntry("lib/helpers.py"));
+            zip.write(bytes("helpers"));
+            zip.closeEntry();
+        }
+        Path notes = directory.resolve("notes.txt");
+        Files.writeString(notes, "notes");
+        Path workingDirectory = Files.createDirectory(directory.resolve("home"));
+        String script = "./environment/bin/python; cat deps.zip/lib/helpers.py readme; echo \" $1\"";
+        List<String> entrypoint = EmrServerlessSparkRunner.unpackingFirst(List.of(
+                archive(environment, "environment"), archive(libraries, "deps.zip"), archive(notes, "readme")),
+                List.of("sh", "-c", script, "sh"));
+        List<String> command = new ArrayList<>(entrypoint);
+        command.add("argument");
+
+        BootstrapProcess.Result ended = BootstrapProcess.run(new ProcessBuilder(command).directory(
+                workingDirectory.toFile()));
+
+        assertEquals(new BootstrapProcess.Result(0, "python\nhelpersnotes argument\n"), ended);
+    }
+
+    @Test
+    void anArchiveThatDoesNotUnpackStopsTheDriverFromStarting(@TempDir Path directory) throws Exception {
+        Path broken = Files.writeString(directory.resolve("broken.tar.gz"), "not an archive");
+        List<String> command = EmrServerlessSparkRunner.unpackingFirst(List.of(archive(broken, "environment")),
+                List.of("echo", "started"));
+
+        BootstrapProcess.Result ended = BootstrapProcess.run(new ProcessBuilder(command).directory(directory.toFile()));
+
+        assertTrue(ended.exit() != 0);
+        assertFalse(ended.output().contains("started"));
     }
 
     @Test
@@ -583,6 +764,34 @@ class EmrServerlessSparkRunnerTest {
         }
     }
 
+    // What each tar copied into the container holds, by entry, read as the daemon reads it.
+    private static Map<String, String> copiedIn(CopyArchiveToContainerCmd copy) {
+        Map<String, String> copied = new LinkedHashMap<>();
+        when(copy.withTarInputStream(any())).thenAnswer(streaming -> {
+            InputStream stream = streaming.getArgument(0);
+            TarArchiveInputStream tar = new TarArchiveInputStream(stream);
+            for (TarArchiveEntry entry = tar.getNextEntry(); entry != null; entry = tar.getNextEntry()) {
+                copied.put(entry.getName(), new String(tar.readAllBytes(), StandardCharsets.UTF_8));
+            }
+            // Read to its end, as the daemon does, so the writer finishes; the copy closes the stream.
+            stream.transferTo(OutputStream.nullOutputStream());
+            return copy;
+        });
+        return copied;
+    }
+
+    // An object in Floci's S3, which each read opens afresh.
+    private void inS3(String bucket, String key, String content) {
+        S3Object object = new S3Object(bucket, key, bytes(content), "application/octet-stream");
+        when(s3.openObject(bucket, key, null))
+                .thenAnswer(read -> new S3Service.ObjectRead(object, new ByteArrayInputStream(object.getData())));
+    }
+
+    // An archive at file, a path on this host, to be unpacked into directory.
+    private static EmrServerlessSparkRunner.Archive archive(Path file, String directory) {
+        return new EmrServerlessSparkRunner.Archive(null, null, file.toString(), directory);
+    }
+
     private static byte[] bytes(String text) {
         return text.getBytes(StandardCharsets.UTF_8);
     }
@@ -626,18 +835,24 @@ class EmrServerlessSparkRunnerTest {
                                           SparkJobRunner.CloudWatchLogs cloudWatchLogs) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 imageTemplate, null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults,
-                application, null, timeout, logFolder, cloudWatchLogs, Map.of());
+                application, null, timeout, logFolder, cloudWatchLogs, Map.of(), List.of());
     }
 
     private static SparkJobRunner.Job customImageJob(String customImage) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 null, customImage, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
-                List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of());
+                List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), List.of());
+    }
+
+    private static SparkJobRunner.Job archiveJob(List<String> archives) {
+        return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
+                null, null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
+                List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), archives);
     }
 
     private static SparkJobRunner.Job commandJob(List<String> command, Map<String, String> sparkDefaults) {
         return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults, List.of(), command,
-                Duration.ZERO, null, null, Map.of("PYSPARK_PYTHON", "/usr/bin/python3.11"));
+                Duration.ZERO, null, null, Map.of("PYSPARK_PYTHON", "/usr/bin/python3.11"), List.of());
     }
 }

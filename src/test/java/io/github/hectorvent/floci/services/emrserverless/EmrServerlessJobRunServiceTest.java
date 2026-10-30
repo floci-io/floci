@@ -264,6 +264,7 @@ class EmrServerlessJobRunServiceTest {
         assertNull(job.logFolder());
         assertNull(job.cloudWatchLogs());
         assertEquals(Map.of(), job.environment());
+        assertEquals(List.of(), job.archives());
     }
 
     @Test
@@ -664,6 +665,71 @@ class EmrServerlessJobRunServiceTest {
         assertEquals(List.of("--conf", "spark.executor.cores=2", "--py-files", "s3://bucket/jobs/lib.zip",
                 "s3://bucket/jobs/report.py", "s3://bucket/input/", "s3://bucket/output/"),
                 EmrServerlessJobRunService.application(sparkSubmit));
+    }
+
+    @Test
+    void aRunsDriverEnvAndArchivesAreItsSparkPropertiesTheSubmitParametersWinning() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner);
+        RuntimeConfiguration defaults = new RuntimeConfiguration();
+        defaults.setMember("classification", "spark-defaults");
+        defaults.setMember("properties", Map.of(
+                "spark.emr-serverless.driverEnv.JAVA_HOME", "/usr/lib/jvm/java-17-amazon-corretto.x86_64/",
+                "spark.archives", "s3://bucket/envs/previous.tar.gz#environment"));
+        CreateApplicationRequest create = applicationRequest("python", "emr-7.5.0", "SPARK");
+        create.setRuntimeConfiguration(List.of(defaults));
+        String python = applications.createApplication(create).getApplicationId();
+        // The user guide's "Building a Python virtual environment".
+        StartJobRunRequest request = request(null, null);
+        request.getJobDriver().getSparkSubmit().setSparkSubmitParameters(String.join(" ",
+                "--conf spark.archives=s3://bucket/envs/pyspark_venv.tar.gz#environment",
+                "--conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python",
+                "--conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python",
+                "--conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python"));
+
+        service.startJobRun(python, request);
+        runNext();
+
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(Map.of("JAVA_HOME", "/usr/lib/jvm/java-17-amazon-corretto.x86_64/",
+                "PYSPARK_DRIVER_PYTHON", "./environment/bin/python", "PYSPARK_PYTHON", "./environment/bin/python"),
+                job.environment());
+        assertEquals(List.of("s3://bucket/envs/pyspark_venv.tar.gz#environment"), job.archives());
+    }
+
+    @Test
+    void sparkPropertiesTakeEachFormOfConfASubmitGivesALaterOneWinning() {
+        JobDriver.SparkSubmit sparkSubmit = new JobDriver.SparkSubmit();
+        sparkSubmit.setSparkSubmitParameters("--conf spark.archives=s3://bucket/a.zip "
+                + "--conf='spark.archives= s3://bucket/b.tar.gz#b ,, s3://bucket/c.tgz' "
+                + "-c spark.emr-serverless.driverEnv.A=1=2 --conf spark.emr-serverless.driverEnv.=x "
+                + "--conf no-value --name spark.archives=ignored --conf");
+
+        Map<String, String> properties = EmrServerlessJobRunService.sparkProperties(
+                Map.of("spark.executor.cores", "4"), sparkSubmit);
+
+        assertEquals(Map.of("spark.executor.cores", "4",
+                "spark.archives", " s3://bucket/b.tar.gz#b ,, s3://bucket/c.tgz",
+                "spark.emr-serverless.driverEnv.A", "1=2", "spark.emr-serverless.driverEnv.", "x"), properties);
+        assertEquals(List.of("s3://bucket/b.tar.gz#b", "s3://bucket/c.tgz"),
+                EmrServerlessJobRunService.archives(properties));
+        assertEquals(Map.of("A", "1=2"), EmrServerlessJobRunService.driverEnvironment(properties));
+    }
+
+    @Test
+    void theLastArchivesOptionIsSparkArchivesWinningOverASettingOfItWhereverThatComes() {
+        JobDriver.SparkSubmit sparkSubmit = new JobDriver.SparkSubmit();
+        sparkSubmit.setSparkSubmitParameters("--archives s3://bucket/first.zip "
+                + "--archives=s3://bucket/envs/pyspark_venv.tar.gz#environment "
+                + "--conf spark.archives=s3://bucket/conf.zip");
+
+        Map<String, String> properties = EmrServerlessJobRunService.sparkProperties(
+                Map.of("spark.archives", "s3://bucket/defaults.zip"), sparkSubmit);
+
+        assertEquals(Map.of("spark.archives", "s3://bucket/envs/pyspark_venv.tar.gz#environment"), properties);
+        sparkSubmit.setSparkSubmitParameters("--conf spark.archives=s3://bucket/conf.zip --archives");
+        assertEquals(Map.of("spark.archives", "s3://bucket/conf.zip"),
+                EmrServerlessJobRunService.sparkProperties(Map.of(), sparkSubmit));
     }
 
     private String applicationWithSparkDefaults(String releaseLabel) {

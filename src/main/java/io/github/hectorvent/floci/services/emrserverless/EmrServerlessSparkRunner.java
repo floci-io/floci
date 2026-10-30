@@ -7,6 +7,7 @@ import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.S3Uri;
@@ -17,12 +18,15 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.core.common.docker.RetryingTarCopier;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayInputStream;
@@ -30,6 +34,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -39,6 +44,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import java.util.zip.GZIPOutputStream;
 
 /**
@@ -48,7 +54,8 @@ import java.util.zip.GZIPOutputStream;
  * in local mode: the container holds the driver and its executors. The container reaches Floci as the
  * other containers Floci launches do, with the run's execution role as its credentials, and S3A, which
  * takes {@code s3://} on every release, is pointed at Floci's S3. With TLS on, every JVM in the container
- * trusts Floci's CA, through the Java trust store copied in before it starts. The driver's output goes to
+ * trusts Floci's CA, through the Java trust store copied in before it starts, and the run's archives in S3
+ * are unpacked into its working directory before the driver starts. The driver's output goes to
  * Floci's log and, while it runs, to the run's CloudWatch log streams, when it has some; once it ends, its
  * standard output and error go, gzipped, to the run's log folder in Floci's S3, when it has one.
  */
@@ -71,6 +78,28 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                     + " -e '/^spark\\.submit\\.customResourceManager/d' \"$conf/spark-defaults.conf\"",
             "printf '%s\\n' \"$" + SPARK_DEFAULTS_VARIABLE + "\" >> \"$conf/spark-defaults.conf\"",
             "export SPARK_CONF_DIR=\"$conf\"",
+            "exec \"$@\"");
+    // The archives a driver needs in its working directory are put in this folder of its container, each in a
+    // numbered folder of its own, which the copy creates.
+    private static final String ARCHIVES_FOLDER = "/tmp/floci-archives";
+    // While an archive is streamed in, a stop is looked for after each this many bytes, as Progress.cancelled()
+    // takes the run service's lock.
+    private static final long STOP_LOOK_BYTES = 4L * 1024 * 1024;
+    private static final int ARCHIVE_BUFFER_BYTES = 64 * 1024;
+    // Gets each archive's file and the directory it goes to, then "--" and what runs after, and unpacks each into
+    // the working directory as Spark's Utils.unpack does: a .jar or .zip unzipped, a .tar.gz, .tgz or .tar
+    // untarred, and any other file copied.
+    private static final String ARCHIVES_WRAPPER = String.join("\n",
+            "shopt -s nocasematch",
+            "while [ \"$1\" != -- ]; do",
+            "  case \"$1\" in",
+            "    *.jar|*.zip) mkdir -p \"$2\" && unzip -q -o \"$1\" -d \"$2\" ;;",
+            "    *.tar.gz|*.tgz|*.tar) mkdir -p \"$2\" && tar -xf \"$1\" -C \"$2\" ;;",
+            "    *) cp \"$1\" \"$2\" ;;",
+            "  esac || exit",
+            "  shift 2",
+            "done",
+            "shift",
             "exec \"$@\"");
     private static final String DEFAULT_IMAGE =
             "public.ecr.aws/emr-serverless/spark/%s:latest"; // partition-literal: ECR Public's registry host, where AWS publishes the base images; image-template overrides it
@@ -143,16 +172,18 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             // The deployment that started the driver, which removeLeftoverDrivers() goes by.
             labels.put(ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config));
             String endpoint = awsEnv.flociEndpoint();
+            List<Archive> archives = archives(job);
             ContainerBuilder.Builder container = containerBuilder.newContainer(launchImage(job))
                     .withName(ContainerStorageHelper.dockerName(config, job.service() + "-" + job.runId()))
                     .withEnv(environment(
                             awsEnv.sdkBaselineEnv(job.region(), Optional.empty(), credentials, job.accountId()),
                             job.environment()));
             if (job.command() == null) {
-                container.withEntrypoint(List.of(SPARK_SUBMIT)).withCmd(sparkSubmitArguments(job, endpoint));
+                container.withEntrypoint(unpackingFirst(archives, List.of(SPARK_SUBMIT)))
+                        .withCmd(sparkSubmitArguments(job, endpoint));
             } else {
                 // bash -c's script gets "floci" as its $0, and the command as its arguments, "$@".
-                container.withEntrypoint(List.of("/bin/bash", "-c", COMMAND_WRAPPER, "floci"))
+                container.withEntrypoint(unpackingFirst(archives, List.of("/bin/bash", "-c", COMMAND_WRAPPER, "floci")))
                         .withCmd(job.command())
                         .withEnv(SPARK_DEFAULTS_VARIABLE, sparkDefaultsFile(job, endpoint));
             }
@@ -166,9 +197,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                     .build();
             String containerId = lifecycleManager.create(spec);
             launch.started(containerId);
-            // A stop, a reset or a shutdown while the image was pulled or the trust store copied is read now,
-            // before the driver starts.
-            if (launch.stopRequested() || progress.cancelled()) {
+            // A stop, a reset or a shutdown while the image was pulled, the trust store copied or the archives put
+            // in is read now, before the driver starts; one before an archive or while it streams in puts in no
+            // more of them.
+            BooleanSupplier stopped = () -> launch.stopRequested() || progress.cancelled();
+            putArchives(job, archives, containerId, stopped);
+            if (stopped.getAsBoolean()) {
                 return Outcome.halted();
             }
             lifecycleManager.startCreated(containerId, spec);
@@ -322,6 +356,46 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     }
 
     /**
+     * A job's archives in S3, which its driver finds in its working directory: each with the file it is put at, in
+     * a folder of its own, and the directory it is unpacked to, named as Spark names it, by what follows its
+     * {@code #} or else by its file's name. Spark alone unpacks the others, into its own files folder.
+     */
+    static List<Archive> archives(Job job) {
+        List<Archive> archives = new ArrayList<>();
+        for (String archive : job.archives()) {
+            int hash = archive.indexOf('#');
+            String path = hash < 0 ? archive : archive.substring(0, hash);
+            if (!S3Uri.isS3(path)) {
+                continue;
+            }
+            S3Uri location = S3Uri.parseAnyScheme(path);
+            String name = location.key().substring(location.key().lastIndexOf('/') + 1);
+            if (name.isEmpty()) {
+                throw new IllegalArgumentException("The archive " + archive + " names no object.");
+            }
+            String file = ARCHIVES_FOLDER + "/" + (archives.size() + 1) + "/" + name;
+            archives.add(new Archive(path, location, file, hash < 0 ? name : archive.substring(hash + 1)));
+        }
+        return archives;
+    }
+
+    /** {@code entrypoint}, after the wrapper that unpacks {@code archives} into the working directory, if any. */
+    static List<String> unpackingFirst(List<Archive> archives, List<String> entrypoint) {
+        if (archives.isEmpty()) {
+            return entrypoint;
+        }
+        // bash -c's script gets "floci" as its $0, then each archive's file and directory, "--" and the entrypoint.
+        List<String> unpacking = new ArrayList<>(List.of("/bin/bash", "-c", ARCHIVES_WRAPPER, "floci"));
+        for (Archive archive : archives) {
+            unpacking.add(archive.file());
+            unpacking.add(archive.directory());
+        }
+        unpacking.add("--");
+        unpacking.addAll(entrypoint);
+        return unpacking;
+    }
+
+    /**
      * The image a run's driver starts from: the release's, or the template's, or the application's custom
      * image. A custom image's ECR URI leads to Floci's own registry, as a Lambda function's or an ECS task's
      * does, and the image is pulled for every run, as an ECS task's is, so a tag pushed again is what the next
@@ -334,6 +408,67 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         }
         String image = containerBuilder.resolveImage(ecrRegistryManager.rewriteImageUri(job.customImage()));
         return lifecycleManager.resolveImageForLaunch(image, ImagePullBehavior.DEFAULT, null).imageId();
+    }
+
+    /**
+     * Puts each archive in the created container, for its entrypoint to unpack: read from Floci's S3 as the run's
+     * account and streamed in, so Floci holds little of it however large it is. One that cannot be read fails
+     * the run, naming it. Once the run is {@code stopped}, no other archive is put in, and the one streaming in
+     * stops, leaving run() to read the stop.
+     */
+    private void putArchives(Job job, List<Archive> archives, String containerId, BooleanSupplier stopped) {
+        for (Archive archive : archives) {
+            if (stopped.getAsBoolean()) {
+                return;
+            }
+            S3Uri location = archive.location();
+            try {
+                RequestScopes.runAs(job.accountId(), job.region(),
+                        () -> s3Service.headObject(location.bucket(), location.key()));
+            } catch (AwsException e) {
+                throw new IllegalArgumentException(
+                        "Could not read the archive " + archive.path() + ": " + e.getMessage(), e);
+            }
+            try {
+                // Extracted at the root, the entry is the file's path without its leading slash.
+                RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId, "/", archive.path(),
+                        out -> {
+                            try (S3Service.ObjectRead read = RequestScopes.callAs(job.accountId(), job.region(),
+                                    () -> s3Service.openObject(location.bucket(), location.key(), null));
+                                 TarArchiveOutputStream tar = RetryingTarCopier.newTarStream(out)) {
+                                TarArchiveEntry entry = new TarArchiveEntry(archive.file().substring(1));
+                                entry.setSize(read.object().getSize());
+                                entry.setMode(0644);
+                                tar.putArchiveEntry(entry);
+                                transferUntilStopped(read.body(), tar, stopped);
+                                tar.closeArchiveEntry();
+                            }
+                        });
+            } catch (RuntimeException e) {
+                // A copy the stop ended, or one whose container a reset removed.
+                if (stopped.getAsBoolean()) {
+                    return;
+                }
+                throw e;
+            }
+        }
+    }
+
+    /** Copies {@code in} to {@code out}, failing once the run is {@code stopped}, as looked at each few MiB. */
+    private static void transferUntilStopped(InputStream in, OutputStream out, BooleanSupplier stopped)
+            throws IOException {
+        byte[] buffer = new byte[ARCHIVE_BUFFER_BYTES];
+        long sinceLook = 0;
+        for (int read = in.read(buffer); read >= 0; read = in.read(buffer)) {
+            out.write(buffer, 0, read);
+            sinceLook += read;
+            if (sinceLook >= STOP_LOOK_BYTES) {
+                sinceLook = 0;
+                if (stopped.getAsBoolean()) {
+                    throw new IOException("the job run was stopped");
+                }
+            }
+        }
     }
 
     /**
@@ -402,6 +537,13 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     }
 
     private record SparkSetting(String key, String value) {
+    }
+
+    /**
+     * A job's archive in S3: its path and where that is, the file it is put at in the container, and the directory
+     * of the working directory it is unpacked to.
+     */
+    record Archive(String path, S3Uri location, String file, String directory) {
     }
 
     /**
