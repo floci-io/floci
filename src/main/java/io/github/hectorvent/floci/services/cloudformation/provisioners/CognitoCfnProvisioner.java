@@ -15,6 +15,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -245,6 +246,49 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         // mints tokens with, so a template wiring it into a JWT authorizer validates locally.
         r.getAttributes().put("ProviderName", AwsEndpoints.host("cognito-idp", ctx.region()) + "/" + pool.getId());
         r.getAttributes().put("ProviderURL", cognitoService.getIssuer(pool.getId()));
+        applyEnabledMfas(pool.getId(), props, ctx);
+    }
+
+    /**
+     * EnabledMfas only exists in CloudFormation: CreateUserPool and UpdateUserPool have no such
+     * member, so CloudFormation turns it into SetUserPoolMfaConfig. SMS_MFA takes the pool's
+     * SmsAuthenticationMessage and SmsConfiguration, EMAIL_OTP its EmailAuthenticationMessage and
+     * EmailAuthenticationSubject.
+     */
+    private void applyEnabledMfas(String poolId, JsonNode props, ProvisionContext ctx) {
+        JsonNode resolved = props != null ? ctx.engine().resolveNode(props) : null;
+        JsonNode enabledMfas = resolved != null ? resolved.path("EnabledMfas") : null;
+        if (enabledMfas == null || !enabledMfas.isArray() || enabledMfas.isEmpty()) {
+            return;
+        }
+        Set<String> factors = new HashSet<>();
+        enabledMfas.forEach(factor -> factors.add(factor.asText()));
+
+        Boolean softwareTokenEnabled = factors.contains("SOFTWARE_TOKEN_MFA") ? Boolean.TRUE : null;
+        Map<String, Object> smsMfaConfiguration = null;
+        if (factors.contains("SMS_MFA")) {
+            smsMfaConfiguration = new LinkedHashMap<>();
+            putIfText(smsMfaConfiguration, "SmsAuthenticationMessage", resolved.path("SmsAuthenticationMessage"));
+            if (resolved.path("SmsConfiguration").isObject()) {
+                smsMfaConfiguration.put("SmsConfiguration", jsonObjectToMap(resolved.path("SmsConfiguration")));
+            }
+        }
+        Map<String, Object> emailMfaConfiguration = null;
+        if (factors.contains("EMAIL_OTP")) {
+            emailMfaConfiguration = new LinkedHashMap<>();
+            putIfText(emailMfaConfiguration, "Message", resolved.path("EmailAuthenticationMessage"));
+            putIfText(emailMfaConfiguration, "Subject", resolved.path("EmailAuthenticationSubject"));
+        }
+        String mfaConfiguration = resolved.path("MfaConfiguration").isTextual()
+                ? resolved.path("MfaConfiguration").asText() : null;
+        cognitoService.setUserPoolMfaConfig(poolId, mfaConfiguration, softwareTokenEnabled,
+                smsMfaConfiguration, emailMfaConfiguration, null);
+    }
+
+    private static void putIfText(Map<String, Object> target, String key, JsonNode value) {
+        if (value.isTextual()) {
+            target.put(key, value.asText());
+        }
     }
 
     private void provisionUserPoolClient(StackResource r, JsonNode props, ProvisionContext ctx) {

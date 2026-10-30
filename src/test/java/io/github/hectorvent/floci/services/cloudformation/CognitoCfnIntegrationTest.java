@@ -440,6 +440,62 @@ class CognitoCfnIntegrationTest {
             .body("__type", equalTo("ResourceNotFoundException"));
     }
 
+    /**
+     * EnabledMfas is not a CreateUserPool member: CloudFormation applies it with
+     * SetUserPoolMfaConfig, so GetUserPoolMfaConfig reports the factors the template enabled.
+     */
+    @Test
+    void enabledMfasTurnsOnTheListedFactors() throws Exception {
+        String stack = "cognito-cfn-enabled-mfas-it";
+        cloudFormation(stack, "CreateStack", """
+            {
+              "Resources": {
+                "TotpPool": {
+                  "Type": "AWS::Cognito::UserPool",
+                  "Properties": {
+                    "UserPoolName": "cognito-cfn-totp-pool",
+                    "MfaConfiguration": "ON",
+                    "EnabledMfas": ["SOFTWARE_TOKEN_MFA"]
+                  }
+                },
+                "SmsEmailPool": {
+                  "Type": "AWS::Cognito::UserPool",
+                  "Properties": {
+                    "UserPoolName": "cognito-cfn-sms-email-pool",
+                    "MfaConfiguration": "OPTIONAL",
+                    "EnabledMfas": ["SMS_MFA", "EMAIL_OTP"],
+                    "SmsAuthenticationMessage": "Your code is {####}",
+                    "SmsConfiguration": {"SnsCallerArn": "arn:aws:iam::000000000000:role/sms", "ExternalId": "ext"},
+                    "EmailAuthenticationMessage": "Your email code is {####}",
+                    "EmailAuthenticationSubject": "Sign-in code"
+                  }
+                }
+              },
+              "Outputs": {
+                "TotpPoolId": {"Value": {"Ref": "TotpPool"}},
+                "SmsEmailPoolId": {"Value": {"Ref": "SmsEmailPool"}}
+              }
+            }
+            """);
+        String stacks = describeStacks(stack, "CREATE_COMPLETE");
+
+        cognitoAction("GetUserPoolMfaConfig", "{\"UserPoolId\": \"" + outputValue(stacks, "TotpPoolId") + "\"}")
+            .then().statusCode(200)
+            .body("MfaConfiguration", equalTo("ON"))
+            .body("SoftwareTokenMfaConfiguration.Enabled", equalTo(true));
+
+        cognitoAction("GetUserPoolMfaConfig", "{\"UserPoolId\": \"" + outputValue(stacks, "SmsEmailPoolId") + "\"}")
+            .then().statusCode(200)
+            .body("MfaConfiguration", equalTo("OPTIONAL"))
+            .body("SmsMfaConfiguration.SmsAuthenticationMessage", equalTo("Your code is {####}"))
+            .body("SmsMfaConfiguration.SmsConfiguration.ExternalId", equalTo("ext"))
+            .body("EmailMfaConfiguration.Message", equalTo("Your email code is {####}"))
+            .body("EmailMfaConfiguration.Subject", equalTo("Sign-in code"));
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
     private static String deletionProtectionTemplate(String deletionProtection) {
         return """
             {
