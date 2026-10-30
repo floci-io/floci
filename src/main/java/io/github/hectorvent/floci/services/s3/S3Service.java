@@ -244,6 +244,9 @@ public class S3Service implements Resettable, ResourceProvider {
     private static final String INCOMING_BODIES = ".incoming";
     // Upload ID to part bytes, keyed by each part's storage ID.
     private final ConcurrentHashMap<String, Map<String, byte[]>> memoryMultipartStore = new ConcurrentHashMap<>();
+    private record MultipartPosition(String bucket, String key, String ownerAccountId, Instant initiated) {}
+
+    private final ConcurrentHashMap<String, MultipartPosition> removedMultipartPositions = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, MultipartUpload> multipartUploads = new ConcurrentHashMap<>();
     // Account-level (S3 Control) Block Public Access config, one entry per AWS account.
     // Distinct from the bucket-level configuration held on each Bucket. Block Public Access is a
@@ -422,6 +425,7 @@ public class S3Service implements Resettable, ResourceProvider {
         memoryAnnotationStore.clear();
         memoryMultipartStore.clear();
         multipartUploads.clear();
+        removedMultipartPositions.clear();
         if (!inMemory) {
             // The reset above erases the annotation metadata through storageFactory.clearAll(),
             // so detached .s3ann payload files become unreachable: sweep the annotation payload
@@ -2576,23 +2580,9 @@ public class S3Service implements Resettable, ResourceProvider {
         List<String> commonPrefixes = List.of();
 
         if (delimiter != null && !delimiter.isEmpty()) {
-            Set<String> prefixSet = new LinkedHashSet<>();
-            List<S3Object> directObjects = new ArrayList<>();
-
-            for (S3Object obj : allObjects) {
-                String remainder = obj.getKey().substring(prefix != null ? prefix.length() : 0);
-                int delimIdx = remainder.indexOf(delimiter);
-                if (delimIdx >= 0) {
-                    String cp = (prefix != null ? prefix : "") + remainder.substring(0, delimIdx + delimiter.length());
-                    prefixSet.add(cp);
-                } else {
-                    directObjects.add(obj);
-                }
-            }
-
-            allObjects = directObjects;
-            commonPrefixes = new ArrayList<>(prefixSet);
-            Collections.sort(commonPrefixes);
+            DelimiterGroups<S3Object> groups = groupByDelimiter(allObjects, prefix, delimiter, S3Object::getKey);
+            allObjects = groups.direct();
+            commonPrefixes = groups.commonPrefixes();
         }
 
         allObjects.sort(Comparator.comparing(S3Object::getKey));
@@ -2648,6 +2638,27 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         return new ListObjectsResult(allObjects, commonPrefixes, isTruncated, nextContinuationToken);
+    }
+
+    private record DelimiterGroups<T>(List<T> direct, List<String> commonPrefixes) {}
+
+    private static <T> DelimiterGroups<T> groupByDelimiter(List<T> items, String prefix, String delimiter,
+                                                         Function<T, String> keyExtractor) {
+        List<T> direct = new ArrayList<>();
+        Set<String> prefixes = new LinkedHashSet<>();
+        for (T item : items) {
+            String key = keyExtractor.apply(item);
+            int index = delimiter == null || delimiter.isEmpty() ? -1
+                    : key.indexOf(delimiter, prefix == null ? 0 : prefix.length());
+            if (index < 0) {
+                direct.add(item);
+            } else {
+                prefixes.add(key.substring(0, index + delimiter.length()));
+            }
+        }
+        List<String> commonPrefixes = new ArrayList<>(prefixes);
+        Collections.sort(commonPrefixes);
+        return new DelimiterGroups<>(direct, commonPrefixes);
     }
 
     public S3Object copyObject(String sourceBucket, String sourceKey,
@@ -3093,23 +3104,9 @@ public class S3Service implements Resettable, ResourceProvider {
 
         List<String> commonPrefixes = List.of();
         if (delimiter != null && !delimiter.isEmpty()) {
-            Set<String> prefixSet = new LinkedHashSet<>();
-            List<S3Object> directVersions = new ArrayList<>();
-
-            for (S3Object obj : versions) {
-                String remainder = obj.getKey().substring(prefix != null ? prefix.length() : 0);
-                int delimIdx = remainder.indexOf(delimiter);
-                if (delimIdx >= 0) {
-                    String cp = (prefix != null ? prefix : "") + remainder.substring(0, delimIdx + delimiter.length());
-                    prefixSet.add(cp);
-                } else {
-                    directVersions.add(obj);
-                }
-            }
-
-            versions = directVersions;
-            commonPrefixes = new ArrayList<>(prefixSet);
-            Collections.sort(commonPrefixes);
+            DelimiterGroups<S3Object> groups = groupByDelimiter(versions, prefix, delimiter, S3Object::getKey);
+            versions = groups.direct();
+            commonPrefixes = groups.commonPrefixes();
         }
 
         // Sort by key, then newest first
@@ -5294,6 +5291,59 @@ public class S3Service implements Resettable, ResourceProvider {
                 .toList();
     }
 
+    public record MultipartListingEntry(String key, MultipartUpload upload) {}
+
+    public record ListMultipartUploadsResult(List<MultipartListingEntry> entries, boolean isTruncated,
+                                             String nextKeyMarker, String nextUploadIdMarker) {}
+
+    public ListMultipartUploadsResult listMultipartUploads(String bucket, String prefix, String delimiter,
+                                                           String keyMarker, String uploadIdMarker, int max) {
+        List<MultipartUpload> uploads = listMultipartUploads(bucket).stream()
+                .filter(upload -> prefix == null || upload.getKey().startsWith(prefix)).toList();
+        DelimiterGroups<MultipartUpload> groups = groupByDelimiter(uploads, prefix, delimiter, MultipartUpload::getKey);
+        List<MultipartListingEntry> entries = new ArrayList<>();
+        groups.direct().forEach(upload -> entries.add(new MultipartListingEntry(upload.getKey(), upload)));
+        groups.commonPrefixes().forEach(key -> entries.add(new MultipartListingEntry(key, null)));
+        Comparator<MultipartListingEntry> order = Comparator
+                .comparing(MultipartListingEntry::key, S3Service::compareMultipartKeys)
+                .thenComparing(entry -> entry.upload() == null ? Instant.MIN : entry.upload().getInitiated())
+                .thenComparing(entry -> entry.upload() == null ? "" : entry.upload().getUploadId());
+        entries.sort(order);
+        MultipartListingEntry markedUpload = entries.stream()
+                .filter(entry -> entry.upload() != null && entry.key().equals(keyMarker)
+                        && entry.upload().getUploadId().equals(uploadIdMarker))
+                .findFirst().orElse(null);
+        MultipartPosition removedMarker = uploadIdMarker == null ? null : removedMultipartPositions.get(uploadIdMarker);
+        if (removedMarker != null && (!removedMarker.bucket().equals(bucket)
+                || !removedMarker.key().equals(keyMarker)
+                || !Objects.equals(removedMarker.ownerAccountId(), getBucketOwnerAccountId(bucket)))) {
+            removedMarker = null;
+        }
+        Instant markerInitiated = markedUpload != null ? markedUpload.upload().getInitiated()
+                : removedMarker != null ? removedMarker.initiated() : null;
+        List<MultipartListingEntry> remaining = entries.stream().filter(entry -> {
+            if (keyMarker == null) {
+                return true;
+            }
+            int comparison = compareMultipartKeys(entry.key(), keyMarker);
+            return comparison > 0 || (comparison == 0 && uploadIdMarker != null && entry.upload() != null
+                    && (markerInitiated != null
+                            ? entry.upload().getInitiated().isAfter(markerInitiated)
+                                || (entry.upload().getInitiated().equals(markerInitiated)
+                                    && entry.upload().getUploadId().compareTo(uploadIdMarker) > 0)
+                            : entry.upload().getUploadId().compareTo(uploadIdMarker) > 0));
+        }).toList();
+        boolean truncated = max > 0 && remaining.size() > max;
+        List<MultipartListingEntry> page = remaining.subList(0, Math.min(max, remaining.size()));
+        MultipartListingEntry last = truncated ? page.getLast() : null;
+        return new ListMultipartUploadsResult(page, truncated, last == null ? null : last.key(),
+                last == null ? null : last.upload() == null ? "" : last.upload().getUploadId());
+    }
+
+    private static int compareMultipartKeys(String left, String right) {
+        return Arrays.compareUnsigned(left.getBytes(StandardCharsets.UTF_8), right.getBytes(StandardCharsets.UTF_8));
+    }
+
     public MultipartUpload listParts(String bucket, String key, String uploadId) {
         return getMultipartUpload(bucket, key, uploadId);
     }
@@ -7139,7 +7189,20 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private void cleanupMultipart(String uploadId) {
-        multipartUploads.remove(uploadId);
+        MultipartUpload removed = multipartUploads.remove(uploadId);
+        if (removed != null) {
+            MultipartPosition position = new MultipartPosition(removed.getBucket(), removed.getKey(),
+                    removed.getOwnerAccountId(), removed.getInitiated());
+            removedMultipartPositions.put(uploadId, position);
+            boolean hasRemaining = multipartUploads.values().stream().anyMatch(upload ->
+                    upload.getBucket().equals(position.bucket()) && upload.getKey().equals(position.key())
+                            && Objects.equals(upload.getOwnerAccountId(), position.ownerAccountId()));
+            if (!hasRemaining) {
+                removedMultipartPositions.values().removeIf(previous -> previous.bucket().equals(position.bucket())
+                        && previous.key().equals(position.key())
+                        && Objects.equals(previous.ownerAccountId(), position.ownerAccountId()));
+            }
+        }
         if (inMemory) {
             memoryMultipartStore.remove(uploadId);
         } else {

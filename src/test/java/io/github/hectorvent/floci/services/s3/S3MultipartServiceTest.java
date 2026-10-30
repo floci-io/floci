@@ -14,13 +14,17 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
@@ -40,6 +44,42 @@ class S3MultipartServiceTest {
     void setUp() {
         s3Service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir, true);
         s3Service.createBucket("test-bucket", "us-east-1");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,true", "true,false", "false,true", "false,false"})
+    void listingRetainsRemovedMarkersInInitiationOrder(boolean memory, boolean complete) {
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("removed-markers"), memory);
+        service.createBucket("markers", "us-east-1");
+        List<MultipartUpload> uploads = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            uploads.add(service.initiateMultipartUpload("markers", "key", null));
+        }
+        uploads.sort(Comparator.comparing(MultipartUpload::getUploadId));
+        MultipartUpload later = uploads.get(0);
+        MultipartUpload earlier = uploads.get(1);
+        MultipartUpload marker = uploads.get(2);
+        Instant start = Instant.parse("2026-01-01T00:00:00Z");
+        earlier.setInitiated(start);
+        marker.setInitiated(start.plusSeconds(1));
+        later.setInitiated(start.plusSeconds(2));
+        S3Service.ListMultipartUploadsResult first = service.listMultipartUploads(
+                "markers", null, null, null, null, 2);
+        assertEquals(marker.getUploadId(), first.nextUploadIdMarker());
+        if (complete) {
+            service.uploadPart("markers", "key", marker.getUploadId(), 1, new byte[]{1});
+            service.completeMultipartUpload("markers", "key", marker.getUploadId(), List.of(1), null, null);
+        } else {
+            service.abortMultipartUpload("markers", "key", marker.getUploadId());
+        }
+        S3Service.ListMultipartUploadsResult next = service.listMultipartUploads(
+                "markers", null, null, first.nextKeyMarker(), first.nextUploadIdMarker(), 2);
+        assertEquals(List.of(later.getUploadId()), next.entries().stream()
+                .map(entry -> entry.upload().getUploadId()).toList());
+        assertFalse(next.isTruncated());
+        assertNull(next.nextKeyMarker());
+        assertNull(next.nextUploadIdMarker());
     }
 
     @ParameterizedTest
