@@ -130,12 +130,12 @@ class CloudWatchCompositeAlarmTest {
         List<CompositeAlarm> found = cloudWatch.describeAlarms(request -> request.alarmNames(name)
                 .alarmTypes(AlarmType.COMPOSITE_ALARM)).compositeAlarms();
         assertThat(found).hasSize(1);
-        return found.getFirst();
+        return found.get(0);
     }
 
     private String arn(String name) {
-        String any = cloudWatch.describeAlarms(request -> request.alarmNames(metricAlarms.getFirst()))
-                .metricAlarms().getFirst().alarmArn();
+        String any = cloudWatch.describeAlarms(request -> request.alarmNames(metricAlarms.get(0)))
+                .metricAlarms().get(0).alarmArn();
         return any.substring(0, any.lastIndexOf(':') + 1) + name;
     }
 }
