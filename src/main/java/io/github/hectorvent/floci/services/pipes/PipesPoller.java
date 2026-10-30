@@ -205,7 +205,18 @@ public class PipesPoller implements Resettable {
         // configured it is invoked once with the filtered events (as a bare JSON array, matching the
         // Lambda's SQSRecord[] input) and its response is forwarded to the target.
         if (hasEnrichment(pipe)) {
-            deliverEnrichedBatch(pipe, filtered, messages, matchedMessageIds, queueUrl, region);
+            if (deliverEnrichedBatch(pipe, filtered, region)) {
+                for (Message msg : messages) {
+                    if (matchedMessageIds.contains(msg.getMessageId())) {
+                        try {
+                            sqsService.deleteMessage(queueUrl, msg.getReceiptHandle(), region);
+                        } catch (Exception e) {
+                            LOG.warnv("Pipe {0}: failed to delete SQS message {1}: {2}",
+                                    pipe.getName(), msg.getMessageId(), e.getMessage());
+                        }
+                    }
+                }
+            }
             return;
         }
 
@@ -380,12 +391,18 @@ public class PipesPoller implements Resettable {
         }
         List<JsonNode> filtered = filterMatcher.applyFilterCriteria(recordNodes, pipe.getSourceParameters());
         // ponytail: a partially delivered non-Lambda batch is redelivered whole (at-least-once).
-        if (!filtered.isEmpty() && deliverRecords(pipe, filtered, region) > 0) {
+        if (!filtered.isEmpty() && !disposeDynamoDbBatch(pipe, filtered, region)) {
             LOG.warnv("Pipe {0}: DynamoDB Stream batch on {1} was neither delivered nor sent to a DLQ, "
                     + "retrying it next poll", pipe.getName(), shardId);
             return;
         }
         committed.put(shardId, records.get(records.size() - 1).sequenceNumber());
+    }
+
+    private boolean disposeDynamoDbBatch(Pipe pipe, List<JsonNode> filtered, String region) {
+        return hasEnrichment(pipe)
+                ? deliverEnrichedBatch(pipe, filtered, region)
+                : deliverRecords(pipe, filtered, region) == 0;
     }
 
     void pollKafka(Pipe pipe, String region) {
@@ -562,10 +579,10 @@ public class PipesPoller implements Resettable {
     // ──────────────────────────── Invocation & DLQ ────────────────────────────
 
     private int deliverRecords(Pipe pipe, List<JsonNode> records, String region) {
-        // Enrichment (source → filter → ENRICHMENT → target) is currently applied only on the SQS
-        // source path (see deliverEnrichedBatch). Kinesis, DynamoDB Streams and Kafka sources
-        // deliver the filtered records straight to the target, so a pipe that configures an
-        // enrichment on those sources bypasses it — see docs/services/pipes.md.
+        // Enrichment (source → filter → ENRICHMENT → target) is applied on the SQS and DynamoDB Streams
+        // source paths (see deliverEnrichedBatch). Kinesis and Kafka sources deliver the filtered
+        // records straight to the target, so a pipe that configures an enrichment on those sources
+        // bypasses it — see docs/services/pipes.md.
         if (isLambdaTarget(pipe)) {
             return invokeWithDlq(pipe, wrapRecords(records), region) ? 0 : records.size();
         }
@@ -594,44 +611,56 @@ public class PipesPoller implements Resettable {
     }
 
     /**
-     * Runs the pipe enrichment once over the filtered SQS batch and forwards its response to the
-     * target, then deletes the consumed source messages. The enrichment Lambda receives the events
-     * as a bare JSON array (SQSRecord[]); a null/empty enrichment response skips the target (AWS
-     * behavior) while still consuming the source messages.
+     * Runs the pipe enrichment once over the filtered batch and forwards its response to the target.
+     * The enrichment Lambda receives the events as a bare JSON array; a null/empty enrichment response
+     * skips the target (AWS behavior) while the batch still counts as delivered. A failure sends the
+     * batch to the DLQ. Returns whether the batch is disposed of, which the source acts on in its own
+     * way: SQS deletes its messages and a stream commits its position.
      */
-    private void deliverEnrichedBatch(Pipe pipe, List<JsonNode> filtered, List<Message> messages,
-                                      Set<String> matchedMessageIds, String queueUrl, String region) {
+    private boolean deliverEnrichedBatch(Pipe pipe, List<JsonNode> filtered, String region) {
         String eventsArray = bareArray(filtered);
-        boolean delivered;
         try {
             String enriched = targetInvoker.applyEnrichment(pipe, eventsArray, region);
             if (enriched != null) {
-                // Only a Lambda target expects the batch (JSON array) shape; a Step Functions, SQS,
-                // SNS or EventBridge target must receive the raw enrichment response, matching the
-                // non-enrichment delivery path. Array-wrapping those would corrupt their input.
-                String targetPayload = isLambdaTarget(pipe)
-                        ? asEventArray(objectMapper, enriched)
-                        : enriched;
-                targetInvoker.invoke(pipe, targetPayload, region);
+                for (String targetPayload : enrichedTargetPayloads(pipe, enriched)) {
+                    targetInvoker.invoke(pipe, targetPayload, region);
+                }
             }
-            delivered = true;
+            return true;
         } catch (Exception e) {
             LOG.warnv("Pipe {0}: enriched delivery failed: {1} ({2})",
                     pipe.getName(), e.getMessage(), e.getClass().getSimpleName());
-            delivered = sendToDeadLetterQueue(pipe, eventsArray, region);
+            return sendToDeadLetterQueue(pipe, eventsArray, region);
         }
-        if (delivered) {
-            for (Message msg : messages) {
-                if (matchedMessageIds.contains(msg.getMessageId())) {
-                    try {
-                        sqsService.deleteMessage(queueUrl, msg.getReceiptHandle(), region);
-                    } catch (Exception e) {
-                        LOG.warnv("Pipe {0}: failed to delete SQS message {1}: {2}",
-                                pipe.getName(), msg.getMessageId(), e.getMessage());
-                    }
-                }
-            }
+    }
+
+    /**
+     * What each target invocation takes of an enrichment's response. A target with no batch API, Lambda
+     * or Step Functions, gets the entire JSON array in one request; any other target gets one event per
+     * element, each rendered through the target's template apart. A response that is no array is one
+     * event, raw, and only a Lambda target expects it in the batch (JSON array) shape.
+     */
+    private List<String> enrichedTargetPayloads(Pipe pipe, String enriched) {
+        if (isLambdaTarget(pipe)) {
+            return List.of(asEventArray(objectMapper, enriched));
         }
+        if (isStateMachineTarget(pipe)) {
+            return List.of(enriched);
+        }
+        JsonNode response;
+        try {
+            response = objectMapper.readTree(enriched);
+        } catch (JsonProcessingException e) {
+            LOG.debugv("Pipe enrichment response was not JSON, forwarding it as one event: {0}",
+                    e.getOriginalMessage());
+            return List.of(enriched);
+        }
+        if (!response.isArray()) {
+            return List.of(enriched);
+        }
+        List<String> elements = new ArrayList<>(response.size());
+        response.forEach(element -> elements.add(element.toString()));
+        return elements;
     }
 
     private String bareArray(List<JsonNode> records) {
@@ -826,6 +855,10 @@ public class PipesPoller implements Resettable {
     private static boolean isLambdaTarget(Pipe pipe) {
         String targetArn = pipe.getTarget();
         return targetArn.contains(":lambda:") || targetArn.contains(":function:");
+    }
+
+    private static boolean isStateMachineTarget(Pipe pipe) {
+        return pipe.getTarget().contains(":states:");
     }
 
     private static boolean isKafkaSource(String sourceArn) {
