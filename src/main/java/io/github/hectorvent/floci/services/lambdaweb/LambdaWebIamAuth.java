@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
+import io.github.hectorvent.floci.core.common.StarWildcard;
 import io.github.hectorvent.floci.core.common.auth.CredentialScope;
 import io.github.hectorvent.floci.core.common.auth.SessionTokenCheck;
 import io.github.hectorvent.floci.core.common.auth.SigV4Canonicalization;
@@ -39,6 +40,7 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
@@ -263,38 +265,8 @@ public class LambdaWebIamAuth {
         if (entries.contains("")) {
             return false;
         }
-        return entries.stream().anyMatch(entry -> wildcardMatches(entry, region));
-    }
-
-    /**
-     * Whether {@code pattern}, where {@code *} stands for any run of characters, matches all of
-     * {@code text} ignoring case. A star retries from the last one only, so the work stays within
-     * the product of the two lengths however many stars the caller sends.
-     */
-    private static boolean wildcardMatches(String pattern, String text) {
-        int p = 0;
-        int t = 0;
-        int star = -1;
-        int resume = 0;
-        while (t < text.length()) {
-            if (p < pattern.length() && pattern.charAt(p) == '*') {
-                star = p++;
-                resume = t;
-            } else if (p < pattern.length()
-                    && Character.toLowerCase(pattern.charAt(p)) == Character.toLowerCase(text.charAt(t))) {
-                p++;
-                t++;
-            } else if (star >= 0) {
-                p = star + 1;
-                t = ++resume;
-            } else {
-                return false;
-            }
-        }
-        while (p < pattern.length() && pattern.charAt(p) == '*') {
-            p++;
-        }
-        return p == pattern.length();
+        String lowerRegion = region.toLowerCase(Locale.ROOT);
+        return entries.stream().anyMatch(entry -> StarWildcard.matches(entry.toLowerCase(Locale.ROOT), lowerRegion));
     }
 
     /**
