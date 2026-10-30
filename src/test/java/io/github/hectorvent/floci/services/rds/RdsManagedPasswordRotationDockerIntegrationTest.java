@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
@@ -29,6 +30,15 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @QuarkusTest
 @Tag("docker")
 class RdsManagedPasswordRotationDockerIntegrationTest {
+
+    /**
+     * DriverManager only hands out a driver the caller's class loader can see. After a Quarkus
+     * restart the first connection would find none, so PgJDBC is loaded through this test's loader first.
+     */
+    @BeforeEach
+    void registerPostgresDriver() throws ClassNotFoundException {
+        Class.forName("org.postgresql.Driver");
+    }
 
     @Test
     void freshPostgresConnectionsUseTheRotatedManagedSecret() throws Exception {
