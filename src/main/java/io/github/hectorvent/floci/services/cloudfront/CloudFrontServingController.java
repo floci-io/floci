@@ -901,6 +901,7 @@ public class CloudFrontServingController {
         try {
             host = normalizeOriginHost(origin.getDomainName());
         } catch (IllegalArgumentException ignored) {
+            // An invalid domain cannot name Floci; the normal origin fetch rejects it.
             return null;
         }
         boolean flociHost = host.equalsIgnoreCase(flociHostname) || host.equalsIgnoreCase("localhost")
@@ -914,8 +915,9 @@ public class CloudFrontServingController {
     }
 
     /**
-     * The path a self origin is asked for. CloudFront resolves the viewer's dot segments before it
-     * prepends the origin path, so they cannot climb out of the bucket that path names.
+     * The path a self origin is asked for. CloudFront sends the viewer's path to the origin as it
+     * came, but Floci's listener resolves dot segments, so they would climb out of the bucket the
+     * origin path names. Resolving them within the viewer's part first keeps the request inside it.
      */
     private static String selfOriginPath(Origin origin, String forwardPath) {
         String prefix = CloudFrontRequestRouter.joinPath(origin.getOriginPath(), "");
