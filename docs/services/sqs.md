@@ -215,8 +215,10 @@ Under either setting every form is accepted as input. That covers the AWS URL, t
 ## Storage write failures
 
 When the message backend reports a failed write, the queue retains its previously acknowledged
-live contents and delivery state. Stored message snapshots are detached from live messages, so a
-compaction cannot capture delivery changes that have not been saved. The queue preserves the
+live contents and delivery state. Backends that serialize retained values receive detached message
+snapshots, so compaction or an asynchronous flush cannot capture delivery changes that have not
+been saved. Memory-only backends retain a separate list of the live message references without
+deep-copying messages or attributes. The queue preserves the
 backend's acknowledgement and flush policy. Moves between queues are not atomic.
 
 ## Persisted delivery state

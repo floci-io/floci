@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.sqs;
 
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 
@@ -26,6 +27,7 @@ class GuardedMessageQueue {
     private final StorageBackend<String, List<Message>> messageStore;
     private final String storageKey;
     private final String receiptHandleSecret;
+    private final boolean detachedSnapshots;
     private final SqsQueueActivity activity = new SqsQueueActivity();
     private volatile boolean closed;
 
@@ -50,7 +52,10 @@ class GuardedMessageQueue {
 
     GuardedMessageQueue(List<Message> initial, StorageBackend<String, List<Message>> messageStore, String storageKey,
                         String receiptHandleSecret) {
-        this.messages = copyMessages(initial);
+        this.detachedSnapshots = messageStore != null
+                && !(messageStore instanceof InMemoryStorage<?, ?>
+                || messageStore instanceof AccountAwareStorageBackend<?> aware && aware.isInMemory());
+        this.messages = snapshot(initial);
         this.messageStore = messageStore;
         this.storageKey = storageKey;
         this.receiptHandleSecret = receiptHandleSecret;
@@ -392,7 +397,10 @@ class GuardedMessageQueue {
         messages.addAll(candidate);
     }
 
-    private static List<Message> copyMessages(List<Message> source) {
+    private List<Message> snapshot(List<Message> source) {
+        if (!detachedSnapshots) {
+            return new ArrayList<>(source);
+        }
         return source.stream().map(Message::copy).collect(Collectors.toCollection(ArrayList::new));
     }
 
@@ -400,7 +408,7 @@ class GuardedMessageQueue {
         if (closed || messageStore == null || storageKey == null) {
             return;
         }
-        List<Message> snapshot = copyMessages(candidate);
+        List<Message> snapshot = snapshot(candidate);
         if (messageStore instanceof AccountAwareStorageBackend<List<Message>> aware) {
             String accountId = extractAccountFromStorageKey(storageKey);
             if (accountId != null) {

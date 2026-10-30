@@ -4,7 +4,10 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.HybridStorage;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.PersistentStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.WalStorage;
 import io.github.hectorvent.floci.services.sqs.GuardedMessageQueue.ClaimResult;
 import io.github.hectorvent.floci.services.sqs.GuardedMessageQueue.HandleResult;
@@ -25,6 +28,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.CyclicBarrier;
@@ -34,6 +38,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -798,7 +803,156 @@ class GuardedMessageQueueTest {
         return queue;
     }
 
-    private static class FailingStore extends InMemoryStorage<String, List<Message>> {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void memoryBackendsKeepMessageReferencesWithoutCopyingThem(boolean accountAware) {
+        InMemoryStorage<String, List<Message>> raw = new InMemoryStorage<>();
+        StorageBackend<String, List<Message>> store = accountAware
+                ? new AccountAwareStorageBackend<>(raw, null, "000000000000") : raw;
+        String rawKey = accountAware ? "000000000000/" + KEY : KEY;
+        CountingMessage initial = new CountingMessage("initial");
+        List<Message> loaded = List.of(initial);
+        raw.put(rawKey, loaded);
+        GuardedMessageQueue queue = new GuardedMessageQueue(loaded, store, KEY);
+        assertSame(initial, queue.peekAll().getFirst());
+
+        CountingMessage added = new CountingMessage("added");
+        queue.addMessage(added);
+        List<Message> acknowledged = raw.get(rawKey).orElseThrow();
+        assertEquals(1, loaded.size());
+        assertNotSame(loaded, acknowledged);
+        assertSame(initial, acknowledged.getFirst());
+        assertSame(added, acknowledged.getLast());
+        Message claimed = queue.claimVisibleMessages(1, 900, false, -1, null).claimed().getFirst();
+        queue.removeByReceiptHandle(ReceiptHandle.parse(claimed.getReceiptHandle()), false);
+        assertEquals(2, acknowledged.size());
+        assertSame(added, raw.get(rawKey).orElseThrow().getFirst());
+        queue.purge();
+        assertTrue(raw.get(rawKey).orElseThrow().isEmpty());
+        assertEquals(0, initial.copies);
+        assertEquals(0, added.copies);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void memoryBackendFailuresStillRestoreDeliveryAndListState(boolean accountAware) {
+        MemoryFailingStore raw = new MemoryFailingStore();
+        StorageBackend<String, List<Message>> store = accountAware
+                ? new AccountAwareStorageBackend<>(raw, null, "000000000000") : raw;
+        String rawKey = accountAware ? "000000000000/" + KEY : KEY;
+        GuardedMessageQueue queue = new GuardedMessageQueue(store, KEY);
+        Message message = new Message("acknowledged");
+        queue.addMessage(message);
+        assertSame(message, raw.get(rawKey).orElseThrow().getFirst());
+        raw.fail = true;
+        for (boolean fifo : List.of(false, true)) {
+            assertThrows(IllegalStateException.class,
+                    () -> queue.claimVisibleMessages(1, 900, fifo, -1, null));
+            assertEquals(0, message.getReceiveCount());
+            assertNull(message.getFirstReceiveTimestamp());
+            assertNull(message.getReceiptHandle());
+            assertNull(message.getVisibleAt());
+        }
+        raw.fail = false;
+        queue.claimVisibleMessages(1, 900, true, -1, null);
+        ReceiptHandle receipt = ReceiptHandle.parse(message.getReceiptHandle());
+        Instant deadline = message.getVisibleAt();
+        raw.fail = true;
+
+        assertThrows(IllegalStateException.class, () -> queue.changeVisibility(receipt, 0, true));
+        assertEquals(deadline, message.getVisibleAt());
+        assertThrows(IllegalStateException.class, () -> queue.removeByReceiptHandle(receipt, true));
+        assertThrows(IllegalStateException.class, queue::purge);
+        assertThrows(IllegalStateException.class, queue::drainAll);
+        assertThrows(IllegalStateException.class, () -> queue.addMessage(new Message("failed")));
+        assertEquals(List.of(message), queue.peekAll());
+        assertEquals(List.of(message), raw.get(rawKey).orElseThrow());
+        assertEquals(1, message.getReceiveCount());
+        assertEquals(deadline, message.getVisibleAt());
+    }
+
+    enum SnapshotBackend { PERSISTENT, HYBRID, WAL }
+
+    @ParameterizedTest
+    @EnumSource(SnapshotBackend.class)
+    void serializingBackendsKeepLoadedAndSavedMessagesDetached(SnapshotBackend mode) throws Exception {
+        Path snapshot = directory.resolve("messages.json");
+        TypeReference<Map<String, List<Message>>> type = new TypeReference<>() {};
+        StorageBackend<String, List<Message>> raw = switch (mode) {
+            case PERSISTENT -> new PersistentStorage<>(snapshot, type);
+            case HYBRID -> new HybridStorage<>(snapshot, type, Long.MAX_VALUE);
+            case WAL -> new WalStorage<>(snapshot, directory.resolve("messages.wal"), type, Long.MAX_VALUE);
+        };
+        raw.load();
+        try {
+            for (boolean accountAware : List.of(false, true)) {
+                StorageBackend<String, List<Message>> store = accountAware
+                        ? new AccountAwareStorageBackend<>(raw, null, "000000000000") : raw;
+                String key = KEY + (accountAware ? "-wrapped" : "-raw");
+                String rawKey = accountAware ? "000000000000/" + key : key;
+                GuardedMessageQueue queue = new GuardedMessageQueue(store, key);
+                Message message = new Message("acknowledged");
+                byte[] binary = {1, 2, 3};
+                message.getMessageAttributes().put("binary", new MessageAttributeValue(binary, "Binary"));
+                queue.addMessage(message);
+                Message stored = raw.get(rawKey).orElseThrow().getFirst();
+                assertNotSame(message, stored);
+                assertNotSame(message.getMessageAttributes(), stored.getMessageAttributes());
+                assertNotSame(binary, stored.getMessageAttributes().get("binary").getBinaryValue());
+                binary[0] = 9;
+                message.setBody("unsaved");
+                GuardedMessageQueue restored = new GuardedMessageQueue(raw.get(rawKey).orElseThrow(), store, key);
+                Message loaded = restored.peekAll().getFirst();
+                assertNotSame(stored, loaded);
+                loaded.setReceiveCount(7);
+                loaded.getMessageAttributes().clear();
+                store.flush();
+
+                assertEquals(0, stored.getReceiveCount());
+                assertArrayEquals(new byte[] {1, 2, 3}, stored.getMessageAttributes().get("binary").getBinaryValue());
+                assertEquals("acknowledged", new ObjectMapper().readTree(snapshot.toFile())
+                        .path(rawKey).get(0).path("body").asText());
+                assertEquals("Binary", new ObjectMapper().readTree(snapshot.toFile())
+                        .path(rawKey).get(0).path("messageAttributes").path("binary").path("dataType").asText());
+            }
+        } finally {
+            if (raw instanceof HybridStorage<?, ?> hybrid) {
+                hybrid.shutdown();
+            } else if (raw instanceof WalStorage<?, ?> wal) {
+                wal.shutdown();
+            }
+        }
+    }
+
+    private static class CountingMessage extends Message {
+        private int copies;
+
+        CountingMessage(String body) {
+            super(body);
+        }
+
+        @Override
+        public Message copy() {
+            copies++;
+            return super.copy();
+        }
+    }
+
+    private static class MemoryFailingStore extends InMemoryStorage<String, List<Message>> {
+        private boolean fail;
+
+        @Override
+        public void put(String key, List<Message> value) {
+            if (fail) {
+                throw new IllegalStateException("synthetic memory write failure");
+            }
+            super.put(key, value);
+        }
+    }
+
+    /** Retains values like a backend that may serialize them during a later flush. */
+    private static class FailingStore implements StorageBackend<String, List<Message>> {
+        private final InMemoryStorage<String, List<Message>> delegate = new InMemoryStorage<>();
         private boolean fail;
         private String lastKey;
         private Runnable beforeFailure = () -> { };
@@ -810,7 +964,42 @@ class GuardedMessageQueueTest {
                 beforeFailure.run();
                 throw new IllegalStateException("synthetic write failure");
             }
-            super.put(key, value);
+            delegate.put(key, value);
+        }
+
+        @Override
+        public Optional<List<Message>> get(String key) {
+            return delegate.get(key);
+        }
+
+        @Override
+        public void delete(String key) {
+            delegate.delete(key);
+        }
+
+        @Override
+        public List<List<Message>> scan(Predicate<String> keyFilter) {
+            return delegate.scan(keyFilter);
+        }
+
+        @Override
+        public Set<String> keys() {
+            return delegate.keys();
+        }
+
+        @Override
+        public void flush() {
+            delegate.flush();
+        }
+
+        @Override
+        public void load() {
+            delegate.load();
+        }
+
+        @Override
+        public void clear() {
+            delegate.clear();
         }
     }
 }
