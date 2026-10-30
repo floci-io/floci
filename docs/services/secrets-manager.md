@@ -79,8 +79,13 @@ service writes do not emit these API-call events. Native `Secret Label Updated` 
 Event publication is best effort: a delivery failure does not fail the completed secret write.
 Publication runs on two background workers with a bounded queue of 256 pending events. Slow
 targets do not hold the secret-write response open. Each queued delivery restores the originating
-account and region. A full or stopped queue drops the notification and logs a warning; pending
-notifications are in memory and are not retained across shutdown.
+account and region. Notifications are dropped and logged when the queue is full or publication
+is paused or stopped. Pending notifications are in memory and are not retained across shutdown.
+
+An emulator reset discards queued notifications and pauses new notifications. Active deliveries
+finish before storage is cleared, then publication resumes, including after a failed reset. If
+active deliveries cannot drain within 30 seconds, or draining is interrupted, reset fails before
+the storage wipe.
 
 See AWS's [Secrets Manager event types](https://docs.aws.amazon.com/secretsmanager/latest/userguide/monitoring-eventbridge.html)
 and [CloudTrail event prerequisites](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-service-event-cloudtrail.html).
