@@ -1089,21 +1089,26 @@ public class DynamoDbPartiQLParser {
     }
 
     private boolean isStar(Token token) {
-        return "*".equals(token.value()) && statement.charAt(token.start()) == '*';
+        return token.type() == TType.IDENT && "*".equals(token.value()) && statement.charAt(token.start()) == '*';
     }
 
     private void requireTermStart() {
-        String unexpected = unexpectedTermStart(pos);
+        String unexpected = unexpectedTermStart();
         if (unexpected != null) {
             throw validationEx(NOT_WELL_FORMED + unexpected);
         }
     }
 
+    private static final Set<TType> UNARY_OPERATORS = EnumSet.of(TType.PLUS, TType.MINUS, TType.NOT);
+
     // DML keywords are left out. DynamoDB reads one as the start of a nested statement.
-    private String unexpectedTermStart(int at) {
-        Token t = tokens.get(at);
+    private String unexpectedTermStart() {
+        int next = pos;
+        while (UNARY_OPERATORS.contains(tokens.get(next).type())) {
+            next++;
+        }
+        Token t = tokens.get(next);
         return switch (t.type()) {
-            case PLUS, MINUS, NOT -> unexpectedTermStart(at + 1);
             case EOF, SEMICOLON, RPAREN, RBRACKET, RBRACE, RBAG, COMMA, COLON, DOT, BY, ASC, DESC -> "Unexpected term";
             case WHERE, ORDER, VALUE, INTO, RETURNING, ALL, MODIFIED, OLD, NEW -> "Unexpected keyword";
             case EQ, NE, LT, LE, GT, GE, AND, OR, IS, IN, BETWEEN -> "Unexpected operator";

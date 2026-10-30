@@ -373,6 +373,22 @@ class DynamoDbPartiQLParserTest {
     }
 
     @Test
+    void namesWhatFollowsALongRunOfSigns() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> DynamoDbPartiQLParser.parse(SELECT + "= " + "+ ".repeat(300_000), List.of()));
+
+        assertEquals("Statement wasn't well formed, can't be processed: Unexpected term", e.getMessage());
+    }
+
+    @Test
+    void refusesAStarStringInTheSelectListAsAValidationError() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> DynamoDbPartiQLParser.parse("SELECT '*' FROM \"t\"", List.of()));
+
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
     void parsesNotAheadOfThePredicateItNegates() {
         Stmt stmt = DynamoDbPartiQLParser.parse(
                 "SELECT pk FROM \"t\" WHERE NOT begins_with(val, 'a')", List.of());
