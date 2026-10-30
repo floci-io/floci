@@ -32,6 +32,33 @@ class StepFunctionsJsonataIntegrationTest {
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
+    @ParameterizedTest
+    @ValueSource(ints = {0, 1, 3})
+    void indexesAnExplicitArrayProjectionInARealExecution(int count) throws Exception {
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "Evaluate",
+                    "States": {
+                        "Evaluate": {
+                            "Type": "Pass",
+                            "Output": {
+                                "wrapped": "{% [$states.input.Items.{'ok':true}] %}",
+                                "first": "{% $exists([$states.input.Items.{'ok':true}][0].ok) %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+        String machine = createStateMachine("jsonata-array-projection-" + count, definition);
+        String input = "{\"Items\":[" + "{},".repeat(count).replaceFirst(",$", "") + "]}";
+        JsonNode output = objectMapper.readTree(waitForExecution(startExecution(machine, input)));
+        assertTrue(output.path("wrapped").isArray());
+        assertEquals(count, output.path("wrapped").size());
+        assertEquals(count > 0, output.path("first").asBoolean());
+    }
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();

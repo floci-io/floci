@@ -218,6 +218,7 @@ public class JsonataEvaluator {
             frame.setRuntimeBounds(evaluationTimeoutMillis, maxEvaluationDepth);
             nesting.trackOn(frame);
             boundHeldMemory(frame);
+            preserveConstructedArraySequences(frame);
             stepFunctionsExtensions.forEach(frame::bind);
             // AWS disables $eval, and the library ships it. An unbound name called as a function is
             // the library's own T1006, which is the code AWS answers. $parse is the replacement.
@@ -310,6 +311,19 @@ public class JsonataEvaluator {
         afterEachEvaluationStep(frame, (expression, input, environment, result) -> {
             if (heldBytes(result, 0) > MAX_EXPRESSION_BYTES) {
                 throw new JException(MEMORY_LIMIT_EXCEEDED, -1);
+            }
+        });
+    }
+
+    /**
+     * A constructed array used as a path step must remain a sequence after a predicate.
+     * Dashjoin 0.9.10 otherwise reduces a one-item filtered array to its object, then
+     * evaluatePath casts that object to List before evaluating the next step.
+     */
+    private static void preserveConstructedArraySequences(Jsonata.Frame frame) {
+        afterEachEvaluationStep(frame, (expression, input, environment, result) -> {
+            if (expression.consarray && result instanceof Utils.JList<?> sequence && sequence.sequence) {
+                sequence.keepSingleton = true;
             }
         });
     }
