@@ -4529,13 +4529,11 @@ public class Ec2QueryHandler {
 
     private Response handleCreateInstanceConnectEndpoint(MultivaluedMap<String, String> p, String region) {
         String preserve = p.getFirst("PreserveClientIp");
-        if (Boolean.parseBoolean(p.getFirst("DryRun"))) {
-            throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
-        }
+        // The service validates the request before answering a DryRun, as AWS does.
         InstanceConnectEndpoint endpoint = service.createInstanceConnectEndpoint(region, p.getFirst("SubnetId"),
                 getList(p, "SecurityGroupId"), preserve == null ? null : Boolean.parseBoolean(preserve),
                 p.getFirst("IpAddressType"), parseTagsForResource(p, "instance-connect-endpoint"),
-                p.getFirst("ClientToken"));
+                p.getFirst("ClientToken"), Boolean.parseBoolean(p.getFirst("DryRun")));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateInstanceConnectEndpointResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4548,6 +4546,8 @@ public class Ec2QueryHandler {
     private Response handleDescribeInstanceConnectEndpoints(MultivaluedMap<String, String> p, String region) {
         List<InstanceConnectEndpoint> endpoints = service.describeInstanceConnectEndpoints(region,
                 getList(p, "InstanceConnectEndpointId"), getFiltersList(p));
+        // After the describe, so an unknown ID or filter fails on its own error first.
+        checkDryRun(p);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeInstanceConnectEndpointsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -4565,6 +4565,8 @@ public class Ec2QueryHandler {
             throw new AwsException("MissingParameter",
                     "The request must contain the parameter InstanceConnectEndpointId", 400);
         }
+        service.describeInstanceConnectEndpoints(region, List.of(id), List.of());
+        checkDryRun(p);
         InstanceConnectEndpoint endpoint = service.deleteInstanceConnectEndpoint(region, id);
         XmlBuilder xml = new XmlBuilder()
                 .start("DeleteInstanceConnectEndpointResponse", AwsNamespaces.EC2)

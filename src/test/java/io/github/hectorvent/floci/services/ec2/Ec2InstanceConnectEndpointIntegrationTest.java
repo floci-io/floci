@@ -78,6 +78,54 @@ class Ec2InstanceConnectEndpointIntegrationTest {
         deleteAll(List.of(groupA, groupB), subnetId, vpcId);
     }
 
+    @Test
+    void dryRunValidatesFirstAndChangesNothing() {
+        String vpcId = createVpc("10.82.0.0/16");
+        String subnetId = createSubnet(vpcId, "10.82.1.0/24");
+        String missing = "eice-0123456789abcdef0";
+
+        // An invalid request fails on its own error, not DryRunOperation.
+        assertError(ec2("CreateInstanceConnectEndpoint", "test", "us-east-1")
+                .formParam("SubnetId", "subnet-0123456789abcdef0").formParam("DryRun", "true"),
+                400, "InvalidSubnetID.NotFound");
+        assertError(ec2("CreateInstanceConnectEndpoint", "test", "us-east-1")
+                .formParam("SubnetId", subnetId).formParam("IpAddressType", "bogus").formParam("DryRun", "true"),
+                400, "InvalidParameterValue");
+        assertError(ec2("DescribeInstanceConnectEndpoints", "test", "us-east-1")
+                .formParam("InstanceConnectEndpointId.1", missing).formParam("DryRun", "true"),
+                400, "InvalidInstanceConnectEndpointId.NotFound");
+        assertError(ec2("DeleteInstanceConnectEndpoint", "test", "us-east-1")
+                .formParam("InstanceConnectEndpointId", missing).formParam("DryRun", "true"),
+                400, "InvalidInstanceConnectEndpointId.NotFound");
+
+        // A valid one answers DryRunOperation and creates or deletes nothing.
+        assertError(ec2("CreateInstanceConnectEndpoint", "test", "us-east-1")
+                .formParam("SubnetId", subnetId).formParam("DryRun", "true"), 412, "DryRunOperation");
+        ec2("DescribeInstanceConnectEndpoints", "test", "us-east-1")
+                .formParam("Filter.1.Name", "subnet-id").formParam("Filter.1.Value.1", subnetId)
+                .post("/").then().statusCode(200)
+                .body(ITEM + ".size()", equalTo(0));
+        assertError(ec2("DescribeInstanceConnectEndpoints", "test", "us-east-1").formParam("DryRun", "true"),
+                412, "DryRunOperation");
+
+        String id = ec2("CreateInstanceConnectEndpoint", "test", "us-east-1").formParam("SubnetId", subnetId)
+                .post("/").then().statusCode(200).extract().path(CREATED + ".instanceConnectEndpointId");
+        assertError(ec2("DeleteInstanceConnectEndpoint", "test", "us-east-1")
+                .formParam("InstanceConnectEndpointId", id).formParam("DryRun", "true"), 412, "DryRunOperation");
+        ec2("DescribeInstanceConnectEndpoints", "test", "us-east-1")
+                .formParam("InstanceConnectEndpointId.1", id)
+                .post("/").then().statusCode(200)
+                .body(ITEM + ".state", equalTo("create-complete"));
+
+        ec2("DeleteInstanceConnectEndpoint", "test", "us-east-1").formParam("InstanceConnectEndpointId", id)
+                .post("/").then().statusCode(200);
+        deleteAll(List.of(), subnetId, vpcId);
+    }
+
+    private static void assertError(RequestSpecification request, int status, String code) {
+        request.post("/").then().statusCode(status).body("Response.Errors.Error.Code", equalTo(code));
+    }
+
     private static RequestSpecification create(String subnetId, String groupA, String groupB, String name,
                                                String token) {
         return ec2("CreateInstanceConnectEndpoint", "test", "us-east-1")

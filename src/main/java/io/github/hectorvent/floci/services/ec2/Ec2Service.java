@@ -12570,19 +12570,30 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                                  List<String> securityGroupIds,
                                                                  Boolean preserveClientIp, String ipAddressType,
                                                                  List<Tag> tagList, String clientToken) {
+        return createInstanceConnectEndpoint(region, subnetId, securityGroupIds, preserveClientIp, ipAddressType,
+                tagList, clientToken, false);
+    }
+
+    /** As above; with {@code dryRun} the request is validated and then answered with DryRunOperation. */
+    public InstanceConnectEndpoint createInstanceConnectEndpoint(String region, String subnetId,
+                                                                 List<String> securityGroupIds,
+                                                                 Boolean preserveClientIp, String ipAddressType,
+                                                                 List<Tag> tagList, String clientToken,
+                                                                 boolean dryRun) {
         // Held from the client-token replay scan to the save: two creates with one token then see
         // each other, and deleteSubnet, which takes the same lock, cannot remove the subnet between
         // requireSubnet and the save.
         synchronized (attachmentTopologyLock(region)) {
             return createInstanceConnectEndpointHeld(region, subnetId, securityGroupIds, preserveClientIp,
-                    ipAddressType, tagList, clientToken);
+                    ipAddressType, tagList, clientToken, dryRun);
         }
     }
 
     private InstanceConnectEndpoint createInstanceConnectEndpointHeld(String region, String subnetId,
                                                                       List<String> securityGroupIds,
                                                                       Boolean preserveClientIp, String ipAddressType,
-                                                                      List<Tag> tagList, String clientToken) {
+                                                                      List<Tag> tagList, String clientToken,
+                                                                      boolean dryRun) {
         if (subnetId == null || subnetId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter SubnetId", 400);
         }
@@ -12612,6 +12623,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 }
                 groups.add(groupId);
             }
+        }
+        if (dryRun) {
+            throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
         }
         String token = clientToken != null && !clientToken.isBlank() ? clientToken : null;
         if (token != null) {
