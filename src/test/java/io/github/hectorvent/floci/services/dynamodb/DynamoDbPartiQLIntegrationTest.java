@@ -9,6 +9,9 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
@@ -484,6 +487,48 @@ class DynamoDbPartiQLIntegrationTest {
             .body("message", equalTo("2 validation errors detected: " + badCapacity
                     + "; Value null at 'statements.2.member.statement' "
                     + "failed to satisfy constraint: Member must not be null"));
+    }
+
+    @Test
+    @Order(25)
+    void requestMembersOutsideTheirConstraintsAreListedInDynamoDbOrderUpToTen() {
+        String atLeastOne = "' failed to satisfy constraint: Member must have length greater than or equal to 1";
+        String returnValues = "' failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, NONE]";
+        String badCapacity = "Value 'BAD' at 'returnConsumedCapacity' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]";
+
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"","Parameters":[],"NextToken":"","Limit":0,"ReturnConsumedCapacity":"BAD",
+                 "ReturnValuesOnConditionCheckFailure":"BAD"}
+                """)
+            .statusCode(400)
+            .body("message", equalTo("6 validation errors detected: "
+                    + "Value 'BAD' at 'returnValuesOnConditionCheckFailure" + returnValues
+                    + "; Value '' at 'nextToken" + atLeastOne
+                    + "; Value '0' at 'limit' failed to satisfy constraint: "
+                    + "Member must have value greater than or equal to 1"
+                    + "; Value '' at 'statement" + atLeastOne
+                    + "; " + badCapacity
+                    + "; Value '[]' at 'parameters" + atLeastOne));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"ClientRequestToken":"","ReturnConsumedCapacity":"BAD","TransactStatements":[
+                 {"Statement":"SELECT","ReturnValuesOnConditionCheckFailure":"BAD","Parameters":[]}%s]}
+                """.formatted(",{\"Statement\":\"\"}".repeat(9)))
+            .statusCode(400)
+            .body("message", equalTo("10 validation errors detected: "
+                    + "Value '' at 'clientRequestToken" + atLeastOne
+                    + "; Value 'BAD' at 'transactStatements.1.member.returnValuesOnConditionCheckFailure" + returnValues
+                    + "; Value '[]' at 'transactStatements.1.member.parameters" + atLeastOne
+                    + IntStream.rangeClosed(2, 8)
+                            .mapToObj(n -> "; Value '' at 'transactStatements." + n + ".member.statement" + atLeastOne)
+                            .collect(Collectors.joining())));
+        request("DynamoDB_20120810.ExecuteTransaction", "{\"TransactStatements\":[]}")
+            .statusCode(400)
+            .body("message", equalTo("1 validation error detected: Value '[]' at 'transactStatements" + atLeastOne));
+        request("DynamoDB_20120810.BatchExecuteStatement", "{\"ReturnConsumedCapacity\":\"BAD\"}")
+            .statusCode(400)
+            .body("message", equalTo("2 validation errors detected: " + badCapacity
+                    + "; Value null at 'statements' failed to satisfy constraint: Member must not be null"));
     }
 
     private static void putItem(String pk, String attributes) {

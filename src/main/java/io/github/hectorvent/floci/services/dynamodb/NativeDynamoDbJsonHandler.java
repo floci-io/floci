@@ -3521,6 +3521,11 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private static final int MAX_STATEMENT_LENGTH = 8192;
+    private static final int MAX_NEXT_TOKEN_LENGTH = 32768;
+    private static final int MAX_CLIENT_REQUEST_TOKEN_LENGTH = 36;
+    private static final List<String> PARTIQL_RETURN_VALUES_ON_CONDITION_CHECK_FAILURE = List.of("ALL_OLD", "NONE");
+    // ExecuteTransaction and BatchExecuteStatement name only the first 10 violations.
+    private static final int MAX_PARTIQL_VIOLATIONS = 10;
 
     private static void addStatementError(JsonNode member, String path, List<String> validationErrors) {
         JsonNode statement = member.path("Statement");
@@ -3528,16 +3533,73 @@ public class NativeDynamoDbJsonHandler {
             validationErrors.add(SmithyValidationErrors.notNull(path));
             return;
         }
-        String error = SmithyValidationErrors.lengthOutOfRange(path, statement.asText(), 1, MAX_STATEMENT_LENGTH);
+        addLengthError(member, "Statement", path, MAX_STATEMENT_LENGTH, validationErrors);
+    }
+
+    private static void addLengthError(JsonNode request, String member, String path, int max,
+                                       List<String> validationErrors) {
+        JsonNode value = request.get(member);
+        if (value == null || value.isNull()) {
+            return;
+        }
+        String error = SmithyValidationErrors.lengthOutOfRange(path, value.asText(), 1, max);
         if (error != null) {
             validationErrors.add(error);
         }
     }
 
+    private static void addLimitError(JsonNode request, List<String> validationErrors) {
+        JsonNode limit = request.get("Limit");
+        if (limit != null && !limit.isNull() && limit.asLong() < 1) {
+            validationErrors.add(SmithyValidationErrors.valueTooSmall("limit", limit.asText(), 1));
+        }
+    }
+
+    private static void addParametersError(JsonNode request, String path, List<String> validationErrors) {
+        JsonNode parameters = request.path("Parameters");
+        if (parameters.isArray() && parameters.isEmpty()) {
+            validationErrors.add(SmithyValidationErrors.lengthTooShort(path, "[]", 1));
+        }
+    }
+
+    private static void addPartiQLReturnValuesError(JsonNode request, String path, List<String> validationErrors) {
+        JsonNode value = request.get("ReturnValuesOnConditionCheckFailure");
+        if (value != null && !value.isNull()
+                && !PARTIQL_RETURN_VALUES_ON_CONDITION_CHECK_FAILURE.contains(value.asText())) {
+            validationErrors.add(SmithyValidationErrors.notInEnum(value.asText(), path,
+                    PARTIQL_RETURN_VALUES_ON_CONDITION_CHECK_FAILURE));
+        }
+    }
+
+    private static void addStatementListErrors(JsonNode statements, String path, List<String> validationErrors) {
+        if (!statements.isArray()) {
+            validationErrors.add(SmithyValidationErrors.notNull(path));
+            return;
+        }
+        if (statements.isEmpty()) {
+            validationErrors.add(SmithyValidationErrors.lengthTooShort(path, "[]", 1));
+        }
+        for (int i = 0; i < statements.size(); i++) {
+            JsonNode member = statements.get(i);
+            String memberPath = path + "." + (i + 1) + ".member.";
+            addPartiQLReturnValuesError(member, memberPath + "returnValuesOnConditionCheckFailure", validationErrors);
+            addStatementError(member, memberPath + "statement", validationErrors);
+            addParametersError(member, memberPath + "parameters", validationErrors);
+        }
+    }
+
+    private static void throwPartiQLValidationErrors(List<String> validationErrors) {
+        throwValidationErrors(validationErrors.subList(0, Math.min(validationErrors.size(), MAX_PARTIQL_VIOLATIONS)));
+    }
+
     private Response handleExecuteStatement(JsonNode request, String region) {
         List<String> validationErrors = new ArrayList<>();
+        addPartiQLReturnValuesError(request, "returnValuesOnConditionCheckFailure", validationErrors);
+        addLengthError(request, "NextToken", "nextToken", MAX_NEXT_TOKEN_LENGTH, validationErrors);
+        addLimitError(request, validationErrors);
         addStatementError(request, "statement", validationErrors);
         addReturnConsumedCapacityError(request, validationErrors);
+        addParametersError(request, "parameters", validationErrors);
         throwValidationErrors(validationErrors);
         String statement = request.path("Statement").asText();
         List<JsonNode> parameters = toPartiQLParams(request.path("Parameters"));
@@ -3560,15 +3622,12 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleExecuteTransaction(JsonNode request, String region) {
         JsonNode stmts = request.path("TransactStatements");
-        if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
-            throw new AwsException("ValidationException", "TransactStatements must not be empty", 400);
-        }
         List<String> validationErrors = new ArrayList<>();
-        for (int i = 0; i < stmts.size(); i++) {
-            addStatementError(stmts.get(i), "transactStatements." + (i + 1) + ".member.statement", validationErrors);
-        }
+        addLengthError(request, "ClientRequestToken", "clientRequestToken", MAX_CLIENT_REQUEST_TOKEN_LENGTH,
+                validationErrors);
+        addStatementListErrors(stmts, "transactStatements", validationErrors);
         addReturnConsumedCapacityError(request, validationErrors);
-        throwValidationErrors(validationErrors);
+        throwPartiQLValidationErrors(validationErrors);
         try {
             List<DynamoDbPartiQLParser.Stmt> statements = new ArrayList<>();
             for (int i = 0; i < stmts.size(); i++) {
@@ -3694,15 +3753,8 @@ public class NativeDynamoDbJsonHandler {
         JsonNode stmts = request.path("Statements");
         List<String> validationErrors = new ArrayList<>();
         addReturnConsumedCapacityError(request, validationErrors);
-        if (stmts.isArray()) {
-            for (int i = 0; i < stmts.size(); i++) {
-                addStatementError(stmts.get(i), "statements." + (i + 1) + ".member.statement", validationErrors);
-            }
-        }
-        throwValidationErrors(validationErrors);
-        if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
-            throw new AwsException("ValidationException", "Statements must not be empty", 400);
-        }
+        addStatementListErrors(stmts, "statements", validationErrors);
+        throwPartiQLValidationErrors(validationErrors);
         ArrayNode responses = objectMapper.createArrayNode();
         Map<String, DynamoDbWriteCapacity.Cost> capacity = new LinkedHashMap<>();
         for (JsonNode s : stmts) {
