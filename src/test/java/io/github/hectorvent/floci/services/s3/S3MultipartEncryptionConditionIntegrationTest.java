@@ -117,6 +117,44 @@ class S3MultipartEncryptionConditionIntegrationTest {
                 .then().statusCode(404).body(containsString("NoSuchUpload"));
     }
 
+    @Test
+    void aPutNamingAnUploadButNoPartIsAnObjectWriteAndIsChecked() {
+        Fixture fixture = fixture();
+        S3RequestSigner unpermitted = unpermittedUser();
+
+        given().filter(unpermitted).contentType("text/plain").body("a write")
+                .put("/" + fixture.bucket() + "/written.txt?uploadId=no-such-upload")
+                .then().statusCode(403).body(containsString("AccessDenied"));
+
+        given().filter(fixture.owner()).head("/" + fixture.bucket() + "/written.txt").then().statusCode(404);
+    }
+
+    @Test
+    void aPutNamingAHeldUploadButNoPartIsJudgedByItsOwnHeaders() {
+        Fixture fixture = fixture();
+        S3RequestSigner kmsOnly = kmsOnlyIdentityUser();
+        String uploadId = given().filter(kmsOnly).header(SSE, "aws:kms").header(SSE_KEY, BUCKET_KEY)
+                .post("/" + fixture.bucket() + "/held.bin?uploads")
+                .then().statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given().filter(kmsOnly).contentType("text/plain").body("a write")
+                .put("/" + fixture.bucket() + "/written.txt?uploadId=" + uploadId)
+                .then().statusCode(403).body(containsString("AccessDenied"));
+
+        given().filter(fixture.owner()).delete("/" + fixture.bucket() + "/held.bin?uploadId=" + uploadId)
+                .then().statusCode(204);
+    }
+
+    @Test
+    void aPartCopyNamingAnUploadNotHeldIsChecked() {
+        Fixture fixture = fixture();
+
+        given().filter(unpermittedUser()).header("x-amz-copy-source", "/" + fixture.bucket() + "/source.txt")
+                .put("/" + fixture.bucket() + "/copied.bin?partNumber=1&uploadId=no-such-upload")
+                .then().statusCode(403).body(containsString("AccessDenied"));
+    }
+
     private record Fixture(String bucket, S3RequestSigner owner, S3RequestSigner user) {
     }
 
@@ -132,12 +170,31 @@ class S3MultipartEncryptionConditionIntegrationTest {
     }
 
     private S3RequestSigner user(String userName) {
+        return user(userName, """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:*","kms:*"],"Resource":"*"}]}""");
+    }
+
+    /** A user no policy allows anything. */
+    private S3RequestSigner unpermittedUser() {
+        return user("multipart-unpermitted-" + UUID.randomUUID().toString().substring(0, 8), null);
+    }
+
+    /** A user allowed {@code s3:*} only for a request naming {@code aws:kms}. */
+    private S3RequestSigner kmsOnlyIdentityUser() {
+        return user("multipart-kms-only-" + UUID.randomUUID().toString().substring(0, 8), """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:*","Resource":"*",
+                   "Condition":{"StringEquals":{"s3:x-amz-server-side-encryption":"aws:kms"}}}]}""");
+    }
+
+    private S3RequestSigner user(String userName, String policy) {
         String authorization = EnforcementFixtures.auth(ACCOUNT, "iam");
         EnforcementFixtures.UserCredentials credentials =
                 EnforcementFixtures.createUser(cleanup, endpoint.getPort(), authorization, userName);
-        EnforcementFixtures.putUserPolicy(endpoint.getPort(), authorization, userName, "AllowS3AndKms", """
-                {"Version":"2012-10-17","Statement":[
-                  {"Effect":"Allow","Action":["s3:*","kms:*"],"Resource":"*"}]}""");
+        if (policy != null) {
+            EnforcementFixtures.putUserPolicy(endpoint.getPort(), authorization, userName, "Allow", policy);
+        }
         return S3RequestSigner.signedAs(credentials.accessKeyId(), credentials.secretAccessKey());
     }
 

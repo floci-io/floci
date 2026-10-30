@@ -407,7 +407,7 @@ public class IamConditionContextResolver {
             // The Object Lock keys come from what the request sets: an object creation's headers, the
             // retention and legal-hold bodies. A part or a completion creates nothing from its own
             // headers, and is judged by the encryption its upload recorded.
-            case "s3:PutObject" -> ctx.getUriInfo().getQueryParameters().containsKey("uploadId")
+            case "s3:PutObject" -> isPartOrCompletion(ctx)
                     ? s3UploadEncryptionConditionContext(ctx)
                     : S3ObjectActions.objectCreationConditions(ctx::getHeaderString,
                             s3RequestTagging(ctx), S3ObjectActions.isCopy(ctx.getMethod(), ctx::getHeaderString),
@@ -432,9 +432,25 @@ public class IamConditionContextResolver {
         try {
             return s3Service.get().multipartEncryptionConditions(bucket, s3RequestObjectKey(ctx, bucket),
                     ctx.getUriInfo().getQueryParameters().getFirst("uploadId"));
-        } catch (AwsException e) {
+        } catch (AwsException expected) {
+            // The handler answers an upload not held as NoSuchUpload; here it offers no keys.
             return null;
         }
+    }
+
+    /**
+     * A part or a completion as S3Controller routes them: a PUT naming an upload and a part number, or a
+     * POST naming an upload and not asking for a new one. Any other PUT or POST naming an {@code uploadId}
+     * creates an object or an upload, whatever that parameter says, and is judged by its own headers.
+     */
+    private static boolean isPartOrCompletion(ContainerRequestContext ctx) {
+        MultivaluedMap<String, String> params = ctx.getUriInfo().getQueryParameters();
+        if (!params.containsKey("uploadId")) {
+            return false;
+        }
+        return "PUT".equalsIgnoreCase(ctx.getMethod())
+                ? params.containsKey("partNumber")
+                : "POST".equalsIgnoreCase(ctx.getMethod()) && !params.containsKey("uploads");
     }
 
     /**
@@ -443,7 +459,8 @@ public class IamConditionContextResolver {
      * policy on the encryption keys, as measured.
      */
     boolean namesUploadNotHeld(String action, ContainerRequestContext ctx) {
-        return "s3:PutObject".equals(action) && ctx.getUriInfo().getQueryParameters().containsKey("uploadId")
+        return "s3:PutObject".equals(action) && isPartOrCompletion(ctx)
+                && ctx.getHeaderString("x-amz-copy-source") == null
                 && s3UploadEncryptionConditionContext(ctx) == null && s3Service.isResolvable();
     }
 

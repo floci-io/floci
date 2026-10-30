@@ -5436,6 +5436,7 @@ public class S3Service implements Resettable, ResourceProvider {
         if (!enforceAuth) {
             return;
         }
+        authorizeSignedRequest(authorization);
         authorizeObjectWrite(bucket, key, null, "s3:PutObject", authorization,
                 multipartEncryptionConditions(bucket, key, uploadId));
     }

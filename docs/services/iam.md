@@ -2529,7 +2529,8 @@ floci populates:
   `CompleteMultipartUpload` sends neither header and carries what its upload recorded when it was
   created. An upload holds only what its creation asked for, so one created with no encryption
   carries neither key, where S3 gives it the bucket's default. A part naming an upload floci does
-  not hold answers `NoSuchUpload`, as on AWS, whatever the policy says.
+  not hold answers `NoSuchUpload`, as on AWS, whatever the policy says, unless it copies from a
+  source.
 - An object creation offers its tag and Object Lock keys to each action it is checked as: its
   `s3:PutObject` and the extra actions its settings need.
 - `iam:PassedToService`: the service principal a request passes a role to, for the
