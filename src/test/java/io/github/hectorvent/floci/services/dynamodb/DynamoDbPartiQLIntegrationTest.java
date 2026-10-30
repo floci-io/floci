@@ -448,6 +448,44 @@ class DynamoDbPartiQLIntegrationTest {
             .body("Responses[0].Error.Message", equalTo(notWellFormed + "Unexpected operator"));
     }
 
+    @Test
+    @Order(24)
+    void aStatementOutsideOneTo8192CodePointsIsRefusedBeforeItIsParsed() {
+        String select = "SELECT * FROM \"" + TABLE + "-never-created\" WHERE pk = '";
+        String tooLong = select + "a".repeat(8192 - select.length()) + "'";
+        String badCapacity = "Value 'BAD' at 'returnConsumedCapacity' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]";
+
+        statement(select + "\\ud83d\\ude00" + "a".repeat(8190 - select.length()) + "'")
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+        request("DynamoDB_20120810.ExecuteStatement",
+                "{\"Statement\":\"" + tooLong.replace("\"", "\\\"") + "\",\"ReturnConsumedCapacity\":\"BAD\"}")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("2 validation errors detected: Value '" + tooLong + "' at 'statement' "
+                    + "failed to satisfy constraint: Member must have length less than or equal to 8192; "
+                    + badCapacity));
+        request("DynamoDB_20120810.ExecuteStatement", "{}")
+            .statusCode(400)
+            .body("message", equalTo("1 validation error detected: Value null at 'statement' "
+                    + "failed to satisfy constraint: Member must not be null"));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"SELECT"},{"Statement":""}],"ReturnConsumedCapacity":"BAD"}
+                """)
+            .statusCode(400)
+            .body("message", equalTo("2 validation errors detected: Value '' at 'transactStatements.2.member.statement' "
+                    + "failed to satisfy constraint: Member must have length greater than or equal to 1; "
+                    + badCapacity));
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":"SELECT"},{}],"ReturnConsumedCapacity":"BAD"}
+                """)
+            .statusCode(400)
+            .body("message", equalTo("2 validation errors detected: " + badCapacity
+                    + "; Value null at 'statements.2.member.statement' "
+                    + "failed to satisfy constraint: Member must not be null"));
+    }
+
     private static void putItem(String pk, String attributes) {
         request("DynamoDB_20120810.PutItem", """
                 {"TableName":"%s","Item":{"pk":{"S":"%s"},%s}}

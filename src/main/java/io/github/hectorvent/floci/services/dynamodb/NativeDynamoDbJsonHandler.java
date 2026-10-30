@@ -3520,8 +3520,25 @@ public class NativeDynamoDbJsonHandler {
         return Response.ok(response).build();
     }
 
+    private static final int MAX_STATEMENT_LENGTH = 8192;
+
+    private static void addStatementError(JsonNode member, String path, List<String> validationErrors) {
+        JsonNode statement = member.path("Statement");
+        if (statement.isMissingNode() || statement.isNull()) {
+            validationErrors.add(SmithyValidationErrors.notNull(path));
+            return;
+        }
+        String error = SmithyValidationErrors.lengthOutOfRange(path, statement.asText(), 1, MAX_STATEMENT_LENGTH);
+        if (error != null) {
+            validationErrors.add(error);
+        }
+    }
+
     private Response handleExecuteStatement(JsonNode request, String region) {
-        requireValidReturnConsumedCapacity(request);
+        List<String> validationErrors = new ArrayList<>();
+        addStatementError(request, "statement", validationErrors);
+        addReturnConsumedCapacityError(request, validationErrors);
+        throwValidationErrors(validationErrors);
         String statement = request.path("Statement").asText();
         List<JsonNode> parameters = toPartiQLParams(request.path("Parameters"));
         DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(statement, parameters);
@@ -3547,6 +3564,9 @@ public class NativeDynamoDbJsonHandler {
             throw new AwsException("ValidationException", "TransactStatements must not be empty", 400);
         }
         List<String> validationErrors = new ArrayList<>();
+        for (int i = 0; i < stmts.size(); i++) {
+            addStatementError(stmts.get(i), "transactStatements." + (i + 1) + ".member.statement", validationErrors);
+        }
         addReturnConsumedCapacityError(request, validationErrors);
         throwValidationErrors(validationErrors);
         try {
@@ -3671,8 +3691,15 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleBatchExecuteStatement(JsonNode request, String region) {
-        requireValidReturnConsumedCapacity(request);
         JsonNode stmts = request.path("Statements");
+        List<String> validationErrors = new ArrayList<>();
+        addReturnConsumedCapacityError(request, validationErrors);
+        if (stmts.isArray()) {
+            for (int i = 0; i < stmts.size(); i++) {
+                addStatementError(stmts.get(i), "statements." + (i + 1) + ".member.statement", validationErrors);
+            }
+        }
+        throwValidationErrors(validationErrors);
         if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
             throw new AwsException("ValidationException", "Statements must not be empty", 400);
         }
