@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.testing.DockerAvailability;
 import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -43,6 +44,7 @@ import static org.mockito.Mockito.mock;
 class Ec2SystemdGuestDockerIntegrationTest {
 
     private static final String REGION = "us-east-1";
+    private static final Logger LOG = Logger.getLogger(Ec2SystemdGuestDockerIntegrationTest.class);
 
     @Inject
     DockerClient docker;
@@ -105,7 +107,13 @@ class Ec2SystemdGuestDockerIntegrationTest {
                     "guest's /lib/modules is not read-only: " + inside.stdout());
         } finally {
             if (instance.getDockerContainerId() != null) {
-                docker.removeContainerCmd(instance.getDockerContainerId()).withForce(true).exec();
+                try {
+                    docker.removeContainerCmd(instance.getDockerContainerId()).withForce(true).exec();
+                } catch (RuntimeException e) {
+                    // A cleanup failure must not replace the assertion error the test is reporting.
+                    LOG.warnv("Could not remove test container {0}: {1}", instance.getDockerContainerId(),
+                            e.getMessage());
+                }
             }
         }
     }
