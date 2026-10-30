@@ -73,6 +73,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.ElastiCac
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ElbV2CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsArchiveCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.EventsV2CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.FirehoseCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.GuardDutyMalwareProtectionPlanCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.IamAccessKeyCfnProvisioner;
@@ -141,6 +142,7 @@ import io.github.hectorvent.floci.services.elasticache.ElastiCacheServerlessServ
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
+import io.github.hectorvent.floci.services.eventbridgev2.EventBridgeV2Service;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.guardduty.GuardDutyService;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -268,6 +270,7 @@ final class CfnProvisionerFixture {
         private RedshiftService redshiftService;
         private RedshiftServerlessService redshiftServerlessService;
         private CloudMapService cloudMapService;
+        private EventBridgeV2Service eventBridgeV2Service;
         private GuardDutyService guardDutyService;
         private BedrockAgentCoreControlService bedrockAgentCoreControlService;
         private BedrockAgentCoreMemoryService bedrockAgentCoreMemoryService;
@@ -529,6 +532,9 @@ final class CfnProvisionerFixture {
             }
             if (cloudMapService != null) {
                 discovered.add(new CloudMapCfnProvisioner(cloudMapService));
+            }
+            if (eventBridgeV2Service != null) {
+                discovered.add(new EventsV2CfnProvisioner(eventBridgeV2Service));
             }
             if (guardDutyService != null) {
                 discovered.add(new GuardDutyMalwareProtectionPlanCfnProvisioner(guardDutyService));
@@ -862,6 +868,11 @@ final class CfnProvisionerFixture {
 
         public Builder cloudMap(CloudMapService v) {
             this.cloudMapService = v;
+            return this;
+        }
+
+        public Builder eventBridgeV2(EventBridgeV2Service v) {
+            this.eventBridgeV2Service = v;
             return this;
         }
 

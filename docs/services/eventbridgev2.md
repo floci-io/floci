@@ -106,6 +106,31 @@ Where the two APIs share an operation name, the API serving the request decides 
 checked, not the members the request gives. An EventBridge request that adds a V2 bus's
 `EventBusArn` is still checked on the EventBridge bus it acts on.
 
+## CloudFormation
+
+`AWS::EventsV2::EventBus` and `AWS::EventsV2::Subscriber` are provisioned from their properties.
+`Ref` returns the ARN of each.
+
+| Type | `Fn::GetAtt` |
+| --- | --- |
+| `AWS::EventsV2::EventBus` | `EventBusArn`, `State`, `CreationTime`, `LastModifiedTime` |
+| `AWS::EventsV2::Subscriber` | `SubscriberArn`, `BusName`, `CreationTime`, `LastModifiedTime` |
+
+An update that keeps a bus's `Name` changes it in place. An update that keeps a subscriber's `Name`,
+`EventBusArn`, `InvokeConfiguration.TargetArn`, `Type`, `StartingPosition` and `PointInTimeConfiguration`
+changes the rest in place.
+Changing any of them replaces the subscriber. With a new `Name`, the new subscriber is created and the
+old one deleted once the update completes. Under the same `Name`, the old subscriber is deleted first and
+then created again, the `delete_then_create` replacement its schema declares. If that update rolls back,
+or the new subscriber cannot be created, the old subscriber is recreated with its original ARN and
+settings; a rollback that cannot recreate it fails rather than reporting success. An update rolled back after
+changing a bus or subscriber in place puts back the settings it had. A
+`PointInTimeConfiguration` timestamp is given in ISO 8601.
+
+With `aws-cdk-lib` 2.272 to 2.273, `CfnSubscriber` lacks its `invokeConfiguration` prop
+([aws/aws-cdk#38996](https://github.com/aws/aws-cdk/issues/38996)); set it with
+`addPropertyOverride("InvokeConfiguration", {...})`.
+
 ## Configuration
 
 | Variable | Default | Description |

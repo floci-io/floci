@@ -47,6 +47,7 @@ order:
   - AWS::Cognito
   - AWS::CertificateManager
   - AWS::Events
+  - AWS::EventsV2
   - AWS::Scheduler
   - AWS::Transfer
   - AWS::Backup
@@ -116,6 +117,7 @@ type_order:
   AWS::Batch: [ComputeEnvironment, JobQueue, JobDefinition]
   AWS::Cognito: [UserPool, UserPoolClient]
   AWS::Events: [Rule, EventBus, EventBusPolicy]
+  AWS::EventsV2: [EventBus, Subscriber]
   AWS::CloudFormation: [CustomResource]
   AWS::BedrockAgentCore: [Runtime, RuntimeEndpoint, Memory]
 
@@ -148,6 +150,7 @@ service_labels:
   AWS::EKS: EKS
   AWS::ElasticLoadBalancingV2: Elastic Load Balancing v2
   AWS::Events: EventBridge
+  AWS::EventsV2: EventBridge V2
   AWS::GuardDuty: GuardDuty
   AWS::IAM: IAM
   AWS::IoT: IoT Core
@@ -216,6 +219,7 @@ notes:
   AWS::SES::EmailIdentity: 'BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS''s region- and identity-specific zone assignment'
   AWS::SES::ReceiptRule: 'stored in an existing SES receipt rule set; Ref and RuleName return the rule name; management plane only, with no inbound mail delivery'
   AWS::Events::Archive: '`KmsKeyIdentifier` is ignored'
+  AWS::EventsV2::Subscriber: 'delivers only to Amazon SQS queues; `Transformer` RAW or WITH_METADATA; a target parameter takes a literal or a `$events` path'
   AWS::AppConfig::Environment: '`Tags` and `DeletionProtectionCheck` are accepted and not stored'
   AWS::AppConfig::ConfigurationProfile: '`Tags`, `KmsKeyIdentifier`, `RetrievalRoleArn`, `Validators` and `DeletionProtectionCheck` are accepted and not stored'
   AWS::AppConfig::DeploymentStrategy: '`Tags` are accepted and not stored; `ReplicateTo: SSM_DOCUMENT` writes no SSM document'
