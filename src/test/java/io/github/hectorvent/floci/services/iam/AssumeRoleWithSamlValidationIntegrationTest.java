@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.testing.SamlMetadata;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
@@ -51,6 +52,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 class AssumeRoleWithSamlValidationIntegrationTest {
@@ -250,6 +252,25 @@ class AssumeRoleWithSamlValidationIntegrationTest {
                 .body("GetCallerIdentityResponse.GetCallerIdentityResult.UserId", equalTo(assumedRoleId));
     }
 
+    /**
+     * The session token is as long as the request's {@code MinimumSessionTokenSize} asks for, which
+     * this operation models and now answers with the five others that do. It is pinned here rather
+     * than beside them because a token is minted only once the assertion verifies, which wants the
+     * signing fixture this class already has.
+     */
+    @Test
+    void theSessionTokenIsAsLongAsTheRequestAsksFor() {
+        String role = createRole(true);
+        String assertion = assertion(role, PROVIDER, Instant.now().plusSeconds(300), AUDIENCE, ISSUER, true);
+
+        String token = assumeRequest(role, assertion, PROVIDER)
+                .formParam("MinimumSessionTokenSize", "1024")
+                .when().post("/").then().statusCode(200)
+                .extract().path("AssumeRoleWithSAMLResponse.AssumeRoleWithSAMLResult.Credentials.SessionToken");
+
+        assertEquals(1024, token.length());
+    }
+
     private static void assertSignatureInvalid(Function<XMLSignatureFactory, List<Transform>> transforms) {
         String role = createRole(true);
         assume(role, assertion(role, PROVIDER, Instant.now().plusSeconds(300), AUDIENCE, ISSUER, true, false, transforms),
@@ -272,13 +293,17 @@ class AssumeRoleWithSamlValidationIntegrationTest {
     }
 
     private static ValidatableResponse assume(String role, String assertion, String provider) {
+        return assumeRequest(role, assertion, provider).when().post("/").then();
+    }
+
+    /** The request every case here posts, for a case that carries a member of its own on top. */
+    private static RequestSpecification assumeRequest(String role, String assertion, String provider) {
         return given().contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "AssumeRoleWithSAML")
                 .formParam("RoleArn", role)
                 .formParam("PrincipalArn", provider)
                 .formParam("SAMLAssertion", assertion)
-                .header("Authorization", auth("sts"))
-                .when().post("/").then();
+                .header("Authorization", auth("sts"));
     }
 
     private static String createRole(boolean allow) {

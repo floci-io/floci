@@ -28,6 +28,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -310,6 +311,55 @@ class StsQueryHandlerTest {
         String body = (String) response.getEntity();
         assertEquals(40, extract(SECRET_ACCESS_KEY, body).length());
         assertEquals(200, extract(SESSION_TOKEN, body).length());
+    }
+
+    /**
+     * {@code MinimumSessionTokenSize} is the size materialized rather than a value only validated:
+     * every operation that models it mints its token through one writer, so asking for 1024
+     * characters gets 1024 on each of them. A request asking for less than the 200 this emulator
+     * mints gets the 200, which is what a minimum asks for. Each operation is asked on its own
+     * rather than the writer being trusted through one of them, so an operation that stopped
+     * reading the member is caught here. The two the model carries that this harness cannot reach
+     * are pinned where their requests can be built: {@code StsAssumeRootIntegrationTest} on
+     * {@code AssumeRoot} and {@code AssumeRoleWithSamlValidationIntegrationTest} on
+     * {@code AssumeRoleWithSAML}, which needs a signed assertion before a token is minted at all.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"GetSessionToken", "AssumeRole", "AssumeRoleWithWebIdentity",
+            "GetFederationToken"})
+    void theSessionTokenIsAsLongAsTheRequestAsksFor(String action) {
+        MultivaluedMap<String, String> asked = sessionRequest(action);
+        asked.putSingle("MinimumSessionTokenSize", "1024");
+
+        Response response = newHandler().handle(action, asked);
+
+        assertEquals(200, response.getStatus(), (String) response.getEntity());
+        assertEquals(1024, extract(SESSION_TOKEN, (String) response.getEntity()).length());
+
+        MultivaluedMap<String, String> under = sessionRequest(action);
+        under.putSingle("MinimumSessionTokenSize", "10");
+
+        String shorter = (String) newHandler().handle(action, under).getEntity();
+
+        assertEquals(200, extract(SESSION_TOKEN, shorter).length());
+    }
+
+    /** The least a request needs to reach issuance on an operation that models a token size. */
+    private static MultivaluedMap<String, String> sessionRequest(String action) {
+        Map<String, String> members = switch (action) {
+            case "AssumeRole" -> Map.of(
+                    "RoleArn", "arn:aws:iam::000000000000:role/TestRole",
+                    "RoleSessionName", "test-session");
+            case "AssumeRoleWithWebIdentity" -> Map.of(
+                    "RoleArn", "arn:aws:iam::000000000000:role/TestRole",
+                    "RoleSessionName", "test-session",
+                    "WebIdentityToken", "opaque-token");
+            case "GetFederationToken" -> Map.of("Name", "test-user");
+            default -> Map.of();
+        };
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        members.forEach(params::putSingle);
+        return params;
     }
 
     @Test
