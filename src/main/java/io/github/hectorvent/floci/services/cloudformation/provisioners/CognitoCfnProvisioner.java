@@ -253,7 +253,13 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("ProviderName", AwsEndpoints.host("cognito-idp", ctx.region()) + "/" + pool.getId());
         r.getAttributes().put("ProviderURL", cognitoService.getIssuer(pool.getId()));
         if (enabledMfasManaged) {
-            applyEnabledMfas(pool.getId(), props, ctx);
+            // The pool is already created or updated here, so a refused MFA configuration has to
+            // undo that: a new pool is deleted, an updated one gets its snapshot back.
+            String poolId = pool.getId();
+            CfnRollback.guarded(r, ctx, !ctx.isUpdate(),
+                    () -> delete(USER_POOL, poolId, ctx.region()),
+                    () -> rollbackUpdate(r),
+                    () -> applyEnabledMfas(poolId, props, ctx));
         }
     }
 

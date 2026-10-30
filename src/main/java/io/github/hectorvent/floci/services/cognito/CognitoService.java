@@ -490,7 +490,10 @@ public class CognitoService implements ResourceProvider {
         return restored;
     }
 
-    /** The name and every field {@code populateUserPool} sets, which is what an update can change. */
+    /**
+     * The name, every field {@code populateUserPool} sets and the MFA factors, which is what an
+     * update can change: CloudFormation sets the factors of a pool's EnabledMfas.
+     */
     private static void copyUserPoolSettings(UserPool from, UserPool to) {
         to.setName(from.getName());
         to.setPolicies(from.getPolicies());
@@ -506,6 +509,9 @@ public class CognitoService implements ResourceProvider {
         to.setVerificationMessageTemplate(from.getVerificationMessageTemplate());
         to.setSmsAuthenticationMessage(from.getSmsAuthenticationMessage());
         to.setMfaConfiguration(from.getMfaConfiguration());
+        to.setSoftwareTokenMfaEnabled(from.getSoftwareTokenMfaEnabled());
+        to.setSmsMfaConfiguration(from.getSmsMfaConfiguration());
+        to.setEmailMfaConfiguration(from.getEmailMfaConfiguration());
         to.setDeviceConfiguration(from.getDeviceConfiguration());
         to.setEmailConfiguration(from.getEmailConfiguration());
         to.setSmsConfiguration(from.getSmsConfiguration());

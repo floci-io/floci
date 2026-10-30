@@ -15,6 +15,8 @@ import static io.github.hectorvent.floci.testing.RestAssuredJsonUtils.awsAction;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -526,18 +528,99 @@ class CognitoCfnIntegrationTest {
         CfnStackWaits.awaitStackDeleted(stack);
     }
 
+    /** OFF with a listed factor is refused by SetUserPoolMfaConfig after the pool exists. */
+    @Test
+    void aRefusedEnabledMfasOnCreateRemovesThePool() throws Exception {
+        String stack = "cognito-cfn-mfa-refused-create-it";
+        String poolName = "cognito-cfn-mfa-refused-create-pool";
+        cloudFormation(stack, "CreateStack", enabledMfasTemplate(poolName,
+            "\"MfaConfiguration\": \"OFF\", \"EnabledMfas\": [\"SOFTWARE_TOKEN_MFA\"]", ""));
+        awaitStackStatus(stack, "ROLLBACK_COMPLETE");
+
+        cognitoAction("ListUserPools", "{\"MaxResults\": 60}")
+            .then().statusCode(200)
+            .body("UserPools.Name", not(hasItem(poolName)));
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    @Test
+    void aRefusedEnabledMfasOnUpdatePutsThePoolBack() throws Exception {
+        String stack = "cognito-cfn-mfa-refused-update-it";
+        String poolName = "cognito-cfn-mfa-refused-update-pool";
+        cloudFormation(stack, "CreateStack", enabledMfasTemplate(poolName,
+            "\"MfaConfiguration\": \"ON\", \"EnabledMfas\": [\"SOFTWARE_TOKEN_MFA\"]", ""));
+        String poolId = outputValue(describeStacks(stack, "CREATE_COMPLETE"), "PoolId");
+
+        cloudFormation(stack, "UpdateStack", enabledMfasTemplate(poolName + "-v2",
+            "\"MfaConfiguration\": \"OFF\", \"EnabledMfas\": [\"SOFTWARE_TOKEN_MFA\"]", ""));
+        awaitStackStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
+
+        cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("UserPool.Name", equalTo(poolName));
+        assertMfa(poolId, "ON", true, false);
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    @Test
+    void aLaterFailurePutsTheReplacedFactorsBack() throws Exception {
+        String stack = "cognito-cfn-mfa-later-failure-it";
+        String poolName = "cognito-cfn-mfa-later-failure-pool";
+        cloudFormation(stack, "CreateStack", enabledMfasTemplate(poolName,
+            "\"MfaConfiguration\": \"ON\", \"EnabledMfas\": [\"SOFTWARE_TOKEN_MFA\"]", ""));
+        String poolId = outputValue(describeStacks(stack, "CREATE_COMPLETE"), "PoolId");
+
+        String failingSecret = """
+            ,
+                "BadSecret": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "DependsOn": "Pool",
+                  "Properties": {
+                    "Name": "cognito-cfn-mfa-later-failure",
+                    "SecretString": "explicit",
+                    "GenerateSecretString": {"PasswordLength": 32}
+                  }
+                }""";
+        cloudFormation(stack, "UpdateStack", enabledMfasTemplate(poolName,
+            "\"MfaConfiguration\": \"OPTIONAL\", \"EnabledMfas\": [\"SMS_MFA\"], "
+                + "\"SmsConfiguration\": {\"SnsCallerArn\": \"arn:aws:iam::000000000000:role/sms\"}",
+            failingSecret));
+        awaitStackStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
+
+        assertMfa(poolId, "ON", true, false);
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    private static void assertMfa(String poolId, String mode, boolean softwareToken, boolean sms) {
+        cognitoAction("GetUserPoolMfaConfig", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("MfaConfiguration", equalTo(mode))
+            .body("SoftwareTokenMfaConfiguration.Enabled", softwareToken ? equalTo(true) : nullValue())
+            .body("SmsMfaConfiguration", sms ? notNullValue() : nullValue());
+    }
+
     private static String enabledMfasTemplate(String mfaProperties) {
+        return enabledMfasTemplate("cognito-cfn-mfa-update-pool", mfaProperties, "");
+    }
+
+    private static String enabledMfasTemplate(String poolName, String mfaProperties, String extraResources) {
         return """
             {
               "Resources": {
                 "Pool": {
                   "Type": "AWS::Cognito::UserPool",
-                  "Properties": {"UserPoolName": "cognito-cfn-mfa-update-pool", %s}
-                }
+                  "Properties": {"UserPoolName": "%s", %s}
+                }%s
               },
               "Outputs": {"PoolId": {"Value": {"Ref": "Pool"}}}
             }
-            """.formatted(mfaProperties);
+            """.formatted(poolName, mfaProperties, extraResources);
     }
 
     private static String deletionProtectionTemplate(String deletionProtection) {
