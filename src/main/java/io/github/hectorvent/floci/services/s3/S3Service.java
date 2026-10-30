@@ -6295,8 +6295,8 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /**
      * What AWS reports for a bucket nobody configured: since April 2023 every new bucket starts with
-     * all four Block Public Access settings on. This is only what GetPublicAccessBlock answers. The
-     * bucket stores no configuration, so enforcement on the write paths is unchanged.
+     * all four Block Public Access settings on. The bucket stores no configuration; the default is
+     * applied when the configuration is read and when the write paths enforce it.
      */
     static final String DEFAULT_PUBLIC_ACCESS_BLOCK_XML = new XmlBuilder()
             .start("PublicAccessBlockConfiguration", AwsNamespaces.S3)
@@ -6348,8 +6348,15 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private S3BlockPublicAccessSettings blockPublicAccessFor(Bucket bucket, String bucketOwnerAccount) {
-        return S3BlockPublicAccessSettings.parse(bucket.getPublicAccessBlockConfiguration())
-                .mostRestrictive(accountBlockPublicAccess(bucketOwnerAccount));
+        return bucketBlockPublicAccess(bucket).mostRestrictive(accountBlockPublicAccess(bucketOwnerAccount));
+    }
+
+    /** A bucket nobody configured enforces the default it reports; an explicit or deleted configuration does not. */
+    private static S3BlockPublicAccessSettings bucketBlockPublicAccess(Bucket bucket) {
+        if (bucket.getPublicAccessBlockConfiguration() == null && !bucket.isPublicAccessBlockDeleted()) {
+            return S3BlockPublicAccessSettings.parse(DEFAULT_PUBLIC_ACCESS_BLOCK_XML);
+        }
+        return S3BlockPublicAccessSettings.parse(bucket.getPublicAccessBlockConfiguration());
     }
 
     private S3BlockPublicAccessSettings accountBlockPublicAccess(String accountId) {
