@@ -329,6 +329,41 @@ class CloudFormationStackStatusEventsIntegrationTest {
         }
     }
 
+    /**
+     * A parameter that cannot be fetched fails the update at execute, before any resource: the same
+     * rollback as a failure in a resource, so the same statuses on the bus. Delivery is in order, so
+     * an UPDATE_FAILED sent would be on the queue ahead of the rollback's last status.
+     */
+    @Test
+    void anUpdateFailingOutsideAResourceSendsNoUpdateFailed() throws Exception {
+        String stack = uniqueName("failed-execute");
+        String template = rootTemplate("first").replaceFirst("\\{", """
+                {
+                  "Parameters": {
+                    "Missing": {
+                      "Type": "AWS::SSM::Parameter::Value<String>",
+                      "Default": "/stack-status-events/no-such-parameter"
+                    }
+                  },
+                """);
+        try (EventRuleQueue queue = EventRuleQueue.route("us-east-1", stack, ALL_STATUS_CHANGES)) {
+            String stackId = createStack(stack, "fe-create", "first");
+            createChangeSet(stack, "UPDATE", "update", template);
+            executeChangeSet(stack, "update", "fe-update");
+            CfnStackWaits.awaitStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
+
+            List<JsonNode> rootEvents = naming(awaitEvents(queue, stackId, "UPDATE_ROLLBACK_COMPLETE"), stackId);
+            Map<String, Set<String>> tokens = tokensByStatus(rootEvents);
+
+            assertEquals(List.of(), withStatus(rootEvents, "UPDATE_FAILED"));
+            assertEquals(Set.of("fe-update"), tokens.get("UPDATE_IN_PROGRESS"));
+            assertEquals(Set.of("fe-update"), tokens.get("UPDATE_ROLLBACK_IN_PROGRESS"));
+            assertEquals(Set.of("fe-update"), tokens.get("UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS"));
+            assertEquals(Set.of("fe-update"), tokens.get("UPDATE_ROLLBACK_COMPLETE"));
+            assertEachStatusOnce(rootEvents);
+        }
+    }
+
     /** Green with or without the events: it keeps delivery from ever failing the stack. */
     @Test
     void aTargetThatCannotBeDeliveredToLeavesTheStackAlone() {
