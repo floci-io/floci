@@ -272,13 +272,13 @@ class S3MultipartServiceTest {
 
     @Test
     void completeMultipartUploadAppliesContentEncodingAndCacheControl() {
-        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "encoded.yaml", "application/yaml",
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "encoded.bin", "text/plain",
                 null, null, new PutObjectOptions().withContentEncoding("gzip").withCacheControl("no-cache"));
-        s3Service.uploadPart("test-bucket", "encoded.yaml", upload.getUploadId(), 1, "part1".getBytes());
+        s3Service.uploadPart("test-bucket", "encoded.bin", upload.getUploadId(), 1, "part1".getBytes());
 
-        s3Service.completeMultipartUpload("test-bucket", "encoded.yaml", upload.getUploadId(), List.of(1), null, null);
+        s3Service.completeMultipartUpload("test-bucket", "encoded.bin", upload.getUploadId(), List.of(1), null, null);
 
-        S3Object object = s3Service.headObject("test-bucket", "encoded.yaml");
+        S3Object object = s3Service.headObject("test-bucket", "encoded.bin");
         assertEquals("gzip", object.getContentEncoding());
         assertEquals("no-cache", object.getCacheControl());
     }

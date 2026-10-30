@@ -1564,9 +1564,9 @@ class S3MultipartIntegrationTest {
     @Test
     @Order(40)
     void completedObjectKeepsContentEncodingAndCacheControl() {
-        String key = "encoded-multipart.yaml";
+        String key = "encoded-multipart.bin";
         String encodedUploadId = given()
-            .header("Content-Type", "application/yaml")
+            .header("Content-Type", "text/plain")
             .header("Content-Encoding", "gzip,aws-chunked")
             .header("Cache-Control", "no-cache")
         .when()
@@ -1600,7 +1600,7 @@ class S3MultipartIntegrationTest {
             .header("Content-Encoding", equalTo("gzip"))
             .header("Cache-Control", equalTo("no-cache"))
             // RestAssured appends a default charset to the Content-Type it sends
-            .header("Content-Type", startsWith("application/yaml"));
+            .header("Content-Type", startsWith("text/plain"));
 
         RestAssuredConfig noDecompress = RestAssuredConfig.config()
                 .decoderConfig(DecoderConfig.decoderConfig().noContentDecoders());
@@ -1635,7 +1635,7 @@ class S3MultipartIntegrationTest {
         given().when().delete("/" + BUCKET + "/range-source.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/one-part-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/one-part-composite.bin").then().statusCode(204);
-        given().when().delete("/" + BUCKET + "/encoded-multipart.yaml").then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/encoded-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET).then().statusCode(204);
     }
 

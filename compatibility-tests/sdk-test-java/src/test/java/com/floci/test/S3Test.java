@@ -675,7 +675,7 @@ class S3Test {
     @Order(36)
     void multipartUploadKeepsContentEncodingAndCacheControl() throws IOException {
         String bucket = TestFixtures.uniqueName("mpu-encoding-bucket");
-        String key = "snapshot.yaml";
+        String key = "encoded.bin";
         byte[] body;
         try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
              GZIPOutputStream gz = new GZIPOutputStream(baos)) {
@@ -687,7 +687,7 @@ class S3Test {
         try {
             String uploadId = s3.createMultipartUpload(CreateMultipartUploadRequest.builder()
                     .bucket(bucket).key(key)
-                    .contentType("application/yaml")
+                    .contentType("text/plain")
                     .contentEncoding("gzip")
                     .cacheControl("no-cache")
                     .build()).uploadId();
@@ -705,7 +705,7 @@ class S3Test {
 
             assertThat(head.contentEncoding()).isEqualTo("gzip");
             assertThat(head.cacheControl()).isEqualTo("no-cache");
-            assertThat(head.contentType()).isEqualTo("application/yaml");
+            assertThat(head.contentType()).isEqualTo("text/plain");
         } finally {
             deleteObjectAndBucketQuietly(bucket, key);
         }
