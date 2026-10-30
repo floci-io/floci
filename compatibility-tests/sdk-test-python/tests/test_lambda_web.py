@@ -33,37 +33,45 @@ class TestLambdaWeb:
         suffix = uuid.uuid4().hex[:8]
         role_name = f"pytest-web-role-{suffix}"
         bucket = f"pytest-web-code-{suffix}"
-        state = {
-            "client": lambda_web,
-            # botocore refuses an out-of-range value before sending it.
-            "unvalidated": boto3.client(
-                "lambda-web", config=client_config.merge(Config(parameter_validation=False)), **aws_config),
-            "region": aws_config["region_name"],
-            "role_name": role_name,
-            "role": iam.create_role(RoleName=role_name, AssumeRolePolicyDocument=LAMBDA_TRUST)["Role"]["Arn"],
-            "bucket": bucket,
-        }
-        s3.create_bucket(Bucket=bucket)
-        # AWS takes code only from a versioned bucket that lets Lambda read it.
-        s3.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
-        s3.put_bucket_policy(Bucket=bucket, Policy=json.dumps({
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Effect": "Allow",
-                "Principal": {"Service": "lambda.amazonaws.com"},
-                "Action": ["s3:GetObject", "s3:GetObjectVersion"],
-                "Resource": f"arn:aws:s3:::{bucket}/*",
-            }],
-        }))
-        code = s3.put_object(Bucket=bucket, Key="app.zip", Body=_app_zip())
-        yield state
+        region = aws_config["region_name"]
+        # us-east-1 is the only region that takes a bucket without a location constraint.
+        location = {} if region == "us-east-1" else {"CreateBucketConfiguration": {"LocationConstraint": region}}
+        role = iam.create_role(RoleName=role_name, AssumeRolePolicyDocument=LAMBDA_TRUST)["Role"]["Arn"]
         try:
-            lambda_web.delete_web_function(functionName=FUNCTION_NAME)
-        except lambda_web.exceptions.ResourceNotFoundException:
-            pass  # The last test deletes the function itself.
-        s3.delete_object(Bucket=bucket, Key="app.zip", VersionId=code["VersionId"])
-        s3.delete_bucket(Bucket=bucket)
-        iam.delete_role(RoleName=role_name)
+            s3.create_bucket(Bucket=bucket, **location)
+            try:
+                # AWS takes code only from a versioned bucket that lets Lambda read it.
+                s3.put_bucket_versioning(Bucket=bucket, VersioningConfiguration={"Status": "Enabled"})
+                s3.put_bucket_policy(Bucket=bucket, Policy=json.dumps({
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Principal": {"Service": "lambda.amazonaws.com"},
+                        "Action": ["s3:GetObject", "s3:GetObjectVersion"],
+                        "Resource": f"arn:aws:s3:::{bucket}/*",
+                    }],
+                }))
+                s3.put_object(Bucket=bucket, Key="app.zip", Body=_app_zip())
+                yield {
+                    "client": lambda_web,
+                    # botocore refuses an out-of-range value before sending it.
+                    "unvalidated": boto3.client(
+                        "lambda-web", config=client_config.merge(Config(parameter_validation=False)), **aws_config),
+                    "region": region,
+                    "role_name": role_name,
+                    "role": role,
+                    "bucket": bucket,
+                }
+                try:
+                    lambda_web.delete_web_function(functionName=FUNCTION_NAME)
+                except lambda_web.exceptions.ResourceNotFoundException:
+                    pass  # The last test deletes the function itself.
+            finally:
+                for version in s3.list_object_versions(Bucket=bucket).get("Versions", []):
+                    s3.delete_object(Bucket=bucket, Key=version["Key"], VersionId=version["VersionId"])
+                s3.delete_bucket(Bucket=bucket)
+        finally:
+            iam.delete_role(RoleName=role_name)
 
     @staticmethod
     def build_config(web):
@@ -111,10 +119,11 @@ class TestLambdaWeb:
         assert FUNCTION_NAME in [f["functionName"] for f in client.list_web_functions()["functions"]]
         assert client.get_web_account_settings()["accountQuotas"]["maxEndpointsPerFunction"] == 10
 
-        foreign_region = arn.replace(f":{web['region']}:", ":eu-west-1:")
+        other_region = "us-west-2" if web["region"] == "eu-west-1" else "eu-west-1"
+        foreign_arn = arn.replace(f":{web['region']}:", f":{other_region}:")
         with pytest.raises(client.exceptions.ValidationException) as error:
-            client.get_web_function(functionName=foreign_region)
-        assert "The operation is only allowed in the function's home region eu-west-1." in _message(error)
+            client.get_web_function(functionName=foreign_arn)
+        assert f"The operation is only allowed in the function's home region {other_region}." in _message(error)
         with pytest.raises(client.exceptions.ResourceNotFoundException) as error:
             client.get_web_function(functionName="pytest-no-such-web-fn")
         assert "does not exist." in _message(error)
