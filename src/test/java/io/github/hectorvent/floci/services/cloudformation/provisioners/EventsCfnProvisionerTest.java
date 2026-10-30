@@ -280,6 +280,24 @@ class EventsCfnProvisionerTest {
         assertNull(put.getDeadLetterConfig());
         assertNull(put.getRoleArn());
         assertNull(put.getEcsParameters());
+        assertNull(put.getKinesisParameters());
+    }
+
+    @Test
+    void aKinesisTargetKeepsItsPartitionKeyPath() throws Exception {
+        stubPutRule();
+        ObjectNode props = mapper.createObjectNode().put("Name", "orders");
+        props.putArray("Targets").add(mapper.readTree("""
+                {"Id": "stream", "Arn": "arn:aws:kinesis:us-east-1:000000000000:stream/hub",
+                 "InputPath": "$.detail",
+                 "KinesisParameters": {"PartitionKeyPath": "$.detail.id"}}
+                """));
+
+        provisioner.provision(resource("AWS::Events::Rule", "Rule"), props, ctx(null));
+
+        Target put = onlyPutTarget();
+        assertEquals("$.detail", put.getInputPath());
+        assertEquals("$.detail.id", put.getKinesisParameters().getPartitionKeyPath());
     }
 
     /**
