@@ -14,6 +14,9 @@ PUT, PATCH and DELETE).
 
 ## Supported Operations
 
+For an executable OAC example with direct-S3 and unrelated-distribution negative
+checks, see [Private S3 origin example](cloudfront-private-origin.md).
+
 ### Distributions
 
 | Operation | Method | Path |

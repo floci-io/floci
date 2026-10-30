@@ -87,4 +87,5 @@ action_count_sources:
 
 # docs/services pages that intentionally have no Service Matrix row of their own.
 facet_pages:
+  - cloudfront-private-origin
   - cloudwatch-metric-filters-verification

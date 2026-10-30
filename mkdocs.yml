@@ -201,6 +201,7 @@ nav:
     - AWS FIS: services/fis.md
     - CloudTrail: services/cloudtrail.md
     - CloudFront: services/cloudfront.md
+    - CloudFront Private S3 Origin: services/cloudfront-private-origin.md
     - Route53: services/route53.md
     - Route 53 Resolver: services/route53resolver.md
     - AWS Cloud Map: services/cloudmap.md
