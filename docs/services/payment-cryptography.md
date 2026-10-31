@@ -1,6 +1,6 @@
 # Payment Cryptography
 
-**Protocol:** JSON 1.1 (`X-Amz-Target: PaymentCryptography.*`)
+**Protocol:** JSON 1.0 (`X-Amz-Target: PaymentCryptographyControlPlane.*`)
 **Endpoint:** `POST http://localhost:4566/`
 
 ## Supported Actions

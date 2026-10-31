@@ -19,8 +19,10 @@ import static org.hamcrest.Matchers.notNullValue;
 @QuarkusTest
 class PaymentCryptographyIntegrationTest {
 
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
-    private static final String TARGET = "PaymentCryptography.";
+    // The control plane of Payment Cryptography is an awsJson 1.0 service: the AWS SDK
+    // sends this content type and targets PaymentCryptographyControlPlane.<Operation>.
+    private static final String CONTENT_TYPE = "application/x-amz-json-1.0";
+    private static final String TARGET = "PaymentCryptographyControlPlane.";
 
     @BeforeAll
     static void configureRestAssured() {

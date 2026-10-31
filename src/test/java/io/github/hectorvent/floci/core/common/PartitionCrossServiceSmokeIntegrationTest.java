@@ -83,8 +83,8 @@ class PartitionCrossServiceSmokeIntegrationTest {
     void paymentCryptographyKeyArn(PartitionCase partitionCase) {
         String region = offered(partitionCase, "payment-cryptography");
         String arn = signed(region, "payment-cryptography")
-            .header("X-Amz-Target", "PaymentCryptography.CreateKey")
-            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "PaymentCryptographyControlPlane.CreateKey")
+            .contentType("application/x-amz-json-1.0")
             .body("{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\","
                 + "\"KeyClass\":\"SYMMETRIC_KEY\","
                 + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\"},"
@@ -92,8 +92,8 @@ class PartitionCrossServiceSmokeIntegrationTest {
         .when().post("/").then().statusCode(200)
             .extract().path("Key.KeyArn");
         cleanup.register(() -> signed(region, "payment-cryptography")
-            .header("X-Amz-Target", "PaymentCryptography.DeleteKey")
-            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "PaymentCryptographyControlPlane.DeleteKey")
+            .contentType("application/x-amz-json-1.0")
             .body("{\"KeyIdentifier\":\"" + arn + "\"}")
         .when().post("/"));
         PartitionMatrix.assertArnIn(partitionCase, arn);
