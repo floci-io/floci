@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.iam;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 
 import java.util.UUID;
@@ -67,7 +68,7 @@ class InstanceProfileTagsIntegrationTest {
         .then().statusCode(200);
     }
 
-    private static io.restassured.specification.RequestSpecification tagRequest(String profile,
+    private static RequestSpecification tagRequest(String profile,
                                                                                 int from, int to) {
         RequestSpecification request = given()
             .contentType("application/x-www-form-urlencoded")
@@ -105,7 +106,7 @@ class InstanceProfileTagsIntegrationTest {
             .header("Authorization", auth(ACCOUNT, "iam"))
         .when().post("/")
         .then().statusCode(200)
-            .body(org.hamcrest.Matchers.not(containsString("key1")));
+            .body(Matchers.not(containsString("key1")));
     }
 
     /**
@@ -131,7 +132,7 @@ class InstanceProfileTagsIntegrationTest {
             .header("Authorization", auth(ACCOUNT, "iam"))
         .when().post("/")
         .then().statusCode(200)
-            .body(org.hamcrest.Matchers.not(containsString("key60")));
+            .body(Matchers.not(containsString("key60")));
     }
 
     /** {@code tagKeyListType} is {@code max: 50} on the request itself. */

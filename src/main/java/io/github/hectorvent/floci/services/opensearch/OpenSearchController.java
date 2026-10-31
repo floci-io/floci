@@ -85,7 +85,7 @@ public class OpenSearchController {
     @Path("/opensearch/domain/{domainName}")
     public Response describeDomain(@Context HttpHeaders headers,
                                     @PathParam("domainName") String domainName) {
-        Domain domain = service.describeDomain(domainName);
+        Domain domain = service.describeDomain(domainName, regionResolver.resolveRegion(headers));
         ObjectNode response = objectMapper.createObjectNode();
         response.set("DomainStatus", toDomainStatusNode(domain));
         return Response.ok(response).build();
@@ -98,7 +98,7 @@ public class OpenSearchController {
             JsonNode req = objectMapper.readTree(body);
             List<String> names = new ArrayList<>();
             req.path("DomainNames").forEach(n -> names.add(n.asText()));
-            List<Domain> domains = service.describeDomains(names);
+            List<Domain> domains = service.describeDomains(names, regionResolver.resolveRegion(headers));
 
             ObjectNode response = objectMapper.createObjectNode();
             ArrayNode list = response.putArray("DomainStatusList");
@@ -115,7 +115,7 @@ public class OpenSearchController {
     @Path("/domain")
     public Response listDomainNames(@Context HttpHeaders headers,
                                      @QueryParam("engineType") String engineType) {
-        List<Domain> domains = service.listDomainNames(engineType);
+        List<Domain> domains = service.listDomainNames(engineType, regionResolver.resolveRegion(headers));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode list = response.putArray("DomainNames");
         for (Domain d : domains) {
@@ -132,7 +132,7 @@ public class OpenSearchController {
     @Path("/opensearch/domain/{domainName}/config")
     public Response describeDomainConfig(@Context HttpHeaders headers,
                                           @PathParam("domainName") String domainName) {
-        Domain domain = service.describeDomain(domainName);
+        Domain domain = service.describeDomain(domainName, regionResolver.resolveRegion(headers));
         long epochSeconds = domain.getCreatedAt() != null ? domain.getCreatedAt().getEpochSecond() : 0;
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -175,7 +175,7 @@ public class OpenSearchController {
                     parseDomainEndpointOptions(req.path("DomainEndpointOptions")));
 
             Domain domain = service.updateDomainConfig(domainName, engineVersion, clusterConfig,
-                    ebsOptions, accessPolicies, options);
+                    ebsOptions, accessPolicies, options, regionResolver.resolveRegion(headers));
 
             long epochSeconds = domain.getCreatedAt() != null ? domain.getCreatedAt().getEpochSecond() : 0;
             ObjectNode response = objectMapper.createObjectNode();
@@ -207,7 +207,7 @@ public class OpenSearchController {
     @Path("/opensearch/domain/{domainName}")
     public Response deleteDomain(@Context HttpHeaders headers,
                                   @PathParam("domainName") String domainName) {
-        Domain domain = service.deleteDomain(domainName);
+        Domain domain = service.deleteDomain(domainName, regionResolver.resolveRegion(headers));
         ObjectNode response = objectMapper.createObjectNode();
         response.set("DomainStatus", toDomainStatusNode(domain));
         return Response.ok(response).build();
@@ -292,7 +292,9 @@ public class OpenSearchController {
         // version — matches AWS's GetCompatibleVersions behavior. Otherwise
         // return the full matrix so SDK clients can render upgrade pickers.
         if (domainName != null && !domainName.isBlank()) {
-            String sourceVersion = service.describeDomain(domainName).getEngineVersion();
+            String sourceVersion = service
+                    .describeDomain(domainName, regionResolver.resolveRegion(headers))
+                    .getEngineVersion();
             ObjectNode entry = objectMapper.createObjectNode();
             entry.put("SourceVersion", sourceVersion);
             ArrayNode targets = entry.putArray("TargetVersions");
@@ -424,12 +426,13 @@ public class OpenSearchController {
 
     @POST
     @Path("/opensearch/upgradeDomain")
-    public Response upgradeDomain(String body) {
+    public Response upgradeDomain(@Context HttpHeaders headers, String body) {
         try {
             JsonNode req = objectMapper.readTree(body);
             String domainName = req.path("DomainName").asText(null);
             String targetVersion = req.path("TargetVersion").asText(null);
-            Domain domain = service.upgradeDomain(domainName, targetVersion);
+            Domain domain = service.upgradeDomain(domainName, targetVersion,
+                    regionResolver.resolveRegion(headers));
 
             ObjectNode response = objectMapper.createObjectNode();
             response.put("UpgradeId", UUID.randomUUID().toString());

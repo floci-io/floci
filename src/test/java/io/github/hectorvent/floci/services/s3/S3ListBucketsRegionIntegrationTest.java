@@ -1,21 +1,16 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.testing.S3TestClients;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.RestAssured;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
-import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.Bucket;
 import software.amazon.awssdk.services.s3.model.ListBucketsResponse;
 
-import java.net.URI;
 import java.util.Map;
 import java.util.UUID;
 
@@ -53,7 +48,7 @@ class S3ListBucketsRegionIntegrationTest {
         String prefix = "s3-region-6241-" + UUID.randomUUID();
         String defaultBucket = prefix + "-us";
         String explicitBucket = prefix + "-eu";
-        try (S3Client client = client()) {
+        try (S3Client client = S3TestClients.pathStyle()) {
             client.createBucket(request -> request.bucket(defaultBucket));
             try {
                 client.createBucket(request -> request.bucket(explicitBucket)
@@ -101,15 +96,5 @@ class S3ListBucketsRegionIntegrationTest {
         } finally {
             given().delete("/" + bucket).then().statusCode(204);
         }
-    }
-
-    private static S3Client client() {
-        return S3Client.builder()
-                .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
-                .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .forcePathStyle(true)
-                .region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("741624100001", "test")))
-                .build();
     }
 }

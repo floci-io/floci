@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -352,7 +353,7 @@ class CloudFormationS3BucketPropertiesIntegrationTest {
         return member.substring(idStart, member.indexOf("</PhysicalResourceId>", idStart));
     }
 
-    private static io.restassured.response.ValidatableResponse bucketGet(String bucket, String subresource) {
+    private static ValidatableResponse bucketGet(String bucket, String subresource) {
         return given().when().get("/" + bucket + "?" + subresource).then().statusCode(200);
     }
 

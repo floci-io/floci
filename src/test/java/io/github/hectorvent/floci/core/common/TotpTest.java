@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.OptionalLong;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -82,6 +83,20 @@ class TotpTest {
         Instant now = Instant.ofEpochSecond(1_700_000_000L);
         String other = Totp.newSecret();
         assertFalse(Totp.matchesCode(RFC6238_SECRET, Totp.codeAt(other, Totp.stepAt(now)), 1, now));
+    }
+
+    @Test
+    void matchingStepNamesTheStepTheCodeWasGeneratedFor() {
+        Instant now = Instant.ofEpochSecond(1_700_000_000L);
+        long current = Totp.stepAt(now);
+        for (long step = current - 1; step <= current + 1; step++) {
+            assertEquals(OptionalLong.of(step),
+                    Totp.matchingStep(RFC6238_SECRET, Totp.codeAt(RFC6238_SECRET, step), 1, now));
+        }
+        assertEquals(OptionalLong.empty(),
+                Totp.matchingStep(RFC6238_SECRET, Totp.codeAt(RFC6238_SECRET, current - 2), 1, now));
+        assertEquals(OptionalLong.empty(), Totp.matchingStep(RFC6238_SECRET, "abcdef", 1, now));
+        assertEquals(OptionalLong.empty(), Totp.matchingStep(null, "123456", 1, now));
     }
 
     @Test

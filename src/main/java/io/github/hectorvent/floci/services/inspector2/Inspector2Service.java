@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 @ApplicationScoped
@@ -207,7 +208,7 @@ public class Inspector2Service implements Resettable {
         }
     }
 
-    private java.util.Optional<String> managementAccountFor(String accountId) {
+    private Optional<String> managementAccountFor(String accountId) {
         return organizationsService.findManagementAccountForResource(accountId);
     }
 

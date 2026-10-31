@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds.container;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.exception.DockerException;
+import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.HostConfig;
 import com.github.dockerjava.api.model.Ports;
@@ -222,12 +223,12 @@ class RdsContainerManagerPostgresTest {
 
     private void removeContainerByName(String name) {
         try {
-            List<com.github.dockerjava.api.model.Container> containers = dockerClient
+            List<Container> containers = dockerClient
                     .listContainersCmd()
                     .withShowAll(true)
                     .withNameFilter(List.of(name))
                     .exec();
-            for (com.github.dockerjava.api.model.Container c : containers) {
+            for (Container c : containers) {
                 removeContainer(c.getId());
             }
         } catch (DockerException ignored) {

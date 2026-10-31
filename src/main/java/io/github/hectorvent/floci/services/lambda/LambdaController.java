@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -14,6 +15,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.s3.PreSignedUrlGenerator;
+import io.smallrye.common.annotation.RunOnVirtualThread;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -36,8 +38,10 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * AWS Lambda API REST endpoints.
@@ -96,9 +100,10 @@ public class LambdaController {
                                 @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
         LambdaFunction fn = lambdaService.getFunction(region, functionName, qualifier);
+        String effectiveQualifier = LambdaArnUtils.resolveWithQualifier(functionName, qualifier).qualifier();
 
         ObjectNode root = objectMapper.createObjectNode();
-        root.set("Configuration", objectMapper.valueToTree(buildFunctionConfiguration(fn)));
+        root.set("Configuration", objectMapper.valueToTree(buildReadConfiguration(fn, effectiveQualifier)));
         ObjectNode code = root.putObject("Code");
         if ("Image".equals(fn.getPackageType()) && fn.getImageUri() != null) {
             code.put("RepositoryType", "ECR");
@@ -129,7 +134,6 @@ public class LambdaController {
         }
 
         Integer reservedConcurrency = fn.getReservedConcurrentExecutions();
-        String effectiveQualifier = LambdaArnUtils.resolveWithQualifier(functionName, qualifier).qualifier();
         if (effectiveQualifier == null && reservedConcurrency != null) {
             root.putObject("Concurrency").put("ReservedConcurrentExecutions", reservedConcurrency);
         }
@@ -141,14 +145,19 @@ public class LambdaController {
 
     @GET
     @Path("/functions")
-    public Response listFunctions(@Context HttpHeaders headers) {
+    public Response listFunctions(@Context HttpHeaders headers,
+                                  @QueryParam("MaxItems") String maxItems,
+                                  @QueryParam("Marker") String marker) {
         String region = regionResolver.resolveRegion(headers);
-        List<LambdaFunction> functions = lambdaService.listFunctions(region);
+        PaginatedResult<LambdaFunction> page = lambdaService.listFunctions(region, maxItems, marker);
 
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("Functions");
-        for (LambdaFunction fn : functions) {
+        for (LambdaFunction fn : page.items()) {
             items.add(objectMapper.valueToTree(buildFunctionConfiguration(fn)));
+        }
+        if (page.nextToken() != null) {
+            root.put("NextMarker", page.nextToken());
         }
         return Response.ok(root).build();
     }
@@ -162,7 +171,8 @@ public class LambdaController {
                                               @QueryParam("Qualifier") String qualifier) {
         String region = regionResolver.resolveRegion(headers);
         LambdaFunction fn = lambdaService.getFunction(region, functionName, qualifier);
-        return Response.ok(buildFunctionConfiguration(fn)).build();
+        String effectiveQualifier = LambdaArnUtils.resolveWithQualifier(functionName, qualifier).qualifier();
+        return Response.ok(buildReadConfiguration(fn, effectiveQualifier)).build();
     }
 
     // ──────────────────────────── UpdateFunctionConfiguration ────────────────────────────
@@ -217,31 +227,18 @@ public class LambdaController {
         return Response.noContent().build();
     }
 
-    // ──────────────────────────── GetFunctionCodeSigningConfig ────────────────────────────
-
-    @GET
-    @Path("/functions/{functionName}/code-signing-config")
-    public Response getFunctionCodeSigningConfig(@Context HttpHeaders headers,
-                                                  @PathParam("functionName") String functionName) {
-        String region = regionResolver.resolveRegion(headers);
-        // Verify the function exists
-        lambdaService.getFunction(region, functionName);
-        // Return empty code signing config — floci does not enforce code signing
-        ObjectNode root = objectMapper.createObjectNode();
-        root.put("CodeSigningConfigArn", "");
-        root.put("FunctionName", functionName);
-        return Response.ok(root).build();
-    }
-
     // ──────────────────────────── Invoke ────────────────────────────
 
     private static final int SYNC_REQUEST_LIMIT  = 6 * 1024 * 1024;
     private static final int ASYNC_REQUEST_LIMIT = 1 * 1024 * 1024;
     private static final int SYNC_RESPONSE_LIMIT = 6 * 1024 * 1024;
 
+    // A synchronous invocation waits for its function to finish; on a virtual thread that wait does
+    // not hold one of the shared request workers.
     @POST
     @Path("/functions/{functionName}/invocations")
     @Consumes(MediaType.WILDCARD)
+    @RunOnVirtualThread
     public Response invoke(@Context HttpHeaders headers,
                            @Context UriInfo uriInfo,
                            @PathParam("functionName") String functionName,
@@ -694,7 +691,7 @@ public class LambdaController {
         if (!(weights instanceof Map)) return null;
         Map<String, Object> raw = (Map<String, Object>) weights;
         if (raw.isEmpty()) return null;
-        java.util.Map<String, Double> result = new java.util.HashMap<>();
+        Map<String, Double> result = new HashMap<>();
         raw.forEach((k, v) -> result.put(k, ((Number) v).doubleValue()));
         return result;
     }
@@ -709,6 +706,15 @@ public class LambdaController {
                 && !"$LATEST".equals(configuration.get("Version"))) {
             configuration.put("FunctionArn", arn.substring(0, arn.lastIndexOf(':')));
         }
+    }
+
+    private Map<String, Object> buildReadConfiguration(LambdaFunction fn, String qualifier) {
+        Map<String, Object> configuration = buildFunctionConfiguration(fn);
+        if (qualifier != null && !"$LATEST".equals(qualifier) && !qualifier.equals(fn.getVersion())) {
+            unqualifyArn(configuration);
+            configuration.put("FunctionArn", configuration.get("FunctionArn") + ":" + qualifier);
+        }
+        return configuration;
     }
 
     private Map<String, Object> buildFunctionConfiguration(LambdaFunction fn) {
@@ -866,8 +872,7 @@ public class LambdaController {
         ObjectNode logging = node.putObject("LoggingConfig");
         logging.put("LogFormat", logFormat);
         if ("JSON".equals(logFormat)) {
-            logging.put("ApplicationLogLevel",
-                    fn.getApplicationLogLevel() != null ? fn.getApplicationLogLevel() : "INFO");
+            logging.put("ApplicationLogLevel", fn.applicationLogLevelOrDefault());
             logging.put("SystemLogLevel",
                     fn.getSystemLogLevel() != null ? fn.getSystemLogLevel() : "INFO");
         }
@@ -884,11 +889,7 @@ public class LambdaController {
     }
 
     private String runtimeVersionArn(LambdaFunction fn) {
-        String region = regionResolver.getDefaultRegion();
-        String[] arnParts = fn.getFunctionArn() != null ? fn.getFunctionArn().split(":") : new String[0];
-        if (arnParts.length > 3 && !arnParts[3].isBlank()) {
-            region = arnParts[3];
-        }
+        String region = AwsArnUtils.regionOrDefault(fn.getFunctionArn(), regionResolver.getDefaultRegion());
         return AwsArnUtils.Arn.of("lambda", region, "", "runtime:" + runtimeVersionId(fn.getRuntime())).toString();
     }
 
@@ -905,6 +906,6 @@ public class LambdaController {
         if (config == null || !(config.get(key) instanceof List<?> values)) {
             return List.of();
         }
-        return values.stream().filter(java.util.Objects::nonNull).map(Object::toString).toList();
+        return values.stream().filter(Objects::nonNull).map(Object::toString).toList();
     }
 }

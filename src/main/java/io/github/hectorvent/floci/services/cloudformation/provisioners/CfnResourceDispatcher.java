@@ -58,6 +58,13 @@ public class CfnResourceDispatcher {
         return registry.isCustomResourceType(resourceType);
     }
 
+    /** Resolve an attribute using its resource owner's declared type. */
+    public JsonNode attributeValue(String resourceType, String attributeName, String value) {
+        return registry.forType(resourceType)
+                .map(owner -> owner.attributeValue(resourceType, attributeName, value))
+                .orElseGet(() -> objectMapper.getNodeFactory().textNode(value));
+    }
+
     /**
      * Provisions a single resource and returns the populated StackResource (physical id and
      * attributes set).

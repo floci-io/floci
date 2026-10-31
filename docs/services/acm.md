@@ -38,7 +38,7 @@
 - **Certificate Types:** `AMAZON_ISSUED` (default) and `PRIVATE` (when `CertificateAuthorityArn` is provided)
 - **Imported keys:** `ImportCertificate` requires a private key that matches the certificate. A rejected import leaves an existing certificate unchanged.
 - **Export:** Only `PRIVATE` type certificates can be exported with their private key
-- **In use:** `DescribeCertificate` lists under `InUseBy` the CloudFront distribution of each Cognito custom domain that uses the certificate, and `DeleteCertificate` refuses with `ResourceInUseException` while that list is not empty. Other consumers, such as load balancers and API Gateway domain names, are not tracked yet.
+- **In use:** `DescribeCertificate` lists under `InUseBy` the CloudFront distribution of each Cognito custom domain that uses the certificate, each CloudFront distribution whose `ViewerCertificate.ACMCertificateArn` names it, and each ELBv2 or Classic load balancer whose listener serves it. `DeleteCertificate` refuses with `ResourceInUseException` while that list is not empty. Other consumers, such as API Gateway domain names, are not tracked yet.
 
 ## Configuration
 

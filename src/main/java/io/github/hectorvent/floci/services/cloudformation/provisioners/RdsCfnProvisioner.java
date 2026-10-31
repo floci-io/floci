@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
+import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbProxy;
 import io.github.hectorvent.floci.services.rds.model.DbProxyAuth;
@@ -29,6 +30,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Function;
 
 /**
  * CloudFormation provisioning for RDS: the two parameter-group types, {@code DBSubnetGroup},
@@ -349,12 +352,15 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
         DbInstance instance = sameNameExistingResource(priorPhysicalId, id, rdsService::getDbInstance);
         boolean created = instance == null;
+        String caCertificate = resolveOptional(props, "CACertificateIdentifier", engine);
         if (instance != null) {
+            // A null region keeps the default-region lookup sameNameExistingResource made.
             instance = rdsService.modifyDbInstance(
                     id,
                     resolveDynamicReferences(resolveOptionalWithoutDynamicReferences(props, "MasterUserPassword", engine), region, true),
                     parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
-                    resolveOptional(props, "DBSubnetGroupName", engine));
+                    resolveOptional(props, "DBSubnetGroupName", engine), null, null, null, null,
+                    DbInstanceSettings.unchanged().withCaCertificateIdentifier(caCertificate));
         } else {
             instance = rdsService.createDbInstance(
                     id,
@@ -369,7 +375,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     resolveOptional(props, "DBParameterGroupName", engine),
                     resolveOptional(props, "DBSubnetGroupName", engine),
                     resolveOptional(props, "DBClusterIdentifier", engine),
-                    null, false, false, null, Map.of(), region);
+                    null, false, false, null, Map.of(), List.of(), null, region, true,
+                    DbInstanceSettings.defaults().withCaCertificateIdentifier(caCertificate));
         }
         // The roles go on before a renamed instance's predecessor is deleted, so a refused list
         // deletes only the new instance and the stack still has the old one to roll back to.
@@ -388,6 +395,11 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
         if (instance.getDbiResourceId() != null) {
             r.getAttributes().put("DbiResourceId", instance.getDbiResourceId());
+        }
+        RdsService.InstanceCertificate ca = rdsService.instanceCertificate(instance);
+        r.getAttributes().put("CertificateDetails.CAIdentifier", ca.caIdentifier());
+        if (ca.validTill() != null) {
+            r.getAttributes().put("CertificateDetails.ValidTill", ca.validTill().toString());
         }
     }
 
@@ -918,7 +930,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private io.github.hectorvent.floci.services.rds.model.DbProxy updateDbProxy(
+    private DbProxy updateDbProxy(
             StackResource resource, String name, String engineFamily, String defaultAuthScheme,
             boolean requireTls, int idleClientTimeout, boolean debugLogging, String roleArn,
             List<String> subnetIds, List<String> securityGroupIds, List<DbProxyAuth> auth,
@@ -1151,7 +1163,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private <T> T sameNameExistingResource(String priorPhysicalId, String name,
-                                           java.util.function.Function<String, T> lookup) {
+                                           Function<String, T> lookup) {
         if (priorPhysicalId == null || !priorPhysicalId.equals(name)) {
             return null;
         }
@@ -1166,7 +1178,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void deleteRenamedResource(String priorPhysicalId, String newName,
-                                       java.util.function.Consumer<String> delete, String resourceKind) {
+                                       Consumer<String> delete, String resourceKind) {
         if (priorPhysicalId == null || priorPhysicalId.equals(newName)) {
             return;
         }

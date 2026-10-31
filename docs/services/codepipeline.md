@@ -115,6 +115,8 @@ the approval token, `expires` as an ISO-8601 timestamp, `consoleLink`, `approval
 | `FLOCI_SERVICES_CODEPIPELINE_SOURCE_POLL_INTERVAL_MS` | `500` | How often (ms) S3 sources are polled for a new object revision |
 | `FLOCI_SERVICES_CODEPIPELINE_WORKER_POLL_INTERVAL_MS` | `100` | How often (ms) execution workers check for progress, independently of S3 source polling |
 
+A zero or negative worker polling interval logs a warning and falls back to 100 ms.
+
 ## Example
 
 ```bash

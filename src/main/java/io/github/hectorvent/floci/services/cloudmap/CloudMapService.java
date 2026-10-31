@@ -9,6 +9,9 @@ import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
 import io.github.hectorvent.floci.core.common.dns.DnsRecord;
@@ -19,6 +22,8 @@ import io.github.hectorvent.floci.services.cloudmap.model.Instance;
 import io.github.hectorvent.floci.services.cloudmap.model.Namespace;
 import io.github.hectorvent.floci.services.cloudmap.model.Operation;
 import io.github.hectorvent.floci.services.cloudmap.model.Service;
+import io.github.hectorvent.floci.services.route53.Route53Service;
+import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import io.netty.util.NetUtil;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -35,11 +40,13 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Function;
 
 /**
  * Cloud Map (AWS service discovery) business logic. Mirrors the EventBridge service
@@ -54,6 +61,8 @@ public class CloudMapService {
     private static final String ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789";
     /** Route 53 answers a service discovery query with at most eight records. */
     private static final int MAX_DNS_ANSWERS = 8;
+    /** FailureThreshold is no longer supported: AWS always sets it to 1. */
+    private static final String HEALTH_CHECK_CUSTOM_CONFIG = "{\"FailureThreshold\":1}";
 
     private final SecureRandom random = new SecureRandom();
 
@@ -62,13 +71,15 @@ public class CloudMapService {
     private final StorageBackend<String, Instance> instanceStore;
     private final StorageBackend<String, Operation> operationStore;
     private final RegionResolver regionResolver;
+    private final Route53Service route53Service;
     private final ObjectMapper objectMapper;
     private final int completionDelaySeconds;
     private final ScheduledExecutorService scheduler;
 
     @Inject
     public CloudMapService(StorageFactory storageFactory, EmulatorConfig config,
-                           RegionResolver regionResolver, ObjectMapper objectMapper) {
+                           RegionResolver regionResolver, ObjectMapper objectMapper,
+                           Route53Service route53Service) {
         this.namespaceStore = storageFactory.create("cloudmap", "cloudmap-namespaces.json",
                 new TypeReference<Map<String, Namespace>>() {});
         this.serviceStore = storageFactory.create("cloudmap", "cloudmap-services.json",
@@ -78,6 +89,7 @@ public class CloudMapService {
         this.operationStore = storageFactory.create("cloudmap", "cloudmap-operations.json",
                 new TypeReference<Map<String, Operation>>() {});
         this.regionResolver = regionResolver;
+        this.route53Service = route53Service;
         this.objectMapper = objectMapper;
         this.completionDelaySeconds = config.services().cloudmap().operationCompletionDelaySeconds();
         this.scheduler = completionDelaySeconds > 0
@@ -108,7 +120,7 @@ public class CloudMapService {
     public Operation createPublicDnsNamespace(String name, String creatorRequestId,
                                               String description, Map<String, String> tags, String region) {
         Namespace ns = newNamespace(name, "DNS_PUBLIC", description, creatorRequestId, tags, region);
-        ns.setHostedZoneId(generateHostedZoneId());
+        ns.setHostedZoneId(createZone(ns, null));
         namespaceStore.put(ns.getId(), ns);
         return submitOperation("CREATE_NAMESPACE", "NAMESPACE", ns.getId(), region);
     }
@@ -120,7 +132,7 @@ public class CloudMapService {
         }
         Namespace ns = newNamespace(name, "DNS_PRIVATE", description, creatorRequestId, tags, region);
         ns.setVpc(vpc);
-        ns.setHostedZoneId(generateHostedZoneId());
+        ns.setHostedZoneId(createZone(ns, new VpcAssociation(vpc, region)));
         namespaceStore.put(ns.getId(), ns);
         return submitOperation("CREATE_NAMESPACE", "NAMESPACE", ns.getId(), region);
     }
@@ -166,6 +178,11 @@ public class CloudMapService {
         return result;
     }
 
+    public PaginatedResult<Namespace> listNamespaces(String region, Integer maxResults, String nextToken) {
+        return paginate(listNamespaces(region), Namespace::getId, maxResults, nextToken,
+                "ListNamespaces", region, null);
+    }
+
     public void updateNamespace(String id, String description) {
         Namespace ns = requireNamespace(id);
         ns.setDescription(description);
@@ -179,6 +196,20 @@ public class CloudMapService {
         if (hasServices) {
             throw new AwsException("ResourceInUse",
                     "The namespace contains existing services and cannot be deleted.", 400);
+        }
+        if (ns.getHostedZoneId() != null) {
+            // The zone goes with the namespace. A zone holding records beyond the default NS/SOA
+            // is refused (HostedZoneNotEmpty) and the namespace is kept, rather than orphaning records.
+            try {
+                route53Service.deleteHostedZone(ns.getHostedZoneId());
+            } catch (AwsException e) {
+                if (!"NoSuchHostedZone".equals(e.getErrorCode())) {
+                    throw e;
+                }
+                // Already deleted through Route 53; nothing is orphaned, so the namespace still goes.
+                LOG.debugv("Hosted zone {0} of Cloud Map namespace {1} was already deleted",
+                        ns.getHostedZoneId(), id);
+            }
         }
         namespaceStore.delete(id);
         return submitOperation("DELETE_NAMESPACE", "NAMESPACE", id, region);
@@ -217,7 +248,7 @@ public class CloudMapService {
         service.setDescription(description);
         service.setDnsConfig(dnsConfig);
         service.setHealthCheckConfig(healthCheckConfig);
-        service.setHealthCheckCustomConfig(healthCheckCustomConfig);
+        service.setHealthCheckCustomConfig(healthCheckCustomConfig == null ? null : HEALTH_CHECK_CUSTOM_CONFIG);
         service.setType(resolveServiceType(type, dnsConfig));
         service.setCreatorRequestId(creatorRequestId != null ? creatorRequestId : UUID.randomUUID().toString());
         service.setCreateDate(Instant.now());
@@ -254,6 +285,16 @@ public class CloudMapService {
             result.add(s);
         }
         return result;
+    }
+
+    public PaginatedResult<Service> listServices(String region, String namespaceIdFilter,
+                                                  Integer maxResults, String nextToken) {
+        PaginatedResult<Service> page = paginate(listServices(region, null), Service::getId,
+                maxResults, nextToken, "ListServices", region, namespaceIdFilter);
+        // AWS applies filters after selecting the page, so an empty page can still have a token.
+        List<Service> items = page.items().stream()
+                .filter(s -> namespaceIdFilter == null || namespaceIdFilter.equals(s.getNamespaceId())).toList();
+        return new PaginatedResult<>(items, page.nextToken());
     }
 
     /**
@@ -374,18 +415,27 @@ public class CloudMapService {
                                             String healthFilter, Map<String, String> queryParameters,
                                             Integer maxResults, String region) {
         Service service = resolveService(namespaceName, serviceName, region);
-        List<Instance> all = scanInstances(service.getId());
-        List<Instance> filtered = applyHealthFilter(all, healthFilter);
-        if (queryParameters != null && !queryParameters.isEmpty()) {
-            filtered = filtered.stream()
-                    .filter(i -> queryParameters.entrySet().stream()
-                            .allMatch(e -> e.getValue().equals(i.getAttributes().get(e.getKey()))))
-                    .toList();
-        }
+        List<Instance> filtered = filterInstances(service.getId(), healthFilter, queryParameters);
         if (maxResults != null && maxResults > 0 && filtered.size() > maxResults) {
             filtered = filtered.subList(0, maxResults);
         }
         return new DiscoverResult(filtered, service.getRevision());
+    }
+
+    public List<Instance> filterInstances(String serviceId, String healthFilter,
+                                          Map<String, String> queryParameters) {
+        List<Instance> filtered = applyHealthFilter(listInstances(serviceId), healthFilter);
+        if (queryParameters != null && !queryParameters.isEmpty()) {
+            filtered = filtered.stream()
+                    .filter(i -> queryParameters.entrySet().stream()
+                            .allMatch(e -> e.getValue().equals(attributesOf(i).get(e.getKey()))))
+                    .toList();
+        }
+        return filtered;
+    }
+
+    private static Map<String, String> attributesOf(Instance instance) {
+        return instance.getAttributes() != null ? instance.getAttributes() : Map.of();
     }
 
     public long discoverInstancesRevision(String namespaceName, String serviceName, String region) {
@@ -728,6 +778,26 @@ public class CloudMapService {
         return result;
     }
 
+    public PaginatedResult<Operation> listOperations(String region, Map<String, List<String>> filters,
+                                                     Integer maxResults, String nextToken) {
+        Map<String, List<String>> normalized = new TreeMap<>();
+        if (filters != null) {
+            filters.forEach((name, values) -> normalized.put(name, values.stream().distinct().sorted().toList()));
+        }
+        PaginatedResult<Operation> page = paginate(listOperations(region, null), Operation::getId,
+                maxResults, nextToken, "ListOperations", region, normalized);
+        List<Operation> items = page.items().stream().filter(op -> matchesOperationFilters(op, filters)).toList();
+        return new PaginatedResult<>(items, page.nextToken());
+    }
+
+    private <T> PaginatedResult<T> paginate(List<T> items, Function<T, String> cursorOf,
+                                           Integer maxResults, String nextToken,
+                                           String action, String region, Object query) {
+        String namespace = action + ":" + regionResolver.getAccountId() + ":" + region + ":"
+                + Digests.sha256Hex(objectMapper.valueToTree(query).toString());
+        return Pagination.paginate(items, cursorOf, maxResults, nextToken, 100, 100, 4096, "InvalidInput", namespace);
+    }
+
     private boolean matchesOperationFilters(Operation op, Map<String, List<String>> filters) {
         if (filters == null || filters.isEmpty()) {
             return true;
@@ -887,12 +957,9 @@ public class CloudMapService {
         return sb.toString();
     }
 
-    private String generateHostedZoneId() {
-        StringBuilder sb = new StringBuilder("Z");
-        String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        for (int i = 0; i < 13; i++) {
-            sb.append(chars.charAt(random.nextInt(chars.length())));
-        }
-        return sb.toString();
+    /** Creates the Route 53 zone behind a DNS namespace (private when a VPC association is given). */
+    private String createZone(Namespace ns, VpcAssociation vpc) {
+        return route53Service.createHostedZone(ns.getName(), "cloudmap-" + ns.getId(),
+                "Created by Cloud Map namespace " + ns.getId(), vpc).zone().getId();
     }
 }

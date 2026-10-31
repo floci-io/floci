@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.athena;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.athena.model.QueryExecutionState;
@@ -58,7 +59,7 @@ class AthenaServiceTest {
         when(athena.mock()).thenReturn(false);
 
         service = new AthenaService(storageFactory, duckClient, glueService, s3Service,
-                config, vertx, ddlBuilder);
+                config, vertx, ddlBuilder, mock(RegionResolver.class));
     }
 
     @AfterEach

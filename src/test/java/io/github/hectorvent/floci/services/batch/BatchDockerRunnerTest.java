@@ -111,6 +111,8 @@ class BatchDockerRunnerTest {
                 "io.floci.resource-id", "job-1",
                 "io.floci.account", "000000000000",
                 "io.floci.region", "us-east-1"));
+        // A job's JVMs trust Floci's CA as well.
+        verify(builder).withJavaTrustStore();
     }
 
     @Test

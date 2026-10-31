@@ -4,7 +4,9 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.verifiedpermissions.VerifiedPermissionsClient;
 import software.amazon.awssdk.services.verifiedpermissions.model.ActionIdentifier;
+import software.amazon.awssdk.services.verifiedpermissions.model.ConflictException;
 import software.amazon.awssdk.services.verifiedpermissions.model.Decision;
+import software.amazon.awssdk.services.verifiedpermissions.model.DeletionMode;
 import software.amazon.awssdk.services.verifiedpermissions.model.EntitiesDefinition;
 import software.amazon.awssdk.services.verifiedpermissions.model.EntityIdentifier;
 import software.amazon.awssdk.services.verifiedpermissions.model.GetPolicyStoreResponse;
@@ -88,7 +90,7 @@ class VerifiedPermissionsTest {
             avp.createPolicyStoreAlias(request -> request.aliasName(alias).policyStoreId(policyStoreId));
             assertThat(avp.getPolicyStore(request -> request.policyStoreId(alias)).policyStoreId())
                     .isEqualTo(policyStoreId);
-            avp.deletePolicyStoreAlias(request -> request.aliasName(alias).deletionMode(software.amazon.awssdk.services.verifiedpermissions.model.DeletionMode.HARD_DELETE));
+            avp.deletePolicyStoreAlias(request -> request.aliasName(alias).deletionMode(DeletionMode.HARD_DELETE));
 
             String token = "sdk-idempotency-123";
             String first = avp.createPolicyStore(request -> request.clientToken(token)
@@ -100,7 +102,7 @@ class VerifiedPermissionsTest {
             assertThat(replay).isEqualTo(first);
             assertThatThrownBy(() -> avp.createPolicyStore(request -> request.clientToken(token)
                             .validationSettings(ValidationSettings.builder().mode(ValidationMode.STRICT).build())))
-                    .isInstanceOf(software.amazon.awssdk.services.verifiedpermissions.model.ConflictException.class);
+                    .isInstanceOf(ConflictException.class);
 
             avp.deletePolicy(request -> request.policyStoreId(policyStoreId).policyId(policyId));
             avp.deletePolicyStore(request -> request.policyStoreId(policyStoreId));

@@ -17,6 +17,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
@@ -72,9 +73,18 @@ class ApiGatewayCognitoAuthorizerIntegrationTest {
             given().header("Authorization", "Bearer " + accessToken)
                     .when().get(base + "secured").then().statusCode(401);
             given().header("X-Id-Token", "Bearer " + idToken)
-                    .when().get(base + "secured").then().statusCode(403);
+                    .when().get(base + "secured").then().statusCode(401)
+                    .header("x-amzn-ErrorType", equalTo("UnauthorizedException"))
+                    .body("message", equalTo("Unauthorized"));
             given().header("X-Id-Token", "Bearer " + accessToken)
-                    .when().get(base + "missing-scope").then().statusCode(403);
+                    .when().get(base + "missing-scope").then().statusCode(401)
+                    .body("message", equalTo("Unauthorized"));
+            given().contentType(ContentType.JSON).body("""
+                    {"responseTemplates":{"application/json":"{\\"title\\": \\"Unauthorized\\", \\"status\\": 401}"}}
+                    """).when().put("/restapis/" + apiId + "/gatewayresponses/UNAUTHORIZED").then().statusCode(201);
+            given().header("X-Id-Token", "Bearer " + accessToken)
+                    .when().get(base + "missing-scope").then().statusCode(401)
+                    .body("title", equalTo("Unauthorized"));
             given().header("X-Id-Token", "not-a-jwt")
                     .when().get(base + "secured").then().statusCode(401);
             given().header("X-Id-Token", "Bearer " + accessToken)

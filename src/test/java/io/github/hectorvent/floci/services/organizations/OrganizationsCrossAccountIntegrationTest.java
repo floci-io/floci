@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.organizations;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -100,7 +101,7 @@ class OrganizationsCrossAccountIntegrationTest {
             .body("Handshake.State", equalTo("REQUESTED"))
             .body("Handshake.Action", equalTo("INVITE"))
             .body("Handshake.Arn",
-                    org.hamcrest.Matchers.startsWith("arn:aws:organizations::" + MANAGEMENT_ACCOUNT + ":handshake/"))
+                    Matchers.startsWith("arn:aws:organizations::" + MANAGEMENT_ACCOUNT + ":handshake/"))
             .body("Handshake.RequestedTimestamp", notNullValue())
             .body("Handshake.ExpirationTimestamp", notNullValue())
             .body("Handshake.Parties.Id", hasItem(INVITED_ACCOUNT))
@@ -118,11 +119,11 @@ class OrganizationsCrossAccountIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Handshake.Resources.Type", org.hamcrest.Matchers.everyItem(
-                    org.hamcrest.Matchers.in(List.of("ACCOUNT", "ORGANIZATION", "ORGANIZATION_FEATURE_SET",
+            .body("Handshake.Resources.Type", Matchers.everyItem(
+                    Matchers.in(List.of("ACCOUNT", "ORGANIZATION", "ORGANIZATION_FEATURE_SET",
                             "EMAIL", "MASTER_EMAIL", "MASTER_NAME", "NOTES", "PARENT_HANDSHAKE"))))
             .body("Handshake.Resources.find { it.Type == 'ORGANIZATION' }.Resources.Type",
-                    org.hamcrest.Matchers.containsInAnyOrder("MASTER_EMAIL", "MASTER_NAME"));
+                    Matchers.containsInAnyOrder("MASTER_EMAIL", "MASTER_NAME"));
     }
 
     @Test
@@ -310,7 +311,7 @@ class OrganizationsCrossAccountIntegrationTest {
         .then()
             .statusCode(200)
             .body("Handshakes.Id",
-                    org.hamcrest.Matchers.hasItems(inviteHandshakeId, declinedHandshakeId, canceledHandshakeId));
+                    Matchers.hasItems(inviteHandshakeId, declinedHandshakeId, canceledHandshakeId));
 
         organizations(MANAGEMENT_ACCOUNT, "ListHandshakesForOrganization",
                 "{\"Filter\":{\"States\":[\"DECLINED\"]}}")

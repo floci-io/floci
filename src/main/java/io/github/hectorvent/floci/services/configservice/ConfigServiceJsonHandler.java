@@ -76,7 +76,7 @@ public class ConfigServiceJsonHandler {
             case "TagResource" -> tagResource(request, region);
             case "UntagResource" -> untagResource(request, region);
             case "ListTagsForResource" -> listTagsForResource(request, region);
-            default -> throw new io.github.hectorvent.floci.core.common.AwsException(
+            default -> throw new AwsException(
                     "InvalidAction", "Could not find operation " + action, 400);
         };
     }

@@ -37,7 +37,9 @@ jobs:
   # ── Build native artifact — amd64 ────────────────────────────────────────
   build-native-amd64:
     name: Build native artifact (amd64)
-    runs-on: ubuntu-latest
+    # Pinned, like the arm64 jobs. Built on ubuntu-26.04 the binary asks glibc for x86-64-v3
+    # whatever -march says, and no longer starts on x86-64-v2 CPUs.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
@@ -57,6 +59,12 @@ jobs:
         # conditional-branch range and the build dies with BranchTargetOutOfBoundsException.
         # The flag only exists on Mandrel, so it is passed here rather than in application.yml.
         run: mvn clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-march=x86-64-v2,-H:-AOTSingleCallsiteInline"
+
+      - name: Check the x86-64 ISA level of the binary
+        # The image and the release asset must run on x86-64-v2 CPUs. The runner's CPU has v3, so
+        # starting the binary here proves nothing; the script reads the ISA level the binary asks
+        # glibc for.
+        run: .github/scripts/check-isa-level.sh "$(ls target/*-runner)"
 
       - name: Smoke-test the standalone binary
         # The same binary is published as a release asset (publish-binaries), so it is checked

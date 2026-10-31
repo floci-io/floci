@@ -794,7 +794,7 @@ class ServiceLastAccessedIntegrationTest {
             .body(containsString("ValidationError"));
     }
 
-    /** A malformed request stays malformed even when the marker sits past the end of the list. */
+    /** MaxItems is held to its range before the marker is read, as AWS checks a request's shape first. */
     @Test
     void getServiceLastAccessedDetailsRejectsMaxItemsBelowOneEvenPastTheEnd() {
         String arn = createUser("laa-maxitems-" + suffix());
@@ -806,7 +806,7 @@ class ServiceLastAccessedIntegrationTest {
             .statusCode(400)
             .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
             .body("ErrorResponse.Error.Message", equalTo(
-                    "1 validation error detected: Value '0' at 'maxItems' failed to satisfy "
+                    "1 validation error detected: Value at 'maxItems' failed to satisfy "
                             + "constraint: Member must have value greater than or equal to 1"));
     }
 
@@ -821,19 +821,32 @@ class ServiceLastAccessedIntegrationTest {
             .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
     }
 
-    /** ListPoliciesGrantingServiceAccess models a Marker, so it walks the namespace entries too. */
+    /**
+     * ListPoliciesGrantingServiceAccess models a Marker but no MaxItems, so its list is never cut
+     * and it never issues a marker: every namespace comes back in one page, and a marker, which can
+     * only be one it did not issue, is refused rather than read as an offset.
+     */
     @Test
-    void listPoliciesGrantingServiceAccessHonoursItsMarker() {
+    void listPoliciesGrantingServiceAccessIsOnePageAndRefusesAMarkerItNeverIssued() {
         String arn = createUser("laa-list-marker-" + suffix());
+
+        iam("ListPoliciesGrantingServiceAccess").formParam("Arn", arn)
+            .formParam("ServiceNamespaces.member.1", "s3")
+            .formParam("ServiceNamespaces.member.2", "dynamodb")
+        .when().post("/").then()
+            .statusCode(200)
+            .body(containsString("<ServiceNamespace>dynamodb</ServiceNamespace>"))
+            .body(containsString("<ServiceNamespace>s3</ServiceNamespace>"))
+            .body("ListPoliciesGrantingServiceAccessResponse.ListPoliciesGrantingServiceAccessResult.IsTruncated",
+                    equalTo("false"));
 
         iam("ListPoliciesGrantingServiceAccess").formParam("Arn", arn)
             .formParam("ServiceNamespaces.member.1", "s3")
             .formParam("ServiceNamespaces.member.2", "dynamodb")
             .formParam("Marker", "1")
         .when().post("/").then()
-            .statusCode(200)
-            .body(containsString("<ServiceNamespace>dynamodb</ServiceNamespace>"))
-            .body(not(containsString("<ServiceNamespace>s3</ServiceNamespace>")));
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
     }
 
     @Test
@@ -881,9 +894,14 @@ class ServiceLastAccessedIntegrationTest {
                     + "\"Action\":[\"s3:GetObject\",\"dynamodb:GetItem\"],\"Resource\":\"*\"}]}")
         .when().post("/").then().statusCode(200);
 
+        String jobId = generateJobFor(arn);
+        String marker = iam("GetServiceLastAccessedDetails").formParam("JobId", jobId).formParam("MaxItems", "1")
+        .when().post("/").then().statusCode(200)
+            .extract().path("GetServiceLastAccessedDetailsResponse.GetServiceLastAccessedDetailsResult.Marker");
+
         iam("GetServiceLastAccessedDetails")
-            .formParam("JobId", generateJobFor(arn))
-            .formParam("Marker", "1")
+            .formParam("JobId", jobId)
+            .formParam("Marker", marker)
             .formParam("MaxItems", "1000")
         .when().post("/").then()
             .statusCode(200)
@@ -1017,7 +1035,7 @@ class ServiceLastAccessedIntegrationTest {
             // broke: an over-large MaxItems says nothing about the minimum. Asserted on the parsed
             // element because the raw body escapes the quotes as &apos;.
             .body("ErrorResponse.Error.Message", equalTo(
-                    "1 validation error detected: Value '1001' at 'maxItems' failed to satisfy "
+                    "1 validation error detected: Value at 'maxItems' failed to satisfy "
                             + "constraint: Member must have value less than or equal to 1000"));
     }
 

@@ -2,6 +2,9 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import org.hamcrest.Matcher;
+import org.hamcrest.Matchers;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -304,7 +307,7 @@ class ApiGatewayV2DomainNameIntegrationTest {
         // read or delete by that id would pick between the two mappings arbitrarily.
         String first = createMapping("Aa");
         String second = createMapping("BB");
-        org.junit.jupiter.api.Assertions.assertNotEquals(first, second);
+        Assertions.assertNotEquals(first, second);
 
         given()
         .when()
@@ -671,7 +674,7 @@ class ApiGatewayV2DomainNameIntegrationTest {
             .statusCode(201);
     }
 
-    private static org.hamcrest.Matcher<Iterable<? super String>> hasItemEqualTo(String value) {
-        return org.hamcrest.Matchers.hasItem(equalTo(value));
+    private static Matcher<Iterable<? super String>> hasItemEqualTo(String value) {
+        return Matchers.hasItem(equalTo(value));
     }
 }

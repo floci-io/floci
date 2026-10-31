@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudwatch.logs;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -9,6 +10,8 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -19,7 +22,8 @@ import static org.mockito.Mockito.mock;
  * pre-existing operations: logEvents list 1-10000 on PutLogEvents,
  * logStreamNames list 1-100 on FilterLogEvents, and the Random/ByLogStream
  * distribution enum on PutSubscriptionFilter. All were previously accepted
- * verbatim.
+ * verbatim. Also FilterLogEvents' rule that a request names its log group,
+ * by logGroupName or by logGroupIdentifier.
  */
 class CloudWatchLogsInputConstraintTest {
 
@@ -88,6 +92,34 @@ class CloudWatchLogsInputConstraintTest {
         request.put("logGroupName", GROUP);
         request.putNull("logStreamNames");
         assertEquals(200, handler.handle("FilterLogEvents", request, REGION).getStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"logGroupName\":\"\"}", "{\"logGroupIdentifier\":\"\"}",
+            "{\"logGroupName\":null,\"logGroupIdentifier\":null}"})
+    void filterLogEvents_noLogGroup_isRejected(String body) throws Exception {
+        JsonNode request = MAPPER.readTree(body);
+        AwsException e = expect400(() -> handler.handle("FilterLogEvents", request, REGION));
+        assertEquals("logGroupName or logGroupIdentifier is required.", e.getMessage());
+    }
+
+    @Test
+    void filterLogEvents_noLogGroup_isRejectedWhenAGroupIsNamedNull() {
+        // "null" is a valid log group name, and the one a missing name is keyed under.
+        handler.handle("CreateLogGroup", MAPPER.createObjectNode().put("logGroupName", "null"), REGION);
+        AwsException e = expect400(() -> handler.handle("FilterLogEvents", MAPPER.createObjectNode(), REGION));
+        assertEquals("logGroupName or logGroupIdentifier is required.", e.getMessage());
+    }
+
+    @Test
+    void filterLogEvents_noLogGroupAndTooManyStreamNames_reportsTheStreamNames() {
+        ObjectNode request = MAPPER.createObjectNode();
+        ArrayNode names = request.putArray("logStreamNames");
+        for (int i = 0; i <= 100; i++) {
+            names.add("s" + i);
+        }
+        AwsException e = expect400(() -> handler.handle("FilterLogEvents", request, REGION));
+        assertEquals("logStreamNames must contain between 1 and 100 entries.", e.getMessage());
     }
 
     @Test

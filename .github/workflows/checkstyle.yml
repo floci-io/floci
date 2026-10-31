@@ -55,3 +55,6 @@ jobs:
 
       - name: Test import-order rules
         run: python3 tools/checkstyle/test_import_order.py
+
+      - name: Test that each suppression matches exactly one file
+        run: python3 tools/checkstyle/test_suppressions.py

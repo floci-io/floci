@@ -7,9 +7,11 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.model.Dashboard;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Alarm;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.AlarmHistoryItem;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.AlarmMetricDataQuery;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.CompositeAlarm;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
@@ -24,11 +26,13 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Handles CloudWatch Metrics requests via the JSON 1.0 protocol.
@@ -38,6 +42,22 @@ import java.util.Map;
 public class CloudWatchMetricsJsonHandler {
 
     private static final Logger LOG = Logger.getLogger(CloudWatchMetricsJsonHandler.class);
+
+    /**
+     * The operations served through the console's {@code CloudWatchVersion20130116.} target, each
+     * with the request members accepted there: some of the ones this handler honours, plus
+     * {@code NextToken} and {@code MaxRecords}, which change nothing because every result comes
+     * back at once. DescribeAlarms' {@code StateValue}, {@code ActionPrefix},
+     * {@code ChildrenOfAlarmName} and {@code ParentsOfAlarmName} stay refused here until the
+     * console's API is known to give them the same shapes.
+     */
+    private static final Map<String, Set<String>> CONSOLE_TARGET_OPERATIONS = Map.of(
+            "ListMetrics", Set.of("Namespace", "MetricName", "Dimensions", "NextToken"),
+            "DescribeAlarms", Set.of("AlarmNames", "AlarmNamePrefix", "MaxRecords", "NextToken"),
+            "GetMetricStatistics", Set.of("Namespace", "MetricName", "Dimensions", "StartTime", "EndTime",
+                    "Period", "Statistics", "Unit"),
+            "DeleteAlarms", Set.of("AlarmNames"));
+
     private final CloudWatchMetricsService metricsService;
     private final CloudWatchDashboardsService dashboardsService;
     private final CloudWatchMetricStreamsService metricStreamsService;
@@ -65,6 +85,7 @@ public class CloudWatchMetricsJsonHandler {
             case "DescribeAlarms" -> handleDescribeAlarms(request, region);
             case "DeleteAlarms" -> handleDeleteAlarms(request, region);
             case "SetAlarmState" -> handleSetAlarmState(request, region);
+            case "DescribeAlarmHistory" -> handleDescribeAlarmHistory(request, region);
             case "ListTagsForResource" -> handleListTagsForResource(request, region);
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
@@ -83,6 +104,57 @@ public class CloudWatchMetricsJsonHandler {
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported by CloudWatch JSON."))
                     .build();
         };
+    }
+
+    /**
+     * Handles an operation named with the {@code CloudWatchVersion20130116.} target of the
+     * CloudWatch console's API. The console's model gives many operations and members shapes of
+     * their own, which this handler would silently misread or ignore, such as {@code GetMetricData}
+     * with {@code Defaults} and {@code Metrics}, or {@code PutMetricAlarm} metric items with
+     * {@code Alias} and {@code MetricName}. So only the operations and top-level members in
+     * {@code CONSOLE_TARGET_OPERATIONS} are served: any other operation, and any other member set
+     * to a value other than {@code null} or {@code false}, is refused rather than answered as if it
+     * were unset, and a top-level {@code null} member is dropped. Members nested inside the served
+     * ones are passed on unchecked, nulls included. A {@code DescribeAlarms} answer that would list
+     * an alarm defined with {@code Metrics} is refused too, since the console's API gives those
+     * items its own shape, with {@code Alias} instead of {@code Id} and {@code MetricStat}. The
+     * name matches {@code DynamoDbJsonHandler.handleLegacy}, the entry point of the other JSON-only
+     * target.
+     */
+    public Response handleLegacy(String action, JsonNode request, String region) {
+        Set<String> servedMembers = CONSOLE_TARGET_OPERATIONS.get(action);
+        if (servedMembers == null) {
+            return unsupportedWithConsoleTarget("Operation " + action);
+        }
+        ObjectNode served = objectMapper.createObjectNode();
+        for (Map.Entry<String, JsonNode> member : request.properties()) {
+            JsonNode value = member.getValue();
+            if (value.isNull()) {
+                continue;
+            }
+            if (servedMembers.contains(member.getKey())) {
+                served.set(member.getKey(), value);
+            } else if (!value.isBoolean() || value.booleanValue()) {
+                return unsupportedWithConsoleTarget("Parameter " + member.getKey() + " of " + action);
+            }
+        }
+        Response response = handle(action, served, region);
+        if ("DescribeAlarms".equals(action) && response.getEntity() instanceof JsonNode body) {
+            for (JsonNode alarm : body.path("MetricAlarms")) {
+                if (alarm.has("Metrics")) {
+                    return unsupportedWithConsoleTarget("DescribeAlarms of alarm "
+                            + alarm.path("AlarmName").asText() + ", which is defined with Metrics,");
+                }
+            }
+        }
+        return response;
+    }
+
+    private static Response unsupportedWithConsoleTarget(String subject) {
+        return Response.status(400)
+                .entity(new AwsErrorResponse("UnsupportedOperation", subject
+                        + " is not supported by CloudWatch JSON with the CloudWatchVersion20130116 target."))
+                .build();
     }
 
     private Response handlePutMetricData(JsonNode request, String region) {
@@ -234,18 +306,26 @@ public class CloudWatchMetricsJsonHandler {
         if (namesNode.isArray()) {
             namesNode.forEach(n -> alarmNames.add(n.asText()));
         }
-        String prefix = request.has("AlarmNamePrefix") ? request.path("AlarmNamePrefix").asText() : null;
+        String prefix = request.path("AlarmNamePrefix").asText(null);
 
         List<String> types = new ArrayList<>();
         request.path("AlarmTypes").forEach(value -> types.add(value.asText()));
-        metricsService.validateAlarmTypes(types);
-        List<MetricAlarm> alarms = types.isEmpty() || types.contains("MetricAlarm")
-                ? metricsService.describeAlarms(alarmNames, prefix, region) : List.of();
+        String childrenOf = request.path("ChildrenOfAlarmName").asText(null);
+        String parentsOf = request.path("ParentsOfAlarmName").asText(null);
+        CloudWatchMetricsService.DescribedAlarms alarms = metricsService.describeAlarms(
+                new CloudWatchMetricsService.AlarmFilter(alarmNames, prefix, types,
+                        request.path("StateValue").asText(null), request.path("ActionPrefix").asText(null),
+                        childrenOf, parentsOf), region);
+        boolean related = childrenOf != null || parentsOf != null;
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("MetricAlarms");
-        for (MetricAlarm a : alarms) {
+        for (MetricAlarm a : alarms.metricAlarms()) {
             ObjectNode node = arr.addObject();
+            if (related) {
+                relatedAlarmFields(node, a, childrenOf != null);
+                continue;
+            }
             describeAlarmFields(node, a);
             if (!a.getMetrics().isEmpty()) {
                 node.set("Metrics", objectMapper.valueToTree(a.getMetrics()));
@@ -282,15 +362,34 @@ public class CloudWatchMetricsJsonHandler {
 
         }
         ArrayNode composites = response.putArray("CompositeAlarms");
-        if (types.contains("CompositeAlarm")) {
-            for (CompositeAlarm alarm : metricsService.describeCompositeAlarms(alarmNames, prefix, region)) {
-                ObjectNode node = composites.addObject();
+        for (CompositeAlarm alarm : alarms.compositeAlarms()) {
+            ObjectNode node = composites.addObject();
+            if (related) {
+                relatedAlarmFields(node, alarm, childrenOf != null);
+            } else {
                 describeAlarmFields(node, alarm);
                 node.put("AlarmRule", alarm.getAlarmRule());
             }
         }
         response.putArray("LogAlarms");
         return Response.ok(response).build();
+    }
+
+    /**
+     * An alarm as DescribeAlarms lists it for ChildrenOfAlarmName, with only its name, ARN, state value and
+     * state update time, or for ParentsOfAlarmName, with only its name and ARN.
+     */
+    private static void relatedAlarmFields(ObjectNode node, Alarm a, boolean withState) {
+        node.put("AlarmName", a.getAlarmName());
+        if (a.getAlarmArn() != null) {
+            node.put("AlarmArn", a.getAlarmArn());
+        }
+        if (withState) {
+            if (a.getStateValue() != null) {
+                node.put("StateValue", a.getStateValue());
+            }
+            node.put("StateUpdatedTimestamp", a.getStateUpdatedTimestamp());
+        }
     }
 
     private void describeAlarmFields(ObjectNode node, Alarm a) {
@@ -318,6 +417,7 @@ public class CloudWatchMetricsJsonHandler {
             node.put("StateReasonData", a.getStateReasonData());
         }
         node.put("StateUpdatedTimestamp", a.getStateUpdatedTimestamp());
+        node.put("StateTransitionedTimestamp", a.lastTransitionTimestamp());
         node.put("AlarmConfigurationUpdatedTimestamp", a.getAlarmConfigurationUpdatedTimestamp());
     }
 
@@ -338,6 +438,31 @@ public class CloudWatchMetricsJsonHandler {
         String reasonData = request.path("StateReasonData").asText(null);
         metricsService.setAlarmState(name, state, reason, reasonData, region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDescribeAlarmHistory(JsonNode request, String region) {
+        List<String> types = new ArrayList<>();
+        request.path("AlarmTypes").forEach(value -> types.add(value.asText()));
+        PaginatedResult<AlarmHistoryItem> page = metricsService.describeAlarmHistory(
+                request.path("AlarmName").asText(null), types, request.path("HistoryItemType").asText(null),
+                parseInstantNode(request.path("StartDate")), parseInstantNode(request.path("EndDate")),
+                Pagination.parseMaxResults(request, "MaxRecords", "MalformedInput"),
+                request.path("NextToken").asText(null), request.path("ScanBy").asText(null), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("AlarmHistoryItems");
+        for (AlarmHistoryItem item : page.items()) {
+            items.addObject()
+                    .put("AlarmName", item.alarmName())
+                    .put("AlarmType", item.alarmType())
+                    .put("HistoryData", item.historyData())
+                    .put("HistoryItemType", item.historyItemType())
+                    .put("HistorySummary", item.historySummary())
+                    .put("Timestamp", item.timestamp() / 1000.0);
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
     }
 
     private Response handleListTagsForResource(JsonNode request, String region) {
@@ -715,7 +840,9 @@ public class CloudWatchMetricsJsonHandler {
     private Instant parseInstantNode(JsonNode node) {
         if (node == null || node.isMissingNode() || node.isNull()) return null;
         if (node.isNumber()) {
-            return Instant.ofEpochSecond(node.asLong());
+            BigDecimal seconds = node.decimalValue();
+            return Instant.ofEpochSecond(seconds.longValue(),
+                    seconds.remainder(BigDecimal.ONE).movePointRight(9).longValue());
         }
         return parseInstant(node.asText(null));
     }

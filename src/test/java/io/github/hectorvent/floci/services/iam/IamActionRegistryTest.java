@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.iam;
 import io.github.hectorvent.floci.core.common.AwsProtocolClaimFilter;
 import io.github.hectorvent.floci.core.common.ProtocolClaim;
 import io.github.hectorvent.floci.core.common.WireProtocol;
+import io.github.hectorvent.floci.services.route53.Route53Controller;
 import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.container.ResourceInfo;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -18,11 +20,14 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.when;
@@ -35,6 +40,20 @@ import static org.mockito.Mockito.when;
 class IamActionRegistryTest {
 
     private final IamActionRegistry registry = new IamActionRegistry();
+
+    @ParameterizedTest
+    @CsvSource({"createReusableDelegationSet,CreateReusableDelegationSet",
+            "getReusableDelegationSet,GetReusableDelegationSet",
+            "listReusableDelegationSets,ListReusableDelegationSets",
+            "deleteReusableDelegationSet,DeleteReusableDelegationSet"})
+    void matchedDelegationSetMethodsResolveTheirOwnActions(String method, String operation) {
+        ResourceInfo info = Mockito.mock(ResourceInfo.class);
+        Mockito.doReturn(Route53Controller.class).when(info).getResourceClass();
+        when(info.getResourceMethod()).thenReturn(Arrays.stream(Route53Controller.class.getMethods())
+                .filter(candidate -> candidate.getName().equals(method)).findFirst().orElseThrow());
+        assertEquals("route53:" + operation, registry.resolveMatchedRoute("route53", info));
+        assertNull(registry.resolveMatchedRoute("s3", info));
+    }
 
     @ParameterizedTest
     @CsvSource({"PUT,PutProvisionedConcurrencyConfig", "GET,GetProvisionedConcurrencyConfig",
@@ -387,13 +406,24 @@ class IamActionRegistryTest {
 
     @Test
     void anEksAccessEntryRouteTakesThePrincipalAsTheRestOfThePath() {
-        // EKS reads the principal greedily, so a GET or DELETE under an entry reads or deletes an entry.
+        // EKS reads the principal greedily, but an entry's access policy routes win over the entry's own, as
+        // they do in the router.
         String entry = "/clusters/c/access-entries/arn:aws:iam::000000000000:role/team/worker";
         String[][] routes = {
             {"GET", entry, "eks:DescribeAccessEntry"},
-            {"GET", entry + "/access-policies", "eks:DescribeAccessEntry"},
-            {"DELETE", entry + "/access-policies/arn:aws:eks::aws:cluster-access-policy/Admin", "eks:DeleteAccessEntry"},
+            {"DELETE", entry, "eks:DeleteAccessEntry"},
+            {"GET", entry + "/access-policies", "eks:ListAssociatedAccessPolicies"},
+            {"DELETE", entry + "/access-policies/arn:aws:eks::aws:cluster-access-policy/Admin",
+                "eks:DisassociateAccessPolicy"},
             {"POST", entry + "/access-policies", "eks:AssociateAccessPolicy"},
+            {"DELETE", entry + "/access-policies/arn%3Aaws%3Aeks%3A%3Aaws%3Acluster-access-policy%2FAdmin",
+                "eks:DisassociateAccessPolicy"},
+            // A principal whose IAM path holds an access-policies segment is still an entry: only a cluster
+            // access policy ARN after it makes a DELETE a disassociate.
+            {"DELETE", "/clusters/c/access-entries/arn:aws:iam::000000000000:role/ci/access-policies/runner",
+                "eks:DeleteAccessEntry"},
+            {"GET", "/clusters/c/access-entries/arn:aws:iam::000000000000:role/ci/access-policies/runner",
+                "eks:DescribeAccessEntry"},
             {"POST", entry, "eks:UpdateAccessEntry"},
             {"GET", "/clusters/c/access-entries", "eks:ListAccessEntries"},
         };
@@ -566,6 +596,84 @@ class IamActionRegistryTest {
         }
         // s3:DeleteBucketTagging is not an IAM action; AWS checks DeleteBucketTagging as PutBucketTagging.
         assertEquals("s3:PutBucketTagging", s3Action("DELETE", "/bucket", "tagging"));
+    }
+
+    @Test
+    void s3ControlRoutesResolveToTheActionsAwsChecks() {
+        String bucketArn = "arn:aws:s3:::repro-bucket";
+        assertEquals("s3:ListTagsForResource", s3Action("GET", "/v20180820/tags/" + bucketArn));
+        assertEquals("s3:TagResource", s3Action("POST", "/v20180820/tags/" + bucketArn));
+        assertEquals("s3:UntagResource", s3Action("DELETE", "/v20180820/tags/" + bucketArn, "tagKeys=Env"));
+        // The Go SDK v2, and so Terraform's provider, percent-encodes the ARN's colons and slashes.
+        String encoded = "arn%3Aaws%3As3%3Aus-east-1%3A000000000000%3Abucket%2Frepro-bucket";
+        assertEquals("s3:ListTagsForResource", s3Action("GET", "/v20180820/tags/" + encoded));
+        assertEquals("s3:TagResource", s3Action("POST", "/v20180820/tags/" + encoded));
+        assertEquals("s3:UntagResource", s3Action("DELETE", "/v20180820/tags/" + encoded, "tagKeys=Env"));
+        assertEquals("s3:ListAccessPoints", s3Action("GET", "/v20180820/accesspoint", "bucket=b"));
+        // The account-level Block Public Access: the User Guide requires PutAccountPublicAccessBlock
+        // or GetAccountPublicAccessBlock, and a delete the same action as the write it undoes.
+        assertEquals("s3:PutAccountPublicAccessBlock",
+                s3Action("PUT", "/v20180820/configuration/publicAccessBlock"));
+        assertEquals("s3:GetAccountPublicAccessBlock",
+                s3Action("GET", "/v20180820/configuration/publicAccessBlock"));
+        assertEquals("s3:PutAccountPublicAccessBlock",
+                s3Action("DELETE", "/v20180820/configuration/publicAccessBlock"));
+    }
+
+    @Test
+    void s3ControlRulesClaimOnlyTheRoutesTheControllerServes() {
+        // PUT is no S3 Control tagging route, so a bucket actually named v20180820
+        // keeps its data-plane actions: the resource stays its own bucket and key.
+        assertEquals("s3:PutObject", s3Action("PUT", "/v20180820/tags/key.txt"));
+        assertEquals("s3:GetObject", s3Action("GET", "/v20180820/other/key.txt"));
+        assertEquals("s3:ListBucket", s3Action("GET", "/v20180820"));
+        assertEquals("s3:CreateBucket", s3Action("PUT", "/v20180820"));
+    }
+
+    /**
+     * A tagging route is matched before the data-plane query overrides: S3ControlController
+     * answers it whatever the query string carries, so {@code ?tagging} on the control route
+     * must not have the call checked as the object tagging of a bucket named v20180820, which a
+     * caller holding only that object action would pass while reading the bucket's tags, and a
+     * caller holding only the control action would fail.
+     */
+    @Test
+    void s3ControlRoutesWinOverTheDataPlaneQueryOverrides() {
+        String bucketArn = "arn:aws:s3:::repro-bucket";
+        assertEquals("s3:ListTagsForResource", s3Action("GET", "/v20180820/tags/" + bucketArn, "tagging"));
+        assertEquals("s3:ListTagsForResource",
+                s3Action("GET", "/v20180820/tags/" + bucketArn, "tagging", "versionId=1"));
+        assertEquals("s3:TagResource", s3Action("POST", "/v20180820/tags/" + bucketArn, "tagging"));
+        assertEquals("s3:UntagResource",
+                s3Action("DELETE", "/v20180820/tags/" + bucketArn, "tagging", "tagKeys=Env"));
+        // The Go SDK v2, and so Terraform's provider, percent-encodes the ARN's colons and slashes.
+        String encoded = "arn%3Aaws%3As3%3Aus-east-1%3A000000000000%3Abucket%2Frepro-bucket";
+        assertEquals("s3:ListTagsForResource", s3Action("GET", "/v20180820/tags/" + encoded, "tagging"));
+        // The data-plane object tagging the query names keeps its own action on its own path.
+        assertEquals("s3:GetObjectTagging", s3Action("GET", "/bucket/key.txt", "tagging"));
+        assertEquals("s3:GetObjectVersionTagging", s3Action("GET", "/bucket/key.txt", "tagging", "versionId=1"));
+    }
+
+    /**
+     * The envelope a denial answers in follows the route and not the action: a request the
+     * control controller serves is an S3 Control one however its query reads, and a data-plane
+     * request is not one, even one travelling under the control prefix, as into a bucket
+     * actually named v20180820.
+     */
+    @Test
+    void theControlRoutesDecideWhetherARequestIsAnS3ControlOne() {
+        assertTrue(IamActionRegistry.isS3ControlRequest("s3",
+                mockCtx("GET", "/v20180820/tags/arn:aws:s3:::repro-bucket",
+                        new MultivaluedHashMap<>(), null, "")));
+        assertTrue(IamActionRegistry.isS3ControlRequest("s3",
+                mockCtx("PUT", "/v20180820/configuration/publicAccessBlock",
+                        new MultivaluedHashMap<>(), null, "")));
+        assertFalse(IamActionRegistry.isS3ControlRequest("s3",
+                mockCtx("GET", "/v20180820/other/key.txt", new MultivaluedHashMap<>(), null, "")));
+        assertFalse(IamActionRegistry.isS3ControlRequest("s3",
+                mockCtx("GET", "/bucket/key.txt", new MultivaluedHashMap<>(), null, "")));
+        assertFalse(IamActionRegistry.isS3ControlRequest("lambda",
+                mockCtx("GET", "/2015-03-31/functions", new MultivaluedHashMap<>(), null, "")));
     }
 
     @Test

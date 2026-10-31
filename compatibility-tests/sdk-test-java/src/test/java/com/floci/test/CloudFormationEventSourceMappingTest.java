@@ -6,6 +6,7 @@ import software.amazon.awssdk.services.cloudformation.model.*;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.GetEventSourceMappingResponse;
 import software.amazon.awssdk.services.lambda.model.ListEventSourceMappingsResponse;
+import software.amazon.awssdk.services.lambda.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.sqs.SqsClient;
 
 import java.util.List;
@@ -220,7 +221,7 @@ class CloudFormationEventSourceMappingTest {
         waitForDeleted(STACK_NAME, 30);
 
         assertThatThrownBy(() -> lambda.getEventSourceMapping(r -> r.uuid(esmUuid)))
-                .isInstanceOf(software.amazon.awssdk.services.lambda.model.ResourceNotFoundException.class);
+                .isInstanceOf(ResourceNotFoundException.class);
     }
 
     private static String sqsStackTemplate(String esmOptions) {

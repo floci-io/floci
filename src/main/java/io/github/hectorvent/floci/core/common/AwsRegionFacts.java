@@ -31,6 +31,11 @@ public final class AwsRegionFacts {
     private AwsRegionFacts() {
     }
 
+    /** The RDS hosted zone when a regional value has been captured. */
+    public static Optional<String> rdsHostedZoneId(String region) {
+        return regionText(region, "rdsHostedZoneId");
+    }
+
     /** Classic load balancers share the Application load balancer hosted zone. */
     public static Optional<String> classicElbHostedZoneId(String region) {
         return regionText(region, "classicElbHostedZoneId");

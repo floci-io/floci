@@ -26,6 +26,7 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -374,7 +375,7 @@ public class StackSetService implements PassedRoleLookup {
         getStackSetOrThrow(name);
         String prefix = name + "::";
         return autoDeploymentTargets.scan(key -> key.startsWith(prefix)).stream()
-                .sorted(java.util.Comparator.comparing(StackSetAutoDeploymentTarget::getOrganizationalUnitId))
+                .sorted(Comparator.comparing(StackSetAutoDeploymentTarget::getOrganizationalUnitId))
                 .toList();
     }
 

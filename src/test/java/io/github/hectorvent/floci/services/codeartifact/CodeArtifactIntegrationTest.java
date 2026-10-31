@@ -252,6 +252,49 @@ class CodeArtifactIntegrationTest {
     }
 
     @Test
+    void deletePackageVersionsRouteRemovesAVersionAndDescribeReturnsNotFound() {
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/domain?domain=delete-versions-domain").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{}").post("/v1/repository?domain=delete-versions-domain&repository=repo")
+                .then().statusCode(200);
+        byte[] content = "delete-version-me".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", AUTH).header("x-amz-content-sha256", Digests.sha256Hex(content))
+                .contentType("application/octet-stream").body(content)
+                .post("/v1/package/version/publish?domain=delete-versions-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=my-pkg&version=1.0.0&asset=a.txt")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"]}")
+                .post("/v1/package/versions/delete?domain=delete-versions-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=my-pkg")
+                .then().statusCode(200)
+                .body("successfulVersions.'1.0.0'.status", equalTo("Deleted"))
+                .body("failedVersions", equalTo(Map.of()));
+
+        given().header("Authorization", AUTH)
+                .get("/v1/package/version?domain=delete-versions-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=my-pkg&version=1.0.0")
+                .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"]}")
+                .post("/v1/package/versions/delete?domain=delete-versions-domain&repository=repo&format=generic"
+                        + "&namespace=ns&package=my-pkg")
+                .then().statusCode(200)
+                .body("successfulVersions", equalTo(Map.of()))
+                .body("failedVersions.'1.0.0'.errorCode", equalTo("NOT_FOUND"));
+
+        given().header("Authorization", AUTH)
+                .delete("/v1/repository?domain=delete-versions-domain&repository=repo")
+                .then().statusCode(200);
+        given().header("Authorization", AUTH)
+                .delete("/v1/domain?domain=delete-versions-domain")
+                .then().statusCode(200);
+    }
+
+    @Test
     void putPackageOriginConfigurationCreatesAPackageAndItsRestrictionsSurviveDescribeAndDelete() {
         given().contentType("application/json").header("Authorization", AUTH)
                 .body("{}").post("/v1/domain?domain=origin-config-domain").then().statusCode(200);

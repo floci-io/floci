@@ -4,20 +4,15 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iot.model.IotRetainedMessage;
+import io.github.hectorvent.floci.testing.IotDataRequests;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.RestAssured;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.SdkBytes;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
-import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iotdataplane.IotDataPlaneClient;
 
-import java.net.URI;
 import java.time.Instant;
 import java.util.List;
 import java.util.UUID;
@@ -71,11 +66,7 @@ class IotRetainedTimestampIntegrationTest {
         String authorization = "AWS4-HMAC-SHA256 Credential=" + account
                 + "/20261023/us-east-1/iotdata/aws4_request, SignedHeaders=host, Signature=test";
         ObjectMapper mapper = new ObjectMapper();
-        try (IotDataPlaneClient client = IotDataPlaneClient.builder()
-                .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
-                .httpClientBuilder(UrlConnectionHttpClient.builder()).region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(account, "test")))
-                .build()) {
+        try (IotDataPlaneClient client = IotDataRequests.iotDataClient(account)) {
             long before = System.currentTimeMillis();
             client.publish(request -> request.topic(topic).qos(qos).retain(true).payload(SdkBytes.fromUtf8String("online")));
             long after = System.currentTimeMillis();

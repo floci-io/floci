@@ -3,13 +3,16 @@ package io.github.hectorvent.floci.services.cloudfront;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.LocalStackParity;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.acm.AcmCertificateReferenceProvider.CertificateReference;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.CachePolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontFunction;
@@ -39,6 +42,7 @@ import java.net.URI;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -112,6 +116,8 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             "acba4595-bd28-49b8-b9fe-13317c0390fa";
     private static final Map<String, OriginRequestPolicy> MANAGED_ORIGIN_REQUEST_POLICIES =
             managedOriginRequestPolicies();
+    private static final Map<String, CachePolicy> MANAGED_CACHE_POLICIES = managedCachePolicies();
+    private static final String MANAGED_POLICY_ETAG = "E23ZP02F085DFQ";
 
     private final StorageBackend<String, Distribution> distStore;
     private final StorageBackend<String, List<Invalidation>> invalidationStore;
@@ -133,6 +139,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private final String accountId;
     private final RegionResolver regionResolver;
     private final IamService iamService;
+    private final CertificateReferenceResolver certificates;
     private final String configuredDomainSuffix;
     /**
      * Host suffixes under which every distribution is served as {@code <id><suffix>}, whatever
@@ -147,13 +154,14 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private final Pattern lambdaOriginHost;
 
     public CloudFrontService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver) {
-        this(factory, config, regionResolver, null);
+        this(factory, config, regionResolver, null, null);
     }
 
     @Inject
     public CloudFrontService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver,
-                             IamService iamService) {
+                             IamService iamService, CertificateReferenceResolver certificates) {
         this.iamService = iamService;
+        this.certificates = certificates;
         this.distStore = factory.create("cloudfront", "cloudfront-distributions.json",
                 new TypeReference<Map<String, Distribution>>() {});
         this.invalidationStore = factory.create("cloudfront", "cloudfront-invalidations.json",
@@ -215,7 +223,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             dist.setEtag(UUID.randomUUID().toString());
             if (tags != null && !tags.isEmpty()) {
                 dist.setTags(tags);
-                tagStore.put("distribution/" + id, tags);
+                tagStore.put(dist.getArn(), tags);
             }
             distStore.put(id, dist);
             return dist;
@@ -265,6 +273,30 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         return references;
     }
 
+    /**
+     * The ACM certificates the distributions serve, each held by its distribution, so ACM lists the
+     * distribution in {@code InUseBy} and refuses to delete the certificate. Like
+     * {@link #serverCertificateReferences} it reads a copy of the store and takes no monitor.
+     */
+    public List<CertificateReference> acmCertificateReferences() {
+        List<CertificateReference> references = new ArrayList<>();
+        for (Distribution distribution : distStore.scan(k -> true)) {
+            String certificateArn = acmCertificateArn(distribution.getConfig());
+            if (certificateArn != null) {
+                references.add(new CertificateReference(certificateArn, distribution.getArn()));
+            }
+        }
+        return references;
+    }
+
+    private static String acmCertificateArn(DistributionConfig config) {
+        if (config == null || config.getViewerCertificate() == null) {
+            return null;
+        }
+        String certificateArn = config.getViewerCertificate().get("ACMCertificateArn");
+        return certificateArn == null || certificateArn.isBlank() ? null : certificateArn;
+    }
+
     private static String iamCertificateId(DistributionConfig config) {
         if (config == null || config.getViewerCertificate() == null) {
             return null;
@@ -281,24 +313,49 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                     "The specified SSL certificate doesn't exist, isn't valid, "
                             + "or doesn't include a valid certificate chain.", 400);
         }
+        String certificateArn = acmCertificateArn(config);
+        if (certificateArn != null && !isExistingAcmCertificate(certificateArn)) {
+            throw new AwsException("InvalidViewerCertificate",
+                    "The specified SSL certificate doesn't exist, isn't valid, "
+                            + "or doesn't include a valid certificate chain.", 400);
+        }
     }
 
     /**
-     * Runs a write that may record an IAM server certificate reference while IAM holds the lock
-     * {@code DeleteServerCertificate} takes, so the certificate cannot be deleted between
+     * Only an ACM certificate: the resolver also answers for IAM server certificates, but one named
+     * here would never be held by {@link #serverCertificateReferences}, which reads
+     * {@code IAMCertificateId}.
+     */
+    private boolean isExistingAcmCertificate(String arn) {
+        if (!AwsArnUtils.isArn(arn)) {
+            return false;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return "acm".equals(parsed.service())
+                && (certificates == null || certificates.exists(parsed.region(), arn));
+    }
+
+    /**
+     * Runs a write that may record a certificate reference while the certificate's owner holds the
+     * lock its delete takes, IAM's for {@code DeleteServerCertificate} and ACM's for
+     * {@code DeleteCertificate}, so the certificate cannot be deleted between
      * {@link #validateViewerCertificate} and the store write. Without the guard the delete sees no
      * reference, because the distribution is not saved yet, and the distribution is left holding a
-     * certificate that is gone.
+     * certificate that is gone. IAM's lock is taken first, the order the resolver uses.
      */
     private <T> T whileCertificatesHeld(DistributionConfig config, Supplier<T> action) {
+        String certificateArn = acmCertificateArn(config);
+        Supplier<T> acmHeld = certificates == null || certificateArn == null
+                ? action
+                : () -> certificates.supplyWhileHeld(List.of(certificateArn), action);
         if (iamService == null || iamCertificateId(config) == null) {
-            // Nothing to order. A distribution that names no IAM certificate cannot be left
-            // holding one, and the scan reads a copy of the store rather than a live collection,
-            // so this write cannot disturb it either. Taking the lock anyway would make every
-            // distribution write wait on a certificate delete, and the other way round.
-            return action.get();
+            // Nothing to order with IAM. A distribution that names no IAM certificate cannot be
+            // left holding one, and the scan reads a copy of the store rather than a live
+            // collection, so this write cannot disturb it either. Taking the lock anyway would make
+            // every distribution write wait on a certificate delete, and the other way round.
+            return acmHeld.get();
         }
-        return iamService.supplyWithServerCertificatesHeld(action);
+        return iamService.supplyWithServerCertificatesHeld(acmHeld);
     }
 
     private static void validateOriginSettings(DistributionConfig config) {
@@ -440,6 +497,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         }
         distStore.delete(id);
         invalidationStore.delete(id);
+        tagStore.delete(existing.getArn());
         tagStore.delete("distribution/" + id);
     }
 
@@ -449,8 +507,12 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
      * which owns the resource lifecycle at the stack level.
      */
     public synchronized void removeDistribution(String id) {
+        Distribution existing = distStore.get(id).orElse(null);
         distStore.delete(id);
         invalidationStore.delete(id);
+        if (existing != null) {
+            tagStore.delete(existing.getArn());
+        }
         tagStore.delete("distribution/" + id);
     }
 
@@ -674,12 +736,18 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     public CachePolicy getCachePolicy(String id) {
-        return cachePolicyStore.get(id).orElseThrow(() ->
-                new AwsException("NoSuchCachePolicy", "The specified cache policy does not exist.", 404));
+        return cachePolicyStore.get(id)
+                .or(() -> Optional.ofNullable(MANAGED_CACHE_POLICIES.get(id)))
+                .orElseThrow(() -> new AwsException("NoSuchCachePolicy",
+                        "The specified cache policy does not exist.", 404));
     }
 
     public synchronized CachePolicy updateCachePolicy(String id, String ifMatch, CachePolicy updated) {
         CachePolicy existing = getCachePolicy(id);
+        if (isManagedCachePolicy(id)) {
+            throw new AwsException("IllegalUpdate",
+                    "AWS managed cache policies cannot be updated.", 400);
+        }
         if (!existing.getEtag().equals(ifMatch)) {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
@@ -693,6 +761,10 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     public synchronized void deleteCachePolicy(String id, String ifMatch) {
         CachePolicy existing = getCachePolicy(id);
+        if (isManagedCachePolicy(id)) {
+            throw new AwsException("IllegalDelete",
+                    "AWS managed cache policies cannot be deleted.", 400);
+        }
         if (!existing.getEtag().equals(ifMatch)) {
             throw new AwsException("InvalidIfMatchVersion",
                     "The If-Match version is missing or not valid for the resource.", 400);
@@ -706,10 +778,22 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     public List<CachePolicy> listCachePolicies(String marker, int maxItems) {
-        List<CachePolicy> all = new ArrayList<>(cachePolicyStore.scan(k -> true));
-        all.sort((a, b) -> a.getName() != null && b.getName() != null
-                ? a.getName().compareTo(b.getName()) : a.getId().compareTo(b.getId()));
+        return listCachePolicies(marker, maxItems, null);
+    }
+
+    /**
+     * Lists custom and AWS managed cache policies; {@code type} narrows the list to the AWS
+     * lowercase {@code managed} or {@code custom} value.
+     */
+    public List<CachePolicy> listCachePolicies(String marker, int maxItems, String type) {
+        List<CachePolicy> all = mergeCustomAndManaged(type, "Cache policy",
+                cachePolicyStore.scan(k -> true), MANAGED_CACHE_POLICIES.values(),
+                CachePolicy::getName, CachePolicy::getId);
         return paginate(all, marker, maxItems, CachePolicy::getId);
+    }
+
+    static boolean isManagedCachePolicy(String id) {
+        return MANAGED_CACHE_POLICIES.containsKey(id);
     }
 
     // ── Origin Request Policies ───────────────────────────────────────────────
@@ -774,19 +858,9 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
      * AWS lowercase {@code managed} or {@code custom} value.
      */
     public List<OriginRequestPolicy> listOriginRequestPolicies(String marker, int maxItems, String type) {
-        if (type != null && !"custom".equals(type) && !"managed".equals(type)) {
-            throw new AwsException("InvalidArgument",
-                    "Origin request policy Type must be managed or custom.", 400);
-        }
-        List<OriginRequestPolicy> all = new ArrayList<>();
-        if (!"managed".equals(type)) {
-            all.addAll(orpStore.scan(k -> true));
-        }
-        if (!"custom".equals(type)) {
-            all.addAll(MANAGED_ORIGIN_REQUEST_POLICIES.values());
-        }
-        all.sort((a, b) -> a.getName() != null && b.getName() != null
-                ? a.getName().compareTo(b.getName()) : a.getId().compareTo(b.getId()));
+        List<OriginRequestPolicy> all = mergeCustomAndManaged(type, "Origin request policy",
+                orpStore.scan(k -> true), MANAGED_ORIGIN_REQUEST_POLICIES.values(),
+                OriginRequestPolicy::getName, OriginRequestPolicy::getId);
         return paginate(all, marker, maxItems, OriginRequestPolicy::getId);
     }
 
@@ -812,7 +886,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     public ResponseHeadersPolicy getResponseHeadersPolicy(String id) {
         return rhpStore.get(id)
-                .or(() -> java.util.Optional.ofNullable(MANAGED_RESPONSE_HEADERS_POLICIES.get(id)))
+                .or(() -> Optional.ofNullable(MANAGED_RESPONSE_HEADERS_POLICIES.get(id)))
                 .orElseThrow(() -> new AwsException("NoSuchResponseHeadersPolicy",
                         "The specified response headers policy does not exist.", 404));
     }
@@ -854,22 +928,9 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     public List<ResponseHeadersPolicy> listResponseHeadersPolicies(
             String marker, int maxItems, String type) {
-        String normalizedType = type;
-        if (normalizedType != null
-                && !"custom".equals(normalizedType)
-                && !"managed".equals(normalizedType)) {
-            throw new AwsException("InvalidArgument",
-                    "Response headers policy Type must be managed or custom.", 400);
-        }
-        List<ResponseHeadersPolicy> all = new ArrayList<>();
-        if (!"managed".equals(normalizedType)) {
-            all.addAll(rhpStore.scan(k -> true));
-        }
-        if (!"custom".equals(normalizedType)) {
-            all.addAll(MANAGED_RESPONSE_HEADERS_POLICIES.values());
-        }
-        all.sort((a, b) -> a.getName() != null && b.getName() != null
-                ? a.getName().compareTo(b.getName()) : a.getId().compareTo(b.getId()));
+        List<ResponseHeadersPolicy> all = mergeCustomAndManaged(type, "Response headers policy",
+                rhpStore.scan(k -> true), MANAGED_RESPONSE_HEADERS_POLICIES.values(),
+                ResponseHeadersPolicy::getName, ResponseHeadersPolicy::getId);
         if (marker != null && !marker.isEmpty()) {
             int idx = -1;
             for (int i = 0; i < all.size(); i++) {
@@ -925,7 +986,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         if (config == null) {
             return;
         }
-        Set<String> policyIds = new java.util.LinkedHashSet<>();
+        Set<String> policyIds = new LinkedHashSet<>();
         if (config.getDefaultCacheBehavior() != null) {
             addResponseHeadersPolicyId(
                     policyIds,
@@ -1129,6 +1190,77 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         return Map.copyOf(policies);
     }
 
+    /**
+     * The AWS managed cache policies whose settings the CloudFront Developer Guide lists under
+     * "Use managed cache policies". The four Amplify-only policies have no published settings and
+     * are not modeled.
+     */
+    private static Map<String, CachePolicy> managedCachePolicies() {
+        List<String> noHeaders = List.of();
+        List<String> originOverrideHeaders = List.of(
+                "Host", "Origin", "X-HTTP-Method-Override", "X-HTTP-Method", "X-Method-Override");
+        Map<String, Object> noCookies = selection("CookieBehavior", "none", "Cookies", List.of());
+        Map<String, Object> allCookies = selection("CookieBehavior", "all", "Cookies", List.of());
+        Map<String, Object> noQueryStrings =
+                selection("QueryStringBehavior", "none", "QueryStrings", List.of());
+        Map<String, Object> allQueryStrings =
+                selection("QueryStringBehavior", "all", "QueryStrings", List.of());
+        Map<String, CachePolicy> policies = new LinkedHashMap<>();
+        addManagedCachePolicy(policies, "2e54312d-136d-493c-8eb9-b001f22f67d2", "Managed-Amplify",
+                2, 600, 2, true, true,
+                headerSelection(List.of("Authorization", "CloudFront-Viewer-Country", "Host")),
+                allCookies, allQueryStrings);
+        addManagedCachePolicy(policies, "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+                "Managed-CachingDisabled", 0, 0, 0, false, false,
+                headerSelection(noHeaders), noCookies, noQueryStrings);
+        addManagedCachePolicy(policies, "658327ea-f89d-4fab-a63d-7e88639e58f6",
+                "Managed-CachingOptimized", 1, 31536000, 86400, true, true,
+                headerSelection(noHeaders), noCookies, noQueryStrings);
+        addManagedCachePolicy(policies, "b2884449-e4de-46a7-ac36-70bc7f1ddd6d",
+                "Managed-CachingOptimizedForUncompressedObjects", 1, 31536000, 86400, false, false,
+                headerSelection(noHeaders), noCookies, noQueryStrings);
+        addManagedCachePolicy(policies, "08627262-05a9-4f76-9ded-b50ca2e3a84f",
+                "Managed-Elemental-MediaPackage", 0, 31536000, 86400, true, false,
+                headerSelection(List.of("Origin")), noCookies,
+                selection("QueryStringBehavior", "whitelist", "QueryStrings",
+                        List.of("aws.manifestfilter", "start", "end", "m")));
+        addManagedCachePolicy(policies, "83da9c7e-98b4-4e11-a168-04f0df8e2c65",
+                "Managed-UseOriginCacheControlHeaders", 0, 31536000, 0, true, true,
+                headerSelection(originOverrideHeaders), allCookies, noQueryStrings);
+        addManagedCachePolicy(policies, "4cc15a8a-d715-48a4-82b8-cc0b614638fe",
+                "Managed-UseOriginCacheControlHeaders-QueryStrings", 0, 31536000, 0, true, true,
+                headerSelection(originOverrideHeaders), allCookies, allQueryStrings);
+        return Map.copyOf(policies);
+    }
+
+    private static Map<String, Object> headerSelection(List<String> names) {
+        return selection("HeaderBehavior", names.isEmpty() ? "none" : "whitelist", "Headers", names);
+    }
+
+    private static void addManagedCachePolicy(
+            Map<String, CachePolicy> policies, String id, String name, long minTtl, long maxTtl,
+            long defaultTtl, boolean gzip, boolean brotli, Map<String, Object> headers,
+            Map<String, Object> cookies, Map<String, Object> queryStrings) {
+        Map<String, Object> parameters = new LinkedHashMap<>();
+        parameters.put("EnableAcceptEncodingGzip", Boolean.toString(gzip));
+        parameters.put("EnableAcceptEncodingBrotli", Boolean.toString(brotli));
+        parameters.put("HeadersConfig", headers);
+        parameters.put("CookiesConfig", cookies);
+        parameters.put("QueryStringsConfig", queryStrings);
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("MinTTL", Long.toString(minTtl));
+        config.put("DefaultTTL", Long.toString(defaultTtl));
+        config.put("MaxTTL", Long.toString(maxTtl));
+        config.put("ParametersInCacheKeyAndForwardedToOrigin", Map.copyOf(parameters));
+        CachePolicy policy = new CachePolicy();
+        policy.setId(id);
+        policy.setName(name);
+        policy.setEtag(MANAGED_POLICY_ETAG);
+        policy.setLastModifiedTime(Instant.EPOCH);
+        policy.setConfig(Map.copyOf(config));
+        policies.put(id, policy);
+    }
+
     private static OriginRequestPolicy managedOriginRequestPolicy(
             String id, String name, String comment, Map<String, Object> headers,
             Map<String, Object> cookies, Map<String, Object> queryStrings) {
@@ -1140,7 +1272,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         policy.setId(id);
         policy.setName(name);
         policy.setComment(comment);
-        policy.setEtag("E23ZP02F085DFQ");
+        policy.setEtag(MANAGED_POLICY_ETAG);
         policy.setLastModifiedTime(Instant.EPOCH);
         policy.setConfig(Map.copyOf(config));
         return policy;
@@ -1163,7 +1295,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         policy.setId(id);
         policy.setName(name);
         policy.setComment(comment);
-        policy.setEtag("E23ZP02F085DFQ");
+        policy.setEtag(MANAGED_POLICY_ETAG);
         policy.setLastModifiedTime(Instant.EPOCH);
         policy.setConfig(config);
         return policy;
@@ -2081,7 +2213,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     public RealtimeLogConfig getRealtimeLogConfig(String nameOrArn) {
-        if (nameOrArn != null && nameOrArn.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(nameOrArn)) {
             String name = nameOrArn.substring(nameOrArn.lastIndexOf('/') + 1);
             return realtimeLogConfigStore.get(name).orElseThrow(() ->
                     new AwsException("NoSuchRealtimeLogConfig",
@@ -2305,6 +2437,27 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             sb.append(CHARS.charAt(RANDOM.nextInt(CHARS.length())));
         }
         return sb.toString();
+    }
+
+    private static <T> List<T> mergeCustomAndManaged(String type, String policyLabel,
+                                                     Collection<T> custom, Collection<T> managed,
+                                                     Function<T, String> nameFn,
+                                                     Function<T, String> idFn) {
+        if (type != null && !"custom".equals(type) && !"managed".equals(type)) {
+            throw new AwsException("InvalidArgument",
+                    policyLabel + " Type must be managed or custom.", 400);
+        }
+        List<T> all = new ArrayList<>();
+        if (!"managed".equals(type)) {
+            all.addAll(custom);
+        }
+        if (!"custom".equals(type)) {
+            all.addAll(managed);
+        }
+        all.sort((a, b) -> nameFn.apply(a) != null && nameFn.apply(b) != null
+                ? nameFn.apply(a).compareTo(nameFn.apply(b))
+                : idFn.apply(a).compareTo(idFn.apply(b)));
+        return all;
     }
 
     private <T> List<T> paginate(List<T> all, String marker, int maxItems,

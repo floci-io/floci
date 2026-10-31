@@ -2,12 +2,11 @@ package io.github.hectorvent.floci.services.identitystore;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.identitystore.model.Group;
 import io.github.hectorvent.floci.services.identitystore.model.Membership;
 import io.github.hectorvent.floci.services.identitystore.model.User;
+import io.github.hectorvent.floci.testing.StorageFactories;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -25,27 +24,12 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
-import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 class IdentityStorePersistenceTest {
     private static final String STORE = "d-1234567890";
     private static final String GLOBAL_PARTITION = "000000000000";
 
     private final ObjectMapper mapper = new ObjectMapper();
-
-    private StorageFactory newFactory(Path dir, String mode) {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.defaultAccountId()).thenReturn(GLOBAL_PARTITION);
-        when(config.storage().persistentPath()).thenReturn(dir.toString());
-        when(config.storage().wal().compactionIntervalMs()).thenReturn(3_600_000L);
-        ServiceConfigAccess access = mock(ServiceConfigAccess.class);
-        when(access.storageMode(anyString())).thenReturn(mode);
-        when(access.storageFlushInterval(anyString())).thenReturn(3_600_000L);
-        return new StorageFactory(config, access);
-    }
 
     private ObjectNode idRequest(String idField, String id) {
         ObjectNode request = mapper.createObjectNode();
@@ -114,13 +98,13 @@ class IdentityStorePersistenceTest {
     @ParameterizedTest
     @ValueSource(strings = {"persistent", "hybrid", "wal"})
     void usersGroupsAndMembershipsSurviveRestart(String mode, @TempDir Path dir) {
-        StorageFactory firstFactory = newFactory(dir, mode);
+        StorageFactory firstFactory = StorageFactories.open(dir, mode, GLOBAL_PARTITION);
         IdentityStoreService first = new IdentityStoreService(firstFactory, mapper);
         Seeded seeded = seed(first);
 
         firstFactory.shutdownAll();
 
-        StorageFactory reopenedFactory = newFactory(dir, mode);
+        StorageFactory reopenedFactory = StorageFactories.open(dir, mode, GLOBAL_PARTITION);
         IdentityStoreService reopened = new IdentityStoreService(reopenedFactory, mapper);
         assertReloaded(reopened, seeded);
         reopenedFactory.shutdownAll();
@@ -129,7 +113,7 @@ class IdentityStorePersistenceTest {
     @Test
     void usersGroupsAndMembershipsSurviveWalReplayAfterCrash(@TempDir Path dirA, @TempDir Path dirB)
             throws IOException {
-        StorageFactory crashedFactory = newFactory(dirA, "wal");
+        StorageFactory crashedFactory = StorageFactories.open(dirA, "wal", GLOBAL_PARTITION);
         StorageFactory recoveredFactory = null;
         try {
             IdentityStoreService crashed = new IdentityStoreService(crashedFactory, mapper);
@@ -152,7 +136,7 @@ class IdentityStorePersistenceTest {
                 }
             }
 
-            recoveredFactory = newFactory(dirB, "wal");
+            recoveredFactory = StorageFactories.open(dirB, "wal", GLOBAL_PARTITION);
             IdentityStoreService recovered = new IdentityStoreService(recoveredFactory, mapper);
             assertReloaded(recovered, seeded);
         } finally {

@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -52,15 +53,18 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class EventBridgeService implements ResourceProvider {
+public class EventBridgeService implements ResourceProvider, StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(EventBridgeService.class);
     private static final int MAX_LIST_LIMIT = 100;
@@ -412,12 +416,19 @@ public class EventBridgeService implements ResourceProvider {
      */
     public PaginatedResult<Rule> listRules(String busName, String namePrefix, Integer limit,
                                            String nextToken, String region) {
+        return paginate(listRules(busName, namePrefix, region), Rule::getName, limit, nextToken, "rule");
+    }
+
+    private static <T> PaginatedResult<T> paginate(List<T> items, Function<T, String> cursorOf, Integer limit,
+                                                  String nextToken, String scope) {
         if (limit != null && (limit < 1 || limit > MAX_LIST_LIMIT)) {
             throw limitOutOfRange(limit.toString(), limit < 1);
         }
-        return Pagination.paginate(listRules(busName, namePrefix, region), Rule::getName,
-                limit != null ? limit : MAX_LIST_LIMIT, nextToken, "rule",
-                token -> new AwsException("InvalidToken", "Invalid NextToken: " + token, 400));
+        if (nextToken != null && (nextToken.isEmpty() || nextToken.length() > 2048)) {
+            throw new AwsException("ValidationException", "NextToken must contain 1 to 2048 characters.", 400);
+        }
+        return Pagination.paginate(items, cursorOf, limit == null ? MAX_LIST_LIMIT : limit, nextToken, scope,
+                token -> new AwsException("InvalidToken", "Invalid NextToken.", 400));
     }
 
     static AwsException limitOutOfRange(String value, boolean belowMinimum) {
@@ -905,6 +916,25 @@ public class EventBridgeService implements ResourceProvider {
      *                  {@code null} whenever the target is in the caller's own account.
      */
     public PutEventsResult putEvents(List<Map<String, Object>> entries, String region, String accountId) {
+        return putEvents(entries, region, accountId, false);
+    }
+
+    /**
+     * Publishes the entries of a {@code PutEvents} request. As {@link #putEvents(List, String)}, except that
+     * an entry for an event bus that does not exist is answered as published, with an event id and not
+     * counted as failed, and goes no further, as the EventBridge User Guide gives it: "If you use PutEvents
+     * to publish an event to an event bus that does not exist, EventBridge event matching will not find a
+     * corresponding rule and will drop the event. Although EventBridge will send a 200 response, it will not
+     * fail the request or include the event in the FailedEntryCount value of the request response." Floci's
+     * own deliveries to a bus, for a rule, a pipe or a schedule, go through {@link #putEvents} and still fail
+     * such an entry: the guide's sentence is about the action, and no document says how AWS answers them.
+     */
+    public PutEventsResult putEventsFromRequest(List<Map<String, Object>> entries, String region) {
+        return putEvents(entries, region, null, true);
+    }
+
+    private PutEventsResult putEvents(List<Map<String, Object>> entries, String region, String accountId,
+                                      boolean dropForMissingBus) {
         int failed = 0;
         List<Map<String, String>> resultEntries = new ArrayList<>();
 
@@ -958,6 +988,12 @@ public class EventBridgeService implements ResourceProvider {
             if ("default".equals(effectiveBus)) {
                 getOrCreateDefaultBus(region);
             } else if (accountGet(busStore, accountId, busStoreKey).isEmpty()) {
+                if (dropForMissingBus) {
+                    LOG.infov("PutEvents dropped an event for event bus {0}, which does not exist in {1}",
+                            effectiveBus, region);
+                    resultEntries.add(Map.of("EventId", UUID.randomUUID().toString()));
+                    continue;
+                }
                 failed++;
                 Map<String, String> errorEntry = new HashMap<>();
                 errorEntry.put("ErrorCode", "InvalidArgument");
@@ -1140,9 +1176,9 @@ public class EventBridgeService implements ResourceProvider {
             }
             JsonNode resourcesPattern = pattern.get("resources");
             if (resourcesPattern != null && resourcesPattern.isArray()) {
-                var resources = ((ArrayNode) event.get("Resources")).elements();
+                Iterator<JsonNode> resources = ((ArrayNode) event.get("Resources")).elements();
                 while (resources.hasNext()) {
-                    var resource = resources.next().asText(null);
+                    String resource = resources.next().asText(null);
                     if (matchesArrayField(resourcesPattern, resource)) {
                         return true;
                     }
@@ -1170,9 +1206,9 @@ public class EventBridgeService implements ResourceProvider {
                 return false;
             }
         }
-        var fields = pattern.fields();
+        Iterator<Map.Entry<String, JsonNode>> fields = pattern.fields();
         while (fields.hasNext()) {
-            var field = fields.next();
+            Map.Entry<String, JsonNode> field = fields.next();
             if ("$or".equals(field.getKey())) {
                 continue;
             }
@@ -1582,6 +1618,24 @@ public class EventBridgeService implements ResourceProvider {
         return connection;
     }
 
+    @Override
+    public String namespace() {
+        return "events";
+    }
+
+    /**
+     * The ARN of the caller's connection or API destination of the name in the Region, which follows the name with
+     * the id it was minted with, as its handlers look it up.
+     */
+    @Override
+    public Optional<String> find(String type, String name, String region) {
+        return switch (type) {
+            case "connection" -> connectionStore.get(connectionKey(region, name)).map(Connection::getConnectionArn);
+            case "api-destination" -> apiDestinationStore.get(apiDestinationKey(region, name)).map(ApiDestination::getArn);
+            default -> Optional.empty();
+        };
+    }
+
     public Connection describeConnection(String name, String region) {
         return connectionStore.get(connectionKey(region, name))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -1648,6 +1702,14 @@ public class EventBridgeService implements ResourceProvider {
             }
             return true;
         });
+    }
+
+    public PaginatedResult<Connection> listConnections(String namePrefix, ConnectionState state, Integer limit,
+                                                       String nextToken, String region) {
+        String effectivePrefix = namePrefix == null || namePrefix.isBlank() ? "" : namePrefix;
+        String scope = "events:ListConnections:" + regionResolver.getAccountId() + ":" + region
+                + ":" + effectivePrefix + ":" + (state == null ? "" : state.name());
+        return paginate(listConnections(namePrefix, state, region), Connection::getName, limit, nextToken, scope);
     }
 
     private static void validateConnectionName(String name) {
@@ -2130,7 +2192,7 @@ public class EventBridgeService implements ResourceProvider {
         }
     }
 
-    private <V> java.util.Optional<V> accountGet(StorageBackend<String, V> store, String accountId, String key) {
+    private <V> Optional<V> accountGet(StorageBackend<String, V> store, String accountId, String key) {
         if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {
             return aware.getForAccount(accountId, key);
         }
@@ -2138,7 +2200,7 @@ public class EventBridgeService implements ResourceProvider {
     }
 
     private <V> List<V> accountScan(StorageBackend<String, V> store, String accountId,
-                                    java.util.function.Predicate<String> filter) {
+                                    Predicate<String> filter) {
         if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {
             return aware.scanForAccount(accountId, filter);
         }

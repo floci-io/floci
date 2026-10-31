@@ -207,24 +207,44 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void anEksAccessEntrysPolicyRoutesAreCheckedAsTheEntryRoutesTheyRunAs() {
-        // EKS takes an access entry's principal as the rest of the path, so a request on an entry's access
-        // policies reads or deletes the entry of a longer principal, and is checked as that.
+    void anEksAccessEntrysPolicyRoutesAreCheckedAsTheirOwnActionsOnTheEntry() {
+        // Associating, listing and disassociating an entry's access policies act on that entry, so a grant on
+        // another entry does not cover them, and one on the entry's own ARN does.
         String user = user("route-eks-entry");
         String name = "route-entry-" + suffix();
+        String base = "/clusters/" + name + "/access-entries";
         eksCluster(name);
-        String principal = encoded("arn:aws:iam::" + ACCOUNT + ":role/route-entry");
-        String policies = "/clusters/" + name + "/access-entries/" + principal + "/access-policies";
-        String admin = encoded("arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy");
+        String trust = "{\"Version\":\"2012-10-17\",\"Statement\":[" + allow("s3:*", "*") + "]}";
+        String role = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/", "route-entry-" + suffix(),
+                trust);
+        String otherRole = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/",
+                "route-other-" + suffix(), trust);
+        String entry = eks().body("{\"principalArn\":\"" + role + "\"}").post(base).then().statusCode(200)
+                .extract().path("accessEntry.accessEntryArn");
+        String other = eks().body("{\"principalArn\":\"" + otherRole + "\"}").post(base).then().statusCode(200)
+                .extract().path("accessEntry.accessEntryArn");
+        String policies = base + "/" + encoded(role) + "/access-policies";
+        String admin = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy";
+        String associate = "{\"policyArn\":\"" + admin + "\",\"accessScope\":{\"type\":\"cluster\"}}";
+        String actions = "[\"eks:AssociateAccessPolicy\",\"eks:ListAssociatedAccessPolicies\","
+                + "\"eks:DisassociateAccessPolicy\"]";
 
-        policy(user, allow("eks:ListAssociatedAccessPolicies", "*") + "," + allow("eks:DisassociateAccessPolicy", "*"));
-        refused(as(user, "eks").urlEncodingEnabled(false).get(policies).then(), "eks:DescribeAccessEntry");
-        refused(as(user, "eks").urlEncodingEnabled(false).delete(policies + "/" + admin).then(),
+        policy(user, "{\"Effect\":\"Allow\",\"Action\":" + actions + ",\"Resource\":\"" + other + "\"}");
+        refused(as(user, "eks").urlEncodingEnabled(false).body(associate).post(policies).then(),
+                "eks:AssociateAccessPolicy");
+        refused(as(user, "eks").urlEncodingEnabled(false).get(policies).then(), "eks:ListAssociatedAccessPolicies");
+        refused(as(user, "eks").urlEncodingEnabled(false).delete(policies + "/" + encoded(admin)).then(),
+                "eks:DisassociateAccessPolicy");
+
+        policy(user, "{\"Effect\":\"Allow\",\"Action\":" + actions + ",\"Resource\":\"" + entry + "\"}");
+        as(user, "eks").urlEncodingEnabled(false).body(associate).post(policies).then().statusCode(200);
+        as(user, "eks").urlEncodingEnabled(false).get(policies).then().statusCode(200)
+                .body("associatedAccessPolicies[0].policyArn", equalTo(admin));
+        as(user, "eks").urlEncodingEnabled(false).delete(policies + "/" + encoded(admin)).then().statusCode(200);
+        // A principal whose IAM path holds access-policies is an entry, so deleting it is DeleteAccessEntry.
+        refused(as(user, "eks").urlEncodingEnabled(false)
+                .delete(base + "/arn:aws:iam::" + ACCOUNT + ":role/ci/access-policies/runner").then(),
                 "eks:DeleteAccessEntry");
-        // Allowed, it reaches EKS, which looks up the entry of a principal ending in /access-policies.
-        policy(user, allow("eks:DescribeAccessEntry", "*"));
-        as(user, "eks").urlEncodingEnabled(false).get(policies).then().statusCode(404)
-                .body("message", equalTo("Access entry not found"));
     }
 
     @Test
@@ -338,6 +358,19 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
+    void lambdaCodeSigningNamespacedFunctionIsCheckedAgainstItsTarget() {
+        String user = user("route-lambda-code-signing-namespace");
+        String name = "route-protected-" + suffix();
+        String function = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":function:" + name;
+        String path = "/2020-06-30/functions/function:" + name + "/code-signing-config";
+
+        policy(user, allow("lambda:GetFunctionCodeSigningConfig", function + "-other"));
+        refused(send(user, "GET", path), "lambda:GetFunctionCodeSigningConfig");
+        policy(user, allow("lambda:GetFunctionCodeSigningConfig", function));
+        send(user, "GET", path).statusCode(not(403));
+    }
+
+    @Test
     void lambdaMappingConfigAndLayerRoutesAreCheckedAgainstWhatTheyName() {
         // A grant on the same resource in another account does not cover the caller's own.
         String user = user("route-lambda-resources");
@@ -410,7 +443,8 @@ class IamRestRouteEnforcementIntegrationTest {
 
         policy(user, allow("lambda:RunMicrovm", "*") + "," + deny("lambda:RunMicrovm", image));
         refused(as(user, "lambda").body(run).post("/2025-09-09/microvms").then(), "lambda:RunMicrovm");
-        policy(user, allow("lambda:RunMicrovm", image));
+        // It also passes the managed connectors a MicroVM gets when it names none.
+        policy(user, allow("lambda:RunMicrovm", image) + "," + allow("lambda:PassNetworkConnector", "*"));
         String microvm = as(user, "lambda").body(run).post("/2025-09-09/microvms").then().statusCode(200)
                 .extract().path("microvmId");
         cleanup.register(() -> admin().delete("/2025-09-09/microvms/" + microvm));

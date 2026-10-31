@@ -648,6 +648,46 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
     }
 
     @Test
+    void bedrockGuardrailIsDiscoveredAndTaggingApiWritesReachIt() {
+        String marker = unique();
+        String value = unique();
+        Response created = given()
+            .contentType("application/json")
+            .body("""
+                {"name": "discovery-%s", "blockedInputMessaging": "in", "blockedOutputsMessaging": "out",
+                 "tags": [{"key": "fd", "value": "%s"}]}
+                """.formatted(marker, marker))
+        .when()
+            .post("/guardrails");
+        created.then().statusCode(202);
+        String arn = created.path("guardrailArn");
+        String guardrailId = created.path("guardrailId");
+
+        getResources(markerFilter("bedrock:guardrail", marker))
+            .body("ResourceTagMappingList.ResourceARN", contains(arn));
+
+        tagAddedThroughTaggingApi(arn, value);
+        guardrailTags(arn)
+            .body("tags.find { it.key == 'fd' }.value", equalTo(marker))
+            .body("tags.find { it.key == 'added' }.value", equalTo(value));
+        addedTagIsListedOnce(arn, value);
+
+        untagAddedThroughTaggingApi(arn);
+        guardrailTags(arn)
+            .body("tags.key", not(hasItem("added")));
+        addedTagIsNotListed(arn);
+
+        // Bedrock tags through its own actions, so the shared tags paths still reject a guardrail.
+        for (String path : List.of("/tags/{arn}", "/v1/tags/{arn}")) {
+            tagsPathRejectsArn(path, arn);
+        }
+
+        given().when().delete("/guardrails/" + guardrailId).then().statusCode(202);
+        getResources(markerFilter("bedrock:guardrail", marker))
+            .body("ResourceTagMappingList", empty());
+    }
+
+    @Test
     void taggingApiReportsAnotherAccountsArn() {
         String name = "discovery-" + unique();
         String foreignArn = "arn:aws:sqs:us-east-1:111111111111:" + name;
@@ -993,6 +1033,18 @@ class ResourceGroupsTaggingDiscoveryIntegrationTest {
                 {"QueueUrl": "%s"}
                 """.formatted(queueUrl))
             .then()
+            .statusCode(200);
+    }
+
+    private static ValidatableResponse guardrailTags(String arn) {
+        return given()
+            .contentType("application/json")
+            .body("""
+                {"resourceARN": "%s"}
+                """.formatted(arn))
+        .when()
+            .post("/listTagsForResource")
+        .then()
             .statusCode(200);
     }
 

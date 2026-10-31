@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 
 import java.net.Socket;
 import java.util.List;
+import java.util.Optional;
 
 import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -50,8 +51,8 @@ class SpectrumInterceptorTest {
                 "s3://b/root/", null);
         SpectrumMaterializer.Materialization materialization = new SpectrumMaterializer.Materialization(
                 "spectrum_tmp_x", table.columns());
-        when(catalog.table("000000000000", "dev", "analytics", "events")).thenReturn(java.util.Optional.of(table));
-        when(catalog.schema("000000000000", "dev", "analytics")).thenReturn(java.util.Optional.of(schema));
+        when(catalog.table("000000000000", "dev", "analytics", "events")).thenReturn(Optional.of(table));
+        when(catalog.schema("000000000000", "dev", "analytics")).thenReturn(Optional.of(schema));
         when(materializer.nextIdentifier()).thenReturn("spectrum_tmp_x");
         when(materializer.materialize(any(), any(), any(), any(), eq("spectrum_tmp_x"))).thenReturn(materialization);
 

@@ -457,7 +457,7 @@ final class BedrockOpenAiTranslator {
                     mapper.createObjectNode().put("contentBlockIndex", 0));
         }
 
-        var validToolCalls = collectValidToolCalls(mapper, toolCalls);
+        List<ToolCallAccumulator> validToolCalls = collectValidToolCalls(mapper, toolCalls);
         int blockIndex = anyContentDeltaWritten ? 1 : 0;
         for (ToolCallAccumulator acc : validToolCalls) {
             writeToolCalls(mapper, out, acc, blockIndex);

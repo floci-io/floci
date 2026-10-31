@@ -36,7 +36,9 @@ import java.net.UnknownHostException;
 import java.net.http.HttpRequest;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyStore;
+import java.security.PrivateKey;
 import java.security.Security;
+import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.List;
@@ -171,7 +173,7 @@ class CloudFrontOriginHttpClientTest {
 
         try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
                 resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
-            HttpRequest request = HttpRequest.newBuilder(java.net.URI.create(
+            HttpRequest request = HttpRequest.newBuilder(URI.create(
                             "http://origin.invalid:" + server.getAddress().getPort() + "/"))
                     .timeout(Duration.ofSeconds(5))
                     .header("X-Origin-Verify", "viewer-value")
@@ -206,7 +208,7 @@ class CloudFrontOriginHttpClientTest {
         byte[] payload = "{\"a\":1}".getBytes(StandardCharsets.UTF_8);
         try (CloudFrontOriginHttpClient client = new CloudFrontOriginHttpClient(
                 resolver(InetAddress.getByName("127.0.0.1")), List.of("origin.invalid"))) {
-            HttpRequest request = HttpRequest.newBuilder(java.net.URI.create(
+            HttpRequest request = HttpRequest.newBuilder(URI.create(
                             "http://origin.invalid:" + server.getAddress().getPort() + "/items"))
                     .timeout(Duration.ofSeconds(5))
                     .header("Content-Type", "application/json")
@@ -911,7 +913,7 @@ class CloudFrontOriginHttpClientTest {
     }
 
     private static HttpRequest request(String uri) {
-        return HttpRequest.newBuilder(java.net.URI.create(uri))
+        return HttpRequest.newBuilder(URI.create(uri))
                 .timeout(Duration.ofSeconds(5))
                 .GET()
                 .build();
@@ -948,12 +950,12 @@ class CloudFrontOriginHttpClientTest {
     }
 
     private static SSLContext serverSslContext(
-            X509Certificate certificate, java.security.PrivateKey privateKey) throws Exception {
+            X509Certificate certificate, PrivateKey privateKey) throws Exception {
         char[] password = "changeit".toCharArray();
         KeyStore keyStore = KeyStore.getInstance("PKCS12");
         keyStore.load(null, password);
         keyStore.setKeyEntry("origin", privateKey, password,
-                new java.security.cert.Certificate[] { certificate });
+                new Certificate[] { certificate });
         KeyManagerFactory keyManagers = KeyManagerFactory.getInstance(
                 KeyManagerFactory.getDefaultAlgorithm());
         keyManagers.init(keyStore, password);

@@ -66,8 +66,9 @@ public final class UsagePlanLimits {
 
     /**
      * The stages, throttle and quota of a {@code CreateUsagePlan} request whose JSON types
-     * {@link ApiGatewayRequestShapes} has checked. A JSON number is read as API Gateway reads it, and
-     * text, which only CloudFormation's template values send, is parsed as written.
+     * {@link ApiGatewayRequestShapes} has checked, or of the same shape as CloudFormation's provisioner
+     * builds it. A JSON number is read as API Gateway reads it, and text, which only CloudFormation's
+     * template values send, is parsed as written.
      */
     public static Limits fromRequest(Map<String, Object> request) {
         Map<?, ?> quotaSettings = request.get("quota") instanceof Map<?, ?> settings ? settings : null;

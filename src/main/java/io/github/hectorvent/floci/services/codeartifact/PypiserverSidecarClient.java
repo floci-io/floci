@@ -470,6 +470,51 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
         }
     }
 
+    /**
+     * pypiserver's own root simple index (confirmed live: {@code GET /simple/} with no project
+     * name lists every registered project, each as an {@code <a href="project-name/">} entry,
+     * the same href shape {@link #SIMPLE_INDEX_HREF} already parses for one project's own files).
+     * Each href is already the PEP 503-normalized name real pypiserver registers it under
+     * (confirmed: it never shows the originally-published casing/separators), matching what
+     * {@code CodeArtifactService}'s own {@code accountingPackageName} already normalizes pypi
+     * names to, so no further normalization is needed here. PyPI packages have no namespace.
+     *
+     * <p>Raised by hectorvent's review: every CodeArtifact repository gets a pypi sidecar id at
+     * creation regardless of whether it is ever actually used through pypi, so without checking
+     * {@link PypiserverSidecarManager#isRunning} first, a {@code ListPackages} call with no format
+     * filter would start this repository's own pypiserver container just to find it empty, every
+     * time, for a repository that has never published anything through pypi.
+     */
+    @Override
+    public List<PackageIdentifier> listPackages(String repositoryContainerId, String domain, String repository) {
+        if (!manager.isRunning(repositoryContainerId)) {
+            return List.of();
+        }
+        String baseUrl = ensureReady(repositoryContainerId, null);
+        URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/simple/");
+        HttpRequest request = HttpRequest.newBuilder(uri).timeout(Duration.ofSeconds(10)).GET().build();
+        HttpResponse<String> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.ofString());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the pypiserver sidecar to list packages", e);
+        }
+        if (response.statusCode() == 404) {
+            return List.of();
+        }
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Could not list packages on the pypiserver sidecar: upstream returned "
+                    + response.statusCode());
+        }
+        List<PackageIdentifier> result = new ArrayList<>();
+        SIMPLE_INDEX_HREF.matcher(response.body()).results().forEach(match -> {
+            String href = match.group(1);
+            String name = href.endsWith("/") ? href.substring(0, href.length() - 1) : href;
+            result.add(new PackageIdentifier(null, name));
+        });
+        return result;
+    }
+
     private Optional<String> simpleIndex(String baseUrl, String packageName) {
         String normalized = normalizePackageName(packageName);
         URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/simple/" + SidecarUriUtils.encodeSegment(normalized)

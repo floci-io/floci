@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.github.hectorvent.floci.core.common.AvailabilityZoneIds;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
@@ -45,7 +46,18 @@ public class Subnet {
     public String getAvailabilityZone() { return availabilityZone; }
     public void setAvailabilityZone(String availabilityZone) { this.availabilityZone = availabilityZone; }
 
-    public String getAvailabilityZoneId() { return availabilityZoneId; }
+    /**
+     * Derived from the zone name rather than read back as stored: a subnet persisted before
+     * zone ids took AWS's shape still carries {@code <region>-az<n>}, which
+     * DescribeAvailabilityZones no longer publishes.
+     */
+    public String getAvailabilityZoneId() {
+        if (region == null || availabilityZone == null) {
+            return availabilityZoneId;
+        }
+        return AvailabilityZoneIds.forZoneName(region, availabilityZone);
+    }
+
     public void setAvailabilityZoneId(String availabilityZoneId) { this.availabilityZoneId = availabilityZoneId; }
 
     public int getAvailableIpAddressCount() { return availableIpAddressCount; }

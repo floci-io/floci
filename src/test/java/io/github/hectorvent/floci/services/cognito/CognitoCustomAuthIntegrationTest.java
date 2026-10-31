@@ -123,4 +123,60 @@ class CognitoCustomAuthIntegrationTest {
                     .then().statusCode(200);
         }
     }
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void customSrpProofContinuesToTheCustomChallengeOverTheWire(boolean admin) throws Exception {
+        String id = UUID.randomUUID().toString();
+        String define = "arn:aws:lambda:us-east-1:000000000000:function:define-srp-" + id;
+        String verify = "arn:aws:lambda:us-east-1:000000000000:function:verify-srp-" + id;
+        String poolId = cognitoJson("CreateUserPool", MAPPER.writeValueAsString(Map.of(
+                "PoolName", "custom-srp-" + id,
+                "LambdaConfig", Map.of("DefineAuthChallenge", define, "VerifyAuthChallengeResponse", verify))))
+                .path("UserPool").path("Id").asText();
+        try {
+            String clientId = cognitoJson("CreateUserPoolClient", MAPPER.writeValueAsString(Map.of(
+                    "UserPoolId", poolId, "ClientName", "app", "ExplicitAuthFlows", List.of("ALLOW_CUSTOM_AUTH"))))
+                    .path("UserPoolClient").path("ClientId").asText();
+            cognitoAction("AdminCreateUser", MAPPER.writeValueAsString(Map.of(
+                    "UserPoolId", poolId, "Username", "alice", "MessageAction", "SUPPRESS"))).then().statusCode(200);
+            cognitoAction("AdminSetUserPassword", MAPPER.writeValueAsString(Map.of("UserPoolId", poolId,
+                    "Username", "alice", "Password", "Perm1234!", "Permanent", true))).then().statusCode(200);
+            when(lambdaService.invoke(anyString(), eq(define), any(byte[].class), eq(InvocationType.RequestResponse)))
+                    .thenReturn(new InvokeResult(200, null, MAPPER.writeValueAsBytes(Map.of(
+                            "response", Map.of("challengeName", "PASSWORD_VERIFIER"))), null, "request"))
+                    .thenReturn(new InvokeResult(200, null, MAPPER.writeValueAsBytes(Map.of(
+                            "response", Map.of("challengeName", "CUSTOM_CHALLENGE"))), null, "request"))
+                    .thenReturn(new InvokeResult(200, null, MAPPER.writeValueAsBytes(Map.of(
+                            "response", Map.of("issueTokens", true))), null, "request"));
+            when(lambdaService.invoke(anyString(), eq(verify), any(byte[].class), eq(InvocationType.RequestResponse)))
+                    .thenReturn(new InvokeResult(200, null, MAPPER.writeValueAsBytes(Map.of(
+                            "response", Map.of("answerCorrect", true))), null, "request"));
+            Map<String, Object> request = new HashMap<>(Map.of("ClientId", clientId, "AuthFlow", "CUSTOM_AUTH",
+                    "AuthParameters", Map.of("USERNAME", "alice", "CHALLENGE_NAME", "SRP_A",
+                            "SRP_A", CognitoSrpTestClient.publicA())));
+            if (admin) {
+                request.put("UserPoolId", poolId);
+            }
+            JsonNode started = cognitoJson(admin ? "AdminInitiateAuth" : "InitiateAuth", MAPPER.writeValueAsString(request));
+            assertEquals("PASSWORD_VERIFIER", started.path("ChallengeName").asText());
+            Map<?, ?> params = MAPPER.convertValue(started.path("ChallengeParameters"), Map.class);
+            request.remove("AuthFlow");
+            request.remove("AuthParameters");
+            request.put("Session", started.path("Session").asText());
+            request.put("ChallengeName", "PASSWORD_VERIFIER");
+            request.put("ChallengeResponses", CognitoSrpTestClient.proof(poolId, "alice", "Perm1234!", params));
+            String action = admin ? "AdminRespondToAuthChallenge" : "RespondToAuthChallenge";
+            JsonNode next = cognitoJson(action, MAPPER.writeValueAsString(request));
+            assertEquals("CUSTOM_CHALLENGE", next.path("ChallengeName").asText());
+            assertFalse(next.has("AuthenticationResult"));
+            request.put("Session", next.path("Session").asText());
+            request.put("ChallengeName", "CUSTOM_CHALLENGE");
+            request.put("ChallengeResponses", Map.of("USERNAME", "alice", "ANSWER", "blue"));
+            JsonNode completed = cognitoJson(action, MAPPER.writeValueAsString(request));
+            assertFalse(completed.path("AuthenticationResult").path("AccessToken").asText().isBlank());
+        } finally {
+            cognitoAction("DeleteUserPool", MAPPER.writeValueAsString(Map.of("UserPoolId", poolId))).then().statusCode(200);
+        }
+    }
+
 }

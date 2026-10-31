@@ -22,6 +22,7 @@ import software.amazon.awssdk.services.kms.model.KeyState;
 import software.amazon.awssdk.services.kms.model.KeyUsageType;
 import software.amazon.awssdk.services.kms.model.KmsInvalidStateException;
 import software.amazon.awssdk.services.kms.model.ListResourceTagsResponse;
+import software.amazon.awssdk.services.kms.model.MacAlgorithmSpec;
 import software.amazon.awssdk.services.kms.model.OriginType;
 import software.amazon.awssdk.services.kms.model.SignResponse;
 import software.amazon.awssdk.services.kms.model.SigningAlgorithmSpec;
@@ -38,6 +39,7 @@ import java.security.spec.MGF1ParameterSpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -83,7 +85,7 @@ class KmsFeaturesTest {
 
         ListResourceTagsResponse tags = kms.listResourceTags(b -> b.keyId(keyId));
         Map<String, String> tagMap = tags.tags().stream()
-                .collect(java.util.stream.Collectors.toMap(
+                .collect(Collectors.toMap(
                         software.amazon.awssdk.services.kms.model.Tag::tagKey,
                         software.amazon.awssdk.services.kms.model.Tag::tagValue));
 
@@ -212,8 +214,8 @@ class KmsFeaturesTest {
         String keyId = resp.keyMetadata().keyId();
 
         assertThat(resp.keyMetadata().signingAlgorithms())
-                .contains(software.amazon.awssdk.services.kms.model.SigningAlgorithmSpec.RSASSA_PKCS1_V1_5_SHA_256,
-                        software.amazon.awssdk.services.kms.model.SigningAlgorithmSpec.RSASSA_PSS_SHA_256);
+                .contains(SigningAlgorithmSpec.RSASSA_PKCS1_V1_5_SHA_256,
+                        SigningAlgorithmSpec.RSASSA_PSS_SHA_256);
         assertThat(resp.keyMetadata().encryptionAlgorithms()).isEmpty();
 
         kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
@@ -229,7 +231,7 @@ class KmsFeaturesTest {
         String keyId = resp.keyMetadata().keyId();
 
         assertThat(resp.keyMetadata().macAlgorithms())
-                .containsExactly(software.amazon.awssdk.services.kms.model.MacAlgorithmSpec.HMAC_SHA_256);
+                .containsExactly(MacAlgorithmSpec.HMAC_SHA_256);
         assertThat(resp.keyMetadata().signingAlgorithms()).isEmpty();
         assertThat(resp.keyMetadata().encryptionAlgorithms()).isEmpty();
 
@@ -483,11 +485,11 @@ class KmsFeaturesTest {
         try {
             byte[] publicKeyDer = kms.getPublicKey(b -> b.keyId(keyId)).publicKey().asByteArray();
             PublicKey publicKey = KeyFactory.getInstance("RSA")
-                    .generatePublic(new java.security.spec.X509EncodedKeySpec(publicKeyDer));
+                    .generatePublic(new X509EncodedKeySpec(publicKeyDer));
             Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
-            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, publicKey, new javax.crypto.spec.OAEPParameterSpec(
-                    "SHA-256", "MGF1", java.security.spec.MGF1ParameterSpec.SHA256,
-                    javax.crypto.spec.PSource.PSpecified.DEFAULT));
+            cipher.init(Cipher.ENCRYPT_MODE, publicKey, new OAEPParameterSpec(
+                    "SHA-256", "MGF1", MGF1ParameterSpec.SHA256,
+                    PSource.PSpecified.DEFAULT));
             byte[] localCiphertext = cipher.doFinal("secret payload".getBytes(StandardCharsets.UTF_8));
 
             DecryptResponse decrypted = kms.decrypt(b -> b

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -143,7 +144,7 @@ class CloudFormationVpcGatewayAttachmentIntegrationTest {
         }
     }
 
-    private static io.restassured.response.Response describeIgw(String igwId) {
+    private static Response describeIgw(String igwId) {
         return given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", EC2_AUTH)

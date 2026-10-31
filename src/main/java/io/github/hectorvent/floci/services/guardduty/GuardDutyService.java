@@ -27,6 +27,7 @@ import jakarta.inject.Inject;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
@@ -36,6 +37,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * GuardDuty detector lifecycle and organization configuration backed by the configured
@@ -220,7 +222,7 @@ public class GuardDutyService {
         int maxResults = parseMaxResults(maxResultsValue);
         List<Detector> detectors = detectorStore.scan(key -> key.startsWith(region + "::")).stream()
                 .filter(detector -> accountId.equals(accountIdFromServiceRole(detector.getServiceRole())))
-                .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+                .collect(Collectors.toCollection(ArrayList::new));
         detectors.sort(Comparator.comparing(Detector::getId));
         List<String> ids = detectors.stream().map(Detector::getId).toList();
 
@@ -1029,7 +1031,7 @@ public class GuardDutyService {
     }
 
     private static String isoTimestamp() {
-        return Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MILLIS).toString();
+        return Instant.now().truncatedTo(ChronoUnit.MILLIS).toString();
     }
 
     private static void requireObject(JsonNode value, String field) {

@@ -10,6 +10,7 @@ import org.jboss.logging.Logger;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.StreamSupport;
 
 /**
  * Evaluates a role's trust policy for {@code sts:AssumeRoleWithWebIdentity}, matching the
@@ -248,7 +249,7 @@ public class WebIdentityTrustPolicyEvaluator {
             return List.of(node.asText());
         }
         if (node.isArray()) {
-            return java.util.stream.StreamSupport
+            return StreamSupport
                     .stream(node.spliterator(), false)
                     .filter(JsonNode::isTextual)
                     .map(JsonNode::asText)

@@ -1,7 +1,7 @@
 # OpenSearch Service
 
-**Protocol:** REST JSON  
-**Endpoint:** `http://localhost:4566/2021-01-01/...`  
+**Protocol:** REST JSON
+**Endpoint:** `http://localhost:4566/2021-01-01/...`
 **Credential scope:** `es`
 
 ## Implementation Modes
@@ -45,7 +45,7 @@ services:
 | `DescribeDomainConfig` | `GET /2021-01-01/opensearch/domain/{name}/config` | Get domain configuration |
 | `UpdateDomainConfig` | `POST /2021-01-01/opensearch/domain/{name}/config` | Update cluster config, EBS options, engine version, access policies |
 | `DeleteDomain` | `DELETE /2021-01-01/opensearch/domain/{name}` | Delete a domain |
-| `ListDomainNames` | `GET /2021-01-01/domain` | List all domains (supports `?engineType=` filter) |
+| `ListDomainNames` | `GET /2021-01-01/domain` | List the caller's Region's domains (supports `?engineType=` filter) |
 
 ### Tags
 
@@ -124,6 +124,7 @@ services:
 ## Emulation Behaviour
 
 - **Domain name validation:** 3–28 characters, must start with a lowercase letter, only lowercase letters, digits, and hyphens.
+- **Regional scoping:** a domain name is unique within one account and one Region, exactly as AWS scopes it. Describe, update, delete, upgrade and list resolve only in the Region the request is signed for, so the same name can exist in two Regions and one Region's requests never see, change or delete another Region's domain. Domain records persisted before regional scoping are migrated onto their Region on first use, taking it from the domain's ARN, which has always carried it.
 - **ARN format:** `arn:aws:es:{region}:{accountId}:domain/{domainName}`
 - **Domain ID format:** `{accountId}/{domainName}`
 - **`Created` flag:** `true` immediately in mock mode; set to `true` by the readiness poller in real mode once `/_cluster/health` reports `green` or `yellow`.
@@ -134,7 +135,7 @@ services:
 - **Cluster defaults:** `m5.large.search`, 1 instance, EBS enabled with 10 GiB `gp2` volume.
 - **Instance type families:** `t3.*` / `m5/m6g/m7g.*` / `r5/r6g/r7g.*` / `c5/c6g/c7g.*` are EBS-backed (3584 GiB max). `i3.*` are local-NVMe instance-store. `or1.*` are S3-backed and surface a much larger volume ceiling on `DescribeInstanceTypeLimits` (8–36 TiB depending on size). Floci still boots one Docker container per domain regardless of family — the metadata fidelity matters for SDK clients that introspect, not for runtime data placement.
 - **Container identity:** containers are named `floci-aws-opensearch-<account-id>-<region>-<domain-name>`, or `floci-aws-<namespace>-opensearch-<account-id>-<region>-<domain-name>` when `FLOCI_DOCKER_RESOURCE_NAMESPACE` is set. Account and Region come from the domain's stored ARN and are also recorded in its container labels. Restarts remove older containers by their persisted container ID and preserve the stored volume name. Legacy names that omit account and Region are never removed solely by name, because another domain may own them.
-- **Container storage:** each domain gets a named Docker volume (`floci-aws-opensearch-{volumeId}`) created automatically. In memory mode the volume is removed on domain delete; in persistent modes it is retained unless `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`. Set `FLOCI_SERVICES_OPENSEARCH_DATA_VOLUME` to choose the storage yourself: an absolute path bind-mounts `<path>/<account-id>/<region>/<domain-name>` (a directory on the Docker daemon's host), and any other value is a Docker volume name the domain gets its own `<name>-<account-id>-<region>-<domain-name>` volume of. When `FLOCI_DOCKER_RESOURCE_NAMESPACE` is set, the namespace is inserted into both forms, so two namespaced deployments sharing a Docker daemon never converge on one data directory through the same configured base. Linux daemon paths starting with `/` retain Linux path syntax when Floci runs on Windows; native Windows absolute paths retain their native handling. Before a configured bind directory is mounted, a temporary root container using the selected OpenSearch image copies ownership from the image's data directory and grants the owner write access. Only the directory itself is adjusted; existing files retain their ownership and permissions. Preparation failures abort domain startup. Storage named that way is never removed on domain delete, and a volume created when absent carries no Floci label, so neither a floci-scoped volume prune nor a testcontainers run's labelled-children sweep collects it: the operator named it, so its lifecycle is theirs.
+- **Container storage:** each domain gets a named Docker volume (`floci-aws-opensearch-{volumeId}`) created automatically. In memory mode the volume is removed on domain delete; in persistent modes it is retained unless `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`. Set `FLOCI_SERVICES_OPENSEARCH_DATA_VOLUME` to choose the storage yourself: an absolute path bind-mounts `<path>/<account-id>/<region>/<domain-name>` (a directory on the Docker daemon's host), and any other value is a Docker volume name the domain gets its own `<name>-<account-id>-<region>-<domain-name>` volume of. When `FLOCI_DOCKER_RESOURCE_NAMESPACE` is set, the namespace is inserted into both forms, so two namespaced deployments sharing a Docker daemon never converge on one data directory through the same configured base. Linux daemon paths starting with `/` retain Linux path syntax when Floci runs on Windows; native Windows absolute paths retain their native handling. Before a configured bind directory is mounted, a temporary root container using the selected OpenSearch image copies ownership from the image's data directory and grants the owner write access. Only the directory itself is adjusted; existing files retain their ownership and permissions. Preparation failures abort domain startup. Storage named that way is never removed on domain delete, and a volume created when absent carries no Floci label, so neither a floci-scoped volume prune nor a testcontainers run's labelled-children sweep collects it: the operator named it, so its lifecycle is theirs. Legacy host-path mode (`FLOCI_STORAGE_HOST_PERSISTENT_PATH` set to an absolute path) gives each domain its own `<host-path>/[<namespace>/]opensearch/floci-aws[-<namespace>]-opensearch-<account-id>-<region>-<domain-name>` directory, so two domains sharing a name across Regions or accounts never share one data directory; a domain whose record predates regional scoping keeps the bare `<domain-name>` directory while it still exists, since that is where its data lives.
 
 ## Examples
 

@@ -1678,8 +1678,7 @@ class ElbV2HttpsDataPlaneIntegrationTest {
 
     private static HttpsResult awaitHttpsAtPort(String host, int port, Certificate... trustedCertificates) {
         HttpsResult[] result = new HttpsResult[1];
-        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100))
-                .ignoreException(SSLHandshakeException.class).untilAsserted(() -> {
+        ElbV2TlsReadiness.await(() -> {
                     result[0] = httpsRequest(host, port, trustedCertificates);
                 });
         return result[0];
@@ -1687,8 +1686,7 @@ class ElbV2HttpsDataPlaneIntegrationTest {
 
     private static void awaitHttpsMaterial(String host, int status, String body, Certificate expected,
                                           Certificate... trustedCertificates) {
-        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(100))
-                .ignoreException(SSLHandshakeException.class).untilAsserted(() -> {
+        ElbV2TlsReadiness.await(() -> {
                     HttpsResult response = httpsRequest(host, HTTPS_PORT, trustedCertificates);
                     assertEquals(status, response.statusCode());
                     assertEquals(body, response.body());

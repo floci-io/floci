@@ -13,6 +13,10 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -125,7 +129,7 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
             response = codePipelineService.handle("UpdatePipeline", request, ctx.region(), ctx.accountId());
         }
 
-        java.util.Set<String> desiredDisabledStages = new java.util.LinkedHashSet<>();
+        Set<String> desiredDisabledStages = new LinkedHashSet<>();
         if (transitions != null && transitions.isArray()) {
             for (JsonNode transition : transitions) {
                 desiredDisabledStages.add(transition.path("stageName").asText());
@@ -141,13 +145,13 @@ public class CodePipelineCfnProvisioner implements CfnResourceProvisioner {
                 Iterable<String> candidateStages;
                 if (previouslyManaged != null) {
                     candidateStages = previouslyManaged.isBlank()
-                            ? java.util.List.of() : java.util.Arrays.asList(previouslyManaged.split(","));
+                            ? List.of() : Arrays.asList(previouslyManaged.split(","));
                 } else {
                     // A resource stored before DISABLED_STAGES_ATTR existed has no record of what it
                     // previously disabled. Fall back to reconciling every declared stage rather than
                     // skipping reconciliation outright, which would leave a removed entry disabled
                     // forever after this one legacy update.
-                    java.util.List<String> declaredStages = new java.util.ArrayList<>();
+                    List<String> declaredStages = new ArrayList<>();
                     if (declaration.path("stages").isArray()) {
                         for (JsonNode stage : declaration.path("stages")) {
                             declaredStages.add(stage.path("name").asText());

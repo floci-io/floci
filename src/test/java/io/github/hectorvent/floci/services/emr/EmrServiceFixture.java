@@ -6,7 +6,9 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.emr.model.EmrCluster;
 import io.github.hectorvent.floci.services.emr.model.EmrStep;
+import io.github.hectorvent.floci.services.emrserverless.SparkJobRunner;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import io.github.hectorvent.floci.testing.MutableClock;
 
@@ -14,6 +16,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -28,7 +31,8 @@ import static org.mockito.Mockito.when;
  * An {@link EmrService} on in-memory storage, with a clock the test moves and wakeups the test runs,
  * recording the {@code aws.emr} events it publishes. Each event is handed to {@link #target} as it is
  * published, as EventBridge's first delivery is, and checked to be published once the service is let go,
- * and, for a wakeup's, after it, as the timer's own thread never sends them.
+ * and, for a wakeup's, after it, as the timer's own thread never sends them. In the {@code docker} runner
+ * mode a step's thread, and a bootstrap's, is one the test runs, with {@link #runStepThread}.
  */
 final class EmrServiceFixture {
 
@@ -52,8 +56,13 @@ final class EmrServiceFixture {
     Target target = event -> { };
     private final List<Wakeup> wakeups = new ArrayList<>();
     private final List<Runnable> deliveries = new ArrayList<>();
+    // The docker runner mode's step threads, not yet run.
+    private final List<Runnable> stepThreads = new ArrayList<>();
     private boolean waking;
     private final InMemoryStorageFactory storage;
+    private final SparkJobRunner runner;
+    private final BootstrapRunner bootstrap;
+    private final IamService iam;
     private final int[] durations;
 
     /** The service as configured by default, every duration 0. */
@@ -62,13 +71,28 @@ final class EmrServiceFixture {
     }
 
     EmrServiceFixture(int startupDelaySeconds, int stepDurationSeconds, int terminationDelaySeconds) {
-        this(new InMemoryStorageFactory(ACCOUNT), new MutableClock(),
+        this(new InMemoryStorageFactory(ACCOUNT), new MutableClock(), null, null, null,
                 startupDelaySeconds, stepDurationSeconds, terminationDelaySeconds);
     }
 
-    private EmrServiceFixture(InMemoryStorageFactory storage, MutableClock clock, int... durations) {
+    /** The service in the {@code docker} runner mode, every duration 0, its steps run by {@code runner}. */
+    static EmrServiceFixture docker(SparkJobRunner runner, IamService iam) {
+        return docker(runner, null, iam);
+    }
+
+    /** As {@link #docker(SparkJobRunner, IamService)}, its clusters' bootstrap actions run by {@code bootstrap}. */
+    static EmrServiceFixture docker(SparkJobRunner runner, BootstrapRunner bootstrap, IamService iam) {
+        return new EmrServiceFixture(new InMemoryStorageFactory(ACCOUNT), new MutableClock(), runner, bootstrap, iam,
+                0, 0, 0);
+    }
+
+    private EmrServiceFixture(InMemoryStorageFactory storage, MutableClock clock, SparkJobRunner runner,
+                              BootstrapRunner bootstrap, IamService iam, int... durations) {
         this.storage = storage;
         this.clock = clock;
+        this.runner = runner;
+        this.bootstrap = bootstrap;
+        this.iam = iam;
         this.durations = durations;
         EventBridgeService eventBridge = mock(EventBridgeService.class);
         doAnswer(invocation -> {
@@ -82,14 +106,9 @@ final class EmrServiceFixture {
             target.deliver(event);
             return null;
         }).when(eventBridge).publishServiceEvent(eq("aws.emr"), anyString(), anyString(), isNull(), eq(REGION));
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().emr().defaultReleaseLabel()).thenReturn("emr-7.5.0");
-        when(config.services().emr().clusterStartupDelaySeconds()).thenReturn(durations[0]);
-        when(config.services().emr().stepDurationSeconds()).thenReturn(durations[1]);
-        when(config.services().emr().clusterTerminationDelaySeconds()).thenReturn(durations[2]);
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
         publisher = new EmrEventPublisher(eventBridge, objectMapper, regionResolver);
-        service = new EmrService(storage, config, regionResolver, publisher, clock, new EmrService.Wakeups() {
+        service = new EmrService(storage, config(false), regionResolver, publisher, clock, new EmrService.Wakeups() {
             @Override
             public void at(Instant due, Runnable task) {
                 wakeups.add(new Wakeup(due, task));
@@ -99,12 +118,43 @@ final class EmrServiceFixture {
             public void deliver(Runnable delivery) {
                 deliveries.add(delivery);
             }
-        });
+        }, runner, bootstrap, stepThreads::add, iam);
     }
 
     /** A new service on the same storage and clock, as after a restart of Floci with persistent storage. */
     EmrServiceFixture restart() {
-        return new EmrServiceFixture(storage, clock, durations);
+        return new EmrServiceFixture(storage, clock, runner, bootstrap, iam, durations);
+    }
+
+    /**
+     * A new service on the same storage and clock, as {@link #restart} builds, but with {@code runner},
+     * its wakeups set on {@code wakeups}, and leftover drivers removed when it starts.
+     */
+    EmrService restartReconciling(SparkJobRunner runner, EmrService.Wakeups wakeups) {
+        return new EmrService(storage, config(true), new RegionResolver(REGION, ACCOUNT), publisher, clock, wakeups,
+                runner, bootstrap, stepThreads::add, iam);
+    }
+
+    private EmulatorConfig config(boolean reconcile) {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().emr().defaultReleaseLabel()).thenReturn("emr-7.5.0");
+        when(config.services().emr().clusterStartupDelaySeconds()).thenReturn(durations[0]);
+        when(config.services().emr().stepDurationSeconds()).thenReturn(durations[1]);
+        when(config.services().emr().clusterTerminationDelaySeconds()).thenReturn(durations[2]);
+        when(config.services().emr().imageTemplate()).thenReturn(Optional.empty());
+        when(config.services().emr().dockerNetwork()).thenReturn(Optional.empty());
+        when(config.services().emr().reconcileContainersOnStartup()).thenReturn(reconcile);
+        return config;
+    }
+
+    /** Runs the oldest step thread not yet run, as the docker runner mode's pool would. */
+    void runStepThread() {
+        stepThreads.remove(0).run();
+    }
+
+    /** How many step threads have been started and not yet run. */
+    int stepThreadsWaiting() {
+        return stepThreads.size();
     }
 
     /**

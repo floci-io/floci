@@ -84,6 +84,11 @@ curl -X DELETE "http://localhost:4566/_aws/sqs/messages?QueueUrl=$QUEUE_URL"
 
 `ReceiveMessage` waits up to `WaitTimeSeconds` (0 to 20) for a message to arrive and returns as soon as one is available. Values outside that range are rejected with `InvalidParameterValue`. When the request omits `WaitTimeSeconds`, the queue's `ReceiveMessageWaitTimeSeconds` attribute applies (default `0`, short polling), matching AWS.
 
+`MaxNumberOfMessages` defaults to 1 and must be an integer from 1 to 10.
+Out-of-range, malformed, and overflowing values return `InvalidParameterValue`
+without receiving a message or changing its receive count or visibility. Both
+the JSON and Query protocols enforce this limit.
+
 ```bash
 # Enable long polling for every consumer of the queue
 aws sqs set-queue-attributes \
@@ -97,6 +102,8 @@ aws sqs set-queue-attributes \
 `GetQueueAttributes` with `--attribute-names All` returns the set AWS returns for a standard queue: `QueueArn`, `CreatedTimestamp`, `LastModifiedTimestamp`, `ApproximateNumberOfMessages`, `ApproximateNumberOfMessagesNotVisible`, `ApproximateNumberOfMessagesDelayed`, `VisibilityTimeout`, `MaximumMessageSize`, `MessageRetentionPeriod`, `DelaySeconds`, `ReceiveMessageWaitTimeSeconds` and `SqsManagedSseEnabled`. `Policy`, `RedrivePolicy` and `KmsMasterKeyId` appear only once set, and FIFO queues also report `FifoQueue` and `ContentBasedDeduplication`.
 
 `MaximumMessageSize` defaults to `1048576` bytes, the AWS default and maximum since August 2025, when AWS raised both from `262144`. `CreateQueue` and `SetQueueAttributes` reject values outside 1024 to 1048576 with `InvalidAttributeValue`; raising `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE` above the AWS maximum raises that accepted ceiling with it. Lowering the variable below 1048576 only changes the default a new queue receives: the accepted ceiling stays at the AWS maximum, so a queue can still be set to `1048576` explicitly.
+
+`DelaySeconds` must be 0 to 900, both on a message and as a queue attribute: `SendMessage` rejects other values with `InvalidParameterValue` (in `SendMessageBatch` only that entry fails), and `CreateQueue` and `SetQueueAttributes` reject them with `InvalidAttributeValue`.
 
 `SqsManagedSseEnabled` is `true` for a queue with no `KmsMasterKeyId`, matching AWS, and `false` once a KMS key is set. It is derived on read rather than stored, so clearing `KmsMasterKeyId` returns the queue to `true`, unless you set `SqsManagedSseEnabled` yourself, in which case your value stands. AWS does not document the cleared-key case crisply, so that behaviour is Floci's choice rather than a copied one. `CreateQueue` on an existing name compares requested attributes against these reported values, so asking for `SqsManagedSseEnabled=false` on a queue that reports `true` fails with `QueueAlreadyExists` (`QueueNameExists` over JSON).
 
@@ -204,6 +211,15 @@ https://sqs.<region>.amazonaws.com/000000000000/<queue-name>
 The region is the one the request was signed for, and the host carries that region's partition DNS suffix, so a queue in `cn-north-1` is reported as `https://sqs.cn-north-1.amazonaws.com.cn/...`. Use it for tooling that parses or compares queue URLs against the AWS form. Most SDKs send requests to the endpoint you configured and take only the path from the URL. Clients that send requests to the host in the returned URL, such as the AWS SDK for Java 1.x, need the default `floci` setting or DNS that points the `sqs.<region>` host at Floci.
 
 Under either setting every form is accepted as input. That covers the AWS URL, the Floci URL, any other host whose path ends in `/<account>/<queue-name>`, and the bare queue name. A queue is stored by account and name, so a base URL with a path of its own, such as `http://localhost:4566/sqs`, keeps the same queues under either setting. Existing queues, persisted ones included, are reported in the form the current setting and base URL give.
+
+## Storage write failures
+
+When the message backend reports a failed write, the queue retains its previously acknowledged
+live contents and delivery state. Backends that serialize retained values receive detached message
+snapshots, so compaction or an asynchronous flush cannot capture delivery changes that have not
+been saved. Memory-only backends retain a separate list of the live message references without
+deep-copying messages or attributes. The queue preserves the
+backend's acknowledgement and flush policy. Moves between queues are not atomic.
 
 ## Persisted delivery state
 

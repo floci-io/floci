@@ -36,7 +36,7 @@ public final class DynamoDbTableNames {
             throw SmithyValidationErrors.validationException(
                     SmithyValidationErrors.lengthOutOfRange("tableName", input, 3, 255));
         }
-        if (input.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(input)) {
             throw invalid("TableName must be a short name, not an ARN: " + input);
         }
         validateTableName(input);
@@ -60,7 +60,7 @@ public final class DynamoDbTableNames {
             throw SmithyValidationErrors.validationException(
                     SmithyValidationErrors.lengthOutOfRange("tableName", input, 1, 255));
         }
-        if (input.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(input)) {
             return parseArn(input);
         }
         validateTableName(input);

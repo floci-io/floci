@@ -168,6 +168,18 @@ class PipesPollerTest {
     }
 
     @Test
+    void sqsPollingKeepsConfiguredLargeBatchesWithinTheReceiveLimit() throws Exception {
+        Pipe pipe = new Pipe();
+        pipe.setName("large-sqs-batch");
+        pipe.setSource("arn:aws:sqs:us-east-1:000000000000:src-queue");
+        pipe.setSourceParameters(MAPPER.readTree("{\"SqsQueueParameters\":{\"BatchSize\":25}}"));
+        when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of());
+        poller.pollSqs(pipe, "us-east-1");
+        verify(sqsService).receiveMessage(anyString(), eq(10), anyInt(), anyInt(), eq("us-east-1"));
+    }
+
+    @Test
     void pollSqs_enrichmentToNonLambdaTargetForwardsRawResponse() throws Exception {
         // A non-Lambda target (here Step Functions) must receive the raw enrichment response, not a
         // one-element batch array — array-wrapping would start the execution with [{...}] instead of {...}.
@@ -226,9 +238,9 @@ class PipesPollerTest {
     @Test
     void pollKafka_filtersUsingDecodedPayloadButDeliversOriginalRecord() throws Exception {
         Pipe pipe = selfManagedKafkaPipe();
-        byte[] key = "customer-123".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        byte[] value = "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        byte[] traceId = "abc123".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] key = "customer-123".getBytes(StandardCharsets.UTF_8);
+        byte[] value = "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(StandardCharsets.UTF_8);
+        byte[] traceId = "abc123".getBytes(StandardCharsets.UTF_8);
         KafkaRecordDto record = kafkaRecord("orders", 0, 42L, key, value, new KafkaHeaderDto("traceId", traceId));
 
         when(kafkaConsumerManager.poll(pipe)).thenReturn(List.of(record));

@@ -18,8 +18,7 @@ public final class RequestBodyReader {
 
     private static final Logger LOG = Logger.getLogger(RequestBodyReader.class);
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
-    private static final String BUFFERED_BODY_PROPERTY =
-            "io.github.hectorvent.floci.services.iam.RequestBodyReader.bufferedBody";
+    private static final String BUFFERED_BODY_PROPERTY = RequestBodyReader.class.getName() + ".bufferedBody";
 
     private RequestBodyReader() {
     }

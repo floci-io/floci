@@ -6,11 +6,13 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryController;
+import io.github.hectorvent.floci.core.common.AwsQueryLists;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.OidcIssuerKeyLookup;
+import io.github.hectorvent.floci.core.common.QueryConstraintCheck;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.WebIdentityToken;
@@ -19,6 +21,7 @@ import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.iam.model.DelegationRequest;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.OutboundWebIdentityFederation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Context;
@@ -34,11 +37,12 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
-import java.util.regex.Pattern;
 
 /**
  * Query-protocol handler for STS (Security Token Service) actions.
@@ -48,18 +52,14 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class StsQueryHandler {
 
-    /** accessKeyIdType, the only member GetAccessKeyInfo takes: 16 to 128 characters of {@code [\w]}. */
-    private static final Pattern ACCESS_KEY_ID_PATTERN = Pattern.compile("[\\w]*");
-    private static final int ACCESS_KEY_ID_MIN_LENGTH = 16;
-    private static final int ACCESS_KEY_ID_MAX_LENGTH = 128;
-
     private static final Logger LOG = Logger.getLogger(StsQueryHandler.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     /** Where the five task policies the guide names for a privileged session live. */
     private static final String ROOT_TASK_POLICY_PATH = "/root-task/";
     /** "the maximum session duration of 900 seconds (15 minutes)", which is also the default here. */
     private static final int MAX_ROOT_SESSION_SECONDS = 900;
-    private static final int MAX_SESSION_TOKEN_SIZE = 4096;
+    /** "If not specified, the default duration is 300 seconds (5 minutes)." */
+    private static final int DEFAULT_TOKEN_SECONDS = 300;
     private static final String STS_AUDIENCE = "sts.amazonaws.com"; // partition-literal: web-identity audience; no source outside the commercial partition (P9)
 
     private final IamService iamService;
@@ -74,6 +74,7 @@ public class StsQueryHandler {
     private final SAMLTrustPolicyEvaluator samlTrustEvaluator;
     private final DelegationRequestService delegationRequestService;
     private final CentralRootAccess centralRootAccess;
+    private final WebIdentityTokenIssuer tokenIssuer;
     private final Clock clock;
 
     /** CSPRNG for session secret keys and session tokens; ordinary IDs keep using {@link ThreadLocalRandom}. */
@@ -94,10 +95,11 @@ public class StsQueryHandler {
                            SAMLProviderService samlProviderService,
                            SAMLTrustPolicyEvaluator samlTrustEvaluator,
                            DelegationRequestService delegationRequestService,
-                           CentralRootAccess centralRootAccess) {
+                           CentralRootAccess centralRootAccess,
+                           WebIdentityTokenIssuer tokenIssuer) {
         this(iamService, accountResolver, regionResolver, config, trustPolicyEvaluator, webIdentityTrustEvaluator,
                 tokenVerifier, oidcIssuerKeys, samlProviderService, samlTrustEvaluator, delegationRequestService,
-                centralRootAccess, Clock.systemUTC());
+                centralRootAccess, tokenIssuer, Clock.systemUTC());
     }
 
     StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver,
@@ -109,6 +111,7 @@ public class StsQueryHandler {
                     SAMLTrustPolicyEvaluator samlTrustEvaluator,
                     DelegationRequestService delegationRequestService,
                     CentralRootAccess centralRootAccess,
+                    WebIdentityTokenIssuer tokenIssuer,
                     Clock clock) {
         this.iamService = iamService;
         this.accountResolver = accountResolver;
@@ -122,6 +125,7 @@ public class StsQueryHandler {
         this.samlTrustEvaluator = samlTrustEvaluator;
         this.delegationRequestService = delegationRequestService;
         this.centralRootAccess = centralRootAccess;
+        this.tokenIssuer = tokenIssuer;
         this.clock = clock;
     }
 
@@ -139,19 +143,20 @@ public class StsQueryHandler {
             case "DecodeAuthorizationMessage"  -> handleDecodeAuthorizationMessage(params);
             case "GetDelegatedAccessToken"     -> handleGetDelegatedAccessToken(params);
             case "AssumeRoot"                  -> handleAssumeRoot(params);
+            case "GetWebIdentityToken"         -> handleGetWebIdentityToken(params);
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported by STS.", AwsNamespaces.STS, 400);
         };
     }
 
     private Response handleAssumeRole(MultivaluedMap<String, String> params) {
-        Response validation = validateRequired(params, "RoleArn", "RoleSessionName");
+        Response integerMembers = validateIntegerMembers(params, "DurationSeconds", "MinimumSessionTokenSize");
+        if (integerMembers != null) {
+            return integerMembers;
+        }
+        Response validation = validateDeclaredConstraints("AssumeRole", params);
         if (validation != null) {
             return validation;
-        }
-        Response durationValidation = validateDurationSeconds(params, 900, 43200);
-        if (durationValidation != null) {
-            return durationValidation;
         }
         String roleArn = getParam(params, "RoleArn");
         String sessionName = getParam(params, "RoleSessionName");
@@ -291,7 +296,7 @@ public class StsQueryHandler {
      * nearest that sentence, and {@code docs/services/sts.md} records it as the deviation it is.
      */
     private Response handleGetAccessKeyInfo(MultivaluedMap<String, String> params) {
-        Response validation = validateAccessKeyId(params);
+        Response validation = validateDeclaredConstraints("GetAccessKeyInfo", params);
         if (validation != null) {
             return validation;
         }
@@ -305,51 +310,19 @@ public class StsQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("GetAccessKeyInfo", AwsNamespaces.STS, result)).build();
     }
 
-    /**
-     * accessKeyIdType: required, 16 to 128 characters of {@code [\w]*}, which the reference
-     * describes as "any upper- or lowercase letter or digit". Read before the lookup, so a
-     * malformed id answers for its shape rather than for a key that could not exist.
-     *
-     * <p>An absent member and a present empty one are different answers: only the absent one is
-     * "Member must not be null", where {@code AccessKeyId=} is a value that fails the minimum. That
-     * is what IAM answers for an empty {@code RoleName} on this same wire.
-     *
-     * <p>The member is named the way AWS names it in a constraint message, lower camel case, and
-     * the offending value is quoted beside it, which is what the one recorded rendering Floci
-     * follows elsewhere does: {@link IamService} reads {@code roleName} that way, and so does this
-     * handler's own {@code DurationSeconds} check. The older STS operations name the parameter as
-     * written instead, which is a drift of its own rather than something to copy here.
-     */
-    private Response validateAccessKeyId(MultivaluedMap<String, String> params) {
-        String accessKeyId = params.getFirst("AccessKeyId");
-        String constraint;
-        if (accessKeyId == null) {
-            constraint = "Member must not be null";
-        } else if (accessKeyId.length() < ACCESS_KEY_ID_MIN_LENGTH) {
-            constraint = "Member must have length greater than or equal to " + ACCESS_KEY_ID_MIN_LENGTH;
-        } else if (accessKeyId.length() > ACCESS_KEY_ID_MAX_LENGTH) {
-            constraint = "Member must have length less than or equal to " + ACCESS_KEY_ID_MAX_LENGTH;
-        } else if (!ACCESS_KEY_ID_PATTERN.matcher(accessKeyId).matches()) {
-            constraint = "Member must satisfy regular expression pattern: "
-                    + ACCESS_KEY_ID_PATTERN.pattern();
-        } else {
-            return null;
-        }
-        String value = accessKeyId == null ? "null" : "'" + accessKeyId + "'";
-        return AwsQueryResponse.error("ValidationError",
-                SmithyValidationErrors.message(List.of("Value " + value
-                        + " at 'accessKeyId' failed to satisfy constraint: " + constraint)),
-                AwsNamespaces.STS, 400);
-    }
-
     private Response handleGetSessionToken(MultivaluedMap<String, String> params) {
         if (IamService.isTemporaryAccessKey(callerAccessKeyId())) {
             return AwsQueryResponse.error("AccessDenied", "Cannot call GetSessionToken with session credentials",
                     AwsNamespaces.STS, 403);
         }
-        Response durationValidation = validateDurationSeconds(params, 900, 129600);
-        if (durationValidation != null) {
-            return durationValidation;
+        Response integerMembers =
+                validateIntegerMembers(params, "DurationSeconds", "MinimumSessionTokenSize");
+        if (integerMembers != null) {
+            return integerMembers;
+        }
+        Response validation = validateDeclaredConstraints("GetSessionToken", params);
+        if (validation != null) {
+            return validation;
         }
         int durationSeconds = getIntParam(params, "DurationSeconds", 43200);
         String accessKeyId = "ASIA" + randomId(16);
@@ -365,17 +338,17 @@ public class StsQueryHandler {
     }
 
     private Response handleAssumeRoleWithWebIdentity(MultivaluedMap<String, String> params) {
-        Response validation = validateRequired(params, "RoleArn", "RoleSessionName", "WebIdentityToken");
+        Response integerMembers = validateIntegerMembers(params, "DurationSeconds", "MinimumSessionTokenSize");
+        if (integerMembers != null) {
+            return integerMembers;
+        }
+        Response validation = validateDeclaredConstraints("AssumeRoleWithWebIdentity", params);
         if (validation != null) {
             return validation;
         }
-        validation = validateIamRoleArn(getParam(params, "RoleArn"));
-        if (validation != null) {
-            return validation;
-        }
-        Response durationValidation = validateDurationSeconds(params, 900, 43200);
-        if (durationValidation != null) {
-            return durationValidation;
+        Response roleArnShape = validateIamRoleArn(getParam(params, "RoleArn"));
+        if (roleArnShape != null) {
+            return roleArnShape;
         }
         String roleArn = getParam(params, "RoleArn");
         String sessionName = getParam(params, "RoleSessionName");
@@ -555,13 +528,13 @@ public class StsQueryHandler {
     }
 
     private Response handleAssumeRoleWithSAML(MultivaluedMap<String, String> params) {
-        Response validation = validateRequired(params, "RoleArn", "PrincipalArn", "SAMLAssertion");
+        Response integerMembers = validateIntegerMembers(params, "DurationSeconds", "MinimumSessionTokenSize");
+        if (integerMembers != null) {
+            return integerMembers;
+        }
+        Response validation = validateDeclaredConstraints("AssumeRoleWithSAML", params);
         if (validation != null) {
             return validation;
-        }
-        Response durationValidation = validateDurationSeconds(params, 900, 43200);
-        if (durationValidation != null) {
-            return durationValidation;
         }
         String roleArn = getParam(params, "RoleArn");
         String principalArn = getParam(params, "PrincipalArn");
@@ -636,13 +609,13 @@ public class StsQueryHandler {
             return AwsQueryResponse.error("AccessDenied", IamService.FEDERATION_TOKEN_SESSION_MESSAGE,
                     AwsNamespaces.STS, 403);
         }
-        Response validation = validateRequired(params, "Name");
+        Response integerMembers = validateIntegerMembers(params, "DurationSeconds", "MinimumSessionTokenSize");
+        if (integerMembers != null) {
+            return integerMembers;
+        }
+        Response validation = validateDeclaredConstraints("GetFederationToken", params);
         if (validation != null) {
             return validation;
-        }
-        Response durationValidation = validateDurationSeconds(params, 900, 129600);
-        if (durationValidation != null) {
-            return durationValidation;
         }
         String name = getParam(params, "Name");
         int durationSeconds = getIntParam(params, "DurationSeconds", 43200);
@@ -690,7 +663,7 @@ public class StsQueryHandler {
      * not populated for this operation.
      */
     private Response handleGetDelegatedAccessToken(MultivaluedMap<String, String> params) {
-        Response validation = validateRequired(params, "TradeInToken");
+        Response validation = validateDeclaredConstraints("GetDelegatedAccessToken", params);
         if (validation != null) {
             return validation;
         }
@@ -752,28 +725,15 @@ public class StsQueryHandler {
                     + " AssumeRoot. You must send this request to a Regional AWS STS endpoint.",
                     AwsNamespaces.STS, 400);
         }
-        Response validation = validateRequired(params, "TargetPrincipal", "TaskPolicyArn.arn");
+        Response integerMembers = validateIntegerMembers(params, "DurationSeconds", "MinimumSessionTokenSize");
+        if (integerMembers != null) {
+            return integerMembers;
+        }
+        Response validation = validateDeclaredConstraints("AssumeRoot", params);
         if (validation != null) {
             return validation;
         }
         String targetPrincipal = getParam(params, "TargetPrincipal");
-        if (targetPrincipal.length() < 12 || targetPrincipal.length() > 2048) {
-            String constraint = targetPrincipal.length() < 12
-                    ? "Member must have length greater than or equal to 12"
-                    : "Member must have length less than or equal to 2048";
-            return AwsQueryResponse.error("ValidationError",
-                    SmithyValidationErrors.message(List.of("Value '" + targetPrincipal
-                            + "' at 'targetPrincipal' failed to satisfy constraint: " + constraint)),
-                    AwsNamespaces.STS, 400);
-        }
-        Response durationValidation = validateDurationSeconds(params, 0, 900);
-        if (durationValidation != null) {
-            return durationValidation;
-        }
-        Response tokenSizeValidation = validateMinimumSessionTokenSize(params);
-        if (tokenSizeValidation != null) {
-            return tokenSizeValidation;
-        }
         String callerAccountId = regionResolver.getAccountId();
         Response rootCaller = refuseRootCredentials(callerAccountId);
         if (rootCaller != null) {
@@ -833,38 +793,6 @@ public class StsQueryHandler {
         return AwsArnUtils.parse(arn).resource().startsWith("policy" + ROOT_TASK_POLICY_PATH);
     }
 
-    /**
-     * {@code MinimumSessionTokenSize} is 0 to 4096 in the model, "The value must not exceed 4,096
-     * bytes", and the size it asks for is materialized, so the bound is enforced rather than
-     * clamped: a value outside it is the same {@code ValidationError} every other member violation
-     * answers, and one that is no integer at all the same {@code InvalidParameterValue}
-     * {@code DurationSeconds} gives.
-     */
-    private Response validateMinimumSessionTokenSize(MultivaluedMap<String, String> params) {
-        String value = params.getFirst("MinimumSessionTokenSize");
-        if (value == null) {
-            return null;
-        }
-        int size;
-        try {
-            size = Integer.parseInt(value);
-        } catch (NumberFormatException e) {
-            return AwsQueryResponse.error("InvalidParameterValue", "Value " + value + " for parameter"
-                    + " MinimumSessionTokenSize is invalid. Reason: Must be an integer.",
-                    AwsNamespaces.STS, 400);
-        }
-        if (size < 0 || size > MAX_SESSION_TOKEN_SIZE) {
-            String constraint = size < 0
-                    ? "Member must have value greater than or equal to 0"
-                    : "Member must have value less than or equal to " + MAX_SESSION_TOKEN_SIZE;
-            return AwsQueryResponse.error("ValidationError",
-                    SmithyValidationErrors.message(List.of("Value '" + size
-                            + "' at 'minimumSessionTokenSize' failed to satisfy constraint: " + constraint)),
-                    AwsNamespaces.STS, 400);
-        }
-        return null;
-    }
-
     /** The account a {@code TargetPrincipal} names, whether it is an account id or a principal ARN. */
     private static String accountOf(String targetPrincipal) {
         if (targetPrincipal.matches("\\d{12}")) {
@@ -904,7 +832,7 @@ public class StsQueryHandler {
     }
 
     private Response handleDecodeAuthorizationMessage(MultivaluedMap<String, String> params) {
-        Response validation = validateRequired(params, "EncodedMessage");
+        Response validation = validateDeclaredConstraints("DecodeAuthorizationMessage", params);
         if (validation != null) {
             return validation;
         }
@@ -913,49 +841,213 @@ public class StsQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("DecodeAuthorizationMessage", AwsNamespaces.STS, result)).build();
     }
 
-    private Response validateRequired(MultivaluedMap<String, String> params, String... names) {
+    /**
+     * The constraints the model declares for {@code action}, answered the way this handler answers
+     * every other refusal: one {@code ValidationError} naming every violation it found, in the
+     * order the model lists the members. A member the request names at all carries a value, so an
+     * empty one breaks its minimum length where an absent one is the refusal that names it null,
+     * and the member is named as a constraint message spells it, lower camel case with the
+     * offending value quoted beside it.
+     */
+    private static Response validateDeclaredConstraints(String action,
+                                                        MultivaluedMap<String, String> params) {
+        return validateDeclaredConstraints(action, params, Map.of());
+    }
+
+    /** The same, with a constraint the reference documents where the model declares none. */
+    private static Response validateDeclaredConstraints(String action,
+                                                        MultivaluedMap<String, String> params,
+                                                        Map<String, String> documented) {
+        List<String> violations = StsRequestShapes.violations(action, params, documented);
+        if (violations.isEmpty()) {
+            return null;
+        }
+        return AwsQueryResponse.error("ValidationError", SmithyValidationErrors.message(violations),
+                AwsNamespaces.STS, 400);
+    }
+
+    /**
+     * The members the model declares as numbers, held to being numbers at all. Their ranges are
+     * read from the model, which says nothing about a value that is no number: this package answers
+     * one with {@code InvalidParameterValue}, which is what {@code DurationSeconds} answered before
+     * any of it was read from the model, and a digit string of any width is a number whatever it
+     * overflows.
+     */
+    private static Response validateIntegerMembers(MultivaluedMap<String, String> params,
+                                                   String... names) {
         for (String name : names) {
             String value = params.getFirst(name);
-            if (value == null || value.isBlank()) {
-                return AwsQueryResponse.error("ValidationError",
-                        SmithyValidationErrors.message(List.of(SmithyValidationErrors.notNull(name))),
-                        AwsNamespaces.STS, 400);
+            if (value != null && !QueryConstraintCheck.isInteger(value)) {
+                return notANumber(name, value);
             }
         }
         return null;
     }
 
     /**
-     * Validates the optional {@code DurationSeconds} parameter against {@code minSeconds}/{@code maxSeconds}.
-     * Returns {@code null} when the parameter is absent or valid; otherwise a {@code ValidationError} (out of
-     * range) or {@code InvalidParameterValue} (not an integer) response, matching AWS's own wire behavior.
+     * One violation as this handler answers it, or null where {@code violation} is null. The
+     * wording comes from {@link SmithyValidationErrors} rather than from a sentence written here,
+     * so a member held to its shape by a check of this file's own reads the same as one the model
+     * holds.
      */
-    private Response validateDurationSeconds(MultivaluedMap<String, String> params, int minSeconds, int maxSeconds) {
-        String value = params.getFirst("DurationSeconds");
-        if (value == null) {
+    private static Response violation(String violation) {
+        if (violation == null) {
             return null;
         }
-        int durationSeconds;
-        try {
-            durationSeconds = Integer.parseInt(value);
-        } catch (NumberFormatException e) {
-            return AwsQueryResponse.error("InvalidParameterValue",
-                    "Value " + value + " for parameter DurationSeconds is invalid. Reason: Must be an integer.",
-                    AwsNamespaces.STS, 400);
+        return AwsQueryResponse.error("ValidationError",
+                SmithyValidationErrors.message(List.of(violation)), AwsNamespaces.STS, 400);
+    }
+
+    /**
+     * The refusal for a member the protocol cannot read as the number its shape declares, which is
+     * {@code InvalidParameterValue} rather than a constraint violation: no range of the model's is
+     * what such a value breaks.
+     */
+    private static Response notANumber(String name, String value) {
+        return AwsQueryResponse.error("InvalidParameterValue", "Value " + value + " for parameter "
+                + name + " is invalid. Reason: Must be an integer.", AwsNamespaces.STS, 400);
+    }
+
+    /**
+     * {@code GetWebIdentityToken} answers "a signed JSON Web Token (JWT) that represents the
+     * calling Amazon Web Services identity", signed by STS and verifiable "using the verification
+     * keys published at the issuer's JWKS endpoint". The issuer is the one IAM mints for the
+     * account when outbound web identity federation is enabled, so this reads the state that
+     * switch keeps and refuses while it is off, with
+     * {@code OutboundWebIdentityFederationDisabledException} rather than IAM's own
+     * {@code FeatureDisabled}.
+     *
+     * <p>The declared constraints are read ahead of all of it, from the model rather than from a
+     * check written here: {@code Audience} is 1 to 10 members of 1 to 1000 characters each and
+     * required, {@code SigningAlgorithm} is a fixed length of 5 and required,
+     * {@code DurationSeconds} is 60 to 3600 and defaults to 300, and {@code Tags} is at most 50
+     * tags whose keys and values carry their own lengths and pattern. A member sent empty is a
+     * member that is present, so it breaks its length rather than reading as absent. Every
+     * violation is reported together, in the order the model lists the members, with the two
+     * signing algorithms the reference names reported in that member's own place. A
+     * {@code DurationSeconds} that is no number at all is this file's own
+     * {@code InvalidParameterValue}, answered before the constraints: the model declares the range,
+     * not what counts as a number.
+     *
+     * <p>Three things here are readings rather than published behaviour, and the docs say so. The
+     * model publishes no enum for {@code SigningAlgorithm}, only the fixed length, so a five
+     * character value that is neither {@code RS256} nor {@code ES384} is answered with the enum
+     * violation this package renders for a value outside a documented set. The global endpoint is
+     * refused because the Reference says "The GetWebIdentityToken API is not available on the STS
+     * Global endpoint" without giving the refusal, so it borrows the wording AWS publishes for
+     * {@code AssumeRoot}, and a request to a local host names no such endpoint and is not
+     * refused. {@code JWTPayloadSizeExceededException} is modelled and nothing published says what
+     * the maximum payload is, so no size is invented here to refuse.
+     *
+     * <p>A temporary credential with no live session behind it is refused as expired rather than
+     * read as a caller that cannot be identified. {@link IamEnforcementFilter} answers
+     * {@code ExpiredTokenException} for one and it never reaches here, but with enforcement off,
+     * or in the window between that check and this one, the session lookup comes back empty and
+     * the caller would fall to the account root ARN this file hands an unresolvable caller. A
+     * token is not a request: its subject is signed and outlives the call, so a session already
+     * gone does not get one that speaks for the account. An unknown long-term key keeps the
+     * stand-in, which is what {@code GetCallerIdentity} answers it.
+     */
+    private Response handleGetWebIdentityToken(MultivaluedMap<String, String> params) {
+        if (arrivedOnTheGlobalEndpoint()) {
+            return AwsQueryResponse.error("ValidationError", "The global endpoint is not supported"
+                    + " for GetWebIdentityToken. You must send this request to a Regional AWS STS"
+                    + " endpoint.", AwsNamespaces.STS, 400);
         }
-        if (durationSeconds < minSeconds) {
-            return AwsQueryResponse.error("ValidationError",
-                    "1 validation error detected: Value '" + durationSeconds + "' at 'durationSeconds' failed to "
-                            + "satisfy constraint: Member must have value greater than or equal to " + minSeconds,
-                    AwsNamespaces.STS, 400);
+        Response integerMembers = validateIntegerMembers(params, "DurationSeconds");
+        if (integerMembers != null) {
+            return integerMembers;
         }
-        if (durationSeconds > maxSeconds) {
-            return AwsQueryResponse.error("ValidationError",
-                    "1 validation error detected: Value '" + durationSeconds + "' at 'durationSeconds' failed to "
-                            + "satisfy constraint: Member must have value less than or equal to " + maxSeconds,
-                    AwsNamespaces.STS, 400);
+        Response validation = validateDeclaredConstraints("GetWebIdentityToken", params,
+                documentedAlgorithms(params));
+        if (validation != null) {
+            return validation;
         }
-        return null;
+
+        String accessKeyId = callerAccessKeyId();
+        Optional<Instant> sessionEnds = accessKeyId == null
+                ? Optional.empty()
+                : iamService.findSessionExpiration(accessKeyId);
+        if (sessionEnds.isEmpty() && IamService.isTemporaryAccessKey(accessKeyId)) {
+            return AwsQueryResponse.error("ExpiredTokenException",
+                    IamEnforcementFilter.EXPIRED_TOKEN, AwsNamespaces.STS, 403);
+        }
+
+        Optional<OutboundWebIdentityFederation> federation =
+                iamService.findEnabledOutboundWebIdentityFederation();
+        if (federation.isEmpty()) {
+            return AwsQueryResponse.error("OutboundWebIdentityFederationDisabledException",
+                    "The outbound web identity federation feature is not enabled for this account."
+                            + " To use this feature, you must first enable it through the AWS"
+                            + " Management Console or API.", AwsNamespaces.STS, 403);
+        }
+        Instant issuedAt = clock.instant();
+        Instant expiration = issuedAt.plusSeconds(
+                getIntParam(params, "DurationSeconds", DEFAULT_TOKEN_SECONDS));
+        if (sessionEnds.filter(expiration::isAfter).isPresent()) {
+            return AwsQueryResponse.error("SessionDurationEscalationException",
+                    "The requested token duration would extend the session beyond its original"
+                            + " expiration time. You cannot use this operation to extend the"
+                            + " lifetime of a session beyond what was granted when the session was"
+                            + " originally created.", AwsNamespaces.STS, 403);
+        }
+        String subject = iamService.resolveCallerArn(accessKeyId).orElseGet(() ->
+                regionResolver.buildGlobalArn("iam", regionResolver.getAccountId(), "root"));
+        String token = tokenIssuer.mint(
+                WebIdentityTokenIssuer.Algorithm.valueOf(params.getFirst("SigningAlgorithm")),
+                federation.get().getIssuerIdentifier(), subject, audiences(params),
+                new WebIdentityTokenIssuer.CustomClaims(regionResolver.getAccountId(),
+                        regionResolver.getRegion(), tagClaims(params)),
+                issuedAt, expiration);
+        LOG.debugv("Issued a web identity token for {0} expiring at {1}", subject, expiration);
+        String result = new XmlBuilder()
+                .elem("WebIdentityToken", token)
+                .elem("Expiration", isoDate(expiration))
+                .build();
+        return Response.ok(
+                AwsQueryResponse.envelope("GetWebIdentityToken", AwsNamespaces.STS, result)).build();
+    }
+
+    /**
+     * The audiences the request carries, in the order their indexes read, each as it was sent: the
+     * model holds every one of them to a minimum length of 1, so by here none is absent.
+     */
+    private static List<String> audiences(MultivaluedMap<String, String> params) {
+        return AwsQueryLists.members(params, "Audience", null).stream()
+                .map(member -> Objects.requireNonNullElse(params.getFirst(member.prefix()), ""))
+                .toList();
+    }
+
+    /**
+     * The tags the request turns into claims, the last value winning for a key sent twice, which is
+     * how a Query map's duplicate key resolves elsewhere in this package. {@code Tag} declares both
+     * its fields required, so a member reaching here carries them.
+     */
+    private static Map<String, String> tagClaims(MultivaluedMap<String, String> params) {
+        Map<String, String> claims = new LinkedHashMap<>();
+        for (AwsQueryLists.IndexedMember tag : AwsQueryLists.members(params, "Tags", null)) {
+            String key = params.getFirst(tag.prefix() + ".Key");
+            String value = params.getFirst(tag.prefix() + ".Value");
+            if (key != null && value != null) {
+                claims.put(key, value);
+            }
+        }
+        return claims;
+    }
+
+    /**
+     * {@code jwtAlgorithmType} publishes a fixed length of 5 and no enum, and the reference names
+     * the two values that length is for, so the value set is documented where the length is
+     * declared. It is read against a value the model's own length accepts, and reported in that
+     * member's place rather than after the members the model lists below it.
+     */
+    private static Map<String, String> documentedAlgorithms(MultivaluedMap<String, String> params) {
+        String algorithm = params.getFirst("SigningAlgorithm");
+        if (algorithm == null || WebIdentityTokenIssuer.Algorithm.names().contains(algorithm)) {
+            return Map.of();
+        }
+        return Map.of("SigningAlgorithm", SmithyValidationErrors.notInEnum(algorithm,
+                "signingAlgorithm", WebIdentityTokenIssuer.Algorithm.names()));
     }
 
     private String credentialsXml(String accessKeyId, String secretKey, String sessionToken, Instant expiration) {
@@ -973,11 +1065,18 @@ public class StsQueryHandler {
         return params.getFirst(name);
     }
 
+    /**
+     * The number as the check that let it through read it. {@link QueryConstraintCheck} takes a
+     * Query number with the whitespace around it off, so a padded value satisfies its range, and
+     * the read behind it has to take it off too: parsing the value as the request spelled it would
+     * throw here and fall back to the default, handing out a session or a token of a length nothing
+     * asked for. IAM reads its own `maxItems` the same way.
+     */
     private int getIntParam(MultivaluedMap<String, String> params, String name, int defaultValue) {
         String value = params.getFirst(name);
         if (value == null) return defaultValue;
         try {
-            return Integer.parseInt(value);
+            return Integer.parseInt(value.trim());
         } catch (NumberFormatException e) {
             return defaultValue;
         }

@@ -41,6 +41,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.LogRecord;
 import java.util.stream.Stream;
 
@@ -196,7 +197,7 @@ class MskScramServiceTest {
         when(config.services().msk().mock()).thenReturn(false);
         String healthySecret = SECRET + "-healthy";
         associate(SECRET, version("alice", "original"));
-        setSecretValue(healthySecret, version("bob", "original"));
+        AtomicReference<SecretVersion> healthyVersion = rotatingSecret(healthySecret, version("bob", "original"));
         assertTrue(service.batchAssociateScramSecret(healthyCluster.getClusterArn(), List.of(healthySecret)).isEmpty());
 
         CountDownLatch operationForFirstClusterStarted = new CountDownLatch(1);
@@ -221,7 +222,7 @@ class MskScramServiceTest {
             // More rotations than workers expose duplicate blocked jobs exhausting the pool.
             for (int rotation = 1; rotation <= 6; rotation++) {
                 String password = "healthy-rotation-" + rotation;
-                setSecretValue(healthySecret, version("bob", password));
+                healthyVersion.set(version("bob", password));
                 await()
                     .atMost(Duration.ofSeconds(5))
                     .untilAsserted(() -> verify(redpanda).createUser(healthyCluster, "bob", password));
@@ -267,14 +268,14 @@ class MskScramServiceTest {
     void scheduledReconciliationAppliesRotationsUsingConfiguredInterval() {
         associate(SECRET, version("alice", "original"));
         when(config.services().msk().scramReconciliationIntervalMs()).thenReturn(5L);
-        setSecretValue(SECRET, version("alice", "rotated"));
+        AtomicReference<SecretVersion> currentVersion = rotatingSecret(SECRET, version("alice", "rotated"));
 
         try {
             service.onStart(null);
             await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                 verify(redpanda).createUser(cluster, "alice", "rotated"));
 
-            setSecretValue(SECRET, version("alice", "rotated-again"));
+            currentVersion.set(version("alice", "rotated-again"));
             await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
                 verify(redpanda).createUser(cluster, "alice", "rotated-again"));
         } finally {
@@ -289,12 +290,23 @@ class MskScramServiceTest {
     }
 
     private void setSecretValue(String arn, SecretVersion version) {
+        doReturn(secretValue(arn, version)).when(secrets).describeSecret(arn, AwsArnUtils.parse(arn).region());
+    }
+
+    private AtomicReference<SecretVersion> rotatingSecret(String arn, SecretVersion initialVersion) {
+        AtomicReference<SecretVersion> currentVersion = new AtomicReference<>(initialVersion);
+        doAnswer(invocation -> secretValue(arn, currentVersion.get()))
+            .when(secrets).describeSecret(arn, AwsArnUtils.parse(arn).region());
+        return currentVersion;
+    }
+
+    private Secret secretValue(String arn, SecretVersion version) {
         Secret secret = new Secret();
         secret.setArn(arn);
         secret.setKmsKeyId("customer-key");
         version.setVersionStages(List.of("AWSCURRENT"));
         secret.setVersions(Map.of(version.getVersionId(), version));
-        doReturn(secret).when(secrets).describeSecret(arn, AwsArnUtils.parse(arn).region());
+        return secret;
     }
 
     private void setSecretReadError(String errorCode, String message) {

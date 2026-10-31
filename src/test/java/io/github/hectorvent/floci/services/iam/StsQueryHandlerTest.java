@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.WebIdentityToken;
 import io.github.hectorvent.floci.core.common.WebIdentityTokenVerifier;
 import io.github.hectorvent.floci.services.iam.model.DelegationRequest;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.OutboundWebIdentityFederation;
 import io.github.hectorvent.floci.testing.PartitionMatrix;
 import io.github.hectorvent.floci.testing.PartitionMatrix.PartitionCase;
 import jakarta.ws.rs.core.HttpHeaders;
@@ -36,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -88,6 +90,13 @@ class StsQueryHandlerTest {
 
     private static StsQueryHandler newHandler(IamService iamService, RegionResolver regionResolver,
                                               Clock clock, DelegationRequestService delegation) {
+        return newHandler(iamService, regionResolver, clock, delegation,
+                mock(WebIdentityTokenIssuer.class));
+    }
+
+    private static StsQueryHandler newHandler(IamService iamService, RegionResolver regionResolver,
+                                              Clock clock, DelegationRequestService delegation,
+                                              WebIdentityTokenIssuer tokenIssuer) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.IamServiceConfig iam = mock(EmulatorConfig.IamServiceConfig.class);
@@ -108,6 +117,7 @@ class StsQueryHandlerTest {
                 mock(SAMLTrustPolicyEvaluator.class),
                 delegation,
                 mock(CentralRootAccess.class),
+                tokenIssuer,
                 clock);
     }
 
@@ -141,6 +151,135 @@ class StsQueryHandlerTest {
             Response response = handler.handle(action, params);
             assertEquals(200, response.getStatus());
         }
+    }
+
+    /**
+     * A duration the constraint check accepted is the duration the caller gets. The check reads a
+     * Query number with the whitespace around it off, so a padded value passes its range, and the
+     * read behind it takes it off as well: parsing the raw value would throw and fall back to the
+     * default, so a request asking for an hour would have been handed the twelve hours
+     * {@code GetSessionToken} defaults to, or the five minutes a web identity token defaults to.
+     */
+    @Test
+    void aPaddedDurationIsTheOneAskedForRatherThanTheDefault() {
+        Instant now = Instant.parse("2026-01-01T00:00:00Z");
+        Clock clock = Clock.fixed(now, ZoneOffset.UTC);
+        IamService iamService = mock(IamService.class);
+        StsQueryHandler sessions =
+                newHandler(iamService, new RegionResolver(REGION, "000000000000"), clock);
+        setCaller(sessions, "AKIAlongterm", "-");
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("DurationSeconds", " 3600 ");
+
+        Response session = sessions.handle("GetSessionToken", params);
+
+        assertEquals(200, session.getStatus(), (String) session.getEntity());
+        assertEquals("2026-01-01T01:00:00Z", extract(EXPIRATION, (String) session.getEntity()));
+
+        when(iamService.findEnabledOutboundWebIdentityFederation())
+                .thenReturn(Optional.of(enabledFederation()));
+        WebIdentityTokenIssuer tokenIssuer = mock(WebIdentityTokenIssuer.class);
+        when(tokenIssuer.mint(any(), anyString(), anyString(), anyList(), any(), any(), any()))
+                .thenReturn("header.claims.signature");
+        StsQueryHandler tokens = newHandler(iamService, new RegionResolver(REGION, "000000000000"),
+                clock, mock(DelegationRequestService.class), tokenIssuer);
+        setCaller(tokens, "AKIAlongterm", "-");
+
+        MultivaluedMap<String, String> tokenParams = new MultivaluedHashMap<>();
+        tokenParams.putSingle("Audience.member.1", "app");
+        tokenParams.putSingle("SigningAlgorithm", "RS256");
+        tokenParams.putSingle("DurationSeconds", " 1800 ");
+
+        Response token = tokens.handle("GetWebIdentityToken", tokenParams);
+
+        assertEquals(200, token.getStatus(), (String) token.getEntity());
+        assertEquals("2026-01-01T00:30:00Z", extract(EXPIRATION, (String) token.getEntity()));
+    }
+
+    /** The account's federation state with the feature on, which the operation reads the issuer from. */
+    private static OutboundWebIdentityFederation enabledFederation() {
+        OutboundWebIdentityFederation federation = new OutboundWebIdentityFederation();
+        federation.setEnabled(true);
+        federation.setIssuerIdentifier("https://sts.us-east-1.amazonaws.com/000000000000");
+        return federation;
+    }
+
+    /**
+     * A caller on temporary credentials "cannot use this operation to extend the lifetime of a
+     * session beyond what was granted when the session was originally created", so the ceiling on
+     * a web identity token is the session's own expiration. The boundary is that instant itself: a
+     * token ending exactly with the session is issued, and one ending a second later is not, which
+     * is why the clock is fixed here rather than read. A long-term caller has no session to
+     * escalate, so only the duration's own 3600 holds it.
+     */
+    @ParameterizedTest
+    @CsvSource({"ASIASESSION, 299, 200", "ASIASESSION, 300, 200", "ASIASESSION, 301, 403",
+            "ASIASESSION, 3600, 403", "AKIALONGTERM, 3600, 200"})
+    void aWebIdentityTokenCannotOutliveTheCallersSession(String accessKeyId, String duration,
+                                                         int expectedStatus) {
+        Instant now = Instant.parse("2026-01-01T00:00:00Z");
+        IamService iamService = mock(IamService.class);
+        when(iamService.findEnabledOutboundWebIdentityFederation())
+                .thenReturn(Optional.of(enabledFederation()));
+        when(iamService.findSessionExpiration("ASIASESSION"))
+                .thenReturn(Optional.of(now.plusSeconds(300)));
+        WebIdentityTokenIssuer tokenIssuer = mock(WebIdentityTokenIssuer.class);
+        when(tokenIssuer.mint(any(), anyString(), anyString(), anyList(), any(), any(), any()))
+                .thenReturn("header.claims.signature");
+        StsQueryHandler handler = newHandler(iamService, new RegionResolver(REGION, "000000000000"),
+                Clock.fixed(now, ZoneOffset.UTC), mock(DelegationRequestService.class),
+                tokenIssuer);
+        setCaller(handler, accessKeyId, "-");
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Audience.member.1", "app");
+        params.putSingle("SigningAlgorithm", "RS256");
+        params.putSingle("DurationSeconds", duration);
+        Response response = handler.handle("GetWebIdentityToken", params);
+
+        String body = (String) response.getEntity();
+        assertEquals(expectedStatus, response.getStatus(), body);
+        if (expectedStatus == 403) {
+            assertTrue(body.contains("<Code>SessionDurationEscalationException</Code>"), body);
+            assertTrue(body.contains("You cannot use this operation to extend the lifetime of a"
+                    + " session beyond what was granted when the session was originally created."),
+                    body);
+            verifyNoInteractions(tokenIssuer);
+        } else {
+            verify(tokenIssuer).mint(any(), anyString(), anyString(), anyList(), any(), any(),
+                    any());
+        }
+    }
+
+    /**
+     * A temporary credential the session store no longer knows is refused as expired rather than
+     * minted for. The lookup comes back empty for a session that has gone, which would otherwise
+     * fall through to the account root ARN this file hands a caller it cannot resolve, and a
+     * token's subject is signed and outlives the request that asked for it.
+     */
+    @Test
+    void aTemporaryCredentialWithNoLiveSessionIsRefusedRatherThanSignedAsRoot() {
+        IamService iamService = mock(IamService.class);
+        when(iamService.findEnabledOutboundWebIdentityFederation())
+                .thenReturn(Optional.of(enabledFederation()));
+        WebIdentityTokenIssuer tokenIssuer = mock(WebIdentityTokenIssuer.class);
+        StsQueryHandler handler = newHandler(iamService, new RegionResolver(REGION, "000000000000"),
+                Clock.fixed(Instant.parse("2026-01-01T00:00:00Z"), ZoneOffset.UTC),
+                mock(DelegationRequestService.class), tokenIssuer);
+        setCaller(handler, "ASIAGONE", "-");
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Audience.member.1", "app");
+        params.putSingle("SigningAlgorithm", "RS256");
+        Response response = handler.handle("GetWebIdentityToken", params);
+
+        String body = (String) response.getEntity();
+        assertEquals(403, response.getStatus(), body);
+        assertTrue(body.contains("<Code>ExpiredTokenException</Code>"), body);
+        assertTrue(body.contains("The security token included in the request has expired."), body);
+        assertFalse(body.contains(":root"), body);
+        verifyNoInteractions(tokenIssuer);
     }
 
     private static void setCaller(StsQueryHandler handler, String headerKey, String queryKey) {
@@ -650,8 +789,8 @@ class StsQueryHandlerTest {
         role.setAssumeRolePolicyDocument("{}");
         when(iamService.findRole("000000000000", "web-role")).thenReturn(Optional.of(role));
         WebIdentityTokenVerifier verifier = mock(WebIdentityTokenVerifier.class);
-        when(verifier.peekIssuer("jwt")).thenReturn(Optional.of(issuer));
-        when(verifier.verify(eq("jwt"), any(), eq(issuer), anyString()))
+        when(verifier.peekIssuer("jwt0")).thenReturn(Optional.of(issuer));
+        when(verifier.verify(eq("jwt0"), any(), eq(issuer), anyString()))
                 .thenReturn(new WebIdentityToken(issuer, "system:serviceaccount:default:app",
                         List.of("sts.amazonaws.com")));
         OidcIssuerKeyLookup keys = mock(OidcIssuerKeyLookup.class);
@@ -662,11 +801,12 @@ class StsQueryHandlerTest {
         StsQueryHandler handler = new StsQueryHandler(iamService, mock(AccountResolver.class),
                 new RegionResolver(REGION, "000000000000"), config, mock(AssumeRolePolicyEvaluator.class),
                 trust, verifier, keys, mock(SAMLProviderService.class), mock(SAMLTrustPolicyEvaluator.class),
-                mock(DelegationRequestService.class), mock(CentralRootAccess.class));
+                mock(DelegationRequestService.class), mock(CentralRootAccess.class),
+                mock(WebIdentityTokenIssuer.class));
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", requestedRoleArn);
         params.putSingle("RoleSessionName", "app");
-        params.putSingle("WebIdentityToken", "jwt");
+        params.putSingle("WebIdentityToken", "jwt0");
 
         Response response = handler.handle("AssumeRoleWithWebIdentity", params);
 
@@ -681,7 +821,7 @@ class StsQueryHandlerTest {
     void assumeRoleMintsTheSessionInTheRolesPartition() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/commercial-role");
-        params.putSingle("RoleSessionName", "s");
+        params.putSingle("RoleSessionName", "sx");
         IamRole role = new IamRole();
         role.setRoleName("commercial-role");
         role.setArn("arn:aws:iam::000000000000:role/commercial-role");
@@ -690,7 +830,7 @@ class StsQueryHandlerTest {
                 .handle("AssumeRole", params);
 
         assertEquals(200, response.getStatus());
-        assertEquals("arn:aws:sts::000000000000:assumed-role/commercial-role/s",
+        assertEquals("arn:aws:sts::000000000000:assumed-role/commercial-role/sx",
                 extract(ARN, (String) response.getEntity()));
     }
 
@@ -735,7 +875,7 @@ class StsQueryHandlerTest {
 
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("RoleArn", role.getArn());
-        params.putSingle("RoleSessionName", "s");
+        params.putSingle("RoleSessionName", "sx");
         params.putSingle("DurationSeconds", "900");
 
         Response response = handler.handle("AssumeRole", params);
@@ -744,7 +884,7 @@ class StsQueryHandlerTest {
         assertEquals(expected, extract(EXPIRATION, (String) response.getEntity()));
         ArgumentCaptor<Instant> sessionExpiration = ArgumentCaptor.forClass(Instant.class);
         verify(iamService).registerSession(anyString(), anyString(), anyString(), eq(role.getArn()),
-                sessionExpiration.capture(), isNull(), eq("000000000000"), eq("s"), anyString());
+                sessionExpiration.capture(), isNull(), eq("000000000000"), eq("sx"), anyString());
         assertEquals(expiration, sessionExpiration.getValue());
     }
 

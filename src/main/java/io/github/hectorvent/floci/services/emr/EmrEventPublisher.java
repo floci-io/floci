@@ -59,12 +59,15 @@ public class EmrEventPublisher {
         this.regionResolver = regionResolver;
     }
 
-    /** {@code cluster} entering {@code state} at {@code at}: STARTING, WAITING or TERMINATED. */
+    /**
+     * {@code cluster} entering {@code state} at {@code at}: STARTING, WAITING, TERMINATED or
+     * TERMINATED_WITH_ERRORS.
+     */
     Event clusterStateChange(EmrCluster cluster, String state, Instant at) {
-        boolean terminated = "TERMINATED".equals(state);
+        boolean terminated = EmrClusterLifecycle.isTerminated(state);
         String code = cluster.getStateChangeReasonCode();
         // The examples' reason is a JSON string: {"code":""} for a WAITING cluster, and the reason's code
-        // and message for a TERMINATED one.
+        // and message for a terminated one.
         ObjectNode reason = objectMapper.createObjectNode().put("code", terminated && code != null ? code : "");
         if (terminated && cluster.getStateChangeMessage() != null) {
             reason.put("message", cluster.getStateChangeMessage());
@@ -80,10 +83,17 @@ public class EmrEventPublisher {
         return new Event(CLUSTER_STATE_CHANGE, detail.toString());
     }
 
-    /** {@code step} of {@code cluster} entering {@code state}: PENDING, RUNNING, COMPLETED or CANCELLED. */
+    /**
+     * {@code step} of {@code cluster} entering {@code state}: PENDING, RUNNING, COMPLETED, CANCELLED or
+     * FAILED.
+     */
     Event stepStatusChange(EmrCluster cluster, EmrStep step, String state) {
         ObjectNode detail = objectMapper.createObjectNode();
-        detail.put("severity", "CANCELLED".equals(state) ? "WARN" : "INFO");
+        detail.put("severity", switch (state) {
+            case "CANCELLED" -> "WARN";
+            case "FAILED" -> "ERROR";
+            default -> "INFO";
+        });
         detail.put("actionOnFailure", step.getActionOnFailure());
         detail.put("stepId", step.getId());
         detail.put("name", step.getName());
@@ -136,6 +146,8 @@ public class EmrEventPublisher {
                     : "Amazon EMR cluster " + named + " finished running all pending steps at " + time(at) + ".";
             case "TERMINATED" -> "Amazon EMR Cluster " + named + " has terminated at " + time(at)
                     + " with a reason of " + cluster.getStateChangeReasonCode() + ".";
+            case "TERMINATED_WITH_ERRORS" -> "Amazon EMR Cluster " + named + " has terminated with errors at "
+                    + time(at) + " with a reason of " + cluster.getStateChangeReasonCode() + ".";
             default -> throw new IllegalArgumentException("No cluster event for state " + state);
         };
     }
@@ -156,6 +168,8 @@ public class EmrEventPublisher {
             case "CANCELLED" -> "Cancellation request has succeeded for cluster step " + stepNamed
                     + " in Amazon EMR cluster " + clusterNamed + " at " + time(step.getEndDateTime())
                     + ", and the step is now cancelled.";
+            case "FAILED" -> "Step " + stepNamed + " in Amazon EMR cluster " + clusterNamed + " failed at "
+                    + time(step.getEndDateTime()) + ".";
             default -> throw new IllegalArgumentException("No step event for state " + state);
         };
     }

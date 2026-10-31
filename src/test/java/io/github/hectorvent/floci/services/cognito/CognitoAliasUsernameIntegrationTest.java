@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -166,7 +167,7 @@ class CognitoAliasUsernameIntegrationTest {
     @Order(5)
     void signInByUuidAlsoIssuesTokens() {
         initiateUserPasswordAuth(uuidUsername).then().statusCode(200)
-                .body("AuthenticationResult.AccessToken", org.hamcrest.Matchers.notNullValue());
+                .body("AuthenticationResult.AccessToken", Matchers.notNullValue());
     }
 
     @Test
@@ -204,7 +205,7 @@ class CognitoAliasUsernameIntegrationTest {
 
         // New email now signs in.
         initiateUserPasswordAuth(NEW_EMAIL).then().statusCode(200)
-                .body("AuthenticationResult.AccessToken", org.hamcrest.Matchers.notNullValue());
+                .body("AuthenticationResult.AccessToken", Matchers.notNullValue());
 
         // Old email no longer resolves.
         cognitoAction("InitiateAuth", """

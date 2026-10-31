@@ -320,23 +320,22 @@ public class IamAuthValidator {
         return "test".equals(accessKeyId);
     }
 
+    static String requestArn(String region, String accountId, String apiId) {
+        return appsyncArn(region, accountId, "apis/" + apiId + "/*");
+    }
+
+    static String fieldArn(String region, String accountId, String apiId, String typeName, String fieldName) {
+        return appsyncArn(region, accountId, "apis/" + apiId + "/types/" + typeName + "/fields/" + fieldName);
+    }
+
     /**
      * The resource these two build is matched against a policy the customer wrote using the ARN
      * AppSync handed them, and that ARN carries the region's partition. Pinning {@code aws} here
      * meant a GovCloud policy naming its own API never matched, and the request was denied.
      */
-    private static String appsyncArnPrefix(String region) {
-        return "arn:" + AwsRegions.partitionFor(region) + ":appsync:";
-    }
-
-    static String requestArn(String region, String accountId, String apiId) {
-        return appsyncArnPrefix(region) + nullToEmpty(region) + ":" + nullToEmpty(accountId)
-                + ":apis/" + apiId + "/*";
-    }
-
-    static String fieldArn(String region, String accountId, String apiId, String typeName, String fieldName) {
-        return appsyncArnPrefix(region) + nullToEmpty(region) + ":" + nullToEmpty(accountId)
-                + ":apis/" + apiId + "/types/" + typeName + "/fields/" + fieldName;
+    private static String appsyncArn(String region, String accountId, String resource) {
+        return new AwsArnUtils.Arn(AwsRegions.partitionFor(region), "appsync", nullToEmpty(region),
+                nullToEmpty(accountId), resource).toString();
     }
 
     static String usernameFromArn(String userArn, String accessKeyId) {

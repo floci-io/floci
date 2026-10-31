@@ -8,7 +8,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
-/** An EMR job-flow step. State machine: PENDING → RUNNING → COMPLETED (or CANCELLED/FAILED). */
+/**
+ * An EMR job-flow step. State machine: PENDING → RUNNING → COMPLETED (or CANCELLED/FAILED). A step the
+ * {@code docker} runner mode started runs in a container, and a FAILED one carries its FailureDetails.
+ */
 @RegisterForReflection
 public class EmrStep {
 
@@ -22,6 +25,9 @@ public class EmrStep {
     private String state;
     private String stateChangeReason;
     private String executionRoleArn;
+    private boolean runInContainer;
+    private String failureReason;
+    private String failureMessage;
     private Instant creationDateTime;
     private Instant startDateTime;
     private Instant endDateTime;
@@ -57,6 +63,15 @@ public class EmrStep {
 
     public String getExecutionRoleArn() { return executionRoleArn; }
     public void setExecutionRoleArn(String executionRoleArn) { this.executionRoleArn = executionRoleArn; }
+
+    public boolean isRunInContainer() { return runInContainer; }
+    public void setRunInContainer(boolean runInContainer) { this.runInContainer = runInContainer; }
+
+    public String getFailureReason() { return failureReason; }
+    public void setFailureReason(String failureReason) { this.failureReason = failureReason; }
+
+    public String getFailureMessage() { return failureMessage; }
+    public void setFailureMessage(String failureMessage) { this.failureMessage = failureMessage; }
 
     public Instant getCreationDateTime() { return creationDateTime; }
     public void setCreationDateTime(Instant creationDateTime) { this.creationDateTime = creationDateTime; }

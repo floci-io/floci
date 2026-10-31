@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.AwsCanonicalUserId;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.S3IamEnforcementProfile;
@@ -263,7 +264,7 @@ class S3BucketPolicyEnforcementIntegrationTest {
                         {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}""")
                 .header("Authorization", auth("000000000000", "iam")).when().post("/").then().statusCode(200);
         ExtractableResponse<Response> assumed = given().formParam("Action", "AssumeRole")
-                .formParam("RoleArn", roleArn).formParam("RoleSessionName", "s")
+                .formParam("RoleArn", roleArn).formParam("RoleSessionName", "sx")
                 .header("Authorization", auth("000000000000", "sts")).when().post("/")
                 .then().statusCode(200).extract();
         String sessionArn = assumed.path("AssumeRoleResponse.AssumeRoleResult.AssumedRoleUser.Arn");
@@ -309,7 +310,7 @@ class S3BucketPolicyEnforcementIntegrationTest {
         putBucketPolicy(bucket, """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/userid/*",
-                   "Condition":{"StringNotLike":{"aws:userid":"AROA*:s"}}},
+                   "Condition":{"StringNotLike":{"aws:userid":"AROA*:sx"}}},
                   {"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/type/*",
                    "Condition":{"StringNotEquals":{"aws:PrincipalType":"AssumedRole"}}},
                   {"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/username/*",
@@ -357,8 +358,10 @@ class S3BucketPolicyEnforcementIntegrationTest {
 
     @Test
     void aBucketPolicyNamingAnAccountByItsCanonicalIdGrantsThatAccount() {
-        // A bucket policy can name an account by its S3 canonical user ID (IAM User Guide, "AWS account
-        // principals"), and Floci's canonical ID for an account is its account id.
+        // A bucket policy can name an account by its S3 canonical user ID (IAM User Guide, "AWS
+        // account principals"): the 64-hex value S3 reports as owner, which Floci derives from
+        // the account. The account ID itself still matches, for policies written when Floci
+        // reported the account as the canonical ID.
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String source = "bp-canonical-" + suffix;
         S3RequestSigner owner = sourceBucketInAccountA(source);
@@ -371,6 +374,14 @@ class S3BucketPolicyEnforcementIntegrationTest {
 
         allowGetObject(owner, source, "{\"CanonicalUser\":\"" + ACCOUNT_B + "\"}");
         assertReadAndCopy(reader, source, destination, 200);
+
+        allowGetObject(owner, source,
+                "{\"CanonicalUser\":\"" + AwsCanonicalUserId.forAccount(ACCOUNT_B) + "\"}");
+        assertReadAndCopy(reader, source, destination, 200);
+
+        allowGetObject(owner, source,
+                "{\"CanonicalUser\":\"" + AwsCanonicalUserId.forAccount(ACCOUNT_A) + "\"}");
+        assertReadAndCopy(reader, source, destination, 403);
     }
 
     /** Creates a bucket in account A holding {@code o.txt}, and returns its owner, an account-A administrator. */
@@ -406,7 +417,7 @@ class S3BucketPolicyEnforcementIntegrationTest {
                 .header("Authorization", auth(accountId, "iam")).when().post("/").then().statusCode(200);
         ExtractableResponse<Response> assumed = given().formParam("Action", "AssumeRole")
                 .formParam("RoleArn", "arn:aws:iam::" + accountId + ":role/team/" + role)
-                .formParam("RoleSessionName", "s")
+                .formParam("RoleSessionName", "sx")
                 .header("Authorization", auth(accountId, "sts")).when().post("/")
                 .then().statusCode(200).extract();
         return S3RequestSigner.signedAs(

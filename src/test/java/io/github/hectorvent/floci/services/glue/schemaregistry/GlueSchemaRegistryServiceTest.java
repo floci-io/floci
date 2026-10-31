@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -191,7 +192,7 @@ class GlueSchemaRegistryServiceTest {
     @Test
     void updateRegistryChangesDescriptionAndUpdatedTime() throws InterruptedException {
         service.createRegistry("r1", "old", null, REGION);
-        java.time.Instant beforeTime = service.getRegistry(new RegistryId("r1", null), REGION).getUpdatedTime();
+        Instant beforeTime = service.getRegistry(new RegistryId("r1", null), REGION).getUpdatedTime();
         Thread.sleep(10);
 
         Registry updated = service.updateRegistry(new RegistryId("r1", null), "new", REGION);

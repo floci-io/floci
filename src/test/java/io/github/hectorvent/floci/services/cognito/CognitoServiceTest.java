@@ -37,6 +37,9 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
+
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
@@ -45,8 +48,10 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -1154,7 +1159,7 @@ class CognitoServiceTest {
                 true,
                 true,
                 List.of(" code ", "code", "implicit", "", "implicit"),
-                new ArrayList<>(java.util.Arrays.asList(" openid ", "openid", "email", null, "email")),
+                new ArrayList<>(Arrays.asList(" openid ", "openid", "email", null, "email")),
                 null,
                 List.of("https://example.com/callback"),
                 "https://example.com/callback",
@@ -4951,7 +4956,7 @@ class CognitoServiceTest {
         // REFRESH_TOKEN_AUTH path never called the check at all, so this minted fresh tokens.
         long issuedAtMillis = System.currentTimeMillis() - Duration.ofMinutes(61).toMillis();
         String raw = pool.getId() + "|alice|" + client.getClientId() + "|" + issuedAtMillis + "|"
-                + java.util.UUID.randomUUID();
+                + UUID.randomUUID();
         String expiredRefreshToken = signRawRefreshToken(pool, raw);
 
         AwsException exception = assertThrows(AwsException.class, () ->
@@ -4993,7 +4998,7 @@ class CognitoServiceTest {
 
         // Attacker who knows the pool id, client id, and a valid username, but not the pool's secret.
         String raw = pool.getId() + "|alice|" + client.getClientId() + "|"
-                + System.currentTimeMillis() + "|" + java.util.UUID.randomUUID();
+                + System.currentTimeMillis() + "|" + UUID.randomUUID();
         String forgedToken = Base64.getEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
 
         AwsException exception = assertThrows(AwsException.class, () ->
@@ -5066,7 +5071,7 @@ class CognitoServiceTest {
 
         // Validly signed, but with a non-numeric issued-at field, must not throw an
         // uncaught NumberFormatException — it should be rejected as an invalid token.
-        String raw = pool.getId() + "|alice|" + client.getClientId() + "|not-a-number|" + java.util.UUID.randomUUID();
+        String raw = pool.getId() + "|alice|" + client.getClientId() + "|not-a-number|" + UUID.randomUUID();
         String malformedToken = signRawRefreshToken(pool, raw);
 
         AwsException exception = assertThrows(AwsException.class, () ->
@@ -5368,7 +5373,7 @@ class CognitoServiceTest {
 
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
-                        Map.of("USERNAME", "alice", "CHALLENGE_NAME", "SRP_A")));
+                        Map.of("USERNAME", "alice", "CHALLENGE_NAME", "SRP_A", "SRP_A", "ABCDEF1234567890")));
         assertEquals("InvalidUserPoolConfigurationException", ex.getErrorCode());
     }
 
@@ -5483,8 +5488,8 @@ class CognitoServiceTest {
         UserPool pool = createPoolAndUser();
         UserPoolClient client = openClient(service, pool.getId(), "c", true);
 
-        javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
-        mac.init(new javax.crypto.spec.SecretKeySpec(
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(
                 client.getClientSecret().getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
         String secretHash = Base64.getEncoder().encodeToString(
                 mac.doFinal(("alice" + client.getClientId()).getBytes(StandardCharsets.UTF_8)));
@@ -5645,7 +5650,7 @@ class CognitoServiceTest {
 
         IdentityProvider held = service.describeIdentityProvider(pool.getId(), "CopyOidc");
 
-        Map<String, String> updated = new java.util.LinkedHashMap<>(details);
+        Map<String, String> updated = new LinkedHashMap<>(details);
         updated.put("client_id", "after");
         service.updateIdentityProvider(pool.getId(), "CopyOidc", updated, null, null);
 
@@ -5971,7 +5976,7 @@ class CognitoServiceTest {
 
     private static boolean isUuid(String value) {
         try {
-            java.util.UUID.fromString(value);
+            UUID.fromString(value);
             return true;
         } catch (RuntimeException e) {
             return false;

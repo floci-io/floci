@@ -6,6 +6,7 @@ import software.amazon.awssdk.services.detective.DetectiveClient;
 import software.amazon.awssdk.services.detective.model.Account;
 import software.amazon.awssdk.services.detective.model.CreateMembersResponse;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
+import software.amazon.awssdk.services.organizations.model.AwsOrganizationsNotInUseException;
 
 import java.util.List;
 
@@ -28,7 +29,7 @@ class DetectiveOrganizationAdministrationTest {
              DetectiveClient administrator = TestFixtures.detectiveClient(ADMIN_ACCOUNT)) {
             try {
                 organizations.describeOrganization();
-            } catch (software.amazon.awssdk.services.organizations.model.AwsOrganizationsNotInUseException e) {
+            } catch (AwsOrganizationsNotInUseException e) {
                 organizations.createOrganization();
             }
 

@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -539,7 +540,7 @@ class CustomResourceProvisionerTest {
         return readEvent(captor::getValue);
     }
 
-    private JsonNode readEvent(java.util.function.Supplier<byte[]> supplier) {
+    private JsonNode readEvent(Supplier<byte[]> supplier) {
         try {
             return mapper.readTree(supplier.get());
         } catch (Exception e) {

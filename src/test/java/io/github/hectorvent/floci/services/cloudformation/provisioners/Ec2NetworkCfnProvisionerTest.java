@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
+import io.github.hectorvent.floci.services.ec2.model.NatGatewayAddress;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.Route;
 import io.github.hectorvent.floci.services.ec2.model.RouteTable;
@@ -20,6 +21,7 @@ import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 import org.mockito.invocation.Invocation;
 import org.mockito.stubbing.OngoingStubbing;
 
@@ -96,6 +98,22 @@ class Ec2NetworkCfnProvisionerTest {
         r.setResourceType(type);
         r.setAttributes(new HashMap<>());
         return r;
+    }
+
+    private static NatGateway natGateway(String natGatewayId) {
+        NatGateway nat = new NatGateway();
+        nat.setNatGatewayId(natGatewayId);
+        return nat;
+    }
+
+    /** A gateway with the one primary address CreateNatGateway gives it. */
+    private static NatGateway natGateway(String natGatewayId, String eniId, String privateIp) {
+        NatGateway nat = natGateway(natGatewayId);
+        NatGatewayAddress primary = new NatGatewayAddress();
+        primary.setNetworkInterfaceId(eniId);
+        primary.setPrivateIp(privateIp);
+        nat.getNatGatewayAddresses().add(primary);
+        return nat;
     }
 
     private static Subnet subnet() {
@@ -200,16 +218,16 @@ class Ec2NetworkCfnProvisionerTest {
 
     @Test
     void natGatewayIsCreatedPublicWithNoTags() {
-        NatGateway nat = new NatGateway();
-        nat.setNatGatewayId(NAT_ID);
-        when(ec2.createNatGateway(REGION, SUBNET_ID, ALLOC_ID, "public", List.of())).thenReturn(nat);
+        NatGateway nat = natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.10");
+        when(ec2.createNatGateway(REGION, SUBNET_ID, ALLOC_ID, "public", null, List.of())).thenReturn(nat);
         StackResource r = resource("AWS::EC2::NatGateway", "Nat");
 
         provisioner.provision(r, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID), ctx());
 
         assertEquals(NAT_ID, r.getPhysicalId());
-        assertEquals(Set.of("NatGatewayId"), r.getAttributes().keySet().stream()
+        assertEquals(Set.of("NatGatewayId", "EniId"), r.getAttributes().keySet().stream()
                 .filter(key -> !key.startsWith("__Floci")).collect(Collectors.toSet()));
+        assertEquals("eni-0123456789abcdef0", r.getAttributes().get("EniId"));
     }
 
     /**
@@ -218,10 +236,9 @@ class Ec2NetworkCfnProvisionerTest {
      */
     @Test
     void natGatewayRecordsTheSubnetAndElasticIpItUsesUnderHiddenKeys() {
-        NatGateway nat = new NatGateway();
-        nat.setNatGatewayId(NAT_ID);
+        NatGateway nat = natGateway(NAT_ID);
         nat.setSubnetId(SUBNET_ID);
-        when(ec2.createNatGateway(REGION, SUBNET_ID, ALLOC_ID, "public", List.of())).thenReturn(nat);
+        when(ec2.createNatGateway(REGION, SUBNET_ID, ALLOC_ID, "public", null, List.of())).thenReturn(nat);
         Address addr = new Address();
         addr.setAllocationId(ALLOC_ID);
         addr.setPublicIp(PUBLIC_IP);
@@ -461,19 +478,17 @@ class Ec2NetworkCfnProvisionerTest {
 
     @Test
     void aNatGatewayWithTheSameSubnetAndAllocationIsKeptAndAChangedSubnetReplacesIt() {
-        NatGateway nat = new NatGateway();
-        nat.setNatGatewayId(NAT_ID);
+        NatGateway nat = natGateway(NAT_ID);
         nat.setSubnetId(SUBNET_ID);
         nat.setAllocationId(ALLOC_ID);
         when(ec2.describeNatGateways(REGION, List.of(NAT_ID), Map.of())).thenReturn(List.of(nat));
         StackResource same = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
         provisioner.provision(same, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID), ctx(NAT_ID));
-        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any());
+        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any());
         assertEquals(NAT_ID, same.getPhysicalId());
 
-        NatGateway replacement = new NatGateway();
-        replacement.setNatGatewayId("nat-replacement");
-        when(ec2.createNatGateway(REGION, "subnet-other", ALLOC_ID, "public", List.of())).thenReturn(replacement);
+        NatGateway replacement = natGateway("nat-replacement");
+        when(ec2.createNatGateway(REGION, "subnet-other", ALLOC_ID, "public", null, List.of())).thenReturn(replacement);
         StackResource moved = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
         provisioner.provision(moved, mapper.createObjectNode().put("SubnetId", "subnet-other").put("AllocationId", ALLOC_ID), ctx(NAT_ID));
         assertEquals("nat-replacement", moved.getPhysicalId());
@@ -606,9 +621,8 @@ class Ec2NetworkCfnProvisionerTest {
 
     @Test
     void aPrivateNatGatewayNeedsNoAllocationAndAPublicOneRequiresIt() {
-        NatGateway nat = new NatGateway();
-        nat.setNatGatewayId(NAT_ID);
-        when(ec2.createNatGateway(eq(REGION), eq(SUBNET_ID), isNull(), eq("private"), any())).thenReturn(nat);
+        NatGateway nat = natGateway(NAT_ID);
+        when(ec2.createNatGateway(eq(REGION), eq(SUBNET_ID), isNull(), eq("private"), isNull(), any())).thenReturn(nat);
         StackResource r = resource("AWS::EC2::NatGateway", "Nat");
 
         provisioner.provision(r, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("ConnectivityType", "private"), ctx());
@@ -623,36 +637,112 @@ class Ec2NetworkCfnProvisionerTest {
     }
 
     @Test
+    void aRegionalNatGatewayIsRefusedRatherThanCreatedZonal() {
+        // A regional template names its VPC and no subnet; one that names a subnet as well must not
+        // quietly get a zonal gateway either.
+        for (ObjectNode props : List.of(
+                mapper.createObjectNode().put("AvailabilityMode", "regional").put("VpcId", VPC_ID),
+                mapper.createObjectNode().put("AvailabilityMode", "regional").put("SubnetId", SUBNET_ID)
+                        .put("AllocationId", ALLOC_ID))) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> provisioner.provision(resource("AWS::EC2::NatGateway", "Nat"), props, ctx()));
+            assertEquals("UnsupportedOperation", e.getErrorCode());
+        }
+        // The schema's enum is exact-case, so a value that is neither mode is invalid, not zonal.
+        AwsException invalid = assertThrows(AwsException.class, () -> provisioner.provision(resource("AWS::EC2::NatGateway", "Nat"),
+                mapper.createObjectNode().put("AvailabilityMode", "Regional").put("SubnetId", SUBNET_ID)
+                        .put("ConnectivityType", "private"), ctx()));
+        assertEquals("InvalidParameterValue", invalid.getErrorCode());
+        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aNatGatewayWithSecondaryAddressesIsRefusedRatherThanCreatedWithoutThem() {
+        ObjectNode withAllocations = mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID);
+        withAllocations.putArray("SecondaryAllocationIds").add("eipalloc-0fedcba9876543210");
+        ObjectNode withAddresses = mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("ConnectivityType", "private");
+        withAddresses.putArray("SecondaryPrivateIpAddresses").add("10.0.1.70");
+        for (ObjectNode props : List.of(withAllocations, withAddresses,
+                mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("ConnectivityType", "private")
+                        .put("SecondaryPrivateIpAddressCount", 2))) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> provisioner.provision(resource("AWS::EC2::NatGateway", "Nat"), props, ctx()));
+            assertEquals("UnsupportedOperation", e.getErrorCode());
+        }
+        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aNatGatewayIsCreatedWithThePrivateIpAddressTheTemplateNames() {
+        when(ec2.createNatGateway(REGION, SUBNET_ID, null, "private", "10.0.1.50", List.of()))
+                .thenReturn(natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50"));
+        StackResource r = resource("AWS::EC2::NatGateway", "Nat");
+
+        provisioner.provision(r, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("ConnectivityType", "private")
+                .put("PrivateIpAddress", "10.0.1.50"), ctx());
+
+        verify(ec2).createNatGateway(REGION, SUBNET_ID, null, "private", "10.0.1.50", List.of());
+        assertEquals(NAT_ID, r.getPhysicalId());
+    }
+
+    /**
+     * PrivateIpAddress is createOnly: the gateway's own address keeps it, in whatever form the
+     * template writes it, and so does a template that names none. A different address replaces it.
+     */
+    @Test
+    void aNatGatewayKeepsItsPrivateIpAddressAndAChangedOneReplacesIt() {
+        NatGateway nat = natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50");
+        nat.setSubnetId(SUBNET_ID);
+        nat.setConnectivityType("private");
+        when(ec2.describeNatGateways(REGION, List.of(NAT_ID), Map.of())).thenReturn(List.of(nat));
+        ObjectNode privateNat = mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("ConnectivityType", "private");
+        for (ObjectNode props : List.of(privateNat.deepCopy().put("PrivateIpAddress", "10.0.1.50"),
+                privateNat.deepCopy().put("PrivateIpAddress", "10.0.1.050"), privateNat)) {
+            StackResource kept = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
+            provisioner.provision(kept, props, ctx(NAT_ID));
+            assertEquals(NAT_ID, kept.getPhysicalId());
+        }
+        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any());
+
+        when(ec2.createNatGateway(REGION, SUBNET_ID, null, "private", "10.0.1.60", List.of()))
+                .thenReturn(natGateway("nat-replacement", "eni-0fedcba9876543210", "10.0.1.60"));
+        StackResource moved = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
+        provisioner.provision(moved, privateNat.deepCopy().put("PrivateIpAddress", "10.0.1.60"), ctx(NAT_ID));
+        assertEquals("nat-replacement", moved.getPhysicalId());
+        assertEquals(NAT_ID, provisioner.updateCleanupPhysicalId(moved));
+    }
+
+    @Test
     void aNatGatewayWhoseConnectivityTypeChangedIsReplaced() {
-        NatGateway nat = new NatGateway();
-        nat.setNatGatewayId(NAT_ID);
+        NatGateway nat = natGateway(NAT_ID);
         nat.setSubnetId(SUBNET_ID);
         nat.setAllocationId(ALLOC_ID);
         nat.setConnectivityType("public");
         when(ec2.describeNatGateways(REGION, List.of(NAT_ID), Map.of())).thenReturn(List.of(nat));
-        NatGateway replacement = new NatGateway();
-        replacement.setNatGatewayId("nat-private");
-        when(ec2.createNatGateway(eq(REGION), eq(SUBNET_ID), isNull(), eq("private"), any())).thenReturn(replacement);
-        StackResource r = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
+        NatGateway replacement = natGateway("nat-private", "eni-0fedcba9876543210", "10.0.1.11");
+        when(ec2.createNatGateway(eq(REGION), eq(SUBNET_ID), isNull(), eq("private"), isNull(), any())).thenReturn(replacement);
+        StackResource r = prior("AWS::EC2::NatGateway", "Nat", NAT_ID,
+                Map.of("NatGatewayId", NAT_ID, "EniId", "eni-0123456789abcdef0"));
 
         provisioner.provision(r, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("ConnectivityType", "private"), ctx(NAT_ID));
 
         assertEquals("nat-private", r.getPhysicalId());
         assertEquals(NAT_ID, provisioner.updateCleanupPhysicalId(r));
+        // The update arrives with the displaced gateway's attributes; its interface goes with it.
+        assertEquals("eni-0fedcba9876543210", r.getAttributes().get("EniId"));
     }
 
     @Test
     void natGatewayTagsGoThroughItsCreateCall() {
-        NatGateway nat = new NatGateway();
-        nat.setNatGatewayId(NAT_ID);
-        when(ec2.createNatGateway(eq(REGION), eq(SUBNET_ID), eq(ALLOC_ID), eq("public"), any())).thenReturn(nat);
+        NatGateway nat = natGateway(NAT_ID);
+        when(ec2.createNatGateway(eq(REGION), eq(SUBNET_ID), eq(ALLOC_ID), eq("public"), isNull(), any())).thenReturn(nat);
 
         provisioner.provision(resource("AWS::EC2::NatGateway", "Nat"),
                 withTags(mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID), "Name", "nat"), ctx());
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.forClass(List.class);
-        verify(ec2).createNatGateway(eq(REGION), eq(SUBNET_ID), eq(ALLOC_ID), eq("public"), tags.capture());
+        verify(ec2).createNatGateway(eq(REGION), eq(SUBNET_ID), eq(ALLOC_ID), eq("public"), isNull(), tags.capture());
         assertEquals(List.of("Name=nat"), pairs(tags.getValue()));
         verify(ec2, never()).createTags(any(), any(), any());
     }
@@ -692,11 +782,11 @@ class Ec2NetworkCfnProvisionerTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> removed = ArgumentCaptor.forClass(List.class);
-        verify(ec2, org.mockito.Mockito.times(2)).deleteTags(eq(REGION), eq(List.of(RTB_ID)), removed.capture());
+        verify(ec2, Mockito.times(2)).deleteTags(eq(REGION), eq(List.of(RTB_ID)), removed.capture());
         assertEquals(List.of("env=null"), pairs(removed.getAllValues().get(1)), "the key the update added is removed");
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> written = ArgumentCaptor.forClass(List.class);
-        verify(ec2, org.mockito.Mockito.times(2)).createTags(eq(REGION), eq(List.of(RTB_ID)), written.capture());
+        verify(ec2, Mockito.times(2)).createTags(eq(REGION), eq(List.of(RTB_ID)), written.capture());
         assertEquals(List.of("Name=old", "team=net"), pairs(written.getAllValues().get(1)), "the prior tags are written back");
         assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
     }
@@ -765,7 +855,7 @@ class Ec2NetworkCfnProvisionerTest {
         verify(ec2, never()).createRouteTable(any(), any());
         verify(ec2, never()).associateRouteTable(any(), any(), any());
         verify(ec2, never()).createRoute(any(), any(), any(), any(), any(), any(), any(), any(), any());
-        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any());
+        verify(ec2, never()).createNatGateway(any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -788,7 +878,7 @@ class Ec2NetworkCfnProvisionerTest {
         provisioner.provision(updated, mapper.createObjectNode().put("RouteTableId", RTB_ID)
                 .put("DestinationCidrBlock", "10.40.0.18/24").put("GatewayId", IGW_ID), ctx(RTB_ID + "|10.40.0.0/24"));
         verify(ec2).replaceRoute(REGION, RTB_ID, "10.40.0.18/24", null, null, IGW_ID, null, null);
-        verify(ec2, org.mockito.Mockito.times(1)).createRoute(any(), any(), any(), any(), any(), any(), any(), any(), any());
+        verify(ec2, Mockito.times(1)).createRoute(any(), any(), any(), any(), any(), any(), any(), any(), any());
         assertEquals(RTB_ID + "|10.40.0.0/24", updated.getPhysicalId());
     }
 
@@ -872,7 +962,7 @@ class Ec2NetworkCfnProvisionerTest {
         ReplacementCleanup.mergeDisplaced(previous, r);
         assertEquals("subnet-replacement", provisioner.updateCleanupPhysicalId(previous), "the replacement stays owed a delete");
         provisioner.completeUpdate(previous);
-        verify(ec2, org.mockito.Mockito.times(2)).deleteSubnet(REGION, "subnet-replacement");
+        verify(ec2, Mockito.times(2)).deleteSubnet(REGION, "subnet-replacement");
     }
 
     @Test
@@ -930,11 +1020,11 @@ class Ec2NetworkCfnProvisionerTest {
         assertEquals("TagLimitExceeded", e.getErrorCode());
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> written = ArgumentCaptor.forClass(List.class);
-        verify(ec2, org.mockito.Mockito.times(2)).createTags(eq(REGION), eq(List.of(RTB_ID)), written.capture());
+        verify(ec2, Mockito.times(2)).createTags(eq(REGION), eq(List.of(RTB_ID)), written.capture());
         assertEquals(List.of("Name=old", "team=net"), pairs(written.getAllValues().get(1)), "the prior tags are put back");
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> removed = ArgumentCaptor.forClass(List.class);
-        verify(ec2, org.mockito.Mockito.times(2)).deleteTags(eq(REGION), eq(List.of(RTB_ID)), removed.capture());
+        verify(ec2, Mockito.times(2)).deleteTags(eq(REGION), eq(List.of(RTB_ID)), removed.capture());
         assertEquals(List.of("env=null"), pairs(removed.getAllValues().get(1)), "the key the failed update added is removed again");
         assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
         assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR), "a successful restore reports nothing");
@@ -956,11 +1046,11 @@ class Ec2NetworkCfnProvisionerTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> written = ArgumentCaptor.forClass(List.class);
-        verify(ec2, org.mockito.Mockito.times(2)).createTags(eq(REGION), eq(List.of(SUBNET_ID)), written.capture());
+        verify(ec2, Mockito.times(2)).createTags(eq(REGION), eq(List.of(SUBNET_ID)), written.capture());
         assertEquals(List.of("Name=old"), pairs(written.getAllValues().get(1)));
         // the snapshot recorded the prior value before the flip was attempted, so the restore writes it back
         verify(ec2).modifySubnetAttribute(REGION, SUBNET_ID, "mapPublicIpOnLaunch", "false");
-        verify(ec2, org.mockito.Mockito.times(2)).modifySubnetAttribute(any(), any(), any(), any());
+        verify(ec2, Mockito.times(2)).modifySubnetAttribute(any(), any(), any(), any());
         verify(ec2, never()).deleteSubnet(any(), any());
     }
 
@@ -987,8 +1077,7 @@ class Ec2NetworkCfnProvisionerTest {
 
     @Test
     void aFailedNatGatewayTagChangePutsThePriorTagsBack() {
-        NatGateway nat = new NatGateway();
-        nat.setNatGatewayId(NAT_ID);
+        NatGateway nat = natGateway(NAT_ID);
         nat.setSubnetId(SUBNET_ID);
         nat.setAllocationId(ALLOC_ID);
         nat.setTags(List.of(new Tag("Name", "old")));
@@ -1002,7 +1091,7 @@ class Ec2NetworkCfnProvisionerTest {
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> written = ArgumentCaptor.forClass(List.class);
-        verify(ec2, org.mockito.Mockito.times(2)).createTags(eq(REGION), eq(List.of(NAT_ID)), written.capture());
+        verify(ec2, Mockito.times(2)).createTags(eq(REGION), eq(List.of(NAT_ID)), written.capture());
         assertEquals(List.of("Name=old"), pairs(written.getAllValues().get(1)));
         verify(ec2, never()).deleteNatGateway(any(), any());
     }
@@ -1200,14 +1289,31 @@ class Ec2NetworkCfnProvisionerTest {
         describesPrefixList(prefixList(1, 2, OFFICE));
         StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
 
-        provisioner.provision(r, prefixListProps(2, "192.0.2.19/24", "office"), ctx(PREFIX_LIST_ID));
+        provisioner.provision(r, prefixListProps(2, "192.0.2.0/24", "office"), ctx(PREFIX_LIST_ID));
 
         assertEquals(PREFIX_LIST_ID, r.getPhysicalId());
         assertEquals("1", r.getAttributes().get("Version"));
         assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR),
-                "a CIDR written with host bits is the same block, not a change");
+                "an unchanged canonical entry needs no update");
         verify(ec2, never()).modifyManagedPrefixList(any(), any(), any(), any(), any(), any(), any());
         verify(ec2, never()).createManagedPrefixList(any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void invalidUpdateEntriesAreRejectedBeforeDiffingOrTags() {
+        describesPrefixList(prefixList(1, 2, OFFICE));
+        StackResource r = prior("AWS::EC2::PrefixList", "Firewall", PREFIX_LIST_ID, Map.of("PrefixListId", PREFIX_LIST_ID));
+        doThrow(new AwsException("InvalidParameterValue", "invalid CIDR", 400))
+                .when(ec2).validatePrefixListEntry(any(), eq("IPv4"));
+
+        AwsException error = assertThrows(AwsException.class, () -> provisioner.provision(r,
+                withTags(prefixListProps(2, "192.0.2.19/24", "office"), "team", "changed"), ctx(PREFIX_LIST_ID)));
+
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertFalse(r.getAttributes().containsKey(Ec2NetworkCfnProvisioner.IN_PLACE_PRIOR_ATTR));
+        verify(ec2, never()).modifyManagedPrefixList(any(), any(), any(), any(), any(), any(), any());
+        verify(ec2, never()).createTags(any(), any(), any());
+        verify(ec2, never()).deleteTags(any(), any(), any());
     }
 
     @Test

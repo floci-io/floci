@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.ListenBacklog;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
@@ -35,6 +36,15 @@ import java.util.function.Consumer;
  * as a host sibling (created through the mounted Docker socket, exactly like the instance
  * container and its SSH binding). The sidecar publishes an allocated host port and forwards
  * it to the instance container's IP, so {@code curl localhost:<hostPort>} reaches the app.
+ *
+ * <p>Both socat addresses run with {@code nodelay} (TCP_NODELAY). With Nagle's algorithm left
+ * on, socat holds a client's second small write until the first is acknowledged, and a peer
+ * with delayed ACK stretches that to roughly 40 ms on the Docker network, so a request the
+ * client sends as two writes pays a visible stall on every round trip.
+ *
+ * <p>The listen address also sets {@code backlog} to {@link ListenBacklog#ACCEPT}, since
+ * socat's default accept queue of 5 silently drops the final ACK of a burst's overflow
+ * connections, which the client then pays for in retransmit stalls or a reset.
  *
  * <p>Because each forward is a fresh container, ports opened <em>after</em> launch via
  * {@code authorize-security-group-ingress} are handled the same way as ports present at
@@ -206,8 +216,8 @@ public class Ec2PortForwardManager {
                     .withName(name)
                     .withEntrypoint(List.of("socat"))
                     .withCmd(List.of(
-                            "TCP-LISTEN:" + appPort + ",fork,reuseaddr",
-                            "TCP:" + target.ip() + ":" + appPort))
+                            "TCP-LISTEN:" + appPort + ",fork,reuseaddr,nodelay,backlog=" + ListenBacklog.ACCEPT,
+                            "TCP:" + target.ip() + ":" + appPort + ",nodelay"))
                     .withPortBinding(appPort, hostPort)
                     .withLogRotation();
             if (target.network() != null) {

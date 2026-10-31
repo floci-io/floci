@@ -45,6 +45,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -897,6 +898,162 @@ class CodeArtifactNpmDataPlaneTest {
 
         assertEquals(409, response.statusCode());
         assertEquals(true, upstreamReceivedPut.get());
+    }
+
+    /**
+     * Closes 10-NATIVE-STATUS for npm: a plain {@code npm install} download of a tarball whose
+     * version this service has Archived must 404 without ever reaching Verdaccio, the same way a
+     * publish to that coordinate is already refused above.
+     */
+    @Test
+    void aTarballDownloadOfAnArchivedVersionIsBlockedWithoutForwarding() throws Exception {
+        AtomicReference<Boolean> upstreamReceivedGet = new AtomicReference<>(false);
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> {
+                    if (request.method() == HttpMethod.GET) {
+                        upstreamReceivedGet.set(true);
+                    }
+                    request.response().setStatusCode(200).end("tarball bytes");
+                })
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        doReturn(Map.of("1.0.0", new Object())).when(service).containerBackedOverridesForPackage(
+                eq("000000000000"), eq("us-east-1"), eq(DOMAIN), eq(REPOSITORY), eq("npm"), isNull(),
+                eq("my-pkg"));
+        doThrow(new AwsException("ResourceNotFoundException", "Package version '1.0.0' was not found.", 404))
+                .when(service).requireContainerBackedVersionDownloadable(eq("000000000000"), eq("us-east-1"),
+                        eq(DOMAIN), eq(REPOSITORY), eq("npm"), isNull(), eq("my-pkg"), eq("1.0.0"),
+                        eq(NPM_REPOSITORY_ID));
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        when(verdaccioClient.versionForTarballFilename(eq(NPM_REPOSITORY_ID), eq(DOMAIN), eq(REPOSITORY), isNull(),
+                eq("my-pkg"), eq("my-pkg-1.0.0.tgz"))).thenReturn(Optional.of("1.0.0"));
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg/-/my-pkg-1.0.0.tgz",
+                "good-token");
+
+        assertEquals(404, response.statusCode());
+        assertEquals(false, upstreamReceivedGet.get());
+    }
+
+    /**
+     * Raised by Greptile's review: a real npm {@code dist.tarball} filename is not required to
+     * embed its version at all, so this must resolve the real coordinate against Verdaccio's own
+     * packument, not by stripping a {@code <packageName>-<version>.tgz} shape out of the filename
+     * text. A tarball literally named {@code bundle.tgz} for version {@code 1.0.0} must still be
+     * blocked once that version is Archived.
+     */
+    @Test
+    void aTarballDownloadWhoseFilenameDoesNotEmbedItsVersionIsStillBlockedWhenArchived() throws Exception {
+        AtomicReference<Boolean> upstreamReceivedGet = new AtomicReference<>(false);
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> {
+                    if (request.method() == HttpMethod.GET) {
+                        upstreamReceivedGet.set(true);
+                    }
+                    request.response().setStatusCode(200).end("tarball bytes");
+                })
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        doReturn(Map.of("1.0.0", new Object())).when(service).containerBackedOverridesForPackage(
+                eq("000000000000"), eq("us-east-1"), eq(DOMAIN), eq(REPOSITORY), eq("npm"), isNull(),
+                eq("my-pkg"));
+        doThrow(new AwsException("ResourceNotFoundException", "Package version '1.0.0' was not found.", 404))
+                .when(service).requireContainerBackedVersionDownloadable(eq("000000000000"), eq("us-east-1"),
+                        eq(DOMAIN), eq(REPOSITORY), eq("npm"), isNull(), eq("my-pkg"), eq("1.0.0"),
+                        eq(NPM_REPOSITORY_ID));
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        when(verdaccioClient.versionForTarballFilename(eq(NPM_REPOSITORY_ID), eq(DOMAIN), eq(REPOSITORY), isNull(),
+                eq("my-pkg"), eq("bundle.tgz"))).thenReturn(Optional.of("1.0.0"));
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg/-/bundle.tgz",
+                "good-token");
+
+        assertEquals(404, response.statusCode());
+        assertEquals(false, upstreamReceivedGet.get());
+    }
+
+    /**
+     * The scope has to be decoded off the path and passed through as the namespace before the
+     * check even runs, the same {@code %2F}/{@code %2f} decoding {@link
+     * CodeArtifactNpmDataPlane#packageIdentityFromPath} already does for a publish; an
+     * unarchived version still proxies through once the check passes.
+     */
+    @Test
+    void aTarballDownloadOfAScopedPackageParsesTheNamespaceBeforeCheckingTheOverride() throws Exception {
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> request.response().setStatusCode(200).end("tarball bytes"))
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        doReturn(Map.of("1.0.0", new Object())).when(service).containerBackedOverridesForPackage(
+                eq("000000000000"), eq("us-east-1"), eq(DOMAIN), eq(REPOSITORY), eq("npm"), eq("myscope"),
+                eq("my-pkg"));
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        when(verdaccioClient.versionForTarballFilename(eq(NPM_REPOSITORY_ID), eq(DOMAIN), eq(REPOSITORY),
+                eq("myscope"), eq("my-pkg"), eq("my-pkg-1.0.0.tgz"))).thenReturn(Optional.of("1.0.0"));
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY
+                + "/@myscope%2fmy-pkg/-/my-pkg-1.0.0.tgz", "good-token");
+
+        assertEquals(200, response.statusCode());
+        verify(service).requireContainerBackedVersionDownloadable(eq("000000000000"), eq("us-east-1"), eq(DOMAIN),
+                eq(REPOSITORY), eq("npm"), eq("myscope"), eq("my-pkg"), eq("1.0.0"), eq(NPM_REPOSITORY_ID));
+    }
+
+    /**
+     * Guards against the marker detection over-triggering: a plain packument fetch (no {@code /-/}
+     * in the path at all) must never reach the download guard, the same way {@link
+     * CodeArtifactNpmDataPlane#nativeUnpublishTarget} only matches its own {@code /-rev/} marker
+     * and leaves every other shape alone.
+     */
+    @Test
+    void aPlainPackageMetadataGetNeverConsultsTheDownloadGuard() throws Exception {
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> request.response().setStatusCode(200).end("{}"))
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token");
+
+        assertEquals(200, response.statusCode());
+        verify(service, never()).requireContainerBackedVersionDownloadable(any(), any(), any(), any(), any(), any(),
+                any(), any(), any());
     }
 
     private void startDataPlane(CodeArtifactService service, VerdaccioSidecarClient verdaccioClient)

@@ -266,7 +266,7 @@ public class SsoAdminJsonHandler {
         return Response.ok(response).build();
     }
 
-    private ObjectNode trustedTokenIssuerMetadataNode(io.github.hectorvent.floci.services.ssoadmin.model.TrustedTokenIssuer issuer) {
+    private ObjectNode trustedTokenIssuerMetadataNode(TrustedTokenIssuer issuer) {
         ObjectNode response = mapper.createObjectNode();
         response.put("Name", issuer.name());
         response.put("TrustedTokenIssuerArn", issuer.trustedTokenIssuerArn());
@@ -304,7 +304,7 @@ public class SsoAdminJsonHandler {
         return Response.ok(response).build();
     }
 
-    private ObjectNode regionNode(io.github.hectorvent.floci.services.ssoadmin.model.RegionMetadata region) {
+    private ObjectNode regionNode(RegionMetadata region) {
         ObjectNode response = mapper.createObjectNode();
         response.put("AddedDate", service.regionAddedDateEpochSeconds(region));
         response.put("IsPrimaryRegion", region.primaryRegion());

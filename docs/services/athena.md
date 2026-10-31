@@ -33,6 +33,23 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 | `DeleteWorkGroup` | Deletes a workgroup |
 <!-- floci:actions:end -->
 
+`ListDataCatalogs` accepts `MaxResults` from 2 to 50. Floci uses 50 when it is
+omitted, since the API reference does not document a default. The built-in
+`AwsDataCatalog` stays first, followed by registered catalogs in name order.
+Pass the opaque `NextToken` to continue; final pages omit it. Tokens are scoped
+to the action, caller account, and request region and remain resumable after a
+cursor catalog is deleted. Malformed tokens, tokens outside the 1-to-1024
+character range, and invalid page sizes return `InvalidRequestException`.
+
+`ListQueryExecutions` returns at most `MaxResults` IDs from the requested
+`WorkGroup`, defaulting to `primary`. Floci uses a bounded page of 50 when the
+page size is omitted, null, or zero; the API reference permits zero but does not
+specify its behavior or a default. Positive page sizes must not exceed 50.
+IDs are ordered deterministically, and the final page omits `NextToken`.
+Continuation tokens are scoped to the action, account, region, and workgroup;
+invalid sizes, malformed tokens, and tokens outside 1 to 1024 characters return
+`InvalidRequestException`.
+
 ## How it works
 
 1. **Lazy sidecar start**: On the first `StartQueryExecution` call, Floci checks for a local `floci/floci-duck:latest` image and starts the container. Subsequent queries reuse the running container.

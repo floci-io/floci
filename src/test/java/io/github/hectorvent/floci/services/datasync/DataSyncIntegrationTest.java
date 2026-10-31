@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.datasync;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -62,7 +63,7 @@ class DataSyncIntegrationTest {
                 .extract().path("LocationArn");
     }
 
-    private static io.restassured.response.Response describeLocation(String action, String locationArn) {
+    private static Response describeLocation(String action, String locationArn) {
         return awsAction(TARGET, action, "{\"LocationArn\": \"" + locationArn + "\"}");
     }
 

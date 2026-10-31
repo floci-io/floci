@@ -53,6 +53,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -160,14 +161,31 @@ public class CodeArtifactService implements Resettable {
     public record AssetSummary(String name, long size, Map<String, String> hashes) {}
     public record PackageVersionAssetsListResult(String format, String namespace, String packageName,
             String version, String versionRevision, List<AssetSummary> assets, String nextToken) {}
-    public record PackageVersionSummary(String version, String revision, String status) {}
+    public record PackageVersionSummary(String version, String revision, String status, String originType,
+            String externalConnectionName) {}
     public record ListPackageVersionsResult(String format, String namespace, String packageName,
             String defaultDisplayVersion, List<PackageVersionSummary> versions, String nextToken) {}
+    public record PackageSummaryEntry(String format, String namespace, String packageName,
+            String publishRestriction, String upstreamRestriction) {}
+    public record ListPackagesResult(List<PackageSummaryEntry> packages, String nextToken) {}
+    /** Every package a repository holds, regardless of format, before origin-restriction filtering
+     * and pagination are applied in {@link #listPackages}. */
+    private record PackageCoordinate(String format, String namespace, String packageName) {}
+
+    /**
+     * {@link #allPackagesInRepository}'s own two outputs, kept together so {@link #listPackages}
+     * never has to re-derive one from the other: {@code coordinates} is already deduplicated and
+     * normalized, and {@code originConfigsByCoordinate} is keyed by that exact same normalized
+     * coordinate, resolved from the one scan of {@code packageOriginConfigs} that method already
+     * does for its own union.
+     */
+    private record PackagesWithOriginConfigs(List<PackageCoordinate> coordinates,
+            Map<PackageCoordinate, PackageOriginConfig> originConfigsByCoordinate) {}
     /** Internal working shape shared by the generic and container-backed branches of {@link
      * #listPackageVersions} before status/origin filtering and pagination are applied.
      * {@code publishedEpochSeconds} is {@code null} when nothing is known to order by. */
     private record PackageVersionEntry(String version, String revision, String status,
-            Long publishedEpochSeconds) {}
+            Long publishedEpochSeconds, String originType, String externalConnectionName) {}
     public record AuthorizationToken(String token, long expirationEpochSeconds) {}
     public record AuthorizationTokenScope(String owner, String region) {}
     private record AuthorizationTokenRecord(String owner, String region, String domain, Instant expiration) {}
@@ -193,6 +211,11 @@ public class CodeArtifactService implements Resettable {
     // currentContainerBackedPackageFence's own javadoc for what this protects against.
     private final ConcurrentHashMap<String, Long> containerBackedPackageDeletionFence = new ConcurrentHashMap<>();
     private final AtomicLong containerBackedPackageDeletionCounter = new AtomicLong();
+    // Same race guard, scoped to one version instead of the whole package: see
+    // currentContainerBackedVersionFence's own javadoc. Shares containerBackedPackageDeletionCounter
+    // rather than a counter of its own, so a snapshot that compares equal at write time still proves
+    // neither this version nor the whole package was removed in between, with a single scalar.
+    private final ConcurrentHashMap<String, Long> containerBackedVersionDeletionFence = new ConcurrentHashMap<>();
     // Maven, npm, pypi, and nuget publishes go straight to their own sidecar and never create a
     // packageVersions record (see CONTAINER_BACKED_FORMATS), so DescribeDomain's assetSizeBytes
     // can't see their bytes by summing packageVersions the way it does for generic. Each format's
@@ -250,6 +273,58 @@ public class CodeArtifactService implements Resettable {
     // entry for no caller that would ever need it.
     private final ConcurrentHashMap<String, Set<String>> containerBackedOverriddenPackagesByRepository =
             new ConcurrentHashMap<>();
+    // Which public:maven-* external connection a Maven package version was first retained from,
+    // keyed like packageVersionKey (format fixed to "maven"). Claimed atomically, once per
+    // version (see claimMavenRetainedVersionOrigin's own javadoc): AWS's own documented "checking
+    // asset origins" rule is that a retained version's origin never changes once set, even if the
+    // repository's external connection is later swapped for a different one, so later assets of
+    // the same version fetched under a different connection must be rejected rather than mixed in.
+    // Removed on DeletePackageVersions/DeletePackage/DeleteRepository, the same way every other
+    // per-version/per-package/per-repository bookkeeping map here already is, so a coordinate
+    // recreated under the same name never inherits a dead claim it would otherwise be stuck
+    // behind. In memory only, like every other container-backed bookkeeping map here: the real
+    // retained bytes live in the Reposilite container itself, which has no attached volume and
+    // does not survive a Floci restart either, so persisting this alone would leave it answering
+    // for a version that, after a restart, no longer exists anywhere real.
+    //
+    // A plain name-to-connection map would let one in-flight attempt's own cleanup (nothing it
+    // fetched panned out) remove a claim a second, still-in-flight attempt under the same
+    // connection is still relying on, opening a window for a third attempt to claim the version
+    // under a newly-swapped connection while the first is still mid-fetch. Each entry instead
+    // counts how many attempts currently hold it and whether any of them ever actually wrote real
+    // content (see MavenRetainedVersionOriginClaim's own javadoc): the claim is only ever removed
+    // once no attempt is left holding it and nothing was ever confirmed under it.
+    private final ConcurrentHashMap<String, MavenRetainedVersionOriginClaim> mavenRetainedVersionOriginConnections =
+            new ConcurrentHashMap<>();
+
+    // inFlightAttempts alone only protects one claim episode against its own sibling attempts.
+    // If that whole episode is torn down (every attempt finishes, or the package/version is
+    // deleted and the map entry removed outright) and a brand new episode is then claimed under
+    // the exact same connection name, a stray finish call from the old episode, arriving late, is
+    // indistinguishable from a legitimate finish for the new one: same key, same connection name.
+    // episodeId, assigned fresh only when a claim is created from nothing, gives every episode
+    // its own identity a same-named replacement can never share, so a finish call can only ever
+    // affect the exact episode it was issued for.
+    private final AtomicLong mavenClaimEpisodeCounter = new AtomicLong();
+
+    /**
+     * One version's current claim on {@code externalConnectionName}, tagged with {@code
+     * episodeId}: {@code inFlightAttempts} counts how many calls into {@link
+     * #claimMavenRetainedVersionOrigin} for this exact version and episode have not yet reached
+     * their own matching {@link #finishMavenRetainedVersionOriginAttempt} call, and {@code
+     * confirmed} is {@code true} once any one of them actually wrote real content under this
+     * claim. A claim is only ever removed by {@link #finishMavenRetainedVersionOriginAttempt}
+     * once {@code inFlightAttempts} reaches 0 <em>and</em> {@code confirmed} is still {@code
+     * false}: as long as either holds, the connection stays reserved, so a concurrent attempt
+     * under a different connection is refused outright rather than slipping in once a sibling
+     * attempt's own cleanup happens to run first. {@code episodeId} is assigned fresh only when a
+     * claim is created from nothing (never on an increment of an existing one), so a finish call
+     * for an episode already torn down and replaced by a new one under the same connection name
+     * can never be mistaken for a finish of that new episode (see the field's own javadoc above).
+     */
+    private record MavenRetainedVersionOriginClaim(String externalConnectionName, int inFlightAttempts,
+            boolean confirmed, long episodeId) {
+    }
 
     /**
      * {@code publishedEpochSeconds} is carried forward from whichever value was already true for
@@ -555,6 +630,14 @@ public class CodeArtifactService implements Resettable {
                 .filter(k -> k.startsWith(ownerScopedOriginPrefix))
                 .toList()
                 .forEach(containerBackedOverriddenPackagesByRepository::remove);
+        // Same reasoning, same prefix: a Maven repository recreated under this same name must
+        // not inherit a previous retention's claimed origin for a version with the same
+        // coordinates, or a real, freshly configured external connection on the new repository
+        // would be wrongly refused for mixing with a connection that belonged to the deleted one.
+        mavenRetainedVersionOriginConnections.keySet().stream()
+                .filter(k -> k.startsWith(ownerScopedOriginPrefix))
+                .toList()
+                .forEach(mavenRetainedVersionOriginConnections::remove);
         return r;
     }
 
@@ -610,9 +693,9 @@ public class CodeArtifactService implements Resettable {
      * {@link #ensureFormatContainerId} plus {@link RepositorySidecarManager#beginUse}, both under
      * this same {@code synchronized} monitor {@link #deleteRepository} also holds for its own
      * sidecar cleanup, so a delete can never run its cleanup in the gap between resolving
-     * {@code repoId} and registering use of it. Only {@link #listPackageVersions} needs this: it
-     * is the one caller of {@link #ensureFormatContainerId} whose sidecar call is bracketed by
-     * {@code beginUse}/{@code endUse} at all.
+     * {@code repoId} and registering use of it. Used by every caller of {@link
+     * #ensureFormatContainerId} whose sidecar call is bracketed by {@code beginUse}/{@code
+     * endUse} at all: {@link #listPackageVersions} and {@link #listPackages}.
      */
     private synchronized String resolveContainerIdAndBeginUse(String format, String region, String domain,
             String domainOwner, String repository, RepositorySidecarManager manager) {
@@ -1065,9 +1148,12 @@ public class CodeArtifactService implements Resettable {
      *
      * <p>{@code sortBy=PUBLISHED_TIME}, the only value {@code PackageVersionSortType} has, is
      * always applied (most recently published first) regardless of whether the caller passes it:
-     * there is no other sort mode for an omitted value to mean instead. {@code originType} other
-     * than {@code INTERNAL} always answers empty: Floci has no external-connection ingestion for
-     * any format, so nothing it ever lists is {@code EXTERNAL} or {@code UNKNOWN}.
+     * there is no other sort mode for an omitted value to mean instead. {@code originType}
+     * filters against each version's own real origin ({@link #versionOriginType}): {@code
+     * EXTERNAL} for a Maven version this service's own records show was retained from a {@code
+     * public:maven-*} external connection, {@code INTERNAL} for every other version, and nothing
+     * ever answers {@code UNKNOWN} at all, since every version this service tracks resolves to
+     * one of the other two.
      *
      * <p>{@code defaultDisplayVersion} is computed over every {@code Published} version
      * regardless of the {@code status}/{@code originType} filters applied to the returned {@code
@@ -1129,18 +1215,26 @@ public class CodeArtifactService implements Resettable {
                     .collect(Collectors.toSet());
             Stream<PackageVersionEntry> fromSidecar = raw.stream().map(v -> {
                 PackageVersionStatusOverride override = overridesByVersion.get(v.version());
+                VersionOrigin origin = versionOrigin(region, domain, owner, repository, format, namespace,
+                        packageName, v.version());
                 if (override != null) {
                     return new PackageVersionEntry(v.version(), override.revision(), override.status(),
-                            override.publishedEpochSeconds());
+                            override.publishedEpochSeconds(), origin.originType(), origin.externalConnectionName());
                 }
                 return new PackageVersionEntry(v.version(),
                         synthesizeContainerBackedRevision(format, repoId, namespace, packageName, v.version()),
-                        "Published", v.publishedTime() == null ? null : v.publishedTime().getEpochSecond());
+                        "Published", v.publishedTime() == null ? null : v.publishedTime().getEpochSecond(),
+                        origin.originType(), origin.externalConnectionName());
             });
             Stream<PackageVersionEntry> disposedOnly = overridesByVersion.entrySet().stream()
                     .filter(e -> !coveredVersions.contains(e.getKey()))
-                    .map(e -> new PackageVersionEntry(e.getKey(), e.getValue().revision(), e.getValue().status(),
-                            e.getValue().publishedEpochSeconds()));
+                    .map(e -> {
+                        VersionOrigin origin = versionOrigin(region, domain, owner, repository, format, namespace,
+                                packageName, e.getKey());
+                        return new PackageVersionEntry(e.getKey(), e.getValue().revision(), e.getValue().status(),
+                                e.getValue().publishedEpochSeconds(), origin.originType(),
+                                origin.externalConnectionName());
+                    });
             entries = Stream.concat(fromSidecar, disposedOnly).toList();
             preferredDisplayVersion = manager.preferredDisplayVersion(repoId, domain, repository, namespace,
                     packageName).orElse(null);
@@ -1152,7 +1246,7 @@ public class CodeArtifactService implements Resettable {
             }
             entries = versions.stream()
                     .map(pv -> new PackageVersionEntry(pv.getVersion(), pv.getRevision(), pv.getStatus(),
-                            pv.getPublishedTime()))
+                            pv.getPublishedTime(), "INTERNAL", null))
                     .toList();
         }
 
@@ -1163,8 +1257,8 @@ public class CodeArtifactService implements Resettable {
                 ? preferredVersion
                 : mostRecentlyPublishedVersion(entries);
 
-        List<PackageVersionEntry> matchingOrigin = originType != null && !"INTERNAL".equals(originType)
-                ? List.of()
+        List<PackageVersionEntry> matchingOrigin = originType != null
+                ? entries.stream().filter(e -> originType.equals(e.originType())).toList()
                 : entries;
         List<PackageVersionEntry> filtered = status != null
                 ? matchingOrigin.stream().filter(e -> status.equals(e.status())).toList()
@@ -1176,7 +1270,8 @@ public class CodeArtifactService implements Resettable {
                 CodeArtifactService::packageVersionSortCursor, maxResults, nextToken, 50, 1000,
                 "ValidationException");
         List<PackageVersionSummary> summaries = page.items().stream()
-                .map(e -> new PackageVersionSummary(e.version(), e.revision(), e.status()))
+                .map(e -> new PackageVersionSummary(e.version(), e.revision(), e.status(), e.originType(),
+                        e.externalConnectionName()))
                 .toList();
         return new ListPackageVersionsResult(format, namespace, packageName, defaultDisplayVersion, summaries,
                 page.nextToken());
@@ -1297,6 +1392,286 @@ public class CodeArtifactService implements Resettable {
         }
         return applyPackageVersionStatusChange(region, domain, domainOwner, repository, format, namespace,
                 packageName, "disposing", versions, versionRevisions, expectedStatus, "Disposed", true);
+    }
+
+    /**
+     * Permanently removes one or more versions of a package, every real asset included. Confirmed
+     * against the wire model and the User Guide rather than assumed from the shared {@code
+     * PackageVersionError} enum alone, the same discipline {@link #disposePackageVersions}'s own
+     * javadoc used:
+     * <ul>
+     * <li>{@code DeletePackageVersionsRequest} has no {@code versionRevisions} field at all
+     * (confirmed directly against {@code service-2.json}'s member list), only a single {@code
+     * expectedStatus} applied to the whole batch. Unlike {@link #updatePackageVersionsStatus}/
+     * {@link #disposePackageVersions}, this can never fail {@code MISMATCHED_REVISION}.
+     * <li>{@code expectedStatus} reuses the full, unrestricted {@code PackageVersionStatus} shape
+     * (confirmed against the wire model: unlike {@code targetStatus}, it is not narrowed to its
+     * own request-specific enum the way {@link #UPDATE_EXPECTED_STATUSES}/{@link
+     * #DISPOSE_EXPECTED_STATUSES} are), so every one of the six real status values is accepted.
+     * <li>Deleting is explicitly documented as allowed from every status, {@code Disposed}
+     * included: "the only action that can be taken on a package version that has been disposed is
+     * for it to be deleted." This never reuses {@link #checkStatusTransitionAllowed}, whose
+     * Disposed-blocks-further-change rule is specific to {@link #updatePackageVersionsStatus}/
+     * {@link #disposePackageVersions} and would otherwise wrongly reject exactly the one case AWS
+     * says this action must accept.
+     * <li>Unlike {@link #disposePackageVersions}, which keeps a tombstone record so {@link
+     * #describePackageVersion} can keep answering {@code Disposed}, a deleted version is
+     * documented as "no longer in the repository" at all, the same as one that was never
+     * published. {@link #describePackageVersion}/{@link #getPackageVersionAsset} must 404 on it
+     * afterward, and the freed coordinate can be freely republished (unlike Archived/Disposed,
+     * which {@link #publishPackageVersion}'s own check blocks).
+     * <li>The whole call is still all-or-nothing, the same documented behavior {@link
+     * #disposePackageVersions} shares: every version that would otherwise have succeeded is
+     * reported {@code SKIPPED} rather than partially applied.
+     * </ul>
+     *
+     * <p>{@code synchronized} for the same reason every other package-mutating method here is.
+     */
+    public synchronized PackageVersionStatusChangeResult deletePackageVersions(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName,
+            List<String> versions, String expectedStatus) {
+        validatePackageCoordinates(format, namespace, packageName, "deleting versions of");
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        if (expectedStatus != null && !PACKAGE_VERSION_STATUSES.contains(expectedStatus)) {
+            throw validation("expectedStatus must be one of " + PACKAGE_VERSION_STATUSES + ".");
+        }
+        if (versions == null || versions.isEmpty()) {
+            throw validation("versions is required and must specify at least one version.");
+        }
+        if (versions.size() > MAX_PACKAGE_VERSIONS_PER_BATCH_CALL) {
+            throw validation("A single call can process at most " + MAX_PACKAGE_VERSIONS_PER_BATCH_CALL
+                    + " versions.");
+        }
+        List<String> requestedVersions = List.copyOf(new LinkedHashSet<>(versions));
+        for (String version : requestedVersions) {
+            validatePackageToken("packageVersion", version);
+        }
+        String owner = effectiveOwner(domainOwner);
+        requireRepository(owner, repositoryKey(region, domain, repository), repository);
+
+        if (CONTAINER_BACKED_FORMATS.contains(format)) {
+            return deleteContainerBackedPackageVersions(region, domain, owner, repository, format, namespace,
+                    packageName, requestedVersions, expectedStatus);
+        }
+        return deleteGenericPackageVersions(region, domain, owner, repository, format, namespace, packageName,
+                requestedVersions, expectedStatus);
+    }
+
+    /**
+     * The one check shared by every requested version in {@link #deletePackageVersions}, for
+     * either storage branch: {@code null} means the version is eligible to actually be deleted; a
+     * non-null result is the exact failure to report. Deliberately does not reuse {@link
+     * #checkStatusTransitionAllowed}: that method's Disposed-blocks-further-change rule does not
+     * apply here (see {@link #deletePackageVersions}'s own javadoc), and there is no revision to
+     * check against at all, since the real request shape has no {@code versionRevisions} field.
+     */
+    private static PackageVersionError checkDeletionAllowed(String currentStatus, String expectedStatus) {
+        if (expectedStatus != null && !expectedStatus.equals(currentStatus)) {
+            return new PackageVersionError("MISMATCHED_STATUS", "current status: " + currentStatus
+                    + ", expected status: " + expectedStatus);
+        }
+        return null;
+    }
+
+    /**
+     * The {@code generic} branch of {@link #deletePackageVersions}: removes the version's record
+     * from {@code packageVersions} first, exactly the way {@link #deletePackage} already does for
+     * a whole package's worth of versions, and for the same reason: once the record is gone, no
+     * caller can reach its bytes through it regardless of whether the best-effort cleanup below
+     * succeeds, so a cleanup failure (logged, not thrown) can never leave a surviving record
+     * pointing at bytes that are already gone. This differs from {@link #disposePackageVersions}'s
+     * own stricter ordering deliberately: that action keeps a tombstone a failed cleanup could
+     * misrepresent, this one does not.
+     */
+    private PackageVersionStatusChangeResult deleteGenericPackageVersions(String region, String domain, String owner,
+            String repository, String format, String namespace, String packageName, List<String> requestedVersions,
+            String expectedStatus) {
+        Map<String, PackageVersionError> failures = new LinkedHashMap<>();
+        List<String> pending = new ArrayList<>();
+        Map<String, CodeArtifactPackageVersion> byVersion = new LinkedHashMap<>();
+        for (String version : requestedVersions) {
+            String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
+            CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key).orElse(null);
+            if (pv == null) {
+                failures.put(version, new PackageVersionError("NOT_FOUND", "Could not find version " + version));
+                continue;
+            }
+            PackageVersionError failure = checkDeletionAllowed(pv.getStatus(), expectedStatus);
+            if (failure != null) {
+                failures.put(version, failure);
+                continue;
+            }
+            byVersion.put(version, pv);
+            pending.add(version);
+        }
+        if (!failures.isEmpty()) {
+            for (String version : pending) {
+                failures.put(version, new PackageVersionError("SKIPPED", "Version " + version + " is skipped"));
+            }
+            return new PackageVersionStatusChangeResult(Map.of(), failures);
+        }
+
+        Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
+        for (String version : pending) {
+            CodeArtifactPackageVersion pv = byVersion.get(version);
+            String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
+            packageVersions.deleteForAccount(owner, key);
+            for (PackageAsset asset : pv.getAssets().values()) {
+                try {
+                    deleteAssetContent(owner, key, asset.getName());
+                } catch (UncheckedIOException e) {
+                    LOG.warnv(e, "Could not delete CodeArtifact asset file for {0}/{1}: {2}", key,
+                            asset.getName(), e.getMessage());
+                }
+            }
+            successes.put(version, new SuccessfulPackageVersionInfo(pv.getRevision(), "Deleted"));
+        }
+        return new PackageVersionStatusChangeResult(successes, Map.of());
+    }
+
+    /**
+     * The container-backed branch of {@link #deletePackageVersions}: deletes every one of the
+     * version's real assets first, through the exact same {@link #deleteContainerBackedVersionAssets}
+     * {@link #disposePackageVersions} already uses (real deletion, byte accounting, and Maven
+     * metadata cleanup are identical regardless of which action triggered them), propagating any
+     * sidecar failure rather than swallowing it, the same ordering {@link #deletePackage}'s own
+     * container-backed branch already uses for a whole package. The status override is only
+     * cleared afterward, with {@link #clearContainerBackedStatusOverride} rather than {@link
+     * #writeContainerBackedStatusOverride}: unlike {@link #disposePackageVersions}, this leaves no
+     * tombstone, so {@link #containerBackedVersionExists} reports the version gone entirely once
+     * both steps finish, matching the User Guide's "no longer in the repository" wording.
+     */
+    private PackageVersionStatusChangeResult deleteContainerBackedPackageVersions(String region, String domain,
+            String owner, String repository, String format, String namespace, String packageName,
+            List<String> requestedVersions, String expectedStatus) {
+        String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
+        RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
+                .orElseThrow(() -> notFound("Package '" + packageName + "' was not found.", packageName, "package"));
+        List<RepositorySidecarManager.PackageVersionTimestamp> raw;
+        try {
+            raw = manager.listPackageVersions(repoId, domain, repository, namespace, packageName);
+        } catch (UnsupportedOperationException e) {
+            throw new AwsException("InternalServerException", "Deleting " + format + " package versions is not "
+                    + "yet supported by this emulator.", 500);
+        }
+        // Keyed by normalized version (see normalizedContainerBackedVersion), the same as
+        // applyContainerBackedStatusChange's own realPublishedTimes. Raised by Greptile's review:
+        // BaGetter's own listing can spell a NuGet version differently than a caller's own
+        // request does, and the override side index already normalizes on write, so comparing
+        // both against the same normalized form here is what keeps existence checks, override
+        // reads, and the deletion gate below consistent with every other container-backed lookup.
+        Map<String, Instant> realPublishedTimes = new LinkedHashMap<>();
+        for (RepositorySidecarManager.PackageVersionTimestamp v : raw) {
+            realPublishedTimes.put(normalizedContainerBackedVersion(format, v.version()), v.publishedTime());
+        }
+        Map<String, PackageVersionStatusOverride> overridesByVersion = containerBackedOverridesForPackage(owner,
+                region, domain, repository, format, namespace, packageName);
+
+        Map<String, PackageVersionError> failures = new LinkedHashMap<>();
+        List<String> pending = new ArrayList<>();
+        Map<String, String> finalRevisionByVersion = new LinkedHashMap<>();
+        for (String version : requestedVersions) {
+            String matchVersion = normalizedContainerBackedVersion(format, version);
+            boolean existsNow = realPublishedTimes.containsKey(matchVersion)
+                    || overridesByVersion.containsKey(matchVersion);
+            if (!existsNow) {
+                failures.put(version, new PackageVersionError("NOT_FOUND", "Could not find version " + version));
+                continue;
+            }
+            PackageVersionStatusOverride override = overridesByVersion.get(matchVersion);
+            String currentStatus = override != null ? override.status() : "Published";
+            String currentRevision = override != null ? override.revision()
+                    : synthesizeContainerBackedRevision(format, repoId, namespace, packageName, version);
+            PackageVersionError failure = checkDeletionAllowed(currentStatus, expectedStatus);
+            if (failure != null) {
+                failures.put(version, failure);
+                continue;
+            }
+            finalRevisionByVersion.put(version, currentRevision);
+            pending.add(version);
+        }
+        if (!failures.isEmpty()) {
+            for (String version : pending) {
+                failures.put(version, new PackageVersionError("SKIPPED", "Version " + version + " is skipped"));
+            }
+            return new PackageVersionStatusChangeResult(Map.of(), failures);
+        }
+
+        Map<String, SuccessfulPackageVersionInfo> successes = new LinkedHashMap<>();
+        for (String version : pending) {
+            String matchVersion = normalizedContainerBackedVersion(format, version);
+            PackageVersionStatusOverride override = overridesByVersion.get(matchVersion);
+            boolean retryingPendingAssets = override != null && !override.pendingAssetNames().isEmpty();
+            boolean sidecarStillListsIt = realPublishedTimes.containsKey(matchVersion);
+            if (retryingPendingAssets || sidecarStillListsIt) {
+                List<String> assetNames;
+                if (retryingPendingAssets) {
+                    // A retry of a previously partially-failed dispose, or of this same delete
+                    // call (see the write below): reuse exactly what is still known to need
+                    // cleanup rather than asking the sidecar again, since npm's own listing can no
+                    // longer answer this once a prior attempt's own per-asset delete already
+                    // updated the packument (see PackageVersionStatusOverride's own javadoc).
+                    // Raised by Greptile's review: this case used to fall through to the sidecar
+                    // listing below, which for npm no longer named the version at all once its
+                    // packument update had landed, so these assets were silently skipped and the
+                    // override cleared anyway, orphaning the tarball on disk.
+                    assetNames = override.pendingAssetNames();
+                } else {
+                    try {
+                        assetNames = manager.listPackageVersionAssetNames(repoId, domain, repository, namespace,
+                                packageName, version);
+                    } catch (UnsupportedOperationException e) {
+                        throw new AwsException("InternalServerException", "Deleting a package version of this "
+                                + "format is not yet supported by this emulator.", 500);
+                    }
+                }
+                // Written before deleting, exactly like disposePackageVersions's own ordering: a
+                // sidecar failing partway through this version's own asset deletions must leave
+                // pendingAssetNames naming only what genuinely remains, so a retry (another
+                // DeletePackageVersions call on the same coordinate) can still find it afterward.
+                Instant publishedTime = realPublishedTimes.get(matchVersion);
+                writeContainerBackedStatusOverride(owner, region, domain, repository, format, namespace,
+                        packageName, version,
+                        new PackageVersionStatusOverride(override != null ? override.status() : "Published",
+                                override != null ? override.revision() : finalRevisionByVersion.get(version),
+                                override != null ? override.publishedEpochSeconds()
+                                        : (publishedTime == null ? null : publishedTime.getEpochSecond()),
+                                assetNames));
+                // Called even when assetNames ends up empty here (every real asset already
+                // deleted by an earlier attempt): raised by Greptile's review, {@code
+                // deleteContainerBackedVersionAssets}'s own trailing {@code recordVersionDisposed}
+                // call is what retries Maven's metadata.xml/checksum cleanup, and gating this call
+                // on a non-empty list, as an earlier version of this fix did, meant a retry whose
+                // only remaining failure was that metadata update (sidecarStillListsIt true,
+                // nothing left in a fresh asset listing) skipped retrying it and cleared the
+                // override anyway.
+                deleteContainerBackedVersionAssets(manager, repoId, owner, region, domain, repository, format,
+                        namespace, packageName, version, assetNames);
+            }
+            clearContainerBackedStatusOverride(owner, region, domain, repository, format, namespace, packageName,
+                    version);
+            // npm/pypi readmes are captured separately at publish time (see
+            // recordPublishedPackageVersionReadme's own javadoc) and never answered live from the
+            // sidecar the way nuget's readme is, so deleting the version here would otherwise leave
+            // getPackageVersionReadme still serving it forever.
+            String readmeKey = packageVersionKey(region, domain, repository, format, namespace,
+                    accountingPackageName(format, packageName), version);
+            packageVersionReadmes.remove(ownerScopedKey(owner, readmeKey));
+            // Harmless no-op for every format but Maven, the only one that ever populates this
+            // map: a Maven version deleted and republished under the same coordinates must not
+            // inherit its previous claimed retention origin.
+            mavenRetainedVersionOriginConnections.remove(ownerScopedKey(owner, readmeKey));
+            // Bumps this version's own fence (see currentContainerBackedVersionFence's own
+            // javadoc): raised by Greptile's review, without this a publish's readme capture
+            // already in flight for this exact version, delayed past this delete, would resurrect
+            // the readme just removed above, since nothing short of this would ever invalidate its
+            // own snapshot.
+            containerBackedVersionDeletionFence.put(ownerScopedKey(owner, readmeKey),
+                    containerBackedPackageDeletionCounter.incrementAndGet());
+            successes.put(version, new SuccessfulPackageVersionInfo(finalRevisionByVersion.get(version), "Deleted"));
+        }
+        return new PackageVersionStatusChangeResult(successes, Map.of());
     }
 
     private PackageVersionStatusChangeResult applyPackageVersionStatusChange(String region, String domain,
@@ -1588,6 +1963,15 @@ public class CodeArtifactService implements Resettable {
             if (disposing) {
                 deleteContainerBackedVersionAssets(manager, repoId, owner, region, domain, repository, format,
                         namespace, packageName, version, assetNames);
+                // Bumps this version's own fence (see currentContainerBackedVersionFence's own
+                // javadoc): without this, a Maven external-connection import already fetching an
+                // asset for this exact version, delayed past this dispose, would write it back
+                // into the sidecar after disposal already deleted every real asset, leaving a
+                // disposed version with real bytes again.
+                String versionFenceKey = ownerScopedKey(owner, packageVersionKey(region, domain, repository, format,
+                        namespace, accountingPackageName(format, packageName), version));
+                containerBackedVersionDeletionFence.put(versionFenceKey,
+                        containerBackedPackageDeletionCounter.incrementAndGet());
             }
             successes.put(version, new SuccessfulPackageVersionInfo(updated.revision(), updated.status()));
         }
@@ -1698,17 +2082,13 @@ public class CodeArtifactService implements Resettable {
      * one status that still allows a normal download ("if the Unlisted package version is already
      * referenced in an npm package-lock.json file, it can still be downloaded and installed").
      *
-     * <p><b>Known gap, not fixed here (flagged by Qodo review on the PR that added {@code
-     * DisposePackageVersions}):</b> this only guards {@code GetPackageVersionAsset} itself. The
-     * native per-format data planes ({@code CodeArtifactMavenController}'s GAV path, {@code
-     * CodeArtifactNpmDataPlane}'s tarball route, {@code CodeArtifactPypiController}'s raw
-     * filename-only download route, {@code CodeArtifactNuGetController}'s content route) proxy
-     * straight to each sidecar and never consult this override at all, for any purpose, so a
-     * plain {@code pip install}/{@code npm install}/{@code mvn} fetch against an Archived version
-     * can still download it. Fixing this means threading status awareness into four independently
-     * shaped native protocols (pypi's own download route does not even carry a version in its
-     * URL, only a filename, unlike the other three), a feature-family-sized gap closer to Package
-     * Groups than a quick patch, tracked in the private design memo, not silently dropped.
+     * <p>The native per-format data planes ({@code CodeArtifactMavenController}'s GAV path,
+     * {@code CodeArtifactNpmDataPlane}'s tarball route, {@code CodeArtifactPypiController}'s raw
+     * filename-only download route, {@code CodeArtifactNuGetController}'s content route) each
+     * call this same check too, via {@link #requireContainerBackedVersionDownloadable}, before
+     * proxying a GET straight to their own sidecar: see that method's own javadoc for why only
+     * {@code Archived} needs an active block there (a {@code Disposed} version's native download
+     * already 404s against the sidecar directly, since its bytes are genuinely gone).
      */
     private static void requireAssetDownloadable(String status, String version) {
         if ("Archived".equals(status) || "Disposed".equals(status)) {
@@ -1877,6 +2257,37 @@ public class CodeArtifactService implements Resettable {
     }
 
     /**
+     * The download-side counterpart to {@link #requireContainerBackedVersionNotArchivedOrDisposed}
+     * above: blocks a native per-format download route (Maven's GAV path, npm's tarball route,
+     * nuget's content route, pypi's filename route) from serving an {@code Archived} version's
+     * bytes, the same way {@link #getContainerBackedPackageVersionAsset} already blocks it for
+     * {@code GetPackageVersionAsset} itself, via this exact same {@link #requireAssetDownloadable}.
+     * {@code Disposed} needs no real check here: {@link #deleteContainerBackedVersionAssets}
+     * already deletes the sidecar's own bytes, so a disposed version's native download already
+     * 404s against the sidecar directly, with nothing left here to block, but this still covers
+     * it anyway, so a caller never has to reason about which of the two statuses this does or
+     * doesn't close.
+     *
+     * <p>Unlike {@link #requireContainerBackedVersionNotArchivedOrDisposed}, this takes an
+     * already-resolved {@code owner} and {@code repoId} rather than a raw {@code domainOwner}:
+     * every native controller has already resolved both, {@code owner} from its own token scope,
+     * {@code repoId} from its own {@link #ensureFormatContainerId} call, before it ever reaches
+     * this check, so re-resolving either here would only repeat work the caller already paid for.
+     *
+     * <p>Not {@code synchronized}, unlike that counterpart: nothing here writes, so there is no
+     * race to close, the same reasoning that already leaves {@link
+     * #getContainerBackedPackageVersionAsset}'s own call to {@link
+     * #currentContainerBackedVersionStatus} unsynchronized.
+     */
+    public void requireContainerBackedVersionDownloadable(String owner, String region, String domain,
+            String repository, String format, String namespace, String packageName, String version,
+            String repoId) {
+        PackageVersionStatusOverride state = currentContainerBackedVersionStatus(owner, region, domain, repository,
+                format, namespace, packageName, version, repoId);
+        requireAssetDownloadable(state.status(), version);
+    }
+
+    /**
      * Raised by Greptile's review of this same PR: a native publish's own check, real sidecar
      * write, and override clear are three separate calls (necessarily, since the real write sits
      * in between and this class's own lock cannot be held across it), so a concurrent {@link
@@ -1966,8 +2377,15 @@ public class CodeArtifactService implements Resettable {
      * then looked up individually in {@link #containerBackedPackageVersionStatusOverrides} itself.
      * Empty for a package nothing has ever called {@link #updatePackageVersionsStatus} or {@link
      * #disposePackageVersions} on, which is every container-backed package before this existed.
+     *
+     * <p>Public (not just this class's own internal callers) for the same reason {@link
+     * #containerBackedOverriddenVersionStatusesByRepository} already is: raised by Greptile's
+     * review, a real npm tarball GET names a package directly (unlike pypi's bare filename), so
+     * {@code CodeArtifactNpmDataPlane}'s own download-side guard can check this cheaply, in
+     * memory, before ever paying for a live Verdaccio packument fetch to resolve which version
+     * (if any) a requested filename actually belongs to.
      */
-    private Map<String, PackageVersionStatusOverride> containerBackedOverridesForPackage(String owner, String region,
+    public Map<String, PackageVersionStatusOverride> containerBackedOverridesForPackage(String owner, String region,
             String domain, String repository, String format, String namespace, String packageName) {
         String accountingName = accountingPackageName(format, packageName);
         Set<String> versions = containerBackedOverriddenVersionsByPackage.get(ownerScopedKey(owner,
@@ -2069,7 +2487,247 @@ public class CodeArtifactService implements Resettable {
         pv.setVersion(version);
         pv.setStatus(state.status());
         pv.setRevision(state.revision());
+        pv.setOriginType(versionOriginType(region, domain, owner, repository, format, namespace, packageName,
+                version));
         return pv;
+    }
+
+    /**
+     * {@code EXTERNAL} for a Maven version this service's own records show was retained from a
+     * {@code public:maven-*} external connection, {@code INTERNAL} for everything else: every
+     * other format/path here still only ever creates a version by direct publish. Without this,
+     * a retained version's real origin never reaches {@code DescribePackageVersion}/{@code
+     * ListPackageVersions} at all, both of which would keep reporting {@code INTERNAL}
+     * unconditionally, so filtering either by {@code originType=EXTERNAL} would find nothing even
+     * for a version this service itself knows was retained.
+     */
+    private String versionOriginType(String region, String domain, String owner, String repository, String format,
+            String namespace, String packageName, String version) {
+        return versionOrigin(region, domain, owner, repository, format, namespace, packageName, version)
+                .originType();
+    }
+
+    /**
+     * {@code originType} plus, for an {@code EXTERNAL} Maven version, the exact external
+     * connection it was retained from: AWS's own {@code DomainEntryPoint} reference describes an
+     * ingested package's entry point as the external connection it came from, {@code
+     * repositoryName} only for one published directly, so a caller surfacing a domain entry
+     * point needs the connection name itself, not just the originType flag.
+     */
+    private record VersionOrigin(String originType, String externalConnectionName) {}
+
+    private VersionOrigin versionOrigin(String region, String domain, String owner, String repository, String format,
+            String namespace, String packageName, String version) {
+        if (!"maven".equals(format)) {
+            return new VersionOrigin("INTERNAL", null);
+        }
+        return mavenRetainedVersionOriginConnection(region, domain, owner, repository, namespace, packageName,
+                version).map(name -> new VersionOrigin("EXTERNAL", name)).orElse(new VersionOrigin("INTERNAL", null));
+    }
+
+    /**
+     * Every package a repository holds, for {@code ListPackages}: every format unless
+     * {@code requestedFormat} narrows it to one, in which case only that one format's own source
+     * is ever touched, container-backed sidecar included: without this, an unfiltered-by-format
+     * caller's own lazily-provisioned sidecar containers would stay the real cost of answering
+     * "all formats", but a caller who already named one format would otherwise still pay to start
+     * every other format's container for nothing, just to filter its packages back out a moment
+     * later.
+     *
+     * <p>{@code generic} is read straight from the stored {@link CodeArtifactPackageVersion}
+     * records' own {@code format}/{@code namespace}/{@code packageName} fields (the same technique
+     * {@link #genericPackageVersions} already uses for one known package, here scanned
+     * repository-wide instead of by one package's own prefix), plus any origin-config-only
+     * package's own matching fields on {@link PackageOriginConfig}, never by parsing a scanned key
+     * back into parts, which {@link #escapeKeySegment}'s own javadoc explains is lossy. Every
+     * container-backed format's own new {@link RepositorySidecarManager#listPackages} answers the
+     * same for real sidecar content, plus the same origin-config-only union. {@code domainOwner}
+     * is threaded through (rather than just the already-resolved {@code owner}) only because
+     * {@link #resolveContainerIdAndBeginUse} re-resolves it itself, the same double-resolution
+     * {@link #listPackageVersions} already does at its own call site.
+     *
+     * <p>Raised by Greptile's review: every coordinate here, from every source, is now normalized
+     * through {@link #accountingPackageName} before it is ever added to the result set or used as
+     * an origin-config lookup key. Without it, a pypi/nuget package whose {@link
+     * PackageOriginConfig} was set under its as-typed spelling (case, or pypi's {@code -}/{@code _}/
+     * {@code .} variants) would union into a second, spelling-distinct entry alongside the same
+     * package's real, sidecar-normalized one, and the config lookup keyed by the normalized
+     * spelling would never find a config stored under the raw one, silently falling back to the
+     * ALLOW/BLOCK defaults instead of what was actually configured. Resolving every origin config
+     * once here, into a map keyed by this same normalized coordinate, is what lets {@link
+     * #listPackages} read it correctly regardless of which spelling the config was originally set
+     * under.
+     */
+    private PackagesWithOriginConfigs allPackagesInRepository(String region, String domain, String domainOwner,
+            String owner, String repository, String requestedFormat) {
+        Set<PackageCoordinate> coordinates = new LinkedHashSet<>();
+        Map<PackageCoordinate, PackageOriginConfig> originConfigsByCoordinate = new LinkedHashMap<>();
+        String originPrefix = region + "::" + domain + "::" + repository + "::";
+        if (requestedFormat == null || "generic".equals(requestedFormat)) {
+            for (CodeArtifactPackageVersion pv : packageVersions.scanForAccount(owner,
+                    k -> k.startsWith(originPrefix))) {
+                coordinates.add(new PackageCoordinate(pv.getFormat(), pv.getNamespace(),
+                        accountingPackageName(pv.getFormat(), pv.getPackageName())));
+            }
+        }
+        for (PackageOriginConfig config : packageOriginConfigs.scanForAccount(owner,
+                k -> k.startsWith(originPrefix))) {
+            if (config.getFormat() != null
+                    && (requestedFormat == null || requestedFormat.equals(config.getFormat()))) {
+                PackageCoordinate coordinate = new PackageCoordinate(config.getFormat(), config.getNamespace(),
+                        accountingPackageName(config.getFormat(), config.getPackageName()));
+                coordinates.add(coordinate);
+                originConfigsByCoordinate.put(coordinate, config);
+            }
+        }
+        for (String format : CONTAINER_BACKED_FORMATS) {
+            if (requestedFormat != null && !requestedFormat.equals(format)) {
+                continue;
+            }
+            RepositorySidecarManager manager = sidecarRegistry.forFormat(format).orElse(null);
+            if (manager == null) {
+                continue;
+            }
+            String repoId = resolveContainerIdAndBeginUse(format, region, domain, domainOwner, repository, manager);
+            try {
+                for (RepositorySidecarManager.PackageIdentifier id : manager.listPackages(repoId, domain,
+                        repository)) {
+                    coordinates.add(new PackageCoordinate(format, id.namespace(),
+                            accountingPackageName(format, id.packageName())));
+                }
+            } catch (UnsupportedOperationException e) {
+                throw new AwsException("InternalServerException", "Listing " + format + " packages is not yet "
+                        + "supported by this emulator.", 500);
+            } finally {
+                manager.endUse(repoId);
+            }
+            // Raised by Greptile's review: disposing a container-backed package's last version
+            // deletes its real sidecar content, so the sidecar's own listing above no longer names
+            // it at all, but updatePackageVersionsStatus/disposePackageVersions leave a status
+            // override behind specifically so ListPackageVersions/DescribePackageVersion can keep
+            // answering Disposed/Archived for it. Without this, a package with no origin
+            // configuration either (nothing else to keep it in the union) would silently disappear
+            // from ListPackages the moment its last version was disposed. Only ever adds something
+            // for npm/pypi/nuget (see containerBackedOverriddenVersionStatusesByRepository's own
+            // javadoc for why its index is namespace-less only); the same gap for maven or a scoped
+            // npm package, both of which always carry a namespace, is not closed here.
+            for (String packageName : containerBackedOverriddenVersionStatusesByRepository(region, domain,
+                    domainOwner, repository, format).keySet()) {
+                coordinates.add(new PackageCoordinate(format, null, packageName));
+            }
+        }
+        return new PackagesWithOriginConfigs(new ArrayList<>(coordinates), originConfigsByCoordinate);
+    }
+
+    /**
+     * Sorts the same way {@link #packageVersionSortCursor} does for its own action, as an opaque
+     * cursor: {@code ListPackages} has no {@code sortBy} parameter at all in the wire model (unlike
+     * {@code ListPackageVersions}' {@code PUBLISHED_TIME}), so alphabetical by format, then
+     * namespace, then package name is the best-justified deterministic order available, not an
+     * AWS-confirmed one.
+     *
+     * <p>Raised by Greptile's review: joining the three fields with a plain {@code ::} the way an
+     * earlier version of this method did collides for two different coordinates whose namespace
+     * and package name happen to straddle that same separator differently, e.g. namespace
+     * {@code a::b} with package {@code c} against namespace {@code a} with package {@code b::c};
+     * {@code Pagination}'s own resume logic (strictly-greater-cursor) would then skip whichever of
+     * the two sorts second. Each field is now escaped through {@link #escapeKeySegment}, the same
+     * helper this service's own storage keys already use for exactly this collision, before being
+     * joined.
+     */
+    private static String packageSortCursor(PackageSummaryEntry entry) {
+        return escapeKeySegment(entry.format()) + "::" + escapeKeySegment(entry.namespace()) + "::"
+                + escapeKeySegment(entry.packageName());
+    }
+
+    /**
+     * Lists every package a repository holds, across every format at once unless {@code format}
+     * filters to one. {@code namespace} is a prefix filter exactly like {@code packagePrefix} (its
+     * own doc: "although this option is called --namespace and not --namespace-prefix, it has
+     * prefix-matching behavior"), and real AWS rejects it when {@code format} is omitted ("Using
+     * --namespace by itself results in an error," the User Guide's own documented search-option
+     * combination rule): {@code format} combined with a namespace-less format (pypi, nuget) is
+     * still accepted, since nothing in that same rule singles it out, it just can never match
+     * anything, the same way a {@code packagePrefix} nothing matches returns empty rather than an
+     * error.
+     *
+     * <p>{@code publish}/{@code upstream} filter against each package's own resolved restriction
+     * (its {@link PackageOriginConfig} if one was ever set, else CodeArtifact's documented default
+     * of publish {@code ALLOW}, upstream {@code BLOCK}), the same resolution {@link
+     * #describePackage} already does for one known package.
+     *
+     * <p>Default page size is 100 (the User Guide's own stated default), not the 50 {@code
+     * ListPackageVersions} uses: a real, AWS-documented difference between the two actions, not
+     * an oversight copying one convention over the other.
+     */
+    public ListPackagesResult listPackages(String region, String domain, String domainOwner, String repository,
+            String format, String namespace, String packagePrefix, Integer maxResults, String nextToken,
+            String publish, String upstream) {
+        requireNonBlank(domain, "domain");
+        requireNonBlank(repository, "repository");
+        if (format != null && !PACKAGE_FORMATS.contains(format)) {
+            throw validation("format must be one of " + PACKAGE_FORMATS + ".");
+        }
+        if (namespace != null) {
+            if (format == null) {
+                throw validation("format must be specified when namespace is provided.");
+            }
+            validatePackageToken("namespace", namespace);
+        }
+        if (packagePrefix != null) {
+            validatePackageToken("packagePrefix", packagePrefix);
+        }
+        if (publish != null && !ORIGIN_RESTRICTION_VALUES.contains(publish)) {
+            throw validation("publish must be one of " + ORIGIN_RESTRICTION_VALUES + ".");
+        }
+        if (upstream != null && !ORIGIN_RESTRICTION_VALUES.contains(upstream)) {
+            throw validation("upstream must be one of " + ORIGIN_RESTRICTION_VALUES + ".");
+        }
+        String owner = effectiveOwner(domainOwner);
+        requireRepository(owner, repositoryKey(region, domain, repository), repository);
+
+        List<PackageSummaryEntry> entries = new ArrayList<>();
+        PackagesWithOriginConfigs packages = allPackagesInRepository(region, domain, domainOwner, owner, repository,
+                format);
+        for (PackageCoordinate coordinate : packages.coordinates()) {
+            if (namespace != null
+                    && (coordinate.namespace() == null || !coordinate.namespace().startsWith(namespace))) {
+                continue;
+            }
+            if (packagePrefix != null && !coordinate.packageName().startsWith(packagePrefix)) {
+                continue;
+            }
+            // Resolved from the same normalized map allPackagesInRepository already built, rather
+            // than a fresh key lookup here: see that method's own javadoc for why a direct lookup
+            // keyed by this (already normalized) coordinate could otherwise miss a config stored
+            // under its caller's original, un-normalized spelling.
+            Optional<PackageOriginConfig> config = Optional.ofNullable(
+                    packages.originConfigsByCoordinate().get(coordinate));
+            // Raised by Greptile's review: a PackageOriginConfig persisted before format/namespace/
+            // packageName existed on it (see that model's own javadoc) has none of the three, so
+            // allPackagesInRepository's own scan can never resolve it into this map at all, even
+            // though the package it configures is still found here through its real version record
+            // or sidecar listing. Falling back to the original key-based lookup, exactly like
+            // describePackage's own, is what keeps that package's real restriction (not the ALLOW/
+            // BLOCK default) resolving for it too.
+            if (config.isEmpty()) {
+                config = packageOriginConfigs.getForAccount(owner, packageKey(region, domain, repository,
+                        coordinate.format(), coordinate.namespace(), coordinate.packageName()));
+            }
+            String publishRestriction = config.map(PackageOriginConfig::getPublishRestriction).orElse("ALLOW");
+            String upstreamRestriction = config.map(PackageOriginConfig::getUpstreamRestriction).orElse("BLOCK");
+            if (publish != null && !publish.equals(publishRestriction)) {
+                continue;
+            }
+            if (upstream != null && !upstream.equals(upstreamRestriction)) {
+                continue;
+            }
+            entries.add(new PackageSummaryEntry(coordinate.format(), coordinate.namespace(),
+                    coordinate.packageName(), publishRestriction, upstreamRestriction));
+        }
+        PaginatedResult<PackageSummaryEntry> page = Pagination.paginate(entries,
+                CodeArtifactService::packageSortCursor, maxResults, nextToken, 100, 1000, "ValidationException");
+        return new ListPackagesResult(page.items(), page.nextToken());
     }
 
     /**
@@ -2140,8 +2798,381 @@ public class CodeArtifactService implements Resettable {
         requireRepository(owner, repositoryKey(region, domain, repository), repository);
         String key = packageKey(region, domain, repository, format, namespace, packageName);
         packageOriginConfigs.putForAccount(owner, key, new PackageOriginConfig(publishRestriction,
-                upstreamRestriction));
+                upstreamRestriction, format, namespace, packageName));
         return new PackageDescription(format, namespace, packageName, publishRestriction, upstreamRestriction);
+    }
+
+    /**
+     * Whether retaining a package version from an upstream/external source must be refused for
+     * {@code packageName}: {@code true} when an explicit {@code upstream: BLOCK} is on record,
+     * exactly like {@link #publishPackageVersion}'s own {@code publish: BLOCK} check, but also
+     * when no configuration was ever saved <em>and</em> the package already has a real version:
+     * no saved configuration does not always mean a brand-new package. A direct Maven deploy
+     * never writes an explicit configuration at all (see {@link #publishPackageVersion}'s own
+     * {@code publishRestriction} lookup, which defaults the same way), yet its real, documented
+     * default is {@code upstream: BLOCK}, the same default {@link #describePackage} already
+     * reports for it. Treating "no configuration" as universally unblocked would let a later
+     * retention attempt import a public version into a package {@code DescribePackage} itself
+     * already reports as blocked, then overwrite its defaults to {@code publish: BLOCK}/{@code
+     * upstream: ALLOW} as though it had never been published directly at all. Only a package
+     * genuinely never seen before (no configuration, no existing version) defaults to unblocked.
+     *
+     * <p>A standard Maven import writes its first asset, making {@code
+     * packageExistsViaVersionsOrSidecar} true, well before its own {@code finally} block finishes
+     * and saves {@code upstream: ALLOW} as the package's default (see {@link
+     * #ensureRetainedPackageOriginDefault}'s own javadoc). A second, concurrent request for a
+     * different file or version of the very same in-progress import would otherwise read that
+     * in-between state as a directly-published package and get wrongly refused. For Maven
+     * specifically, an in-flight or confirmed retention claim already existing for <em>any</em>
+     * version of this exact package (see {@link #claimMavenRetainedVersionOrigin}) is checked
+     * first: it can only exist at all because some earlier attempt already got past this exact
+     * check while the package had no real content yet, so it is itself the proof this package's
+     * real origin is external, without weakening the default block a package that has never had
+     * such a claim, and so can only have gotten real content from a direct publish, still gets.
+     */
+    public boolean isUpstreamRetentionBlocked(String region, String domain, String domainOwner, String repository,
+            String format, String namespace, String packageName) {
+        String owner = effectiveOwner(domainOwner);
+        String key = packageKey(region, domain, repository, format, namespace, packageName);
+        Optional<PackageOriginConfig> config = packageOriginConfigs.getForAccount(owner, key);
+        if (config.isPresent()) {
+            return "BLOCK".equals(config.get().getUpstreamRestriction());
+        }
+        if ("maven".equals(format) && hasMavenRetainedVersionOriginClaimForAnyVersion(region, domain, owner,
+                repository, namespace, packageName)) {
+            return false;
+        }
+        return packageExistsViaVersionsOrSidecar(region, domain, owner, repository, format, namespace, packageName);
+    }
+
+    /**
+     * Whether any version of {@code packageName}, under any connection, currently has or has ever
+     * had an entry in {@link #mavenRetainedVersionOriginConnections}: {@code true} for an
+     * in-flight claim just as much as a confirmed one, since {@link #isUpstreamRetentionBlocked}'s
+     * own caller (see its javadoc) needs to know an external import is under way before it ever
+     * writes anything a confirmed-only check could see.
+     */
+    private boolean hasMavenRetainedVersionOriginClaimForAnyVersion(String region, String domain, String owner,
+            String repository, String namespace, String packageName) {
+        String prefix = ownerScopedKey(owner, packageKey(region, domain, repository, "maven", namespace,
+                packageName)) + "::";
+        return mavenRetainedVersionOriginConnections.keySet().stream().anyMatch(k -> k.startsWith(prefix));
+    }
+
+    /**
+     * Writes {@code publish: BLOCK, upstream: ALLOW} as {@code packageName}'s origin
+     * configuration the first time any of its versions is retained from an upstream/external
+     * source, matching the User Guide's own documented default ("Default package origin control
+     * settings": "If the first package version is ingested from a public source, the settings
+     * will be Publish: BLOCK and Upstream: ALLOW"). A no-op once any configuration already
+     * exists, explicit or written by an earlier retention, so a caller's own {@code
+     * PutPackageOriginConfiguration} call, or an earlier retained version's own default, is never
+     * silently overwritten. Without this, {@link #describePackage}/{@link #listPackages} would
+     * report the direct-publish default ({@code publish: ALLOW, upstream: BLOCK}) for a package
+     * that in fact arrived the other way, and a second retention attempt for the same package
+     * would read as blocked the moment this service started honoring {@code upstream: BLOCK} at
+     * all.
+     *
+     * <p>Checks that the repository itself still exists, the same way {@link
+     * #recordContainerBackedAssetBytes} already does: {@code DeleteRepository} removes a
+     * repository's {@code packageOriginConfigs} entries directly rather than through this fence,
+     * so the package-level fence check below cannot by itself catch an import finishing after
+     * the repository was deleted. Without this, a repository recreated under the same name would
+     * see a stale default written back for a package it never had any version of.
+     */
+    public synchronized void ensureRetainedPackageOriginDefault(String region, String domain, String domainOwner,
+            String repository, String format, String namespace, String packageName, long packageFenceSnapshot) {
+        String owner = effectiveOwner(domainOwner);
+        if (repositories.getForAccount(owner, repositoryKey(region, domain, repository)).isEmpty()) {
+            return;
+        }
+        String key = packageKey(region, domain, repository, format, namespace, packageName);
+        // Without this fence check, a DeletePackage that completed after the importer's own fence
+        // snapshot but before this call runs would have its removal of the package silently
+        // undone, recreating settings for a package whose real content is already gone, the same
+        // way every other write into this state already guards against (recordContainerBackedAssetBytes's
+        // own check, right below the one case that still differs: a deleted package genuinely has
+        // no configuration left to find, so an empty read here does not by itself mean this call
+        // is safe to proceed).
+        long currentFence = containerBackedPackageDeletionFence.getOrDefault(ownerScopedKey(owner, key), 0L);
+        if (currentFence != packageFenceSnapshot) {
+            return;
+        }
+        if (packageOriginConfigs.getForAccount(owner, key).isPresent()) {
+            return;
+        }
+        packageOriginConfigs.putForAccount(owner, key,
+                new PackageOriginConfig("BLOCK", "ALLOW", format, namespace, packageName));
+    }
+
+    /**
+     * The {@code public:maven-*} external connection name a Maven package version was genuinely
+     * retained from, or {@link Optional#empty()} if it has never been retained at all (either
+     * published directly, never seen before, or only ever tried and never confirmed; see {@link
+     * MavenRetainedVersionOriginClaim#confirmed}). Deliberately does not report a claim still only
+     * held by an in-flight attempt: nothing has genuinely been retained under it yet, so {@code
+     * false} here is the correct answer for a caller asking "is this version already retained",
+     * not just a conservative one.
+     */
+    public Optional<String> mavenRetainedVersionOriginConnection(String region, String domain, String domainOwner,
+            String repository, String namespace, String packageName, String version) {
+        String owner = effectiveOwner(domainOwner);
+        String key = packageVersionKey(region, domain, repository, "maven", namespace, packageName, version);
+        return Optional.ofNullable(mavenRetainedVersionOriginConnections.get(ownerScopedKey(owner, key)))
+                .filter(MavenRetainedVersionOriginClaim::confirmed)
+                .map(MavenRetainedVersionOriginClaim::externalConnectionName);
+    }
+
+    /**
+     * The outcome of {@link #claimMavenRetainedVersionOrigin}: {@code claimed} is {@code false}
+     * only when a different connection already holds the claim, or the fence no longer matched,
+     * in which case {@code episodeId} is meaningless and must not be used. A {@code true} result
+     * must be matched, exactly once, by a later call to {@link
+     * #finishMavenRetainedVersionOriginAttempt} passing this exact {@code episodeId} back.
+     */
+    public record MavenClaimOutcome(boolean claimed, long episodeId) {
+    }
+
+    /**
+     * Atomically claims {@code version}'s retention origin for {@code externalConnectionName},
+     * checked under the same fence {@code packageFenceSnapshot} was taken against (see {@link
+     * #currentContainerBackedPackageFence}'s own javadoc). The caller may proceed to fetch and
+     * write assets under this connection when {@link MavenClaimOutcome#claimed} is {@code true}:
+     * either this is the first claim for the version (a fresh {@link
+     * MavenRetainedVersionOriginClaim#episodeId} is assigned), or it was already claimed under
+     * the exact same connection and the exact same still-live episode (an idempotent retry, or a
+     * concurrent request for the same version and source), in which case this attempt is added to
+     * that episode's own {@link MavenRetainedVersionOriginClaim#inFlightAttempts} count. {@code
+     * claimed} is {@code false} when a different connection already holds the claim, or the fence
+     * no longer matches (the repository or package was deleted since the snapshot was taken).
+     *
+     * <p>Claims the origin atomically, before any network fetch or write happens at all, so the
+     * loser of a race between two concurrent imports for the same version, under two different
+     * connections, never writes anything in the first place, rather than both passing a
+     * read-then-write check and both writing real bytes before either recorded anything, mixing
+     * assets from two different public sources into one version, exactly what AWS's own "checking
+     * asset origins" rule exists to prevent.
+     *
+     * <p>Counting in-flight attempts, rather than a plain claim-or-reject flag, keeps the claim
+     * reserved for its connection as long as any attempt, confirmed or not, is still holding it:
+     * one attempt's own cleanup (see {@link #finishMavenRetainedVersionOriginAttempt}) must not
+     * remove a claim a sibling attempt under the same connection is still relying on, which would
+     * otherwise reopen a window for a third attempt to claim the version under a newly-swapped
+     * connection while the first is still mid-fetch.
+     *
+     * <p>{@code episodeId}, returned here and required back by {@link
+     * #finishMavenRetainedVersionOriginAttempt}, gives every claim episode an identity a
+     * same-named replacement can never share: once an entire episode is torn down (every attempt
+     * finishes with nothing confirmed, or a delete removes the map entry outright) and a brand
+     * new episode is claimed under the exact same connection name, a stray finish call from the
+     * old episode arriving late would otherwise be indistinguishable, by connection name alone,
+     * from a legitimate finish of the new one.
+     */
+    public synchronized MavenClaimOutcome claimMavenRetainedVersionOrigin(String region, String domain,
+            String domainOwner, String repository, String namespace, String packageName, String version,
+            String externalConnectionName, long packageFenceSnapshot) {
+        String owner = effectiveOwner(domainOwner);
+        String packageKeyStr = packageKey(region, domain, repository, "maven", namespace, packageName);
+        long currentFence = containerBackedPackageDeletionFence.getOrDefault(ownerScopedKey(owner, packageKeyStr),
+                0L);
+        if (currentFence != packageFenceSnapshot) {
+            return new MavenClaimOutcome(false, 0L);
+        }
+        String key = ownerScopedKey(owner, packageVersionKey(region, domain, repository, "maven", namespace,
+                packageName, version));
+        MavenRetainedVersionOriginClaim existing = mavenRetainedVersionOriginConnections.get(key);
+        if (existing == null) {
+            long episodeId = mavenClaimEpisodeCounter.incrementAndGet();
+            mavenRetainedVersionOriginConnections.put(key,
+                    new MavenRetainedVersionOriginClaim(externalConnectionName, 1, false, episodeId));
+            return new MavenClaimOutcome(true, episodeId);
+        }
+        if (!existing.externalConnectionName().equals(externalConnectionName)) {
+            return new MavenClaimOutcome(false, 0L);
+        }
+        mavenRetainedVersionOriginConnections.put(key, new MavenRetainedVersionOriginClaim(externalConnectionName,
+                existing.inFlightAttempts() + 1, existing.confirmed(), existing.episodeId()));
+        return new MavenClaimOutcome(true, existing.episodeId());
+    }
+
+    /**
+     * The exactly-once counterpart to a {@code claimed}-true {@link #claimMavenRetainedVersionOrigin}
+     * call for the same version, passing back the exact {@code episodeId} that call returned:
+     * marks the claim confirmed if {@code importedAnything} is {@code true} (this attempt, or an
+     * earlier sibling in the same episode, genuinely wrote real content under it), then removes
+     * this attempt from the episode's own in-flight count. The claim itself is only ever removed
+     * once no attempt is left holding it <em>and</em> it was never confirmed by any of them;
+     * otherwise it stays, so a sibling attempt still mid-fetch in the same episode keeps seeing
+     * its own claim intact, and a version that genuinely has real content stays reserved for its
+     * one true origin forever. A claim already gone, or now on a different episode (the one this
+     * call was issued for already torn down and replaced, see this method's own javadoc on {@link
+     * #claimMavenRetainedVersionOrigin}), is left alone: this attempt's own claim must have
+     * already been rejected or otherwise accounted for, and a same-named replacement episode is
+     * never mistaken for it.
+     */
+    public synchronized void finishMavenRetainedVersionOriginAttempt(String region, String domain,
+            String domainOwner, String repository, String namespace, String packageName, String version,
+            long episodeId, boolean importedAnything) {
+        String owner = effectiveOwner(domainOwner);
+        String key = ownerScopedKey(owner, packageVersionKey(region, domain, repository, "maven", namespace,
+                packageName, version));
+        MavenRetainedVersionOriginClaim existing = mavenRetainedVersionOriginConnections.get(key);
+        if (existing == null || existing.episodeId() != episodeId) {
+            return;
+        }
+        boolean confirmed = existing.confirmed() || importedAnything;
+        int remaining = Math.max(existing.inFlightAttempts() - 1, 0);
+        if (remaining == 0 && !confirmed) {
+            mavenRetainedVersionOriginConnections.remove(key);
+        } else {
+            mavenRetainedVersionOriginConnections.put(key, new MavenRetainedVersionOriginClaim(
+                    existing.externalConnectionName(), remaining, confirmed, episodeId));
+        }
+    }
+
+    /**
+     * The outcome of {@link #deployMavenAssetUnderVersionFence}: {@code fenceMatched} is {@code
+     * false} only when the version's fence had already moved before the write was even
+     * attempted, in which case {@code outcome} is always {@code null}; otherwise {@code outcome}
+     * is whatever {@link ReposiliteSidecarClient#deployArtifact} returned, or {@code null} if
+     * that call itself failed.
+     */
+    public record MavenDeployAttemptResult(boolean fenceMatched, ReposiliteSidecarClient.DeployOutcome outcome) {
+    }
+
+    /**
+     * Deploys one Maven asset to the Reposilite sidecar, but only if {@code versionFenceSnapshot}
+     * still matches this exact version's current fence, checked and acted on inside the very same
+     * {@code synchronized} call {@link #deletePackageVersions}, {@link #deletePackage}, {@link
+     * #deleteRepository}, and {@link #disposePackageVersions} already hold for their own entire
+     * operation, so the two can never interleave at all: whichever gets here first finishes its
+     * entire write (or delete) before the other even starts, so a delete or disposal either
+     * already bumped the fence before this check runs (caught right here, nothing written) or
+     * has not started yet (and will see this exact write as part of what it must clean up, once
+     * this call returns and releases the lock). A plain compare-the-fence-before-and-after-the-write
+     * check, without the shared lock, could only narrow that window, never close it, and a
+     * rollback compensating for whatever landed in the narrower window would still risk deleting
+     * a different, later attempt's own legitimate write if it matched by name alone.
+     *
+     * <p>Byte accounting runs inside this exact same locked call, right after a real write,
+     * rather than in a separate call made after this one already returned and released the lock:
+     * {@link #recordContainerBackedAssetBytes} (itself {@code synchronized}, safely reentrant
+     * from here on the same thread) could otherwise be straddled by a delete or disposal landing
+     * in the gap between this call releasing the lock and that separate call acquiring it,
+     * subtracting this asset's bytes as part of its own normal cleanup before the separate call
+     * added them, leaving {@code DescribeDomain.assetSizeBytes} permanently over-counted for an
+     * asset already gone.
+     *
+     * <p>{@code reposilite}, {@code repoId}, {@code gav}, and {@code content} come from the
+     * caller, not a field here, so this service never needs its own reference to a sidecar
+     * client: the real, slow fetch from the public source that produced {@code content} must
+     * already be finished before calling this, since it must never itself run while this lock is
+     * held, the same way every other synchronized method here only ever talks to a sidecar it
+     * already has everything it needs for.
+     *
+     * <p>The fence comparison alone only proves nothing changed <em>since the caller's own
+     * snapshot was taken</em>; it says nothing about whether this version was already Disposed or
+     * Archived <em>before</em> that snapshot, the one case a plain delete/recreate (a fresh,
+     * legitimate fence value with no override at all) can never produce. A request the
+     * controller's own {@code isDownloadable} check already let through before a disposal that
+     * landed before this attempt's own snapshot was even taken, delayed past it by the real fetch
+     * above, would otherwise still write real bytes back for a version whose status says it can
+     * no longer be used. The status is checked here directly, inside the same lock {@link
+     * #disposePackageVersions} itself holds while writing that exact status, so the two can no
+     * longer straddle each other either.
+     *
+     * <p>{@code episodeId} must be the exact one {@link #claimMavenRetainedVersionOrigin} returned
+     * for this write's own claim, checked here against whatever episode (if any) currently owns
+     * the version's origin. Neither fence catches a {@link #deletePackage} that found no real
+     * content yet to delete: it removes the origin claim outright but, having deleted nothing,
+     * never bumps the package fence either, so a sibling attempt still mid-fetch under the old,
+     * now-removed claim would otherwise see both fences still match and write its content back
+     * under whatever connection claimed the version next, mixing assets from two different public
+     * sources into one version. Checking the live claim's own episode identity, not just the
+     * fences, catches exactly that case: a torn-down-and-replaced claim can never share an episode
+     * with the attempt that held the old one, no matter how its connection name compares.
+     */
+    public synchronized MavenDeployAttemptResult deployMavenAssetUnderVersionFence(String region, String domain,
+            String domainOwner, String repository, String namespace, String packageName, String version,
+            long versionFenceSnapshot, long packageFenceSnapshot, long episodeId, ReposiliteSidecarClient reposilite,
+            String repoId, String gav, byte[] content) {
+        if (currentContainerBackedVersionFence(region, domain, domainOwner, repository, "maven", namespace,
+                packageName, version) != versionFenceSnapshot) {
+            return new MavenDeployAttemptResult(false, null);
+        }
+        String owner = effectiveOwner(domainOwner);
+        String status = currentContainerBackedVersionStatus(owner, region, domain, repository, "maven", namespace,
+                packageName, version, repoId).status();
+        if ("Disposed".equals(status) || "Archived".equals(status)) {
+            return new MavenDeployAttemptResult(false, null);
+        }
+        String claimKey = ownerScopedKey(owner, packageVersionKey(region, domain, repository, "maven", namespace,
+                packageName, version));
+        MavenRetainedVersionOriginClaim currentClaim = mavenRetainedVersionOriginConnections.get(claimKey);
+        if (currentClaim == null || currentClaim.episodeId() != episodeId) {
+            return new MavenDeployAttemptResult(false, null);
+        }
+        ReposiliteSidecarClient.DeployOutcome outcome;
+        try {
+            outcome = reposilite.deployArtifact(repoId, gav, content);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not deploy {0} while retaining a Maven release through an external connection.",
+                    gav);
+            return new MavenDeployAttemptResult(true, null);
+        }
+        if ((outcome.status() == 200 || outcome.status() == 201) && outcome.wroteNewContent()) {
+            recordContainerBackedAssetBytes(region, domain, domainOwner, repository, "maven", namespace,
+                    packageName, content.length, packageFenceSnapshot);
+        }
+        return new MavenDeployAttemptResult(true, outcome);
+    }
+
+    /**
+     * {@link ReposiliteSidecarClient#mergeExternalConnectionReleaseVersions}'s own counterpart to
+     * {@link #deployMavenAssetUnderVersionFence}, at package granularity rather than one version's:
+     * a metadata merge has no single version or claim episode of its own to check against, since
+     * it only ever advertises versions, never retains real bytes for any of them. Checked and
+     * acted on inside this very same {@code synchronized} call {@link #deletePackage} already
+     * holds for its own entire operation (and bumps {@code containerBackedPackageDeletionFence}
+     * behind), so the two can never interleave.
+     *
+     * <p>Raised by Greptile's review: {@code CodeArtifactMavenExternalConnectionImporter} used to
+     * fetch the real public repository's metadata and write the merge straight back with no fence
+     * check at all. A {@code DeletePackage} that finished while that real, slow fetch was still in
+     * flight would have its removal silently undone the moment the fetch finally completed and
+     * this write landed, resurrecting a {@code maven-metadata.xml} (and its checksums) for a
+     * package {@code DeletePackage} had already told its caller was gone, even if the external
+     * connection itself was also removed somewhere in that same gap.
+     *
+     * <p>{@code packageFenceSnapshot} is whatever {@link #currentContainerBackedPackageFence}
+     * returned when the importer called it, right before issuing the real fetch that produced
+     * {@code externalMetadataXml}; {@code reposilite}, {@code repoId}, and the rest of the merge's
+     * own inputs come from the caller for the same reason {@link #deployMavenAssetUnderVersionFence}
+     * takes them as parameters rather than fields: the slow part already happened before this lock
+     * was ever taken.
+     *
+     * <p>Raised by Greptile's review: the package fence alone says nothing about {@link
+     * #deleteRepository} (also {@code synchronized} on this same lock) having removed the whole
+     * repository, not just this one package, while that same fetch was in flight. Without also
+     * checking that here, {@link ReposiliteSidecarClient#mergeExternalConnectionReleaseVersions}'s
+     * own {@code ensureRepository} call would transparently recreate the Reposilite repository
+     * {@code deleteRepository} had just torn down, leaving real metadata and checksum files behind
+     * with no CodeArtifact repository left through which anything could ever delete them again.
+     */
+    public synchronized boolean mergeMavenMetadataUnderPackageFence(String region, String domain,
+            String domainOwner, String repository, String namespace, String packageName, long packageFenceSnapshot,
+            ReposiliteSidecarClient reposilite, String repoId, byte[] externalMetadataXml,
+            Predicate<String> versionAllowed) {
+        if (currentContainerBackedPackageFence(region, domain, domainOwner, repository, "maven", namespace,
+                packageName) != packageFenceSnapshot) {
+            return false;
+        }
+        String owner = effectiveOwner(domainOwner);
+        if (repositories.getForAccount(owner, repositoryKey(region, domain, repository)).isEmpty()) {
+            return false;
+        }
+        return reposilite.mergeExternalConnectionReleaseVersions(repoId, namespace, packageName, externalMetadataXml,
+                versionAllowed);
     }
 
     /**
@@ -2212,11 +3243,16 @@ public class CodeArtifactService implements Resettable {
         if (CONTAINER_BACKED_FORMATS.contains(format)) {
             hadRealContent = deleteContainerBackedPackageIfPresent(region, domain, owner, repository, format,
                     namespace, packageName);
-            if (hadRealContent) {
-                // Bumped only on an actual deletion, never a no-op (nothing there to begin with):
-                // see currentContainerBackedPackageFence's own javadoc for what this protects
-                // against, and why it can replace a sidecar round trip entirely rather than just
-                // relocate one.
+            if (hadRealContent || originConfig.isPresent()) {
+                // Bumped on any deletion this call actually goes through with, not just one that
+                // removed real content: see currentContainerBackedPackageFence's own javadoc for
+                // what this protects against, and why it can replace a sidecar round trip entirely
+                // rather than just relocate one. Raised by Greptile's review: an origin-config-only
+                // package (no real content, just a stored PutPackageOriginConfiguration) used to
+                // leave this fence untouched, so a Maven metadata merge already in flight for that
+                // exact package, racing this exact delete, could still write maven-metadata.xml
+                // back afterward with a snapshot that still matched, resurrecting a package this
+                // call had already told its caller was gone.
                 containerBackedPackageDeletionFence.put(ownerScopedKey(owner, accountingKey),
                         containerBackedPackageDeletionCounter.incrementAndGet());
             }
@@ -2240,6 +3276,14 @@ public class CodeArtifactService implements Resettable {
                     .toList()
                     .forEach(containerBackedPackageVersionStatusOverrides::remove);
             containerBackedOverriddenVersionsByPackage.remove(ownerScopedKey(owner, accountingKey));
+            // Same prefix, same reasoning: a Maven package deleted and republished under the
+            // same coordinates must not inherit a previous version's claimed retention origin,
+            // which would otherwise keep refusing a genuine new retention attempt under
+            // whichever connection the repository has configured now.
+            mavenRetainedVersionOriginConnections.keySet().stream()
+                    .filter(k -> k.startsWith(ownerScopedReadmePrefix))
+                    .toList()
+                    .forEach(mavenRetainedVersionOriginConnections::remove);
             if (namespace == null) {
                 Set<String> packageNames = containerBackedOverriddenPackagesByRepository.get(
                         ownerScopedKey(owner, repositoryFormatKey(region, domain, repository, format)));
@@ -2316,13 +3360,21 @@ public class CodeArtifactService implements Resettable {
      * origin-config-only or not; that cost already existed for every real package before this
      * method's origin-config awareness, this just stops it from being skipped by accident instead
      * of by choice.
+     *
+     * <p>Checked through {@link RepositorySidecarManager#hasAnyContentToDelete}, not {@link
+     * RepositorySidecarManager#packageExists}: a Maven package that only ever had its {@code
+     * maven-metadata.xml} merged in from an external connection, with no version ever actually
+     * retained, correctly answers {@code packageExists} {@code false} (see that method's own
+     * javadoc), but still has that merged metadata file sitting on the sidecar for this call to
+     * actually remove, rather than skipping the delete and reporting success while leaving it
+     * fetchable.
      */
     private boolean deleteContainerBackedPackageIfPresent(String region, String domain, String owner,
             String repository, String format, String namespace, String packageName) {
         String repoId = ensureFormatContainerId(format, region, domain, owner, repository);
         RepositorySidecarManager manager = sidecarRegistry.forFormat(format)
                 .orElseThrow(() -> notFound("Package '" + packageName + "' was not found.", packageName, "package"));
-        if (!manager.packageExists(repoId, domain, repository, namespace, packageName)) {
+        if (!manager.hasAnyContentToDelete(repoId, domain, repository, namespace, packageName)) {
             return false;
         }
         try {
@@ -2911,6 +3963,8 @@ public class CodeArtifactService implements Resettable {
             }
             copyCapturedReadmeIfApplicable(region, domain, owner, sourceRepository, destinationRepository, format,
                     namespace, packageName, version);
+            copyMavenRetainedVersionOriginIfApplicable(region, domain, owner, sourceRepository,
+                    destinationRepository, format, namespace, packageName, version);
             // Drops any status override left over from whatever used to be at this destination
             // coordinate (an Archived version this copy's allowOverwrite just replaced, most
             // concretely): the response below reports Published, and a stale override would
@@ -2962,8 +4016,8 @@ public class CodeArtifactService implements Resettable {
             if (readme == null) {
                 return;
             }
-            long readmeFenceSnapshot = currentContainerBackedPackageFence(region, domain, owner,
-                    destinationRepository, format, namespace, packageName);
+            long readmeFenceSnapshot = currentContainerBackedVersionFence(region, domain, owner,
+                    destinationRepository, format, namespace, packageName, version);
             recordPublishedPackageVersionReadme(region, domain, owner, destinationRepository, format, namespace,
                     packageName, version, readme, readmeFenceSnapshot);
         } catch (RuntimeException e) {
@@ -2971,6 +4025,51 @@ public class CodeArtifactService implements Resettable {
                     + "version itself still succeeded.", domain, sourceRepository, packageName, version,
                     destinationRepository);
         }
+    }
+
+    /**
+     * Carries the source version's Maven retention origin into the destination: {@link
+     * #versionOrigin} only ever answers from the destination coordinate's own claim, and {@link
+     * #copyContainerBackedPackageVersions} copies a version's real asset bytes without copying
+     * that claim, so a copied version would otherwise keep reporting whatever origin the
+     * destination held before this exact write, even though its real content (and, with {@code
+     * allowOverwrite}, its real bytes) just became whatever the source held instead.
+     *
+     * <p>Replaces the destination's claim outright rather than going through {@link
+     * #claimMavenRetainedVersionOrigin}'s own claim-or-reject gate: that gate exists to stop two
+     * concurrent writers from mixing sources into a version neither has written to yet, not to
+     * protect a claim this exact write, already finished by the time this call runs, has just
+     * superseded. Going through it here would silently leave a stale, mismatched claim in place
+     * on exactly the case that matters most: overwriting a destination version already retained
+     * under a different connection, where the real bytes changed but the losing claim-or-reject
+     * call would leave the old origin recorded, pointing at content no longer actually there. A
+     * stray finish from whatever attempt held the old claim can never affect this fresh one:
+     * {@link #deployMavenAssetUnderVersionFence}'s own episode check already treats a torn-down-
+     * and-replaced claim as a hard rejection regardless of its former connection name, the same
+     * protection a {@link #deletePackage} tearing down a claim already relies on.
+     *
+     * <p>A source with no claim at all (a direct publish, not retained from any connection)
+     * clears any claim the destination held before this write, rather than leaving a stale one
+     * behind: the destination's real content just became the source's own, directly-published
+     * bytes, which were never retained from anywhere.
+     */
+    private void copyMavenRetainedVersionOriginIfApplicable(String region, String domain, String owner,
+            String sourceRepository, String destinationRepository, String format, String namespace,
+            String packageName, String version) {
+        if (!"maven".equals(format)) {
+            return;
+        }
+        String key = ownerScopedKey(owner, packageVersionKey(region, domain, destinationRepository, "maven",
+                namespace, packageName, version));
+        Optional<String> sourceConnection = mavenRetainedVersionOriginConnection(region, domain, owner,
+                sourceRepository, namespace, packageName, version);
+        if (sourceConnection.isEmpty()) {
+            mavenRetainedVersionOriginConnections.remove(key);
+            return;
+        }
+        long episodeId = mavenClaimEpisodeCounter.incrementAndGet();
+        mavenRetainedVersionOriginConnections.put(key,
+                new MavenRetainedVersionOriginClaim(sourceConnection.get(), 0, true, episodeId));
     }
 
     /**
@@ -3245,18 +4344,19 @@ public class CodeArtifactService implements Resettable {
      * existence here, inside the same {@code synchronized} call that does the write, closes that
      * window the same way every other mutating method here already does.
      *
-     * <p>{@code packageFenceSnapshot} is whatever {@link #currentContainerBackedPackageFence}
-     * returned when the proxy called it, right before issuing the real write this call reports the
-     * readme of, the exact same snapshot the proxy already takes to call
-     * {@link #recordContainerBackedAssetBytes}. Without comparing it here too, a publish's readme
-     * capture that runs on a delayed callback (npm's own, off the event loop) after a concurrent
-     * {@link #deletePackage} or native unpublish has already removed this package would resurrect
-     * a readme for a package {@link #getPackageVersionReadme} should now 404 on, the same window
-     * {@code recordContainerBackedAssetBytes} already closes for byte accounting.
+     * <p>{@code fenceSnapshot} is whatever {@link #currentContainerBackedVersionFence} returned
+     * when the proxy called it, right before issuing the real write this call reports the readme
+     * of. Without comparing it here too, a publish's readme capture that runs on a delayed callback
+     * (npm's own, off the event loop) after a concurrent {@link #deletePackage}, native unpublish,
+     * or {@link #deletePackageVersions} call for this exact version has already removed it would
+     * resurrect a readme {@link #getPackageVersionReadme} should now 404 on. Raised by Greptile's
+     * review: this used to compare against {@link #currentContainerBackedPackageFence} alone, which
+     * only ever changes on a whole-package removal, so a single version's own deletion never
+     * invalidated a readme capture already in flight for it.
      */
     public synchronized void recordPublishedPackageVersionReadme(String region, String domain, String domainOwner,
             String repository, String format, String namespace, String packageName, String version,
-            String readme, long packageFenceSnapshot) {
+            String readme, long fenceSnapshot) {
         if (!isValidPackageToken(packageName) || !isValidPackageToken(version)
                 || (namespace != null && !isValidPackageToken(namespace))) {
             LOG.warnv("Skipping readme capture for {0}/{1} package ''{2}'' version ''{3}'': the namespace, name, "
@@ -3266,20 +4366,22 @@ public class CodeArtifactService implements Resettable {
         }
         String owner = effectiveOwner(domainOwner);
         if (repositories.getForAccount(owner, repositoryKey(region, domain, repository)).isEmpty()) {
-            LOG.warnv("Skipping readme capture for {0}/{1}: the repository was deleted while this publish was in "
-                    + "flight.", domain, repository);
+            LOG.warnv("Skipping readme capture for {0}/{1}: the repository was deleted while this publish was "
+                    + "in flight.", domain, repository);
             return;
         }
         String accountingName = accountingPackageName(format, packageName);
         String fenceKey = packageKey(region, domain, repository, format, namespace, accountingName);
-        long currentFence = containerBackedPackageDeletionFence.getOrDefault(ownerScopedKey(owner, fenceKey), 0L);
-        if (currentFence != packageFenceSnapshot) {
-            LOG.warnv("Skipping readme capture for {0}/{1} package ''{2}'': a DeletePackage removed it from the "
-                    + "{3} sidecar (possibly replaced by a different publish) while this publish was in flight.",
-                    domain, repository, packageName, format);
+        String key = packageVersionKey(region, domain, repository, format, namespace, accountingName, version);
+        long currentFence = Math.max(containerBackedPackageDeletionFence.getOrDefault(ownerScopedKey(owner,
+                fenceKey), 0L), containerBackedVersionDeletionFence.getOrDefault(ownerScopedKey(owner, key), 0L));
+        if (currentFence != fenceSnapshot) {
+            LOG.warnv("Skipping readme capture for {0}/{1} package ''{2}'' version ''{3}'': a DeletePackage or "
+                    + "DeletePackageVersions removed it from the {4} sidecar (possibly replaced by a different "
+                    + "publish) while this publish was in flight.", domain, repository, packageName, version,
+                    format);
             return;
         }
-        String key = packageVersionKey(region, domain, repository, format, namespace, accountingName, version);
         packageVersionReadmes.put(ownerScopedKey(owner, key), readme == null ? "" : readme);
     }
 
@@ -3391,10 +4493,12 @@ public class CodeArtifactService implements Resettable {
         packageOriginConfigs.clear();
         containerBackedAssetBytes.clear();
         containerBackedPackageDeletionFence.clear();
+        containerBackedVersionDeletionFence.clear();
         packageVersionReadmes.clear();
         containerBackedPackageVersionStatusOverrides.clear();
         containerBackedOverriddenVersionsByPackage.clear();
         containerBackedOverriddenPackagesByRepository.clear();
+        mavenRetainedVersionOriginConnections.clear();
         authorizationTokens.clear();
         if (inMemory) {
             memoryAssetStore.clear();
@@ -3488,8 +4592,10 @@ public class CodeArtifactService implements Resettable {
      * delayed callback (its own Vert.x response arriving well after this snapshot was taken, long
      * after Maven's or pypi's near-immediate inline accounting would have run) must not have the
      * first publish's bytes misattributed to the second. {@code deletePackage}'s container-backed
-     * branch bumps the counter behind this snapshot on an actual deletion; so does
-     * {@link #forgetContainerBackedPackage}, for the one other way a container-backed package's
+     * branch bumps the counter behind this snapshot on any deletion it actually goes through with,
+     * real content or an origin-config-only package alike, never a no-op where neither existed to
+     * begin with (that case 404s outright instead); so does {@link #forgetContainerBackedPackage},
+     * for the one other way a container-backed package's
      * real content can disappear: a real npm client's native {@code npm unpublish}, which the
      * pinned Verdaccio image (configured with {@code unpublish: $all}) honors on its own wire
      * protocol without ever calling {@code deletePackage} (confirmed: {@code
@@ -3506,6 +4612,40 @@ public class CodeArtifactService implements Resettable {
         String key = packageKey(region, domain, repository, format, namespace, accountingPackageName(format,
                 packageName));
         return containerBackedPackageDeletionFence.getOrDefault(ownerScopedKey(owner, key), 0L);
+    }
+
+    /**
+     * Same purpose as {@link #currentContainerBackedPackageFence}, narrowed to one version: a
+     * snapshot a format proxy takes right before issuing a real per-version write (an npm publish's
+     * own readme, or pypi's twine upload description), for {@link
+     * #recordPublishedPackageVersionReadme} to compare against once that write completes. Unlike
+     * byte accounting, which only ever runs for a whole package at a time (see {@link
+     * #recordContainerBackedAssetBytes}'s own javadoc) and so has no per-version snapshot of its
+     * own, a captured readme is keyed per version, and {@link #deletePackageVersions} can remove
+     * just one version's readme without touching its siblings'. Raised by Greptile's review:
+     * {@link #deletePackageVersions} cleared a deleted version's own captured readme without
+     * bumping any fence at all, so a publish callback already in flight for that exact version,
+     * delayed past the delete (Verdaccio's own response arriving well after this emulator's side of
+     * the delete already finished), would resurrect the readme it just removed. Returns whichever
+     * of the package-wide fence or this version's own is higher, so a snapshot taken here still
+     * catches a whole-package removal ({@link #deletePackage}, or a native {@code npm unpublish}
+     * via {@link #forgetContainerBackedPackage}) exactly the way {@link
+     * #currentContainerBackedPackageFence} already does on its own. {@link #disposePackageVersions}'s
+     * container-backed branch also bumps this version's own fence once it actually deletes real
+     * assets, for the same reason: {@code CodeArtifactMavenExternalConnectionImporter} takes its
+     * own snapshot before fetching from a public source and re-checks it right before writing each
+     * asset back, so a disposal that lands while that fetch is in flight is never silently undone.
+     */
+    public long currentContainerBackedVersionFence(String region, String domain, String domainOwner,
+            String repository, String format, String namespace, String packageName, String version) {
+        String owner = effectiveOwner(domainOwner);
+        String accountingName = accountingPackageName(format, packageName);
+        String packageFenceKey = ownerScopedKey(owner, packageKey(region, domain, repository, format, namespace,
+                accountingName));
+        String versionFenceKey = ownerScopedKey(owner, packageVersionKey(region, domain, repository, format,
+                namespace, accountingName, version));
+        return Math.max(containerBackedPackageDeletionFence.getOrDefault(packageFenceKey, 0L),
+                containerBackedVersionDeletionFence.getOrDefault(versionFenceKey, 0L));
     }
 
     /**

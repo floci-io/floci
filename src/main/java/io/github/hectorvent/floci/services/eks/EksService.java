@@ -397,6 +397,12 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     void deleteClusterForAccount(String accountId, String clusterName) {
+        synchronized (capacityLock(accountId, clusterName)) {
+            deleteClusterForAccountHoldingCapacity(accountId, clusterName);
+        }
+    }
+
+    private void deleteClusterForAccountHoldingCapacity(String accountId, String clusterName) {
         Cluster cluster = (storage instanceof AccountAwareStorageBackend<Cluster> aware)
                 ? aware.getForAccount(accountId, clusterName).orElse(null)
                 : storage.get(clusterName).orElse(null);
@@ -853,15 +859,24 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     public Cluster deleteCluster(String name) {
-        Cluster cluster = storage.get(name)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "No cluster found for name: " + name, 404));
-        if (cluster.getAccountId() == null) {
-            cluster.setAccountId(regionResolver.getAccountId());
+        // A first node group replacing the node holds this lock while the swap runs; deleting
+        // meanwhile would find no container to stop and have its cluster written back. Read the
+        // cluster only once the lock is held: a delete that waited may find it gone.
+        synchronized (capacityLock(regionResolver.getAccountId(), name)) {
+            Cluster cluster = storage.get(name)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "No cluster found for name: " + name, 404));
+            if (cluster.getAccountId() == null) {
+                cluster.setAccountId(regionResolver.getAccountId());
+            }
+            return deleteClusterHoldingCapacity(name, cluster);
         }
+    }
 
+    private Cluster deleteClusterHoldingCapacity(String name, Cluster cluster) {
         // One delete at a time per cluster, so a delete that fails cannot restore the status or
-        // state of a cluster another delete is tearing down.
+        // state of a cluster another delete is tearing down. Deletes from other threads already
+        // wait on the capacity lock; this refuses one nested on the same thread.
         if (!clustersBeingDeleted.add(cluster)) {
             throw new AwsException("ResourceInUseException",
                     "Cluster is already being deleted: " + name, 409);
@@ -983,8 +998,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         nodeGroup.setTags(request.getTags() != null ? new HashMap<>(request.getTags()) : new HashMap<>());
 
         String capacityKey = accountId + "/" + clusterName;
-        Object capacityLock = nodeGroupCapacityLocks.computeIfAbsent(capacityKey,
-                ignored -> new Object());
+        Object capacityLock = capacityLock(accountId, clusterName);
         boolean hasUserData = launchTemplateData != null && launchTemplateData.getUserData() != null
                 && !launchTemplateData.getUserData().isBlank();
         Cluster currentCluster;
@@ -1172,9 +1186,13 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                 .collect(Collectors.toList());
     }
 
+    /** Serializes node group capacity changes and cluster deletion; taken before clustersBeingDeleted. */
+    private Object capacityLock(String accountId, String clusterName) {
+        return nodeGroupCapacityLocks.computeIfAbsent(accountId + "/" + clusterName, ignored -> new Object());
+    }
+
     public Nodegroup deleteNodeGroup(String clusterName, String nodegroupName) {
-        Object capacityLock = nodeGroupCapacityLocks.computeIfAbsent(
-                regionResolver.getAccountId() + "/" + clusterName, ignored -> new Object());
+        Object capacityLock = capacityLock(regionResolver.getAccountId(), clusterName);
         synchronized (capacityLock) {
             Nodegroup nodeGroup = describeNodeGroup(clusterName, nodegroupName);
             nodeGroup.setStatus(NodegroupStatus.DELETING);

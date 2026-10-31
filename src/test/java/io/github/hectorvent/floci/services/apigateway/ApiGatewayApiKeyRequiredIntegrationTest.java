@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -15,6 +16,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 
 /**
  * Integration tests for {@code AWS::ApiGateway::Method.ApiKeyRequired} enforcement on the
@@ -36,6 +38,7 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
     private static String protectedResourceId;
     private static String openResourceId;
     private static String keyValue;
+    private static String planId;
 
     @Test @Order(1)
     void createEchoLambda() throws Exception {
@@ -92,14 +95,14 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
                 .body("{\"authorizationType\":\"NONE\",\"apiKeyRequired\":true}")
                 .when().put("/restapis/" + apiId + "/resources/" + protectedResourceId + "/methods/GET")
                 .then().statusCode(201)
-                .body("apiKeyRequired", org.hamcrest.Matchers.is(true));
+                .body("apiKeyRequired", Matchers.is(true));
 
         given()
                 .contentType(ContentType.JSON)
                 .body("{\"authorizationType\":\"NONE\"}")
                 .when().put("/restapis/" + apiId + "/resources/" + openResourceId + "/methods/GET")
                 .then().statusCode(201)
-                .body("apiKeyRequired", org.hamcrest.Matchers.is(false));
+                .body("apiKeyRequired", Matchers.is(false));
 
         String uri = "arn:aws:apigateway:" + REGION + ":lambda:path/2015-03-31/functions/"
                 + "arn:aws:lambda:" + REGION + ":" + ACCOUNT + ":function:" + ECHO_FUNCTION + "/invocations";
@@ -143,7 +146,7 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
                 .then().statusCode(200)
                 .extract().path("value");
 
-        String planId = given()
+        planId = given()
                 .contentType(ContentType.JSON)
                 .body("""
                         {"name":"apikeyrequired-plan","apiStages":[{"apiId":"%s","stage":"prod"}]}
@@ -166,7 +169,8 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
         given()
                 .when().get("/execute-api/" + apiId + "/prod/secret")
                 .then().statusCode(403)
-                .body("message", org.hamcrest.Matchers.is("Forbidden"));
+                .header("x-amzn-ErrorType", equalTo("ForbiddenException"))
+                .body("message", Matchers.is("Forbidden"));
     }
 
     @Test @Order(5)
@@ -175,7 +179,8 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
                 .header("x-api-key", "not-a-real-key")
                 .when().get("/execute-api/" + apiId + "/prod/secret")
                 .then().statusCode(403)
-                .body("message", org.hamcrest.Matchers.is("Forbidden"));
+                .header("x-amzn-ErrorType", equalTo("ForbiddenException"))
+                .body("message", Matchers.is("Forbidden"));
     }
 
     @Test @Order(6)
@@ -184,7 +189,7 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
                 .header("x-api-key", keyValue)
                 .when().get("/execute-api/" + apiId + "/prod/secret")
                 .then().statusCode(200)
-                .body("ok", org.hamcrest.Matchers.is(true));
+                .body("ok", Matchers.is(true));
     }
 
     @Test @Order(7)
@@ -192,7 +197,7 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
         given()
                 .when().get("/execute-api/" + apiId + "/prod/public")
                 .then().statusCode(200)
-                .body("ok", org.hamcrest.Matchers.is(true));
+                .body("ok", Matchers.is(true));
     }
 
     @Test @Order(8)
@@ -238,7 +243,7 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
                         """)
                 .when().patch("/restapis/" + apiId + "/resources/" + protectedResourceId + "/methods/GET")
                 .then().statusCode(200)
-                .body("apiKeyRequired", org.hamcrest.Matchers.is(false));
+                .body("apiKeyRequired", Matchers.is(false));
 
         given()
                 .contentType(ContentType.JSON)
@@ -251,7 +256,41 @@ class ApiGatewayApiKeyRequiredIntegrationTest {
                         """)
                 .when().patch("/restapis/" + apiId + "/resources/" + protectedResourceId + "/methods/GET")
                 .then().statusCode(200)
-                .body("apiKeyRequired", org.hamcrest.Matchers.is(true));
+                .body("apiKeyRequired", Matchers.is(true));
+    }
+
+    @Test @Order(11)
+    void protectedMethodRejectsDisabledAndUnboundApiKeys() {
+        String disabledKeyId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"apikeyrequired-disabled\",\"enabled\":false}")
+                .when().post("/apikeys")
+                .then().statusCode(201)
+                .extract().path("id");
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"keyId\":\"%s\",\"keyType\":\"API_KEY\"}".formatted(disabledKeyId))
+                .when().post("/usageplans/" + planId + "/keys")
+                .then().statusCode(201);
+        String unboundKeyId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\":\"apikeyrequired-unbound\",\"enabled\":true}")
+                .when().post("/apikeys")
+                .then().statusCode(201)
+                .extract().path("id");
+
+        for (String keyId : new String[] {disabledKeyId, unboundKeyId}) {
+            String value = given()
+                    .when().get("/apikeys/" + keyId + "?includeValue=true")
+                    .then().statusCode(200)
+                    .extract().path("value");
+            given()
+                    .header("x-api-key", value)
+                    .when().get("/execute-api/" + apiId + "/prod/secret")
+                    .then().statusCode(403)
+                    .header("x-amzn-ErrorType", equalTo("ForbiddenException"))
+                    .body("message", equalTo("Forbidden"));
+        }
     }
 
     private static byte[] zipEntries(Map<String, String> entries) throws Exception {

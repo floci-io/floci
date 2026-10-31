@@ -30,6 +30,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Email and domain identities, extracted from {@link SesService} as the last store of the
@@ -258,7 +260,7 @@ public class SesIdentityService implements SesTaggable {
     }
 
     /** Only a domain that is not yet verified can still change status, through its DKIM records. */
-    private Identity withCurrentStatus(Identity identity, String region) {
+    Identity withCurrentStatus(Identity identity, String region) {
         if ("Domain".equals(identity.getIdentityType()) && !"Success".equals(identity.getVerificationStatus())) {
             Identity refreshed = refreshIdentityState(identity, region);
             return refreshed == null ? identity : refreshed;
@@ -774,30 +776,47 @@ public class SesIdentityService implements SesTaggable {
     private boolean hasExpectedDkimRecord(String domain, String token) {
         String expectedName = normalizeDnsName(token + "._domainkey." + domain);
         String expectedValue = normalizeDnsName(token + "." + DKIM_SIGNING_HOSTED_ZONE);
-        for (HostedZone zone : route53Service.listHostedZones(null, Integer.MAX_VALUE)) {
-            for (ResourceRecordSet recordSet : route53Service.listResourceRecordSets(zone.getId(), null, null,
-                    Integer.MAX_VALUE)) {
-                if (!"CNAME".equalsIgnoreCase(recordSet.getType())) {
-                    continue;
-                }
-                if (!expectedName.equals(normalizeDnsName(recordSet.getName()))) {
-                    continue;
-                }
-                List<ResourceRecord> records = recordSet.getRecords();
-                if (records == null) {
-                    continue;
-                }
-                for (ResourceRecord record : records) {
-                    if (record != null && expectedValue.equals(normalizeDnsName(record.getValue()))) {
-                        return true;
-                    }
-                }
-            }
-        }
-        return false;
+        return recordSets("CNAME")
+                .filter(recordSet -> expectedName.equals(normalizeDnsName(recordSet.getName())))
+                .anyMatch(recordSet -> recordSet.getRecords() != null && recordSet.getRecords().stream()
+                        .anyMatch(record -> record != null
+                                && expectedValue.equals(normalizeDnsName(record.getValue()))));
     }
 
-    private String normalizeDnsName(String value) {
+    /**
+     * The names of the TXT record sets in every Route53 hosted zone, normalized as by
+     * {@link #normalizeDnsName}: the stand-in for the public DNS lookups SES makes. Empty while DNS
+     * lookup is disabled.
+     */
+    Set<String> txtRecordNames() {
+        if (route53Service == null) {
+            return Set.of();
+        }
+        return recordSets("TXT").map(recordSet -> normalizeDnsName(recordSet.getName()))
+                .collect(Collectors.toSet());
+    }
+
+    /** Zone by zone, so a lookup that finds its record reads no further zones. */
+    private Stream<ResourceRecordSet> recordSets(String type) {
+        return route53Service.listHostedZones(null, Integer.MAX_VALUE).stream()
+                .flatMap(zone -> zoneRecordSets(zone.getId()).stream())
+                .filter(recordSet -> type.equalsIgnoreCase(recordSet.getType()));
+    }
+
+    /** A zone deleted after the zones were listed holds no records rather than failing the SES call. */
+    private List<ResourceRecordSet> zoneRecordSets(String zoneId) {
+        try {
+            return route53Service.listResourceRecordSets(zoneId, null, null, Integer.MAX_VALUE);
+        } catch (AwsException e) {
+            if (!"NoSuchHostedZone".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("Hosted zone {0} was deleted during an SES DNS lookup; skipping it", zoneId);
+            return List.of();
+        }
+    }
+
+    static String normalizeDnsName(String value) {
         if (value == null) {
             return "";
         }
@@ -818,7 +837,7 @@ public class SesIdentityService implements SesTaggable {
 
     private String dkimLookupCacheKey(String region, Identity identity) {
         List<String> normalizedTokens = identity.getDkimTokens().stream()
-                .map(this::normalizeDnsName)
+                .map(SesIdentityService::normalizeDnsName)
                 .sorted()
                 .toList();
         return region + "::" + normalizeDnsName(identity.getIdentity()) + "::" + String.join(",", normalizedTokens);

@@ -16,6 +16,10 @@ Floci implements the AWS Security Hub CSPM organization and central-configuratio
 | `DescribeHub` | - |
 | `EnableSecurityHub` | - |
 | `UpdateSecurityHubConfiguration` | - |
+| `DescribeStandards` | Lists the standards Security Hub offers: CIS 1.2.0, 1.4.0, 3.0.0 and 5.0.0, AFSBP, NIST 800-53 Rev5, PCI DSS 3.2.1 and 4.0.1, and the resource tagging standard |
+| `BatchEnableStandards` | Subscribes standards (`READY` at once); an unknown standards ARN is `InvalidInputException`, a disabled hub `InvalidAccessException`. `EnableSecurityHub` subscribes AFSBP and CIS 1.2.0 unless `EnableDefaultStandards` is false |
+| `BatchDisableStandards` | Removes subscriptions, answered as `DELETING`; an unknown one is `ResourceNotFoundException`, and then none of the batch is removed |
+| `GetEnabledStandards` | Lists subscriptions, all or the named ones. Controls and findings are not evaluated |
 | `ListFindingAggregators` | - |
 | `CreateFindingAggregator` | - |
 | `GetFindingAggregator` | - |

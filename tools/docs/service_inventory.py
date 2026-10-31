@@ -39,11 +39,13 @@ import yaml
 
 import check_service_matrix as csm
 
-CONFIG_SOURCE = "src/main/java/io/github/hectorvent/floci/config/EmulatorConfig.java"
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from java_sources import PACKAGE_DIR, SERVICES_PACKAGE_DIR  # noqa: E402
+
+CONFIG_SOURCE = f"{PACKAGE_DIR}/config/EmulatorConfig.java"
 APPLICATION_YML = "src/main/resources/application.yml"
 README = "README.md"
 SERVICES_YAML = "tools/docs/services.yaml"
-PACKAGE_DIR = "src/main/java/io/github/hectorvent/floci/services"
 
 # Warn this far ahead of a deferred entry's expiry, so a red main is a decision rather
 # than a surprise on the morning the date passes.
@@ -290,7 +292,7 @@ def collect(repo_root: Path) -> dict:
         ),
         "yaml_keys": yaml_keys,
         "yaml_enabled": yaml_enabled,
-        "packages": sorted(p.name for p in (repo_root / PACKAGE_DIR).iterdir() if p.is_dir()),
+        "packages": sorted(p.name for p in (repo_root / SERVICES_PACKAGE_DIR).iterdir() if p.is_dir()),
         "matrix_rows": parse_matrix_rows(
             (repo_root / csm.MATRIX_DOC).read_text(encoding="utf-8")
         ),
@@ -500,13 +502,13 @@ def render(result: dict) -> str:
     w("")
 
     w("3. SOURCE  (keyspace: Java package, naming normalised)")
-    line("services/ packages", c["service_packages"], PACKAGE_DIR)
+    line("services/ packages", c["service_packages"], SERVICES_PACKAGE_DIR)
     delta("no descriptor, explained", pkg["noted"])
     for p in pkg["noted"]:
         note(f"{p}: {PACKAGE_NOTES[p]}")
     if pkg["unregistered"]:
         delta("UNREGISTERED", pkg["unregistered"])
-        note(f"A package under {PACKAGE_DIR} that no descriptor(...) names.")
+        note(f"A package under {SERVICES_PACKAGE_DIR} that no descriptor(...) names.")
         note("Register it, or add it to PACKAGE_NOTES with the reason it has none.")
     else:
         line("= every other package registered", "", "ADVISORY, no gate")

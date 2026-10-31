@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -10,6 +12,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
@@ -19,6 +22,7 @@ import java.util.zip.ZipOutputStream;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.emptyOrNullString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasItems;
@@ -26,6 +30,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 class SamTransformIntegrationTest {
@@ -105,6 +110,73 @@ class SamTransformIntegrationTest {
         assertThat(resourcesXml, containsString("<ResourceType>AWS::Lambda::Function</ResourceType>"));
         assertThat(resourcesXml, containsString("<ResourceType>AWS::IAM::Role</ResourceType>"));
         assertThat(resourcesXml, not(containsString("AWS::Serverless::Function")));
+    }
+
+    @Test
+    void samAutoPublishAliasReferenceCreatesLambdaPermission() throws Exception {
+        String stackName = "sam-ref-alias-" + Long.toString(System.nanoTime(), 36);
+        String functionName = stackName + "-fn";
+        stacksToDelete.add(stackName);
+
+        String template = """
+            Transform: AWS::Serverless-2016-10-31
+            Resources:
+              Fn:
+                Type: AWS::Serverless::Function
+                Properties:
+                  FunctionName: %s
+                  Runtime: nodejs22.x
+                  Handler: index.handler
+                  InlineCode: "exports.handler = async () => ({ ok: true });"
+                  AutoPublishAlias: live
+              FnPermission:
+                Type: AWS::Lambda::Permission
+                Properties:
+                  Action: lambda:InvokeFunction
+                  FunctionName: !Ref Fn.Alias
+                  Principal: events.amazonaws.com
+            Outputs:
+              AliasArn:
+                Value: !Ref Fn.Alias
+            """.formatted(functionName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
+        String stackXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        assertThat(stackXml, containsString(":function:" + functionName + ":live"));
+
+        String functionArn = given().when().get("/2015-03-31/functions/" + functionName)
+                .then().statusCode(200).extract().path("Configuration.FunctionArn");
+        String policyJson = given()
+        .when()
+            .get("/2015-03-31/functions/" + functionName + "/policy?Qualifier=live")
+        .then()
+            .statusCode(200)
+            .extract().path("Policy");
+        JsonNode statements = new ObjectMapper().readTree(policyJson).path("Statement");
+        assertEquals(1, statements.size());
+        JsonNode statement = statements.get(0);
+        assertEquals("lambda:InvokeFunction", statement.path("Action").asText());
+        assertEquals("events.amazonaws.com", statement.path("Principal").path("Service").asText());
+        assertEquals(functionArn + ":live", statement.path("Resource").asText());
     }
 
     @Test
@@ -524,6 +596,146 @@ class SamTransformIntegrationTest {
         .when().get("/2019-09-30/functions/" + function + "/provisioned-concurrency")
             .then().statusCode(404)
             .body("__type", equalTo("ProvisionedConcurrencyConfigNotFoundException"));
+    }
+
+    /**
+     * VersionDescription describes the version the alias publishes, resolved as CloudFormation
+     * resolves it, and not the function; each version keeps the description it was published with.
+     */
+    @Test
+    void samVersionDescriptionDescribesEachPublishedVersion() {
+        String stackName = "sam-version-description-stack";
+        String function = "sam-version-description-func";
+        stacksToDelete.add(stackName);
+        String template = """
+            Transform: AWS::Serverless-2016-10-31
+            Parameters:
+              Release:
+                Type: String
+            Resources:
+              Function:
+                Type: AWS::Serverless::Function
+                Properties:
+                  FunctionName: sam-version-description-func
+                  Handler: index.handler
+                  Runtime: nodejs20.x
+                  AutoPublishAlias: live
+                  VersionDescription:
+                    Fn::Sub: release ${Release}
+                  InlineCode: "exports.handler = async () => ({ release: '%s' });"
+            """;
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted("first"))
+            .formParam("Parameters.member.1.ParameterKey", "Release")
+            .formParam("Parameters.member.1.ParameterValue", "1")
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when().post("/").then().statusCode(200);
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
+        given().queryParam("Qualifier", "live")
+        .when().get("/2015-03-31/functions/" + function + "/configuration")
+            .then().statusCode(200).body("Version", equalTo("1")).body("Description", equalTo("release 1"));
+
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted("second"))
+            .formParam("Parameters.member.1.ParameterKey", "Release")
+            .formParam("Parameters.member.1.ParameterValue", "2")
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when().post("/").then().statusCode(200);
+        waitForStackStatus(stackName, "UPDATE_COMPLETE");
+
+        given().queryParam("Qualifier", "live")
+        .when().get("/2015-03-31/functions/" + function + "/configuration")
+            .then().statusCode(200).body("Version", equalTo("2")).body("Description", equalTo("release 2"));
+        given().when().get("/2015-03-31/functions/" + function + "/versions")
+            .then().statusCode(200)
+            .body("Versions.Version", equalTo(List.of("$LATEST", "1", "2")))
+            .body("Versions.find { it.Version == '1' }.Description", equalTo("release 1"))
+            .body("Versions.find { it.Version == '$LATEST' }.Description", emptyOrNullString());
+    }
+
+    /**
+     * Under AutoPublishAliasAllProperties a Tags change names a new id but publishes nothing, since
+     * the function has not changed. A new VersionDescription alone keeps the id: the change set
+     * reports the version replaced, but floci keeps it with its first description, where AWS fails
+     * the update. The next new id, from another Tags change, publishes with the new description,
+     * which no longer matches the last version's.
+     */
+    @Test
+    void samVersionDescriptionAloneKeepsThePublishedVersion() {
+        String stackName = "sam-version-description-only-stack";
+        String function = "sam-version-description-only-func";
+        stacksToDelete.add(stackName);
+        String template = """
+            Transform: AWS::Serverless-2016-10-31
+            Resources:
+              Function:
+                Type: AWS::Serverless::Function
+                Properties:
+                  FunctionName: sam-version-description-only-func
+                  Handler: index.handler
+                  Runtime: nodejs20.x
+                  AutoPublishAlias: live
+                  AutoPublishAliasAllProperties: true
+                  VersionDescription: %s
+                  Tags:
+                    build: %s
+                  InlineCode: "exports.handler = async () => ({});"
+            """;
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted("release 1", "a"))
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when().post("/").then().statusCode(200);
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
+
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted("release 1", "b"))
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when().post("/").then().statusCode(200);
+        waitForStackStatus(stackName, "UPDATE_COMPLETE");
+        given().when().get("/2015-03-31/functions/" + function + "/aliases/live")
+            .then().statusCode(200).body("FunctionVersion", equalTo("1"));
+
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet").formParam("StackName", stackName)
+            .formParam("ChangeSetName", "described").formParam("ChangeSetType", "UPDATE")
+            .formParam("TemplateBody", template.formatted("release 2", "b"))
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when().post("/").then().statusCode(200);
+        String changeSet = given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet").formParam("StackName", stackName)
+            .formParam("ChangeSetName", "described")
+        .when().post("/").then().statusCode(200).extract().asString();
+        List<String> versionChanges = XmlParser.extractGroups(changeSet, "ResourceChange").stream()
+            .filter(change -> change.get("LogicalResourceId").startsWith("FunctionVersion"))
+            .map(change -> change.get("Action") + " " + change.get("Replacement"))
+            .toList();
+        assertThat(versionChanges, equalTo(List.of("Modify True")));
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ExecuteChangeSet").formParam("StackName", stackName)
+            .formParam("ChangeSetName", "described")
+        .when().post("/").then().statusCode(200);
+        waitForStackStatus(stackName, "UPDATE_COMPLETE");
+        given().when().get("/2015-03-31/functions/" + function + "/versions")
+            .then().statusCode(200)
+            .body("Versions.Version", equalTo(List.of("$LATEST", "1")))
+            .body("Versions.find { it.Version == '1' }.Description", equalTo("release 1"));
+
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack").formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted("release 2", "c"))
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when().post("/").then().statusCode(200);
+        waitForStackStatus(stackName, "UPDATE_COMPLETE");
+        given().when().get("/2015-03-31/functions/" + function + "/aliases/live")
+            .then().statusCode(200).body("FunctionVersion", equalTo("2"));
+        given().when().get("/2015-03-31/functions/" + function + "/versions")
+            .then().statusCode(200)
+            .body("Versions.find { it.Version == '1' }.Description", equalTo("release 1"))
+            .body("Versions.find { it.Version == '2' }.Description", equalTo("release 2"));
     }
 
     @Test
@@ -2012,8 +2224,8 @@ class SamTransformIntegrationTest {
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
             try (ZipOutputStream zos = new ZipOutputStream(baos)) {
-                zos.putNextEntry(new java.util.zip.ZipEntry("index.js"));
-                zos.write("exports.handler=async(e)=>({statusCode:200})".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                zos.putNextEntry(new ZipEntry("index.js"));
+                zos.write("exports.handler=async(e)=>({statusCode:200})".getBytes(StandardCharsets.UTF_8));
                 zos.closeEntry();
             }
             return baos.toByteArray();
@@ -2025,7 +2237,7 @@ class SamTransformIntegrationTest {
     private static void waitForStackStatus(String stackName, String status) {
         String expected = "<StackStatus>" + status + "</StackStatus>";
         String body = "";
-        long deadline = System.nanoTime() + java.time.Duration.ofSeconds(5).toNanos();
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
         while (System.nanoTime() < deadline) {
             body = given()
                 .contentType("application/x-www-form-urlencoded")

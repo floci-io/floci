@@ -11,6 +11,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 
 /**
  * Represents a DynamoDB table definition (metadata, not items).
@@ -90,7 +91,7 @@ public class TableDefinition {
         this.itemCount = 0;
         this.tableSizeBytes = 0;
         this.tableArn = AwsArnUtils.Arn.of("dynamodb", region, accountId, "table/" + tableName).toString();
-        this.tableId = java.util.UUID.randomUUID().toString();
+        this.tableId = UUID.randomUUID().toString();
         this.provisionedThroughput = new ProvisionedThroughput(5, 5);
         this.tags = new HashMap<>();
         this.globalSecondaryIndexes = new ArrayList<>();
@@ -211,7 +212,7 @@ public class TableDefinition {
 
     /** Returns the partition key attribute name. */
     public String getTableId() {
-        if (tableId == null) tableId = java.util.UUID.randomUUID().toString();
+        if (tableId == null) tableId = UUID.randomUUID().toString();
         return tableId;
     }
     public void setTableId(String tableId) { this.tableId = tableId; }

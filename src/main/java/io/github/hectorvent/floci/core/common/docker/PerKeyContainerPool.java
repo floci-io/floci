@@ -103,6 +103,17 @@ public class PerKeyContainerPool {
     }
 
     /**
+     * Whether a container for {@code key} is currently tracked by this pool, without starting one
+     * for a key that has none: a plain map read, never {@link #ensureReady}'s own health probe or
+     * {@code Starter} call. For a caller that only wants to ask an already-running container
+     * something (whether it holds any content worth enumerating, say) and must not provision a
+     * brand-new one just to find out it has nothing.
+     */
+    public boolean isTracked(String key) {
+        return containers.containsKey(key);
+    }
+
+    /**
      * Stops and removes the container for one key, if one was ever started. No-op otherwise.
      * Shares {@link #ensureReady}'s per-key lock so a stop racing a concurrent first-use of the
      * same key serializes against it, instead of running between the moment that start commits to

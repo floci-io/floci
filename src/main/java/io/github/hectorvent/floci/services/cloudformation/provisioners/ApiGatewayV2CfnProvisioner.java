@@ -91,7 +91,7 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void delete(StackResource resource, String region) {
         switch (resource.getResourceType()) {
-            case API -> apiGatewayV2Service.deleteApi(region, resource.getPhysicalId());
+            case API -> deleteApi(region, resource.getPhysicalId());
             case AUTHORIZER -> {
                 // Deleting an authorizer needs the api id (a create-time attribute) as well as the
                 // authorizer id (the physical id), which the id-only delete path cannot supply.
@@ -118,6 +118,15 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
             CfnDeletes.safeDelete("API Gateway V2 VPC link", physicalId,
                     () -> apiGatewayV2Service.deleteVpcLink(region, physicalId), "NotFoundException");
         }
+    }
+
+    /**
+     * Deletes an api, and with it every child, tolerating one already gone: removed out of band, or
+     * deleted by a provision whose Body failed before the update rollback deletes the resource again.
+     */
+    private void deleteApi(String region, String apiId) {
+        CfnDeletes.safeDelete("API Gateway V2 API", apiId, () -> apiGatewayV2Service.deleteApi(region, apiId),
+                "NotFoundException");
     }
 
     @Override
@@ -195,11 +204,15 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
             req.put("corsConfiguration", cors);
         }
 
+        // Read before anything changes, so a document that cannot be read leaves the API as it was.
+        JsonNode body = OpenApiDocuments.resolve(props, engine, s3Service, objectMapper);
+
+        boolean created = !ctx.isUpdate();
         Api api;
-        if (r.getPhysicalId() == null) {
+        if (created) {
             api = apiGatewayV2Service.createApi(region, req);
         } else {
-            api = apiGatewayV2Service.updateApi(region, r.getPhysicalId(), req);
+            api = apiGatewayV2Service.updateApi(region, ctx.priorPhysicalId(), req);
         }
         r.setPhysicalId(api.getApiId());
         r.getAttributes().put("ApiId", api.getApiId());
@@ -208,17 +221,23 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         // arn:<partition>:execute-api:<region>:<account>:<apiId> for this attribute.
         r.getAttributes().put("ExecuteApiArn",
                 AwsArnUtils.Arn.of("execute-api", region, ctx.accountId(), api.getApiId()).toString());
-        reconcileBodyRoutes(r, region, api.getApiId(), props, engine);
+        // A Body that cannot be materialized fails the provision after the API exists. Its own
+        // rollback has already removed what it generated, or kept the ids of what it could not, and
+        // on a kept API put back the routes, integrations and authorizers it replaced; what
+        // UpdateApi changed stays. An API this provision created is then deleted too, with every
+        // child it still has, or left marked for the stack's rollback when that delete fails.
+        CfnRollback.guarded(r, ctx, created,
+                () -> deleteApi(region, api.getApiId()),
+                () -> { },
+                () -> reconcileBodyRoutes(r, region, api.getApiId(), body));
     }
 
     /**
      * Reconciles the routes, integrations and authorizers materialized from an ApiGatewayV2 OpenAPI
-     * body. Only ids stored on this resource are removed, so separately declared V2 resources stay
-     * outside this generated-resource lifecycle.
+     * body, {@code null} when the resource declares none. Only ids stored on this resource are
+     * removed, so separately declared V2 resources stay outside this generated-resource lifecycle.
      */
-    private void reconcileBodyRoutes(StackResource r, String region, String apiId, JsonNode props,
-                                     CloudFormationTemplateEngine engine) {
-        JsonNode body = OpenApiDocuments.resolve(props, engine, s3Service, objectMapper);
+    private void reconcileBodyRoutes(StackResource r, String region, String apiId, JsonNode body) {
         BodyResourceState previous = null;
         try {
             previous = snapshotBodyResources(r, region, apiId);
@@ -294,6 +313,7 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                             Map<String, Object> integrationRequest = new HashMap<>();
                             integrationRequest.put("integrationType", integrationType.toUpperCase(Locale.ROOT));
                             putOpenApiIntegrationValue(integrationRequest, "integrationUri", integration, "uri");
+                            putOpenApiIntegrationValue(integrationRequest, "credentialsArn", integration, "credentials");
                             putOpenApiIntegrationValue(integrationRequest, "integrationMethod", integration,
                                     "httpMethod");
                             putOpenApiIntegrationValue(integrationRequest, "payloadFormatVersion", integration,
@@ -359,6 +379,7 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
             request.put("authorizerType", authorizerType);
             putOpenApiAuthorizerIdentitySource(request, definition);
             putOpenApiAuthorizerValue(request, "authorizerUri", definition, "authorizerUri");
+            putOpenApiAuthorizerValue(request, "authorizerCredentialsArn", definition, "authorizerCredentials");
             putOpenApiAuthorizerValue(request, "authorizerPayloadFormatVersion", definition,
                     "authorizerPayloadFormatVersion");
             putOpenApiAuthorizerValue(request, "authorizerResultTtlInSeconds", definition,
@@ -867,6 +888,27 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         String connectionId = ctx.resolveOptional(props, "ConnectionId");
         req.put("connectionType", connectionType);
         req.put("connectionId", connectionId);
+        req.put("integrationMethod", ctx.resolveOrDefault(props, "IntegrationMethod", null));
+        req.put("templateSelectionExpression",
+                ctx.resolveOrDefault(props, "TemplateSelectionExpression", null));
+        String timeout = ctx.resolveOrDefault(props, "TimeoutInMillis", null);
+        int timeoutInMillis = 0;
+        if (timeout != null) {
+            try {
+                timeoutInMillis = Integer.parseInt(timeout);
+                req.put("timeoutInMillis", timeoutInMillis);
+            } catch (NumberFormatException e) {
+                throw new AwsException("ValidationError", "TimeoutInMillis must be an integer", 400);
+            }
+        }
+        Map<String, String> requestParameters = resolveStringMap(props, "RequestParameters", ctx.engine());
+        if (requestParameters != null) {
+            req.put("requestParameters", requestParameters);
+        }
+        Map<String, String> requestTemplates = resolveStringMap(props, "RequestTemplates", ctx.engine());
+        if (requestTemplates != null) {
+            req.put("requestTemplates", requestTemplates);
+        }
         // A snapshot describes the update in flight; one an earlier update left behind is stale.
         r.getAttributes().remove(CfnRollback.INTEGRATION_CONNECTION_SNAPSHOT_ATTR);
 
@@ -883,6 +925,12 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                 // A connection removed from the template is removed here too. INTERNET is the AWS default.
                 apiGatewayV2Service.replaceIntegrationConnection(region, apiId, r.getPhysicalId(),
                         connectionType != null ? connectionType : "INTERNET", connectionId);
+                // These fields are exactly what the template says: one it dropped is removed, and a
+                // dropped TimeoutInMillis is 0, the value CreateIntegration stores when it is absent.
+                apiGatewayV2Service.replaceIntegrationSettings(region, apiId, r.getPhysicalId(),
+                        (String) req.get("integrationMethod"),
+                        (String) req.get("templateSelectionExpression"), timeoutInMillis,
+                        requestParameters, requestTemplates);
                 integration = apiGatewayV2Service.updateIntegration(region, apiId, r.getPhysicalId(), req);
             } catch (RuntimeException failure) {
                 // The stack skips rollbackUpdate for a resource whose own update failed, so undo it here.
@@ -890,7 +938,7 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                     rollbackIntegrationConnection(r);
                 } catch (RuntimeException restoreFailure) {
                     r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR,
-                            "Could not roll back the connection of integration " + r.getPhysicalId() + ": "
+                            "Could not roll back integration " + r.getPhysicalId() + ": "
                                     + restoreFailure.getMessage());
                     if (restoreFailure != failure) {
                         failure.addSuppressed(restoreFailure);
@@ -904,9 +952,9 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * The connection the integration had before this update, and whether the update also changes
-     * another field. UpdateIntegration keeps a field the request leaves out, so only a value that
-     * is set and differs counts as a change.
+     * The connection and the five settings the integration had before this update, and whether the
+     * update also changes another field. UpdateIntegration keeps a field the request leaves out, so
+     * only a value that is set and differs counts as a change.
      */
     private String integrationConnectionSnapshot(String region, String apiId, Integration prior,
                                                  Map<String, Object> req) {
@@ -918,6 +966,11 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         snapshot.put("apiId", apiId);
         snapshot.put("connectionType", prior.getConnectionType());
         snapshot.put("connectionId", prior.getConnectionId());
+        snapshot.put("integrationMethod", prior.getIntegrationMethod());
+        snapshot.put("templateSelectionExpression", prior.getTemplateSelectionExpression());
+        snapshot.put("timeoutInMillis", prior.getTimeoutInMillis());
+        snapshot.set("requestParameters", objectMapper.valueToTree(prior.getRequestParameters()));
+        snapshot.set("requestTemplates", objectMapper.valueToTree(prior.getRequestTemplates()));
         snapshot.put("otherFieldChanged", otherFieldChanged);
         return snapshot.toString();
     }
@@ -927,9 +980,9 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Puts the connection back from the snapshot taken before the update. Answers true only when the
-     * update changed nothing else: this provisioner keeps no copy of the other fields, so the stack
-     * must still report that their rollback is not implemented.
+     * Puts the connection and the settings back from the snapshot taken before the update. Answers
+     * true only when the update changed nothing else: this provisioner keeps no copy of the other
+     * fields, so the stack must still report that their rollback is not implemented.
      */
     private boolean rollbackIntegrationConnection(StackResource resource) {
         String raw = resource.getAttributes().get(CfnRollback.INTEGRATION_CONNECTION_SNAPSHOT_ATTR);
@@ -947,9 +1000,23 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         apiGatewayV2Service.replaceIntegrationConnection(snapshot.path("region").asText(),
                 snapshot.path("apiId").asText(), resource.getPhysicalId(),
                 textOrNull(snapshot, "connectionType"), textOrNull(snapshot, "connectionId"));
+        apiGatewayV2Service.replaceIntegrationSettings(snapshot.path("region").asText(),
+                snapshot.path("apiId").asText(), resource.getPhysicalId(),
+                textOrNull(snapshot, "integrationMethod"), textOrNull(snapshot, "templateSelectionExpression"),
+                snapshot.path("timeoutInMillis").asInt(), stringMapOrNull(snapshot.path("requestParameters")),
+                stringMapOrNull(snapshot.path("requestTemplates")));
         // Spent only once the restore succeeded, so a restore that throws can be tried again.
         resource.getAttributes().remove(CfnRollback.INTEGRATION_CONNECTION_SNAPSHOT_ATTR);
         return !snapshot.path("otherFieldChanged").asBoolean();
+    }
+
+    private static Map<String, String> stringMapOrNull(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        Map<String, String> out = new LinkedHashMap<>();
+        node.fields().forEachRemaining(e -> out.put(e.getKey(), e.getValue().asText()));
+        return out;
     }
 
     // ── Stage ────────────────────────────────────────────────────────────────
@@ -1155,10 +1222,19 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
     }
 
     private Map<String, String> parseStageVariables(JsonNode props, CloudFormationTemplateEngine engine) {
-        if (props == null || !props.has("StageVariables") || props.get("StageVariables").isNull()) {
+        return resolveStringMap(props, "StageVariables", engine);
+    }
+
+    /**
+     * Resolves an object property to a string map in template order, or null when absent or not an
+     * object. An entry whose value is a selected {@code AWS::NoValue} is left out.
+     */
+    private static Map<String, String> resolveStringMap(JsonNode props, String name,
+                                                        CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(name) || props.get(name).isNull()) {
             return null;
         }
-        JsonNode resolved = engine.resolveNode(props.get("StageVariables"));
+        JsonNode resolved = engine.resolveNodeOmittingNoValue(props.get(name));
         if (resolved == null || !resolved.isObject()) {
             return null;
         }

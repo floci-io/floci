@@ -198,6 +198,55 @@ public class BagetterSidecarClient implements RepositorySidecarManager {
         return result;
     }
 
+    /**
+     * BaGetter's NuGet V3 Search resource ({@code /v3/search}), pressed into service purely as an
+     * admin-side enumeration for this management API, a different purpose from the native NuGet
+     * client protocol this class's own class-level documentation explains it deliberately never
+     * stands up Search to serve. An empty {@code q} matches every package (confirmed live); {@code
+     * data} empties out once every page has been read, the loop's own termination signal rather
+     * than {@code totalHits}, which was confirmed live to report results *remaining from the
+     * current skip*, not a stable grand total, so trusting it as a loop bound would stop one page
+     * early. {@code id} is returned real-cased by BaGetter (confirmed live), lowercased here to
+     * match what {@code CodeArtifactService}'s own {@code accountingPackageName} already
+     * normalizes every NuGet package name to (AWS's own documented NuGet normalization). NuGet
+     * packages have no namespace.
+     *
+     * <p>Raised by Greptile's review: the real NuGet V3 Search resource excludes prerelease
+     * versions whenever {@code prerelease} is omitted (the official API's own documented default),
+     * so a package whose only published version is a prerelease (e.g. {@code 1.0.0-beta}) would
+     * never appear here without it. {@code prerelease=true} is passed explicitly since this call
+     * enumerates every package a repository holds, regardless of what any one version's own
+     * stability looks like, not a client-facing search that should default to stable results.
+     *
+     * <p>Raised by hectorvent's review: every CodeArtifact repository gets a nuget sidecar id at
+     * creation regardless of whether it is ever actually used through nuget, so without checking
+     * {@link BagetterSidecarManager#isRunning} first, a {@code ListPackages} call with no format
+     * filter would start this repository's own BaGetter container just to find it empty, every
+     * time, for a repository that has never published anything through nuget.
+     */
+    @Override
+    public List<PackageIdentifier> listPackages(String repositoryContainerId, String domain, String repository) {
+        if (!manager.isRunning(repositoryContainerId)) {
+            return List.of();
+        }
+        List<PackageIdentifier> result = new ArrayList<>();
+        int skip = 0;
+        int take = 100;
+        while (true) {
+            JsonNode page = getJson(repositoryContainerId, "/v3/search?q=&prerelease=true&skip=" + skip + "&take="
+                    + take).orElseThrow(() -> new IllegalStateException("Could not list packages on the BaGetter "
+                            + "sidecar"));
+            JsonNode data = page.path("data");
+            if (!data.isArray() || data.isEmpty()) {
+                return result;
+            }
+            for (JsonNode entry : data) {
+                result.add(new PackageIdentifier(null, entry.path("id").asText("").toLowerCase(Locale.ROOT)));
+            }
+            skip += data.size();
+        }
+    }
+
     private Optional<JsonNode> getJson(String repositoryContainerId, String encodedPath) {
         String baseUrl = ensureReady(repositoryContainerId, null);
         return getJsonAbsolute(baseUrl + encodedPath);

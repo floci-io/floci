@@ -13,6 +13,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -45,18 +46,41 @@ class IamRestRouteCoverageTest {
      * Operations Floci does not serve, whose request runs as another operation instead and so is checked
      * as that one: S3 has no bucket metadata configuration, and {@code ?metadataConfiguration} on a
      * bucket falls through to ListObjects and DeleteBucket. Checking it as the metadata table action
-     * would let that action list or delete the bucket. EKS takes an access entry's principal as the rest
-     * of the path, so an entry's access policy routes read and delete the entry of a longer principal.
+     * would let that action list or delete the bucket.
      */
     private static final Map<String, String> RUN_AS_ANOTHER_OPERATION = Map.of(
             "GetBucketMetadataConfiguration", "s3:ListBucket",
-            "DeleteBucketMetadataConfiguration", "s3:DeleteBucket",
-            "ListAssociatedAccessPolicies", "eks:DescribeAccessEntry",
-            "DisassociateAccessPolicy", "eks:DeleteAccessEntry");
+            "DeleteBucketMetadataConfiguration", "s3:DeleteBucket");
 
     /** Models every operation of which is checked: the services whose routes the registry maps in full. */
     private static final Set<String> FULLY_ROUTED_MODELS =
             Set.of("scheduler", "pipes", "eks", "lambda", "lambda-microvms", "lambda-core", "dsql");
+
+    /**
+     * The S3 Control operations Floci serves, the rest-routes entry of which is a route the
+     * registry maps. Every other operation of the s3control model has no route in Floci: the
+     * request falls through to the S3 data plane and is checked as the object or bucket
+     * operation that runs.
+     */
+    private static final Set<String> SERVED_S3_CONTROL_OPERATIONS = Set.of(
+            "DeletePublicAccessBlock", "GetPublicAccessBlock", "ListAccessPoints", "ListTagsForResource",
+            "PutPublicAccessBlock", "TagResource", "UntagResource");
+
+    /**
+     * The account-level Block Public Access, the one route the Service Reference cannot settle.
+     * It files S3's and S3 Control's GetPublicAccessBlock, PutPublicAccessBlock and
+     * DeletePublicAccessBlock under the bucket actions (s3:GetBucketPublicAccessBlock,
+     * s3:PutBucketPublicAccessBlock and s3:DeleteBucketPublicAccessBlock), one action between
+     * the two clients, although the account level is a different permission. The S3 User
+     * Guide's Block Public Access page gives the account level s3:PutAccountPublicAccessBlock
+     * to write and s3:GetAccountPublicAccessBlock to read, and a delete needs the same action
+     * as the write it undoes.
+     * https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html
+     */
+    private static final Map<String, String> ACCOUNT_PUBLIC_ACCESS_BLOCK_ACTIONS = Map.of(
+            "GetPublicAccessBlock", "s3:GetAccountPublicAccessBlock",
+            "PutPublicAccessBlock", "s3:PutAccountPublicAccessBlock",
+            "DeletePublicAccessBlock", "s3:PutAccountPublicAccessBlock");
 
     private final IamActionRegistry registry = new IamActionRegistry();
 
@@ -99,6 +123,39 @@ class IamRestRouteCoverageTest {
                 tests.add(DynamicTest.dynamicTest(model + " " + operation.getKey(),
                         () -> assertEquals(expected, resolve(route), route.toString())));
             }
+        }
+        return tests.stream();
+    }
+
+    /**
+     * Every route of the s3control model, which signs with the s3 scope. A route Floci serves is
+     * checked as the action the Service Reference gives the operation, with the account-level
+     * Block Public Access as its one written-down exception; a route Floci does not serve runs
+     * as the S3 data plane, so it must not resolve to any of the served routes' actions.
+     */
+    @TestFactory
+    Stream<DynamicTest> everyS3ControlRouteIsCheckedAsTheServiceReferenceGivesIt() throws IOException {
+        JsonNode models = load("/aws/rest-routes.json").path("models");
+        JsonNode authorized = load("/aws/iam-authorized-actions.json").path("authorizedActions");
+        Map<String, String> served = new HashMap<>();
+        for (String operation : SERVED_S3_CONTROL_OPERATIONS) {
+            served.put(operation, ACCOUNT_PUBLIC_ACCESS_BLOCK_ACTIONS.getOrDefault(operation,
+                    authorized.path("s3").path(operation).asText("s3:" + operation)));
+        }
+        List<DynamicTest> tests = new ArrayList<>();
+        Iterator<Map.Entry<String, JsonNode>> operations =
+                models.path("s3control").path("operations").fields();
+        while (operations.hasNext()) {
+            Map.Entry<String, JsonNode> operation = operations.next();
+            Route route = new Route("s3", "s3control", operation.getKey(),
+                    operation.getValue().path("method").asText(),
+                    operation.getValue().path("requestUri").asText());
+            String expected = served.get(operation.getKey());
+            tests.add(expected == null
+                    ? DynamicTest.dynamicTest("s3control " + operation.getKey() + " (not served)",
+                            () -> assertFalse(served.containsValue(resolve(route)), route.toString()))
+                    : DynamicTest.dynamicTest("s3control " + operation.getKey(),
+                            () -> assertEquals(expected, resolve(route), route.toString())));
         }
         return tests.stream();
     }
@@ -153,12 +210,18 @@ class IamRestRouteCoverageTest {
             return ctx;
         }
 
-        /** The path with each {@code {label}} filled in, and a greedy {@code {label+}} given two segments. */
+        /**
+         * The path with each {@code {label}} filled in, and a greedy {@code {label+}} given two segments. A
+         * {@code {policyArn}} gets a cluster access policy ARN, encoded as an SDK sends it, since only that
+         * shape routes to the policy operations.
+         */
         private static String fill(String template) {
             Matcher label = LABEL.matcher(template);
             StringBuilder path = new StringBuilder();
             while (label.find()) {
-                String value = label.group(1).toLowerCase() + "-value";
+                String value = label.group(1).equals("policyArn")
+                        ? "arn%3Aaws%3Aeks%3A%3Aaws%3Acluster-access-policy%2FAmazonEKSViewPolicy"
+                        : label.group(1).toLowerCase() + "-value";
                 label.appendReplacement(path, label.group(2).isEmpty() ? value : value + "/part");
             }
             label.appendTail(path);

@@ -127,9 +127,13 @@ class AppConfigLegacyIntegrationTest {
     }
 
     @Test
-    void matchingClientVersionReturnsAnEmptyBody() {
+    void matchingClientVersionReturnsNoContentWithoutEntityHeaders() {
         given().queryParam("client_id", "reader").queryParam("client_configuration_version", "1")
-                .get(path()).then().statusCode(200).header("Configuration-Version", "1").body(equalTo(""));
+                .get(path()).then().statusCode(204)
+                .header("Configuration-Version", "1")
+                .header("Content-Type", nullValue())
+                .header("Content-Length", nullValue())
+                .body(equalTo(""));
         given().queryParam("client_id", "reader").queryParam("client_configuration_version", "0")
                 .get(path()).then().statusCode(200).body("enabled", equalTo(true));
         given().queryParam("client_id", "another-reader").get(path())

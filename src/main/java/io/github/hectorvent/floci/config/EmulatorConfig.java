@@ -1107,7 +1107,8 @@ public interface EmulatorConfig {
 
         /**
          * {@code immediate} follows the job run states without running anything; {@code docker} runs
-         * each Spark job run's {@code spark-submit} in a container of the release's EMR Serverless image.
+         * each Spark job run's {@code spark-submit} in a container of the application's custom image, or
+         * else of the release's EMR Serverless image.
          */
         @WithDefault("immediate")
         String runnerMode();
@@ -1115,9 +1116,10 @@ public interface EmulatorConfig {
         Optional<String> dockerNetwork();
 
         /**
-         * The image a {@code docker} job run uses, with {@code %s} standing for the application's
-         * release label, for example "registry.internal/emr-serverless/spark/%s:20250425". If omitted,
-         * Floci uses the release's public image on Amazon ECR Public.
+         * The image a {@code docker} job run uses when its application names no custom image, with
+         * {@code %s} standing for the application's release label, for example
+         * "registry.internal/emr-serverless/spark/%s:20250425". If omitted, Floci uses the release's public
+         * image on Amazon ECR Public.
          */
         Optional<String> imageTemplate();
 
@@ -1724,6 +1726,17 @@ public interface EmulatorConfig {
 
     interface RedshiftServiceConfig {
         @WithDefault("true")
+        boolean automatedSnapshotsEnabled();
+
+        /**
+         * Publish the AWS/Redshift CloudWatch metrics of every available cluster once a minute.
+         * Env: FLOCI_SERVICES_REDSHIFT_CLOUDWATCH_METRICS_ENABLED
+         */
+        @WithDefault("true")
+        boolean cloudwatchMetricsEnabled();
+        @WithDefault("60")
+        long snapshotSweepIntervalSeconds();
+        @WithDefault("true")
         boolean enabled();
         @WithDefault("5439")
         int defaultPort();
@@ -1897,6 +1910,24 @@ public interface EmulatorConfig {
     interface RedshiftServerlessServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("true")
+        boolean snapshotExpirationEnabled();
+
+        @WithDefault("60")
+        int snapshotExpirationSweepIntervalSeconds();
+
+        @WithDefault("true")
+        boolean snapshotCopyEnabled();
+
+        @WithDefault("60")
+        int snapshotCopySweepIntervalSeconds();
+
+        @WithDefault("true")
+        boolean scheduledActionsEnabled();
+
+        @WithDefault("60")
+        int scheduledActionSweepIntervalSeconds();
     }
 
     interface NeptuneServiceConfig {
@@ -1979,6 +2010,34 @@ public interface EmulatorConfig {
         /** How long a cluster stays TERMINATING before it is TERMINATED; 0 ends it at once. */
         @WithDefault("0")
         int clusterTerminationDelaySeconds();
+
+        /**
+         * {@code immediate} completes each step by time without running anything; {@code docker} runs each
+         * Spark step's {@code spark-submit} in a container of the release's EMR Serverless image.
+         */
+        @WithDefault("immediate")
+        String runnerMode();
+
+        Optional<String> dockerNetwork();
+
+        /**
+         * The image a {@code docker} step uses, with {@code %s} standing for the cluster's release label,
+         * for example "registry.internal/emr-serverless/spark/%s:20250425". If omitted, Floci uses the
+         * release's public EMR Serverless image on Amazon ECR Public.
+         */
+        Optional<String> imageTemplate();
+
+        /**
+         * When true, Floci removes, in the {@code docker} runner mode, every EMR step driver and bootstrap
+         * container a previous run of <em>this same</em> Floci left on the daemon (matched by the
+         * {@code io.floci.owner} label), and the images bootstrap actions left for clusters that are gone or
+         * have ended, when the EMR service starts. Turn it off when two Floci instances share a daemon with
+         * the same port and no resource namespace, so one does not remove the other's drivers.
+         *
+         * Env var: FLOCI_SERVICES_EMR_RECONCILE_CONTAINERS_ON_STARTUP
+         */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
     }
 
     interface WafV2ServiceConfig {
@@ -2382,6 +2441,10 @@ public interface EmulatorConfig {
          */
         @WithDefault("false")
         boolean allowUnsafeHostVolumes();
+
+        /** Allow ECS task definitions to launch Docker containers with host-level privilege. */
+        @WithDefault("false")
+        boolean allowPrivilegedContainers();
 
         /**
          * When true, Floci removes on startup, in Docker mode, every ECS container a previous run
@@ -2979,7 +3042,7 @@ public interface EmulatorConfig {
         @WithDefault("public.ecr.aws") // partition-literal: configurable; ECR Public exists only in the commercial partition
         String ecrBaseUri();
 
-        /** Full image references for individual runtimes, keyed by Lambda runtime identifier. */
+        /** Full image references keyed by runtime, or runtime.os.arch for a selected Docker platform. */
         Map<String, String> runtimeImages();
 
         @WithDefault("128")

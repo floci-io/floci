@@ -352,6 +352,39 @@ class ElbV2IntegrationTest {
     }
 
     @Test
+    @Order(9)
+    void setSecurityGroupsReturnsSecurityGroupIdsAsFlatMemberList() {
+        given()
+                .formParam("Action", "SetSecurityGroups")
+                .formParam("LoadBalancerArn", lbArn)
+                .formParam("SecurityGroups.member.1", "sg-0123456789abcdef0")
+                .formParam("SecurityGroups.member.2", "sg-0fedcba9876543210")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .contentType("application/xml")
+                .body(containsString("<SecurityGroupIds><member>sg-0123456789abcdef0</member>"
+                        + "<member>sg-0fedcba9876543210</member></SecurityGroupIds>"))
+                .body(not(containsString("<member><member>")))
+                .body("SetSecurityGroupsResponse.SetSecurityGroupsResult.SecurityGroupIds.member",
+                        contains("sg-0123456789abcdef0", "sg-0fedcba9876543210"))
+                .body("SetSecurityGroupsResponse.ResponseMetadata.RequestId", not(emptyOrNullString()));
+
+        given()
+                .formParam("Action", "DescribeLoadBalancers")
+                .formParam("LoadBalancerArns.member.1", lbArn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.SecurityGroups.member",
+                        contains("sg-0123456789abcdef0", "sg-0fedcba9876543210"));
+    }
+
+    @Test
     @Order(17)
     void createAndSetSubnetMappingsDriveSubnetsAndVpcId() {
         // The AWS Load Balancer Controller sends SubnetMappings rather than Subnets; both actions

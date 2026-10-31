@@ -317,7 +317,7 @@ public class EmrHandler {
         EmrCluster cluster = service.getClusterForInstances(text(request, "ClusterId"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Instances");
-        boolean terminated = "TERMINATED".equals(cluster.getState());
+        boolean terminated = EmrClusterLifecycle.isTerminated(cluster.getState());
         List<String> states = stringList(request.path("InstanceStates"));
         if ((!states.isEmpty() && !states.contains(terminated ? "TERMINATED" : "RUNNING"))
                 || (terminated && !withinTerminatedInstanceRetention(cluster.getEndDateTime(), Instant.now()))) {
@@ -666,6 +666,12 @@ public class EmrHandler {
         if (step.getStateChangeReason() != null) {
             status.putObject("StateChangeReason").put("Message", step.getStateChangeReason());
         }
+        if (step.getFailureReason() != null) {
+            ObjectNode failure = status.putObject("FailureDetails").put("Reason", step.getFailureReason());
+            if (step.getFailureMessage() != null) {
+                failure.put("Message", step.getFailureMessage());
+            }
+        }
         ObjectNode timeline = status.putObject("Timeline");
         putEpoch(timeline, "CreationDateTime", step.getCreationDateTime());
         putEpoch(timeline, "StartDateTime", step.getStartDateTime());
@@ -736,7 +742,7 @@ public class EmrHandler {
                                              boolean terminated) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Id", "ci-" + index + cluster.getId());
-        node.put("Ec2InstanceId", "i-" + String.format("%017d", index));
+        node.put("Ec2InstanceId", EmrService.ec2InstanceId(index));
         node.put("PublicDnsName", AwsEndpoints.ec2PublicDns("203.0.113." + index, cluster.getRegion()));
         String privateIp = "10.0.0." + index;
         node.put("PrivateDnsName", AwsRegions.ec2PrivateIpDnsName(privateIp, cluster.getRegion()));

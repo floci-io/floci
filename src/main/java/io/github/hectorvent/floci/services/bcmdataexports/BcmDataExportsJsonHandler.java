@@ -6,11 +6,14 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.bcmdataexports.model.DataQuery;
 import io.github.hectorvent.floci.services.bcmdataexports.model.DestinationConfiguration;
 import io.github.hectorvent.floci.services.bcmdataexports.model.Export;
 import io.github.hectorvent.floci.services.bcmdataexports.model.ExportExecution;
 import io.github.hectorvent.floci.services.bcmdataexports.model.RefreshCadence;
+import io.github.hectorvent.floci.services.cur.CurEmissionScheduler;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -20,7 +23,6 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -35,12 +37,12 @@ public class BcmDataExportsJsonHandler {
 
     private final BcmDataExportsService service;
     private final ObjectMapper objectMapper;
-    private final io.github.hectorvent.floci.services.cur.CurEmissionScheduler scheduler;
+    private final CurEmissionScheduler scheduler;
 
     @Inject
     public BcmDataExportsJsonHandler(BcmDataExportsService service,
                                      ObjectMapper objectMapper,
-                                     io.github.hectorvent.floci.services.cur.CurEmissionScheduler scheduler) {
+                                     CurEmissionScheduler scheduler) {
         this.service = service;
         this.objectMapper = objectMapper;
         this.scheduler = scheduler;
@@ -51,7 +53,7 @@ public class BcmDataExportsJsonHandler {
         return switch (action) {
             case "CreateExport" -> handleCreate(request, region);
             case "GetExport" -> handleGet(request);
-            case "ListExports" -> handleList();
+            case "ListExports" -> handleList(request);
             case "UpdateExport" -> handleUpdate(request);
             case "DeleteExport" -> handleDelete(request);
             case "ListExecutions" -> handleListExecutions(request);
@@ -85,12 +87,17 @@ public class BcmDataExportsJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleList() {
-        List<Export> exports = service.listExports();
+    private Response handleList(JsonNode request) {
+        PaginatedResult<Export> page = service.listExports(
+                Pagination.parseMaxResults(request, "MaxResults", "ValidationException"),
+                Pagination.parseNextToken(request, "NextToken", "ValidationException"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Exports");
-        for (Export export : exports) {
+        for (Export export : page.items()) {
             arr.add(serializeExportReference(export));
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }
@@ -119,11 +126,16 @@ public class BcmDataExportsJsonHandler {
 
     private Response handleListExecutions(JsonNode request) {
         String arn = stringOrNull(request, "ExportArn");
-        List<ExportExecution> executions = service.listExecutions(arn);
+        PaginatedResult<ExportExecution> page = service.listExecutions(arn,
+                Pagination.parseMaxResults(request, "MaxResults", "ValidationException"),
+                Pagination.parseNextToken(request, "NextToken", "ValidationException"));
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("Executions");
-        for (ExportExecution exec : executions) {
+        for (ExportExecution exec : page.items()) {
             arr.add(serializeExecution(exec));
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }

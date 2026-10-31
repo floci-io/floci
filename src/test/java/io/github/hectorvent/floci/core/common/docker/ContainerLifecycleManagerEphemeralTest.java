@@ -18,6 +18,7 @@ import static org.mockito.Mockito.*;
 
 class ContainerLifecycleManagerEphemeralTest {
     private DockerClient docker;
+    private ImageCacheService images;
     private ContainerLifecycleManager manager;
     private RemoveContainerCmd remove;
     private CreateContainerCmd create;
@@ -26,7 +27,7 @@ class ContainerLifecycleManagerEphemeralTest {
     @BeforeEach
     void setUp() {
         docker = mock(DockerClient.class);
-        ImageCacheService images = mock(ImageCacheService.class);
+        images = mock(ImageCacheService.class);
         when(images.ensureImageExists(spec.image())).thenReturn("image-id");
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         manager = spy(new ContainerLifecycleManager(docker, images, mock(ContainerDetector.class), config));
@@ -72,6 +73,18 @@ class ContainerLifecycleManagerEphemeralTest {
         doReturn(info).when(manager).startCreated("owned-id", spec);
         assertSame(info, manager.createAndStartEphemeral(spec));
         verify(docker, never()).removeContainerCmd(anyString());
+    }
+
+    @Test
+    void ephemeralStartForAPlatformCreatesTheContainerForIt() {
+        when(images.ensureImageExists(spec.image(), "linux/amd64")).thenReturn("amd64-id");
+        when(docker.createContainerCmd("amd64-id")).thenReturn(create);
+        ContainerLifecycleManager.ContainerInfo info = new ContainerLifecycleManager.ContainerInfo("owned-id", Map.of());
+        doReturn(info).when(manager).startCreated("owned-id", spec);
+
+        assertSame(info, manager.createAndStartEphemeral(spec, "linux/amd64"));
+
+        verify(create).withPlatform("linux/amd64");
     }
 
     @Test

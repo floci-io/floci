@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.ssm;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -10,6 +12,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.DeadlineCharSequence;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
@@ -24,6 +27,7 @@ import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
+import io.github.hectorvent.floci.services.ssm.model.ParameterResourcePolicy;
 import io.github.hectorvent.floci.services.ssm.model.ParameterStringFilter;
 import io.github.hectorvent.floci.services.ssm.model.PatchBaselineIdentity;
 import io.github.hectorvent.floci.services.ssm.model.ServiceSetting;
@@ -50,6 +54,10 @@ public class SsmService implements ResourceProvider {
     private static final Logger LOG = Logger.getLogger(SsmService.class);
 
     private static final String PUBLIC_PARAMETER_PREFIX = "/aws/service/";
+    private static final String ECS_AL2023_RECOMMENDED =
+            "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended";
+    private static final String ECS_AL2023_ARM64_RECOMMENDED =
+            "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended";
     private static final DateTimeFormatter SOURCE_RESULT_DATE =
             DateTimeFormatter.ofPattern("MMM d, yyyy, h:mm:ss a", Locale.US).withZone(ZoneOffset.UTC);
     static final String SECRET_REFERENCE_PREFIX = "/aws/reference/secretsmanager/";
@@ -65,6 +73,9 @@ public class SsmService implements ResourceProvider {
     private static final String TAG_KEY_REGEX = "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$";
     private static final Pattern TAG_KEY_PATTERN = Pattern.compile(TAG_KEY_REGEX);
     private static final int MAX_TAG_KEY_LENGTH = 128;
+    private static final int MAX_RESOURCE_POLICY_BYTES = 1024;
+    private static final ObjectMapper POLICY_JSON = new ObjectMapper()
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     /** The tail AWS appends to every rejected parameter name, whichever prefix the operation reserves. */
     private static final String PARAMETER_NAME_FORMAT_RULE = "If formed as a path, it can consist of sub-paths "
             + "divided by slash symbol; each sub-path can be formed as a mix of letters, numbers and the following "
@@ -303,9 +314,7 @@ public class SsmService implements ResourceProvider {
         Parameter parameter = new Parameter(name, value, type != null ? type : "String");
         parameter.setVersion(version);
         parameter.setDescription(description);
-        if ("SecureString".equals(parameter.getType())) {
-            parameter.setKeyId(keyId);
-        }
+        parameter.setKeyId(keyIdOf(parameter.getType(), keyId));
         parameter.setAllowedPattern(allowedPattern);
         // AWS keeps existing policies until new ones, or an empty list, are sent.
         if (policies == null) {
@@ -330,6 +339,10 @@ public class SsmService implements ResourceProvider {
         } else if (tags != null && !tags.isEmpty()) {
             parameter.setTags(new HashMap<>(tags));
         }
+        if (existing != null && existing.getResourcePolicy() != null) {
+            requireResourcePolicyEligible(parameter);
+            parameter.setResourcePolicy(existing.getResourcePolicy());
+        }
 
         parameterStore.put(storageKey, parameter);
         addHistory(storageKey, parameter);
@@ -348,10 +361,11 @@ public class SsmService implements ResourceProvider {
         return getParameter(parameterName(nameOrArn, region), true, region);
     }
 
-    public Parameter getParameter(String name, boolean withDecryption, String region) {
-        if (name != null && name.startsWith(SECRET_REFERENCE_PREFIX)) {
-            return secretReference(name, withDecryption, region);
+    public Parameter getParameter(String nameOrArn, boolean withDecryption, String region) {
+        if (nameOrArn != null && nameOrArn.startsWith(SECRET_REFERENCE_PREFIX)) {
+            return secretReference(nameOrArn, withDecryption, region);
         }
+        String name = parameterReadName(nameOrArn, region);
         return findParameter(name, region).orElseThrow(() -> {
             int separator = name == null ? -1 : name.lastIndexOf(':');
             if (separator > 0 && separator < name.length() - 1
@@ -563,7 +577,23 @@ public class SsmService implements ResourceProvider {
             return Optional.empty();
         }
         return imageCatalog.findByPublicParameterName(name).map(image -> {
-            Parameter parameter = new Parameter(name, image.imageId, "String");
+            String value = image.imageId;
+            if (name.startsWith(ECS_AL2023_RECOMMENDED)
+                    || name.startsWith(ECS_AL2023_ARM64_RECOMMENDED)) {
+                ObjectNode metadata = JsonNodeFactory.instance.objectNode();
+                metadata.put("schema_version", 1);
+                metadata.put("image_name", image.name);
+                metadata.put("image_id", image.imageId);
+                metadata.put("os", "Amazon Linux 2023");
+                // The catalog image is synthetic; do not claim an installed ECS agent or runtime version.
+                metadata.put("ecs_agent_version", "unknown");
+                metadata.put("ecs_runtime_version", "unknown");
+                String recommendedName = name.startsWith(ECS_AL2023_ARM64_RECOMMENDED)
+                        ? ECS_AL2023_ARM64_RECOMMENDED : ECS_AL2023_RECOMMENDED;
+                value = name.equals(recommendedName) ? metadata.toString()
+                        : metadata.required(name.substring(recommendedName.length() + 1)).asText();
+            }
+            Parameter parameter = new Parameter(name, value, "String");
             parameter.setArn(AwsArnUtils.Arn.of("ssm", region, "", parameterResource(name)).toString());
             parameter.setLastModifiedDate(Instant.parse(image.creationDate));
             return parameter;
@@ -764,10 +794,14 @@ public class SsmService implements ResourceProvider {
 
     /** A SecureString put without a KeyId is encrypted with the AWS managed key. */
     static String keyIdOf(Parameter parameter) {
-        if (!"SecureString".equals(parameter.getType())) {
+        return keyIdOf(parameter.getType(), parameter.getKeyId());
+    }
+
+    static String keyIdOf(String type, String keyId) {
+        if (!"SecureString".equals(type)) {
             return null;
         }
-        return parameter.getKeyId() != null ? parameter.getKeyId() : DEFAULT_SSM_KEY_ID;
+        return keyId != null ? keyId : DEFAULT_SSM_KEY_ID;
     }
 
     private static boolean matchesAny(String actual, ParameterStringFilter filter) {
@@ -1082,15 +1116,153 @@ public class SsmService implements ResourceProvider {
     }
 
     /**
+     * Attaches or replaces the parameter's resource policy. A parameter holds one policy, so
+     * replacing it takes the current {@code policyId} and {@code policyHash}, which keeps two
+     * writers from overwriting each other.
+     */
+    public synchronized ParameterResourcePolicy putResourcePolicy(String resourceArn, String policy,
+                                                                  String policyId, String policyHash,
+                                                                  String region) {
+        Parameter parameter = resourcePolicyParameter(resourceArn, region);
+        requireResourcePolicyEligible(parameter);
+        if (policy.getBytes(StandardCharsets.UTF_8).length > MAX_RESOURCE_POLICY_BYTES) {
+            throw new AwsException("ResourcePolicyLimitExceededException",
+                    "A policy can't be greater than " + MAX_RESOURCE_POLICY_BYTES + " bytes in size.", 400);
+        }
+        if (!isJsonObject(policy)) {
+            throw new AwsException("MalformedResourcePolicyDocumentException",
+                    "The specified policy document is malformed or invalid.", 400);
+        }
+
+        ParameterResourcePolicy current = parameter.getResourcePolicy();
+        String id;
+        if (current == null) {
+            if (policyId != null) {
+                throw resourcePolicyNotFound();
+            }
+            id = UUID.randomUUID().toString();
+        } else {
+            if (policyId == null) {
+                throw resourcePolicyConflict();
+            }
+            requireCurrentPolicy(current, policyId, policyHash);
+            id = current.policyId();
+        }
+
+        ParameterResourcePolicy updated = new ParameterResourcePolicy(id, policyHash(policy), policy);
+        parameter.setResourcePolicy(updated);
+        parameterStore.put(regionKey(region, parameter.getName()), parameter);
+        LOG.debugv("Put resource policy {0} on parameter: {1}", id, parameter.getName());
+        return updated;
+    }
+
+    public List<ParameterResourcePolicy> getResourcePolicies(String resourceArn, String region) {
+        ParameterResourcePolicy policy = resourcePolicyParameter(resourceArn, region).getResourcePolicy();
+        return policy == null ? List.of() : List.of(policy);
+    }
+
+    public synchronized void deleteResourcePolicy(String resourceArn, String policyId, String policyHash,
+                                                  String region) {
+        Parameter parameter = resourcePolicyParameter(resourceArn, region);
+        ParameterResourcePolicy current = parameter.getResourcePolicy();
+        if (current == null) {
+            throw resourcePolicyNotFound();
+        }
+        requireCurrentPolicy(current, policyId, policyHash);
+        parameter.setResourcePolicy(null);
+        parameterStore.put(regionKey(region, parameter.getName()), parameter);
+        LOG.debugv("Deleted resource policy {0} from parameter: {1}", policyId, parameter.getName());
+    }
+
+    /** Only a parameter ARN in the caller's account and region addresses a parameter here. */
+    private Parameter resourcePolicyParameter(String resourceArn, String region) {
+        Optional<Parameter> parameter = AwsArnUtils.isArnFor(resourceArn, "ssm")
+                ? parameterStore.get(regionKey(region, parameterReadName(resourceArn, region)))
+                : Optional.empty();
+        return parameter.orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                "The specified parameter to be shared could not be found.", 400));
+    }
+
+    /**
+     * Only an advanced-tier parameter, and not a SecureString under the default aws/ssm key, can have a
+     * resource policy, whether one is being attached or an overwrite would keep one.
+     */
+    private static void requireResourcePolicyEligible(Parameter parameter) {
+        if (!"Advanced".equals(tierOf(parameter))) {
+            throw new AwsException("ResourcePolicyInvalidParameterException",
+                    "Only parameters in the advanced tier can have a resource policy.", 400);
+        }
+        if (isDefaultSsmKey(keyIdOf(parameter))) {
+            throw new AwsException("ResourcePolicyInvalidParameterException",
+                    "A SecureString parameter encrypted with the default aws/ssm key can't have a resource policy.",
+                    400);
+        }
+    }
+
+    /** The AWS managed aws/ssm key, named by its alias or by the alias's ARN. */
+    private static boolean isDefaultSsmKey(String keyId) {
+        return DEFAULT_SSM_KEY_ID.equals(keyId)
+                || keyId != null && AwsArnUtils.isArnFor(keyId, "kms") && keyId.endsWith(":" + DEFAULT_SSM_KEY_ID);
+    }
+
+    private static void requireCurrentPolicy(ParameterResourcePolicy current, String policyId, String policyHash) {
+        if (!current.policyId().equals(policyId)) {
+            throw resourcePolicyNotFound();
+        }
+        if (!current.policyHash().equals(policyHash)) {
+            throw resourcePolicyConflict();
+        }
+    }
+
+    private static AwsException resourcePolicyConflict() {
+        return new AwsException("ResourcePolicyConflictException",
+                "The hash provided in the call doesn't match the stored hash.", 400);
+    }
+
+    private static AwsException resourcePolicyNotFound() {
+        return new AwsException("ResourcePolicyNotFoundException",
+                "No policies with the specified policy ID and hash could be found.", 400);
+    }
+
+    private static boolean isJsonObject(String policy) {
+        try {
+            JsonNode document = POLICY_JSON.readTree(policy);
+            return document != null && document.isObject();
+        } catch (JsonProcessingException e) {
+            return false;
+        }
+    }
+
+    /** AWS documents the hash only as a value to send back; this one changes whenever the document does. */
+    private static String policyHash(String policy) {
+        return Digests.sha256Hex(policy);
+    }
+
+    /**
      * The stored name a parameter name or ARN addresses. The ARN carries a leading slash the stored name may
      * lack, so {@code parameter/foo} falls back to {@code foo} when only {@code foo} is stored. A version or
      * label selector after the last colon is kept, but the fallback checks the name without it.
      */
     private String parameterName(String nameOrArn, String region) {
-        if (nameOrArn != null && nameOrArn.startsWith("arn:")) {
+        return parameterName(nameOrArn, region, false);
+    }
+
+    String parameterReadName(String nameOrArn, String region) {
+        return parameterName(nameOrArn, region, true);
+    }
+
+    private String parameterName(String nameOrArn, String region, boolean parameterRead) {
+        if (AwsArnUtils.looksLikeArn(nameOrArn)) {
             try {
                 AwsArnUtils.Arn arn = AwsArnUtils.parse(nameOrArn);
                 if ("ssm".equals(arn.service()) && arn.resource().startsWith("parameter")) {
+                    if (parameterRead && (!arn.resource().startsWith("parameter/")
+                            || arn.resource().startsWith("parameter" + SECRET_REFERENCE_PREFIX)
+                            || !arn.accountId().equals(regionResolver.getAccountId())
+                            || !arn.region().equals(region)
+                            || !arn.partition().equals(regionResolver.partitionForRegion(region)))) {
+                        return nameOrArn;
+                    }
                     String name = arn.resource().substring("parameter".length());
                     int separator = name.lastIndexOf(':');
                     String baseName = separator > 0 ? name.substring(0, separator) : name;

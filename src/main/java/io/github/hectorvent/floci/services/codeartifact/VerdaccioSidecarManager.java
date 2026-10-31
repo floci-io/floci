@@ -82,6 +82,18 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
         pool.stopContainer(npmRepositoryId);
     }
 
+    /**
+     * Whether this npm repository's own Verdaccio container is already running, without starting
+     * one for a repository that has never used npm at all. Every CodeArtifact repository gets an
+     * npm sidecar id at creation regardless of whether it is ever actually used through npm (see
+     * {@code CodeArtifactService#ensureFormatContainerId}'s own callers), so a caller that only
+     * wants to ask an already-running container what it holds must check this first rather than
+     * provision a brand-new container just to find it has nothing.
+     */
+    public boolean isRunning(String npmRepositoryId) {
+        return pool.isTracked(npmRepositoryId);
+    }
+
     private PerKeyContainerPool.StartedContainer startContainer(String npmRepositoryId, String publicUrl) {
         String image = config.services().codeartifact().npmImage();
         String containerName = ContainerStorageHelper.dockerName(config, "floci-verdaccio-" + npmRepositoryId);

@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.testutil.AppSyncRequestSigner;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -301,8 +303,8 @@ class IamAuthValidatorTest {
      * A pinned {@code aws} here meant a GovCloud policy naming its own API never matched and the
      * request was denied with nothing saying why.
      */
-    @org.junit.jupiter.params.ParameterizedTest
-    @org.junit.jupiter.params.provider.CsvSource({
+    @ParameterizedTest
+    @CsvSource({
             "us-east-1,      arn:aws:appsync:",
             "us-gov-west-1,  arn:aws-us-gov:appsync:",
             "cn-north-1,     arn:aws-cn:appsync:",
@@ -385,7 +387,7 @@ class IamAuthValidatorTest {
      */
     private static Map<String, String> signedWithSessionToken(String accessKeyId, String secretKey, String token)
             throws Exception {
-        Map<String, String> signed = new java.util.LinkedHashMap<>(AppSyncRequestSigner.signedHeaders(
+        Map<String, String> signed = new LinkedHashMap<>(AppSyncRequestSigner.signedHeaders(
                 "api-1", HOST, BODY, accessKeyId, secretKey, REGION, NOW));
         signed.put("X-Amz-Security-Token", token);
         return signed;

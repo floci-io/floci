@@ -22,6 +22,7 @@ import software.amazon.awssdk.services.redshiftdata.model.GetStatementResultRequ
 import software.amazon.awssdk.services.redshiftdata.model.GetStatementResultResponse;
 import software.amazon.awssdk.services.redshiftdata.model.GetStatementResultV2Response;
 import software.amazon.awssdk.services.redshiftdata.model.ResultFormatString;
+import software.amazon.awssdk.services.redshiftdata.model.SessionData;
 import software.amazon.awssdk.services.redshiftdata.model.SqlParameter;
 import software.amazon.awssdk.services.redshiftdata.model.StatusString;
 import software.amazon.awssdk.services.redshiftdata.model.SubStatementData;
@@ -84,6 +85,26 @@ class RedshiftDataOperationsTest {
         if (redshift != null) {
             redshift.close();
         }
+    }
+
+    @Test
+    @DisplayName("ListSessions exposes retained sessions and their closed history")
+    void listSessionsLifecycle() throws Exception {
+        String statement = data.executeStatement(r -> r.clusterIdentifier(clusterId).database(DATABASE)
+                .dbUser(USERNAME).sessionKeepAliveSeconds(60).sql("SELECT 1")).id();
+        awaitFinished(statement);
+        String sessionId = data.describeStatement(r -> r.id(statement)).sessionId();
+        SessionData session = data.listSessions(r -> r.sessionId(sessionId)).sessions().get(0);
+        assertThat(session.statusAsString()).isEqualTo("AVAILABLE");
+        assertThat(session.clusterIdentifier()).isEqualTo(clusterId);
+        assertThat(session.database()).isEqualTo(DATABASE);
+        assertThat(session.createdAt()).isNotNull();
+        assertThat(session.sessionTtl()).isAfter(session.createdAt());
+        String close = data.executeStatement(r -> r.sessionId(sessionId).sessionKeepAliveSeconds(0).sql("SELECT 2")).id();
+        awaitFinished(close);
+        assertThat(data.listSessions(r -> r.sessionId(sessionId)).sessions().get(0).statusAsString()).isEqualTo("CLOSED");
+        assertThat(data.listSessions(r -> r.clusterIdentifier(clusterId)).sessions())
+                .noneMatch(candidate -> sessionId.equals(candidate.sessionId()));
     }
 
     @Test

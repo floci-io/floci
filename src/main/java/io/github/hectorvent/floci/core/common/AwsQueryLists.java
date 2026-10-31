@@ -4,6 +4,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 
 import java.util.Comparator;
 import java.util.List;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -35,6 +36,38 @@ public final class AwsQueryLists {
                 .sorted(Comparator.comparingInt(AwsQueryLists::memberIndex))
                 .map(params::getFirst)
                 .filter(value -> value != null && !value.isBlank())
+                .toList();
+    }
+
+    /**
+     * One member of a Query list: the prefix its own parameters are named under, and the index the
+     * request numbered it with, read back as it was spelled rather than as the number it reads as.
+     */
+    public record IndexedMember(String prefix, String index) {
+    }
+
+    /**
+     * The members of {@code list}, in the order their indexes read, each with the prefix its own
+     * parameters are named under. Unlike {@link #values}, a member of a list of structures counts:
+     * its fields arrive under the prefix rather than at it, as {@code Tags.member.1.Key} does, and
+     * a member present with an empty value is still a member.
+     *
+     * <p>The index is kept as the request spelled it, {@code 007} and all, and a segment that is no
+     * number is not one: with a null {@code member}, {@code SubnetIds.SubnetIdentifier.4} is a list
+     * naming its own member rather than a member numbered {@code SubnetIdentifier}, and this reads
+     * the generic and bare forms only, as {@link #memberKeys} does.
+     */
+    public static List<IndexedMember> members(MultivaluedMap<String, String> params, String list,
+                                              String member) {
+        String names = member == null ? "" : "|\\." + Pattern.quote(member);
+        Pattern keys = Pattern.compile("(" + Pattern.quote(list) + "(?:\\.member" + names
+                + ")?\\.(\\d+))(?:\\..*)?");
+        return params.keySet().stream()
+                .map(keys::matcher)
+                .filter(Matcher::matches)
+                .map(matcher -> new IndexedMember(matcher.group(1), matcher.group(2)))
+                .distinct()
+                .sorted(Comparator.comparingInt(one -> memberIndex(one.prefix())))
                 .toList();
     }
 

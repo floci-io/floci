@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.redshift.container;
 
+import com.github.dockerjava.api.exception.NotModifiedException;
 import com.github.dockerjava.api.model.Container;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -112,7 +113,7 @@ public class RedshiftContainerManager {
         ContainerSpec spec = specBuilder.build();
         ContainerInfo info = lifecycleManager.createAndStartEphemeral(spec);
         return initializeAndRegisterHandle(info, accountId, clusterIdentifier, masterUsername, containerName, enginePort,
-                effectiveDb);
+                effectiveDb, true);
     }
 
     /**
@@ -145,15 +146,48 @@ public class RedshiftContainerManager {
             return start(accountId, clusterIdentifier, masterUsername, masterPassword, databaseName, nodeType);
         }
 
+        return adoptExisting(accountId, clusterIdentifier, masterUsername, databaseName, existing.get(), true);
+    }
+
+    /** Stops PostgreSQL without removing its container or data volume. Docker failures propagate. */
+    public void pause(String accountId, String clusterIdentifier) {
+        String key = containerKey(accountId, clusterIdentifier);
+        RedshiftContainerHandle handle = containers.get(key);
+        String id = handle == null ? containerName(accountId, clusterIdentifier) : handle.getContainerId();
+        try {
+            lifecycleManager.getDockerClient().stopContainerCmd(id).withTimeout(30).exec();
+        } catch (NotModifiedException alreadyStopped) {
+            LOG.debugv("Redshift container {0} was already stopped", id);
+        }
+        if (handle != null && handle.getLogStream() != null) {
+            lifecycleManager.closeLogStreamAfterContainerStop(handle.getLogStream());
+            handle.setLogStream(null);
+        }
+        containers.remove(key);
+    }
+
+    /** Resumes only the existing data-bearing container; never creates an empty replacement. */
+    public RedshiftContainerHandle resume(String accountId, String clusterIdentifier,
+                                           String masterUsername, String databaseName) {
+        Container existing = lifecycleManager.findByName(containerName(accountId, clusterIdentifier))
+                .orElseThrow(() -> new AwsException("InvalidClusterState",
+                        "The paused container for cluster " + clusterIdentifier + " no longer exists", 400));
+        return adoptExisting(accountId, clusterIdentifier, masterUsername, databaseName, existing, false);
+    }
+
+    private RedshiftContainerHandle adoptExisting(String accountId, String clusterIdentifier,
+                                                   String masterUsername, String databaseName, Container existing,
+                                                   boolean bootstrap) {
+        String containerName = containerName(accountId, clusterIdentifier);
         String effectiveDb = (databaseName != null && !databaseName.isBlank()) ? databaseName : DEFAULT_DATABASE;
-        adoptedContainers.put(containerKey(accountId, clusterIdentifier), existing.get().getId());
+        adoptedContainers.put(containerKey(accountId, clusterIdentifier), existing.getId());
         LOG.infov("Adopting existing container {0} for cluster {1} to avoid discarding its data",
                 containerName, clusterIdentifier);
         int enginePort = 5432;
-        ContainerInfo info = lifecycleManager.adopt(existing.get().getId(), List.of(enginePort),
+        ContainerInfo info = lifecycleManager.adopt(existing.getId(), List.of(enginePort),
                 containerBuilder.resolveDockerNetwork(config.services().redshift().dockerNetwork()));
         return initializeAndRegisterHandle(info, accountId, clusterIdentifier, masterUsername, containerName, enginePort,
-                effectiveDb);
+                effectiveDb, bootstrap);
     }
 
     static int maxConnections(String clusterIdentifier, String nodeType) {
@@ -180,7 +214,7 @@ public class RedshiftContainerManager {
             String masterUsername,
             String containerName,
             int enginePort,
-            String databaseName) {
+            String databaseName, boolean bootstrap) {
         EndpointInfo endpoint = info.getEndpoint(enginePort);
         RedshiftContainerHandle handle = new RedshiftContainerHandle(
                 info.containerId(), clusterIdentifier, endpoint.host(), endpoint.port());
@@ -199,7 +233,9 @@ public class RedshiftContainerManager {
 
         try {
             waitForReady(containerName, info.containerId(), masterUsername, databaseName);
-            bootstrapCatalog(info.containerId(), masterUsername, databaseName);
+            if (bootstrap) {
+                bootstrapCatalog(info.containerId(), masterUsername, databaseName);
+            }
         } catch (RuntimeException e) {
             containers.put(containerKey(accountId, clusterIdentifier), handle);
             throw e;

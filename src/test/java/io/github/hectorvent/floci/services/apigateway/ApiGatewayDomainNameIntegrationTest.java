@@ -3,9 +3,11 @@ package io.github.hectorvent.floci.services.apigateway;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import io.restassured.response.ValidatableResponse;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -74,6 +76,37 @@ class ApiGatewayDomainNameIntegrationTest {
             .body("endpointConfiguration.types[0]", equalTo("EDGE"))
             .body("distributionDomainName", endsWith(".cloudfront.net"))
             .body("distributionHostedZoneId", equalTo("Z2FDTNDATAQYW2"));
+
+        deleteDomain(domain);
+    }
+
+    @Test
+    void domainWithOnlyACertificateArnDefaultsToEdge() {
+        String domain = "default-edge.apigw-domain-it.example.com";
+        createDomain("""
+                {"domainName":"%s","certificateArn":"%s"}
+                """.formatted(domain, CERTIFICATE_ARN));
+
+        given().when().get("/domainnames/" + domain).then()
+            .statusCode(200)
+            .body("endpointConfiguration.types[0]", equalTo("EDGE"))
+            .body("distributionDomainName", endsWith(".cloudfront.net"))
+            .body("distributionHostedZoneId", equalTo("Z2FDTNDATAQYW2"));
+
+        deleteDomain(domain);
+    }
+
+    @Test
+    void domainWithOnlyARegionalCertificateStaysRegional() {
+        String domain = "default-regional.apigw-domain-it.example.com";
+        createDomain("""
+                {"domainName":"%s","regionalCertificateArn":"%s"}
+                """.formatted(domain, CERTIFICATE_ARN));
+
+        given().when().get("/domainnames/" + domain).then()
+            .statusCode(200)
+            .body("endpointConfiguration.types[0]", equalTo("REGIONAL"))
+            .body("distributionDomainName", nullValue());
 
         deleteDomain(domain);
     }
@@ -206,7 +239,7 @@ class ApiGatewayDomainNameIntegrationTest {
         AtomicInteger created = new AtomicInteger();
         AtomicInteger rejected = new AtomicInteger();
         try {
-            List<Future<?>> calls = new java.util.ArrayList<>();
+            List<Future<?>> calls = new ArrayList<>();
             for (int i = 0; i < callers; i++) {
                 calls.add(pool.submit(() -> {
                     start.await();
@@ -294,7 +327,7 @@ class ApiGatewayDomainNameIntegrationTest {
         AtomicInteger succeeded = new AtomicInteger();
         AtomicInteger rejected = new AtomicInteger();
         try {
-            List<Future<?>> calls = new java.util.ArrayList<>();
+            List<Future<?>> calls = new ArrayList<>();
             for (int i = 0; i < callers; i++) {
                 calls.add(pool.submit(() -> {
                     start.await();
@@ -322,7 +355,7 @@ class ApiGatewayDomainNameIntegrationTest {
         void run() throws Exception;
     }
 
-    private static io.restassured.response.ValidatableResponse createDomain(String body) {
+    private static ValidatableResponse createDomain(String body) {
         return given().contentType(ContentType.JSON).body(body)
             .when().post("/domainnames").then().statusCode(201);
     }

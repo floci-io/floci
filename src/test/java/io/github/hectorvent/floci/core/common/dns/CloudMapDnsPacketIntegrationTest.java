@@ -3,6 +3,10 @@ package io.github.hectorvent.floci.core.common.dns;
 import io.github.hectorvent.floci.services.cloudmap.CloudMapDnsRecordSource;
 import io.github.hectorvent.floci.services.cloudmap.CloudMapService;
 import io.github.hectorvent.floci.services.cloudmap.model.Service;
+import io.github.hectorvent.floci.services.route53.Route53DnsRecordSource;
+import io.github.hectorvent.floci.services.route53.Route53Service;
+import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
+import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.quarkus.test.junit.QuarkusTest;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -13,6 +17,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -36,6 +41,12 @@ class CloudMapDnsPacketIntegrationTest {
     CloudMapDnsRecordSource cloudMapDnsRecordSource;
 
     @Inject
+    Route53DnsRecordSource route53DnsRecordSource;
+
+    @Inject
+    Route53Service route53Service;
+
+    @Inject
     Vertx vertx;
 
     @Test
@@ -56,6 +67,64 @@ class CloudMapDnsPacketIntegrationTest {
         assertEquals(15, packet.getInt(request.length + 6));
         assertArrayEquals(new byte[]{(byte) 172, 31, 0, 6},
                 Arrays.copyOfRange(response, request.length + 12, request.length + 16));
+    }
+
+    /**
+     * The namespace's Route 53 zone covers the same names, and answers NXDOMAIN for a name it
+     * has no record for, or NOERROR/NODATA for a name holding only another type (the TXT below).
+     * With that source consulted first, Cloud Map's A record must still win.
+     */
+    @Test
+    void cloudMapInstanceResolvesWhenTheRoute53ZoneSourceIsConsultedFirst() throws Exception {
+        String namespace = uniqueNamespace();
+        String namespaceId = privateDnsNamespace(namespace);
+        Service service = cloudMapService.createService("both", namespaceId, null, null,
+                "{\"DnsRecords\":[{\"Type\":\"A\",\"TTL\":15}]}", null, null, null, Map.of(), REGION);
+        cloudMapService.registerInstance(service.getId(), "task-1", null,
+                Map.of("AWS_INSTANCE_IPV4", "172.31.0.7"), REGION);
+        String zoneId = cloudMapService.getNamespace(namespaceId).getHostedZoneId();
+        List<Map<String, Object>> txts = new ArrayList<>();
+        for (String txtName : List.of("both." + namespace, "txtonly." + namespace)) {
+            ResourceRecordSet txt = new ResourceRecordSet();
+            txt.setName(txtName);
+            txt.setType("TXT");
+            txt.setTtl(60L);
+            txt.setRecords(List.of(new ResourceRecord("\"owner=test\"")));
+            route53Service.changeResourceRecordSets(zoneId, List.of(Map.of("action", "CREATE", "rrs", txt)), null);
+            txts.add(Map.of("action", "DELETE", "rrs", txt));
+        }
+        try {
+            assertBothSourceOrdersResolve(namespace);
+        } finally {
+            // The namespace's zone must hold only its SOA and NS again, or DeleteNamespace fails.
+            route53Service.changeResourceRecordSets(zoneId, txts, null);
+        }
+    }
+
+    private void assertBothSourceOrdersResolve(String namespace) throws Exception {
+        for (List<DnsRecordSource> sources : List.of(
+                List.of(route53DnsRecordSource, cloudMapDnsRecordSource),
+                List.of(cloudMapDnsRecordSource, route53DnsRecordSource))) {
+            byte[] request = buildQuery("both." + namespace, (short) 1);
+            byte[] response = query(new EmbeddedDnsServer(List.of(), sources), request);
+            ByteBuffer packet = ByteBuffer.wrap(response);
+
+            assertEquals(0, packet.getShort(2) & 0x000F);
+            assertEquals(1, packet.getShort(6));
+            assertArrayEquals(new byte[]{(byte) 172, 31, 0, 7},
+                    Arrays.copyOfRange(response, request.length + 12, request.length + 16));
+
+            // A name only Route 53 holds (as TXT) is NODATA for A, not Cloud Map's NXDOMAIN.
+            ByteBuffer txtOnly = ByteBuffer.wrap(query(new EmbeddedDnsServer(List.of(), sources),
+                    buildQuery("txtonly." + namespace, (short) 1)));
+            assertEquals(0, txtOnly.getShort(2) & 0x000F);
+            assertEquals(0, txtOnly.getShort(6));
+        }
+        // A name neither source has is still NXDOMAIN.
+        byte[] missing = query(new EmbeddedDnsServer(List.of(),
+                List.of(route53DnsRecordSource, cloudMapDnsRecordSource)),
+                buildQuery("nothere." + namespace, (short) 1));
+        assertEquals(3, ByteBuffer.wrap(missing).getShort(2) & 0x000F);
     }
 
     @Test

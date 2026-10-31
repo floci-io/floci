@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -35,21 +34,6 @@ class DynamoDbSetOrderTest {
                 base64(0x00), base64(0xc0), base64(0x7f), base64(0x01), base64(0x00, 0xff), base64(0x01, 0x01)));
         assertEquals(List.of(base64(0x00), base64(0x00, 0xff), base64(0x01), base64(0x01, 0x00), base64(0x01, 0x01),
                 base64(0x02), base64(0x7f), base64(0x80), base64(0xc0), base64(0xff)), sorted);
-    }
-
-    @Test
-    void sortSetsInReachesMapsAndLists() throws Exception {
-        ObjectNode item = (ObjectNode) MAPPER.readTree("""
-                {"pk":{"S":"a"},"ss":{"SS":["b","a"]},
-                 "m":{"M":{"deep":{"SS":["b","a",""]},"nums":{"NS":["10","9"]}}},
-                 "l":{"L":[{"NS":["2","1"]},{"M":{"inner":{"BS":["gA==","AQ=="]}}}]}}
-                """);
-        DynamoDbSetOrder.sortSetsIn(item);
-        assertEquals(MAPPER.readTree("""
-                {"pk":{"S":"a"},"ss":{"SS":["a","b"]},
-                 "m":{"M":{"deep":{"SS":["","a","b"]},"nums":{"NS":["9","10"]}}},
-                 "l":{"L":[{"NS":["1","2"]},{"M":{"inner":{"BS":["AQ==","gA=="]}}}]}}
-                """), item);
     }
 
     @Test

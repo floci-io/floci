@@ -19,12 +19,16 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
+import java.util.function.ToDoubleFunction;
 
 /**
  * Translates the SWF JSON 1.0 wire protocol to and from {@link SwfService}.
@@ -153,7 +157,7 @@ public class SwfJsonHandler {
         List<SwfDomain> domains = service.listDomains(region, text(request, "registrationStatus"));
         if (request.path("reverseOrder").asBoolean(false)) {
             domains = new ArrayList<>(domains);
-            java.util.Collections.reverse(domains);
+            Collections.reverse(domains);
         }
         return pagedList(request, "domainInfos", domains, domain -> domainInfo(domain, region));
     }
@@ -363,7 +367,7 @@ public class SwfJsonHandler {
                 buildFilter(request, closed), closed);
         if (request.path("reverseOrder").asBoolean(false)) {
             executions = new ArrayList<>(executions);
-            java.util.Collections.reverse(executions);
+            Collections.reverse(executions);
         }
 
         return pagedList(request, "executionInfos", executions, this::executionInfo);
@@ -445,7 +449,7 @@ public class SwfJsonHandler {
     }
 
     private ExecutionFilter timeFilter(JsonNode filterNode,
-                                       java.util.function.ToDoubleFunction<SwfWorkflowExecution> extractor) {
+                                       ToDoubleFunction<SwfWorkflowExecution> extractor) {
         if (filterNode == null || filterNode.isMissingNode() || filterNode.isNull()) {
             return ExecutionFilter.all();
         }
@@ -740,8 +744,8 @@ public class SwfJsonHandler {
 
     private static String encodePageToken(int offset, String taskToken) {
         String body = "offset=" + offset + (taskToken == null ? "" : "\ntask=" + taskToken);
-        return java.util.Base64.getEncoder()
-                .encodeToString(body.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        return Base64.getEncoder()
+                .encodeToString(body.getBytes(StandardCharsets.UTF_8));
     }
 
     private static Page decodePageToken(String token) {
@@ -750,8 +754,8 @@ public class SwfJsonHandler {
         }
         String decoded;
         try {
-            decoded = new String(java.util.Base64.getDecoder().decode(token),
-                    java.nio.charset.StandardCharsets.UTF_8);
+            decoded = new String(Base64.getDecoder().decode(token),
+                    StandardCharsets.UTF_8);
         } catch (IllegalArgumentException e) {
             throw SwfFaults.invalidPageToken();
         }

@@ -22,8 +22,6 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Duration;
-import java.time.Instant;
 import java.util.Properties;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -195,28 +193,24 @@ class RdsIamTokenCompatTest {
     }
 
     private static Connection awaitPostgresConnection(String username, String password) throws Exception {
-        Instant deadline = Instant.now().plus(Duration.ofSeconds(60));
-        SQLException last = null;
-        while (Instant.now().isBefore(deadline)) {
-            try {
-                return openPostgresConnection(username, password);
-            } catch (SQLException e) {
-                last = e;
-                Thread.sleep(1000);
-            }
-        }
-        throw last != null ? last : new SQLException("Timed out waiting for RDS proxy connection");
+        return TestFixtures.awaitJdbcConnection(postgresUrl(), postgresProperties(username, password));
     }
 
     private static Connection openPostgresConnection(String username, String password) throws SQLException {
+        return DriverManager.getConnection(postgresUrl(), postgresProperties(username, password));
+    }
+
+    private static String postgresUrl() {
+        return "jdbc:postgresql://" + TestFixtures.proxyHost() + ":" + proxyPort + "/" + DATABASE;
+    }
+
+    private static Properties postgresProperties(String username, String password) {
         Properties props = new Properties();
         props.setProperty("user", username);
         props.setProperty("password", password);
         props.setProperty("sslmode", "disable");
         props.setProperty("connectTimeout", "5");
-        return DriverManager.getConnection(
-                "jdbc:postgresql://" + TestFixtures.proxyHost() + ":" + proxyPort + "/" + DATABASE,
-                props);
+        return props;
     }
 
     private static int selectOne(Connection conn) throws SQLException {

@@ -32,23 +32,56 @@ final class RequestResourceMembers {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final Pattern VARIABLE = Pattern.compile("\\$\\{(\\w+)}");
     private static final Pattern MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\[])?");
+    /** A member holding an ARN may also be one level inside a structure or each of a list's structures. */
+    private static final Pattern ARN_MEMBER = Pattern.compile("[A-Za-z][A-Za-z0-9_]*(\\[])?(\\.[A-Za-z][A-Za-z0-9_]*(\\[])?)?");
+    /**
+     * A member filling a variable may also be a field of a structure, or of each of a list's structures, one value
+     * for each.
+     */
+    private static final Pattern FILL_MEMBER = Pattern.compile(
+            "[A-Za-z][A-Za-z0-9_]*(\\[]|\\[]\\.[A-Za-z][A-Za-z0-9_]*|\\.[A-Za-z][A-Za-z0-9_]*)?");
     /** An ARN format's leading resource type word, and the rest of its resource. */
     private static final Pattern RESOURCE_PART = Pattern.compile(
             "^arn:\\$\\{Partition}:[^:]*:[^:]*:[^:]*:([A-Za-z][A-Za-z0-9-]*)(.*)$");
+    /** A format's resource that is a literal and one variable. */
+    private static final Pattern ONE_VARIABLE = Pattern.compile("[^$]*\\$\\{\\w+}");
     /** The one id a child type's format appends to its parent's. */
     private static final Pattern APPENDED_ID = Pattern.compile("[/:]\\$\\{\\w+}");
 
-    /** A top-level request member that holds a string, or a list of them when {@code list}. */
-    record Member(String name, boolean list) {
+    /**
+     * A top-level request member that holds a string, or a list of them when {@code list}, or, with a
+     * {@code field}, a structure or a list of them, of which that field is read.
+     */
+    record Member(String name, boolean list, Member field) {
+
+        Member(String name, boolean list) {
+            this(name, list, null);
+        }
+
+        /** As the file writes it: {@code Name}, {@code Name[]}, {@code Name.Field} or {@code Name[].Field}. */
+        String path() {
+            return name + (list ? "[]" : "") + (field == null ? "" : "." + field.path());
+        }
+
+        /** Whether it is a field of each of a list's structures, which gives one value for each of them. */
+        boolean eachElement() {
+            return list && field != null && !field.list();
+        }
     }
 
     /**
      * A resource type's ARN format, with {@code ${Partition}}, {@code ${Region}}, {@code ${Account}} and the
      * variables a request fills, and the pattern an ARN of the type matches; {@code unqualified} when its service
      * checks an ARN of it given with a qualifier, one more {@code :<name>} past the format, without that qualifier
-     * (Step Functions checks a version or an alias on its state machine's ARN).
+     * (Step Functions checks a version or an alias on its state machine's ARN); {@code minted} when its service
+     * follows the one variable the format ends in with an id it mints, {@code /<id>}, which the format leaves out
+     * (EventBridge's {@code connection/<name>/<id>}).
      */
-    record ArnFormat(String format, Pattern pattern, boolean unqualified) {
+    record ArnFormat(String format, Pattern pattern, boolean unqualified, boolean minted) {
+
+        ArnFormat(String format, Pattern pattern, boolean unqualified) {
+            this(format, pattern, unqualified, false);
+        }
 
         /** The ARN as its service checks it: an unqualified type's without the qualifier it may carry. */
         String checked(String arn) {
@@ -65,17 +98,37 @@ final class RequestResourceMembers {
             }
             return arn.substring(0, at);
         }
+
+        /** The one variable of a format whose resource ends in it ({@code event-bus/${EventBusName}}), from an ARN of it. */
+        String variable(String arn) {
+            String resource = format.split(":", 6)[5];
+            return AwsArnUtils.parse(arn).resource().substring(resource.indexOf("${"));
+        }
     }
 
     /**
      * A resource a request names: by a member holding its ARN, which names a resource of one of {@code types} when
      * it matches the type's format, or by members filling the variables of one type's format, the others open,
-     * only {@code when} each member named has one of its values, an empty one for the member absent, in the
-     * account an {@code account} member gives (ECR's {@code registryId}), or else the request's. An ARN member's
-     * value is read up to the character {@code before}, when there is one, as its handler drops the rest.
+     * only {@code when} each member named has one of its values and {@code unless} it has one of those, an empty
+     * one for the member absent or given a JSON null it is not read as a value for, in the account an {@code account} member gives (ECR's {@code registryId}), or else
+     * the request's. A member {@code absent} from the request, or given a JSON null, is read as the value given for
+     * it (an EventBridge request naming no event bus names {@code default}), and one in {@code arnOf} may give an
+     * ARN of the type named for it instead of its name, read as that type's one variable, the resource then in the
+     * ARN's account and Region, or the caller's and the request's where the ARN leaves them empty. A member filling
+     * a variable may be a field of each of a list's structures ({@code Entries[].EventBusName}), which names one
+     * resource for each structure, read as {@code absent} gives for one that lacks it and in the account and Region
+     * of the ARN that structure gives, if any. Such a member is in {@code absent} or {@code arnOf} only when it
+     * fills a variable. A member filling a variable may also be a field of a structure ({@code pipeline.name}). A
+     * variable no member gives may be {@code fixed} to the one value its handler uses (a CodePipeline custom action
+     * type's owner, {@code Custom}). A member's value, an ARN or a variable's, is read up to the character
+     * {@code before}, when there is one: Step Functions Local's handler drops a test case after {@code #}, and a
+     * CodeBuild build id is {@code <project>:<id>}, a build being checked on its project. A create naming other
+     * resources beside the one it makes marks that one {@code made}, where its tags go (a webhook, not the pipeline
+     * it connects to).
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
-                    Member account, String before) {
+                    Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
+                    Member account, String before, Map<String, String> fixed, boolean made) {
     }
 
     /**
@@ -118,6 +171,7 @@ final class RequestResourceMembers {
         Map<String, Map<String, ArnFormat>> formats = new LinkedHashMap<>();
         document.path("arnFormats").properties().forEach(namespace -> {
             Set<String> unqualified = names(document.path("unqualified").path(namespace.getKey()));
+            Set<String> minted = names(document.path("mintedIds").path(namespace.getKey()));
             Map<String, ArnFormat> types = new LinkedHashMap<>();
             namespace.getValue().properties().forEach(type -> {
                 String format = type.getValue().asText("");
@@ -125,7 +179,8 @@ final class RequestResourceMembers {
                     throw new IllegalStateException(RESOURCE_NAME + " gives " + namespace.getKey() + "'s "
                             + type.getKey() + " no ARN format");
                 }
-                types.put(type.getKey(), new ArnFormat(format, pattern(format), unqualified.contains(type.getKey())));
+                types.put(type.getKey(), new ArnFormat(format, pattern(format), unqualified.contains(type.getKey()),
+                        minted.contains(type.getKey())));
             });
             formats.put(namespace.getKey(), Map.copyOf(types));
         });
@@ -134,6 +189,14 @@ final class RequestResourceMembers {
             if (!namespace.getValue().isArray() || !types.containsAll(names(namespace.getValue()))) {
                 throw new IllegalStateException(RESOURCE_NAME + " checks " + namespace.getKey() + "'s "
                         + namespace.getValue() + " without a qualifier, no types with an ARN format");
+            }
+        });
+        document.path("mintedIds").properties().forEach(namespace -> {
+            Map<String, ArnFormat> types = formats.getOrDefault(namespace.getKey(), Map.of());
+            if (!namespace.getValue().isArray() || !names(namespace.getValue()).stream().allMatch(type ->
+                    types.containsKey(type) && ONE_VARIABLE.matcher(types.get(type).format().split(":", 6)[5]).matches())) {
+                throw new IllegalStateException(RESOURCE_NAME + " gives " + namespace.getKey() + "'s "
+                        + namespace.getValue() + " a minted id, no types whose format ends in its one variable");
             }
         });
         Map<String, List<Resource>> entries = new LinkedHashMap<>();
@@ -168,19 +231,24 @@ final class RequestResourceMembers {
     }
 
     private static Resource resource(String operation, JsonNode resource, Map<String, ArnFormat> formats) {
+        if (resource.has("made") && !(resource.path("made").isBoolean() && resource.path("made").booleanValue())) {
+            throw new IllegalStateException(RESOURCE_NAME + " marks a resource of " + operation + " made by "
+                    + resource.path("made") + ", which is not true");
+        }
+        boolean made = resource.has("made");
+        String before = resource.has("before") ? resource.path("before").asText("") : null;
+        if (before != null && before.length() != 1) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads a member for " + operation
+                    + " before " + before + ", no one character");
+        }
         if (resource.has("arn")) {
             List<String> types = resource.path("types").valueStream().map(JsonNode::asText).toList();
             if (types.isEmpty() || !formats.keySet().containsAll(types)) {
                 throw new IllegalStateException(RESOURCE_NAME + " reads an ARN for " + operation
                         + " of types with no format: " + types);
             }
-            String before = resource.has("before") ? resource.path("before").asText("") : null;
-            if (before != null && before.length() != 1) {
-                throw new IllegalStateException(RESOURCE_NAME + " reads an ARN for " + operation
-                        + " before " + before + ", no one character");
-            }
-            return new Resource(types, member(operation, resource.path("arn").asText("")), Map.of(), Map.of(), null,
-                    before);
+            return new Resource(types, arnMember(operation, resource.path("arn").asText("")), Map.of(), Map.of(),
+                    Map.of(), Map.of(), Map.of(), null, before, Map.of(), made);
         }
         String type = resource.path("type").asText("");
         ArnFormat format = formats.get(type);
@@ -195,27 +263,64 @@ final class RequestResourceMembers {
                 throw new IllegalStateException(RESOURCE_NAME + " fills " + variable.getKey() + " for " + operation
                         + ", no variable of " + type + "'s format");
             }
-            fill.put(variable.getKey(), member(operation, variable.getValue().asText("")));
+            fill.put(variable.getKey(), fillMember(operation, variable.getValue().asText("")));
+        });
+        Map<String, String> fixed = new LinkedHashMap<>();
+        resource.path("fixed").properties().forEach(variable -> {
+            if (!variables.contains(variable.getKey()) || fill.containsKey(variable.getKey())
+                    || !variable.getValue().isTextual() || variable.getValue().asText().isEmpty()) {
+                throw new IllegalStateException(RESOURCE_NAME + " fixes " + variable.getKey() + " for " + operation
+                        + ", no variable of " + type + "'s format that no member fills, or to no value");
+            }
+            fixed.put(variable.getKey(), variable.getValue().asText());
         });
         if (fill.values().stream().filter(Member::list).count() > 1) {
             throw new IllegalStateException(RESOURCE_NAME + " fills " + type + " for " + operation
                     + " from more than one list");
         }
-        Map<String, List<String>> when = new LinkedHashMap<>();
-        resource.path("when").properties().forEach(member -> {
-            if (member(operation, member.getKey()).list() || !member.getValue().isArray() || member.getValue().isEmpty()) {
-                throw new IllegalStateException(RESOURCE_NAME + " names a " + type + " for " + operation
-                        + " when " + member.getKey() + " has no values");
+        Map<String, List<String>> when = values(operation, type, resource.path("when"));
+        Map<String, List<String>> unless = values(operation, type, resource.path("unless"));
+        Set<String> filled = Set.copyOf(fill.values().stream().map(Member::path).toList());
+        Map<String, String> absent = new LinkedHashMap<>();
+        resource.path("absent").properties().forEach(member -> {
+            if (!readAsOne(operation, member.getKey(), filled) || !member.getValue().isTextual()
+                    || member.getValue().asText().isEmpty()) {
+                throw new IllegalStateException(RESOURCE_NAME + " reads " + member.getKey() + " for " + operation
+                        + " when absent as no value");
             }
-            when.put(member.getKey(), member.getValue().valueStream().map(value -> value.isNull() ? "" : value.asText())
-                    .toList());
+            absent.put(member.getKey(), member.getValue().asText());
+        });
+        Map<String, String> arnOf = new LinkedHashMap<>();
+        resource.path("arnOf").properties().forEach(member -> {
+            ArnFormat named = formats.get(member.getValue().asText(""));
+            if (!readAsOne(operation, member.getKey(), filled) || named == null
+                    || !ONE_VARIABLE.matcher(named.format().split(":", 6)[5]).matches()) {
+                throw new IllegalStateException(RESOURCE_NAME + " reads " + member.getKey() + " for " + operation
+                        + " as an ARN of " + member.getValue() + ", no type named by one variable");
+            }
+            arnOf.put(member.getKey(), member.getValue().asText());
         });
         Member account = resource.has("account") ? member(operation, resource.path("account").asText("")) : null;
         if (account != null && (account.list() || !format.format().contains("${Account}"))) {
             throw new IllegalStateException(RESOURCE_NAME + " takes " + type + "'s account for " + operation
                     + " from " + account.name() + ", no member of one account or a type of none");
         }
-        return new Resource(List.of(type), null, Map.copyOf(fill), Map.copyOf(when), account, null);
+        return new Resource(List.of(type), null, Map.copyOf(fill), when, unless, Map.copyOf(absent), Map.copyOf(arnOf),
+                account, before, Map.copyOf(fixed), made);
+    }
+
+    /** The values each member named in {@code when} or {@code unless} may have, an empty one for the member absent. */
+    private static Map<String, List<String>> values(String operation, String type, JsonNode members) {
+        Map<String, List<String>> values = new LinkedHashMap<>();
+        members.properties().forEach(member -> {
+            if (member(operation, member.getKey()).list() || !member.getValue().isArray() || member.getValue().isEmpty()) {
+                throw new IllegalStateException(RESOURCE_NAME + " names a " + type + " for " + operation
+                        + " when or unless " + member.getKey() + " has no values");
+            }
+            values.put(member.getKey(), member.getValue().valueStream().map(value -> value.isNull() ? "" : value.asText())
+                    .toList());
+        });
+        return Map.copyOf(values);
     }
 
     private static Created created(String operation, JsonNode created, Map<String, ArnFormat> formats) {
@@ -239,6 +344,42 @@ final class RequestResourceMembers {
             throw new IllegalStateException(RESOURCE_NAME + " reads " + operation + " at " + path + ", which is no member");
         }
         return path.endsWith("[]") ? new Member(path.substring(0, path.length() - 2), true) : new Member(path, false);
+    }
+
+    /**
+     * A member filling a variable: {@code Name}, {@code Name[]}, or a field of a structure, {@code Name.Field}, or of
+     * each of a list's structures, {@code Name[].Field}.
+     */
+    private static Member fillMember(String operation, String path) {
+        if (!FILL_MEMBER.matcher(path).matches()) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads " + operation + " at " + path + ", which is no member");
+        }
+        return arnMember(operation, path);
+    }
+
+    /**
+     * Whether a member gives one value as it is read: one that is no list, top-level or a field of a structure, or a
+     * field of each of a list's structures that fills a variable, one value for each structure.
+     */
+    private static boolean readAsOne(String operation, String path, Set<String> filled) {
+        if (FILL_MEMBER.matcher(path).matches() && path.contains("[].")) {
+            return filled.contains(path);
+        }
+        Member member = path.contains(".") ? fillMember(operation, path) : member(operation, path);
+        return !member.list() && (member.field() == null || !member.field().list());
+    }
+
+    /** A member holding an ARN: {@code Name}, {@code Name[]}, or a field of it, {@code Name.Field} or {@code Name[].Field}. */
+    private static Member arnMember(String operation, String path) {
+        if (!ARN_MEMBER.matcher(path).matches()) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads " + operation + " at " + path + ", which is no member");
+        }
+        int dot = path.indexOf('.');
+        if (dot < 0) {
+            return member(operation, path);
+        }
+        Member outer = member(operation, path.substring(0, dot));
+        return new Member(outer.name(), outer.list(), member(operation, path.substring(dot + 1)));
     }
 
     /**

@@ -77,6 +77,41 @@ class BedrockAgentCoreTaggingIdentityIntegrationTest {
     }
 
     @Test
+    void nonDefaultAccountCanTagItsMemoryAndRejectsForeignIdentity() {
+        String authorization = "AWS4-HMAC-SHA256 Credential=111111111111/20261028/us-east-1/bedrock-agentcore/aws4_request";
+        String arn = given().header("Authorization", authorization).contentType("application/json")
+                .body("{\"name\":\"accountTagMem\",\"eventExpiryDuration\":30}")
+                .when().post("/memories/create").then().statusCode(202).extract().path("memory.arn");
+        try {
+            given().header("Authorization", authorization).contentType("application/json")
+                    .body("{\"tags\":{\"env\":\"dev\"}}")
+                    .when().post("/tags/" + arn).then().statusCode(204);
+            given().header("Authorization", authorization).when().get("/tags/" + arn)
+                    .then().statusCode(200).body("tags.env", equalTo("dev"));
+            given().header("Authorization", authorization).when().delete("/tags/" + arn + "?tagKeys=env")
+                    .then().statusCode(204);
+            given().header("Authorization", authorization).when().get("/tags/" + arn)
+                    .then().statusCode(200).body("tags.env", nullValue());
+
+            for (String foreign : new String[] {arn.replace(":111111111111:", ":222222222222:"),
+                    arn.replace(":us-east-1:", ":eu-west-1:")}) {
+                given().header("Authorization", authorization).when().get("/tags/" + foreign)
+                        .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+                given().header("Authorization", authorization).contentType("application/json")
+                        .body("{\"tags\":{\"env\":\"stolen\"}}")
+                        .when().post("/tags/" + foreign).then().statusCode(404)
+                        .body("__type", equalTo("ResourceNotFoundException"));
+                given().header("Authorization", authorization).when().delete("/tags/" + foreign + "?tagKeys=env")
+                        .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+            }
+        } finally {
+            String memoryId = arn.substring(arn.lastIndexOf('/') + 1);
+            given().header("Authorization", authorization).when().delete("/memories/" + memoryId + "/delete")
+                    .then().statusCode(202);
+        }
+    }
+
+    @Test
     @Order(3)
     void workloadIdentityCrud() {
         given().contentType("application/json").body("{\"name\":\"wid_test_1\"}")

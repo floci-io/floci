@@ -2,15 +2,19 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.VectorIndex;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 
 /**
@@ -21,6 +25,9 @@ final class DynamoDbItemSize {
     static final int MAX_ITEM_SIZE = 400 * 1024; // 400 KB = 409,600 bytes
 
     static final String UPDATE_EXCEEDED = "Item size to update has exceeded the maximum allowed size";
+
+    /** What a vector index reads per vector component, whatever the written decimal text costs. */
+    static final int VECTOR_COMPONENT_BYTES = 4;
 
     // An UpdateExpression is also measured as a statement: these per action, the target paths
     // with a shared prefix counted once, and every operand a SET reads or an ADD writes.
@@ -160,6 +167,33 @@ final class DynamoDbItemSize {
             }
             return size;
         }
+    }
+
+    static int billedItemSize(TableDefinition table, JsonNode item) {
+        return billedItemSize(table, item, calculateItemSize(item));
+    }
+
+    /**
+     * The size a read or write of the base table item is billed at. Once a vector index is
+     * ACTIVE, the attribute it reads costs its name plus four bytes per dimension there, even
+     * when an item written before the index holds something other than a vector. The 400KB
+     * limit and every secondary index copy still count what the attribute holds.
+     */
+    static int billedItemSize(TableDefinition table, JsonNode item, int storedSize) {
+        List<VectorIndex> indexes = table.getVectorIndexes();
+        if (item == null || indexes.isEmpty()) {
+            return storedSize;
+        }
+        int size = storedSize;
+        Set<String> counted = new HashSet<>();
+        for (VectorIndex index : indexes) {
+            String name = index.getVectorAttributeName();
+            JsonNode vector = item.get(name);
+            if (vector != null && "ACTIVE".equals(index.getIndexStatus()) && counted.add(name)) {
+                size += (int) (VECTOR_COMPONENT_BYTES * index.getDimensions()) - attributeValueSize(vector);
+            }
+        }
+        return size;
     }
 
     static int calculateItemSize(JsonNode item) {

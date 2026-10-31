@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
@@ -66,7 +67,7 @@ public final class FixtureLoader {
         }
         if (node instanceof ObjectNode obj) {
             Iterator<String> fields = obj.fieldNames();
-            List<String> toRemove = new java.util.ArrayList<>();
+            List<String> toRemove = new ArrayList<>();
             while (fields.hasNext()) {
                 String f = fields.next();
                 if (VOLATILE_FIELDS.contains(f)) toRemove.add(f);

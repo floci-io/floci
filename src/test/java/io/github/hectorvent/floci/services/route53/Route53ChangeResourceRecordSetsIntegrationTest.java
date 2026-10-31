@@ -8,6 +8,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 
 import java.util.stream.Stream;
 
+import static io.github.hectorvent.floci.services.route53.Route53HostedZoneTestSupport.createZone;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -397,18 +398,5 @@ class Route53ChangeResourceRecordSetsIntegrationTest {
         return Stream.of(
                 Arguments.of("EmptyChanges", emptyChanges),
                 Arguments.of("NoChangeBatch", noChangeBatch));
-    }
-
-    private static String createZone(String name, String callerReference) {
-        String create = """
-                <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
-                  <Name>%s</Name>
-                  <CallerReference>%s</CallerReference>
-                </CreateHostedZoneRequest>
-                """.formatted(name, callerReference);
-        String location = given().contentType(XML).body(create)
-                .post("/2013-04-01/hostedzone")
-                .then().statusCode(201).extract().header("Location");
-        return location.substring(location.lastIndexOf('/') + 1);
     }
 }

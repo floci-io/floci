@@ -47,6 +47,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.PathMatcher;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -213,7 +214,7 @@ public class CodeBuildRunner implements ContainerTeardown {
                     || (build.getEnvironment() != null
                     && Boolean.TRUE.equals(build.getEnvironment().getPrivilegedMode()));
 
-            Map<String, Object> logsMap = new java.util.HashMap<>();
+            Map<String, Object> logsMap = new HashMap<>();
             logsMap.put("groupName", logGroup);
             logsMap.put("streamName", logStream);
             logsMap.put("cloudWatchLogsArn", AwsArnUtils.Arn.of("logs", region, regionResolver.getAccountId(), "log-group:" + logGroup + ":log-stream:" + logStream).toString());

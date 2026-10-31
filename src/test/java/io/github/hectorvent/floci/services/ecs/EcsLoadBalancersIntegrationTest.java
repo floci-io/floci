@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecs;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -106,7 +107,7 @@ class EcsLoadBalancersIntegrationTest {
                 .when().post("/")
                 .then().statusCode(200)
                 .body("service.serviceName", equalTo("lb-svc-3"))
-                .body("service.loadBalancers", org.hamcrest.Matchers.nullValue());
+                .body("service.loadBalancers", Matchers.nullValue());
     }
 
     @Test
@@ -119,7 +120,7 @@ class EcsLoadBalancersIntegrationTest {
                         + "\"loadBalancers\":[{\"containerName\":\"web\"}]}")
                 .when().post("/")
                 .then().statusCode(400)
-                .body("__type", org.hamcrest.Matchers.containsString("InvalidParameterException"));
+                .body("__type", Matchers.containsString("InvalidParameterException"));
     }
 
     @Test
@@ -132,7 +133,7 @@ class EcsLoadBalancersIntegrationTest {
                         + "\"loadBalancers\":[{\"containerName\":\"web\",\"containerPort\":8080}]}")
                 .when().post("/")
                 .then().statusCode(400)
-                .body("__type", org.hamcrest.Matchers.containsString("InvalidParameterException"));
+                .body("__type", Matchers.containsString("InvalidParameterException"));
     }
 
     @Test

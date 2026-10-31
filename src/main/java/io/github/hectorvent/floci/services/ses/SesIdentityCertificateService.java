@@ -93,13 +93,12 @@ public class SesIdentityCertificateService {
         List<String> violations = new ArrayList<>();
         requireIdentityMember(emailIdentity, violations);
         if (certificateArn == null) {
-            violations.add(violation("certificateArn", "Member must not be null"));
+            violations.add(SmithyValidationErrors.notNullWithoutValue("certificateArn"));
         } else {
-            if (certificateArn.length() < 20) {
-                violations.add(violation("certificateArn", "Member must have length greater than or equal to 20"));
-            }
-            if (certificateArn.length() > 2048) {
-                violations.add(violation("certificateArn", "Member must have length less than or equal to 2048"));
+            String certificateArnLength = SmithyValidationErrors.sizeOutOfRange("certificateArn",
+                    certificateArn.length(), 20, 2048);
+            if (certificateArnLength != null) {
+                violations.add(certificateArnLength);
             }
             if (!CERTIFICATE_ARN.matcher(certificateArn).matches()) {
                 violations.add(violation("certificateArn",
@@ -335,7 +334,7 @@ public class SesIdentityCertificateService {
 
     private static void requireIdentityMember(String emailIdentity, List<String> violations) {
         if (emailIdentity == null) {
-            violations.add(violation("emailIdentity", "Member must not be null"));
+            violations.add(SmithyValidationErrors.notNullWithoutValue("emailIdentity"));
         } else if (emailIdentity.isEmpty()) {
             violations.add(violation("emailIdentity", "Member must have length greater than or equal to 1"));
         }

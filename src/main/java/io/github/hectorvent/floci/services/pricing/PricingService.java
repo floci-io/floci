@@ -15,13 +15,23 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * AWS Pricing API emulation backed by a bundled static snapshot.
@@ -234,7 +244,7 @@ public class PricingService {
         // Group entries per (region, currency) and keep the one whose
         // effective window covers `effectiveDate`. AWS returns one price list
         // per service/region/currency pair, matched by effective date.
-        Map<String, JsonNode> winningByKey = new java.util.LinkedHashMap<>();
+        Map<String, JsonNode> winningByKey = new LinkedHashMap<>();
         Map<String, Instant> winningEffective = new HashMap<>();
         if (node != null && node.isArray()) {
             for (JsonNode entry : node) {
@@ -292,7 +302,7 @@ public class PricingService {
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Url", "https://pricing-snapshot.floci.local/"
-                + java.net.URLEncoder.encode(priceListArn, java.nio.charset.StandardCharsets.UTF_8)
+                + URLEncoder.encode(priceListArn, StandardCharsets.UTF_8)
                 + "/" + fileFormat.toLowerCase());
         return response;
     }
@@ -412,35 +422,35 @@ public class PricingService {
         JsonNode effective = entry.path("EffectiveDate");
         if (!effective.isMissingNode() && !effective.isNull() && !effective.asText().isEmpty()) {
             try {
-                return java.time.OffsetDateTime.parse(effective.asText()).toInstant();
-            } catch (java.time.format.DateTimeParseException ignored) {
+                return OffsetDateTime.parse(effective.asText()).toInstant();
+            } catch (DateTimeParseException ignored) {
                 try {
                     return Instant.parse(effective.asText());
-                } catch (java.time.format.DateTimeParseException ignored2) {
+                } catch (DateTimeParseException ignored2) {
                     // fall through to ARN parsing
                 }
             }
         }
         String arn = entry.path("PriceListArn").asText("");
-        java.util.regex.Matcher m = ARN_TIMESTAMP.matcher(arn);
+        Matcher m = ARN_TIMESTAMP.matcher(arn);
         if (m.find()) {
             String ts = m.group(1);
             try {
-                return java.time.LocalDateTime.parse(ts, ARN_TIMESTAMP_FMT)
-                        .toInstant(java.time.ZoneOffset.UTC);
-            } catch (java.time.format.DateTimeParseException ignored) {
+                return LocalDateTime.parse(ts, ARN_TIMESTAMP_FMT)
+                        .toInstant(ZoneOffset.UTC);
+            } catch (DateTimeParseException ignored) {
                 // fall through
             }
         }
         return null;
     }
 
-    private static final java.util.regex.Pattern SAFE_PATH_SEGMENT =
-            java.util.regex.Pattern.compile("[A-Za-z0-9._-]+");
-    private static final java.util.regex.Pattern ARN_TIMESTAMP =
-            java.util.regex.Pattern.compile("/(\\d{14})(?:/|$)");
-    private static final java.time.format.DateTimeFormatter ARN_TIMESTAMP_FMT =
-            java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
+    private static final Pattern SAFE_PATH_SEGMENT =
+            Pattern.compile("[A-Za-z0-9._-]+");
+    private static final Pattern ARN_TIMESTAMP =
+            Pattern.compile("/(\\d{14})(?:/|$)");
+    private static final DateTimeFormatter ARN_TIMESTAMP_FMT =
+            DateTimeFormatter.ofPattern("yyyyMMddHHmmss");
 
     record ServiceEntry(String serviceCode, List<String> attributeNames) {
     }

@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -673,7 +674,7 @@ public class MarketplaceService implements Resettable {
             }
         }
         ArrayNode entityIds = out.putArray("EntityIdList");
-        Set<String> unique = new java.util.LinkedHashSet<>();
+        Set<String> unique = new LinkedHashSet<>();
         changeSet.path("ChangeSet").forEach(change -> unique.add(change.path("Entity").path("Identifier").asText()));
         unique.forEach(entityIds::add);
         return out;

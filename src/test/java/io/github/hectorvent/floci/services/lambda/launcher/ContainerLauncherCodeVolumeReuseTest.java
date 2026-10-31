@@ -18,7 +18,11 @@ import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Answers;
 import org.mockito.ArgumentCaptor;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.Files;
+import java.nio.file.LinkOption;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
@@ -307,7 +311,7 @@ class ContainerLauncherCodeVolumeReuseTest {
 
         assertEquals("keep", Files.readString(symlinkTarget),
                 "writing a completion marker must not follow and truncate a pre-existing symlink");
-        assertTrue(Files.isRegularFile(marker, java.nio.file.LinkOption.NOFOLLOW_LINKS),
+        assertTrue(Files.isRegularFile(marker, LinkOption.NOFOLLOW_LINKS),
                 "successful population should replace the symlink with a real marker file");
         assertFalse(Files.isSymbolicLink(marker));
     }
@@ -316,7 +320,7 @@ class ContainerLauncherCodeVolumeReuseTest {
     void partialTarProducerFailureIsStrictOnlyForCodeVolumePopulation() throws Exception {
         DockerClient dockerClient = mock(DockerClient.class);
         CopyArchiveToContainerCmd copyCommand = mock(CopyArchiveToContainerCmd.class);
-        java.io.InputStream[] capturedInput = {null};
+        InputStream[] capturedInput = {null};
         when(dockerClient.copyArchiveToContainerCmd("container-123")).thenReturn(copyCommand);
         when(copyCommand.withRemotePath("/var/task")).thenReturn(copyCommand);
         when(copyCommand.withTarInputStream(any()))
@@ -325,7 +329,7 @@ class ContainerLauncherCodeVolumeReuseTest {
                     return copyCommand;
                 });
         doAnswer(invocation -> {
-            capturedInput[0].transferTo(java.io.OutputStream.nullOutputStream());
+            capturedInput[0].transferTo(OutputStream.nullOutputStream());
             return null;
         }).when(copyCommand).exec();
 
@@ -333,7 +337,7 @@ class ContainerLauncherCodeVolumeReuseTest {
                 dockerClient, "container-123", tempDir, "/var/task", "orders",
                 (sourceDir, out) -> {
                     out.write(new byte[]{1, 2, 3});
-                    throw new java.io.IOException("ordinary copy producer closed");
+                    throw new IOException("ordinary copy producer closed");
                 }));
 
         RuntimeException failure = assertThrows(RuntimeException.class,
@@ -341,7 +345,7 @@ class ContainerLauncherCodeVolumeReuseTest {
                         dockerClient, "container-123", tempDir, "/var/task", "orders",
                         (sourceDir, out) -> {
                             out.write(new byte[]{1, 2, 3});
-                            throw new java.io.IOException("producer failed after partial archive");
+                            throw new IOException("producer failed after partial archive");
                         }));
 
         assertTrue(failure.getMessage().contains("Failed to copy directory"), failure.getMessage());

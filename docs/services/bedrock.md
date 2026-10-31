@@ -67,6 +67,10 @@ request, so `CreateGuardrail` and `TagResource` both raise `TooManyTagsException
 the resulting total would pass 50. Replacing the value of a tag key the guardrail
 already carries does not add to that total.
 
+Guardrails are listed by the Resource Groups Tagging API (resource type `bedrock:guardrail`)
+and Resource Explorer with their own tags, and `TagResources` / `UntagResources` there change
+those tags, as `TagResource` and `UntagResource` do.
+
 ## Not implemented
 
 The rest of the Bedrock control plane is absent rather than stubbed, because

@@ -14,6 +14,7 @@ import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
+import org.eclipse.paho.mqttv5.client.MqttConnectionOptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
@@ -109,8 +110,8 @@ class IotMqttTlsIntegrationTest {
     void mqtt5ConnectsOverTls() throws Exception {
         org.eclipse.paho.mqttv5.client.MqttClient client = new org.eclipse.paho.mqttv5.client.MqttClient(
                 "ssl://127.0.0.1:" + TLS_PORT, "tls-v5-" + System.nanoTime(), null);
-        org.eclipse.paho.mqttv5.client.MqttConnectionOptions options =
-                new org.eclipse.paho.mqttv5.client.MqttConnectionOptions();
+        MqttConnectionOptions options =
+                new MqttConnectionOptions();
         options.setCleanStart(true);
         options.setConnectionTimeout(10);
         options.setSocketFactory(device().sslContext(TLS_DIR).getSocketFactory());

@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -128,7 +129,7 @@ class SnsFifoThroughputScopeCfnIntegrationTest {
             .formParam("Action", "DescribeStacks")
             .formParam("StackName", STACK)
         .when().post("/").then().statusCode(200)
-            .body(org.hamcrest.Matchers.containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
+            .body(Matchers.containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
             .extract().asString();
     }
 

@@ -22,6 +22,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
 
@@ -73,7 +74,7 @@ class KarapaceManagerTest {
 
         ContainerBuilder containerBuilder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
         manager = new KarapaceManager(containerBuilder, lifecycleManager, containerDetector, config, portAllocator,
-                dockerHostResolver, java.time.Duration.ofMillis(500));
+                dockerHostResolver, Duration.ofMillis(500));
     }
 
     @AfterEach

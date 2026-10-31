@@ -2,8 +2,10 @@ package io.github.hectorvent.floci.services.lambda;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -68,7 +70,21 @@ public class LambdaProvisionedConcurrencyController {
 
     @GET
     public Response get(@Context HttpHeaders headers, @PathParam("functionName") String name,
-                        @QueryParam("Qualifier") String qualifier) {
+                        @QueryParam("Qualifier") String qualifier, @QueryParam("List") String list,
+                        @QueryParam("MaxItems") String maxItems, @QueryParam("Marker") String marker) {
+        if ("ALL".equals(list)) {
+            PaginatedResult<ProvisionedConcurrencyPool.ListedConfiguration> page = pool.list(
+                    regions.resolveRegion(headers), name, regions.getAccountId(), maxItems, marker);
+            ObjectNode result = mapper.createObjectNode();
+            ArrayNode configurations = result.putArray("ProvisionedConcurrencyConfigs");
+            for (ProvisionedConcurrencyPool.ListedConfiguration entry : page.items()) {
+                configurations.add(wire(entry.status()).put("FunctionArn", entry.functionArn()));
+            }
+            if (page.nextToken() != null) {
+                result.put("NextMarker", page.nextToken());
+            }
+            return Response.ok(result).build();
+        }
         return Response.ok(wire(pool.get(regions.resolveRegion(headers), name, qualifier,
                 regions.getAccountId()))).build();
     }

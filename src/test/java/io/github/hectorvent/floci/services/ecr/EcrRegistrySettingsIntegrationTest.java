@@ -4,13 +4,25 @@ import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.RestAssured;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.ecr.EcrClient;
+import software.amazon.awssdk.services.ecr.model.InvalidParameterException;
+
+import java.net.URI;
+import java.util.Collections;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.when;
 
 /**
@@ -103,6 +115,35 @@ class EcrRegistrySettingsIntegrationTest {
                 + "\"CONTINUOUS_SCAN\",\"repositoryFilters\":[{\"filter\":\"*\",\"filterType\":\"WILDCARD\"}]}]}",
                 region).statusCode(400)
                 .body("__type", equalTo("InvalidParameterException"));
+    }
+
+    @Test
+    void repositoryScanningBatchRejectsInvalidNames() {
+        String region = "eu-west-3";
+        for (String body : new String[] {
+                "{}", "{\"repositoryNames\":[]}", "{\"repositoryNames\":[\"a\"]}",
+                "{\"repositoryNames\":[\"Invalid Name\"]}",
+                "{\"repositoryNames\":[" + String.join(",", Collections.nCopies(26, "\"valid-name\"")) + "]}"
+        }) {
+            call("BatchGetRepositoryScanningConfiguration", body, region).statusCode(400)
+                    .body("__type", equalTo("InvalidParameterException"));
+        }
+    }
+
+    @Test
+    void repositoryScanningBatchSdkRejectsMalformedName() {
+        try (EcrClient client = EcrClient.builder()
+                .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
+                .httpClientBuilder(UrlConnectionHttpClient.builder())
+                .region(Region.EU_WEST_3)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("000000000000", "test")))
+                .build()) {
+            InvalidParameterException error = assertThrows(InvalidParameterException.class,
+                    () -> client.batchGetRepositoryScanningConfiguration(b -> b.repositoryNames("Invalid Name")));
+            assertEquals(400, error.statusCode());
+            assertEquals(1, client.batchGetRepositoryScanningConfiguration(b -> b.repositoryNames("sdk-missing"))
+                    .failures().size());
+        }
     }
 
     @Test

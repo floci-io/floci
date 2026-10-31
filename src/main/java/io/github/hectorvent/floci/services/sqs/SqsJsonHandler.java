@@ -259,7 +259,8 @@ public class SqsJsonHandler {
 
     private Response handleReceiveMessage(JsonNode request, String region) {
         String queueUrl = request.path("QueueUrl").asText(null);
-        int maxMessages = request.path("MaxNumberOfMessages").asInt(1);
+        Integer requestedMax = getOptionalIntField(request, "MaxNumberOfMessages");
+        int maxMessages = requestedMax == null ? 1 : requestedMax;
         int visibilityTimeout = request.path("VisibilityTimeout").asInt(-1);
         Integer waitTimeSeconds = getOptionalIntField(request, "WaitTimeSeconds");
 
@@ -612,7 +613,8 @@ public class SqsJsonHandler {
         if (node.isMissingNode() || node.isNull()) {
             return null;
         }
-        if (!node.isIntegralNumber()) {
+        // asInt() wraps a value outside the int range, so 4294967296 would read as 0.
+        if (!node.isIntegralNumber() || !node.canConvertToInt()) {
             throw new AwsException("InvalidParameterValue",
                     "Value for parameter " + paramName + " is invalid. Reason: Must be an integer.", 400);
         }

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -21,6 +22,7 @@ import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -30,6 +32,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 /**
@@ -73,14 +77,20 @@ public class RamService {
 
     private final StorageFactory storageFactory;
     private final OrganizationsService organizationsService;
+    private final Clock clock;
     private StorageBackend<String, ResourceShare> shares;
     private StorageBackend<String, Boolean> settings;
     private StorageBackend<String, ResourceShareInvitation> invitations;
 
     @Inject
     public RamService(StorageFactory storageFactory, OrganizationsService organizationsService) {
+        this(storageFactory, organizationsService, Clock.systemUTC());
+    }
+
+    RamService(StorageFactory storageFactory, OrganizationsService organizationsService, Clock clock) {
         this.storageFactory = storageFactory;
         this.organizationsService = organizationsService;
+        this.clock = clock;
     }
 
     /** Constructor used by isolated service tests with an explicit Organizations test double. */
@@ -169,6 +179,19 @@ public class RamService {
             result.add(share);
         }
         return result;
+    }
+
+    public PaginatedResult<ResourceShare> getResourceSharesPage(String callerAccountId, String resourceOwner,
+                                                                 String name, List<String> resourceShareArns,
+                                                                 String resourceShareStatus, String region,
+                                                                 Integer maxResults, String nextToken) {
+        return paginateRamResults(
+                () -> getResourceShares(callerAccountId, resourceOwner, name,
+                        resourceShareArns, resourceShareStatus, region),
+                ResourceShare::getResourceShareArn, maxResults, nextToken,
+                () -> "ram-resource-shares|" + callerAccountId + "|" + region + "|" + resourceOwner
+                        + "|" + (name == null ? "~" : Base64Url.encode(name)) + "|" + resourceShareStatus + "|"
+                        + resourceShareArns.stream().distinct().sorted().map(Base64Url::encode).toList());
     }
 
     /**
@@ -306,8 +329,7 @@ public class RamService {
 
     /** {@code arn:aws:ram:<region>:<account>:resource-share/<id>} → {@code <region>}. */
     private static String extractRegion(String resourceShareArn) {
-        String[] parts = resourceShareArn.split(":", 6);
-        return parts.length < 4 ? "" : parts[3];
+        return AwsArnUtils.regionOrDefault(resourceShareArn, "");
     }
 
     private void putInvitation(ResourceShareInvitation invitation) {
@@ -342,14 +364,15 @@ public class RamService {
         return result;
     }
 
-    public ResourceShare deleteResourceShare(String resourceShareArn, String callerAccountId, String region) {
+    public synchronized ResourceShare deleteResourceShare(String resourceShareArn, String callerAccountId,
+                                                          String region) {
         return putForOwner(
                 requireOwnedShare(resourceShareArn, callerAccountId, region).withStatus("DELETED"));
     }
 
-    public ResourceShare updateResourceShare(String resourceShareArn, String name,
-                                             Boolean allowExternalPrincipals, String callerAccountId,
-                                             String region) {
+    public synchronized ResourceShare updateResourceShare(String resourceShareArn, String name,
+                                                          Boolean allowExternalPrincipals, String callerAccountId,
+                                                          String region) {
         ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId, region);
         if (name != null) {
             share = share.withName(name);
@@ -379,9 +402,9 @@ public class RamService {
         }
     }
 
-    public ResourceShare disassociateResourceShare(String resourceShareArn, List<String> resourceArns,
-                                                    List<String> principals, String callerAccountId,
-                                                    String region) {
+    public synchronized ResourceShare disassociateResourceShare(String resourceShareArn,
+                                                                 List<String> resourceArns, List<String> principals,
+                                                                 String callerAccountId, String region) {
         ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId, region);
         ResourceShare updated = share.withPrincipalsAndResources(
                 withoutAll(share.getPrincipals(), principals),
@@ -430,41 +453,49 @@ public class RamService {
         if (resourceArn != null && !isValidArn(resourceArn)) {
             throw new AwsException("MalformedArnException", "Invalid resourceArn: " + resourceArn, 400);
         }
+        return paginateRamResults(() -> {
+            List<ResourceShareAssociation> associations = new ArrayList<>();
+            if (associationStatus == null || "ASSOCIATED".equals(associationStatus)) {
+                for (ResourceShare share : sharesIn(region)) {
+                    if (!isConsumableShare(share, callerAccountId, "SELF", resourceShareArns)) {
+                        continue;
+                    }
+                    if ("RESOURCE".equals(associationType)) {
+                        for (String entity : new LinkedHashSet<>(share.getResourceArns())) {
+                            if (resourceArn == null || resourceArn.equals(entity)) {
+                                associations.add(association(share, entity, "RESOURCE"));
+                            }
+                        }
+                    } else if ("PRINCIPAL".equals(associationType)) {
+                        for (String entity : new LinkedHashSet<>(share.getPrincipals())) {
+                            if (principal == null || principal.equals(entity)) {
+                                associations.add(association(share, entity, "PRINCIPAL"));
+                            }
+                        }
+                    }
+                }
+            }
+            return associations;
+        },
+                association -> association.resourceShareArn() + "\u0000" + association.associatedEntity(),
+                maxResults, nextToken,
+                () -> "ram-associations|" + callerAccountId + "|" + region + "|" + associationType
+                        + "|" + associationStatus + "|" + resourceShareArns.stream().sorted().toList()
+                        + "|" + resourceArn + "|" + principal);
+    }
+
+    private static <T> PaginatedResult<T> paginateRamResults(Supplier<List<T>> items,
+                                                               Function<T, String> cursorOf,
+                                                               Integer maxResults, String nextToken,
+                                                               Supplier<String> namespace) {
         if (maxResults != null && (maxResults < 1 || maxResults > 500)) {
             throw new AwsException("InvalidParameterException", "maxResults must be between 1 and 500.", 400);
         }
         if (nextToken != null && nextToken.isEmpty()) {
             throw new AwsException("InvalidNextTokenException", "Invalid nextToken.", 400);
         }
-
-        List<ResourceShareAssociation> associations = new ArrayList<>();
-        if (associationStatus == null || "ASSOCIATED".equals(associationStatus)) {
-            for (ResourceShare share : sharesIn(region)) {
-                if (!isConsumableShare(share, callerAccountId, "SELF", resourceShareArns)) {
-                    continue;
-                }
-                if ("RESOURCE".equals(associationType)) {
-                    for (String entity : new LinkedHashSet<>(share.getResourceArns())) {
-                        if (resourceArn == null || resourceArn.equals(entity)) {
-                            associations.add(association(share, entity, "RESOURCE"));
-                        }
-                    }
-                } else if ("PRINCIPAL".equals(associationType)) {
-                    for (String entity : new LinkedHashSet<>(share.getPrincipals())) {
-                        if (principal == null || principal.equals(entity)) {
-                            associations.add(association(share, entity, "PRINCIPAL"));
-                        }
-                    }
-                }
-            }
-        }
-
-        String namespace = "ram-associations|" + callerAccountId + "|" + region + "|" + associationType
-                + "|" + associationStatus + "|" + resourceShareArns.stream().sorted().toList()
-                + "|" + resourceArn + "|" + principal;
-        return Pagination.paginate(associations,
-                association -> association.resourceShareArn() + "\u0000" + association.associatedEntity(),
-                maxResults != null ? maxResults : 100, nextToken, namespace,
+        return Pagination.paginate(items.get(), cursorOf,
+                maxResults != null ? maxResults : 100, nextToken, namespace.get(),
                 ignored -> new AwsException("InvalidNextTokenException", "Invalid nextToken.", 400));
     }
 
@@ -522,16 +553,16 @@ public class RamService {
                 && parsed.resource().length() > RESOURCE_SHARE_PREFIX.length();
     }
 
-    public void tagResource(String resourceShareArn, Map<String, String> newTags, String callerAccountId,
-                            String region) {
+    public synchronized void tagResource(String resourceShareArn, Map<String, String> newTags,
+                                         String callerAccountId, String region) {
         ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId, region);
         Map<String, String> merged = new LinkedHashMap<>(share.getTags());
         merged.putAll(newTags);
         putForOwner(share.withTags(merged));
     }
 
-    public void untagResource(String resourceShareArn, List<String> tagKeys, String callerAccountId,
-                              String region) {
+    public synchronized void untagResource(String resourceShareArn, List<String> tagKeys,
+                                           String callerAccountId, String region) {
         ResourceShare share = requireOwnedShare(resourceShareArn, callerAccountId, region);
         Map<String, String> remaining = new LinkedHashMap<>(share.getTags());
         tagKeys.forEach(remaining::remove);
@@ -575,12 +606,31 @@ public class RamService {
     }
 
     /**
-     * The single write seam: every create and every mutation lands here, so stamping
-     * lastUpdatedTime once at this point keeps it advancing without six call sites having to
-     * remember to do it. Returns the stamped share so callers respond with what was stored.
+     * The single write seam: every create and every mutation lands here. Existing shares are
+     * stamped here so lastUpdatedTime advances without six call sites having to remember to do it;
+     * a fresh share keeps its equal creation and last-updated timestamps. The read, timestamp
+     * calculation, and write are one critical section so concurrent mutations cannot reuse a stamp.
+     * Returns the stored share.
      */
-    private ResourceShare putForOwner(ResourceShare share) {
-        ResourceShare stamped = share.withLastUpdatedTime(Instant.now());
+    private synchronized ResourceShare putForOwner(ResourceShare share) {
+        String owningAccountId = share.getOwningAccountId();
+        Optional<ResourceShare> previous;
+        if (shares instanceof AccountAwareStorageBackend<ResourceShare> accountAware) {
+            previous = accountAware.getForAccountMigratingLegacy(
+                    owningAccountId, share.getResourceShareArn(),
+                    candidate -> owningAccountId.equals(candidate.getOwningAccountId()));
+        } else {
+            previous = shares.get(share.getResourceShareArn());
+        }
+        ResourceShare stamped = share;
+        if (previous.isPresent()) {
+            Instant now = clock.instant();
+            Instant previousLastUpdated = previous.get().getLastUpdatedTime();
+            if (now.toEpochMilli() <= previousLastUpdated.toEpochMilli()) {
+                now = Instant.ofEpochMilli(previousLastUpdated.toEpochMilli() + 1);
+            }
+            stamped = share.withLastUpdatedTime(now);
+        }
         if (shares instanceof AccountAwareStorageBackend<ResourceShare> accountAware) {
             accountAware.putForAccount(
                     stamped.getOwningAccountId(), stamped.getResourceShareArn(), stamped);
@@ -734,12 +784,12 @@ public class RamService {
 
     /** {@code arn:aws:ec2:...:transit-gateway/tgw-1} → {@code ec2:TransitGateway}. */
     private static String ramResourceType(String resourceArn) {
-        String[] parts = resourceArn.split(":", 6);
-        if (parts.length < 6) {
+        if (!AwsArnUtils.isArn(resourceArn)) {
             return "";
         }
-        String service = parts[2];
-        String resource = parts[5];
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(resourceArn);
+        String service = parsed.service();
+        String resource = parsed.resource();
         int separator = indexOfTypeSeparator(resource);
         String typeSegment = separator >= 0 ? resource.substring(0, separator) : resource;
         StringBuilder camel = new StringBuilder();

@@ -15,10 +15,12 @@ import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -331,7 +333,7 @@ class BagetterSidecarClientTest {
 
     private void respondWithVersions(String packageName, String... versions) {
         String json = "{\"versions\":[" + String.join(",",
-                java.util.Arrays.stream(versions).map(v -> "\"" + v + "\"").toArray(String[]::new)) + "]}";
+                Arrays.stream(versions).map(v -> "\"" + v + "\"").toArray(String[]::new)) + "]}";
         backend.createContext("/v3/package/" + packageName + "/index.json", exchange -> {
             byte[] bytes = json.getBytes(StandardCharsets.UTF_8);
             exchange.getResponseHeaders().set("Content-Type", "application/json");
@@ -339,6 +341,53 @@ class BagetterSidecarClientTest {
             exchange.getResponseBody().write(bytes);
             exchange.close();
         });
+    }
+
+    /**
+     * Raised by Greptile's review: the real NuGet V3 Search resource excludes prerelease versions
+     * whenever {@code prerelease} is omitted, so a package whose only published version is a
+     * prerelease would never come back from {@link BagetterSidecarClient#listPackages} without it.
+     */
+    @Test
+    void listPackagesIncludesAPackageWhoseOnlyVersionIsAPrerelease() throws Exception {
+        BagetterSidecarManager manager = manager();
+        seedPooledContainer(manager, "nuget-repo-1", "tracked-bagetter-1", backendUrl);
+        AtomicReference<String> requestedQuery = new AtomicReference<>();
+        backend.createContext("/v3/search", exchange -> {
+            String query = exchange.getRequestURI().getQuery();
+            requestedQuery.set(query);
+            boolean firstPage = query.contains("skip=0");
+            byte[] body = (firstPage ? "{\"data\":[{\"id\":\"demo-pkg\"}]}" : "{\"data\":[]}")
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+
+        List<RepositorySidecarManager.PackageIdentifier> packages = client(manager).listPackages("nuget-repo-1",
+                "dom", "repo");
+
+        assertEquals(1, packages.size());
+        assertEquals("demo-pkg", packages.get(0).packageName());
+        assertTrue(requestedQuery.get().contains("prerelease=true"));
+    }
+
+    /**
+     * Raised by hectorvent's review: every CodeArtifact repository gets a nuget sidecar id at
+     * creation regardless of whether it is ever actually used through nuget, so {@code
+     * ListPackages} with no format filter must not start this repository's own BaGetter
+     * container just to find out it was never used. No context is registered on {@code backend}
+     * at all here: a real container start would have nothing to connect to and throw.
+     */
+    @Test
+    void listPackagesReturnsEmptyWithoutStartingAContainerThatWasNeverUsed() {
+        BagetterSidecarManager manager = manager();
+
+        List<RepositorySidecarManager.PackageIdentifier> packages = client(manager).listPackages("nuget-repo-1",
+                "dom", "repo");
+
+        assertTrue(packages.isEmpty());
     }
 
     private BagetterSidecarManager manager() {

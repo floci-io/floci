@@ -72,7 +72,7 @@ public class UsagePlan {
     @RegisterForReflection
     public record Quota(int limit, int offset, String period) {}
 
-    /** A plan's stages, throttle and quota as one value. */
+    /** A plan's stages, throttle and quota, which CloudFormation replaces as one. */
     @RegisterForReflection
     public record Limits(List<ApiStage> apiStages, Throttle throttle, Quota quota) {}
 }

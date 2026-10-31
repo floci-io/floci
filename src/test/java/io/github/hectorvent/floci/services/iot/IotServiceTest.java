@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -16,9 +17,11 @@ import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbOperations.S
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbTableAccess;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
+import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iot.model.IotPolicy;
 import io.github.hectorvent.floci.services.iot.model.IotShadow;
 import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
+import io.github.hectorvent.floci.services.iot.model.Thing;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -33,6 +36,8 @@ import org.mockito.ArgumentCaptor;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -42,6 +47,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static io.github.hectorvent.floci.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -71,7 +77,9 @@ import static org.mockito.Mockito.when;
  * failure document, and the {@code firehose} and {@code cloudwatchLogs} actions deliver the payload.
  * Also the five-version cap on a policy, including under racing creates, the device shadow
  * events that reach MQTT subscribers and topic rules on the AWS response topics, and one stored
- * registration when identical RegisterCertificateWithoutCA calls race.
+ * registration when identical RegisterCertificateWithoutCA calls race. Last, how UpdateThing and
+ * DeleteThing treat the attributes, the thing type and the expected version, including racing merges
+ * and racing versioned updates and deletes.
  */
 class IotServiceTest {
 
@@ -142,8 +150,8 @@ class IotServiceTest {
                 lambda,
                 firehose,
                 logs,
-                inlineMock(io.github.hectorvent.floci.config.FlociCertificateAuthority.class),
-                new io.github.hectorvent.floci.services.iam.IamPolicyEvaluator(mapper));
+                inlineMock(FlociCertificateAuthority.class),
+                new IamPolicyEvaluator(mapper));
     }
 
     private IotTopicRule createRule(String name, String payloadJson) throws Exception {
@@ -1620,5 +1628,276 @@ class IotServiceTest {
                 fannedOut(update + "/rejected"));
         assertEquals(List.of(update + "/rejected"), recordedTopics());
         assertEquals(List.of(), service.listNamedShadowsForThing("sensor-14", REGION));
+    }
+
+    @Test
+    void updateThingWithMergePutsTheGivenAttributesAndRemovesTheEmptyOnes() {
+        service.createThing("merged", Map.of("a", "1", "b", "2"), REGION);
+
+        Thing updated = service.updateThing("merged", Map.of("b", "", "c", "3", "missing", ""), true, null, false, null, REGION);
+
+        assertEquals(2L, updated.getVersion());
+        assertEquals(Map.of("a", "1", "c", "3"), service.describeThing("merged", REGION).getAttributes());
+    }
+
+    @Test
+    void updateThingWithoutMergeReplacesTheAttributesAndDropsTheEmptyOnes() {
+        service.createThing("replaced", Map.of("a", "1", "b", "2"), REGION);
+
+        service.updateThing("replaced", Map.of("e", "5", "f", ""), false, null, false, null, REGION);
+
+        assertEquals(Map.of("e", "5"), service.describeThing("replaced", REGION).getAttributes());
+    }
+
+    @Test
+    void updateThingWithoutAttributesKeepsThemAndAnEmptyMapClearsThemOnlyWithoutMerge() {
+        service.createThing("kept", Map.of("a", "1"), REGION);
+
+        service.updateThing("kept", null, true, null, false, null, REGION);
+        service.updateThing("kept", null, false, null, false, null, REGION);
+        service.updateThing("kept", Map.of(), true, null, false, null, REGION);
+
+        Thing kept = service.describeThing("kept", REGION);
+        assertEquals(Map.of("a", "1"), kept.getAttributes());
+        assertEquals(4L, kept.getVersion());
+
+        service.updateThing("kept", Map.of(), false, null, false, null, REGION);
+
+        Thing cleared = service.describeThing("kept", REGION);
+        assertEquals(Map.of(), cleared.getAttributes());
+        assertEquals(5L, cleared.getVersion());
+    }
+
+    @Test
+    void updateThingSetsAndRemovesTheThingTypeAndKeepsTheAttributes() {
+        service.createThingType("sensor-type", mapper.createObjectNode(), REGION);
+        service.createThing("typed", Map.of("a", "1"), REGION);
+
+        service.updateThing("typed", null, false, "sensor-type", false, null, REGION);
+
+        Thing typed = service.describeThing("typed", REGION);
+        assertEquals("sensor-type", typed.getThingTypeName());
+        assertEquals(Map.of("a", "1"), typed.getAttributes());
+
+        service.updateThing("typed", null, false, null, true, null, REGION);
+        assertNull(service.describeThing("typed", REGION).getThingTypeName());
+        assertDoesNotThrow(() -> service.updateThing("typed", null, false, null, true, null, REGION));
+
+        Thing untyped = service.describeThing("typed", REGION);
+        assertNull(untyped.getThingTypeName());
+        assertEquals(Map.of("a", "1"), untyped.getAttributes());
+        assertEquals(4L, untyped.getVersion());
+    }
+
+    @Test
+    void updateThingRejectsRemovingTheTypeWhileNamingOneBeforeLookingUpTheThing() {
+        service.createThingType("sensor-type", mapper.createObjectNode(), REGION);
+        service.createThing("typed", Map.of("a", "1"), REGION);
+
+        for (String thingName : List.of("typed", "no-such-thing")) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> service.updateThing(thingName, null, false, "sensor-type", true, 99L, REGION));
+            assertEquals("InvalidRequestException", e.getErrorCode(), thingName);
+            assertEquals(400, e.getHttpStatus(), thingName);
+            assertEquals("Cannot remove thing type when thing type is not null", e.getMessage(), thingName);
+        }
+        Thing unchanged = service.describeThing("typed", REGION);
+        assertNull(unchanged.getThingTypeName());
+        assertEquals(1L, unchanged.getVersion());
+    }
+
+    @Test
+    void updateThingLooksUpTheThingTypeBeforeTheVersionAndRejectsADeprecatedType() {
+        service.createThing("typed", Map.of("a", "1"), REGION);
+        service.createThingType("old-type", mapper.createObjectNode(), REGION);
+        service.deprecateThingType("old-type", REGION);
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.updateThing("typed", null, false, "no-such-type", false, 99L, REGION));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+        assertEquals(404, missing.getHttpStatus());
+
+        AwsException deprecated = assertThrows(AwsException.class,
+                () -> service.updateThing("typed", Map.of("b", "2"), false, "old-type", false, 99L, REGION));
+        assertEquals("InvalidRequestException", deprecated.getErrorCode());
+        assertEquals(400, deprecated.getHttpStatus());
+        assertEquals("Can not update a thing to use deprecated thing type: old-type", deprecated.getMessage());
+
+        Thing unchanged = service.describeThing("typed", REGION);
+        assertNull(unchanged.getThingTypeName());
+        assertEquals(Map.of("a", "1"), unchanged.getAttributes());
+        assertEquals(1L, unchanged.getVersion());
+    }
+
+    @Test
+    void updateThingRejectsAnEmptyOrMalformedThingTypeName() {
+        service.createThingType("sensor-type", mapper.createObjectNode(), REGION);
+        service.createThing("typed", Map.of("a", "1"), "sensor-type", REGION);
+
+        String tooLong = "a".repeat(129);
+        String tooLongWithSpace = "a".repeat(128) + " ";
+        String emptyMessage = "2 validation errors detected: "
+                + "Value '' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1; "
+                + "Value '' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [a-zA-Z0-9:_-]+";
+        Map<String, String> expectedMessages = new LinkedHashMap<>();
+        expectedMessages.put("", emptyMessage);
+        expectedMessages.put("  ", "1 validation error detected: "
+                + "Value '  ' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [a-zA-Z0-9:_-]+");
+        expectedMessages.put("bad type", "1 validation error detected: "
+                + "Value 'bad type' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [a-zA-Z0-9:_-]+");
+        expectedMessages.put(tooLong, "1 validation error detected: "
+                + "Value '" + tooLong + "' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 128");
+        expectedMessages.put(tooLongWithSpace, "2 validation errors detected: "
+                + "Value '" + tooLongWithSpace + "' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 128; "
+                + "Value '" + tooLongWithSpace + "' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [a-zA-Z0-9:_-]+");
+
+        for (Map.Entry<String, String> expected : expectedMessages.entrySet()) {
+            String thingTypeName = expected.getKey();
+            AwsException e = assertThrows(AwsException.class,
+                    () -> service.updateThing("typed", null, false, thingTypeName, false, null, REGION));
+            assertEquals("InvalidRequestException", e.getErrorCode(), thingTypeName);
+            assertEquals(400, e.getHttpStatus(), thingTypeName);
+            assertEquals(expected.getValue(), e.getMessage(), thingTypeName);
+        }
+        AwsException removeWithEmpty = assertThrows(AwsException.class,
+                () -> service.updateThing("typed", null, false, "", true, null, REGION));
+        assertEquals("InvalidRequestException", removeWithEmpty.getErrorCode());
+        assertEquals(400, removeWithEmpty.getHttpStatus());
+        assertEquals(emptyMessage, removeWithEmpty.getMessage());
+
+        Thing unchanged = service.describeThing("typed", REGION);
+        assertEquals("sensor-type", unchanged.getThingTypeName());
+        assertEquals(Map.of("a", "1"), unchanged.getAttributes());
+        assertEquals(1L, unchanged.getVersion());
+    }
+
+    @Test
+    void concurrentMergeUpdatesKeepEveryAttribute() throws Exception {
+        service.createThing("raced", Map.of(), REGION);
+        int writers = 8;
+        int updatesPerWriter = 50;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(writers);
+        List<Future<?>> outcomes = new ArrayList<>();
+        try {
+            for (int i = 0; i < writers; i++) {
+                int writer = i;
+                outcomes.add(pool.submit(() -> {
+                    start.await();
+                    for (int update = 0; update < updatesPerWriter; update++) {
+                        service.updateThing("raced", Map.of("t" + writer + "-" + update, "v"), true, null, false, null, REGION);
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> outcome : outcomes) {
+                outcome.get(60, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        Map<String, String> expected = new HashMap<>();
+        for (int writer = 0; writer < writers; writer++) {
+            for (int update = 0; update < updatesPerWriter; update++) {
+                expected.put("t" + writer + "-" + update, "v");
+            }
+        }
+        Thing raced = service.describeThing("raced", REGION);
+        assertEquals(expected, raced.getAttributes());
+        assertEquals(writers * updatesPerWriter + 1L, raced.getVersion());
+    }
+
+    @Test
+    void racingVersionedUpdatesAndDeletesConsumeAnExpectedVersionOnce() throws Exception {
+        Set<String> losers = Set.of("VersionConflictException", "ResourceNotFoundException");
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+        try {
+            for (int round = 0; round < 200; round++) {
+                String name = "cas-" + round;
+                service.createThing(name, Map.of("a", "1"), REGION);
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<String>> outcomes = new ArrayList<>();
+                for (int i = 0; i < 2; i++) {
+                    outcomes.add(pool.submit(() -> {
+                        start.await();
+                        try {
+                            service.updateThing(name, Map.of("b", "2"), true, null, false, 1L, REGION);
+                            return "update";
+                        } catch (AwsException e) {
+                            return e.getErrorCode();
+                        }
+                    }));
+                    outcomes.add(pool.submit(() -> {
+                        start.await();
+                        try {
+                            service.deleteThing(name, 1L, REGION);
+                            return "delete";
+                        } catch (AwsException e) {
+                            return e.getErrorCode();
+                        }
+                    }));
+                }
+                start.countDown();
+                List<String> results = new ArrayList<>();
+                for (Future<String> outcome : outcomes) {
+                    results.add(outcome.get(60, TimeUnit.SECONDS));
+                }
+
+                String context = "round " + round + ": " + results;
+                List<String> winners = new ArrayList<>();
+                for (String result : results) {
+                    if (result.equals("update") || result.equals("delete")) {
+                        winners.add(result);
+                    } else {
+                        assertTrue(losers.contains(result), context);
+                    }
+                }
+                assertEquals(1, winners.size(), context);
+                if (winners.getFirst().equals("update")) {
+                    Thing updated = service.describeThing(name, REGION);
+                    assertEquals(2L, updated.getVersion(), context);
+                    assertEquals(Map.of("a", "1", "b", "2"), updated.getAttributes(), context);
+                } else {
+                    AwsException gone = assertThrows(AwsException.class, () -> service.describeThing(name, REGION), context);
+                    assertEquals("ResourceNotFoundException", gone.getErrorCode(), context);
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void aStaleExpectedVersionIsAVersionConflictOnUpdateAndDeleteAndKeepsTheThing() {
+        service.createThing("versioned", Map.of("a", "1"), REGION);
+        service.updateThing("versioned", Map.of("a", "2"), false, null, false, 1L, REGION);
+        String message = "The version for thing versioned does not match the expected version.";
+
+        AwsException update = assertThrows(AwsException.class,
+                () -> service.updateThing("versioned", Map.of("a", "3"), false, null, false, 1L, REGION));
+        AwsException delete = assertThrows(AwsException.class, () -> service.deleteThing("versioned", 1L, REGION));
+
+        for (AwsException e : List.of(update, delete)) {
+            assertEquals("VersionConflictException", e.getErrorCode());
+            assertEquals(409, e.getHttpStatus());
+            assertEquals(message, e.getMessage());
+        }
+        Thing kept = service.describeThing("versioned", REGION);
+        assertEquals(Map.of("a", "2"), kept.getAttributes());
+        assertEquals(2L, kept.getVersion());
+
+        service.deleteThing("versioned", 2L, REGION);
+
+        assertEquals("ResourceNotFoundException",
+                assertThrows(AwsException.class, () -> service.describeThing("versioned", REGION)).getErrorCode());
     }
 }

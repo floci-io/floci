@@ -6,7 +6,10 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
+import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService.ConnectorVersion;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService.NetworkConnector;
+import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService.NetworkConnectorVersion;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -21,6 +24,9 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -87,7 +93,32 @@ public class LambdaNetworkConnectorsController {
     public Response getNetworkConnector(@Context HttpHeaders headers,
                                         @PathParam("identifier") String identifier) {
         String region = regionResolver.resolveRegion(headers);
-        return Response.ok(connectorNode(service.getConnector(region, identifier), ConnectorShape.GET)).build();
+        ConnectorVersion named = service.getConnectorVersion(region, identifier);
+        return Response.ok(named.qualified() ? versionNode(named, false)
+                : connectorNode(named.connector(), ConnectorShape.GET)).build();
+    }
+
+    @GET
+    @Path("/network-connectors/{identifier}/versions")
+    public Response listNetworkConnectorVersions(@Context HttpHeaders headers,
+                                                 @PathParam("identifier") String identifier) {
+        String region = regionResolver.resolveRegion(headers);
+        List<NetworkConnectorVersion> versions = service.listConnectorVersions(region, identifier);
+        NetworkConnector connector = service.getConnector(region, identifier);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("NetworkConnectorVersions");
+        for (NetworkConnectorVersion version : versions) {
+            ObjectNode item = items.addObject();
+            item.put("Arn", connector.arn);
+            item.put("VersionArn", LambdaArnUtils.networkConnectorVersionArn(connector.arn, version.version));
+            item.put("Name", connector.name);
+            item.put("Id", connector.id);
+            item.put("Version", version.version);
+            item.put("State", version.state);
+            item.put("StateReason", version.stateReason);
+            item.put("LastModified", iso(version.lastModified));
+        }
+        return Response.ok(root).build();
     }
 
     @PUT
@@ -110,19 +141,20 @@ public class LambdaNetworkConnectorsController {
     public Response deleteNetworkConnector(@Context HttpHeaders headers,
                                            @PathParam("identifier") String identifier) {
         String region = regionResolver.resolveRegion(headers);
-        // Read the connector before it goes: the delete answers 202 with the
-        // connector's own body in DELETING, not an empty object.
-        NetworkConnector doomed = service.getConnector(region, identifier);
-        ObjectNode body = connectorNode(doomed, ConnectorShape.DELETE);
+        // The delete answers 202 with the body of what it deletes in DELETING, not an empty object.
+        ConnectorVersion deleted = service.deleteConnector(region, identifier);
+        ObjectNode body = deleted.qualified() ? versionNode(deleted, true)
+                : connectorNode(deleted.connector(), ConnectorShape.DELETE);
         body.put("State", "DELETING");
-        service.deleteConnector(region, identifier);
         return Response.status(202).entity(body).build();
     }
 
     /**
      * The four shapes a connector is returned in. Create and Delete return a
-     * base six; Get adds LastModified and StateReason; Update adds the update
-     * status but not StateReason; and only the list summary carries Type.
+     * base six; Get adds LastModified, StateReason and the update status; Update
+     * adds the update status but not StateReason; and only the list summary
+     * carries Type. Get names the latest version, Create and Update the version
+     * they made, and Delete none.
      * Absent means absent — a connector that has never been updated has no
      * LastUpdateStatus at all, and sending one as null diverges on every read.
      */
@@ -133,24 +165,18 @@ public class LambdaNetworkConnectorsController {
         node.put("Id", connector.id);
         node.put("Name", connector.name);
         node.put("Arn", connector.arn);
+        if (shape == ConnectorShape.GET) {
+            node.put("LatestVersionArn",
+                    LambdaArnUtils.networkConnectorVersionArn(connector.arn, connector.latestVersion));
+            node.put("LatestVersion", connector.latestVersion);
+        } else if (shape != ConnectorShape.DELETE) {
+            node.put("VersionArn", LambdaArnUtils.networkConnectorVersionArn(connector.arn, connector.latestVersion));
+            node.put("Version", connector.latestVersion);
+        }
         node.put("State", shape == ConnectorShape.CREATE ? "PENDING" : connector.state);
-        if (connector.operatorRole == null) {
-            node.putNull("OperatorRole");
-        } else {
-            node.put("OperatorRole", connector.operatorRole);
-        }
-        ObjectNode vpc = node.putObject("Configuration").putObject("VpcEgressConfiguration");
-        ArrayNode subnets = vpc.putArray("SubnetIds");
-        connector.subnetIds.forEach(subnets::add);
-        ArrayNode sgs = vpc.putArray("SecurityGroupIds");
-        connector.securityGroupIds.forEach(sgs::add);
-        // Both arrive on the request; echoing them is what lets a client read
-        // back what it set.
-        ArrayNode types = vpc.putArray("AssociatedComputeResourceTypes");
-        connector.associatedComputeResourceTypes.forEach(types::add);
-        if (connector.networkProtocol != null) {
-            vpc.put("NetworkProtocol", connector.networkProtocol);
-        }
+        putOperatorRole(node, connector.operatorRole);
+        putConfiguration(node, connector.subnetIds, connector.securityGroupIds,
+                connector.associatedComputeResourceTypes, connector.networkProtocol);
 
         if (shape == ConnectorShape.GET || shape == ConnectorShape.UPDATE) {
             node.put("LastModified", iso(connector.lastModified));
@@ -158,7 +184,7 @@ public class LambdaNetworkConnectorsController {
         if (shape == ConnectorShape.GET && connector.stateReason != null) {
             node.put("StateReason", connector.stateReason);
         }
-        if (shape == ConnectorShape.UPDATE) {
+        if (shape == ConnectorShape.GET || shape == ConnectorShape.UPDATE) {
             if (connector.lastUpdateStatus != null) {
                 node.put("LastUpdateStatus", connector.lastUpdateStatus);
             }
@@ -167,6 +193,51 @@ public class LambdaNetworkConnectorsController {
             }
         }
         return node;
+    }
+
+    /** A version-qualified Get, or the body of a version-qualified Delete, which has no state reason or time. */
+    private ObjectNode versionNode(ConnectorVersion named, boolean deleted) {
+        NetworkConnector connector = named.connector();
+        NetworkConnectorVersion version = named.version();
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Id", connector.id);
+        node.put("Name", connector.name);
+        node.put("Arn", connector.arn);
+        node.put("VersionArn", named.versionArn());
+        node.put("Version", version.version);
+        node.put("State", version.state);
+        putOperatorRole(node, version.operatorRole);
+        putConfiguration(node, version.subnetIds, version.securityGroupIds,
+                version.associatedComputeResourceTypes, version.networkProtocol);
+        if (!deleted) {
+            node.put("StateReason", version.stateReason);
+            node.put("LastModified", iso(version.lastModified));
+        }
+        return node;
+    }
+
+    private static void putOperatorRole(ObjectNode node, String operatorRole) {
+        if (operatorRole == null) {
+            node.putNull("OperatorRole");
+        } else {
+            node.put("OperatorRole", operatorRole);
+        }
+    }
+
+    private static void putConfiguration(ObjectNode node, List<String> subnetIds, List<String> securityGroupIds,
+                                         List<String> computeResourceTypes, String networkProtocol) {
+        ObjectNode vpc = node.putObject("Configuration").putObject("VpcEgressConfiguration");
+        ArrayNode subnets = vpc.putArray("SubnetIds");
+        subnetIds.forEach(subnets::add);
+        ArrayNode sgs = vpc.putArray("SecurityGroupIds");
+        securityGroupIds.forEach(sgs::add);
+        // Both arrive on the request; echoing them is what lets a client read
+        // back what it set.
+        ArrayNode types = vpc.putArray("AssociatedComputeResourceTypes");
+        computeResourceTypes.forEach(types::add);
+        if (networkProtocol != null) {
+            vpc.put("NetworkProtocol", networkProtocol);
+        }
     }
 
     /** The list summary, the only shape carrying Type. */
@@ -178,13 +249,15 @@ public class LambdaNetworkConnectorsController {
         node.put("Type", "VPC_EGRESS");
         node.put("State", connector.state);
         node.put("LastModified", iso(connector.lastModified));
+        node.put("LatestVersionArn", LambdaArnUtils.networkConnectorVersionArn(connector.arn, connector.latestVersion));
+        node.put("LatestVersion", connector.latestVersion);
         return node;
     }
 
-    private static String iso(java.time.Instant when) {
-        return java.time.format.DateTimeFormatter.ISO_INSTANT
-                .format((when == null ? java.time.Instant.now() : when)
-                        .truncatedTo(java.time.temporal.ChronoUnit.SECONDS));
+    private static String iso(Instant when) {
+        return DateTimeFormatter.ISO_INSTANT
+                .format((when == null ? Instant.now() : when)
+                        .truncatedTo(ChronoUnit.SECONDS));
     }
 
     private JsonNode parse(String body) {

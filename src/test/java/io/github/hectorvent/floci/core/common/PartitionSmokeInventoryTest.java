@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import io.github.hectorvent.floci.testing.MainSources;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -28,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class PartitionSmokeInventoryTest {
 
-    private static final Path SERVICES = Path.of("src/main/java/io/github/hectorvent/floci/services");
+    private static final Path SERVICES = MainSources.BASE_DIR.resolve("services");
     private static final Path EXEMPTIONS = Path.of("src/test/resources/partition/smoke-exemptions.tsv");
     private static final Pattern MINTS = Pattern.compile(
             "buildArn\\(|buildGlobalArn\\(|\\bArn\\.of\\(|\\bArn\\.global\\(|\\bnew (AwsArnUtils\\.)?Arn\\("

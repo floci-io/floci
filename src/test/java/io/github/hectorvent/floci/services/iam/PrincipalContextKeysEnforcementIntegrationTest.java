@@ -85,7 +85,8 @@ class PrincipalContextKeysEnforcementIntegrationTest {
                   {"Effect":"Allow","Action":"iam:ListRoles","Resource":"*",
                    "Condition":{"StringEquals":{"aws:username":"%s"}}},
                   {"Effect":"Allow","Action":"iam:ListGroups","Resource":"*",
-                   "Condition":{"StringLike":{"aws:userid":"AROA*:s"}}}]}""".formatted(role));
+                   "Condition":{"StringLike":{"aws:userid":"AROA*:%2$s"}}}]}"""
+                .formatted(role, EnforcementFixtures.SESSION_NAME));
         Session session = EnforcementFixtures.assumeRole(baseUri.getPort(), ACCOUNT, roleArn);
 
         iamCall(session.accessKeyId(), session.sessionToken(), "ListUsers").then().statusCode(200);

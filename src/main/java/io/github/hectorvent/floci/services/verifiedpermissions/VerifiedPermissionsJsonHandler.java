@@ -1,10 +1,13 @@
 package io.github.hectorvent.floci.services.verifiedpermissions;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.services.verifiedpermissions.model.EntityIdentifier;
 import io.github.hectorvent.floci.services.verifiedpermissions.model.IdentitySource;
 import io.github.hectorvent.floci.services.verifiedpermissions.model.Policy;
 import io.github.hectorvent.floci.services.verifiedpermissions.model.PolicyStore;
@@ -15,6 +18,8 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -193,11 +198,11 @@ public class VerifiedPermissionsJsonHandler {
             if (!parsed.isObject()) {
                 return List.of();
             }
-            java.util.ArrayList<String> names = new java.util.ArrayList<>();
+            ArrayList<String> names = new ArrayList<>();
             parsed.fieldNames().forEachRemaining(names::add);
             names.sort(String::compareTo);
             return names;
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+        } catch (JsonProcessingException e) {
             throw new IllegalStateException("Stored Verified Permissions schema is not valid JSON", e);
         }
     }
@@ -259,7 +264,7 @@ public class VerifiedPermissionsJsonHandler {
         }
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode results = out.putArray("results");
-        io.github.hectorvent.floci.services.verifiedpermissions.model.EntityIdentifier principal = null;
+        EntityIdentifier principal = null;
         for (JsonNode item : requests) {
             ObjectNode single = objectMapper.createObjectNode();
             single.put("policyStoreId", storeIdentifier);
@@ -480,7 +485,7 @@ public class VerifiedPermissionsJsonHandler {
             String policy = VerifiedPermissionsService.requiredText(item, "policyId");
             try {
                 results.add(policyDetail(service.getPolicy(store, policy, region), region));
-            } catch (io.github.hectorvent.floci.core.common.AwsException e) {
+            } catch (AwsException e) {
                 ObjectNode error = errors.addObject();
                 error.put("policyStoreId", store);
                 error.put("policyId", policy);
@@ -500,10 +505,10 @@ public class VerifiedPermissionsJsonHandler {
 
     private boolean storeExists(String id, String region) {
         try { service.getPolicyStore(id, region); return true; }
-        catch (io.github.hectorvent.floci.core.common.AwsException e) { return false; }
+        catch (AwsException e) { return false; }
     }
 
-    private static void addEntity(ObjectNode out, String field, io.github.hectorvent.floci.services.verifiedpermissions.model.EntityIdentifier entity) {
+    private static void addEntity(ObjectNode out, String field, EntityIdentifier entity) {
         if (entity == null) {
             return;
         }
@@ -548,7 +553,7 @@ public class VerifiedPermissionsJsonHandler {
         if (!node.isObject()) {
             throw VerifiedPermissionsService.validation("tags is required.");
         }
-        Map<String, String> out = new java.util.LinkedHashMap<>();
+        Map<String, String> out = new LinkedHashMap<>();
         node.fields().forEachRemaining(e -> {
             if (!e.getValue().isTextual()) {
                 throw VerifiedPermissionsService.validation("Tag values must be strings.");
@@ -562,7 +567,7 @@ public class VerifiedPermissionsJsonHandler {
         if (!node.isArray()) {
             throw VerifiedPermissionsService.validation("tagKeys is required.");
         }
-        java.util.ArrayList<String> out = new java.util.ArrayList<>();
+        ArrayList<String> out = new ArrayList<>();
         node.forEach(v -> {
             if (!v.isTextual()) {
                 throw VerifiedPermissionsService.validation("tagKeys must contain strings.");

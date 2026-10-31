@@ -7,6 +7,8 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.endsWith;
@@ -64,7 +66,7 @@ class EcsDescribeServicesIntegrationTest {
      * same value, so read them as BigDecimal.
      */
     private static double epochSeconds(Response response, String path) {
-        return ((java.math.BigDecimal) response
+        return ((BigDecimal) response
                 .jsonPath(new JsonPathConfig(JsonPathConfig.NumberReturnType.BIG_DECIMAL))
                 .get(path)).doubleValue();
     }

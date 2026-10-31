@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.MatcherAssert;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -111,7 +112,7 @@ class DynamoDbTagResourcePartitionIntegrationTest {
         String tableName = "tag-partition-" + UUID.randomUUID().toString().substring(0, 8);
         String tableArn = createTable(region, tableName);
 
-        org.hamcrest.MatcherAssert.assertThat(tableArn, startsWith(expectedArnPrefix));
+        MatcherAssert.assertThat(tableArn, startsWith(expectedArnPrefix));
         tag(region, tableArn).then().statusCode(200);
     }
 

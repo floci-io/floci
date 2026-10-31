@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudmap;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
@@ -9,8 +10,14 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -137,10 +144,19 @@ class CloudMapIntegrationTest {
     @Test
     @Order(8)
     void listOperationsFilteredByNamespace() {
-        call("ListOperations",
-                "{\"Filters\":[{\"Name\":\"NAMESPACE_ID\",\"Condition\":\"EQ\",\"Values\":[\"" + namespaceId + "\"]}]}")
-                .then().statusCode(200)
-                .body("Operations.find { it.Status == 'SUCCESS' }", notNullValue());
+        // AWS pages before it filters, so a match can sit behind an empty page when other tests made operations.
+        String filters = "\"Filters\":[{\"Name\":\"NAMESPACE_ID\",\"Condition\":\"EQ\",\"Values\":[\"" + namespaceId + "\"]}]";
+        List<String> statuses = new ArrayList<>();
+        String nextToken = null;
+        do {
+            String token = nextToken == null ? "" : ",\"NextToken\":\"" + nextToken + "\"";
+            JsonPath page = call("ListOperations", "{" + filters + token + "}")
+                    .then().statusCode(200).extract().jsonPath();
+            statuses.addAll(page.getList("Operations.Status", String.class));
+            nextToken = page.getString("NextToken");
+        } while (nextToken != null);
+
+        assertThat(statuses, hasItem("SUCCESS"));
     }
 
     @Test
@@ -177,5 +193,119 @@ class CloudMapIntegrationTest {
         call("GetNamespace", "{\"Id\":\"ns-doesnotexist00000\"}")
                 .then().statusCode(404)
                 .body("__type", equalTo("NamespaceNotFound"));
+    }
+
+    @Test
+    @Order(13)
+    void healthCheckCustomConfigAlwaysReadsBackFailureThresholdOne() {
+        String operationId = call("CreateHttpNamespace", "{\"Name\":\"floci-cm-custom-health\"}")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("OperationId");
+        String customNamespaceId = call("GetOperation", "{\"OperationId\":\"" + operationId + "\"}")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("Operation.Targets.NAMESPACE");
+        String emptyId = createCustomHealthService("empty", customNamespaceId, "{}");
+        String thresholdId = createCustomHealthService("threshold", customNamespaceId, "{\"FailureThreshold\":3}");
+
+        for (String id : List.of(emptyId, thresholdId)) {
+            call("GetService", "{\"Id\":\"" + id + "\"}")
+                    .then().statusCode(200)
+                    .body("Service.HealthCheckCustomConfig.FailureThreshold", equalTo(1));
+            call("DeleteService", "{\"Id\":\"" + id + "\"}").then().statusCode(200);
+        }
+        call("DeleteNamespace", "{\"Id\":\"" + customNamespaceId + "\"}").then().statusCode(200);
+    }
+
+    @Test
+    void privateDnsNamespaceBacksARealPrivateHostedZone() {
+        String nsId = createDnsNamespace("CreatePrivateDnsNamespace",
+                "{\"Name\":\"cm-private.example.com\",\"Vpc\":\"vpc-cm123456\"}");
+        String zoneId = hostedZoneId(nsId);
+
+        given().get("/2013-04-01/hostedzone/" + zoneId).then().statusCode(200)
+                .body("GetHostedZoneResponse.HostedZone.Name", equalTo("cm-private.example.com."))
+                .body("GetHostedZoneResponse.HostedZone.Config.PrivateZone", equalTo("true"))
+                .body("GetHostedZoneResponse.VPCs.VPC.VPCId", equalTo("vpc-cm123456"));
+
+        call("DeleteNamespace", "{\"Id\":\"" + nsId + "\"}").then().statusCode(200);
+        given().get("/2013-04-01/hostedzone/" + zoneId).then().statusCode(404)
+                .body("ErrorResponse.Error.Code", equalTo("NoSuchHostedZone"));
+    }
+
+    @Test
+    void publicDnsNamespaceBacksARealPublicHostedZone() {
+        String nsId = createDnsNamespace("CreatePublicDnsNamespace", "{\"Name\":\"cm-public.example.com\"}");
+        String zoneId = hostedZoneId(nsId);
+
+        given().get("/2013-04-01/hostedzone/" + zoneId).then().statusCode(200)
+                .body("GetHostedZoneResponse.HostedZone.Name", equalTo("cm-public.example.com."))
+                .body("GetHostedZoneResponse.HostedZone.Config.PrivateZone", equalTo("false"));
+
+        call("DeleteNamespace", "{\"Id\":\"" + nsId + "\"}").then().statusCode(200);
+        given().get("/2013-04-01/hostedzone/" + zoneId).then().statusCode(404);
+    }
+
+    @Test
+    void deleteNamespaceWithServicesKeepsNamespaceAndZone() {
+        String nsId = createDnsNamespace("CreatePrivateDnsNamespace",
+                "{\"Name\":\"cm-inuse.example.com\",\"Vpc\":\"vpc-cm123456\"}");
+        String zoneId = hostedZoneId(nsId);
+        call("CreateService", "{\"Name\":\"s\",\"NamespaceId\":\"" + nsId + "\"}").then().statusCode(200);
+
+        call("DeleteNamespace", "{\"Id\":\"" + nsId + "\"}").then().statusCode(400)
+                .body("__type", equalTo("ResourceInUse"));
+
+        call("GetNamespace", "{\"Id\":\"" + nsId + "\"}").then().statusCode(200);
+        given().get("/2013-04-01/hostedzone/" + zoneId).then().statusCode(200);
+    }
+
+    @Test
+    void deleteNamespaceToleratesAZoneThatIsAlreadyGone() {
+        String nsId = createDnsNamespace("CreatePublicDnsNamespace", "{\"Name\":\"cm-nozone.example.com\"}");
+        given().delete("/2013-04-01/hostedzone/" + hostedZoneId(nsId)).then().statusCode(200);
+
+        call("DeleteNamespace", "{\"Id\":\"" + nsId + "\"}").then().statusCode(200);
+        call("GetNamespace", "{\"Id\":\"" + nsId + "\"}").then().statusCode(404)
+                .body("__type", equalTo("NamespaceNotFound"));
+    }
+
+    @Test
+    void deleteNamespaceWithUserRecordsInTheZoneKeepsTheNamespace() {
+        String nsId = createDnsNamespace("CreatePublicDnsNamespace", "{\"Name\":\"cm-records.example.com\"}");
+        String zoneId = hostedZoneId(nsId);
+        given().contentType("application/xml").body("""
+                <ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <ChangeBatch><Changes><Change><Action>CREATE</Action><ResourceRecordSet>
+                    <Name>www.cm-records.example.com</Name><Type>A</Type><TTL>60</TTL>
+                    <ResourceRecords><ResourceRecord><Value>10.0.0.1</Value></ResourceRecord></ResourceRecords>
+                  </ResourceRecordSet></Change></Changes></ChangeBatch>
+                </ChangeResourceRecordSetsRequest>""")
+                .post("/2013-04-01/hostedzone/" + zoneId + "/rrset").then().statusCode(200);
+
+        call("DeleteNamespace", "{\"Id\":\"" + nsId + "\"}").then().statusCode(400)
+                .body("__type", equalTo("HostedZoneNotEmpty"));
+        call("GetNamespace", "{\"Id\":\"" + nsId + "\"}").then().statusCode(200);
+    }
+
+    private static String createDnsNamespace(String action, String body) {
+        String operationId = call(action, body).then().statusCode(200)
+                .extract().jsonPath().getString("OperationId");
+        return call("GetOperation", "{\"OperationId\":\"" + operationId + "\"}")
+                .then().statusCode(200).extract().jsonPath().getString("Operation.Targets.NAMESPACE");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static String hostedZoneId(String nsId) {
+        Map<String, Object> ns = call("GetNamespace", "{\"Id\":\"" + nsId + "\"}").then().statusCode(200)
+                .extract().jsonPath().getMap("Namespace");
+        Map<String, Object> props = (Map<String, Object>) ns.get("Properties");
+        return (String) ((Map<String, Object>) props.get("DnsProperties")).get("HostedZoneId");
+    }
+
+    private static String createCustomHealthService(String name, String nsId, String healthCheckCustomConfig) {
+        return call("CreateService", "{\"Name\":\"" + name + "\",\"NamespaceId\":\"" + nsId
+                + "\",\"HealthCheckCustomConfig\":" + healthCheckCustomConfig + "}")
+                .then().statusCode(200)
+                .extract().jsonPath().getString("Service.Id");
     }
 }

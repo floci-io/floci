@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.sql.Array;
 import java.sql.Blob;
 import java.sql.Date;
@@ -47,7 +48,7 @@ final class RdsDataFieldMapper {
                 } else if (value instanceof Blob blob) {
                     field.put("blobValue", blob.getBytes(1, Math.toIntExact(blob.length())));
                 } else {
-                    field.put("blobValue", value.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    field.put("blobValue", value.toString().getBytes(StandardCharsets.UTF_8));
                 }
             }
             case Types.BOOLEAN, Types.BIT -> {

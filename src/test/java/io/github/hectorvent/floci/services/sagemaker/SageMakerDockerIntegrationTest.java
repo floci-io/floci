@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
@@ -236,7 +237,7 @@ class SageMakerDockerIntegrationTest {
                 .until(currentStatus, current -> wanted.equals(current) || "Failed".equals(current));
     }
 
-    private io.restassured.response.Response post(String target, String body) {
+    private Response post(String target, String body) {
         return given().header("Authorization", AUTH).header("X-Amz-Target", target)
                 .contentType("application/x-amz-json-1.1").body(body).when().post("/");
     }

@@ -50,6 +50,10 @@
 | `ListReplays` | - |
 <!-- floci:actions:end -->
 
+`ListRules` and `ListConnections` accept `NextToken` values of 1 to 2048
+characters. Empty or overlong tokens return `ValidationException`; unrecognized
+cursors within those bounds return `InvalidToken`.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -110,6 +114,11 @@ suffix when present. These checks do not verify resource existence or permission
 
 EventBridge includes a default event bus (`default`) that accepts events from AWS services. Custom buses are for your own application events.
 
+Secrets Manager `PutSecretValue` and `UpdateSecret` calls publish `AWS API Call via CloudTrail`
+events here when a logging CloudTrail trail selects management writes. See
+[secret write events](secrets-manager.md#secret-write-events) for the required trail configuration
+and a pattern matching `detail.responseElements.arn`.
+
 ```bash
 # List rules on the default bus
 aws events list-rules --endpoint-url $AWS_ENDPOINT_URL
@@ -143,6 +152,40 @@ the state machine from the account and region in its ARN.
 
 State machine aliases and versions are not supported as EventBridge targets.
 
+## Redshift Data API Targets
+
+A matching rule can submit one SQL statement to the Redshift Data API for a provisioned cluster, or
+multiple statements as one batch. A Redshift Serverless workgroup ARN is also supported. Configure
+the database and SQL in `RedshiftDataParameters`; `WithEvent` publishes the statement's terminal
+status event through Redshift Data API's existing EventBridge integration.
+
+```bash
+aws events put-targets \
+  --rule refresh-warehouse \
+  --targets '[{
+    "Id": "refresh-redshift",
+    "Arn": "arn:aws:redshift:us-east-1:000000000000:cluster:warehouse",
+    "RoleArn": "arn:aws:iam::000000000000:role/EventBridgeRedshiftRole",
+    "RedshiftDataParameters": {
+      "Database": "dev",
+      "DbUser": "admin",
+      "Sql": "refresh materialized view daily_totals",
+      "StatementName": "refresh-warehouse"
+    }
+  }]' \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+`Sqls` selects `BatchExecuteStatement`; otherwise the target submits `Sql` with
+`ExecuteStatement`. `SecretManagerArn` maps to the Data API's `SecretArn`. The target's ARN provides
+the region used for execution; statements run in the rule's account. The stored `RoleArn` is passed
+as the Data API principal; Floci does not assume the role or evaluate its IAM policies.
+
+String parameters, including entries in `Sqls`, can be complete JSONPath references such as
+`$.detail.database`, `$.detail.query` or `$.detail.queries[0]`. Paths resolve against the original event, before
+`Input`, `InputPath` or `InputTransformer`; embedded paths inside SQL text are left unchanged.
+Dispatch is rejected when the `redshift-data` service is disabled.
+
 ## Target Roles
 
 `PutTargets` stores each target's optional `RoleArn`, and `ListTargetsByRule`
@@ -158,6 +201,13 @@ IAM policies.
 ## API Destination Targets
 
 A matching rule can send events directly to HTTP or HTTPS endpoints via API destinations. An API destination pairs an HTTP endpoint URL and HTTP method with an EventBridge Connection for authentication (API key, basic auth, or OAuth client credentials).
+
+`ListConnections` applies its name-prefix and state filters before returning
+name-ordered pages. `Limit` accepts 1 to 100; Floci uses 100 when it is omitted.
+Pass the returned `NextToken` with the same filters to continue. Tokens are scoped
+to the action, account, region, prefix and state; final pages omit the token.
+A cursor remains resumable after its connection is deleted. Token lengths must
+be 1 to 2048 characters, and unrecognized cursors return `InvalidToken`.
 
 ```bash
 # 1. Create a connection with API key auth
@@ -232,6 +282,7 @@ aws events put-targets \
 ## Current Behavior
 
 - `PutEvents` reports success once the source bus accepts an event. Target delivery failures are retried and dead-lettered as described above, and otherwise surface only as a `WARN` in the Floci logs.
+- A `PutEvents` entry for an event bus that does not exist is answered as AWS answers it: with an event id, not counted in `FailedEntryCount`, and dropped, as no rule matches it. Floci logs the drop at `INFO`. Floci's own deliveries to a bus, for a rule, a pipe or a schedule, are unchanged: an entry for a bus that does not exist fails there.
 - A `Detail` forwarded to an event bus must be a JSON object, as in AWS; anything else is dropped, including an `InputPath` selecting a scalar such as `$.detail.orderId` or an envelope carrying `"detail": null`.
 - A bus ARN naming another account is forwarded under that account, so the target bus and its rules resolve there.
 - Onward delivery from that bus follows each target type: SQS and Step Functions resolve cross-account, while Lambda, SNS, Batch and Firehose resolve in the caller's account.

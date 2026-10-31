@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.aps;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -29,8 +31,8 @@ class ApsControllerIntegrationTest {
         return given()
             .contentType("application/json")
             .body("""
-                {"alias": "%s", "tags": {"team": "devops"}, "clientToken": "token-123"}
-                """.formatted(alias))
+                {"alias": "%s", "tags": {"team": "devops"}, "clientToken": "%s"}
+                """.formatted(alias, UUID.randomUUID()))
         .when()
             .post("/workspaces")
         .then()
@@ -224,7 +226,7 @@ class ApsControllerIntegrationTest {
         .then()
             .statusCode(200)
             .body("tags.env", equalTo("test"))
-            .body("tags", not(org.hamcrest.Matchers.hasKey("team")));
+            .body("tags", not(Matchers.hasKey("team")));
     }
 
     private static final String RULES = Base64.getEncoder().encodeToString(

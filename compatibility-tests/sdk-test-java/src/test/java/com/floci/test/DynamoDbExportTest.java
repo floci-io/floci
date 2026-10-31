@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
+import software.amazon.awssdk.services.dynamodb.model.DynamoDbException;
 import software.amazon.awssdk.services.dynamodb.waiters.DynamoDbWaiter;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
@@ -207,7 +208,7 @@ class DynamoDbExportTest {
                         .s3Bucket(BUCKET_NAME)
                         .exportType(ExportType.INCREMENTAL_EXPORT)
                         .build()))
-                .isInstanceOf(software.amazon.awssdk.services.dynamodb.model.DynamoDbException.class)
+                .isInstanceOf(DynamoDbException.class)
                 .hasMessageContaining("Incremental Export Specification expected when export type is set as Incremental Export");
     }
 
@@ -218,7 +219,7 @@ class DynamoDbExportTest {
                 DescribeExportRequest.builder()
                         .exportArn("arn:aws:dynamodb:us-east-1:000000000000:table/T/export/doesnotexist")
                         .build()))
-                .isInstanceOf(software.amazon.awssdk.services.dynamodb.model.DynamoDbException.class);
+                .isInstanceOf(DynamoDbException.class);
     }
 
     @Test

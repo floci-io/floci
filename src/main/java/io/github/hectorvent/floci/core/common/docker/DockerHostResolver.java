@@ -6,6 +6,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.net.InetAddress;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -39,7 +40,7 @@ public class DockerHostResolver {
     }
 
     public String resolve() {
-        java.util.Optional<String> override = config.services().lambda().dockerHostOverride();
+        Optional<String> override = config.services().lambda().dockerHostOverride();
         if (override.isPresent() && !override.get().isBlank()) {
             LOG.debugv("Using configured docker host override: {0}", override.get());
             return override.get();
@@ -47,7 +48,7 @@ public class DockerHostResolver {
 
         if (containerDetector.isRunningInContainer()) {
             if (currentContainerNetworkResolver != null) {
-                java.util.Optional<String> currentNetworkIp = currentContainerNetworkResolver.resolveContainerIp();
+                Optional<String> currentNetworkIp = currentContainerNetworkResolver.resolveContainerIp();
                 if (currentNetworkIp.isPresent()) {
                     LOG.infov("Running in Docker — using current network IP for Runtime API: {0}",
                             currentNetworkIp.get());

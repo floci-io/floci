@@ -1,11 +1,14 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -44,6 +47,28 @@ class LambdaProvisionedConcurrencyIntegrationTest {
                 .body("AvailableProvisionedConcurrentExecutions", equalTo(1));
         given().queryParam("Qualifier", "live").delete(PATH).then().statusCode(204).body(equalTo(""));
         verify(pool).delete(anyString(), eq("example"), eq("live"), anyString());
+    }
+
+    @Test
+    void listUsesItsOwnOperationAndRendersQualifiedConfigurationsAndMarker() {
+        String arn = "arn:aws:lambda:us-east-1:111111111111:function:example:live";
+        ProvisionedConcurrencyPool.Status status = new ProvisionedConcurrencyPool.Status(
+                2, 0, 0, "FAILED", "initialization failed", "2026-01-01T00:00:00+0000");
+        when(pool.list(anyString(), eq("example"), anyString(), eq("1"), eq("previous")))
+                .thenReturn(new PaginatedResult<>(List.of(
+                        new ProvisionedConcurrencyPool.ListedConfiguration(arn, status)), "next"));
+        given().queryParam("List", "ALL").queryParam("MaxItems", "1").queryParam("Marker", "previous")
+                .get(PATH).then().statusCode(200)
+                .body("NextMarker", equalTo("next"))
+                .body("ProvisionedConcurrencyConfigs.size()", equalTo(1))
+                .body("ProvisionedConcurrencyConfigs[0].FunctionArn", equalTo(arn))
+                .body("ProvisionedConcurrencyConfigs[0].Status", equalTo("FAILED"))
+                .body("ProvisionedConcurrencyConfigs[0].StatusReason", equalTo("initialization failed"))
+                .body("ProvisionedConcurrencyConfigs[0].RequestedProvisionedConcurrentExecutions", equalTo(2))
+                .body("ProvisionedConcurrencyConfigs[0].AllocatedProvisionedConcurrentExecutions", equalTo(0))
+                .body("ProvisionedConcurrencyConfigs[0].AvailableProvisionedConcurrentExecutions", equalTo(0))
+                .body("ProvisionedConcurrencyConfigs[0].LastModified", equalTo("2026-01-01T00:00:00+0000"));
+        verify(pool, never()).get(any(), any(), any(), any());
     }
 
     @Test

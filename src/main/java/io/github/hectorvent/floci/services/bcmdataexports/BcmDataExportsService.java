@@ -3,9 +3,12 @@ package io.github.hectorvent.floci.services.bcmdataexports;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.S3DestinationValidation;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.bcmdataexports.model.DataQuery;
@@ -20,6 +23,7 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -43,6 +47,7 @@ import java.util.regex.Pattern;
 public class BcmDataExportsService {
 
     private static final Logger LOG = Logger.getLogger(BcmDataExportsService.class);
+    private static final int MAX_PAGE_SIZE = 300;
 
     private static final Pattern EXPORT_NAME_PATTERN = Pattern.compile("[A-Za-z0-9_-]+");
     private static final Set<String> ALLOWED_FREQUENCY = Set.of("SYNCHRONOUS");
@@ -112,9 +117,11 @@ public class BcmDataExportsService {
                         "Export " + exportArn + " not found.", 400));
     }
 
-    /** {@code ListExports} — returns every export owned by the calling account. */
-    public List<Export> listExports() {
-        return new ArrayList<>(exportStore.scan(key -> true));
+    /** Returns one account-scoped page for {@code ListExports}. */
+    public PaginatedResult<Export> listExports(Integer maxResults, String nextToken) {
+        return Pagination.paginate(exportStore.scan(key -> true), Export::getExportArn, maxResults, nextToken,
+                MAX_PAGE_SIZE, MAX_PAGE_SIZE, 8192, "ValidationException",
+                "ListExports:" + regionResolver.getAccountId());
     }
 
     /**
@@ -124,15 +131,15 @@ public class BcmDataExportsService {
      */
     public Map<String, List<Export>> listAllExportsByAccount() {
         Collection<Export> all;
-        if (exportStore instanceof io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<?> aware) {
+        if (exportStore instanceof AccountAwareStorageBackend<?> aware) {
             @SuppressWarnings("unchecked")
-            io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<Export> typed =
-                    (io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<Export>) aware;
+            AccountAwareStorageBackend<Export> typed =
+                    (AccountAwareStorageBackend<Export>) aware;
             all = typed.scanAllAccounts();
         } else {
             all = exportStore.scan(key -> true);
         }
-        Map<String, List<Export>> result = new java.util.LinkedHashMap<>();
+        Map<String, List<Export>> result = new LinkedHashMap<>();
         for (Export export : all) {
             String account = export.getOwnerAccountId();
             if (account == null || account.isEmpty()) {
@@ -186,15 +193,17 @@ public class BcmDataExportsService {
         return existing;
     }
 
-    /** {@code ListExecutions} — returns every recorded execution for the export. */
-    public List<ExportExecution> listExecutions(String exportArn) {
+    /** Returns one page of recorded executions for the export. */
+    public PaginatedResult<ExportExecution> listExecutions(String exportArn, Integer maxResults, String nextToken) {
         requireNonEmpty(exportArn, "ExportArn");
         if (exportStore.get(exportKey(exportArn)).isEmpty()) {
             throw new AwsException("ResourceNotFoundException",
                     "Export " + exportArn + " not found.", 400);
         }
         String prefix = exportArn + "::";
-        return new ArrayList<>(executionStore.scan(key -> key.startsWith(prefix)));
+        return Pagination.paginate(executionStore.scan(key -> key.startsWith(prefix)), ExportExecution::getExecutionId,
+                maxResults, nextToken, MAX_PAGE_SIZE, MAX_PAGE_SIZE, 8192, "ValidationException",
+                "ListExecutions:" + regionResolver.getAccountId() + ":" + exportArn);
     }
 
     /** {@code GetExecution} — returns one execution record. */
@@ -222,10 +231,10 @@ public class BcmDataExportsService {
         exec.setCreatedBy(createdBy);
         exec.setCreatedAt(System.currentTimeMillis());
         String key = executionKey(exportArn, exec.getExecutionId());
-        if (executionStore instanceof io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<?> aware) {
+        if (executionStore instanceof AccountAwareStorageBackend<?> aware) {
             @SuppressWarnings("unchecked")
-            io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<ExportExecution> typed =
-                    (io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<ExportExecution>) aware;
+            AccountAwareStorageBackend<ExportExecution> typed =
+                    (AccountAwareStorageBackend<ExportExecution>) aware;
             typed.putForAccount(accountId, key, exec);
         } else {
             executionStore.put(key, exec);
@@ -249,10 +258,10 @@ public class BcmDataExportsService {
             exec.setStatusReason(reason);
         }
         String key = executionKey(exec.getExportArn(), exec.getExecutionId());
-        if (executionStore instanceof io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<?> aware) {
+        if (executionStore instanceof AccountAwareStorageBackend<?> aware) {
             @SuppressWarnings("unchecked")
-            io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<ExportExecution> typed =
-                    (io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<ExportExecution>) aware;
+            AccountAwareStorageBackend<ExportExecution> typed =
+                    (AccountAwareStorageBackend<ExportExecution>) aware;
             typed.putForAccount(accountId, key, exec);
         } else {
             executionStore.put(key, exec);

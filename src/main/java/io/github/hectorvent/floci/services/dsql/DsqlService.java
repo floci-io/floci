@@ -12,6 +12,8 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dsql.model.DsqlCluster;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages.PolicyType;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService.CallerArns;
@@ -488,13 +490,13 @@ public class DsqlService implements Resettable {
             throw new AwsException("AccessDeniedException", "Invalid input for 'resourceArn'. The cluster ARN that you"
                     + " specified isn't valid. Provide the cluster ARN in the format"
                     + " 'arn:partition:dsql:region:account-id:cluster/cluster-id' and try again."
-                    + DsqlPrincipals.notAuthorized(caller, "dsql:" + action, "*",
-                            DsqlPrincipals.EXPLICIT_RESOURCE_DENY), 403);
+                    + AccessDeniedMessages.notAuthorized(caller, "dsql:" + action, "*",
+                            PolicyType.RESOURCE_BASED_POLICY.explicitDeny()), 403);
         }
         if (!regionResolver.getAccountId().equals(parsed.accountId())) {
             // Measured: another account's cluster is refused, not looked up in the caller's.
-            throw new AwsException("AccessDeniedException", DsqlPrincipals.notAuthorized(caller, "dsql:" + action, arn,
-                    "because no resource-based policy allows the dsql:" + action + " action"), 403);
+            throw new AwsException("AccessDeniedException", AccessDeniedMessages.notAuthorized(caller, "dsql:" + action,
+                    arn, PolicyType.RESOURCE_BASED_POLICY.noAllow("dsql:" + action)), 403);
         }
         if (!region.equals(parsed.region())) {
             throw new AwsException("BadRequestException", "Invalid input resource arn: expected region " + region, 400);

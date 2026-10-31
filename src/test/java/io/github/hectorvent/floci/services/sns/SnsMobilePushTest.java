@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -297,7 +298,7 @@ class SnsMobilePushTest {
     void publish_unknownEndpointArnReturnsNotFound() {
         AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
                 null,
-                "arn:aws:sns:us-east-1:000000000000:endpoint/APNS/missing/" + java.util.UUID.randomUUID(),
+                "arn:aws:sns:us-east-1:000000000000:endpoint/APNS/missing/" + UUID.randomUUID(),
                 null, "hello", null, null, null, null, null, REGION));
         assertEquals("NotFound", e.getErrorCode());
         assertEquals(404, e.getHttpStatus());
@@ -494,7 +495,7 @@ class SnsMobilePushTest {
     @Test
     void deleteEndpoint_isIdempotent() {
         assertDoesNotThrow(() -> snsService.deleteEndpoint(
-                "arn:aws:sns:us-east-1:000000000000:endpoint/APNS/x/" + java.util.UUID.randomUUID(), REGION));
+                "arn:aws:sns:us-east-1:000000000000:endpoint/APNS/x/" + UUID.randomUUID(), REGION));
     }
 
     @Test

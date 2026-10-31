@@ -567,7 +567,9 @@ class IamPassRoleEnforcementIntegrationTest {
 
         user.policy(allow("lambda:CreateMicrovmImage", "*"));
         denied(user.rest("lambda").body(createImage).post("/2025-09-09/microvm-images").then());
-        user.policy(allow("lambda:CreateMicrovmImage", "*") + "," + passRole(build, LAMBDA));
+        // It also passes the managed egress connector an image gets when it names none.
+        user.policy(allow("lambda:CreateMicrovmImage", "*") + "," + passRole(build, LAMBDA) + ","
+                + allow("lambda:PassNetworkConnector", "*"));
         user.rest("lambda").body(createImage).post("/2025-09-09/microvm-images").then().statusCode(201);
         cleanup.register(() -> admin("lambda").delete("/2025-09-09/microvm-images/" + image));
         // Reading it is checked against the image's ARN.

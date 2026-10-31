@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages.PolicyType;
 import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator.TrustDecision;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
@@ -76,8 +78,7 @@ public class LambdaTaskAuthorizer {
         Optional<IamRole> invokingRole = role(roleArn);
         if (invokingRole.isEmpty()) {
             LOG.infov("Role {0} names no existing role, so it cannot invoke {1}", roleArn, resourceArn);
-            return Optional.of(denied(roleArn, action, resourceArn, "because no identity-based policy allows the "
-                    + action + " action"));
+            return Optional.of(denied(roleArn, action, resourceArn, PolicyType.IDENTITY_BASED_POLICY.noAllow(action)));
         }
         // The role is evaluated as itself, under the ARN IAM holds for it, whichever form names it.
         String invokingRoleArn = invokingRole.get().getArn();
@@ -122,8 +123,8 @@ public class LambdaTaskAuthorizer {
         Optional<IamRole> executionRole = role(executionRoleArn);
         if (executionRole.isEmpty()) {
             LOG.infov("Execution role {0} names no existing role, so it cannot assume {1}", executionRoleArn, roleArn);
-            return Optional.of(denied(executionRoleArn, ASSUME_ROLE, roleArn, "because no identity-based policy allows the "
-                    + ASSUME_ROLE + " action"));
+            return Optional.of(denied(executionRoleArn, ASSUME_ROLE, roleArn,
+                    PolicyType.IDENTITY_BASED_POLICY.noAllow(ASSUME_ROLE)));
         }
         String callerRoleArn = executionRole.get().getArn();
         Optional<IamRole> target = role(roleArn);
@@ -215,27 +216,27 @@ public class LambdaTaskAuthorizer {
         boolean crossAccount = relationship == ResourceAccountRelationship.CROSS_ACCOUNT;
 
         if (scps.contains(SimulationDecision.EXPLICIT_DENY)) {
-            return "with an explicit deny in a service control policy";
+            return PolicyType.SERVICE_CONTROL_POLICY.explicitDeny();
         }
         if (grant.explicitDeny()) {
-            return "with an explicit deny in " + grant.deniedIn();
+            return grant.type().explicitDeny();
         }
         if (identity == SimulationDecision.EXPLICIT_DENY) {
-            return "with an explicit deny in an identity-based policy";
+            return PolicyType.IDENTITY_BASED_POLICY.explicitDeny();
         }
         if (boundary == SimulationDecision.EXPLICIT_DENY) {
-            return "with an explicit deny in a permissions boundary";
+            return PolicyType.PERMISSIONS_BOUNDARY.explicitDeny();
         }
         if (scps.contains(SimulationDecision.IMPLICIT_DENY)) {
-            return "because no service control policy allows the " + action + " action";
+            return PolicyType.SERVICE_CONTROL_POLICY.noAllow(action);
         }
         if ((grant.required() || crossAccount) && !grant.allows()) {
-            return "because no " + grant.kind() + " allows the " + action + " action";
+            return grant.type().noAllow(action);
         }
         if (identity != SimulationDecision.ALLOWED && (crossAccount || !grant.sufficient())) {
-            return "because no identity-based policy allows the " + action + " action";
+            return PolicyType.IDENTITY_BASED_POLICY.noAllow(action);
         }
-        return "because no permissions boundary allows the " + action + " action";
+        return PolicyType.PERMISSIONS_BOUNDARY.noAllow(action);
     }
 
     private SimulationDecision simulate(List<String> documents, String action, String resource,
@@ -244,8 +245,7 @@ public class LambdaTaskAuthorizer {
     }
 
     private static String denied(String roleArn, String action, String resource, String reason) {
-        return "User: " + sessionArn(roleArn) + " is not authorized to perform: " + action + " on resource: "
-                + resource + (reason == null ? "" : " " + reason);
+        return AccessDeniedMessages.notAuthorized(sessionArn(roleArn), action, resource, reason);
     }
 
     /**
@@ -272,24 +272,23 @@ public class LambdaTaskAuthorizer {
      *                   caller's identity-based policies
      * @param required   whether the call needs it to allow even within one account, as a role's
      *                   trust policy does
-     * @param deniedIn   the policy, as an explicit denial names it
-     * @param kind       the policy type, as an implicit denial names it
+     * @param type       the policy type, as the access denied message names it
      */
     private record ResourceGrant(boolean explicitDeny, boolean allows, boolean sufficient, boolean required,
-                                 String deniedIn, String kind) {
+                                 PolicyType type) {
 
         static ResourceGrant of(ResourcePolicyDecision functionPolicy) {
             boolean sufficient = functionPolicy == ResourcePolicyDecision.ALLOW
                     || functionPolicy == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER;
             return new ResourceGrant(functionPolicy == ResourcePolicyDecision.EXPLICIT_DENY,
                     sufficient || functionPolicy == ResourcePolicyDecision.ALLOW_ACCOUNT, sufficient, false,
-                    "a resource-based policy", "resource-based policy");
+                    PolicyType.RESOURCE_BASED_POLICY);
         }
 
         static ResourceGrant of(TrustDecision trust) {
             return new ResourceGrant(trust == TrustDecision.EXPLICIT_DENY,
                     trust == TrustDecision.ALLOW || trust == TrustDecision.ALLOW_ACCOUNT,
-                    trust == TrustDecision.ALLOW, true, "the role trust policy", "role trust policy");
+                    trust == TrustDecision.ALLOW, true, PolicyType.ROLE_TRUST_POLICY);
         }
     }
 }

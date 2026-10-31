@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -113,19 +114,24 @@ public class RamController {
         JsonNode request = readTree(body);
         String resourceOwner = request.hasNonNull("resourceOwner")
                 ? request.path("resourceOwner").asText() : null;
-        List<ResourceShare> shares = service.getResourceShares(
+        PaginatedResult<ResourceShare> page = service.getResourceSharesPage(
                 regionResolver.getAccountId(),
                 resourceOwner,
                 request.hasNonNull("name") ? request.path("name").asText() : null,
                 stringList(request.path("resourceShareArns")),
                 request.hasNonNull("resourceShareStatus")
                         ? request.path("resourceShareStatus").asText() : null,
-                regionResolver.getRegion());
+                regionResolver.getRegion(),
+                Pagination.parseMaxResults(request, "maxResults", "InvalidParameterException"),
+                Pagination.parseNextToken(request, "nextToken", "InvalidNextTokenException"));
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = objectMapper.createArrayNode();
-        shares.forEach(share -> array.add(shareNode(share)));
+        page.items().forEach(share -> array.add(shareNode(share)));
         response.set("resourceShares", array);
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 

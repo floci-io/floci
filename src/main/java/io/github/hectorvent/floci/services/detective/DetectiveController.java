@@ -20,6 +20,7 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.util.ArrayList;
 import java.util.List;
 
 @Path("/")
@@ -134,7 +135,7 @@ public class DetectiveController {
         if (accounts == null || !accounts.isArray() || accounts.isEmpty() || accounts.size() > 50) {
             throw new AwsException("ValidationException", "Accounts must contain between 1 and 50 members.", 400);
         }
-        List<String> accountIds = new java.util.ArrayList<>(accounts.size());
+        List<String> accountIds = new ArrayList<>(accounts.size());
         for (JsonNode account : accounts) {
             accountIds.add(account.path("AccountId").asText(null));
         }
@@ -170,7 +171,7 @@ public class DetectiveController {
         return Response.ok().build();
     }
 
-    private com.fasterxml.jackson.databind.node.ObjectNode memberNode(String region, DetectiveMember member) {
+    private ObjectNode memberNode(String region, DetectiveMember member) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("AccountId", member.getAccountId());
         node.put("EmailAddress", member.getEmailAddress());

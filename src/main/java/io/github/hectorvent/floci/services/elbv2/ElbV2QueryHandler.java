@@ -245,7 +245,9 @@ public class ElbV2QueryHandler {
                 .start("SetSecurityGroupsResponse", AwsNamespaces.ELB_V2)
                 .start("SetSecurityGroupsResult")
                   .start("SecurityGroupIds");
-        for (String sg : sgs) xml.start("member").elem("member", sg).end("member");
+        for (String sg : sgs) {
+            xml.elem("member", sg);
+        }
         xml.end("SecurityGroupIds")
            .end("SetSecurityGroupsResult")
            .raw(AwsQueryResponse.responseMetadata())

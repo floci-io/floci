@@ -7,6 +7,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -38,7 +39,7 @@ class SpectrumCatalogTest {
 
         catalog.createSchema(schema);
 
-        assertEquals(java.util.Optional.of(schema), catalog.schema(ACCOUNT, "dev", "analytics"));
+        assertEquals(Optional.of(schema), catalog.schema(ACCOUNT, "dev", "analytics"));
     }
 
     @Test
@@ -51,7 +52,7 @@ class SpectrumCatalogTest {
         catalog.createSchema(owning);
         catalog.createTable(table("events"));
 
-        assertEquals(java.util.Optional.of(owning), catalog.findLegacySchema(ACCOUNT, "dev", "analytics"));
+        assertEquals(Optional.of(owning), catalog.findLegacySchema(ACCOUNT, "dev", "analytics"));
     }
 
     @Test

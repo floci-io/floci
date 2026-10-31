@@ -3,6 +3,7 @@ package com.floci.test;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.scheduler.SchedulerClient;
 import software.amazon.awssdk.services.scheduler.model.*;
+import software.amazon.awssdk.services.scheduler.model.RetryPolicy;
 import software.amazon.awssdk.services.scheduler.model.Tag;
 
 import java.time.Instant;
@@ -311,7 +312,7 @@ class SchedulerTest {
                 .target(Target.builder()
                         .arn("arn:aws:lambda:us-east-1:000000000000:function:rp-func")
                         .roleArn("arn:aws:iam::000000000000:role/r")
-                        .retryPolicy(software.amazon.awssdk.services.scheduler.model.RetryPolicy.builder()
+                        .retryPolicy(RetryPolicy.builder()
                                 .maximumEventAgeInSeconds(3600)
                                 .maximumRetryAttempts(5)
                                 .build())

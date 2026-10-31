@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
 import java.util.List;
+import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -113,7 +114,7 @@ public final class BackupWindows {
                 + minuteOfDay(dayAndTime.substring(colon + 1), () -> invalidMaintenanceTime(dayAndTime));
     }
 
-    private static int minuteOfDay(String time, java.util.function.Supplier<AwsException> invalid) {
+    private static int minuteOfDay(String time, Supplier<AwsException> invalid) {
         Matcher m = TIME.matcher(time);
         if (!m.matches()) {
             throw invalid.get();

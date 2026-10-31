@@ -14,6 +14,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.regex.MatchResult;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -563,10 +565,10 @@ class DynamoDbAccessPathValidatorTest {
     }
 
     private String[] extractPlaceholders(String expression) {
-        return java.util.regex.Pattern.compile(":\\w+")
+        return Pattern.compile(":\\w+")
                 .matcher(expression)
                 .results()
-                .map(java.util.regex.MatchResult::group)
+                .map(MatchResult::group)
                 .distinct()
                 .toArray(String[]::new);
     }

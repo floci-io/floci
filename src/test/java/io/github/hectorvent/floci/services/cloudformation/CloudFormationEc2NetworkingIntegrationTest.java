@@ -192,6 +192,15 @@ class CloudFormationEc2NetworkingIntegrationTest {
         list = prefixListXml(id);
         assertTrue(list.contains("<maxEntries>3</maxEntries>") && list.contains("<version>3</version>"), list);
 
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", prefixListTemplate(vpcId, "IPv4", 1, offices, team, false));
+        describeStacks(PREFIX_LIST_STACK, "UPDATE_ROLLBACK_COMPLETE");
+        list = prefixListXml(id);
+        assertTrue(list.contains("<maxEntries>3</maxEntries>") && list.contains("<version>3</version>"),
+                "shrinking below the entry count must preserve capacity and version: " + list);
+        assertEquals(XmlParser.extractPairs(entries, "item", "cidr", "description"),
+                XmlParser.extractPairs(entriesXml(id), "item", "cidr", "description"),
+                "a rejected shrink must preserve both entries");
+
         // Capacity and entries together, and another address family, fail the update and change nothing.
         cloudFormation(PREFIX_LIST_STACK, "UpdateStack", prefixListTemplate(vpcId, "IPv4", 4, office, team, false));
         describeStacks(PREFIX_LIST_STACK, "UPDATE_ROLLBACK_COMPLETE");
@@ -236,6 +245,15 @@ class CloudFormationEc2NetworkingIntegrationTest {
                 .replace("\"office-egress\"", "\"office-egress-renamed\""));
         describeStacks(PREFIX_LIST_STACK, "UPDATE_COMPLETE");
         assertFalse(prefixListXml(id).contains("<key>team</key>"), "the dropped tags must be removed");
+
+        String withoutEntries = prefixListTemplate(vpcId, "IPv4", 3, offices, "", false)
+                .replace(", \"Entries\": " + offices, "")
+                .replace("\"office-egress\"", "\"office-egress-renamed\"");
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", withoutEntries);
+        assertEquals(id, XmlParser.extractPairs(describeStacks(PREFIX_LIST_STACK, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("Ref"));
+        assertFalse(entriesXml(id).contains("<cidr>"), "dropping declared Entries must clear the list");
+        assertTrue(prefixListXml(id).contains("<maxEntries>3</maxEntries>"), "omitting Entries preserves capacity");
 
         cloudFormation(PREFIX_LIST_STACK, "DeleteStack", null);
         CfnStackWaits.awaitStackDeleted(PREFIX_LIST_STACK);
@@ -362,7 +380,8 @@ class CloudFormationEc2NetworkingIntegrationTest {
             "AssocId": {"Value": {"Ref": "PublicAssoc"}},
             "EipRef": {"Value": {"Ref": "NatEip"}},
             "EipAllocationId": {"Value": {"Fn::GetAtt": ["NatEip", "AllocationId"]}},
-            "NatId": {"Value": {"Ref": "Nat"}}
+            "NatId": {"Value": {"Ref": "Nat"}},
+            "NatEniId": {"Value": {"Fn::GetAtt": ["Nat", "EniId"]}}
           }
         }
         """.formatted(vpcId, publicSubnetCidr, extraSubnetTag);
@@ -393,6 +412,7 @@ class CloudFormationEc2NetworkingIntegrationTest {
         assertTrue(out.get("EipAllocationId").startsWith("eipalloc-"), out.get("EipAllocationId"));
         assertFalse(out.get("EipRef").startsWith("eipalloc-"), "Ref of an EIP is its public IP: " + out.get("EipRef"));
         assertTrue(out.get("NatId").startsWith("nat-"), out.get("NatId"));
+        assertTrue(out.get("NatEniId").startsWith("eni-"), out.get("NatEniId"));
 
         String subnets = ec2("DescribeSubnets");
         assertTrue(subnets.contains(out.get("SubnetId")));
@@ -401,7 +421,10 @@ class CloudFormationEc2NetworkingIntegrationTest {
         assertTrue(routeTables.contains("<value>public-rt</value>"), "route table tags must reach EC2");
         assertTrue(routeTables.contains(out.get("PublicRtId")) && routeTables.contains(out.get("AssocId")));
         assertTrue(routeTables.contains(out.get("NatId")), "the private route must point at the NAT gateway");
-        assertTrue(ec2("DescribeNatGateways").contains(out.get("NatId")));
+        String natGateways = ec2("DescribeNatGateways");
+        assertTrue(natGateways.contains(out.get("NatId")));
+        assertTrue(natGateways.contains("<networkInterfaceId>" + out.get("NatEniId") + "</networkInterfaceId>"),
+                "EniId must be the gateway's own interface");
         assertTrue(ec2("DescribeAddresses").contains(out.get("EipAllocationId")));
         assertTrue(ec2("DescribeInternetGateways").contains(out.get("IgwId")));
 
@@ -434,6 +457,10 @@ class CloudFormationEc2NetworkingIntegrationTest {
         Map<String, String> replaced = XmlParser.extractPairs(describeStacks("UPDATE_COMPLETE"), "Outputs", "OutputKey", "OutputValue");
         assertFalse(out.get("SubnetId").equals(replaced.get("SubnetId")), "a changed CIDR must replace the subnet");
         assertFalse(out.get("NatId").equals(replaced.get("NatId")), "the NAT gateway follows its subnet");
+        assertFalse(out.get("NatEniId").equals(replaced.get("NatEniId")), "EniId must not be the displaced gateway's");
+        assertTrue(ec2("DescribeNatGateways", Map.of("NatGatewayId.1", replaced.get("NatId")))
+                        .contains("<networkInterfaceId>" + replaced.get("NatEniId") + "</networkInterfaceId>"),
+                "EniId must be the replacement gateway's own interface");
         assertFalse(out.get("AssocId").equals(replaced.get("AssocId")), "the association follows its subnet");
         assertEquals(out.get("IgwId"), replaced.get("IgwId"));
         assertFalse(out.get("EipAllocationId").equals(replaced.get("EipAllocationId")), "the gateway takes the new EIP");

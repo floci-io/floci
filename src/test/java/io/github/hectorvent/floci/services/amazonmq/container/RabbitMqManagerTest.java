@@ -13,6 +13,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -157,7 +158,7 @@ class RabbitMqManagerTest {
         verify(builder).withPortBinding(15672, 15673);
         verify(builder, never()).withExposedPort(Mockito.anyInt());
         verify(builder, never()).withDynamicPort(Mockito.anyInt());
-        assertEquals(java.util.List.of("amqp://172.17.0.5:5672"),
+        assertEquals(List.of("amqp://172.17.0.5:5672"),
                 broker.getBrokerInstances().get(0).getEndpoints());
         assertEquals("http://172.17.0.5:15672", broker.getBrokerInstances().get(0).getConsoleURL());
     }

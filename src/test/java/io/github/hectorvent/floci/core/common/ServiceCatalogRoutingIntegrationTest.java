@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayController;
+import io.github.hectorvent.floci.services.iot.IotController;
 import io.github.hectorvent.floci.services.s3.S3Controller;
 import io.github.hectorvent.floci.services.securityadmin.SecurityAdminController;
 import io.quarkus.test.junit.QuarkusTest;
@@ -15,6 +16,14 @@ class ServiceCatalogRoutingIntegrationTest {
 
     @Inject
     ResolvedServiceCatalog catalog;
+
+    @Test
+    void executeApiScopeDefaultsToApiGatewayWhileIotRetainsItsRouteOwnership() {
+        assertEquals("apigateway", catalog.byCredentialScope("execute-api").orElseThrow().externalKey());
+        ServiceDescriptor iot = catalog.byResourceClass(IotController.class).orElseThrow();
+        assertEquals("iot", iot.externalKey());
+        assertTrue(iot.credentialScopes().contains("execute-api"));
+    }
 
     @Test
     void targetResolutionExtractsMatchingPrefixAndAction() {
@@ -38,6 +47,17 @@ class ServiceCatalogRoutingIntegrationTest {
     void cborSdkServiceIdsResolveThroughCatalog() {
         assertEquals("states", catalog.byCborSdkServiceId("SFN").orElseThrow().externalKey());
         assertEquals("monitoring", catalog.byCborSdkServiceId("GraniteServiceVersion20100801").orElseThrow().externalKey());
+    }
+
+    @Test
+    void consoleCloudWatchTargetIsJsonOnly() {
+        ServiceCatalog.TargetMatch match = catalog.matchTarget("CloudWatchVersion20130116.ListMetrics")
+                .orElseThrow();
+
+        assertEquals("monitoring", match.descriptor().externalKey());
+        assertEquals("ListMetrics", match.action());
+        assertTrue(match.jsonOnly());
+        assertTrue(catalog.byCborSdkServiceId("CloudWatchVersion20130116").isEmpty());
     }
 
     @Test

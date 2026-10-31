@@ -27,7 +27,9 @@ import org.jboss.logging.Logger;
 import java.io.Closeable;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
+import java.net.SocketException;
 import java.net.URI;
+import java.net.UnknownHostException;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -355,6 +357,7 @@ public class FlociUiManager {
         }
         env.put(PORT_ENV, String.valueOf(console.internalPort()));
         env.put("FLOCI_CLOUD", FLOCI_CLOUD);
+        env.put("FLOCI_INFO_URL", infoUrl(endpoint));
         if (config.services().ui().insecureSkipTlsVerify()) {
             LOG.warn("floci.services.ui.insecure-skip-tls-verify=true: the web console sidecar will "
                     + "not verify Floci's TLS certificate. Intended for Floci's self-signed "
@@ -368,6 +371,12 @@ public class FlociUiManager {
         List<String> rendered = new ArrayList<>(env.size());
         env.forEach((key, value) -> rendered.add(key + "=" + value));
         return rendered;
+    }
+
+    /** Console Contract v2's {@code FLOCI_INFO_URL}: the manifest, at the address the console reaches Floci on. */
+    static String infoUrl(String endpoint) {
+        String base = endpoint.endsWith("/") ? endpoint.substring(0, endpoint.length() - 1) : endpoint;
+        return base + "/_floci/info";
     }
 
     /**
@@ -869,7 +878,7 @@ public class FlociUiManager {
         for (Throwable t = e; t != null; t = t.getCause()) {
             // BindException and ConnectException both extend SocketException; the docker-java
             // Apache transport surfaces a refused/denied Unix-socket connect this way.
-            if (t instanceof java.net.SocketException || t instanceof java.net.UnknownHostException) {
+            if (t instanceof SocketException || t instanceof UnknownHostException) {
                 return true;
             }
         }

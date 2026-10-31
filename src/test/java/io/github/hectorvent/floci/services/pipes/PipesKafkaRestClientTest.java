@@ -2,11 +2,13 @@ package io.github.hectorvent.floci.services.pipes;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -98,13 +100,13 @@ class PipesKafkaRestClientTest {
         return URI.create("http://localhost:" + fakeServer.getAddress().getPort() + "/");
     }
 
-    private void record(com.sun.net.httpserver.HttpExchange exchange) throws java.io.IOException {
+    private void record(HttpExchange exchange) throws IOException {
         lastRequestMethod.set(exchange.getRequestMethod());
         lastRequestPath.set(exchange.getRequestURI().toString());
         lastRequestBody.set(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
     }
 
-    private static void respond(com.sun.net.httpserver.HttpExchange exchange, int status, String body) throws java.io.IOException {
+    private static void respond(HttpExchange exchange, int status, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.sendResponseHeaders(status, bytes.length == 0 ? -1 : bytes.length);
         if (bytes.length > 0) {

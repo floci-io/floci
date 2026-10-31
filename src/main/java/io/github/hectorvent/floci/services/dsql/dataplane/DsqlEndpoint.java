@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.services.dsql.DsqlPrincipals;
 import io.github.hectorvent.floci.services.dsql.model.DsqlCluster;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages;
+import io.github.hectorvent.floci.services.iam.AccessDeniedMessages.PolicyType;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourceAccountRelationship;
@@ -418,8 +420,8 @@ public class DsqlEndpoint {
             return null;
         }
         return Admission.refused(clusterPolicy == ResourcePolicyDecision.EXPLICIT_DENY
-                ? DsqlPrincipals.notAuthorized(arns.callerArn(), action, route.arn(),
-                        DsqlPrincipals.EXPLICIT_RESOURCE_DENY)
+                ? AccessDeniedMessages.notAuthorized(arns.callerArn(), action, route.arn(),
+                        PolicyType.RESOURCE_BASED_POLICY.explicitDeny())
                 : null);
     }
 

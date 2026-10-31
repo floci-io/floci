@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.testing.SynchronousBillingEmissionProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
@@ -85,7 +86,7 @@ class CurEmissionIntegrationTest {
         assertThat(listing.size(), greaterThanOrEqualTo(1));
         String parquetKey = listing.get(0).getKey();
         assertThat(parquetKey, startsWith("billing/sync-emit/"));
-        assertThat(parquetKey.endsWith(".parquet"), org.hamcrest.Matchers.equalTo(true));
+        assertThat(parquetKey.endsWith(".parquet"), Matchers.equalTo(true));
 
         // Confirm DuckDB can read the artifact back.
         String s3Uri = "s3://" + destBucket + "/" + parquetKey;
@@ -150,7 +151,7 @@ class CurEmissionIntegrationTest {
         .then().statusCode(200)
             .body("Executions.size()", greaterThanOrEqualTo(1))
             .body("Executions[0].ExecutionStatus.StatusCode",
-                    org.hamcrest.Matchers.either(org.hamcrest.Matchers.equalTo("DELIVERY_SUCCESS"))
-                            .or(org.hamcrest.Matchers.equalTo("DELIVERY_FAILURE")));
+                    Matchers.either(Matchers.equalTo("DELIVERY_SUCCESS"))
+                            .or(Matchers.equalTo("DELIVERY_FAILURE")));
     }
 }

@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -627,11 +628,11 @@ class ApiGatewayRestApiCfnProvisionerTest {
                 Map.of("responseParameters", Map.of(
                         "method.response.header.Access-Control-Allow-Origin", true)));
         verify(api).putIntegration(eq("us-east-1"), eq("api-1"), eq("res-1"), eq("OPTIONS"),
-                org.mockito.ArgumentMatchers.argThat(request -> Map.of(
+                ArgumentMatchers.argThat(request -> Map.of(
                         "application/json", "{\"statusCode\":200}")
                         .equals(request.get("requestTemplates"))));
         verify(api).putIntegrationResponse(eq("us-east-1"), eq("api-1"), eq("res-1"), eq("OPTIONS"), eq("200"),
-                org.mockito.ArgumentMatchers.argThat(request ->
+                ArgumentMatchers.argThat(request ->
                         Map.of("method.response.header.Access-Control-Allow-Origin", "'*'")
                                 .equals(request.get("responseParameters"))
                         && Map.of("application/json", "{}").equals(request.get("responseTemplates"))));

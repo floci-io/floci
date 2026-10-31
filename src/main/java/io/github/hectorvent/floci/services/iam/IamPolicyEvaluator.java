@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iam;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsCanonicalUserId;
 import io.github.hectorvent.floci.core.common.AwsServiceNamespaces;
 import io.github.hectorvent.floci.core.common.CidrCanonicalizer;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
@@ -24,7 +25,9 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
@@ -805,9 +808,9 @@ public class IamPolicyEvaluator {
                 continue;
             }
             List<String> values = entry.getValue().stream()
-                    .filter(java.util.Objects::nonNull)
+                    .filter(Objects::nonNull)
                     .toList();
-            normalized.putIfAbsent(entry.getKey().toLowerCase(java.util.Locale.ROOT), values);
+            normalized.putIfAbsent(entry.getKey().toLowerCase(Locale.ROOT), values);
         }
         return normalized;
     }
@@ -1005,9 +1008,10 @@ public class IamPolicyEvaluator {
      * role session matches the role it assumed through that role's own ARN, path included.
      * {@code Service} names one service exactly; {@code {"Service": "*"}} is not a form AWS accepts
      * and matches nothing. {@code CanonicalUser}, which S3 bucket policies accept, names an account
-     * by its S3 canonical user ID, and matches the IAM identities of that account as an account
-     * principal does; Floci's canonical ID for an account is the account id, as its S3 ACLs report
-     * it. {@code Federated} and any other type name callers this evaluator never sees, and so match
+     * by its S3 canonical user ID, the 64-hex value S3 reports as owner and ACL grantee, and matches
+     * the IAM identities of that account as an account principal does. The account ID itself still
+     * matches, for policies written when Floci reported the account as the canonical ID.
+     * {@code Federated} and any other type name callers this evaluator never sees, and so match
      * nothing, rather than being compared with an IAM ARN. An entry naming the caller itself wins
      * over one naming only its account.
      */
@@ -1054,7 +1058,8 @@ public class IamPolicyEvaluator {
             } else if ("CanonicalUser".equalsIgnoreCase(type)) {
                 if (principal.type() == RequestPrincipal.Type.IAM && principal.arn() != null) {
                     String accountId = extractAccountId(principal.arn());
-                    if (accountId != null && patterns.contains(accountId)) {
+                    if (accountId != null && (patterns.contains(AwsCanonicalUserId.forAccount(accountId))
+                            || patterns.contains(accountId))) {
                         strongest = PrincipalMatch.ACCOUNT;
                     }
                 }
@@ -1388,7 +1393,7 @@ public class IamPolicyEvaluator {
         boolean substitute = policyVariables && VARIABLE_CONDITION_OPERATORS.contains(baseOp);
 
         for (Map.Entry<String, List<String>> entry : keyValueMap.entrySet()) {
-            String condKey = entry.getKey().toLowerCase(java.util.Locale.ROOT);
+            String condKey = entry.getKey().toLowerCase(Locale.ROOT);
             List<String> condValues = entry.getValue();
             List<String> ctxValues = ctx.get(condKey);
 

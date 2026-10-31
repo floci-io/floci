@@ -21,6 +21,7 @@ import io.github.hectorvent.floci.services.redshift.RedshiftQueryHandler;
 import io.github.hectorvent.floci.services.ses.SesQueryHandler;
 import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
+import io.smallrye.common.annotation.RunOnVirtualThread;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
@@ -40,6 +41,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -49,6 +51,9 @@ import java.util.stream.Stream;
  * Authorization header's credential scope. When there is no such header, or its scope names no
  * service that speaks the Query protocol, the action name and the {@code Version} the request
  * declares decide instead, as {@link #inferServiceFromAction} describes.
+ * <p>
+ * Requests run on virtual threads, so an SQS ReceiveMessage long poll, which waits up to 20 seconds,
+ * does not hold one of the shared request workers while it waits.
  *
  * @see AwsJsonController
  */
@@ -68,7 +73,7 @@ public class AwsQueryController {
     private final DocDbService docDbService;
     private final RdsService rdsService;
     /** ARNs already reported as held by both services, so the warning is logged once each. */
-    private final java.util.Set<String> reportedArnCollisions = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final Set<String> reportedArnCollisions = ConcurrentHashMap.newKeySet();
     private final SqsQueryHandler sqsQueryHandler;
     private final SnsQueryHandler snsQueryHandler;
     private final SesQueryHandler sesQueryHandler;
@@ -135,6 +140,7 @@ public class AwsQueryController {
     @POST
     @Consumes(MediaType.APPLICATION_FORM_URLENCODED)
     @Produces(MediaType.APPLICATION_XML)
+    @RunOnVirtualThread
     public Response dispatch(
             @HeaderParam("Authorization") String authorization,
             @Context UriInfo uriInfo,
@@ -387,6 +393,7 @@ public class AwsQueryController {
     @GET
     @Path(QUERY_GET_PATH)
     @Produces({MediaType.APPLICATION_XML, MediaType.TEXT_HTML})
+    @RunOnVirtualThread
     public Response dispatchQueryGet(@HeaderParam("Authorization") String authorization,
                                                @Context UriInfo uriInfo,
                                                @Context ContainerRequestContext request) {
@@ -479,6 +486,7 @@ public class AwsQueryController {
             Map.entry("RemoveTagsFromResource", "rds"),
             Map.entry("DescribeEngineDefaultParameters", "rds"),
             Map.entry("DescribeEvents", "rds"),
+            Map.entry("DescribeEventCategories", "redshift"),
             Map.entry("DescribeAccountAttributes", "ec2"),
             Map.entry("DescribeSnapshots", "ec2"),
             Map.entry("DescribeAccountLimits", "elasticloadbalancing"),

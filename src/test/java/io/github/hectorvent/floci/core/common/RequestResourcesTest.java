@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
@@ -215,12 +216,226 @@ class RequestResourcesTest {
         assertEquals(List.of(execution), of("states:DescribeExecution", json("{\"executionArn\":\"" + execution + "\"}")));
     }
 
+    /**
+     * An ARN inside a structure, or inside each of a list's structures, names its resource as a top-level one does:
+     * {@code SetRulePriorities} acts on the rules its priorities name, read to the first element without one, as
+     * its handler loops, and an alias acts on the state machine its versions are of.
+     */
+    @Test
+    void anArnInsideAStructureNamesItsResource() {
+        String prefix = "arn:aws:elasticloadbalancing:us-east-1:000000000000:listener-rule/app/web/abc/def/";
+        assertEquals(List.of(prefix + "1", prefix + "2"), of("elasticloadbalancing:SetRulePriorities", form(
+                "Action=SetRulePriorities&RulePriorities.member.1.RuleArn=" + prefix + "1&RulePriorities.member.1.Priority=5"
+                        + "&RulePriorities.member.2.RuleArn=" + prefix + "2&RulePriorities.member.2.Priority=6"
+                        + "&RulePriorities.member.3.Priority=7&RulePriorities.member.4.RuleArn=" + prefix + "4")));
+        assertEquals(List.of(prefix + "1"), of("elasticloadbalancing:SetRulePriorities",
+                json("{\"RulePriorities\":[{\"RuleArn\":\"" + prefix + "1\"},\"" + prefix + "2\",{\"Priority\":1}]}")));
+        assertEquals(List.of(MACHINE), of("states:CreateStateMachineAlias", json("{\"name\":\"PROD\","
+                + "\"routingConfiguration\":[{\"stateMachineVersionArn\":\"" + MACHINE + ":1\",\"weight\":90},"
+                + "{\"stateMachineVersionArn\":\"" + MACHINE + ":2\",\"weight\":10}]}")));
+        assertEquals(List.of(MACHINE), of("states:UpdateStateMachineAlias", json("{\"stateMachineAliasArn\":\""
+                + MACHINE + ":PROD\",\"routingConfiguration\":[{\"stateMachineVersionArn\":\"" + MACHINE + ":2\"}]}")));
+        // An ARN there of a type the action does not act on is not checked: a rule's target group.
+        String listener = "arn:aws:elasticloadbalancing:us-east-1:000000000000:listener/app/web/abc/def";
+        assertEquals(List.of(listener), of("elasticloadbalancing:CreateRule", form("Action=CreateRule&ListenerArn="
+                + listener + "&Actions.member.1.Type=forward&Actions.member.1.TargetGroupArn="
+                + "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/web/1")));
+    }
+
+    /**
+     * An EventBridge rule is on the event bus its request names, by name or ARN, or on the default one when it names
+     * none, whose rules have no bus in their ARN; a bus of another account names that account's rule, as given and
+     * as the caller's own, which Floci acts on.
+     */
+    @Test
+    void aRuleIsOnTheEventBusItsRequestNames() {
+        String events = "arn:aws:events:us-east-1:000000000000:";
+        assertEquals(List.of(events + "rule/r"), of("events:DescribeRule", json("{\"Name\":\"r\"}")));
+        assertEquals(List.of(events + "rule/r"), of("events:DescribeRule",
+                json("{\"Name\":\"r\",\"EventBusName\":\"default\"}")));
+        assertEquals(List.of(events + "rule/orders/r"), of("events:DescribeRule",
+                json("{\"Name\":\"r\",\"EventBusName\":\"orders\"}")));
+        assertEquals(List.of(events + "rule/orders/r"), of("events:DescribeRule",
+                json("{\"Name\":\"r\",\"EventBusName\":\"" + events + "event-bus/orders\"}")));
+        assertEquals(List.of(events + "rule/r"), of("events:DescribeRule",
+                json("{\"Name\":\"r\",\"EventBusName\":\"" + events + "event-bus/default\"}")));
+        assertEquals(List.of("arn:aws:events:eu-west-1:111122223333:rule/orders/r",
+                "arn:aws:events:us-east-1:111122223333:rule/orders/r", "arn:aws:events:eu-west-1:000000000000:rule/orders/r",
+                events + "rule/orders/r"), of("events:DescribeRule", json("{\"Name\":\"r\",\"EventBusName\":"
+                + "\"arn:aws:events:eu-west-1:111122223333:event-bus/orders\"}")));
+        // A target's rule is named by Rule.
+        assertEquals(List.of(events + "rule/orders/r"), of("events:PutTargets", json("{\"Rule\":\"r\","
+                + "\"EventBusName\":\"orders\",\"Targets\":[{\"Id\":\"1\",\"Arn\":\"arn:aws:sqs:us-east-1:000000000000:q\"}]}")));
+        // A request naming no event bus describes the default one.
+        assertEquals(List.of(events + "event-bus/default"), of("events:DescribeEventBus", json("{}")));
+        assertEquals(List.of(events + "event-bus/orders"), of("events:DescribeEventBus", json("{\"Name\":\"orders\"}")));
+        assertEquals(List.of(events + "event-bus/orders"), of("events:DescribeEventBus",
+                json("{\"Name\":\"" + events + "event-bus/orders\"}")));
+    }
+
+    /**
+     * A rule on another account's default event bus is that account's, checked as the caller's too, and a bus ARN
+     * leaving its account and Region empty, or a null bus, names the caller's, which the handler acts on.
+     */
+    @Test
+    void aRuleIsOnTheEventBusItsHandlerActsOn() {
+        String events = "arn:aws:events:us-east-1:000000000000:";
+        assertEquals(List.of("arn:aws:events:us-east-1:111122223333:rule/r", events + "rule/r"),
+                of("events:DescribeRule", json("{\"Name\":\"r\",\"EventBusName\":"
+                + "\"arn:aws:events:us-east-1:111122223333:event-bus/default\"}")));
+        assertEquals(List.of(events + "rule/orders/r"), of("events:DescribeRule",
+                json("{\"Name\":\"r\",\"EventBusName\":\"arn:aws:events:::event-bus/orders\"}")));
+        assertEquals(List.of(events + "rule/r"), of("events:DescribeRule",
+                json("{\"Name\":\"r\",\"EventBusName\":null}")));
+        assertEquals(List.of(events + "event-bus/orders"), of("events:DescribeEventBus",
+                json("{\"Name\":\"arn:aws:events:::event-bus/orders\"}")));
+        assertEquals(List.of(events + "event-bus/default"), of("events:DescribeEventBus", json("{\"Name\":null}")));
+    }
+
+    /**
+     * Each {@code PutEvents} entry is published to the event bus it names, by name or ARN, in the account and Region
+     * that ARN gives, or to the default one when it names none, gives a null or a blank; a request publishing nothing
+     * names no bus.
+     */
+    @Test
+    void eachEntryIsOnTheEventBusItNames() {
+        String events = "arn:aws:events:us-east-1:000000000000:";
+        assertEquals(List.of(events + "event-bus/orders", events + "event-bus/default", events + "event-bus/audit"),
+                of("events:PutEvents", json("{\"Entries\":[{\"EventBusName\":\"orders\"},{\"Source\":\"s\"},"
+                        + "{\"EventBusName\":\"audit\"},{\"EventBusName\":\"orders\"}]}")));
+        assertEquals(List.of(events + "event-bus/default"), of("events:PutEvents",
+                json("{\"Entries\":[{\"EventBusName\":null},{\"EventBusName\":\"\"},{\"EventBusName\":\" \"}]}")));
+        // Each ARN puts its entry's bus in its own account and Region, checked as the caller's too.
+        assertEquals(List.of("arn:aws:events:eu-west-1:111122223333:event-bus/orders",
+                "arn:aws:events:us-east-1:111122223333:event-bus/orders",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/orders", events + "event-bus/orders",
+                events + "event-bus/audit", "arn:aws:events:us-east-1:444455556666:event-bus/billing",
+                events + "event-bus/billing"), of("events:PutEvents", json("{\"Entries\":["
+                + "{\"EventBusName\":\"arn:aws:events:eu-west-1:111122223333:event-bus/orders\"},"
+                + "{\"EventBusName\":\"audit\"},"
+                + "{\"EventBusName\":\"arn:aws:events:us-east-1:444455556666:event-bus/billing\"}]}")));
+        assertEquals(List.of(events + "event-bus/orders"), of("events:PutEvents",
+                json("{\"Entries\":[{\"EventBusName\":\"arn:aws:events:::event-bus/orders\"}]}")));
+        assertEquals(List.of(), of("events:PutEvents", json("{\"Entries\":[]}")));
+        assertEquals(List.of(), of("events:PutEvents", json("{}")));
+        // A form's entries run from 1 to the first it gives nothing of.
+        assertEquals(List.of(events + "event-bus/orders", events + "event-bus/default"), of("events:PutEvents",
+                form("Action=PutEvents&Entries.member.1.EventBusName=orders&Entries.member.2.Source=s"
+                        + "&Entries.member.4.EventBusName=late")));
+    }
+
+    /**
+     * A connection or an API destination, whose ARN EventBridge follows with an id it mints after the name, is the
+     * one stored under the name the request gives, and has that id open when none is or nothing looks it up.
+     */
+    @Test
+    void aResourceWhoseIdItsServiceMintsIsTheOneStoredUnderItsName() {
+        String events = "arn:aws:events:us-east-1:000000000000:";
+        StoredResourceArns stored = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "events";
+            }
+
+            @Override
+            public Optional<String> find(String type, String name, String region) {
+                return "web".equals(name) && "us-east-1".equals(region) ? Optional.of(events + type + "/web/1234")
+                        : Optional.empty();
+            }
+        };
+        assertEquals(List.of(events + "connection/web/1234"), RequestResources.of("events:DescribeConnection",
+                json("{\"Name\":\"web\"}"), "aws", "us-east-1", "000000000000", stored));
+        assertEquals(List.of(events + "api-destination/web/1234"), RequestResources.of(
+                "events:DescribeApiDestination", json("{\"Name\":\"web\"}"), "aws", "us-east-1", "000000000000", stored));
+        assertEquals(List.of(events + "connection/other/*"), RequestResources.of("events:DescribeConnection",
+                json("{\"Name\":\"other\"}"), "aws", "us-east-1", "000000000000", stored));
+        assertEquals(List.of(events + "connection/web/*"), of("events:DescribeConnection", json("{\"Name\":\"web\"}")));
+        // A create names the connection it uses by its ARN, the id given, and has its own id open.
+        assertEquals(List.of(events + "connection/web/1234", events + "api-destination/new/*"), RequestResources.of(
+                "events:CreateApiDestination", json("{\"Name\":\"new\",\"ConnectionArn\":\"" + events
+                + "connection/web/1234\"}"), "aws", "us-east-1", "000000000000", stored));
+    }
+
     /** A request value is a name, so a {@code ${...}} in it is kept, not read as a variable of the format. */
     @Test
     void aValueIsTakenLiterally() {
         assertEquals(List.of("arn:aws:ecr:us-east-1:000000000000:repository/${Account}"),
                 of("ecr:DescribeRepositories", json(
                 "{\"repositoryNames\":[\"${Account}\"]}")));
+    }
+
+    /**
+     * A pipeline is the one its request's {@code pipeline.name} names; its {@code roleArn}, the role CodePipeline
+     * assumes, names none, even when it holds a pipeline's ARN. A webhook is the one {@code webhook.name} names, on
+     * the pipeline {@code webhook.targetPipeline} names, and its tags go on the webhook alone.
+     */
+    @Test
+    void aPipelineIsTheOneItsStructuresNameNames() {
+        String codePipeline = "arn:aws:codepipeline:us-east-1:000000000000:";
+        assertEquals(List.of(codePipeline + "b"), of("codepipeline:UpdatePipeline",
+                json("{\"pipeline\":{\"name\":\"b\",\"roleArn\":\"" + codePipeline + "a\"}}")));
+        assertEquals(List.of(codePipeline + "b"), of("codepipeline:CreatePipeline", form("Action=CreatePipeline"
+                + "&pipeline.name=b&pipeline.roleArn=" + codePipeline + "a")));
+        assertEquals(List.of(), of("codepipeline:UpdatePipeline", json("{\"pipeline\":{\"roleArn\":\"" + codePipeline
+                + "a\"}}")));
+        assertEquals(List.of(codePipeline + "webhook:w", codePipeline + "p"), of("codepipeline:PutWebhook",
+                json("{\"webhook\":{\"name\":\"w\",\"targetPipeline\":\"p\"}}")));
+        // A webhook's tags go on the webhook, not on the pipeline it connects to.
+        assertEquals(List.of(codePipeline + "webhook:w"), created("codepipeline:PutWebhook",
+                json("{\"webhook\":{\"name\":\"w\",\"targetPipeline\":\"p\"}}")));
+    }
+
+    /** A custom action type is {@code Custom}'s, the owner CodePipeline gives every one, which its request does not. */
+    @Test
+    void aCustomActionTypeIsCustoms() {
+        assertEquals(List.of("arn:aws:codepipeline:us-east-1:000000000000:actiontype:Custom/Build/MyProvider/1"),
+                of("codepipeline:CreateCustomActionType",
+                        json("{\"category\":\"Build\",\"provider\":\"MyProvider\",\"version\":\"1\"}")));
+        assertEquals(List.of("arn:aws:codepipeline:us-east-1:000000000000:actiontype:Custom/Build/MyProvider/1"),
+                of("codepipeline:DeleteCustomActionType",
+                        json("{\"category\":\"Build\",\"provider\":\"MyProvider\",\"version\":\"1\"}")));
+        assertEquals(List.of(), of("codepipeline:DeleteCustomActionType", json("{}")));
+    }
+
+    /**
+     * A Cloud Map service is created in the namespace {@code NamespaceId} names, or {@code DnsConfig.NamespaceId}
+     * when it names none or gives a JSON null, as the handler reads them, and tags go on the service it creates,
+     * not on the namespace.
+     */
+    @Test
+    void aServiceIsCreatedInTheNamespaceItsHandlerReads() {
+        String cloudMap = "arn:aws:servicediscovery:us-east-1:000000000000:";
+        assertEquals(List.of(cloudMap + "namespace/ns-a", cloudMap + "service/*"), of("servicediscovery:CreateService",
+                json("{\"Name\":\"s\",\"NamespaceId\":\"ns-a\"}")));
+        assertEquals(List.of(cloudMap + "namespace/ns-b", cloudMap + "service/*"), of("servicediscovery:CreateService",
+                json("{\"Name\":\"s\",\"DnsConfig\":{\"NamespaceId\":\"ns-b\"}}")));
+        assertEquals(List.of(cloudMap + "namespace/ns-a", cloudMap + "service/*"), of("servicediscovery:CreateService",
+                json("{\"Name\":\"s\",\"NamespaceId\":\"ns-a\",\"DnsConfig\":{\"NamespaceId\":\"ns-b\"}}")));
+        // A JSON null is no namespace, as the handler reads it, which then takes DnsConfig's.
+        assertEquals(List.of(cloudMap + "namespace/ns-b", cloudMap + "service/*"), of("servicediscovery:CreateService",
+                json("{\"Name\":\"s\",\"NamespaceId\":null,\"DnsConfig\":{\"NamespaceId\":\"ns-b\"}}")));
+        assertEquals(List.of(cloudMap + "service/*"), created("servicediscovery:CreateService",
+                json("{\"Name\":\"s\",\"NamespaceId\":\"ns-a\"}")));
+    }
+
+    /** A CodeBuild build is checked on its project, which its id names before its {@code :}. */
+    @Test
+    void aBuildIsCheckedOnItsProject() {
+        String project = "arn:aws:codebuild:us-east-1:000000000000:project/";
+        assertEquals(List.of(project + "a"), of("codebuild:StopBuild", json("{\"id\":\"a:1\"}")));
+        assertEquals(List.of(project + "a", project + "b"), of("codebuild:BatchGetBuilds",
+                json("{\"ids\":[\"a:1\",\"b:2\",\"a:3\"]}")));
+        assertEquals(List.of(project + "a"), of("codebuild:RetryBuild", form("Action=RetryBuild&id=a:1")));
+    }
+
+    /** A list taking a name or an ARN for each value names each value's resource, whichever it gives. */
+    @Test
+    void aListMixingNamesAndArnsNamesEachValuesResource() {
+        String project = "arn:aws:codebuild:us-east-1:000000000000:project/";
+        assertEquals(List.of(project + "b", project + "a"), of("codebuild:BatchGetProjects",
+                json("{\"names\":[\"a\",\"" + project + "b\"]}")));
+        assertEquals(List.of(project + "a", project + "b"), of("codebuild:BatchGetProjects",
+                json("{\"names\":[\"" + project + "a\",\"" + project + "b\"]}")));
     }
 
     @Test

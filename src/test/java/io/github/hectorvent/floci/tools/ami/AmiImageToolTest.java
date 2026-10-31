@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.tools.ami;
 
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.testing.MainSources;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -149,7 +150,7 @@ class AmiImageToolTest {
 
     @Test
     void toolTreeDoesNotContainShellScripts() throws Exception {
-        Path tools = Path.of("src/main/java/io/github/hectorvent/floci/tools/ami");
+        Path tools = MainSources.packageDir(AmiImageTool.class);
         if (Files.isDirectory(tools)) {
             try (Stream<Path> stream = Files.walk(tools)) {
                 assertFalse(stream.anyMatch(path -> path.getFileName().toString().endsWith(".sh")));

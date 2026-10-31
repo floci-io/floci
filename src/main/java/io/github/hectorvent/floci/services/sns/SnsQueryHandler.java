@@ -503,7 +503,7 @@ public class SnsQueryHandler {
             String entryPrefix = "PublishBatchRequestEntries.member." + i;
             String id = getParam(params, entryPrefix + ".Id");
             if (id == null) break;
-            Map<String, Object> entry = new java.util.HashMap<>();
+            Map<String, Object> entry = new HashMap<>();
             entry.put("Id", id);
             entry.put("Message", getParam(params, entryPrefix + ".Message"));
             entry.put("Subject", getParam(params, entryPrefix + ".Subject"));

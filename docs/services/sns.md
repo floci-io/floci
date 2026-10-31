@@ -60,7 +60,10 @@ Under IAM enforcement the topic policy decides what AWS services may publish to 
 [SES's event destinations and notifications](ses.md#iam-enforcement), and takes part in an IAM
 caller's request the way any [resource-based policy](iam.md#resource-based-policies) does when the
 request names the topic in a JSON-protocol body. A Query-protocol request carries the topic in its
-form body, which enforcement does not read yet, so the topic policy plays no part in it.
+form body, which enforcement does not read yet, so the topic policy plays no part in it. A
+Query-protocol request that IAM enforcement refuses answers `AuthorizationError` (HTTP 403), the
+error every SNS operation lists for a caller denied access, which SDKs raise as
+`AuthorizationErrorException`.
 
 ## SMS sandbox and opt-out
 

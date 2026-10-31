@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.Mockito;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -312,6 +313,6 @@ class RdsDataResourceResolverTest {
 
         assertEquals("BadRequestException", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
-        org.mockito.Mockito.verifyNoInteractions(rdsService);
+        Mockito.verifyNoInteractions(rdsService);
     }
 }

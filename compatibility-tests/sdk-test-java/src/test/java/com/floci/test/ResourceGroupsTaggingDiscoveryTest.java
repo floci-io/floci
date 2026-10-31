@@ -9,6 +9,8 @@ import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.services.apigateway.ApiGatewayClient;
 import software.amazon.awssdk.services.apigateway.model.CreateApiKeyResponse;
 import software.amazon.awssdk.services.apigateway.model.GetApiKeyResponse;
+import software.amazon.awssdk.services.bedrock.BedrockClient;
+import software.amazon.awssdk.services.bedrock.model.CreateGuardrailResponse;
 import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
 import software.amazon.awssdk.services.cloudwatchlogs.model.DescribeLogGroupsResponse;
 import software.amazon.awssdk.services.cloudwatchlogs.model.LogGroup;
@@ -46,6 +48,7 @@ class ResourceGroupsTaggingDiscoveryTest {
     private static LambdaClient lambda;
     private static CloudWatchLogsClient logs;
     private static ApiGatewayClient apiGateway;
+    private static BedrockClient bedrock;
 
     @BeforeAll
     static void setup() {
@@ -54,6 +57,7 @@ class ResourceGroupsTaggingDiscoveryTest {
         lambda = TestFixtures.lambdaClient();
         logs = TestFixtures.cloudWatchLogsClient();
         apiGateway = TestFixtures.apiGatewayClient();
+        bedrock = TestFixtures.bedrockClient();
     }
 
     @AfterAll
@@ -64,6 +68,7 @@ class ResourceGroupsTaggingDiscoveryTest {
             lambda.close();
             logs.close();
             apiGateway.close();
+            bedrock.close();
         }
     }
 
@@ -151,6 +156,45 @@ class ResourceGroupsTaggingDiscoveryTest {
                     .containsOnly(Map.entry("Env", "dev"));
         } finally {
             sqs.deleteQueue(request -> request.queueUrl(queueUrl));
+        }
+    }
+
+    @Test
+    @DisplayName("Bedrock guardrails are found by type and tag, and tagging API writes are the guardrail's own tags")
+    void bedrockGuardrailIsDiscoveredAndTaggingApiWritesReachIt() {
+        String run = TestFixtures.uniqueName("run");
+        CreateGuardrailResponse created = bedrock.createGuardrail(request -> request
+                .name(TestFixtures.uniqueName("tag-discovery-guardrail"))
+                .blockedInputMessaging("Input blocked.")
+                .blockedOutputsMessaging("Output blocked.")
+                .tags(software.amazon.awssdk.services.bedrock.model.Tag.builder().key("Run").value(run).build()));
+        String arn = created.guardrailArn();
+
+        try {
+            GetResourcesResponse matched = tagging.getResources(request -> request
+                    .resourceTypeFilters("bedrock:guardrail")
+                    .tagFilters(tagFilter("Run", run)));
+
+            assertThat(matched.resourceTagMappingList()).singleElement().satisfies(mapping -> {
+                assertThat(mapping.resourceARN()).isEqualTo(arn);
+                assertThat(tags(mapping)).containsOnly(Map.entry("Run", run));
+            });
+
+            TagResourcesResponse tagged = tagging.tagResources(request -> request
+                    .resourceARNList(arn)
+                    .tags(Map.of("Owner", "compat")));
+
+            assertThat(tagged.failedResourcesMap()).isEmpty();
+            assertThat(guardrailTags(arn)).containsOnly(Map.entry("Run", run), Map.entry("Owner", "compat"));
+
+            UntagResourcesResponse untagged = tagging.untagResources(request -> request
+                    .resourceARNList(arn)
+                    .tagKeys("Owner"));
+
+            assertThat(untagged.failedResourcesMap()).isEmpty();
+            assertThat(guardrailTags(arn)).containsOnly(Map.entry("Run", run));
+        } finally {
+            bedrock.deleteGuardrail(request -> request.guardrailIdentifier(created.guardrailId()));
         }
     }
 
@@ -283,6 +327,12 @@ class ResourceGroupsTaggingDiscoveryTest {
 
     private static Map<String, String> tags(ResourceTagMapping mapping) {
         return mapping.tags().stream().collect(Collectors.toMap(Tag::key, Tag::value));
+    }
+
+    private static Map<String, String> guardrailTags(String arn) {
+        return bedrock.listTagsForResource(request -> request.resourceARN(arn)).tags().stream()
+                .collect(Collectors.toMap(software.amazon.awssdk.services.bedrock.model.Tag::key,
+                        software.amazon.awssdk.services.bedrock.model.Tag::value));
     }
 
     private static void deleteApiKeyAfterFailure(String id) {

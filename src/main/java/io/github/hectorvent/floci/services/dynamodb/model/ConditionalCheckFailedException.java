@@ -1,9 +1,10 @@
 package io.github.hectorvent.floci.services.dynamodb.model;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 
 
-public class ConditionalCheckFailedException extends io.github.hectorvent.floci.core.common.AwsException {
+public class ConditionalCheckFailedException extends AwsException {
 
     private final JsonNode item;
 

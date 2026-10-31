@@ -3,11 +3,15 @@ package io.github.hectorvent.floci.services.eks;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.eks.model.AccessEntry;
+import io.github.hectorvent.floci.services.eks.model.AccessScope;
+import io.github.hectorvent.floci.services.eks.model.AssociateAccessPolicyRequest;
+import io.github.hectorvent.floci.services.eks.model.AssociatedAccessPolicy;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
 import io.github.hectorvent.floci.services.eks.model.CreateAccessEntryRequest;
@@ -18,19 +22,22 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.time.Instant;
+import java.time.Clock;
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
-/** Access-entry management metadata; Kubernetes authorization is handled separately. */
+/** Access-entry and access-policy management metadata; Kubernetes authorization is handled separately. */
 @ApplicationScoped
 public class EksAccessEntryService {
     private final StorageBackend<String, StoredEntry> entries;
     private final IamService iam;
+    private final Clock clock;
 
     @Inject
     public EksAccessEntryService(StorageFactory factory, IamService iam) {
@@ -38,15 +45,103 @@ public class EksAccessEntryService {
     }
 
     EksAccessEntryService(StorageBackend<String, StoredEntry> entries, IamService iam) {
+        this(entries, iam, Clock.systemUTC());
+    }
+
+    EksAccessEntryService(StorageBackend<String, StoredEntry> entries, IamService iam, Clock clock) {
         this.entries = entries;
         this.iam = iam;
+        this.clock = clock;
     }
 
     @RegisterForReflection
-    public record StoredEntry(AccessEntry entry, String principalId, String clientRequestToken) {}
+    public record StoredEntry(AccessEntry entry, String principalId, String clientRequestToken,
+                              List<AssociatedAccessPolicy> accessPolicies) {
+        public StoredEntry {
+            accessPolicies = accessPolicies == null ? List.of() : List.copyOf(accessPolicies);
+        }
+    }
 
     @RegisterForReflection
     public record Page(List<String> accessEntries, String nextToken) {}
+
+    @RegisterForReflection
+    public record PolicyPage(List<AssociatedAccessPolicy> associatedAccessPolicies, String nextToken) {}
+
+    public synchronized AssociatedAccessPolicy associate(Cluster cluster, String principal,
+                                                         AssociateAccessPolicyRequest request) {
+        StoredEntry stored = storedEntry(cluster, principal);
+        if (request == null || request.policyArn() == null) {
+            throw invalid("policyArn is required");
+        }
+        requireAccessPolicyArn(cluster, request.policyArn());
+        AccessScope scope = accessScope(request.accessScope());
+        if (!"STANDARD".equals(stored.entry().type())) {
+            throw new AwsException("InvalidRequestException",
+                    "Access policies can only be associated with STANDARD access entries", 400);
+        }
+        double now = clock.millis() / 1000.0;
+        double associatedAt = stored.accessPolicies().stream()
+                .filter(existing -> existing.policyArn().equals(request.policyArn()))
+                .mapToDouble(AssociatedAccessPolicy::associatedAt).findFirst().orElse(now);
+        AssociatedAccessPolicy association = new AssociatedAccessPolicy(request.policyArn(), scope, associatedAt, now);
+        List<AssociatedAccessPolicy> policies = new ArrayList<>(stored.accessPolicies());
+        policies.removeIf(existing -> existing.policyArn().equals(request.policyArn()));
+        policies.add(association);
+        policies.sort(Comparator.comparing(AssociatedAccessPolicy::policyArn));
+        entries.put(prefix(cluster) + principal, new StoredEntry(stored.entry(), stored.principalId(),
+                stored.clientRequestToken(), policies));
+        return association;
+    }
+
+    public synchronized PolicyPage listAccessPolicies(Cluster cluster, String principal, Integer maxResults,
+                                                      String nextToken) {
+        List<AssociatedAccessPolicy> policies = storedEntry(cluster, principal).accessPolicies();
+        // The newline ends the principal, so a token for role/a:b is not read as one for role/a.
+        PaginatedResult<AssociatedAccessPolicy> page = Pagination.paginate(policies, AssociatedAccessPolicy::policyArn,
+                pageSize(maxResults), nextToken, "policies:" + prefix(cluster) + principal + "\n",
+                token -> invalid("Invalid nextToken"));
+        return new PolicyPage(page.items(), page.nextToken());
+    }
+
+    public synchronized void disassociate(Cluster cluster, String principal, String policyArn) {
+        StoredEntry stored = storedEntry(cluster, principal);
+        requireAccessPolicyArn(cluster, policyArn);
+        List<AssociatedAccessPolicy> policies = stored.accessPolicies().stream()
+                .filter(existing -> !existing.policyArn().equals(policyArn)).toList();
+        if (policies.size() == stored.accessPolicies().size()) {
+            return; // EKS documents no error for a policy the entry does not hold
+        }
+        entries.put(prefix(cluster) + principal, new StoredEntry(stored.entry(), stored.principalId(),
+                stored.clientRequestToken(), policies));
+    }
+
+    private StoredEntry storedEntry(Cluster cluster, String principal) {
+        requireApiAccess(cluster);
+        return entries.get(prefix(cluster) + principal)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Access entry not found", 404));
+    }
+
+    private static AccessScope accessScope(AccessScope scope) {
+        if (scope == null || scope.type() == null) {
+            throw invalid("accessScope.type is required");
+        }
+        List<String> namespaces = scope.namespaces() == null ? List.of() : scope.namespaces();
+        if ("cluster".equals(scope.type())) {
+            if (!namespaces.isEmpty()) {
+                throw invalid("namespaces can only be specified for a namespace access scope");
+            }
+            return new AccessScope("cluster", List.of());
+        }
+        if (!"namespace".equals(scope.type())) {
+            throw invalid("accessScope.type must be cluster or namespace");
+        }
+        if (namespaces.isEmpty() || namespaces.stream().anyMatch(namespace -> namespace == null || namespace.isBlank())) {
+            throw invalid("A namespace access scope requires nonempty namespace names");
+        }
+        // Terraform models namespaces as a set, so a repeated name must not come back twice.
+        return new AccessScope("namespace", List.copyOf(new LinkedHashSet<>(namespaces)));
+    }
 
     public synchronized AccessEntry create(Cluster cluster, CreateAccessEntryRequest request) {
         requireApiAccess(cluster);
@@ -125,13 +220,13 @@ public class EksAccessEntryService {
         if (entries.get(key).isPresent()) {
             throw new AwsException("ResourceInUseException", "Access entry already exists", 409);
         }
-        double now = Instant.now().toEpochMilli() / 1000.0;
+        double now = clock.millis() / 1000.0;
         String entryArn = new AwsArnUtils.Arn(clusterArn.partition(), "eks", clusterArn.region(), clusterArn.accountId(),
                 "access-entry/" + cluster.getName() + "/" + (role ? "role" : "user") + "/" + arn.accountId() + "/" + name
                         + "/" + UUID.randomUUID()).toString();
         AccessEntry entry = new AccessEntry(entryArn, cluster.getName(), principal,
                 type, username, List.copyOf(groups), Map.copyOf(tags), now, now);
-        entries.put(key, new StoredEntry(entry, principalId, token));
+        entries.put(key, new StoredEntry(entry, principalId, token, List.of()));
         return entry;
     }
 
@@ -145,9 +240,7 @@ public class EksAccessEntryService {
     }
 
     public synchronized AccessEntry describe(Cluster cluster, String principal) {
-        requireApiAccess(cluster);
-        return entries.get(prefix(cluster) + principal).map(StoredEntry::entry)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Access entry not found", 404));
+        return storedEntry(cluster, principal).entry();
     }
 
     public synchronized void delete(Cluster cluster, String principal) {
@@ -156,34 +249,19 @@ public class EksAccessEntryService {
     }
 
     public synchronized Page list(Cluster cluster, Integer maxResults, String nextToken) {
+        return list(cluster, maxResults, nextToken, null);
+    }
+
+    public synchronized Page list(Cluster cluster, Integer maxResults, String nextToken, String associatedPolicyArn) {
         requireApiAccess(cluster);
-        int limit = maxResults == null ? 100 : maxResults;
-        if (limit < 1 || limit > 100) {
-            throw invalid("maxResults must be between 1 and 100");
-        }
         String prefix = prefix(cluster);
-        String after = "";
-        if (nextToken != null) {
-            try {
-                String decoded = Base64Url.decode(nextToken);
-                if (!decoded.startsWith(prefix + "\n")) {
-                    throw invalid("nextToken does not belong to this cluster");
-                }
-                after = decoded.substring(prefix.length() + 1);
-                if (after.isBlank()) {
-                    throw invalid("Invalid nextToken");
-                }
-            } catch (IllegalArgumentException exception) {
-                throw invalid("Invalid nextToken");
-            }
-        }
-        String cursor = after;
-        List<String> remaining = entries.scan(key -> key.startsWith(prefix)).stream()
-                .map(stored -> stored.entry().principalArn()).filter(principal -> principal.compareTo(cursor) > 0)
-                .sorted(Comparator.naturalOrder()).toList();
-        List<String> page = remaining.stream().limit(limit).toList();
-        String token = remaining.size() > limit ? Base64Url.encode(prefix + "\n" + page.getLast()) : null;
-        return new Page(page, token);
+        List<String> principals = entries.scan(key -> key.startsWith(prefix)).stream()
+                .filter(stored -> associatedPolicyArn == null || stored.accessPolicies().stream()
+                        .anyMatch(policy -> policy.policyArn().equals(associatedPolicyArn)))
+                .map(stored -> stored.entry().principalArn()).toList();
+        PaginatedResult<String> page = Pagination.paginate(principals, principal -> principal, pageSize(maxResults),
+                nextToken, "entries:" + prefix, token -> invalid("Invalid nextToken"));
+        return new Page(page.items(), page.nextToken());
     }
 
     public synchronized void deleteClusterEntries(Cluster cluster) {
@@ -204,6 +282,31 @@ public class EksAccessEntryService {
         }
         if (cluster.getStatus() != ClusterStatus.ACTIVE) {
             throw new AwsException("InvalidRequestException", "Cluster must be ACTIVE", 400);
+        }
+    }
+
+    private static int pageSize(Integer maxResults) {
+        int limit = maxResults == null ? 100 : maxResults;
+        if (limit < 1 || limit > 100) {
+            throw invalid("maxResults must be between 1 and 100");
+        }
+        return limit;
+    }
+
+    private static void requireAccessPolicyArn(Cluster cluster, String policyArn) {
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(policyArn);
+        } catch (IllegalArgumentException e) {
+            throw invalid("policyArn must identify an EKS cluster access policy");
+        }
+        boolean accessPolicy = arn.partition().equals(AwsArnUtils.parse(cluster.getArn()).partition())
+                && arn.service().equals("eks")
+                && arn.region().isEmpty()
+                && arn.accountId().equals("aws") // partition-literal: the AWS-managed account, "aws" in every partition
+                && arn.resource().matches("cluster-access-policy/[A-Za-z0-9]+");
+        if (!accessPolicy) {
+            throw invalid("policyArn must identify an EKS cluster access policy");
         }
     }
 

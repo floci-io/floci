@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -50,11 +52,11 @@ class Ec2DuplicateRouteTest {
 
     private static String routeTableId;
 
-    private static io.restassured.specification.RequestSpecification ec2() {
+    private static RequestSpecification ec2() {
         return given().header("Authorization", AUTH_HEADER);
     }
 
-    private static io.restassured.response.ValidatableResponse describe() {
+    private static ValidatableResponse describe() {
         return ec2()
             .formParam("Action", "DescribeRouteTables")
             .formParam("RouteTableId.1", routeTableId)
@@ -65,7 +67,7 @@ class Ec2DuplicateRouteTest {
     }
 
     /** CreateRoute with one destination and the internet gateway as its target. */
-    private static io.restassured.specification.RequestSpecification createRoute(
+    private static RequestSpecification createRoute(
             String destinationParam, String destination) {
         return ec2()
             .formParam("Action", "CreateRoute")
@@ -76,7 +78,7 @@ class Ec2DuplicateRouteTest {
 
     /** Asserts the response is RouteAlreadyExists and names the destination it refused. */
     private static void expectRouteAlreadyExists(
-            io.restassured.specification.RequestSpecification request, String destination) {
+            RequestSpecification request, String destination) {
         String message = request
         .when()
             .post("/")
@@ -216,7 +218,7 @@ class Ec2DuplicateRouteTest {
     }
 
     /** Asserts the request fails with the given 400 error code. */
-    private static void expectError(io.restassured.specification.RequestSpecification request, String code) {
+    private static void expectError(RequestSpecification request, String code) {
         request
         .when()
             .post("/")

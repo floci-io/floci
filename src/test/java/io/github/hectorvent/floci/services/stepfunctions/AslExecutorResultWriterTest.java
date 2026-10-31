@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -553,7 +554,7 @@ class AslExecutorResultWriterTest {
         for (int i = 0; i < keys.getAllValues().size(); i++) {
             if (keys.getAllValues().get(i).endsWith("SUCCEEDED_0.json")) {
                 resultKey = keys.getAllValues().get(i);
-                String body = new String(bodies.getAllValues().get(i), java.nio.charset.StandardCharsets.UTF_8);
+                String body = new String(bodies.getAllValues().get(i), StandardCharsets.UTF_8);
                 String[] lines = body.strip().split("\n");
                 assertEquals(2, lines.length);
                 assertEquals(1, mapper.readTree(lines[0]).path("a").asInt());

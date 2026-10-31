@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.StreamSupport;
 
 @ApplicationScoped
 public class NetworkFirewallService {
@@ -439,7 +440,7 @@ public class NetworkFirewallService {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode result = response.putArray("Firewalls");
         List<String> vpcIds = request != null && request.path("VpcIds").isArray()
-                ? java.util.stream.StreamSupport.stream(request.path("VpcIds").spliterator(), false)
+                ? StreamSupport.stream(request.path("VpcIds").spliterator(), false)
                         .map(JsonNode::asText).toList()
                 : List.of();
         firewalls.scan(key -> true).stream()

@@ -5,6 +5,8 @@ import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import com.github.dockerjava.core.command.ExecStartResultCallback;
 import com.github.dockerjava.core.command.LogContainerResultCallback;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
@@ -44,6 +46,9 @@ class EcsContainerManagerFirelensDockerIntegrationTest {
 
     @Inject
     DockerClient dockerClient;
+
+    @Inject
+    EmulatorConfig config;
 
     private EcsTaskHandle taskHandle;
 
@@ -92,7 +97,16 @@ class EcsContainerManagerFirelensDockerIntegrationTest {
         // The Docker daemon, not the application container, makes this connection, so the
         // address has to be a path on the host: the socket the router creates inside the
         // task's own volume, which the daemon reaches at the volume's mountpoint.
-        assertEquals("unix://" + firelensVolumeMountpoint() + "/fluent.sock", appLogDriverAddress(appId));
+        String socketPath = firelensVolumeMountpoint() + "/fluent.sock";
+        assertTrue(socketPath.getBytes(StandardCharsets.UTF_8).length <= 107);
+        assertTrue(taskHandle.getFirelensVolumeName().length() <= 55);
+        assertEquals("unix://" + socketPath, appLogDriverAddress(appId));
+        Map<String, String> labels = dockerClient.inspectVolumeCmd(taskHandle.getFirelensVolumeName())
+                .exec().getLabels();
+        assertEquals(ContainerStorageHelper.ownerIdentity(config), labels.get(ContainerStorageHelper.OWNER_LABEL));
+        assertEquals("ecs", labels.get(ContainerStorageHelper.SERVICE_LABEL));
+        config.docker().resourceNamespace().ifPresent(namespace ->
+                assertEquals(namespace, labels.get("floci_namespace")));
 
         String routerLogs = awaitRouterLogs(routerId, marker);
         assertTrue(routerLogs.contains(marker),

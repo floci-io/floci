@@ -3,14 +3,41 @@ package io.github.hectorvent.floci.services.elasticache.proxy;
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.net.Socket;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class ElastiCacheAuthProxyTest {
+
+    @Test
+    void selectorsFailClosedBeforeChangingBackendCredentials() {
+        ElastiCacheBackendAcl acl = new ElastiCacheBackendAcl();
+        Socket backend = mock(Socket.class);
+
+        assertThrows(IOException.class, () -> acl.authenticate(backend, "subscriber",
+                "on -@all (+@all ~* &*)"));
+        verifyNoInteractions(backend);
+    }
+
+    @Test
+    void clusterModeFailsClosedBeforeChangingBackendReplicationCredentials() {
+        ElastiCacheAuthProxy.PasswordValidator validator = mock(ElastiCacheAuthProxy.PasswordValidator.class);
+        when(validator.hasMembers()).thenReturn(true);
+        when(validator.clusterMode()).thenReturn(true);
+        ElastiCacheAuthProxy proxy = new ElastiCacheAuthProxy("cluster", AuthMode.IAM, "127.0.0.1", 6379,
+                validator, mock(SigV4Validator.class));
+        Socket backend = mock(Socket.class);
+
+        assertThrows(IOException.class, () -> proxy.initializeBackend(backend, "subscriber"));
+        verifyNoInteractions(backend);
+    }
 
     @Test
     void authModeIsReadFromTheCacheOnEachConnection() {

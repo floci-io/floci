@@ -53,7 +53,8 @@ class EcsLinuxParametersDockerIntegrationTest {
         public Map<String, String> getConfigOverrides() {
             return Map.of("floci.services.ecs.mock", "false",
                     "floci.network.security-group-enforcement.enabled", "false",
-                    "floci.services.ecs.host-volume-roots", "/dev/null");
+                    "floci.services.ecs.host-volume-roots", "/dev/null",
+                    "floci.services.ecs.allow-privileged-containers", "true");
         }
     }
 
@@ -136,5 +137,40 @@ class EcsLinuxParametersDockerIntegrationTest {
         assertTrue(command >= 0, Arrays.toString(top.getTitles()));
         assertTrue(top.getProcesses()[0][command].contains("docker-init"),
                 "PID 1 is the init process, with the command under it: " + Arrays.deepToString(top.getProcesses()));
+    }
+
+    @Test
+    void privilegedEc2ContainerRunsWithDockerPrivilege() {
+        String family = "privileged-" + UUID.randomUUID().toString().substring(0, 8);
+        String taskDefinitionArn = given().contentType(ECS_CT)
+                .header("X-Amz-Target", ECS_TARGET + "RegisterTaskDefinition")
+                .body("""
+                        {
+                          "family": "%s",
+                          "requiresCompatibilities": ["EC2"],
+                          "networkMode": "bridge",
+                          "containerDefinitions": [{
+                            "name": "worker",
+                            "image": "%s",
+                            "memory": 256,
+                            "command": ["sleep", "120"],
+                            "privileged": true
+                          }]
+                        }
+                        """.formatted(family, TestImages.BUSYBOX))
+                .when().post("/").then().statusCode(200)
+                .extract().path("taskDefinition.taskDefinitionArn");
+
+        clusterName = family;
+        ecsService.createCluster(clusterName, REGION);
+        EcsTask task = ecsService.runTask(clusterName, taskDefinitionArn, 1,
+                null, null, null, null, null, REGION).getFirst();
+        taskArn = task.getTaskArn();
+        EcsTask described = ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst();
+        assertEquals("RUNNING", described.getLastStatus(), "the container must be up: " + described.getStoppedReason());
+
+        String containerId = described.getContainers().getFirst().getRuntimeId();
+        InspectContainerResponse inspected = dockerClient.inspectContainerCmd(containerId).exec();
+        assertEquals(Boolean.TRUE, inspected.getHostConfig().getPrivileged());
     }
 }

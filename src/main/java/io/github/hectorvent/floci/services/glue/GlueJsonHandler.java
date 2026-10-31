@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsJsonTimestamp;
 import io.github.hectorvent.floci.services.glue.model.*;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.glue.schemaregistry.model.Registry;
@@ -460,10 +461,42 @@ public class GlueJsonHandler {
                         region, readMaxResults(request), readNextToken(request));
                 yield Response.ok(pageResponse("SecurityConfigurations", page.items(), page.nextToken())).build();
             }
-            // Read-only Glue actions for resources the emulator does not model. The AWS SDK
-            // expects each to return a 200 with its result key present (empty), so we emit the
-            // documented empty shape rather than an InvalidAction 400 that callers can't read.
-            case "ListDataQualityRulesets" -> Response.ok(Map.of("Rulesets", List.of())).build();
+            case "CreateDataQualityRuleset" -> {
+                Map<String, String> tags = request.hasNonNull("Tags")
+                        ? mapper.convertValue(request.get("Tags"), STRING_MAP)
+                        : null;
+                DataQualityRuleset created = glueService.createDataQualityRuleset(
+                        request.path("Name").asText(null), request.path("Description").asText(null),
+                        request.path("Ruleset").asText(null), readTargetTable(request.get("TargetTable")),
+                        request.path("DataQualitySecurityConfiguration").asText(null), tags, region);
+                yield Response.ok(Map.of("Name", created.getName())).build();
+            }
+            case "GetDataQualityRuleset" ->
+                    Response.ok(glueService.getDataQualityRuleset(request.path("Name").asText(null), region)).build();
+            case "UpdateDataQualityRuleset" -> {
+                DataQualityRuleset updated = glueService.updateDataQualityRuleset(request.path("Name").asText(null),
+                        request.path("Description").asText(null), request.path("Ruleset").asText(null), region);
+                Map<String, Object> response = new LinkedHashMap<>();
+                response.put("Name", updated.getName());
+                putIfNotNull(response, "Description", updated.getDescription());
+                response.put("Ruleset", updated.getRuleset());
+                yield Response.ok(response).build();
+            }
+            case "DeleteDataQualityRuleset" -> {
+                glueService.deleteDataQualityRuleset(request.path("Name").asText(null), region);
+                yield Response.ok(Map.of()).build();
+            }
+            case "ListDataQualityRulesets" -> {
+                Map<String, String> tags = request.hasNonNull("Tags")
+                        ? mapper.convertValue(request.get("Tags"), STRING_MAP)
+                        : null;
+                GlueService.Page<DataQualityRuleset> page = glueService.listDataQualityRulesets(
+                        readDataQualityFilter(request.get("Filter")), tags,
+                        readMaxResults(request), readNextToken(request), region);
+                yield Response.ok(pageResponse("Rulesets",
+                        page.items().stream().map(GlueJsonHandler::dataQualityListItem).toList(),
+                        page.nextToken())).build();
+            }
             case "CreateTrigger" -> {
                 Trigger trigger = toTrigger(request);
                 trigger.setName(request.path("Name").asText(null));
@@ -1111,6 +1144,42 @@ public class GlueJsonHandler {
         if (value != null) {
             target.put(key, value);
         }
+    }
+
+    private static DataQualityRuleset.TargetTable readTargetTable(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        return new DataQualityRuleset.TargetTable(node.path("TableName").asText(null),
+                node.path("DatabaseName").asText(null), node.path("CatalogId").asText(null));
+    }
+
+    private static GlueService.DataQualityRulesetFilter readDataQualityFilter(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        return new GlueService.DataQualityRulesetFilter(node.path("Name").asText(null),
+                node.path("Description").asText(null),
+                AwsJsonTimestamp.epochSeconds(node, "CreatedBefore", "InvalidInputException"),
+                AwsJsonTimestamp.epochSeconds(node, "CreatedAfter", "InvalidInputException"),
+                AwsJsonTimestamp.epochSeconds(node, "LastModifiedBefore", "InvalidInputException"),
+                AwsJsonTimestamp.epochSeconds(node, "LastModifiedAfter", "InvalidInputException"),
+                readTargetTable(node.get("TargetTable")));
+    }
+
+    private static Map<String, Object> dataQualityListItem(DataQualityRuleset ruleset) {
+        Map<String, Object> item = new LinkedHashMap<>();
+        item.put("Name", ruleset.getName());
+        putIfNotNull(item, "Description", ruleset.getDescription());
+        item.put("CreatedOn", epochSeconds(ruleset.getCreatedOn()));
+        item.put("LastModifiedOn", epochSeconds(ruleset.getLastModifiedOn()));
+        putIfNotNull(item, "TargetTable", ruleset.getTargetTable());
+        putIfNotNull(item, "RuleCount", GlueService.dataQualityRuleCount(ruleset.getRuleset()));
+        return item;
+    }
+
+    private static double epochSeconds(Instant instant) {
+        return instant.toEpochMilli() / 1000.0;
     }
 
     private static String iso(Instant instant) {

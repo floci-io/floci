@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.redshiftdata;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.testing.ManualClock;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
@@ -12,14 +13,15 @@ import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
@@ -31,6 +33,44 @@ class RedshiftDataSessionsTest {
     private static final RedshiftDataSessions.Scope OWNER = new RedshiftDataSessions.Scope("000000000000", "us-east-1", "caller");
     private static final RedshiftDataResourceResolver.DatabaseTarget TARGET = new RedshiftDataResourceResolver.DatabaseTarget(
             "arn:aws:redshift:us-east-1:000000000000:cluster:warehouse", "localhost", 5439, "dev", "admin", "password");
+
+    @Test
+    void snapshotsKeepSessionsRetiredDuringTheLiveScan() throws Exception {
+        Clock clock = mock(Clock.class);
+        Instant now = Instant.parse("2026-10-29T00:00:00Z");
+        when(clock.instant()).thenReturn(now);
+        try (RedshiftDataSessions sessions = new RedshiftDataSessions(clock)) {
+            RedshiftDataConnectionFactory factory = mock(RedshiftDataConnectionFactory.class);
+            when(factory.open(any())).thenAnswer(invocation -> mock(Connection.class));
+            List<RedshiftDataSessions.Reservation> closing = new ArrayList<>();
+            for (int n = 0; n < 64; n++) {
+                RedshiftDataSessions.Reservation first = sessions.reserve(OWNER,
+                        request().put("SessionKeepAliveSeconds", 60), TARGET);
+                first.admitted();
+                first.connection(factory);
+                first.finish();
+                RedshiftDataSessions.Reservation last = sessions.reserve(OWNER,
+                        MAPPER.createObjectNode().put("SessionId", first.id()).put("SessionKeepAliveSeconds", 0), TARGET);
+                last.admitted();
+                closing.add(last);
+            }
+            AtomicInteger reads = new AtomicInteger();
+            when(clock.instant()).thenAnswer(invocation -> {
+                // The sweep reads each live session's deadline. Close them at the first live metadata read,
+                // after the original implementation copied history but before it finishes scanning live sessions.
+                if (reads.incrementAndGet() == closing.size() + 1) {
+                    closing.forEach(RedshiftDataSessions.Reservation::finish);
+                }
+                return now;
+            });
+
+            List<RedshiftDataSessions.SessionInfo> snapshot = sessions.snapshots();
+
+            assertEquals(closing.size(), snapshot.size(), "Retirement must not hide a session from both maps");
+            assertTrue(snapshot.stream().allMatch(info -> "CLOSED".equals(info.status())));
+            assertEquals(closing.size(), sessions.snapshots().size());
+        }
+    }
 
     @Test
     void failedConnectionOpeningCannotAdmitAReplacementReservation() throws Exception {
@@ -148,7 +188,7 @@ class RedshiftDataSessionsTest {
 
     @Test
     void idleDeadlineStartsAfterCompletionAndUnspecifiedTimeoutIsRetained() throws Exception {
-        MutableClock clock = new MutableClock();
+        ManualClock clock = new ManualClock(Instant.parse("2026-10-24T00:00:00Z"));
         try (RedshiftDataSessions sessions = new RedshiftDataSessions(clock)) {
             Connection connection = mock(Connection.class);
             RedshiftDataConnectionFactory factory = mock(RedshiftDataConnectionFactory.class);
@@ -177,7 +217,7 @@ class RedshiftDataSessionsTest {
 
     @Test
     void busySessionsRejectNewWorkAndFailedAdmissionDoesNotExtendIdleTime() throws Exception {
-        MutableClock clock = new MutableClock();
+        ManualClock clock = new ManualClock(Instant.parse("2026-10-24T00:00:00Z"));
         try (RedshiftDataSessions sessions = new RedshiftDataSessions(clock)) {
             RedshiftDataConnectionFactory factory = mock(RedshiftDataConnectionFactory.class);
             when(factory.open(any())).thenReturn(mock(Connection.class));
@@ -232,7 +272,7 @@ class RedshiftDataSessionsTest {
 
     @Test
     void absoluteDeadlineClosesAnActiveConnectionAndCannotBeExtended() throws Exception {
-        MutableClock clock = new MutableClock();
+        ManualClock clock = new ManualClock(Instant.parse("2026-10-24T00:00:00Z"));
         try (RedshiftDataSessions sessions = new RedshiftDataSessions(clock)) {
             Connection connection = mock(Connection.class);
             RedshiftDataConnectionFactory factory = mock(RedshiftDataConnectionFactory.class);
@@ -270,26 +310,24 @@ class RedshiftDataSessionsTest {
         return MAPPER.createObjectNode().put("ClusterIdentifier", "warehouse").put("Database", "dev").put("DbUser", "admin");
     }
 
-    private static final class MutableClock extends Clock {
-        private Instant now = Instant.parse("2026-10-24T00:00:00Z");
-
-        void advance(Duration duration) {
-            now = now.plus(duration);
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return now;
+    @Test
+    void failedAdmissionCreatesNoHistoryAndClosedHistoryDoesNotConsumeCapacity() {
+        try (RedshiftDataSessions sessions = new RedshiftDataSessions(Clock.systemUTC())) {
+            RedshiftDataSessions.Reservation rejected = sessions.reserve(OWNER, request().put("SessionKeepAliveSeconds", 60), TARGET);
+            rejected.abort();
+            assertTrue(sessions.snapshots().isEmpty());
+            for (int n = 0; n < 501; n++) {
+                RedshiftDataSessions.Reservation reservation = sessions.reserve(OWNER,
+                        request().put("SessionKeepAliveSeconds", 60), TARGET);
+                reservation.admitted();
+                reservation.finish();
+            }
+            assertEquals(501, sessions.snapshots().size());
+            assertTrue(sessions.snapshots().stream().allMatch(info -> "CLOSED".equals(info.status())));
+            RedshiftDataSessions.Reservation next = sessions.reserve(OWNER, request().put("SessionKeepAliveSeconds", 60), TARGET);
+            next.abort();
+            sessions.clear();
+            assertTrue(sessions.snapshots().isEmpty());
         }
     }
 }

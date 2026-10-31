@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.lambdamicrovms;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
@@ -9,6 +12,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
@@ -154,6 +158,38 @@ class LambdaMicrovmsServicePersistenceTest {
      * reached the backend. Only a JSON round trip separates state that was written from state that
      * was merely mutated.
      */
+    @Test
+    void connectorVersionsSurviveARestart() {
+        LambdaMicrovmsService first = process();
+        String connectorId = createConnector(first);
+        first.updateConnector(REGION, connectorId, List.of("subnet-2"), null, null, null, null);
+
+        LambdaMicrovmsService reloaded = process();
+        assertEquals(2, reloaded.getConnector(REGION, connectorId).latestVersion);
+        assertEquals(List.of("subnet-1"),
+                reloaded.getConnectorVersion(REGION, connectorId + ":1").version().subnetIds);
+    }
+
+    @Test
+    void aConnectorStoredBeforeVersionsIsItsFirstVersion() throws IOException {
+        String connectorId = createConnector(process());
+        Path file = storageDir.resolve("lambda-network-connectors.json");
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode stored = mapper.readTree(file.toFile());
+        stored.findParents("versions").forEach(node -> ((ObjectNode) node).remove(List.of("versions", "latestVersion")));
+        mapper.writeValue(file.toFile(), stored);
+
+        LambdaMicrovmsService.NetworkConnectorVersion first =
+                process().getConnectorVersion(REGION, connectorId + ":1").version();
+        assertEquals(List.of("subnet-1"), first.subnetIds);
+    }
+
+    private static String createConnector(LambdaMicrovmsService service) {
+        return service.createConnector(REGION, ACCOUNT_ID, "probe-connector",
+                List.of("subnet-1"), List.of("sg-1"), "arn:aws:iam::000000000000:role/operator",
+                "token-1", List.of("WebFunction"), "IPv4").id;
+    }
+
     private static final class FileStorageFactory extends StorageFactory {
         private final Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
         private final Path directory;

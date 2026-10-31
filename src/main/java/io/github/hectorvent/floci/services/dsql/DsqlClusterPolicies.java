@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.PublicAccessConditions;
@@ -187,7 +188,7 @@ final class DsqlClusterPolicies {
                     List<String> arns = new ArrayList<>();
                     for (String value : texts(type.getValue())) {
                         String arn = ACCOUNT_ID.matcher(value).matches()
-                                ? "arn:" + partition + ":iam::" + value + ":root" : value;
+                                ? AwsArnUtils.Arn.global(partition, "iam", value, "root").toString() : value;
                         boolean known = "*".equals(arn) || SESSION_ARN.matcher(arn).matches()
                                 || IAM_ARN.matcher(arn).matches() && principalExists.test(arn);
                         if (!known) {

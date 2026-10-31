@@ -68,6 +68,20 @@ the AWS [2011-12-05 DescribeTable](https://docs.aws.amazon.com/amazondynamodb/la
 and [BatchWriteItem](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/API_BatchWriteItem_v20111205.html)
 documentation.
 
+## Query and Scan IAM selection
+
+With IAM enforcement enabled, `dynamodb:Select` includes the effective selection
+for `Query` and `Scan`: `ALL_ATTRIBUTES` for an unprojected table read,
+`ALL_PROJECTED_ATTRIBUTES` for an unprojected index read, and
+`SPECIFIC_ATTRIBUTES` when a nonblank projection expression or a nonempty
+attribute list is supplied. Blank expressions and empty lists retain the table or
+index default for IAM evaluation. An explicit `Select` value
+is preserved. Legacy Query uses `Count` and `AttributesToGet` for the same purpose.
+
+`dynamodb:Attributes` still describes attributes named in the request, not all
+attributes returned. An attributes-only condition does not require a projection;
+use a `dynamodb:Select` condition when the policy must require specific attributes.
+
 ## Legacy conditional requests
 
 The native backend accepts `KeyConditions` together with `FilterExpression`.
@@ -250,7 +264,9 @@ For write-heavy workloads under persistent setups, configuring `FLOCI_STORAGE_SE
 
 ### Item layout on disk
 
-With the default `single-file` layout, every table's items live in one `dynamodb-items.json`, and any item write saves all of them: `persistent` rewrites the file on the write, `hybrid` on the next flush, and `wal` appends the whole table to its log and rewrites the whole snapshot on compaction. A small table that changes often, such as a heartbeat table, then keeps rewriting every large table beside it.
+In `memory` mode, item writes update the live concurrent table map without copying the table, with either layout.
+
+With the default `single-file` layout and a durable storage mode, every table's items live in one `dynamodb-items.json`, and any item write saves all of them: `persistent` rewrites the file on the write, `hybrid` on the next flush, and `wal` appends the whole table to its log and rewrites the whole snapshot on compaction. A small table that changes often, such as a heartbeat table, then keeps rewriting every large table beside it.
 
 `FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_LAYOUT=per-table` stores items under `dynamodb-items/` instead, as `FLOCI_STORAGE_SERVICES_DYNAMODB_ITEM_SHARDS` files per table (one by default). An item belongs to the file chosen by a hash of its key, and a write saves only the items it touched:
 

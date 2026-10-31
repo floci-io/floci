@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import org.junit.jupiter.api.Test;
+import org.mockito.InOrder;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -106,7 +107,7 @@ class IamInstanceProfileCfnProvisionerTest {
                 {"InstanceProfileName": "web", "Roles": ["new-role"]}
                 """), ctx("web"));
 
-        org.mockito.InOrder order = inOrder(iam);
+        InOrder order = inOrder(iam);
         order.verify(iam).removeRoleFromInstanceProfile("web", "old-role");
         order.verify(iam).addRoleToInstanceProfile("web", "new-role");
     }
@@ -263,7 +264,7 @@ class IamInstanceProfileCfnProvisionerTest {
 
         provisioner.delete(TYPE, "web", "us-east-1");
 
-        org.mockito.InOrder order = inOrder(iam);
+        InOrder order = inOrder(iam);
         order.verify(iam).removeRoleFromInstanceProfile("web", "app-role");
         order.verify(iam).deleteInstanceProfile("web");
     }

@@ -14,6 +14,7 @@ on:
       - 'docs/**'
       - 'mkdocs.yml'
       - 'tools/docs/**'
+      - 'tools/java_sources.py'
       - 'Makefile'
       - '.github/workflows/docs-actions.yml'
   push:
@@ -25,6 +26,7 @@ on:
       - 'docs/**'
       - 'mkdocs.yml'
       - 'tools/docs/**'
+      - 'tools/java_sources.py'
       - 'Makefile'
       - '.github/workflows/docs-actions.yml'
 
