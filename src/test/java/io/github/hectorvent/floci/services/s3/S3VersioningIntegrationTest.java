@@ -832,4 +832,47 @@ class S3VersioningIntegrationTest {
                 .body(equalTo("older"));
     }
 
+    @Test
+    @Order(30)
+    void aSuspendedWriteMakesTheVersionItReplacesNoncurrent() {
+        String bucket = "suspended-null-write";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        List<String> keys = List.of("put", "copy", "upload");
+        List<String> older = keys.stream()
+                .map(key -> given().body("older").when().put("/" + bucket + "/" + key)
+                        .then().statusCode(200).extract().header("x-amz-version-id"))
+                .toList();
+        given().body("<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+
+        given().body("null").when().put("/" + bucket + "/put").then().statusCode(200);
+        given().header("x-amz-copy-source", "/" + bucket + "/put")
+                .when().put("/" + bucket + "/copy").then().statusCode(200);
+        String uploadId = given().when().post("/" + bucket + "/upload?uploads").then().statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+        String partETag = given().body("null").when().put("/" + bucket + "/upload?uploadId=" + uploadId
+                + "&partNumber=1").then().statusCode(200).extract().header("ETag");
+        given().contentType("application/xml")
+                .body("""
+                        <CompleteMultipartUpload>
+                            <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                        </CompleteMultipartUpload>""".formatted(partETag))
+                .when().post("/" + bucket + "/upload?uploadId=" + uploadId).then().statusCode(200);
+
+        for (int i = 0; i < keys.size(); i++) {
+            given().queryParam("versions", "").queryParam("prefix", keys.get(i)).when().get("/" + bucket)
+                    .then().statusCode(200)
+                    .body("ListVersionsResult.Version.VersionId", contains("null", older.get(i)))
+                    .body("ListVersionsResult.Version.IsLatest", contains("true", "false"));
+        }
+
+        given().queryParam("versionId", "null").when().delete("/" + bucket + "/put").then().statusCode(204)
+                .header("x-amz-version-id", "null");
+        given().when().get("/" + bucket + "/put").then().statusCode(200)
+                .header("x-amz-version-id", older.get(0))
+                .body(equalTo("older"));
+    }
+
 }

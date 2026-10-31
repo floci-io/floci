@@ -154,6 +154,31 @@ class S3VersioningServiceTest {
         assertEquals(List.of(current.getVersionId() + " latest"), versionLines("put"));
     }
 
+    @Test
+    void aSuspendedPutMakesTheVersionOrDeleteMarkerItReplacesNoncurrent() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object first = s3Service.putObject("versioned-bucket", "put",
+                "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        S3Object second = s3Service.putObject("versioned-bucket", "put",
+                "v2".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        S3Object hidden = s3Service.putObject("versioned-bucket", "marker",
+                "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        S3Object marker = s3Service.deleteObject("versioned-bucket", "marker");
+        s3Service.putBucketVersioning("versioned-bucket", "Suspended");
+        s3Service.putObject("versioned-bucket", "put", "null".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putObject("versioned-bucket", "marker", "null".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        assertEquals(List.of("null latest", second.getVersionId(), first.getVersionId()), versionLines("put"));
+        assertEquals(List.of("null latest", marker.getVersionId() + " marker", hidden.getVersionId()),
+                versionLines("marker"));
+
+        s3Service.deleteObject("versioned-bucket", "put", "null");
+        s3Service.deleteObject("versioned-bucket", "marker", "null");
+        assertEquals(List.of(second.getVersionId() + " latest", first.getVersionId()), versionLines("put"));
+        assertEquals(List.of(marker.getVersionId() + " marker latest", hidden.getVersionId()),
+                versionLines("marker"));
+    }
+
     private List<String> versionLines(String key) {
         return s3Service.listObjectVersions("versioned-bucket", key, 100, null).versions().stream()
                 .map(version -> (version.getVersionId() != null ? version.getVersionId() : "null")

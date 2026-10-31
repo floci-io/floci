@@ -1089,6 +1089,11 @@ public class S3Service implements Resettable, ResourceProvider {
                 }
                 throw e;
             }
+            // In a suspended bucket the version or delete marker this write replaces stays as noncurrent.
+            if (prev != null && prev.getVersionId() != null) {
+                prev.setLatest(false);
+                putObjectForAccount(bucketOwnerAccount, versionedKey(bucketName, key, prev.getVersionId()), prev);
+            }
             // Retain archived null history and annotations until publication succeeds.
             // Annotation readers share this bucket monitor, so they cannot observe the
             // replacement with the old annotations while cleanup is pending.
@@ -2468,29 +2473,14 @@ public class S3Service implements Resettable, ResourceProvider {
                     .filter(existing -> isNamedVersion(existing, versionId))
                     .orElse(null);
             if (toDelete == null && "null".equals(versionId)) {
-                // A current null delete marker exists only at the plain latest key.
+                // A current null version or null delete marker exists only at the plain latest key.
                 toDelete = objectStore.get(objectKey(bucketName, key))
                         .filter(candidate -> key.equals(candidate.getKey()))
-                        .filter(candidate -> candidate.isDeleteMarker() && candidate.getVersionId() == null)
-                        .orElse(null);
-            }
-            if (toDelete == null && "null".equals(versionId)) {
-                // Before the null version is archived it exists only at the plain latest key.
-                S3Object existing = objectStore.get(objectKey(bucketName, key))
-                        .filter(candidate -> key.equals(candidate.getKey()))
-                        .filter(candidate -> !candidate.isDeleteMarker())
                         .filter(candidate -> candidate.getVersionId() == null)
                         .orElse(null);
-                if (existing == null) {
+                if (toDelete == null) {
                     return null;
                 }
-                checkLockProtection(existing, bypassGovernance);
-                objectStore.delete(objectKey(bucketName, key));
-                deleteFile(bucketName, key);
-                deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
-                LOG.debugv("Permanently deleted null version: {0}/{1}", bucketName, key);
-                fireNotifications(bucketName, key, removalEvent + ":Delete", existing);
-                return existing;
             }
             if (toDelete != null && !toDelete.isDeleteMarker()) {
                 checkLockProtection(toDelete, bypassGovernance);
