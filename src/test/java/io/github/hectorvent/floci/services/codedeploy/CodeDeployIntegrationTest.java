@@ -409,4 +409,18 @@ class CodeDeployIntegrationTest {
             .statusCode(400)
             .body("__type", containsString("InvalidDeploymentConfigNameException"));
     }
+
+    @Test
+    @Order(19)
+    void listDeploymentGroupsRequiresApplicationName() {
+        given()
+            .header("X-Amz-Target", "CodeDeploy_20141006.ListDeploymentGroups")
+            .contentType(CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ApplicationNameRequiredException"));
+    }
 }

@@ -1195,4 +1195,133 @@ class SchedulerIntegrationTest {
                 .body("__type", containsString("SerializationException"));
         }
     }
+    @Test
+    @Order(90)
+    void listScheduleGroupsPaginatesWithMaxResultsAndNextToken() {
+        given().contentType("application/json").body("{}")
+            .when().post("/schedule-groups/page-group-a")
+            .then().statusCode(200);
+        given().contentType("application/json").body("{}")
+            .when().post("/schedule-groups/page-group-b")
+            .then().statusCode(200);
+
+        String nextToken = given()
+            .queryParam("NamePrefix", "page-group-")
+            .queryParam("MaxResults", 1)
+        .when()
+            .get("/schedule-groups")
+        .then()
+            .statusCode(200)
+            .body("ScheduleGroups", hasSize(1))
+            .body("ScheduleGroups[0].Name", equalTo("page-group-a"))
+            .body("NextToken", notNullValue())
+            .extract().path("NextToken");
+
+        given()
+            .queryParam("NamePrefix", "page-group-")
+            .queryParam("MaxResults", 1)
+            .queryParam("NextToken", nextToken)
+        .when()
+            .get("/schedule-groups")
+        .then()
+            .statusCode(200)
+            .body("ScheduleGroups", hasSize(1))
+            .body("ScheduleGroups[0].Name", equalTo("page-group-b"))
+            .body("NextToken", nullValue());
+    }
+
+    @Test
+    @Order(91)
+    void listSchedulesPaginatesWithMaxResultsAndNextToken() {
+        String schedule = """
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {
+                        "Arn": "arn:aws:sqs:us-east-1:000000000000:queue",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role"
+                    }
+                }
+                """;
+        given().contentType("application/json").body(schedule)
+            .when().post("/schedules/page-sched-a")
+            .then().statusCode(200);
+        given().contentType("application/json").body(schedule)
+            .when().post("/schedules/page-sched-b")
+            .then().statusCode(200);
+
+        String nextToken = given()
+            .queryParam("NamePrefix", "page-sched-")
+            .queryParam("MaxResults", 1)
+        .when()
+            .get("/schedules")
+        .then()
+            .statusCode(200)
+            .body("Schedules", hasSize(1))
+            .body("Schedules[0].Name", equalTo("page-sched-a"))
+            .body("NextToken", notNullValue())
+            .extract().path("NextToken");
+
+        given()
+            .queryParam("NamePrefix", "page-sched-")
+            .queryParam("MaxResults", 1)
+            .queryParam("NextToken", nextToken)
+        .when()
+            .get("/schedules")
+        .then()
+            .statusCode(200)
+            .body("Schedules", hasSize(1))
+            .body("Schedules[0].Name", equalTo("page-sched-b"))
+            .body("NextToken", nullValue());
+    }
+
+    @Test
+    @Order(92)
+    void listSchedulesPagesThroughEqualNamesInDifferentGroups() {
+        String schedule = """
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "GroupName": "%s",
+                    "Target": {
+                        "Arn": "arn:aws:sqs:us-east-1:000000000000:queue",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role"
+                    }
+                }
+                """;
+        for (String group : List.of("dup-group-a", "dup-group-b")) {
+            given().contentType("application/json").body("{}")
+                .when().post("/schedule-groups/" + group)
+                .then().statusCode(200);
+            given().contentType("application/json").body(schedule.formatted(group))
+                .when().post("/schedules/dup-sched")
+                .then().statusCode(200);
+        }
+
+        String nextToken = given()
+            .queryParam("NamePrefix", "dup-sched")
+            .queryParam("MaxResults", 1)
+        .when()
+            .get("/schedules")
+        .then()
+            .statusCode(200)
+            .body("Schedules", hasSize(1))
+            .body("Schedules[0].Name", equalTo("dup-sched"))
+            .body("Schedules[0].GroupName", equalTo("dup-group-a"))
+            .body("NextToken", notNullValue())
+            .extract().path("NextToken");
+
+        given()
+            .queryParam("NamePrefix", "dup-sched")
+            .queryParam("MaxResults", 1)
+            .queryParam("NextToken", nextToken)
+        .when()
+            .get("/schedules")
+        .then()
+            .statusCode(200)
+            .body("Schedules", hasSize(1))
+            .body("Schedules[0].Name", equalTo("dup-sched"))
+            .body("Schedules[0].GroupName", equalTo("dup-group-b"))
+            .body("NextToken", nullValue());
+    }
 }
