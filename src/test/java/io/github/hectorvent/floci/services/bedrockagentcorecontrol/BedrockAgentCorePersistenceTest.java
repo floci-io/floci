@@ -96,31 +96,34 @@ class BedrockAgentCorePersistenceTest {
         Path walAfterCrash = dir.resolve("runtimes-after-crash.wal");
         WalStorage<String, AgentRuntime> writer =
                 new WalStorage<>(dir.resolve("runtimes.json"), wal, ref, 3_600_000L);
-        writer.load();
-        RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
-        BedrockAgentCoreControlController controller = new BedrockAgentCoreControlController(
-                new BedrockAgentCoreControlService(writer, regionResolver), regionResolver, mapper);
-
-        Response response = controller.createAgentRuntime(mock(HttpHeaders.class), """
-                {
-                  "agentRuntimeName": "walAgent",
-                  "agentRuntimeArtifact": {"containerConfiguration": {"containerUri": "x:latest"}},
-                  "networkConfiguration": {"networkMode": "PUBLIC"},
-                  "roleArn": "arn:aws:iam::000000000000:role/agent",
-                  "tags": {"team": "ml"}
-                }""");
-        assertEquals(202, response.getStatus());
-        String id = ((ObjectNode) response.getEntity()).path("agentRuntimeId").asText();
-
-        // A copy of the WAL is what a crash leaves behind: nothing later rewrites the runtime.
-        Files.copy(wal, walAfterCrash);
-        WalStorage<String, AgentRuntime> reader =
-                new WalStorage<>(dir.resolve("runtimes-after-crash.json"), walAfterCrash, ref, 3_600_000L);
-        reader.load();
         try {
-            assertEquals(Map.of("team", "ml"), reader.get("runtime:" + REGION + ":" + id).orElseThrow().getTags());
+            writer.load();
+            RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
+            BedrockAgentCoreControlController controller = new BedrockAgentCoreControlController(
+                    new BedrockAgentCoreControlService(writer, regionResolver), regionResolver, mapper);
+
+            Response response = controller.createAgentRuntime(mock(HttpHeaders.class), """
+                    {
+                      "agentRuntimeName": "walAgent",
+                      "agentRuntimeArtifact": {"containerConfiguration": {"containerUri": "x:latest"}},
+                      "networkConfiguration": {"networkMode": "PUBLIC"},
+                      "roleArn": "arn:aws:iam::000000000000:role/agent",
+                      "tags": {"team": "ml"}
+                    }""");
+            assertEquals(202, response.getStatus());
+            String id = ((ObjectNode) response.getEntity()).path("agentRuntimeId").asText();
+
+            // A copy of the WAL is what a crash leaves behind: nothing later rewrites the runtime.
+            Files.copy(wal, walAfterCrash);
+            WalStorage<String, AgentRuntime> reader =
+                    new WalStorage<>(dir.resolve("runtimes-after-crash.json"), walAfterCrash, ref, 3_600_000L);
+            try {
+                reader.load();
+                assertEquals(Map.of("team", "ml"), reader.get("runtime:" + REGION + ":" + id).orElseThrow().getTags());
+            } finally {
+                reader.shutdown();
+            }
         } finally {
-            reader.shutdown();
             writer.shutdown();
         }
     }

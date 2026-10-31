@@ -13,6 +13,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -80,8 +81,9 @@ class BedrockAgentCoreTaggingIdentityIntegrationTest {
     void aClientTokenReplayKeepsTheTagsOfTheOriginalCreate() {
         String clientToken = "replay-create-runtime-tags-token-0001";
         String firstArn = createRuntimeWithTags(clientToken, "{\"team\":\"ml\"}");
-        createRuntimeWithTags(clientToken, "{\"env\":\"dev\"}");
+        String replayArn = createRuntimeWithTags(clientToken, "{\"env\":\"dev\"}");
 
+        assertEquals(firstArn, replayArn);
         given().when().get("/tags/" + firstArn)
                 .then().statusCode(200)
                 .body("tags.team", equalTo("ml"))
