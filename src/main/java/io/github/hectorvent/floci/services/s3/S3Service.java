@@ -2132,6 +2132,14 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
+    /** Whether the version {@code versionId} names, the current one when it is null, is a delete marker. */
+    public boolean isDeleteMarker(String bucketName, String key, String versionId) {
+        return resolveBucketEntry(bucketName)
+                .flatMap(bucket -> findStoredObject(bucket, bucketName, key, versionId))
+                .map(S3Object::isDeleteMarker)
+                .orElse(false);
+    }
+
     public InputStream openObjectStream(String bucketName, String key, String versionId) {
         if ("null".equals(versionId)) {
             return openObject(bucketName, key, versionId).body();

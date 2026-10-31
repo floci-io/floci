@@ -864,6 +864,14 @@ public class LambdaWebService implements Resettable {
             LOG.debugv("Web function code object s3://{0}/{1} is not readable: {2}", build.bucket, build.key,
                     e.getMessage());
             String object = "s3://" + build.bucket + "/" + build.key;
+            if (s3Service.isDeleteMarker(build.bucket, build.key, build.versionId)) {
+                if (build.versionId != null) {
+                    // AWS fails internally on a version that is a delete marker.
+                    throw new LambdaWebInternalServerException();
+                }
+                throw new AwsException("ValidationException", "The latest version of the S3 object is a delete marker."
+                        + " Upload a new object version or pass an explicit S3ObjectVersion.", 400);
+            }
             if (build.versionId == null) {
                 throw new AwsException("ValidationException", "The specified S3 object does not exist: " + object
                         + ". Verify the object exists in the bucket.", 400);
