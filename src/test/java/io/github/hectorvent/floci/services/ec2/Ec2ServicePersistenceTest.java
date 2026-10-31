@@ -245,7 +245,8 @@ class Ec2ServicePersistenceTest {
         String instanceId = first.runInstances(REGION, "ami-0abcdef1234567890", "t3.micro", 1, 1, null,
                 List.of(), null, null, List.of(), null, null).getInstances().getFirst().getInstanceId();
         Image captured = first.createImage(REGION, instanceId, "provenance-capture", null, true);
-        Image copied = first.copyImage("us-west-2", REGION, captured.getImageId(), "provenance-copy", null);
+        Image copied = first.copyImage("us-west-2", REGION, captured.getImageId(),
+                "provenance-copy", null, false, List.of());
 
         Ec2Service restarted = newService(dir);
 
@@ -352,7 +353,8 @@ class Ec2ServicePersistenceTest {
         assertTrue(restarted.describeImages("us-west-2", List.of(), List.of(),
                 Map.of("source-image-id", List.of("*"))).isEmpty());
 
-        Image copiedNow = restarted.copyImage("us-west-2", REGION, capture, "copied-after-upgrade", null);
+        Image copiedNow = restarted.copyImage("us-west-2", REGION, capture,
+                "copied-after-upgrade", null, false, List.of());
         assertEquals(capture, copiedNow.getCreationSourceImageId());
         assertEquals(REGION, copiedNow.getCreationSourceImageRegion());
         assertEquals("ami-0abcdef1234567890", copiedNow.getSourceImageId());

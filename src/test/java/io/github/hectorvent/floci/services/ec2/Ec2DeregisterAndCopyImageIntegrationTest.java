@@ -300,7 +300,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
         Image source = service.registerImage(EAST, uniqueName("floci-copy-state-src"), null,
                 "arm64", "/dev/xvda", List.of(mapping("/dev/xvda", "snap-" + hex())));
         Image copy = service.copyImage(WEST, EAST, source.getImageId(),
-                uniqueName("floci-copy-state-dst"), "promoted");
+                uniqueName("floci-copy-state-dst"), "promoted", false, List.of());
 
         assertEquals("available", copy.getState());
         assertEquals(source.getOwnerId(), copy.getOwnerId());
@@ -318,7 +318,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
         Image source = service.registerImage(EAST, uniqueName("floci-copy-snap-src"), null,
                 "x86_64", "/dev/xvda", List.of(mapping("/dev/xvda", "snap-" + hex())));
         Image copy = service.copyImage(WEST, EAST, source.getImageId(),
-                uniqueName("floci-copy-snap-dst"), null);
+                uniqueName("floci-copy-snap-dst"), null, false, List.of());
 
         assertNotEquals(snapshotIdOf(source), snapshotIdOf(copy));
         assertEquals(1, service.describeSnapshots(WEST, List.of(snapshotIdOf(copy)), null, Map.of()).size());
@@ -331,7 +331,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
         Image source = service.registerImage(EAST, uniqueName("floci-copy-launch-src"), null,
                 "x86_64", "/dev/xvda", null);
         Image copy = service.copyImage(WEST, EAST, source.getImageId(),
-                uniqueName("floci-copy-launch-dst"), null);
+                uniqueName("floci-copy-launch-dst"), null, false, List.of());
 
         String instanceId = service.runInstances(WEST, copy.getImageId(), "t3.micro",
                 1, 1, null, List.of(), null, null, List.of(), null, null, null)
@@ -382,11 +382,11 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
         // All three are documented as required; SourceRegion in particular has no useful default,
         // since a missing one would silently mean "the destination region".
         assertEquals("MissingParameter", assertThrows(AwsException.class,
-                () -> service.copyImage(WEST, EAST, null, "n", null)).getErrorCode());
+                () -> service.copyImage(WEST, EAST, null, "n", null, false, List.of())).getErrorCode());
         assertEquals("MissingParameter", assertThrows(AwsException.class,
-                () -> service.copyImage(WEST, null, "ami-0abcdef1234567890", "n", null)).getErrorCode());
+                () -> service.copyImage(WEST, null, "ami-0abcdef1234567890", "n", null, false, List.of())).getErrorCode());
         assertEquals("MissingParameter", assertThrows(AwsException.class,
-                () -> service.copyImage(WEST, EAST, "ami-0abcdef1234567890", null, null)).getErrorCode());
+                () -> service.copyImage(WEST, EAST, "ami-0abcdef1234567890", null, null, false, List.of())).getErrorCode());
     }
 
     @Test
@@ -549,7 +549,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
             AtomicInteger duplicates = new AtomicInteger();
             List<Image> created = runConcurrently(RACE_THREADS, () -> {
                 try {
-                    return service.copyImage(WEST, EAST, source.getImageId(), name, null);
+                    return service.copyImage(WEST, EAST, source.getImageId(), name, null, false, List.of());
                 } catch (AwsException e) {
                     assertEquals("InvalidAMIName.Duplicate", e.getErrorCode());
                     duplicates.incrementAndGet();
@@ -608,7 +608,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
         AtomicInteger seq = new AtomicInteger();
         List<Image> copies = runConcurrently(24,
                 () -> service.copyImage(WEST, EAST, source.getImageId(),
-                        prefix + "-" + seq.getAndIncrement(), null));
+                        prefix + "-" + seq.getAndIncrement(), null, false, List.of()));
 
         Set<String> ids = copies.stream().map(Image::getImageId).collect(Collectors.toSet());
         assertEquals(24, ids.size(), "every concurrent copy must get a distinct id");

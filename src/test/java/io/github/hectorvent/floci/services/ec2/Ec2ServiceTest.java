@@ -3308,7 +3308,7 @@ class Ec2ServiceTest {
                 Map.of("block-device-mapping.volume-type", List.of("gp2"))).get(0);
         assertEquals("gp2", found.getBlockDeviceMappings().get(0).getEbs().getVolumeType());
 
-        Image copy = service.copyImage("us-east-1", "us-east-1", found.getImageId(), "copy", null);
+        Image copy = service.copyImage("us-east-1", "us-east-1", found.getImageId(), "copy", null, false, List.of());
         assertEquals("gp2", copy.getBlockDeviceMappings().get(0).getEbs().getVolumeType());
     }
 
@@ -3331,7 +3331,7 @@ class Ec2ServiceTest {
         }
 
         // A copy's root is still backed by a real snapshot record.
-        Image copy = service.copyImage("us-east-1", "us-east-1", catalog.getImageId(), "copy", null);
+        Image copy = service.copyImage("us-east-1", "us-east-1", catalog.getImageId(), "copy", null, false, List.of());
         String copySnapshot = copy.getBlockDeviceMappings().getFirst().getEbs().getSnapshotId();
         assertEquals(1, service.describeSnapshots("us-east-1", List.of(copySnapshot), null, Map.of()).size());
     }

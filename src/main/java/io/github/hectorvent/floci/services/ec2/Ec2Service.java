@@ -8936,11 +8936,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .anyMatch(ebs -> snapshotId.equals(ebs.getSnapshotId()));
     }
 
-    public Image copyImage(String destinationRegion, String sourceRegion, String sourceImageId,
-                           String name, String description) {
-        return copyImage(destinationRegion, sourceRegion, sourceImageId, name, description, false, List.of());
-    }
-
     /**
      * CopyImage. "The copy operation must be initiated in the destination Region", and for a
      * Region-to-Region copy "the destination Region is the Region in which you initiate the copy
