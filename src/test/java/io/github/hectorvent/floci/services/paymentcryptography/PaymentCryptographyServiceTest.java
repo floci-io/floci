@@ -98,8 +98,8 @@ class PaymentCryptographyServiceTest {
 
         assertTrue(!first.getKeyMaterialHex().equals(second.getKeyMaterialHex()),
                 "two keys share their material");
-        assertTrue(!first.getKeyCheckValue().equals(second.getKeyCheckValue()),
-                "two keys share their check value");
+        // The check value is three bytes of the CMAC of the key, so two keys may
+        // legitimately share one. Only the material has to differ.
     }
 
     @Test

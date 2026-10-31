@@ -291,7 +291,7 @@ public class ResolvedServiceCatalog {
                         config.storage().services().paymentcryptography().flushIntervalMs(), null,
                         ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
-                        Set.of("PaymentCryptography."), Set.of("payment-cryptography"),
+                        Set.of("PaymentCryptographyControlPlane."), Set.of("payment-cryptography"),
                         Set.of(), Set.of()),
                 descriptor("secretsmanager", "secretsmanager", config.services().secretsmanager().enabled(), true,
                         "secretsmanager", storageMode(config.storage().services().secretsmanager().mode(), config.storage().mode()),
