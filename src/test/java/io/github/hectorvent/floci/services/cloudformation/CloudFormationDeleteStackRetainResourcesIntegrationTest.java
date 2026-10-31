@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -10,13 +11,13 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
+import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * Verifies {@code DeleteStack}'s {@code RetainResources}: a stack whose delete failed can be deleted
@@ -35,7 +36,7 @@ class CloudFormationDeleteStackRetainResourcesIntegrationTest {
     }
 
     @Test
-    void retainedBucketKeepsItsDataWhileTheRestOfTheStackIsDeleted() throws InterruptedException {
+    void retainedBucketKeepsItsDataWhileTheRestOfTheStackIsDeleted() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String data = "cfn-retain-data-" + suffix;
         String spare = "cfn-retain-spare-" + suffix;
@@ -45,13 +46,10 @@ class CloudFormationDeleteStackRetainResourcesIntegrationTest {
 
         deleteStack(stackName, "DataBucket").then().statusCode(200);
 
-        awaitStackStatus(stackId, "DELETE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "DELETE_COMPLETE");
         given().when().get("/" + data + "/object.txt").then().statusCode(200).body(containsString("kept"));
         bucketRequest(spare).then().statusCode(404);
-        String events = given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "DescribeStackEvents")
-                .formParam("StackName", stackId)
+        String events = cfn("DescribeStackEvents", stackId)
             .when()
                 .post("/")
             .then()
@@ -67,7 +65,7 @@ class CloudFormationDeleteStackRetainResourcesIntegrationTest {
     }
 
     @Test
-    void retainingAResourceTheStackNoLongerHasIsRefused() throws InterruptedException {
+    void retainingAResourceTheStackNoLongerHasIsRefused() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String data = "cfn-retain-gone-data-" + suffix;
         String spare = "cfn-retain-gone-spare-" + suffix;
@@ -83,18 +81,18 @@ class CloudFormationDeleteStackRetainResourcesIntegrationTest {
         given().when().delete("/" + data + "/object.txt");
         given().when().delete("/" + spare + "/object.txt");
         deleteStack(stackName).then().statusCode(200);
-        awaitStackStatus(stackId, "DELETE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "DELETE_COMPLETE");
     }
 
     @Test
-    void retainingIsRefusedUnlessTheStackIsDeleteFailed() throws InterruptedException {
+    void retainingIsRefusedUnlessTheStackIsDeleteFailed() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String bucket = "cfn-retain-live-" + suffix;
         String stackName = "cfn-retain-live-" + suffix;
         String stackId = createStack(stackName, """
             {"Resources": {"Bucket": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "%s"}}}}
             """.formatted(bucket));
-        awaitStackStatus(stackId, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "CREATE_COMPLETE");
 
         assertValidationError(deleteStack(stackName, "Bucket"), "Invalid operation on stack [" + stackId
                 + "]. When you delete a stack, specify which resources to retain only when the stack is in the"
@@ -102,16 +100,13 @@ class CloudFormationDeleteStackRetainResourcesIntegrationTest {
         assertThat(describeStacks(stackId), containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
 
         // An empty list is the one the AWS CLI sends for --retain-resources with no ids: no list at all.
-        given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "DeleteStack")
-                .formParam("StackName", stackName)
+        cfn("DeleteStack", stackName)
                 .formParam("RetainResources", "")
             .when()
                 .post("/")
             .then()
                 .statusCode(200);
-        awaitStackStatus(stackId, "DELETE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "DELETE_COMPLETE");
         bucketRequest(bucket).then().statusCode(404);
     }
 
@@ -136,8 +131,7 @@ class CloudFormationDeleteStackRetainResourcesIntegrationTest {
      * A stack of three buckets whose delete failed on the two holding an object: DataBucket and
      * SpareBucket are DELETE_FAILED, the empty OtherBucket is DELETE_COMPLETE.
      */
-    private static String deleteFailedStack(String stackName, String data, String spare, String other)
-            throws InterruptedException {
+    private static String deleteFailedStack(String stackName, String data, String spare, String other) {
         String stackId = createStack(stackName, """
             {
               "Resources": {
@@ -147,13 +141,13 @@ class CloudFormationDeleteStackRetainResourcesIntegrationTest {
               }
             }
             """.formatted(data, spare, other));
-        awaitStackStatus(stackId, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackId, "CREATE_COMPLETE");
         for (String bucket : new String[] {data, spare}) {
             given().contentType("text/plain").body("kept").when().put("/" + bucket + "/object.txt")
                     .then().statusCode(200);
         }
         deleteStack(stackName).then().statusCode(200);
-        awaitStackStatus(stackId, "DELETE_FAILED");
+        CfnStackWaits.awaitStatus(stackId, "DELETE_FAILED");
         bucketRequest(other).then().statusCode(404);
         return stackId;
     }
@@ -166,10 +160,7 @@ class CloudFormationDeleteStackRetainResourcesIntegrationTest {
     }
 
     private static String createStack(String stackName, String template) {
-        String xml = given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "CreateStack")
-                .formParam("StackName", stackName)
+        String xml = cfn("CreateStack", stackName)
                 .formParam("TemplateBody", template)
             .when()
                 .post("/")
@@ -181,34 +172,15 @@ class CloudFormationDeleteStackRetainResourcesIntegrationTest {
     }
 
     private static Response deleteStack(String stackName, String... retainResources) {
-        RequestSpecification request = given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "DeleteStack")
-                .formParam("StackName", stackName);
+        RequestSpecification request = cfn("DeleteStack", stackName);
         for (int i = 0; i < retainResources.length; i++) {
             request.formParam("RetainResources.member." + (i + 1), retainResources[i]);
         }
         return request.when().post("/");
     }
 
-    private static void awaitStackStatus(String stackId, String status) throws InterruptedException {
-        String xml = "";
-        long deadline = System.currentTimeMillis() + 10_000;
-        while (System.currentTimeMillis() < deadline) {
-            xml = describeStacks(stackId);
-            if (xml.contains("<StackStatus>" + status + "</StackStatus>")) {
-                return;
-            }
-            Thread.sleep(50);
-        }
-        fail("stack " + stackId + " never reached " + status + ": " + xml);
-    }
-
     private static String describeStacks(String stackId) {
-        return given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stackId)
+        return cfn("DescribeStacks", stackId)
             .when()
                 .post("/")
             .then()
