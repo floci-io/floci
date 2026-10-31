@@ -851,6 +851,7 @@ class RedshiftServiceTest {
     private AccountAwareStorageBackend<ClusterParameterGroup> parameterGroupBackend;
     private AccountAwareStorageBackend<ClusterSubnetGroup> subnetGroupBackend;
     private AccountAwareStorageBackend<SnapshotCopyGrant> snapshotCopyGrantBackend;
+    private AccountAwareStorageBackend<Snapshot> snapshotCopyBackend;
     private AccountAwareStorageBackend<SnapshotSchedule> snapshotScheduleBackend;
     private AccountAwareStorageBackend<Integration> integrationBackend;
     private RedshiftContainerManager cm;
@@ -874,6 +875,7 @@ class RedshiftServiceTest {
         parameterGroupBackend = mock(AccountAwareStorageBackend.class);
         subnetGroupBackend = mock(AccountAwareStorageBackend.class);
         snapshotCopyGrantBackend = mock(AccountAwareStorageBackend.class);
+        snapshotCopyBackend = mock(AccountAwareStorageBackend.class);
         snapshotScheduleBackend = mock(AccountAwareStorageBackend.class);
         integrationBackend = mock(AccountAwareStorageBackend.class);
         cm = mock(RedshiftContainerManager.class);
@@ -905,6 +907,7 @@ class RedshiftServiceTest {
         when(sf.<ClusterParameterGroup>create(eq("redshift"), eq("redshift-parameter-groups.json"), any())).thenReturn(parameterGroupBackend);
         when(sf.<ClusterSubnetGroup>create(eq("redshift"), eq("redshift-subnet-groups.json"), any())).thenReturn(subnetGroupBackend);
         when(sf.<SnapshotCopyGrant>create(eq("redshift"), eq("redshift-snapshot-copy-grants.json"), any())).thenReturn(snapshotCopyGrantBackend);
+        when(sf.<Snapshot>create(eq("redshift"), eq("redshift-snapshot-copies.json"), any())).thenReturn(snapshotCopyBackend);
         when(sf.<Integration>create(eq("redshift"), eq("redshift-integrations.json"), any())).thenReturn(integrationBackend);
         when(sf.<SnapshotSchedule>create(eq("redshift"), eq("redshift-snapshot-schedules.json"), any())).thenReturn(snapshotScheduleBackend);
         when(clusterBackend.accountId()).thenReturn("111111111111");

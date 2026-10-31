@@ -214,6 +214,8 @@ floci:
       automated-snapshots-enabled: false
       cloudwatch-metrics-enabled: true
       snapshot-sweep-interval-seconds: 60
+      snapshot-copy-enabled: false
+      snapshot-copy-sweep-interval-seconds: 60
       default-port: 5439
       image-version: postgres:15-alpine
       poll-interval-ms: 1000
