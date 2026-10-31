@@ -12,6 +12,8 @@ import java.util.Locale;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
@@ -35,7 +37,8 @@ class S3DeleteMarkerReadIntegrationTest {
         }
         given().header("Range", "bytes=0-0").when().get("/" + bucket + "/key").then().statusCode(404)
                 .header("x-amz-delete-marker", "true")
-                .header("x-amz-version-id", marker);
+                .header("x-amz-version-id", marker)
+                .body("Error.Key", equalTo("key"));
         given().header("If-Match", "\"stale\"").when().get("/" + bucket + "/key").then().statusCode(404)
                 .header("x-amz-delete-marker", "true")
                 .header("x-amz-version-id", marker);
@@ -74,7 +77,8 @@ class S3DeleteMarkerReadIntegrationTest {
                 .header("Allow", "DELETE")
                 .body(allOf(containsString("<Code>MethodNotAllowed</Code>"),
                         containsString("<Method>GET</Method>"),
-                        containsString("<ResourceType>DeleteMarker</ResourceType>")));
+                        containsString("<ResourceType>DeleteMarker</ResourceType>"),
+                        not(containsString("<Key>"))));
         given().when().head(path).then().statusCode(405)
                 .header("x-amz-delete-marker", "true")
                 .header("x-amz-version-id", versionId)

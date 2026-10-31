@@ -13,7 +13,7 @@ final class S3DeleteMarkerException extends AwsException {
     private final Instant lastModified;
 
     S3DeleteMarkerException(S3Object marker) {
-        super("NoSuchKey", "The specified key does not exist.", 404);
+        super("NoSuchKey", "The specified key does not exist.", 404, Map.of("Key", marker.getKey()));
         this.versionId = marker.getVersionId() != null ? marker.getVersionId() : "null";
         this.lastModified = marker.getLastModified();
     }
