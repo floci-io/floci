@@ -117,6 +117,7 @@ class S3BlockPublicAccessEnforcementIntegrationTest {
     @Test
     void ignorePublicAclsWithholdsAnonymousListBucketOnAPublicBucketAcl() {
         String bucket = createBucket();
+        deleteBucketPublicAccessBlock(bucket);
         putObject(bucket, "object.txt");
         given().filter(OWNER).header("x-amz-acl", "public-read")
                 .when().put("/" + bucket + "?acl")

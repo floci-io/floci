@@ -111,6 +111,29 @@ class S3DefaultPublicAccessBlockTest {
         assertEquals(true, s3Service.getBucketPolicy("deleted-policy").contains("GetObject"));
     }
 
+    @Test
+    void aPublicBucketAclIsRefusedOnAnObjectWriterBucketNobodyConfigured() {
+        s3Service.createBucket("object-writer", "us-east-1");
+        s3Service.putBucketOwnershipControls("object-writer",
+                "<OwnershipControls><Rule><ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>");
+
+        AwsException e = assertThrows(AwsException.class, () -> s3Service.putBucketAcl("object-writer", null,
+                "public-read", null, null, null, null, null));
+
+        assertEquals("AccessDenied", e.getErrorCode());
+        assertEquals(403, e.getHttpStatus());
+    }
+
+    @Test
+    void aPublicBucketAclIsAcceptedOnceTheConfigurationIsDeleted() {
+        s3Service.createBucket("object-writer-open", "us-east-1");
+        s3Service.putBucketOwnershipControls("object-writer-open",
+                "<OwnershipControls><Rule><ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>");
+        s3Service.deletePublicAccessBlock("object-writer-open");
+
+        s3Service.putBucketAcl("object-writer-open", null, "public-read", null, null, null, null, null);
+    }
+
     private static String publicPolicy(String bucket) {
         return policyFor("\"*\"", bucket);
     }
