@@ -1628,7 +1628,9 @@ public class RedshiftService implements ManagedSecretRotator {
         rejectPausedCluster(cluster);
         validateSnapshotIdentifier(snapshotIdentifier);
         String clusterIdentifier = cluster.getClusterIdentifier();
-        if ((scheduledTime == null ? snapshots.get(snapshotIdentifier)
+        boolean shadowedByCopy = scheduledTime == null
+                && snapshotCopies.get(copyKey(regionResolver.getRegion(), snapshotIdentifier)).isPresent();
+        if (shadowedByCopy || (scheduledTime == null ? snapshots.get(snapshotIdentifier)
                 : snapshots.getForAccount(accountId, snapshotIdentifier)).isPresent()) {
             throw new AwsException("ClusterSnapshotAlreadyExists", "Snapshot " + snapshotIdentifier + " already exists", 400);
         }
@@ -2420,6 +2422,11 @@ public class RedshiftService implements ManagedSecretRotator {
             throw new AwsException("UnknownSnapshotCopyRegionFault",
                     "Unknown destination region: " + destinationRegion, 404);
         }
+        if (destinationRegion.equals(snapshotRegion(cluster))) {
+            // A copy in the cluster's own Region would shadow the snapshots it was copied from.
+            throw new AwsException("UnknownSnapshotCopyRegionFault",
+                    "The destination region must differ from the cluster's region: " + destinationRegion, 404);
+        }
         int retention = retentionPeriod == null ? DEFAULT_SNAPSHOT_COPY_RETENTION_DAYS : retentionPeriod;
         int manualRetention = manualRetentionPeriod == null
                 ? RETAIN_MANUAL_SNAPSHOTS_INDEFINITELY : manualRetentionPeriod;
@@ -2710,6 +2717,11 @@ public class RedshiftService implements ManagedSecretRotator {
                     || source.getCopiedToRegions().contains(destination)) {
                 return null;
             }
+            boolean stillCopying = clusters.getForAccount(accountId, cluster.getClusterIdentifier())
+                    .map(current -> destination.equals(current.getSnapshotCopyDestinationRegion())).orElse(false);
+            if (!stillCopying) {
+                return null;
+            }
             String key = copyKey(destination, snapshotId);
             Snapshot existing = snapshotCopies.getForAccount(accountId, key).orElse(null);
             if (existing != null && Objects.equals(source.getSnapshotCreateTime(),
@@ -2734,6 +2746,8 @@ public class RedshiftService implements ManagedSecretRotator {
                     return null;
                 });
             } catch (RuntimeException e) {
+                // The records change in memory before they are flushed, so undo them before the dump goes.
+                rollbackSnapshotCopy(accountId, key, existing, source);
                 deleteCopyDump(accountId, dump == null ? null : dump.toString());
                 throw e;
             }
@@ -2743,6 +2757,22 @@ public class RedshiftService implements ManagedSecretRotator {
             }
             return null;
         });
+    }
+
+    private void rollbackSnapshotCopy(String accountId, String key, Snapshot previousCopy, Snapshot source) {
+        try {
+            mutate(() -> {
+                if (previousCopy == null) {
+                    snapshotCopies.deleteAllAtomicallyForAccounts(Map.of(accountId, Set.of(key)));
+                } else {
+                    snapshotCopies.putAllAtomicallyForAccount(accountId, Map.of(key, previousCopy));
+                }
+                snapshots.putAllAtomicallyForAccount(accountId, Map.of(source.getSnapshotIdentifier(), source));
+                return null;
+            });
+        } catch (RuntimeException rollbackFailure) {
+            LOG.warnv(rollbackFailure, "Could not undo the failed copy of snapshot {0} to {1}", source.getSnapshotIdentifier(), key);
+        }
     }
 
     private Snapshot buildSnapshotCopy(String accountId, Snapshot source, Cluster cluster, Path dump) {
@@ -2813,14 +2843,16 @@ public class RedshiftService implements ManagedSecretRotator {
             if (Thread.currentThread().isInterrupted()) {
                 return;
             }
-            if (!isSnapshotCopyExpired(entry.accountId(), entry.key(), entry.value(), now)) {
-                continue;
-            }
             try {
                 withResourceLock(entry.accountId(), "snapshot", entry.value().getSnapshotIdentifier(), () -> mutate(() -> {
+                    // Read again under the lock: the scanned copy may have been replaced by a newer one meanwhile.
+                    Snapshot current = snapshotCopies.getForAccount(entry.accountId(), entry.key()).orElse(null);
+                    if (current == null || !isSnapshotCopyExpired(entry.accountId(), entry.key(), current, now)) {
+                        return null;
+                    }
                     snapshotCopies.deleteAllAtomicallyForAccounts(Map.of(entry.accountId(), Set.of(entry.key())));
                     snapshotCopies.flush();
-                    deleteCopyDump(entry.accountId(), entry.value().getSqlDump());
+                    deleteCopyDump(entry.accountId(), current.getSqlDump());
                     return null;
                 }));
             } catch (RuntimeException e) {

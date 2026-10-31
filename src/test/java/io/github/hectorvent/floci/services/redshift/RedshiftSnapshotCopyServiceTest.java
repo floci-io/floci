@@ -187,6 +187,34 @@ class RedshiftSnapshotCopyServiceTest {
                 .getSqlDump()).startsWith(directory.resolve("redshift-dumps").resolve(ACCOUNT)));
     }
 
+    @Test
+    void enablingCopyIntoTheClustersOwnRegionIsRefused() {
+        Fixture fixture = fixture();
+        Cluster cluster = seedCluster(fixture, "warehouse", null);
+        cluster.setSnapshotCopyDestinationRegion(null);
+        fixture.clusters().putForAccount(ACCOUNT, "warehouse", cluster);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> fixture.service(SOURCE).enableSnapshotCopy("warehouse", SOURCE, null, null, null));
+        assertEquals("UnknownSnapshotCopyRegionFault", refused.getErrorCode());
+
+        Cluster enabled = fixture.service(SOURCE).enableSnapshotCopy("warehouse", DESTINATION, null, null, null);
+        assertNotNull(enabled.getSnapshotCopyEnabledAt());
+    }
+
+    @Test
+    void aNewSnapshotCannotTakeTheIdentifierOfACopyInThatRegion() {
+        Fixture fixture = fixture();
+        seedCluster(fixture, "warehouse", Instant.now().minusSeconds(60));
+        fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
+        fixture.service(SOURCE).runSnapshotCopies(Instant.now());
+        fixture.service(SOURCE).deleteSnapshot("nightly");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> fixture.service(DESTINATION).createSnapshot("nightly", "warehouse"));
+        assertEquals("ClusterSnapshotAlreadyExists", refused.getErrorCode());
+    }
+
     private long dumpFilesUnderCopies() {
         Path root = directory.resolve("redshift-dumps").resolve(ACCOUNT).resolve("copies");
         if (!Files.isDirectory(root)) {
