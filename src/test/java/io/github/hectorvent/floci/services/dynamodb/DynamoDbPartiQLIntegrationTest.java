@@ -576,6 +576,29 @@ class DynamoDbPartiQLIntegrationTest {
             .body("Responses[0].Error.Message", equalTo("Unsupported operation: IsType"));
     }
 
+    @Test
+    @Order(28)
+    void aStatementTheLexerCannotReadIsRefusedWithNothingAfterTheColon() {
+        String notWellFormed = "Statement wasn't well formed, can't be processed: ";
+
+        statement("SELECT * FROM \"" + TABLE + "\" WHERE pk = 'x' # note")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(notWellFormed));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"UPDATE \\"%1$s\\" SET a = 1 WHERE pk = 'x'"},
+                 {"Statement":"UPDATE \\"%1$s\\" SET a = 1 WHERE pk = 'y"}]}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[1]: " + notWellFormed));
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":"SELECT * FROM \\"%s\\" WHERE pk = 'x' ~"}]}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(notWellFormed));
+    }
+
     private static void putItem(String pk, String attributes) {
         request("DynamoDB_20120810.PutItem", """
                 {"TableName":"%s","Item":{"pk":{"S":"%s"},%s}}

@@ -268,7 +268,7 @@ public class DynamoDbPartiQLParser {
         int i = 0, n = input.length();
         while (i < n) {
             char c = input.charAt(i);
-            if (Character.isWhitespace(c)) { i++; continue; }
+            if (isSpace(c)) { i++; continue; }
             if (input.startsWith("--", i)) {
                 while (i < n && input.charAt(i) != '\n' && input.charAt(i) != '\r') i++;
                 continue;
@@ -288,6 +288,9 @@ public class DynamoDbPartiQLParser {
                     text.append(input.charAt(i));
                     i += input.charAt(i) == '\'' ? 2 : 1;
                 }
+                if (i >= n) {
+                    throw validationEx(NOT_WELL_FORMED);
+                }
                 tokens.add(new Token(TType.STRING, text.toString()));
                 i++;
                 continue;
@@ -295,6 +298,9 @@ public class DynamoDbPartiQLParser {
             if (c == '"') {
                 int start = ++i;
                 while (i < n && input.charAt(i) != '"') i++;
+                if (i >= n) {
+                    throw validationEx(NOT_WELL_FORMED);
+                }
                 tokens.add(new Token(TType.IDENT, input.substring(start, i), start - 1));
                 i++;
                 continue;
@@ -329,7 +335,7 @@ public class DynamoDbPartiQLParser {
                 int start = i;
                 if (c == '-') i++;
                 boolean pointSeen = false;
-                while (i < n && (Character.isDigit(input.charAt(i)) || (input.charAt(i) == '.' && !pointSeen))) {
+                while (i < n && (isDigit(input.charAt(i)) || (input.charAt(i) == '.' && !pointSeen))) {
                     pointSeen |= input.charAt(i) == '.';
                     i++;
                 }
@@ -342,9 +348,9 @@ public class DynamoDbPartiQLParser {
             if (c == '.') { tokens.add(new Token(TType.DOT, ".")); i++; continue; }
             if (c == '+') { tokens.add(new Token(TType.PLUS, "+")); i++; continue; }
             if (c == '-') { tokens.add(new Token(TType.MINUS, "-")); i++; continue; }
-            if (Character.isLetter(c) || c == '_') {
+            if (startsName(c)) {
                 int start = i;
-                while (i < n && (Character.isLetterOrDigit(input.charAt(i)) || input.charAt(i) == '_')) i++;
+                while (i < n && (startsName(input.charAt(i)) || isDigit(input.charAt(i)))) i++;
                 String word = input.substring(start, i);
                 TType type = switch (word.toUpperCase()) {
                     case "SELECT"        -> TType.SELECT;
@@ -380,7 +386,7 @@ public class DynamoDbPartiQLParser {
                 tokens.add(new Token(type, word, start));
                 continue;
             }
-            throw validationEx("Unexpected character '" + c + "' in PartiQL statement");
+            throw validationEx(NOT_WELL_FORMED);
         }
         tokens.add(new Token(TType.EOF, ""));
         return tokens;
@@ -395,10 +401,10 @@ public class DynamoDbPartiQLParser {
         if (digits < n && (input.charAt(digits) == '+' || input.charAt(digits) == '-')) {
             digits++;
         }
-        if (digits >= n || !Character.isDigit(input.charAt(digits))) {
+        if (digits >= n || !isDigit(input.charAt(digits))) {
             return i;
         }
-        while (digits < n && Character.isDigit(input.charAt(digits))) {
+        while (digits < n && isDigit(input.charAt(digits))) {
             digits++;
         }
         return digits;
@@ -408,7 +414,7 @@ public class DynamoDbPartiQLParser {
     // point is a path step and a minus is an operator.
     private static boolean startsNumber(String input, int i, List<Token> tokens) {
         char c = input.charAt(i);
-        if (Character.isDigit(c)) {
+        if (isDigit(c)) {
             return true;
         }
         if (endsOperand(tokens)) {
@@ -422,8 +428,22 @@ public class DynamoDbPartiQLParser {
 
     private static boolean startsUnsignedNumber(String input, int i) {
         char c = input.charAt(i);
-        return Character.isDigit(c)
-                || (c == '.' && i + 1 < input.length() && Character.isDigit(input.charAt(i + 1)));
+        return isDigit(c)
+                || (c == '.' && i + 1 < input.length() && isDigit(input.charAt(i + 1)));
+    }
+
+    // DynamoDB's PartiQL lexer reads only these as spaces, digits and name characters, all ASCII.
+    // It refuses any other character outside a string or a quoted name.
+    private static boolean isSpace(char c) {
+        return c == ' ' || ('\t' <= c && c <= '\r');
+    }
+
+    private static boolean isDigit(char c) {
+        return '0' <= c && c <= '9';
+    }
+
+    private static boolean startsName(char c) {
+        return ('a' <= c && c <= 'z') || ('A' <= c && c <= 'Z') || c == '_' || c == '$';
     }
 
     // DynamoDB reads the exponent as a 32-bit integer and refuses a literal whose exponent,
