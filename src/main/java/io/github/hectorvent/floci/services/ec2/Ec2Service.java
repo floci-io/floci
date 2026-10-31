@@ -12308,8 +12308,49 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     // ─── NAT Gateways ─────────────────────────────────────────────────────────
 
+    /**
+     * Refuses a regional NAT gateway, which spans its VPC instead of sitting in one subnet. Floci
+     * creates only zonal gateways, so it refuses the request before looking at the subnet, which a
+     * regional request does not name. A value that is neither mode fails as AWS fails it, rather
+     * than creating a zonal gateway.
+     */
+    public static void requireZonalNatGateway(String availabilityMode) {
+        requireParameterValue("AvailabilityMode", isSet(availabilityMode) ? availabilityMode : null,
+                "zonal", "regional");
+        if ("regional".equals(availabilityMode)) {
+            throw new AwsException("UnsupportedOperation",
+                    "NAT gateways with AvailabilityMode regional are not supported.", 400);
+        }
+    }
+
+    /**
+     * Refuses the secondary-address parameters. Floci gives a NAT gateway its primary address only,
+     * so a gateway created with them would report fewer addresses than it was asked for.
+     */
+    public static void requireNoSecondaryNatGatewayAddresses(List<String> secondaryAllocationIds,
+                                                             List<String> secondaryPrivateIpAddresses,
+                                                             String secondaryPrivateIpAddressCount) {
+        if (!secondaryAllocationIds.isEmpty() || !secondaryPrivateIpAddresses.isEmpty()
+                || isSet(secondaryPrivateIpAddressCount)) {
+            throw new AwsException("UnsupportedOperation",
+                    "NAT gateways with secondary addresses are not supported.", 400);
+        }
+    }
+
     public NatGateway createNatGateway(String region, String subnetId, String allocationId,
                                        String connectivityType, List<Tag> natGatewayTags) {
+        return createNatGateway(region, subnetId, allocationId, connectivityType, null, natGatewayTags);
+    }
+
+    /**
+     * @param privateIpAddress PrivateIpAddress: the private address of the gateway's interface, or
+     *                         null to let the subnet pick one. It is checked as RunInstances checks
+     *                         its own: an assignable address of the subnet that no other resource
+     *                         holds.
+     */
+    public NatGateway createNatGateway(String region, String subnetId, String allocationId,
+                                       String connectivityType, String privateIpAddress,
+                                       List<Tag> natGatewayTags) {
         ensureDefaultResources(region);
         Subnet subnet = requireSubnet(region, subnetId);
         boolean privateGateway = "private".equalsIgnoreCase(connectivityType);
@@ -12323,6 +12364,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (isSet(allocationId)) {
             getRequiredAddress(region, allocationId);
         }
+        String requestedPrivateIp = isSet(privateIpAddress)
+                ? validateRequestedPrivateIp(privateIpAddress, subnet, null, 1) : null;
 
         NatGateway natGateway = new NatGateway();
         natGateway.setNatGatewayId("nat-" + randomHex(17));
@@ -12348,8 +12391,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 }
             }
             if (!"failed".equals(natGateway.getState())) {
-                NatGatewayAddress gatewayAddress =
-                        natGatewayAddress(region, natGateway.getNatGatewayId(), subnetId, allocationId);
+                NatGatewayAddress gatewayAddress = natGatewayAddress(region, natGateway.getNatGatewayId(),
+                        subnetId, allocationId, requestedPrivateIp);
                 natGateway.getNatGatewayAddresses().add(gatewayAddress);
                 // The Elastic IP is now held by the gateway's interface, so DescribeAddresses has to
                 // say so: an allocation that looks free is one Terraform and the console would offer
@@ -12378,12 +12421,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * aws_nat_gateway exposes all three as resource outputs (public_ip, private_ip,
      * network_interface_id), and Gruntwork's VPC modules re-export nat_gateway_public_ips, so an
      * address carrying only an allocation id propagates empty values into dependent modules.
+     * Callers must hold {@link #privateIpAllocationLock}.
+     *
+     * @param requestedPrivateIp the request's PrivateIpAddress, already checked by
+     *                           {@link #validateRequestedPrivateIp}, or null
      */
     private NatGatewayAddress natGatewayAddress(String region, String natGatewayId, String subnetId,
-                                                String allocationId) {
+                                                String allocationId, String requestedPrivateIp) {
         NatGatewayAddress address = new NatGatewayAddress();
         address.setNetworkInterfaceId(eniIdFromSeed("nat|" + natGatewayId));
-        address.setPrivateIp(assignPrivateIp(region, subnetId));
+        if (requestedPrivateIp != null) {
+            claimRequestedPrivateIp(region, subnetId, requestedPrivateIp);
+            address.setPrivateIp(requestedPrivateIp);
+        } else {
+            address.setPrivateIp(assignPrivateIp(region, subnetId));
+        }
         if (isSet(allocationId)) {
             address.setAllocationId(allocationId);
             address.setAssociationId("eipassoc-" + randomHex(17));

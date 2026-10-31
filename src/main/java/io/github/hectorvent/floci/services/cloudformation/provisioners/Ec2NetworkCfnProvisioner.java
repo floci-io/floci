@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
+import io.github.hectorvent.floci.services.ec2.model.NatGatewayAddress;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.Route;
 import io.github.hectorvent.floci.services.ec2.model.RouteTable;
@@ -374,6 +375,15 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
                 .findFirst().orElse(null), "NatGatewayNotFound", natGatewayId);
     }
 
+    /** Whether the gateway's primary address is {@code privateIpAddress}, both in canonical form. */
+    private static boolean holdsPrivateIp(NatGateway nat, String privateIpAddress) {
+        return nat.getNatGatewayAddresses().stream()
+                .filter(NatGatewayAddress::isPrimary)
+                .map(NatGatewayAddress::getPrivateIp)
+                .filter(Objects::nonNull)
+                .anyMatch(ip -> CidrCanonicalizer.sameBlock(ip + "/32", privateIpAddress + "/32"));
+    }
+
     private ManagedPrefixList findPrefixList(String prefixListId, String region) {
         return tolerateNotFound(() -> ec2Service.describeManagedPrefixLists(region, List.of(prefixListId), Map.of())
                 .stream().findFirst().orElse(null), "InvalidPrefixListID.NotFound", prefixListId);
@@ -587,8 +597,13 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionNatGateway(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Ec2Service.requireZonalNatGateway(ctx.resolveOptional(props, "AvailabilityMode"));
+        Ec2Service.requireNoSecondaryNatGatewayAddresses(ctx.resolveStringList(props, "SecondaryAllocationIds"),
+                ctx.resolveStringList(props, "SecondaryPrivateIpAddresses"),
+                ctx.resolveOptional(props, "SecondaryPrivateIpAddressCount"));
         String subnetId = ctx.resolveOptional(props, "SubnetId");
         String allocationId = ctx.resolveOptional(props, "AllocationId");
+        String privateIpAddress = ctx.resolveOrDefault(props, "PrivateIpAddress", null);
         require(NAT_GATEWAY, "SubnetId", subnetId);
         // ConnectivityType defaults to public in the schema; a public gateway needs an EIP, a
         // private one must not have one, as AWS validates.
@@ -600,14 +615,17 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         if ("private".equals(connectivityType) && allocationId != null && !allocationId.isBlank()) {
             throw new AwsException("ValidationError", "AWS::EC2::NatGateway with ConnectivityType private cannot have an AllocationId", 400);
         }
-        // SubnetId, AllocationId and ConnectivityType are createOnly: the same triple keeps the
-        // gateway, a change replaces it.
+        // SubnetId, AllocationId, ConnectivityType and PrivateIpAddress are createOnly: the same
+        // values keep the gateway, a change replaces it. With no PrivateIpAddress the gateway keeps
+        // the address it was given.
         NatGateway existing = ctx.isUpdate() ? findNatGateway(ctx.priorPhysicalId(), ctx.region()) : null;
         boolean reuse = existing != null && Objects.equals(subnetId, existing.getSubnetId())
                 && Objects.equals(allocationId, existing.getAllocationId())
-                && connectivityType.equalsIgnoreCase(existing.getConnectivityType() == null ? "public" : existing.getConnectivityType());
+                && connectivityType.equalsIgnoreCase(existing.getConnectivityType() == null ? "public" : existing.getConnectivityType())
+                && (privateIpAddress == null || holdsPrivateIp(existing, privateIpAddress));
         NatGateway nat = reuse ? existing
-                : ec2Service.createNatGateway(ctx.region(), subnetId, allocationId, connectivityType, tagList(props, ctx));
+                : ec2Service.createNatGateway(ctx.region(), subnetId, allocationId, connectivityType, privateIpAddress,
+                        tagList(props, ctx));
         if ("failed".equals(nat.getState())) {
             // The resource fails and its failed gateway is not left behind.
             ec2Service.deleteNatGateway(ctx.region(), nat.getNatGatewayId());
@@ -618,6 +636,12 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         }
         r.setPhysicalId(nat.getNatGatewayId());
         r.getAttributes().put("NatGatewayId", nat.getNatGatewayId());
+        nat.getNatGatewayAddresses().stream()
+                .filter(NatGatewayAddress::isPrimary)
+                .map(NatGatewayAddress::getNetworkInterfaceId)
+                .filter(Objects::nonNull)
+                .findFirst()
+                .ifPresent(eniId -> r.getAttributes().put("EniId", eniId));
         // The gateway holds its subnet and Elastic IP until it is deleted; an EIP's physical id is
         // its public IP.
         if (nat.getSubnetId() != null) {

@@ -4451,11 +4451,15 @@ public class Ec2QueryHandler {
     // ─── NAT Gateway handlers ─────────────────────────────────────────────────
 
     private Response handleCreateNatGateway(MultivaluedMap<String, String> p, String region) {
+        Ec2Service.requireZonalNatGateway(p.getFirst("AvailabilityMode"));
+        Ec2Service.requireNoSecondaryNatGatewayAddresses(getList(p, "SecondaryAllocationId"),
+                getList(p, "SecondaryPrivateIpAddress"), p.getFirst("SecondaryPrivateIpAddressCount"));
         NatGateway natGateway = service.createNatGateway(
                 region,
                 p.getFirst("SubnetId"),
                 p.getFirst("AllocationId"),
                 p.getFirst("ConnectivityType"),
+                p.getFirst("PrivateIpAddress"),
                 parseTagsForResource(p, "natgateway"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateNatGatewayResponse", AwsNamespaces.EC2)
@@ -5595,7 +5599,10 @@ public class Ec2QueryHandler {
                 .elem("state", natGateway.getState())
                 .elem("failureCode", natGateway.getFailureCode())
                 .elem("failureMessage", natGateway.getFailureMessage())
-                .elem("connectivityType", natGateway.getConnectivityType());
+                .elem("connectivityType", natGateway.getConnectivityType())
+                // Every gateway Floci creates sits in one subnet. The Terraform AWS provider reads
+                // network_interface_id, private_ip and public_ip only from a gateway reported as zonal.
+                .elem("availabilityMode", "zonal");
         if (natGateway.getCreateTime() != null) {
             xml.elem("createTime", ISO_FMT.format(natGateway.getCreateTime()));
         }

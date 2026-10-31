@@ -749,6 +749,21 @@ Route table ids follow the live API's own inconsistency: an id that does not exi
 | DescribeNatGateways | Lists or returns stored NAT gateways. |
 | DeleteNatGateway | Deletes a NAT gateway record. |
 
+Every NAT gateway Floci creates is zonal: it sits in the subnet it was created in, and responses
+report `availabilityMode` as `zonal`. Regional NAT gateways are not supported: `CreateNatGateway` with
+`AvailabilityMode=regional` fails with `UnsupportedOperation`, and an `AWS::EC2::NatGateway` whose
+`AvailabilityMode` is `regional` fails with the reason `NAT gateways with AvailabilityMode regional
+are not supported.`
+
+`PrivateIpAddress` gives the gateway's interface that address instead of the next free one, on
+`CreateNatGateway` and on `AWS::EC2::NatGateway`, and `DescribeNetworkInterfaces` and
+`DescribeAddresses` report the same address. It follows the `RunInstances` rules: an address outside
+the subnet's CIDR, or one of the five AWS reserves, fails with `InvalidParameterValue`, and one that
+an instance, network interface, NAT gateway or interface endpoint already holds fails with
+`InvalidIPAddress.InUse`. A gateway has its primary address only, so the secondary-address
+parameters (`SecondaryAllocationIds`, `SecondaryPrivateIpAddresses` and
+`SecondaryPrivateIpAddressCount`) fail with `UnsupportedOperation` before anything is created.
+
 ### Capacity Reservations
 
 | Action | Description |
