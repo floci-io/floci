@@ -80,6 +80,37 @@ as a string. Rules of the form `(eq $attribute "value")` are
 encoded; a profile with any other rule is returned unchanged, as JSON, and Floci logs a warning, as it does for a
 caller that does not accept Ion.
 
+## CloudFormation
+
+Floci provisions these resource types:
+
+- `AWS::AppConfig::Application`
+- `AWS::AppConfig::Environment`
+- `AWS::AppConfig::ConfigurationProfile`
+- `AWS::AppConfig::DeploymentStrategy`
+
+`Ref` returns the AppConfig ID of each, which `Fn::GetAtt` also returns as `ApplicationId`, `EnvironmentId`,
+`ConfigurationProfileId` and `Id`. A configuration profile's `KmsKeyArn` is not set.
+
+An update that changes only mutable properties keeps the ID and changes the resource in place: the name and
+description of an application, environment or configuration profile, an environment's `Monitors`, an application's
+`Tags`, and a deployment strategy's description, duration, final bake time, growth factor and growth type. A property
+the template drops is cleared, or set back to its default (`FinalBakeTimeInMinutes` 0, `GrowthType` `LINEAR`). A
+change to a createOnly property (`ApplicationId` on an environment or configuration profile, `LocationUri` or `Type`
+on a configuration profile, `Name` or `ReplicateTo` on a deployment strategy) replaces the resource: the new one is
+created and the old one is deleted once the stack update completes. A failed stack update puts back what it changed in
+place and deletes what it created.
+
+Deleting an environment deletes its deployments, and deleting a configuration profile deletes its hosted configuration
+versions. Floci keeps tags on applications only, so `Tags` on the other three types are accepted and not stored, as
+`TagResource` treats them; so are a configuration profile's `KmsKeyIdentifier`, `RetrievalRoleArn` and `Validators`,
+and `DeletionProtectionCheck`. `ReplicateTo: SSM_DOCUMENT` writes no SSM document.
+`AWS::AppConfig::HostedConfigurationVersion`, `Deployment`, `Extension` and `ExtensionAssociation` are not provisioned.
+
+A stack created before Floci provisioned these types holds stubs for them, and an update creates the real resource in
+place of a stub only when it changes that resource. An update that changes an environment or configuration profile of
+a stubbed application therefore fails with `ResourceNotFoundException` unless it changes the application too.
+
 ## Configuration
 
 | Variable | Default | Description |

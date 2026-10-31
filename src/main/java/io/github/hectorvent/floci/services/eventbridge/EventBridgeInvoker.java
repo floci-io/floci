@@ -450,7 +450,9 @@ public class EventBridgeInvoker {
     }
 
     private static String toPointer(String jsonPath) {
-        return (jsonPath.startsWith("$") ? jsonPath.substring(1) : jsonPath).replace('.', '/');
+        return (jsonPath.startsWith("$") ? jsonPath.substring(1) : jsonPath)
+                .replace("~", "~0").replace("/", "~1")
+                .replaceAll("\\[(\\d+)\\]", "/$1").replace('.', '/');
     }
 
     String extractJsonPath(String jsonPath, String eventJson) {

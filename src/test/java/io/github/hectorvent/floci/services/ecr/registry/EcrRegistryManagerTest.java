@@ -725,4 +725,26 @@ class EcrRegistryManagerTest {
                 "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_manifests",
                 "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_uploads");
     }
+
+    @ParameterizedTest
+    @CsvSource({
+            "123456789012.dkr.ecr.eu-west-1.amazonaws.com/spark/custom:7.5.0, eu-west-1",
+            "123456789012.dkr.ecr.cn-north-1.amazonaws.com.cn/spark/custom:7.5.0, cn-north-1",
+            "000000000000.dkr.ecr.us-east-1.localhost:4566/spark/custom:7.5.0, us-east-1",
+            "000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566/spark/custom:7.5.0, us-east-1",
+            "localhost:4566/000000000000/us-west-2/spark/custom:7.5.0, us-west-2",
+            "localhost.floci.io:4566/000000000000/us-west-2/spark/custom:7.5.0, us-west-2"
+    })
+    void anImageInAnEcrRepositoryHasItsRepositorysRegion(String image, String region) {
+        assertEquals(Optional.of(region), EcrRegistryManager.imageRegion(image));
+    }
+
+    @Test
+    void anImageOutsideEcrHasNoRegion() {
+        for (String image : List.of("public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest", "python:3.12",
+                "localhost:5000/spark/custom:7.5.0", "registry.internal/123456789012/us-east-1/spark:7.5.0")) {
+            assertEquals(Optional.empty(), EcrRegistryManager.imageRegion(image), image);
+        }
+        assertEquals(Optional.empty(), EcrRegistryManager.imageRegion(null));
+    }
 }

@@ -126,6 +126,47 @@ class CloudFormationCompositeAlarmIntegrationTest {
         cw("DeleteAlarms", Map.of("AlarmNames", List.of(name))).then().statusCode(200);
     }
 
+    /** The composite alarm comes first in the template: only its rule's reference orders it after its child. */
+    @Test
+    void aCompositeAlarmOverTheStacksMetricAlarmIsCreatedAfterItAndDeletedBeforeIt() throws Exception {
+        String stack = unique("composite-child");
+        String child = stack + "-child";
+        String parent = stack + "-parent";
+        cleanup.register(() -> cw("DeleteAlarms", Map.of("AlarmNames", List.of(child))).then().statusCode(200));
+        cleanup.register(() -> cw("DeleteAlarms", Map.of("AlarmNames", List.of(parent))).then().statusCode(200));
+        Map<String, Object> resources = new LinkedHashMap<>();
+        resources.put("Parent", Map.of("Type", "AWS::CloudWatch::CompositeAlarm", "Properties", Map.of(
+                "AlarmName", parent, "AlarmRule", Map.of("Fn::Sub", "ALARM(\"${Child}\")"))));
+        resources.put("Child", Map.of("Type", "AWS::CloudWatch::Alarm", "Properties", Map.of("AlarmName", child,
+                "Namespace", "Cfn/Composite", "MetricName", "Errors", "Statistic", "Sum", "Period", 60,
+                "EvaluationPeriods", 1, "Threshold", 1, "ComparisonOperator", "GreaterThanThreshold")));
+        deploy("CreateStack", stack, MAPPER.writeValueAsString(Map.of("Resources", resources)));
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack).status());
+        Map<String, Object> created = alarm(parent);
+        assertEquals(created.get("AlarmArn") + " was created and its alarm rule evaluates to OK",
+                created.get("StateReason"));
+        deleteStack(stack);
+        assertMissing(parent);
+        assertEquals(List.of(), cw("DescribeAlarms", Map.of("AlarmNames", List.of(child))).then().statusCode(200)
+                .extract().jsonPath().getList("MetricAlarms"));
+    }
+
+    @Test
+    void aRuleNamingAMissingAlarmFailsTheStackWithCloudWatchsMessage() throws Exception {
+        String stack = unique("composite-orphan");
+        String parent = stack + "-parent";
+        cleanup.register(() -> cw("DeleteAlarms", Map.of("AlarmNames", List.of(parent))).then().statusCode(200));
+        deploy("CreateStack", stack, MAPPER.writeValueAsString(Map.of("Resources", Map.of("Parent", Map.of(
+                "Type", "AWS::CloudWatch::CompositeAlarm", "Properties", Map.of("AlarmName", parent,
+                        "AlarmRule", "ALARM(" + stack + "-missing)"))))));
+        assertEquals("ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack).status());
+        String reason = CfnStackWaits.failedResourceReason(stack);
+        assertTrue(reason.contains("Could not save the composite alarm as alarms [arn:aws:cloudwatch:us-east-1:"
+                + "000000000000:alarm:" + stack + "-missing] in the alarm rule do not exist"), reason);
+        assertMissing(parent);
+        deleteStack(stack);
+    }
+
     private String template(String name, String rule, Map<String, String> tags, boolean fail, boolean retain)
             throws JsonProcessingException {
         cleanup.register(() -> cw("DeleteAlarms", Map.of("AlarmNames", List.of(name))).then().statusCode(200));

@@ -39,6 +39,7 @@ order:
   - AWS::ApiGateway
   - AWS::ApiGatewayV2
   - AWS::AppSync
+  - AWS::AppConfig
   - AWS::StepFunctions
   - AWS::CodePipeline
   - AWS::CodeBuild
@@ -110,6 +111,7 @@ type_order:
   AWS::ApiGateway: [RestApi, Resource, Authorizer, Method, Deployment, Stage, Account, DomainName, BasePathMapping, GatewayResponse]
   AWS::ApiGatewayV2: [Api, Authorizer, Route, Integration, Stage, Deployment, DomainName, ApiMapping]
   AWS::AppSync: [GraphQLApi, GraphQLSchema, DataSource, FunctionConfiguration, Resolver, ApiKey]
+  AWS::AppConfig: [Application, Environment, ConfigurationProfile, DeploymentStrategy]
   AWS::CodePipeline: [Pipeline, CustomActionType, Webhook]
   AWS::Batch: [ComputeEnvironment, JobQueue, JobDefinition]
   AWS::Cognito: [UserPool, UserPoolClient]
@@ -121,6 +123,7 @@ type_order:
 service_labels:
   AWS::ApiGateway: API Gateway (v1)
   AWS::ApiGatewayV2: API Gateway v2
+  AWS::AppConfig: AppConfig
   AWS::AppSync: AppSync
   AWS::ApplicationAutoScaling: Application Auto Scaling
   AWS::AutoScaling: Auto Scaling
@@ -184,7 +187,6 @@ notes:
   AWS::Lambda::EventInvokeConfig: also what a SAM function's `EventInvokeConfig` expands into
   AWS::Lambda::WebFunction: control plane only; the endpoint domain does not serve requests yet
   AWS::Lambda::WebFunctionRevision: every property is createOnly, so a change mints a new revision
-  AWS::Lambda::WebFunctionEndpoint: '`RegionalEndpoints` is not exposed to `Fn::GetAtt` yet'
   AWS::EC2::VPC: 'deleted on stack teardown; a VPC with dependents outside the stack, including anything still holding a network interface in its subnets (an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone interface, an interface endpoint), fails the delete with `DependencyViolation`, as on AWS'
   AWS::EC2::SecurityGroup: inline `SecurityGroupIngress`/`SecurityGroupEgress` supported
   AWS::EC2::PrefixList: 'updated in place; an update that changes `AddressFamily`, or `MaxEntries` together with `Entries`, fails'
@@ -210,7 +212,11 @@ notes:
   AWS::DynamoDB::Table: '`TimeToLiveSpecification` applied on create and update; to rename an enabled TTL attribute, disable TTL in one update and enable the new attribute in a later one'
   AWS::Cognito::UserPool: '`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`'
   AWS::SES::EmailIdentity: 'BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS''s region- and identity-specific zone assignment'
+  AWS::SES::ReceiptRule: 'stored in an existing SES receipt rule set; Ref and RuleName return the rule name; management plane only, with no inbound mail delivery'
   AWS::Events::Archive: '`KmsKeyIdentifier` is ignored'
+  AWS::AppConfig::Environment: '`Tags` and `DeletionProtectionCheck` are accepted and not stored'
+  AWS::AppConfig::ConfigurationProfile: '`Tags`, `KmsKeyIdentifier`, `RetrievalRoleArn`, `Validators` and `DeletionProtectionCheck` are accepted and not stored'
+  AWS::AppConfig::DeploymentStrategy: '`Tags` are accepted and not stored; `ReplicateTo: SSM_DOCUMENT` writes no SSM document'
   AWS::CloudFront::Function: '`KeyValueStoreAssociations` is ignored'
   AWS::GuardDuty::MalwareProtectionPlan: 'management plane only: no scan runs, so the plan stays ACTIVE; Ref returns the plan id; a BucketName change is rejected'
   AWS::BedrockAgentCore::Runtime: 'Ref returns the AgentRuntimeId; CapacityProviderConfiguration, FilesystemConfigurations, LifecycleConfiguration, PlatformVersion and RequestHeaderConfiguration are accepted and not stored'
@@ -224,6 +230,9 @@ row_notes:
   AWS::CloudWatch: >-
     Composite alarms have backing definitions with name Ref and Arn GetAtt, rollback, and
     replacement cleanup. Composite actions are stored only; suppression properties are rejected.
+  AWS::AppConfig: >-
+    `Ref` returns the AppConfig ID of each. See [AppConfig](appconfig.md#cloudformation) for updates
+    and replacement.
   AWS::AppSync: >-
     `Ref` on `GraphQLApi` and `ApiKey` returns the id where AWS returns the ARN. See
     [AppSync](appsync.md#cloudformation) for `Ref` and `Fn::GetAtt` compared with AWS.

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.elasticache.proxy;
 
+import io.github.hectorvent.floci.core.common.ListenBacklog;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -118,11 +119,19 @@ public abstract class AbstractRedisAuthProxy {
     }
 
     public void start(int proxyPort) throws IOException {
-        serverSocket = new ServerSocket(proxyPort);
+        serverSocket = listenSocket(proxyPort, ListenBacklog.ACCEPT);
         running = true;
         Thread.ofVirtual().name(threadPrefix + "-proxy-accept-" + resourceId).start(this::acceptLoop);
         log.infov("{0} proxy started for {1} on port {2} → {3}:{4}",
                 serviceName, resourceId, String.valueOf(proxyPort), backendHost, String.valueOf(backendPort));
+    }
+
+    /**
+     * Opens the listening socket. A seam so a test can pin the accept backlog: a bound
+     * {@code ServerSocket} does not report the backlog it was created with.
+     */
+    ServerSocket listenSocket(int proxyPort, int backlog) throws IOException {
+        return new ServerSocket(proxyPort, backlog);
     }
 
     int localPort() {

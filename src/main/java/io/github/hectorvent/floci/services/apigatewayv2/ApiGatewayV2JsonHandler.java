@@ -589,6 +589,9 @@ public class ApiGatewayV2JsonHandler {
                 auth.getJwtConfiguration().audience().forEach(aud::add);
             }
         }
+        if (auth.getAuthorizerCredentialsArn() != null) {
+            node.put("AuthorizerCredentialsArn", auth.getAuthorizerCredentialsArn());
+        }
         if (auth.getAuthorizerUri() != null) {
             node.put("AuthorizerUri", auth.getAuthorizerUri());
         }
@@ -628,6 +631,9 @@ public class ApiGatewayV2JsonHandler {
         if (i.getConnectionType() != null) node.put("ConnectionType", i.getConnectionType());
         if (i.getConnectionId() != null) node.put("ConnectionId", i.getConnectionId());
         node.put("PayloadFormatVersion", i.getPayloadFormatVersion());
+        if (i.getCredentialsArn() != null) {
+            node.put("CredentialsArn", i.getCredentialsArn());
+        }
         if (i.getIntegrationUri() != null) node.put("IntegrationUri", i.getIntegrationUri());
         if (i.getRequestTemplates() != null) {
             ObjectNode requestTemplates = node.putObject("RequestTemplates");

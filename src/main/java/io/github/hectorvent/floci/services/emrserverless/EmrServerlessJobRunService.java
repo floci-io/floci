@@ -25,6 +25,7 @@ import io.github.hectorvent.floci.services.emrserverless.model.JobRunRecord;
 import io.github.hectorvent.floci.services.emrserverless.model.JobRunSummary;
 import io.github.hectorvent.floci.services.emrserverless.model.RuntimeConfiguration;
 import io.github.hectorvent.floci.services.emrserverless.model.StartJobRunRequest;
+import io.github.hectorvent.floci.services.emrserverless.model.WorkerTypeSpecification;
 import io.github.hectorvent.floci.services.iam.IamService;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -89,6 +90,8 @@ public class EmrServerlessJobRunService implements Resettable {
     // "If you don't specify the optional values, then CloudWatch publishes the logs to a default log group".
     private static final String DEFAULT_LOG_GROUP = "/aws/emr-serverless";
     private static final String SPARK_DRIVER = "SPARK_DRIVER";
+    // The worker type a Spark application's driver runs as.
+    private static final String DRIVER_WORKER_TYPE = "Driver";
     // No source gives AWS's wording for these; they are Floci's.
     static final String HIVE_NOT_RUN = "Floci runs Spark job runs only, and this is a Hive job run.";
     static final String INTERRUPTED = "Floci stopped while the job run was in progress.";
@@ -103,6 +106,10 @@ public class EmrServerlessJobRunService implements Resettable {
     private static final long DEFAULT_EXECUTION_TIMEOUT_MINUTES = 720;
     // The model's Duration, which bounds executionTimeoutMinutes.
     private static final long MAX_EXECUTION_TIMEOUT_MINUTES = 1_000_000;
+    // RetryPolicy's members: at least 1 in the model, and "Accepted values are 1 to 10, inclusive" for each in
+    // the user guide's "Job resiliency".
+    private static final List<String> RETRY_LIMITS = List.of("maxAttempts", "maxFailedAttemptsPerHour");
+    private static final int MAX_RETRY_LIMIT = 10;
     // The EMR Serverless 7.11.0 release notes: for BATCH job runs the maximum "is 7 days from this release
     // onwards", and the timeout "can no longer be set to 0".
     private static final long MAX_BATCH_EXECUTION_TIMEOUT_MINUTES = 10_080;
@@ -110,8 +117,12 @@ public class EmrServerlessJobRunService implements Resettable {
     // The AWS runtime for Apache Spark, emr-spark-8.0.0 on (and emr-spark-8.0-preview).
     private static final Pattern SPARK_RUNTIME_RELEASE_LABEL =
             Pattern.compile("emr-spark-(\\d{1,6})\\.(\\d{1,6})(?:[.-].*)?");
-    // No run is retried: every run is its own one attempt.
-    private static final int ATTEMPT = 1;
+    // A run's first attempt; a retried run's later ones count on from it.
+    private static final int FIRST_ATTEMPT = 1;
+    // maxAttempts: "The default is 1, which means to not rerun the job."
+    private static final int DEFAULT_MAX_ATTEMPTS = 1;
+    // maxFailedAttemptsPerHour: "The default is five."
+    private static final int DEFAULT_MAX_FAILED_ATTEMPTS_PER_HOUR = 5;
     private static final int MAX_LIST_RESULTS = 50;
     // IAMRoleArn's pattern, as the model and AWS's validation message spell it.
     private static final String ROLE_ARN_PATTERN =
@@ -236,28 +247,35 @@ public class EmrServerlessJobRunService implements Resettable {
     }
 
     /**
-     * The run, as its {@code attempt} saw it; without one, "the latest attempt". A run has one
-     * attempt, so any other number names nothing. No source gives AWS's answer for an attempt a run
-     * never made; ResourceNotFoundException, in Floci's words, is the modeled error that fits.
+     * The run, as its {@code attempt} saw it; without one, "the latest attempt". No source gives AWS's
+     * answer for an attempt a run never made; ResourceNotFoundException, in Floci's words, is the modeled
+     * error that fits.
      */
     public synchronized JobRun getJobRun(String applicationId, String jobRunId, Integer attempt) {
         if (attempt != null) {
-            String violation = SmithyValidationErrors.outOfRange("attempt", attempt, ATTEMPT, Integer.MAX_VALUE);
+            String violation = SmithyValidationErrors.outOfRange("attempt", attempt, FIRST_ATTEMPT,
+                    Integer.MAX_VALUE);
             if (violation != null) {
                 throw SmithyValidationErrors.validationException(violation);
             }
         }
         applications.getApplication(applicationId);
         JobRunRecord record = findRun(applicationId, jobRunId);
-        if (attempt != null && attempt != ATTEMPT) {
+        // Refused before the run settles: settling never makes an attempt, only a run's thread does.
+        if (attempt != null && attempts(record).stream().noneMatch(made -> attempt.equals(made.getAttempt()))) {
             throw new AwsException("ResourceNotFoundException",
                     "Job run " + jobRunId + " has no attempt " + attempt, 404);
         }
+        settle(record);
+        JobRun run = attempts(record).stream()
+                .filter(made -> attempt == null ? made == record.getJobRun() : attempt.equals(made.getAttempt()))
+                .findFirst()
+                .orElseThrow();
         // A copy: a container run's thread may change the stored run while the response is written.
-        return objectMapper.convertValue(settle(record).getJobRun(), JobRun.class);
+        return objectMapper.convertValue(run, JobRun.class);
     }
 
-    /** A run's attempts, which are its one attempt. */
+    /** A run's attempts, oldest first: "information about all attempts related to a job run". */
     public synchronized PaginatedResult<JobRunAttemptSummary> listJobRunAttempts(String applicationId,
                                                                                String jobRunId,
                                                                                Integer maxResults,
@@ -270,12 +288,12 @@ public class EmrServerlessJobRunService implements Resettable {
         }
         applications.getApplication(applicationId);
         JobRunRecord record = settle(findRun(applicationId, jobRunId));
-        PaginatedResult<JobRunRecord> page = Pagination.paginate(List.of(record),
-                only -> String.format("%010d", ATTEMPT), maxResults != null ? maxResults : MAX_LIST_RESULTS,
+        PaginatedResult<JobRun> page = Pagination.paginate(attempts(record),
+                made -> String.format("%010d", made.getAttempt()), maxResults != null ? maxResults : MAX_LIST_RESULTS,
                 nextToken, String.join("|", "ListJobRunAttempts", applicationId, jobRunId),
                 token -> new AwsException("ValidationException", "Invalid nextToken.", 400));
         return new PaginatedResult<>(
-                page.items().stream().map(EmrServerlessJobRunService::toAttemptSummary).toList(),
+                page.items().stream().map(made -> toAttemptSummary(record, made)).toList(),
                 page.nextToken());
     }
 
@@ -432,7 +450,7 @@ public class EmrServerlessJobRunService implements Resettable {
                 ? request.getExecutionTimeoutMinutes() : DEFAULT_EXECUTION_TIMEOUT_MINUTES);
         run.setMode(request.getMode());
         run.setRetryPolicy(request.getRetryPolicy());
-        run.setAttempt(ATTEMPT);
+        run.setAttempt(FIRST_ATTEMPT);
         run.setAttemptCreatedAt(now);
         run.setAttemptUpdatedAt(now);
         if (sparkRunner == null) {
@@ -463,9 +481,9 @@ public class EmrServerlessJobRunService implements Resettable {
         Duration timeout = MODE_STREAMING.equals(run.getMode()) || minutes == null || minutes == 0
                 ? Duration.ZERO : Duration.ofMinutes(minutes);
         SparkJobRunner.Job job = new SparkJobRunner.Job(SERVICE, run.getJobRunId(), arn.accountId(), arn.region(),
-                run.getReleaseLabel(), imageTemplate, dockerNetwork, run.getExecutionRole(), sparkDefaults(app, run),
-                application(run.getJobDriver().getSparkSubmit()), null, timeout, driverLogFolder(app, run),
-                driverCloudWatchLogs(app, run));
+                run.getReleaseLabel(), imageTemplate, customImage(app), dockerNetwork, run.getExecutionRole(),
+                sparkDefaults(app, run), application(run.getJobDriver().getSparkSubmit()), null, timeout,
+                driverLogFolder(app, run), driverCloudWatchLogs(app, run));
         executing.add(run.getJobRunId());
         long launchedIn = generation;
         runExecutor.execute(() -> execute(job, launchedIn));
@@ -481,6 +499,21 @@ public class EmrServerlessJobRunService implements Resettable {
         }
         SparkJobRunner.Outcome ended = outcome;
         RequestScopes.runAs(job.accountId(), job.region(), () -> ended(job.runId(), ended, launchedIn));
+    }
+
+    /**
+     * The custom image a run's driver starts from, or null for the release's: the {@code Driver} worker type's,
+     * else the application's, which "EMR Serverless applies ... to all worker types". Local mode runs the
+     * executors in the driver's container, so an {@code Executor} image is not used.
+     */
+    static String customImage(Application app) {
+        WorkerTypeSpecification driver = app.getWorkerTypeSpecifications() != null
+                ? app.getWorkerTypeSpecifications().get(DRIVER_WORKER_TYPE) : null;
+        if (driver != null && driver.getImageConfiguration() != null
+                && driver.getImageConfiguration().getImageUri() != null) {
+            return driver.getImageConfiguration().getImageUri();
+        }
+        return app.getImageConfiguration() != null ? app.getImageConfiguration().getImageUri() : null;
     }
 
     /**
@@ -578,12 +611,74 @@ public class EmrServerlessJobRunService implements Resettable {
             finish(record, STATE_SUCCESS, now);
         } else {
             // No source gives AWS's wording for a driver that fails; this is Floci's.
-            run.setStateDetails(outcome.stopped() ? INTERRUPTED
+            String details = outcome.stopped() ? INTERRUPTED
                     : outcome.failure() != null ? "Job run could not start: " + outcome.failure()
-                    : "Job run failed: the Spark driver exited with code " + outcome.exitCode() + ".");
+                    : "Job run failed: the Spark driver exited with code " + outcome.exitCode() + ".";
+            // A driver Floci's own shutdown stopped did not fail, and is not tried again. The next attempt is
+            // admitted while its application cannot be deleted, as the first was.
+            if (!outcome.stopped() && retriesAfterFailure(record, now)
+                    && applications.whileLive(run.getApplicationId(), app -> retry(record, app, details, now))) {
+                return;
+            }
+            run.setStateDetails(details);
             finish(record, STATE_FAILED, now);
         }
         LOG.infov("EMR Serverless job run {0} ended {1}", jobRunId, run.getState());
+    }
+
+    /**
+     * Whether a run whose latest attempt has just failed is tried again. "EMR Serverless releases 7.1.0 and
+     * higher include support for job resiliency". A BATCH run is rerun until it has made {@code maxAttempts}
+     * attempts, by default 1, "which means to not rerun the job". "EMR Serverless indefinitely retries
+     * streaming jobs if they fail", until "the maximum number of failed attempts allowed with an hour before
+     * EMR Serverless stops retrying", {@code maxFailedAttemptsPerHour}, by default five, is reached: this
+     * failure and those of the hour before it count.
+     */
+    private static boolean retriesAfterFailure(JobRunRecord record, Instant now) {
+        JobRun run = record.getJobRun();
+        if (!retriesAttempts(run.getReleaseLabel())) {
+            return false;
+        }
+        if (!MODE_STREAMING.equals(run.getMode())) {
+            return run.getAttempt() < retryLimit(run, "maxAttempts", DEFAULT_MAX_ATTEMPTS);
+        }
+        Instant hourBefore = now.minus(Duration.ofHours(1));
+        long failedWithinTheHour = 1 + record.getEarlierAttempts().stream()
+                .filter(earlier -> STATE_FAILED.equals(earlier.getState()) && earlier.getEndedAt().isAfter(hourBefore))
+                .count();
+        return failedWithinTheHour < retryLimit(run, "maxFailedAttemptsPerHour", DEFAULT_MAX_FAILED_ATTEMPTS_PER_HOUR);
+    }
+
+    // A member of the run's retryPolicy, or its default when the run has none.
+    private static int retryLimit(JobRun run, String member, int fallback) {
+        Object limit = run.getRetryPolicy() != null ? run.getRetryPolicy().get(member) : null;
+        return limit instanceof Number number ? number.intValue() : fallback;
+    }
+
+    /**
+     * Ends the run's latest attempt FAILED, kept as it then stood, and starts the next: SCHEDULED again,
+     * its driver started over ("Batch jobs don't have checkpoints, so EMR Serverless always re-runs the job
+     * from the beginning"), "its own set of logs" under its own attempt number.
+     */
+    private void retry(JobRunRecord record, Application app, String details, Instant now) {
+        JobRun run = record.getJobRun();
+        JobRun failed = objectMapper.convertValue(run, JobRun.class);
+        failed.setStateDetails(details);
+        end(failed, STATE_FAILED, now);
+        record.getEarlierAttempts().add(failed);
+        run.setAttempt(run.getAttempt() + 1);
+        run.setAttemptCreatedAt(now);
+        run.setAttemptUpdatedAt(now);
+        run.setUpdatedAt(now);
+        run.setState(STATE_SCHEDULED);
+        run.setStateDetails("");
+        run.setStartedAt(null);
+        run.setEndedAt(null);
+        run.setTotalExecutionDurationSeconds(null);
+        store.put(run.getJobRunId(), record);
+        LOG.infov("EMR Serverless job run {0} failed its attempt {1}; attempt {2} starts", run.getJobRunId(),
+                failed.getAttempt(), run.getAttempt());
+        launch(record, app);
     }
 
     /**
@@ -682,15 +777,14 @@ public class EmrServerlessJobRunService implements Resettable {
 
     // Where under a log destination the user guide puts a run's driver logs, the attempt for a retried run.
     private static String driverLogPath(JobRun run) {
-        String attempts = retried(run) && retriesAttempts(run.getReleaseLabel()) ? "/attempts/" + ATTEMPT : "";
+        String attempts = retried(run) && retriesAttempts(run.getReleaseLabel()) ? "/attempts/" + run.getAttempt() : "";
         return "/applications/" + run.getApplicationId() + "/jobs/" + run.getJobRunId() + attempts + "/"
                 + SPARK_DRIVER;
     }
 
     // A STREAMING run is retried, and a BATCH run whose retryPolicy allows more than one attempt.
     private static boolean retried(JobRun run) {
-        Object maxAttempts = run.getRetryPolicy() != null ? run.getRetryPolicy().get("maxAttempts") : null;
-        return MODE_STREAMING.equals(run.getMode()) || maxAttempts instanceof Number number && number.intValue() > 1;
+        return MODE_STREAMING.equals(run.getMode()) || retryLimit(run, "maxAttempts", DEFAULT_MAX_ATTEMPTS) > 1;
     }
 
     // "EMR Serverless releases 7.1.0 and higher support retry attempts for streaming jobs and batch jobs."
@@ -741,7 +835,11 @@ public class EmrServerlessJobRunService implements Resettable {
     }
 
     private void finish(JobRunRecord record, String state, Instant endedAt) {
-        JobRun run = record.getJobRun();
+        end(record.getJobRun(), state, endedAt);
+        store.put(record.getJobRun().getJobRunId(), record);
+    }
+
+    private static void end(JobRun run, String state, Instant endedAt) {
         run.setState(state);
         run.setEndedAt(endedAt);
         run.setUpdatedAt(endedAt);
@@ -749,7 +847,13 @@ public class EmrServerlessJobRunService implements Resettable {
         // A container run cancelled or failed before its driver ran never started.
         run.setTotalExecutionDurationSeconds(run.getStartedAt() != null
                 ? (int) Duration.between(run.getStartedAt(), endedAt).toSeconds() : 0);
-        store.put(run.getJobRunId(), record);
+    }
+
+    // Every attempt of a run, oldest first: the earlier ones, then the latest.
+    private static List<JobRun> attempts(JobRunRecord record) {
+        List<JobRun> attempts = new ArrayList<>(record.getEarlierAttempts());
+        attempts.add(record.getJobRun());
+        return attempts;
     }
 
     private JobRunRecord findRun(String applicationId, String jobRunId) {
@@ -811,6 +915,7 @@ public class EmrServerlessJobRunService implements Resettable {
     }
 
     private static void validate(StartJobRunRequest request) {
+        Map<String, Integer> retryLimits = retryLimits(request.getRetryPolicy());
         List<String> violations = new ArrayList<>();
         if (request.getClientToken() == null) {
             violations.add(SmithyValidationErrors.notNull("clientToken"));
@@ -831,6 +936,13 @@ public class EmrServerlessJobRunService implements Resettable {
                 violations.add(violation);
             }
         }
+        // No source gives AWS's wording above 10, which the model does not bound; this is the model's form.
+        retryLimits.forEach((member, limit) -> {
+            String violation = SmithyValidationErrors.outOfRange("retryPolicy." + member, limit, 1, MAX_RETRY_LIMIT);
+            if (violation != null) {
+                violations.add(violation);
+            }
+        });
         JobDriver driver = request.getJobDriver();
         if (driver != null && driver.getSparkSubmit() != null && driver.getSparkSubmit().getEntryPoint() == null) {
             violations.add(SmithyValidationErrors.notNull("jobDriver.sparkSubmit.entryPoint"));
@@ -847,6 +959,25 @@ public class EmrServerlessJobRunService implements Resettable {
         if (driver == null || (driver.getSparkSubmit() == null) == (driver.getHive() == null)) {
             throw new AwsException("ValidationException", "jobDriver must contain exactly one union member", 400);
         }
+    }
+
+    /**
+     * The members of a run's {@code retryPolicy} it gives, each an integer in the model. A restJson1 service
+     * refuses a body member of another type, a string, a boolean or a fraction where an integer goes, with
+     * SerializationException, before any constraint (Smithy's restJson1 malformed-request tests); the message
+     * is Floci's.
+     */
+    private static Map<String, Integer> retryLimits(Map<String, Object> retryPolicy) {
+        Map<String, Integer> limits = new LinkedHashMap<>();
+        for (String member : RETRY_LIMITS) {
+            Object value = retryPolicy != null ? retryPolicy.get(member) : null;
+            if (value instanceof Integer limit) {
+                limits.put(member, limit);
+            } else if (value != null) {
+                throw new AwsException("SerializationException", "retryPolicy." + member + " must be an integer", 400);
+            }
+        }
+        return limits;
     }
 
 
@@ -904,24 +1035,25 @@ public class EmrServerlessJobRunService implements Resettable {
         return summary;
     }
 
-    private static JobRunAttemptSummary toAttemptSummary(JobRunRecord record) {
-        JobRun run = record.getJobRun();
+    // An attempt of a run: "createdAt", "The date and time when the job run attempt was created", and
+    // "updatedAt" when it was last updated are the attempt's; "jobCreatedAt" is the run's.
+    private static JobRunAttemptSummary toAttemptSummary(JobRunRecord record, JobRun attempt) {
         JobRunAttemptSummary summary = new JobRunAttemptSummary();
-        summary.setApplicationId(run.getApplicationId());
-        summary.setId(run.getJobRunId());
-        summary.setName(run.getName());
-        summary.setMode(run.getMode());
-        summary.setArn(run.getArn());
-        summary.setCreatedBy(run.getCreatedBy());
-        summary.setJobCreatedAt(run.getCreatedAt());
-        summary.setCreatedAt(run.getCreatedAt());
-        summary.setUpdatedAt(run.getUpdatedAt());
-        summary.setExecutionRole(run.getExecutionRole());
-        summary.setState(run.getState());
-        summary.setStateDetails(run.getStateDetails());
-        summary.setReleaseLabel(run.getReleaseLabel());
+        summary.setApplicationId(attempt.getApplicationId());
+        summary.setId(attempt.getJobRunId());
+        summary.setName(attempt.getName());
+        summary.setMode(attempt.getMode());
+        summary.setArn(attempt.getArn());
+        summary.setCreatedBy(attempt.getCreatedBy());
+        summary.setJobCreatedAt(attempt.getCreatedAt());
+        summary.setCreatedAt(attempt.getAttemptCreatedAt());
+        summary.setUpdatedAt(attempt.getAttemptUpdatedAt());
+        summary.setExecutionRole(attempt.getExecutionRole());
+        summary.setState(attempt.getState());
+        summary.setStateDetails(attempt.getStateDetails());
+        summary.setReleaseLabel(attempt.getReleaseLabel());
         summary.setType(record.getApplicationType());
-        summary.setAttempt(ATTEMPT);
+        summary.setAttempt(attempt.getAttempt());
         return summary;
     }
 

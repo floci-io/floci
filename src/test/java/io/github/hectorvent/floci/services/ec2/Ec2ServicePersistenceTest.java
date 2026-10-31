@@ -218,6 +218,37 @@ class Ec2ServicePersistenceTest {
         assertEquals("10.0.1.0/24", subnets.get(0).getCidrBlock());
     }
 
+    /**
+     * Issue #5580: a subnet persisted before zone ids took AWS's shape stored
+     * {@code ap-southeast-1-az1}, which DescribeAvailabilityZones no longer publishes.
+     */
+    @Test
+    void legacySubnetZoneIdReadsBackAsTheIdDescribeAvailabilityZonesPublishes(@TempDir Path dir)
+            throws IOException {
+        Files.writeString(dir.resolve("ec2-subnets.json"), """
+                {
+                  "ap-southeast-1::subnet-legacy": {
+                    "subnetId": "subnet-legacy",
+                    "vpcId": "vpc-legacy",
+                    "cidrBlock": "172.31.0.0/20",
+                    "state": "available",
+                    "availabilityZone": "ap-southeast-1b",
+                    "availabilityZoneId": "ap-southeast-1-az2",
+                    "region": "ap-southeast-1"
+                  }
+                }
+                """);
+
+        Ec2Service restarted = newService(dir);
+
+        Subnet subnet = restarted.describeSubnets("ap-southeast-1", List.of("subnet-legacy"), Map.of())
+                .getFirst();
+        assertEquals("apse1-az2", subnet.getAvailabilityZoneId());
+        List<Map<String, String>> zones = restarted.describeAvailabilityZones("ap-southeast-1", List.of(),
+                List.of(subnet.getAvailabilityZoneId()), List.of());
+        assertEquals("ap-southeast-1b", zones.getFirst().get("zoneName"));
+    }
+
     @Test
     void registeredImageAndSnapshotSurviveRestart(@TempDir Path dir) {
         Ec2Service first = newService(dir);

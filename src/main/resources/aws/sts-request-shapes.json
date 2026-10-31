@@ -1,0 +1,342 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_sts_shapes.py",
+    "botocore": "botocore 1.43.113 (installed package)"
+  },
+  "operations": {
+    "GetAccessKeyInfo": "GetAccessKeyInfoRequest",
+    "GetSessionToken": "GetSessionTokenRequest",
+    "GetWebIdentityToken": "GetWebIdentityTokenRequest",
+    "AssumeRole": "AssumeRoleRequest",
+    "AssumeRoleWithSAML": "AssumeRoleWithSAMLRequest",
+    "AssumeRoleWithWebIdentity": "AssumeRoleWithWebIdentityRequest",
+    "AssumeRoot": "AssumeRootRequest",
+    "DecodeAuthorizationMessage": "DecodeAuthorizationMessageRequest",
+    "GetDelegatedAccessToken": "GetDelegatedAccessTokenRequest",
+    "GetFederationToken": "GetFederationTokenRequest"
+  },
+  "shapes": {
+    "AssumeRoleRequest": {
+      "type": "structure",
+      "required": [
+        "RoleArn",
+        "RoleSessionName"
+      ],
+      "members": {
+        "RoleArn": "arnType",
+        "RoleSessionName": "roleSessionNameType",
+        "PolicyArns": "policyDescriptorListType",
+        "Policy": "unrestrictedSessionPolicyDocumentType",
+        "DurationSeconds": "roleDurationSecondsType",
+        "Tags": "tagListType",
+        "TransitiveTagKeys": "tagKeyListType",
+        "ExternalId": "externalIdType",
+        "SerialNumber": "serialNumberType",
+        "TokenCode": "tokenCodeType",
+        "SourceIdentity": "sourceIdentityType",
+        "ProvidedContexts": "ProvidedContextsListType",
+        "MinimumSessionTokenSize": "minimumSessionTokenSizeType"
+      }
+    },
+    "AssumeRoleWithSAMLRequest": {
+      "type": "structure",
+      "required": [
+        "RoleArn",
+        "PrincipalArn",
+        "SAMLAssertion"
+      ],
+      "members": {
+        "RoleArn": "arnType",
+        "PrincipalArn": "arnType",
+        "SAMLAssertion": "SAMLAssertionType",
+        "PolicyArns": "policyDescriptorListType",
+        "Policy": "sessionPolicyDocumentType",
+        "DurationSeconds": "roleDurationSecondsType",
+        "MinimumSessionTokenSize": "minimumSessionTokenSizeType"
+      }
+    },
+    "AssumeRoleWithWebIdentityRequest": {
+      "type": "structure",
+      "required": [
+        "RoleArn",
+        "RoleSessionName",
+        "WebIdentityToken"
+      ],
+      "members": {
+        "RoleArn": "arnType",
+        "RoleSessionName": "roleSessionNameType",
+        "WebIdentityToken": "clientTokenType",
+        "ProviderId": "urlType",
+        "PolicyArns": "policyDescriptorListType",
+        "Policy": "sessionPolicyDocumentType",
+        "DurationSeconds": "roleDurationSecondsType",
+        "MinimumSessionTokenSize": "minimumSessionTokenSizeType"
+      }
+    },
+    "AssumeRootRequest": {
+      "type": "structure",
+      "required": [
+        "TargetPrincipal",
+        "TaskPolicyArn"
+      ],
+      "members": {
+        "TargetPrincipal": "TargetPrincipalType",
+        "TaskPolicyArn": "PolicyDescriptorType",
+        "DurationSeconds": "RootDurationSecondsType",
+        "MinimumSessionTokenSize": "minimumSessionTokenSizeType"
+      }
+    },
+    "DecodeAuthorizationMessageRequest": {
+      "type": "structure",
+      "required": [
+        "EncodedMessage"
+      ],
+      "members": {
+        "EncodedMessage": "encodedMessageType"
+      }
+    },
+    "GetAccessKeyInfoRequest": {
+      "type": "structure",
+      "required": [
+        "AccessKeyId"
+      ],
+      "members": {
+        "AccessKeyId": "accessKeyIdType"
+      }
+    },
+    "GetDelegatedAccessTokenRequest": {
+      "type": "structure",
+      "required": [
+        "TradeInToken"
+      ],
+      "members": {
+        "TradeInToken": "tradeInTokenType"
+      }
+    },
+    "GetFederationTokenRequest": {
+      "type": "structure",
+      "required": [
+        "Name"
+      ],
+      "members": {
+        "Name": "userNameType",
+        "Policy": "sessionPolicyDocumentType",
+        "PolicyArns": "policyDescriptorListType",
+        "DurationSeconds": "durationSecondsType",
+        "Tags": "tagListType",
+        "MinimumSessionTokenSize": "minimumSessionTokenSizeType"
+      }
+    },
+    "GetSessionTokenRequest": {
+      "type": "structure",
+      "members": {
+        "DurationSeconds": "durationSecondsType",
+        "SerialNumber": "serialNumberType",
+        "TokenCode": "tokenCodeType",
+        "MinimumSessionTokenSize": "minimumSessionTokenSizeType"
+      }
+    },
+    "GetWebIdentityTokenRequest": {
+      "type": "structure",
+      "required": [
+        "Audience",
+        "SigningAlgorithm"
+      ],
+      "members": {
+        "Audience": "webIdentityTokenAudienceListType",
+        "DurationSeconds": "webIdentityTokenDurationSecondsType",
+        "SigningAlgorithm": "jwtAlgorithmType",
+        "Tags": "tagListType"
+      }
+    },
+    "PolicyDescriptorType": {
+      "type": "structure",
+      "members": {
+        "arn": "arnType"
+      }
+    },
+    "ProvidedContext": {
+      "type": "structure",
+      "members": {
+        "ProviderArn": "arnType",
+        "ContextAssertion": "contextAssertionType"
+      }
+    },
+    "ProvidedContextsListType": {
+      "type": "list",
+      "min": 1,
+      "max": 5,
+      "member": "ProvidedContext"
+    },
+    "RootDurationSecondsType": {
+      "type": "integer",
+      "min": 0,
+      "max": 900
+    },
+    "SAMLAssertionType": {
+      "type": "string",
+      "min": 4,
+      "max": 100000
+    },
+    "Tag": {
+      "type": "structure",
+      "required": [
+        "Key",
+        "Value"
+      ],
+      "members": {
+        "Key": "tagKeyType",
+        "Value": "tagValueType"
+      }
+    },
+    "TargetPrincipalType": {
+      "type": "string",
+      "min": 12,
+      "max": 2048
+    },
+    "accessKeyIdType": {
+      "type": "string",
+      "min": 16,
+      "max": 128,
+      "pattern": "[\\w]*"
+    },
+    "arnType": {
+      "type": "string",
+      "min": 20,
+      "max": 2048,
+      "pattern": "[\\u0009\\u000A\\u000D\\u0020-\\u007E\\u0085\\u00A0-\\uD7FF\\uE000-\\uFFFD\\u10000-\\u10FFFF]+"
+    },
+    "clientTokenType": {
+      "type": "string",
+      "min": 4,
+      "max": 20000
+    },
+    "contextAssertionType": {
+      "type": "string",
+      "min": 4,
+      "max": 2048
+    },
+    "durationSecondsType": {
+      "type": "integer",
+      "min": 900,
+      "max": 129600
+    },
+    "encodedMessageType": {
+      "type": "string",
+      "min": 1,
+      "max": 10240
+    },
+    "externalIdType": {
+      "type": "string",
+      "min": 2,
+      "max": 1224,
+      "pattern": "[\\w+=,.@:\\/-]*"
+    },
+    "jwtAlgorithmType": {
+      "type": "string",
+      "min": 5,
+      "max": 5
+    },
+    "minimumSessionTokenSizeType": {
+      "type": "integer",
+      "min": 0,
+      "max": 4096
+    },
+    "policyDescriptorListType": {
+      "type": "list",
+      "member": "PolicyDescriptorType"
+    },
+    "roleDurationSecondsType": {
+      "type": "integer",
+      "min": 900,
+      "max": 43200
+    },
+    "roleSessionNameType": {
+      "type": "string",
+      "min": 2,
+      "max": 64,
+      "pattern": "[\\w+=,.@-]*"
+    },
+    "serialNumberType": {
+      "type": "string",
+      "min": 9,
+      "max": 256,
+      "pattern": "[\\w+=/:,.@-]*"
+    },
+    "sessionPolicyDocumentType": {
+      "type": "string",
+      "min": 1,
+      "max": 2048,
+      "pattern": "[\\u0009\\u000A\\u000D\\u0020-\\u00FF]+"
+    },
+    "sourceIdentityType": {
+      "type": "string",
+      "min": 2,
+      "max": 64,
+      "pattern": "[\\w+=,.@-]*"
+    },
+    "tagKeyListType": {
+      "type": "list",
+      "max": 50,
+      "member": "tagKeyType"
+    },
+    "tagKeyType": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]+"
+    },
+    "tagListType": {
+      "type": "list",
+      "max": 50,
+      "member": "Tag"
+    },
+    "tagValueType": {
+      "type": "string",
+      "min": 0,
+      "max": 256,
+      "pattern": "[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*"
+    },
+    "tokenCodeType": {
+      "type": "string",
+      "min": 6,
+      "max": 6,
+      "pattern": "[\\d]*"
+    },
+    "tradeInTokenType": {
+      "type": "string"
+    },
+    "unrestrictedSessionPolicyDocumentType": {
+      "type": "string",
+      "min": 1,
+      "pattern": "[\\u0009\\u000A\\u000D\\u0020-\\u00FF]+"
+    },
+    "urlType": {
+      "type": "string",
+      "min": 4,
+      "max": 2048
+    },
+    "userNameType": {
+      "type": "string",
+      "min": 2,
+      "max": 32,
+      "pattern": "[\\w+=,.@-]*"
+    },
+    "webIdentityTokenAudienceListType": {
+      "type": "list",
+      "min": 1,
+      "max": 10,
+      "member": "webIdentityTokenAudienceStringType"
+    },
+    "webIdentityTokenAudienceStringType": {
+      "type": "string",
+      "min": 1,
+      "max": 1000
+    },
+    "webIdentityTokenDurationSecondsType": {
+      "type": "integer",
+      "min": 60,
+      "max": 3600
+    }
+  }
+}

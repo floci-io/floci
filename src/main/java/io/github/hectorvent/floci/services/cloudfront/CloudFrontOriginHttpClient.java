@@ -674,6 +674,14 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
         client.close();
     }
 
+    /** The origin host resolves to an address the private-address guard refuses. */
+    static final class BlockedOriginHostException extends UnknownHostException {
+
+        BlockedOriginHostException(String host) {
+            super("CloudFront origin host resolves to a blocked address: " + host);
+        }
+    }
+
     private record ValidatingDnsResolver(DnsResolver delegate, Set<String> allowedHosts)
             implements DnsResolver {
 
@@ -687,8 +695,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
             if (!allowedHosts.contains(normalizedHost)) {
                 for (InetAddress address : addresses) {
                     if (SsrfProtection.isBlockedAddress(address)) {
-                        throw new UnknownHostException(
-                                "CloudFront origin host resolves to a blocked address: " + normalizedHost);
+                        throw new BlockedOriginHostException(normalizedHost);
                     }
                 }
             }

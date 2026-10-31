@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -304,6 +305,24 @@ class RedshiftAuthProxyTest {
         Field f = RedshiftAuthProxy.class.getDeclaredField("masterPassword");
         f.setAccessible(true);
         assertEquals("rotated", f.get(proxy));
+    }
+
+    @Test
+    void bindsWithABurstTolerantAcceptBacklog() throws Exception {
+        AtomicInteger acceptBacklog = new AtomicInteger();
+        proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", 1,
+                "admin", "Secret123", "dev",
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.REJECT,
+                mock(S3Service.class), mock(IamService.class), 5000, 5000, 100) {
+            @Override
+            ServerSocket listenSocket(int proxyPort, int backlog) throws IOException {
+                acceptBacklog.set(backlog);
+                return super.listenSocket(proxyPort, backlog);
+            }
+        };
+        proxy.start(0);
+        assertEquals(4096, acceptBacklog.get(),
+                "a connection burst must not overflow the proxy's accept queue");
     }
 
     private RdsProxyTlsCertificates realTls() {

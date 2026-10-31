@@ -333,7 +333,7 @@ public class ConnectService implements TagHandler {
         if (instanceId == null || instanceId.isBlank()) {
             throw new AwsException("InvalidRequestException", "InstanceId is required", 400);
         }
-        if (!instanceId.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(instanceId)) {
             return instanceId;
         }
         String resource;

@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
+import io.github.hectorvent.floci.services.appconfig.AppConfigService;
 import io.github.hectorvent.floci.services.applicationautoscaling.ApplicationAutoScalingService;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
@@ -23,6 +24,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewa
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayUsagePlanCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayV2CfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApiGatewayV2DomainCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.AppConfigCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AppSyncCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ApplicationAutoScalingCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.AutoScalingGroupCfnProvisioner;
@@ -107,6 +109,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.Scheduler
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretTargetAttachmentCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SecretsManagerCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SesCfnProvisioner;
+import io.github.hectorvent.floci.services.cloudformation.provisioners.SesReceiptRuleCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SnsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SqsCfnProvisioner;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.SsmCfnProvisioner;
@@ -160,6 +163,7 @@ import io.github.hectorvent.floci.services.s3vectors.S3VectorsService;
 import io.github.hectorvent.floci.services.scheduler.SchedulerService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.ses.SesIdentityService;
+import io.github.hectorvent.floci.services.ses.SesReceiptRuleService;
 import io.github.hectorvent.floci.services.ses.SesService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
@@ -201,10 +205,12 @@ final class CfnProvisionerFixture {
         private S3VectorsService s3VectorsService;
         private SnsService snsService;
         private SesService sesService;
+        private SesReceiptRuleService sesReceiptRuleService;
         private SesIdentityService sesIdentityService;
         private DynamoDbService dynamoDbService;
         private LambdaService lambdaService;
         private AppSyncService appSyncService;
+        private AppConfigService appConfigService;
         private IamService iamService;
         private SsmService ssmService;
         private KmsService kmsService;
@@ -326,6 +332,9 @@ final class CfnProvisionerFixture {
             if (sesService != null && sesIdentityService != null) {
                 discovered.add(new SesCfnProvisioner(sesService, sesIdentityService));
             }
+            if (sesReceiptRuleService != null && sesIdentityService != null) {
+                discovered.add(new SesReceiptRuleCfnProvisioner(sesReceiptRuleService, sesIdentityService));
+            }
             if (dynamoDbService != null) {
                 NativeDynamoDbBackend backend = new NativeDynamoDbBackend(null, null, dynamoDbService, null, null, objectMapper);
                 discovered.add(new DynamoDbCfnProvisioner(new DynamoDbFacade(backend, backend,
@@ -416,6 +425,9 @@ final class CfnProvisionerFixture {
             }
             if (appSyncService != null) {
                 discovered.add(new AppSyncCfnProvisioner(appSyncService));
+            }
+            if (appConfigService != null) {
+                discovered.add(new AppConfigCfnProvisioner(appConfigService));
             }
             if (lambdaService != null) {
                 discovered.add(new LambdaAddressingCfnProvisioner(lambdaService));
@@ -549,6 +561,11 @@ final class CfnProvisionerFixture {
             return this;
         }
 
+        public Builder sesReceiptRules(SesReceiptRuleService v) {
+            this.sesReceiptRuleService = v;
+            return this;
+        }
+
         public Builder dynamoDb(DynamoDbService v) {
             this.dynamoDbService = v;
             return this;
@@ -561,6 +578,11 @@ final class CfnProvisionerFixture {
 
         public Builder appSync(AppSyncService v) {
             this.appSyncService = v;
+            return this;
+        }
+
+        public Builder appConfig(AppConfigService v) {
+            this.appConfigService = v;
             return this;
         }
 

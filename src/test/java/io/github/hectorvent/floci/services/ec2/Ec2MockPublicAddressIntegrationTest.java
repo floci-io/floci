@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -403,6 +404,10 @@ class Ec2MockPublicAddressIntegrationTest {
                 .body(INTERFACE_ADDRESS + "find { it.privateIpAddress == '10.90.1.11' }.association.publicIp",
                         equalTo(secondaryIp));
         assertEquals(primaryIp, publicIp(owner, instance));
+        assertAssociation(owner, instance, primaryIp, owner);
+        // The secondary address's Elastic IP is not the instance's, at either level.
+        String instanceXml = describe(owner, instance).extract().asString();
+        assertFalse(instanceXml.contains(secondaryIp), instanceXml);
 
         // A new address for the primary private address displaces only the address already there.
         ValidatableResponse replacement = allocateAddress(owner);
@@ -661,16 +666,30 @@ class Ec2MockPublicAddressIntegrationTest {
         request("DeleteVpc", owner).formParam("VpcId", vpc).post("/").then().statusCode(200);
     }
 
-    /** Reads the primary interface's association back through DescribeInstances; null expects none. */
+    /**
+     * Reads the primary interface's association back through DescribeInstances, at the interface
+     * and again on its primary private address, where AWS repeats it; null expects none at either.
+     */
     private void assertAssociation(String owner, String instance, String publicIp, String ipOwnerId) {
         XmlPath xml = describe(owner, instance).extract().xmlPath();
-        List<Object> items = xml.getList(INSTANCE + "networkInterfaceSet.item.association");
+        String onInterface = INSTANCE + "networkInterfaceSet.item.association";
+        String onPrimary = INSTANCE + "networkInterfaceSet.item.privateIpAddressesSet.item"
+                + ".find { it.primary == 'true' }.association";
+        List<Object> items = xml.getList(onInterface);
+        List<Object> primaryItems = xml.getList(INSTANCE
+                + "networkInterfaceSet.item.privateIpAddressesSet.item.association");
         if (publicIp == null) {
             assertEquals(0, items.size(), "unexpected association " + items);
+            assertEquals(0, primaryItems.size(), "unexpected private address association " + primaryItems);
         } else {
             assertEquals(1, items.size());
-            assertEquals(publicIp, xml.getString(INSTANCE + "networkInterfaceSet.item.association.publicIp"));
-            assertEquals(ipOwnerId, xml.getString(INSTANCE + "networkInterfaceSet.item.association.ipOwnerId"));
+            assertEquals(1, primaryItems.size());
+            assertEquals(publicIp, xml.getString(onInterface + ".publicIp"));
+            assertEquals(ipOwnerId, xml.getString(onInterface + ".ipOwnerId"));
+            for (String field : List.of("publicIp", "publicDnsName", "ipOwnerId")) {
+                assertEquals(xml.getString(onInterface + "." + field), xml.getString(onPrimary + "." + field),
+                        field + " differs between the interface and its primary private address");
+            }
         }
     }
 
@@ -692,6 +711,9 @@ class Ec2MockPublicAddressIntegrationTest {
         assertEquals(1, xml.getList(INSTANCE + "networkInterfaceSet.item.association").size());
         assertEquals(0, xml.getList(INSTANCE + "networkInterfaceSet.item.find { it.networkInterfaceId == '"
                 + second + "' }.association").size());
+        assertEquals(1, xml.getList(INSTANCE + "networkInterfaceSet.item.privateIpAddressesSet.item.association").size());
+        assertEquals(0, xml.getList(INSTANCE + "networkInterfaceSet.item.find { it.networkInterfaceId == '"
+                + second + "' }.privateIpAddressesSet.item.association").size());
         request("TerminateInstances", owner).formParam("InstanceId.1", instance).post("/").then().statusCode(200);
     }
 

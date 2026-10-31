@@ -36,8 +36,8 @@ class DynamoDbPartiQLHandler {
         return switch (stmt) {
             case Stmt.Select s -> executeSelect(s, ctx, region);
             case Stmt.Insert s -> executeInsert(s, region);
-            case Stmt.Update s -> executeUpdate(s, region);
-            case Stmt.Delete s -> executeDelete(s, region);
+            case Stmt.Update s -> executeUpdate(s, ctx.returnValuesOnConditionCheckFailure(), region);
+            case Stmt.Delete s -> executeDelete(s, ctx.returnValuesOnConditionCheckFailure(), region);
             case Stmt.Exists ignored -> throw new AwsException("ValidationException",
                     "EXISTS can only be used in ExecuteTransaction write requests.", 400);
         };
@@ -454,8 +454,8 @@ class DynamoDbPartiQLHandler {
                 "attribute_type(" + ean.alias(at.path()) + ", " + eav.add(toTypedNode(at.type())) + ")";
             case Cond.SizeCmp sc ->
                 "size(" + ean.alias(sc.path()) + ") " + sc.op() + " " + eav.add(toTypedNode(sc.val()));
-            case Cond.IsNull isNull -> (isNull.negated() ? "NOT " : "") + "attribute_type(" + ean.alias(isNull.path())
-                    + ", " + eav.add(mapper.createObjectNode().put("S", "NULL")) + ")";
+            case Cond.IsType isType -> (isType.negated() ? "NOT " : "") + "attribute_type(" + ean.alias(isType.path())
+                    + ", " + eav.add(mapper.createObjectNode().put("S", isType.type().attributeType())) + ")";
             case Cond.And and -> joinOperands(and.operands(), " AND ", eav, ean);
             case Cond.Or or   -> joinOperands(or.operands(), " OR ", eav, ean);
             case Cond.Not not -> "NOT (" + buildCondExpr(not.operand(), eav, ean) + ")";
@@ -562,7 +562,7 @@ class DynamoDbPartiQLHandler {
 
     // --- UPDATE ---
 
-    private Result executeUpdate(Stmt.Update stmt, String region) {
+    private Result executeUpdate(Stmt.Update stmt, String returnValuesOnConditionCheckFailure, String region) {
         requireNoIndexQualifier(stmt.index());
         TableDefinition table = service.describeTable(stmt.table(), region);
         requireOneValuePerKey(table, stmt.where());
@@ -576,8 +576,8 @@ class DynamoDbPartiQLHandler {
 
         DynamoDbService.UpdateResult result = service.updateItem(stmt.table(), key, null, ue,
                 ean.isEmpty() ? null : ean.toNode(mapper),
-                eav.isEmpty() ? null : eav.toNode(mapper), returnValues, ce, region, "NONE",
-                UpdateSizeRule.FINISHED_ITEM);
+                eav.isEmpty() ? null : eav.toNode(mapper), returnValues, ce, region,
+                returnValuesOnConditionCheckFailure, UpdateSizeRule.FINISHED_ITEM);
         return new Result(itemsResponse(returnedAttributes(stmt.returning(), result)),
                 writeCapacity(table, result.oldItem(), result.newItem()));
     }
@@ -617,7 +617,7 @@ class DynamoDbPartiQLHandler {
 
     // --- DELETE ---
 
-    private Result executeDelete(Stmt.Delete stmt, String region) {
+    private Result executeDelete(Stmt.Delete stmt, String returnValuesOnConditionCheckFailure, String region) {
         requireNoIndexQualifier(stmt.index());
         TableDefinition table = service.describeTable(stmt.table(), region);
         requireOneValuePerKey(table, stmt.where());
@@ -629,7 +629,7 @@ class DynamoDbPartiQLHandler {
 
         JsonNode oldItem = service.deleteItem(stmt.table(), key, ce,
                 ean.isEmpty() ? null : ean.toNode(mapper),
-                eav.isEmpty() ? null : eav.toNode(mapper), region, "NONE");
+                eav.isEmpty() ? null : eav.toNode(mapper), region, returnValuesOnConditionCheckFailure);
         return new Result(itemsResponse(stmt.returning() == Returning.ALL_OLD ? oldItem : null),
                 writeCapacity(table, oldItem, null));
     }
@@ -646,7 +646,7 @@ class DynamoDbPartiQLHandler {
         }
     }
 
-    TransactMember toTransactItem(Stmt stmt, String region) {
+    TransactMember toTransactItem(Stmt stmt, String returnValuesOnConditionCheckFailure, String region) {
         requireNoIndexQualifier(switch (stmt) {
             case Stmt.Update upd -> upd.index();
             case Stmt.Delete del -> del.index();
@@ -687,6 +687,7 @@ class DynamoDbPartiQLHandler {
                 update.set("Key", key);
                 update.put("UpdateExpression", ue);
                 update.put("ConditionExpression", updateCondition(table, upd.where(), eav, ean));
+                update.put("ReturnValuesOnConditionCheckFailure", returnValuesOnConditionCheckFailure);
                 if (!eav.isEmpty()) update.set("ExpressionAttributeValues", eav.toNode(mapper));
                 if (!ean.isEmpty()) update.set("ExpressionAttributeNames", ean.toNode(mapper));
                 txItem.set("Update", update);
@@ -702,6 +703,7 @@ class DynamoDbPartiQLHandler {
                 if (ce != null) {
                     delete.put("ConditionExpression", ce);
                 }
+                delete.put("ReturnValuesOnConditionCheckFailure", returnValuesOnConditionCheckFailure);
                 if (!eav.isEmpty()) {
                     delete.set("ExpressionAttributeValues", eav.toNode(mapper));
                 }

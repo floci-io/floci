@@ -75,9 +75,9 @@ class EcsContainerManagerSecurityGroupTest {
         when(containerBuilder.resolveImage(anyString())).thenAnswer(invocation -> invocation.getArgument(0));
 
         lifecycleManager = mock(ContainerLifecycleManager.class);
-        when(lifecycleManager.resolveImageForLaunch(any(), any()))
+        when(lifecycleManager.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerInfo("docker-id", Map.of()));
+        when(lifecycleManager.createAndStartEphemeral(any(), any())).thenReturn(new ContainerInfo("docker-id", Map.of()));
         dockerClient = mock(DockerClient.class, RETURNS_DEEP_STUBS);
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
 
@@ -209,7 +209,7 @@ class EcsContainerManagerSecurityGroupTest {
         when(ec2Service.describeSecurityGroups(any(), eq(List.of("sg-1")), any(), any()))
                 .thenReturn(List.of(sg));
 
-        when(lifecycleManager.create(any())).thenReturn("router-id");
+        when(lifecycleManager.create(any(), any())).thenReturn("router-id");
         when(lifecycleManager.startCreated(anyString(), any()))
                 .thenReturn(new ContainerInfo("router-id", Map.of()));
         InspectVolumeCmd inspectVolumeCmd = mock(InspectVolumeCmd.class);
@@ -243,9 +243,9 @@ class EcsContainerManagerSecurityGroupTest {
         verify(builder, times(2)).withLabels(Map.of("io.floci.security-group.workload", "true"));
 
         verify(firewallManager).createNamespace(eq("ecs"), eq("abc123"), any(), any(), any(), any(), any(), any());
-        verify(lifecycleManager).create(any());
+        verify(lifecycleManager).create(any(), any());
         verify(lifecycleManager).startCreated(eq("router-id"), any());
-        verify(lifecycleManager).createAndStartEphemeral(any());
+        verify(lifecycleManager).createAndStartEphemeral(any(), any());
     }
 
     private static EcsTask awsvpcTask() {

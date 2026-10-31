@@ -6,6 +6,7 @@ import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.S3Uri;
@@ -16,6 +17,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.iam.model.SessionCreds;
 import io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -45,9 +47,10 @@ import java.util.zip.GZIPOutputStream;
  * supplies at run time, which the public image lacks, so the runner starts {@code spark-submit} itself,
  * in local mode: the container holds the driver and its executors. The container reaches Floci as the
  * other containers Floci launches do, with the run's execution role as its credentials, and S3A, which
- * takes {@code s3://} on every release, is pointed at Floci's S3. The driver's output goes to Floci's log and,
- * while it runs, to the run's CloudWatch log streams, when it has some; once it ends, its standard output
- * and error go, gzipped, to the run's log folder in Floci's S3, when it has one.
+ * takes {@code s3://} on every release, is pointed at Floci's S3. With TLS on, every JVM in the container
+ * trusts Floci's CA, through the Java trust store copied in before it starts. The driver's output goes to
+ * Floci's log and, while it runs, to the run's CloudWatch log streams, when it has some; once it ends, its
+ * standard output and error go, gzipped, to the run's log folder in Floci's S3, when it has one.
  */
 @ApplicationScoped
 public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardown {
@@ -93,6 +96,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private final LaunchedContainerAwsEnv awsEnv;
     private final LambdaExecutionRoleCredentials roleCredentials;
     private final S3Service s3Service;
+    private final EcrRegistryManager ecrRegistryManager;
     private final EmulatorConfig config;
     private final Clock clock;
     private final Duration pollInterval;
@@ -101,21 +105,23 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     public EmrServerlessSparkRunner(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
                                     ContainerLogStreamer logStreamer, LaunchedContainerAwsEnv awsEnv,
                                     LambdaExecutionRoleCredentials roleCredentials, S3Service s3Service,
-                                    EmulatorConfig config, Clock clock) {
-        this(containerBuilder, lifecycleManager, logStreamer, awsEnv, roleCredentials, s3Service, config, clock,
-                POLL_INTERVAL);
+                                    EcrRegistryManager ecrRegistryManager, EmulatorConfig config, Clock clock) {
+        this(containerBuilder, lifecycleManager, logStreamer, awsEnv, roleCredentials, s3Service, ecrRegistryManager,
+                config, clock, POLL_INTERVAL);
     }
 
     EmrServerlessSparkRunner(ContainerBuilder containerBuilder, ContainerLifecycleManager lifecycleManager,
                              ContainerLogStreamer logStreamer, LaunchedContainerAwsEnv awsEnv,
                              LambdaExecutionRoleCredentials roleCredentials, S3Service s3Service,
-                             EmulatorConfig config, Clock clock, Duration pollInterval) {
+                             EcrRegistryManager ecrRegistryManager, EmulatorConfig config, Clock clock,
+                             Duration pollInterval) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
         this.awsEnv = awsEnv;
         this.roleCredentials = roleCredentials;
         this.s3Service = s3Service;
+        this.ecrRegistryManager = ecrRegistryManager;
         this.config = config;
         this.clock = clock;
         this.pollInterval = pollInterval;
@@ -137,8 +143,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             // The deployment that started the driver, which removeLeftoverDrivers() goes by.
             labels.put(ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config));
             String endpoint = awsEnv.flociEndpoint();
-            ContainerBuilder.Builder container = containerBuilder.newContainer(
-                            image(job.imageTemplate(), job.releaseLabel()))
+            ContainerBuilder.Builder container = containerBuilder.newContainer(launchImage(job))
                     .withName(ContainerStorageHelper.dockerName(config, job.service() + "-" + job.runId()))
                     .withEnv(awsEnv.sdkBaselineEnv(job.region(), Optional.empty(), credentials, job.accountId()));
             if (job.command() == null) {
@@ -155,13 +160,16 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                     .withEmbeddedDns()
                     .withLogRotation()
                     .withLabels(labels)
+                    .withJavaTrustStore()
                     .build();
-            String containerId = lifecycleManager.createAndStart(spec).containerId();
+            String containerId = lifecycleManager.create(spec);
             launch.started(containerId);
-            // A stop, a reset or a shutdown while the image was pulled is read now the driver has a container.
+            // A stop, a reset or a shutdown while the image was pulled or the trust store copied is read now,
+            // before the driver starts.
             if (launch.stopRequested() || progress.cancelled()) {
                 return Outcome.halted();
             }
+            lifecycleManager.startCreated(containerId, spec);
             logHandle = attachLog(containerId, job);
             progress.started();
             Outcome outcome = awaitEnd(containerId, job, launch, progress);
@@ -298,6 +306,21 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         String template = imageTemplate != null ? imageTemplate
                 : releaseLabel.startsWith("emr-spark-") ? SPARK_RUNTIME_DEFAULT_IMAGE : DEFAULT_IMAGE;
         return template.formatted(releaseLabel);
+    }
+
+    /**
+     * The image a run's driver starts from: the release's, or the template's, or the application's custom
+     * image. A custom image's ECR URI leads to Floci's own registry, as a Lambda function's or an ECS task's
+     * does, and the image is pulled for every run, as an ECS task's is, so a tag pushed again is what the next
+     * run gets ("New workloads submitted after the update automatically will use the new image"). The driver
+     * starts from the image id that pull resolved, which a later push cannot move.
+     */
+    private String launchImage(Job job) {
+        if (job.customImage() == null) {
+            return image(job.imageTemplate(), job.releaseLabel());
+        }
+        String image = containerBuilder.resolveImage(ecrRegistryManager.rewriteImageUri(job.customImage()));
+        return lifecycleManager.resolveImageForLaunch(image, ImagePullBehavior.DEFAULT, null).imageId();
     }
 
     /**

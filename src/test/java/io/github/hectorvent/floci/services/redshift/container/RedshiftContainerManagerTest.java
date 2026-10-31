@@ -9,6 +9,7 @@ import com.github.dockerjava.api.command.ExecCreateCmdResponse;
 import com.github.dockerjava.api.command.ExecStartCmd;
 import com.github.dockerjava.api.command.InspectExecCmd;
 import com.github.dockerjava.api.command.InspectExecResponse;
+import com.github.dockerjava.api.command.StopContainerCmd;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.StreamType;
@@ -63,6 +64,49 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class RedshiftContainerManagerTest {
+
+    @Test
+    void pauseStopsButNeverRemovesTheDataBearingContainer() {
+        StopContainerCmd command = mock(StopContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.stopContainerCmd("floci-aws-redshift-" + ACCOUNT_ID + "-warehouse"))
+                .thenReturn(command);
+        manager.pause(ACCOUNT_ID, "warehouse");
+        verify(command).withTimeout(30);
+        verify(command).exec();
+        verify(lifecycleManager, never()).removeIfExistsStrict(anyString(), eq(true));
+    }
+
+    @Test
+    void pausePropagatesDockerFailure() {
+        StopContainerCmd command = mock(StopContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.stopContainerCmd(anyString())).thenReturn(command);
+        doThrow(new IllegalStateException("daemon unavailable")).when(command).exec();
+        assertThrows(IllegalStateException.class, () -> manager.pause(ACCOUNT_ID, "warehouse"));
+    }
+
+    @Test
+    void resumeNeverReplacesAMissingContainerWithAnEmptyDatabase() {
+        when(lifecycleManager.findByName(anyString())).thenReturn(Optional.empty());
+        assertThrows(AwsException.class, () -> manager.resume(ACCOUNT_ID, "warehouse", "admin", "dev"));
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+    }
+
+    @Test
+    void resumeAdoptsTheSameContainerAndRefreshesItsBackendEndpoint() {
+        Container existing = mock(Container.class);
+        when(existing.getId()).thenReturn("original");
+        when(lifecycleManager.findByName(anyString())).thenReturn(Optional.of(existing));
+        when(lifecycleManager.adopt(eq("original"), eq(List.of(5432)), any())).thenReturn(
+                new ContainerInfo("original", Map.of(5432, new EndpointInfo("new-host", 5433))));
+
+        RedshiftContainerHandle handle = manager.resume(ACCOUNT_ID, "warehouse", "admin", "dev");
+
+        assertEquals("original", handle.getContainerId());
+        assertEquals("new-host", handle.getHost());
+        assertEquals(5433, handle.getPort());
+        verify(dockerClient, never()).copyArchiveToContainerCmd(anyString());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+    }
 
     @ParameterizedTest
     @ValueSource(strings = {"adopt", "readiness", "proxy"})

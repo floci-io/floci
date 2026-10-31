@@ -1,11 +1,18 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
+import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -577,5 +584,231 @@ class Ec2NetworkInterfaceIntegrationTest {
             .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
 
         Assertions.assertTrue(replacement.startsWith("i-"));
+    }
+
+    @Test
+    @Order(19)
+    void anExplicitAddressAnotherInterfaceHoldsIsRefused() {
+        String holder = given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", subnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+        String held = given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("NetworkInterfaceId.1", holder)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.privateIpAddress");
+
+        given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", subnetId)
+            .formParam("PrivateIpAddress", held)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidIPAddress.InUse"))
+            .body("Response.Errors.Error.Message", equalTo("Address " + held + " is in use."));
+
+        given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("Filter.1.Name", "private-ip-address")
+            .formParam("Filter.1.Value.1", held)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.networkInterfaceId",
+                    equalTo(holder));
+
+        given()
+            .formParam("Action", "DeleteNetworkInterface")
+            .formParam("NetworkInterfaceId", holder)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    // A PrivateIpAddresses list is what the Terraform AWS provider sends for private_ips: the primary
+    // is the entry marked Primary, never an address the subnet allocator picked on its own.
+    private static String addressInSubnet(int lastOctet) {
+        String held = given()
+            .formParam("Action", "DescribeSubnets")
+            .formParam("SubnetId.1", subnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("DescribeSubnetsResponse.subnetSet.item.cidrBlock");
+        String[] o = held.split("/")[0].split("\\.");
+        return o[0] + "." + o[1] + "." + o[2] + "." + lastOctet;
+    }
+
+    private static ValidatableResponse createWithList(String... params) {
+        RequestSpecification r = given()
+            .formParam("Action", "CreateNetworkInterface")
+            .formParam("SubnetId", subnetId)
+            .header("Authorization", AUTH_HEADER);
+        for (int i = 0; i < params.length; i += 2) {
+            r = r.formParam(params[i], params[i + 1]);
+        }
+        return r.when().post("/").then();
+    }
+
+    /** Reads the interface back through DescribeNetworkInterfaces, not the create response. */
+    private static Map<String, Boolean> describedAddresses(String id) {
+        XmlPath xml = given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("NetworkInterfaceId.1", id)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath();
+        String base = "DescribeNetworkInterfacesResponse.networkInterfaceSet.item.privateIpAddressesSet.item.";
+        List<String> ips = xml.getList(base + "privateIpAddress");
+        List<String> primaries = xml.getList(base + "primary");
+        Map<String, Boolean> out = new LinkedHashMap<>();
+        for (int i = 0; i < ips.size(); i++) {
+            out.put(ips.get(i), Boolean.parseBoolean(primaries.get(i)));
+        }
+        return out;
+    }
+
+    private static void deleteEni(String id) {
+        given().formParam("Action", "DeleteNetworkInterface").formParam("NetworkInterfaceId", id)
+            .header("Authorization", AUTH_HEADER).when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    @Order(20)
+    void aSinglePrivateIpAddressesEntryMarkedPrimaryIsThePrimary() {
+        String ip = addressInSubnet(201);
+        String id = createWithList(
+                "PrivateIpAddresses.1.PrivateIpAddress", ip,
+                "PrivateIpAddresses.1.Primary", "true")
+            .statusCode(200)
+            .body("CreateNetworkInterfaceResponse.networkInterface.privateIpAddress", equalTo(ip))
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+
+        Assertions.assertEquals(Map.of(ip, true), describedAddresses(id));
+        deleteEni(id);
+    }
+
+    @Test
+    @Order(21)
+    void theEntryMarkedPrimaryWinsWhateverItsPosition() {
+        String first = addressInSubnet(202);
+        String second = addressInSubnet(203);
+        String id = createWithList(
+                "PrivateIpAddresses.1.PrivateIpAddress", first,
+                "PrivateIpAddresses.1.Primary", "false",
+                "PrivateIpAddresses.2.PrivateIpAddress", second,
+                "PrivateIpAddresses.2.Primary", "true")
+            .statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+
+        Map<String, Boolean> got = describedAddresses(id);
+        Assertions.assertEquals(2, got.size());
+        Assertions.assertEquals(Boolean.TRUE, got.get(second));
+        Assertions.assertEquals(Boolean.FALSE, got.get(first));
+        deleteEni(id);
+    }
+
+    @Test
+    @Order(22)
+    void aSecondaryAnotherInterfaceHoldsIsRefused() {
+        String ip = addressInSubnet(204);
+        String holder = createWithList("PrivateIpAddress", ip).statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+
+        createWithList(
+                "PrivateIpAddresses.1.PrivateIpAddress", addressInSubnet(205),
+                "PrivateIpAddresses.1.Primary", "true",
+                "PrivateIpAddresses.2.PrivateIpAddress", ip)
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidIPAddress.InUse"));
+        deleteEni(holder);
+    }
+
+    @Test
+    @Order(23)
+    void aPrimaryEntryAlongsidePrivateIpAddressIsRefused() {
+        createWithList(
+                "PrivateIpAddress", addressInSubnet(206),
+                "PrivateIpAddresses.1.PrivateIpAddress", addressInSubnet(207),
+                "PrivateIpAddresses.1.Primary", "true")
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterCombination"));
+    }
+
+    private static int enisInSubnet() {
+        return given()
+            .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("Filter.1.Name", "subnet-id")
+            .formParam("Filter.1.Value.1", subnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath()
+            .getList("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.networkInterfaceId").size();
+    }
+
+    @Test
+    @Order(24)
+    void twoEntriesMarkedPrimaryAreRefusedAndCreateNothing() {
+        int before = enisInSubnet();
+        createWithList(
+                "PrivateIpAddresses.1.PrivateIpAddress", addressInSubnet(208),
+                "PrivateIpAddresses.1.Primary", "true",
+                "PrivateIpAddresses.2.PrivateIpAddress", addressInSubnet(209),
+                "PrivateIpAddresses.2.Primary", "true")
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+        Assertions.assertEquals(before, enisInSubnet());
+    }
+
+    @Test
+    @Order(25)
+    void aSecondaryEqualToThePrivateIpAddressCollapsesIntoThePrimary() {
+        String ip = addressInSubnet(210);
+        String id = createWithList(
+                "PrivateIpAddress", ip,
+                "PrivateIpAddresses.1.PrivateIpAddress", ip)
+            .statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+        Assertions.assertEquals(Map.of(ip, true), describedAddresses(id));
+        deleteEni(id);
+    }
+
+    @Test
+    @Order(26)
+    void aNonPrimaryEntryEqualToThePrimaryEntryCollapsesIntoIt() {
+        String ip = addressInSubnet(211);
+        String id = createWithList(
+                "PrivateIpAddresses.1.PrivateIpAddress", ip,
+                "PrivateIpAddresses.1.Primary", "true",
+                "PrivateIpAddresses.2.PrivateIpAddress", ip)
+            .statusCode(200)
+            .extract().path("CreateNetworkInterfaceResponse.networkInterface.networkInterfaceId");
+        Assertions.assertEquals(Map.of(ip, true), describedAddresses(id));
+        deleteEni(id);
     }
 }

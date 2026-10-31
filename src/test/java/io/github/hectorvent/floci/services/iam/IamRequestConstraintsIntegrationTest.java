@@ -10,8 +10,8 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 
 /**
- * The declared constraints the managed-policy family and {@code GetAccountAuthorizationDetails} are
- * now read against, from the model rather than from a hand-written check. What they change is the
+ * The declared constraints every operation is read against, from the model rather than from a
+ * hand-written check. What they change is the
  * status: a value that breaks a declared constraint used to reach the store and answer
  * {@code NoSuchEntity}, or on the second of those to be answered with a 200, where AWS's validation
  * layer runs ahead of the operation and answers {@code ValidationError}, which is the ordering
@@ -175,13 +175,16 @@ class IamRequestConstraintsIntegrationTest {
                     + " Value at 'roleName' failed to satisfy constraint: Member must satisfy"
                     + " regular expression pattern: [\\w+=,.@-]+"));
 
-        // The same empty name on an operation this wave leaves alone, reported the older way.
+        // And the same empty name on `CreateRole`, which is read from the model as well now, so
+        // both constraints are reported there too where the hand-written check stopped at one.
         iam("CreateRole")
             .formParam("RoleName", "")
             .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
         .when().post("/").then().statusCode(400)
-            .body(MESSAGE, equalTo("1 validation error detected: Value at 'roleName' failed to"
-                    + " satisfy constraint: Member must have length greater than or equal to 1"));
+            .body(MESSAGE, equalTo("2 validation errors detected: Value at 'roleName' failed to"
+                    + " satisfy constraint: Member must have length greater than or equal to 1;"
+                    + " Value at 'roleName' failed to satisfy constraint: Member must satisfy"
+                    + " regular expression pattern: [\\w+=,.@-]+"));
     }
 
     /**
@@ -304,5 +307,79 @@ class IamRequestConstraintsIntegrationTest {
                     + " failed to satisfy constraint: Member must have length greater than or"
                     + " equal to 1"))
             .body(MESSAGE, containsString("Member must satisfy regular expression pattern:"));
+    }
+
+    /**
+     * A map's key is held to every rule its shape declares, answered as a set under the map's own
+     * name, and its value is held to its shape under the key the entry carried. The key's own
+     * length and pattern were read before this, by a hand-written check the model now answers for;
+     * an empty value reached the store.
+     */
+    @Test
+    void aMapsKeyAndValueAreEachHeldToTheirShape() {
+        iam("PutAccountProperties")
+            .formParam("Properties.entry.1.key", "1-not-a-key")
+            .formParam("Properties.entry.1.value", "v")
+        .when().post("/").then().statusCode(400)
+            .body(CODE, equalTo("ValidationError"))
+            .body(MESSAGE, equalTo("1 validation error detected: Value at 'properties' failed to"
+                    + " satisfy constraint: Map keys must satisfy constraint: [Member must have"
+                    + " length less than or equal to 50, Member must have length greater than or"
+                    + " equal to 1, Member must satisfy regular expression pattern:"
+                    + " ^[A-Za-z][A-Za-z0-9/_-]*$]"));
+
+        iam("PutAccountProperties")
+            .formParam("Properties.entry.1.key", "Ok/Value")
+            .formParam("Properties.entry.1.value", "")
+        .when().post("/").then().statusCode(400)
+            .body(MESSAGE, equalTo("1 validation error detected: Value at 'properties.Ok/Value'"
+                    + " failed to satisfy constraint: Member must have length greater than or"
+                    + " equal to 1"));
+
+        // A map the request names nowhere is the required member reading as null.
+        iam("PutAccountProperties")
+        .when().post("/").then().statusCode(400)
+            .body(MESSAGE, equalTo("1 validation error detected: Value null at 'properties' failed"
+                    + " to satisfy constraint: Member must not be null"));
+    }
+
+    /**
+     * A map whose value is a structure holding a list is read all the way down, which is the
+     * deepest request this service models: {@code AcquireRole} numbers its replacement values as
+     * entries and each entry's structure carries a list of its own. An entry the request numbered
+     * with a key is an entry, so what the structure under it requires is answered inside it, named
+     * under that key, which is the answer the hand-written check this replaces already gave.
+     */
+    @Test
+    void aMapValuesStructureAndTheListInsideItAreRead() {
+        iam("AcquireRole")
+            .formParam("TemplateArn", "arn:aws:iam::000000000000:policy-template/t")
+            .formParam("ReplacementValues.entry.1.key", "Department")
+        .when().post("/").then().statusCode(400)
+            .body(CODE, equalTo("ValidationError"))
+            .body(MESSAGE, equalTo("1 validation error detected: Value null at"
+                    + " 'replacementValues.Department.values' failed to satisfy constraint: Member"
+                    + " must not be null"));
+    }
+
+    /**
+     * A structure's field may be a list, and its members structures of their own. The name of a
+     * policy parameter is 5 characters at least, which nothing read before.
+     */
+    @Test
+    void aListInsideAStructureIsReadUnderTheNamesTheRequestGives() {
+        iam("CreateDelegationRequest")
+            .formParam("Description", "a delegation")
+            .formParam("RequestorWorkflowId", "wf-0001")
+            .formParam("NotificationChannel", "channel")
+            .formParam("SessionDuration", "3600")
+            .formParam("Permissions.PolicyTemplateArn", "arn:aws:iam::000000000000:policy/t")
+            .formParam("Permissions.Parameters.member.1.Name", "abc")
+            .formParam("Permissions.Parameters.member.1.Type", "string")
+        .when().post("/").then().statusCode(400)
+            .body(CODE, equalTo("ValidationError"))
+            .body(MESSAGE, equalTo("1 validation error detected: Value at"
+                    + " 'permissions.parameters.1.member.name' failed to satisfy constraint:"
+                    + " Member must have length greater than or equal to 5"));
     }
 }

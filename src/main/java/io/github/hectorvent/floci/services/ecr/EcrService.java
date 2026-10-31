@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.concurrent.KeyedWriteLocks;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -42,6 +43,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -84,7 +86,10 @@ public class EcrService implements ResourceProvider {
     private static final ObjectReader SINGLE_JSON_VALUE =
             MAPPER.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     private static final int MAX_REPO_NAME_LENGTH = 256;
+    private static final int MAX_PULL_TIME_EXCLUSIONS = 100;
     private static final int MAX_PULL_THROUGH_CACHE_PREFIX_LENGTH = 30;
+    private static final Map<String, String> ACCOUNT_SETTING_DEFAULTS = Map.of(
+            "BASIC_SCAN_TYPE_VERSION", "AWS_NATIVE", "REGISTRY_POLICY_SCOPE", "V2", "BLOB_MOUNTING", "DISABLED");
 
     private final StorageBackend<String, Repository> repoStore;
     private final StorageBackend<String, ImageMetadata> imageMetaStore;
@@ -97,6 +102,7 @@ public class EcrService implements ResourceProvider {
     private final RegionResolver regionResolver;
     private final EcrLayerUploads layerUploads = new EcrLayerUploads(this::discardUpload);
     private final Set<String> inFlightImmutableTags = ConcurrentHashMap.newKeySet();
+    private final KeyedWriteLocks<String> repositoryWriteLocks = new KeyedWriteLocks<>();
 
     @Inject
     public EcrService(StorageFactory factory,
@@ -856,26 +862,154 @@ public class EcrService implements ResourceProvider {
         if (imageIds == null) imageIds = List.of();
         for (ImageIdentifier id : imageIds) {
             try {
-                String digest = id.getImageDigest();
-                if (digest == null && id.getImageTag() != null) {
-                    digest = http.headManifestDigest(internal, id.getImageTag(), null);
+                lockRepositoryWrites(internal);
+                try {
+                    if (id.getImageDigest() == null && id.getImageTag() != null) {
+                        deleteImageTag(repo, repositoryName, internal, http, id, region, deleted, failures);
+                    } else {
+                        deleteImageDigest(repo, repositoryName, internal, http, id, region, deleted, failures);
+                    }
+                } finally {
+                    unlockRepositoryWrites(internal);
                 }
-                if (digest == null) {
-                    failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
-                    continue;
-                }
-                boolean ok = http.deleteManifest(internal, digest);
-                if (!ok) {
-                    failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
-                    continue;
-                }
-                deleted.add(new ImageIdentifier(id.getImageTag(), digest));
-                imageMetaStore.delete(imageMetaKey(region, repo.getRegistryId(), repositoryName, digest));
             } catch (Exception e) {
                 failures.add(new ImageFailure(id, "ImageNotFound", e.getMessage()));
             }
         }
         return new BatchDeleteImageResult(deleted, failures);
+    }
+
+    /**
+     * Deletes one tag as BatchDeleteImage does on AWS: the manifest goes with it only when no
+     * other tag still references the shared digest. The backing registry deletes manifests by
+     * digest only, and that untags every tag the digest has, so while another tag remains the
+     * manifest is dropped and immediately written back under the surviving tags from a copy
+     * read before the drop, which restores the identical digest. The repository's write lock
+     * (see {@link #lockRepositoryWrites}) is held across the whole sequence, so a manifest
+     * pushed to the repository between the drop and the write-back cannot be overwritten by
+     * the restore, and the drop and the restore run under the registry manager's monitor,
+     * the monitor {@code /_floci/ecr/gc} holds while it runs, so a concurrent GC cannot see
+     * the manifest's layers as unreferenced in that window and reclaim them out from under
+     * the restore.
+     */
+    private void deleteImageTag(Repository repo, String repositoryName, String internal,
+                                RegistryHttpClient http, ImageIdentifier id, String region,
+                                List<ImageIdentifier> deleted, List<ImageFailure> failures)
+            throws Exception {
+        String digest = http.headManifestDigest(internal, id.getImageTag(), null);
+        if (digest == null) {
+            failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
+            return;
+        }
+        List<String> survivingTags;
+        try {
+            survivingTags = tagsReferencing(internal, http, digest, id.getImageTag());
+        } catch (Exception e) {
+            failures.add(new ImageFailure(id, "ServerException",
+                    "The tags of '" + repositoryName + "' could not be listed before deleting tag '"
+                            + id.getImageTag() + "': " + e.getMessage()));
+            return;
+        }
+        if (survivingTags.isEmpty()) {
+            if (!http.deleteManifest(internal, digest)) {
+                failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
+                return;
+            }
+            deleted.add(new ImageIdentifier(id.getImageTag(), digest));
+            imageMetaStore.delete(imageMetaKey(region, repo.getRegistryId(), repositoryName, digest));
+            return;
+        }
+        RegistryHttpClient.ManifestResult manifest = http.getManifest(internal, digest, null);
+        if (manifest == null || manifest.body() == null || manifest.mediaType() == null) {
+            failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
+            return;
+        }
+        synchronized (registryManager) {
+            if (!http.deleteManifest(internal, digest)) {
+                failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
+                return;
+            }
+            for (String survivingTag : survivingTags) {
+                restoreTag(internal, http, digest, manifest, survivingTag, id.getImageTag(), repositoryName);
+            }
+        }
+        deleted.add(new ImageIdentifier(id.getImageTag(), digest));
+    }
+
+    /**
+     * Deletes a manifest with every tag that references it, reporting one imageId per removed
+     * tag the way the API reference's example response does.
+     */
+    private void deleteImageDigest(Repository repo, String repositoryName, String internal,
+                                   RegistryHttpClient http, ImageIdentifier id, String region,
+                                   List<ImageIdentifier> deleted, List<ImageFailure> failures)
+            throws Exception {
+        String digest = id.getImageDigest();
+        if (digest == null) {
+            failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
+            return;
+        }
+        List<String> removedTags;
+        try {
+            removedTags = tagsReferencing(internal, http, digest, null);
+        } catch (Exception e) {
+            failures.add(new ImageFailure(id, "ServerException",
+                    "The tags of '" + repositoryName + "' could not be listed before deleting manifest '"
+                            + digest + "': " + e.getMessage()));
+            return;
+        }
+        if (!http.deleteManifest(internal, digest)) {
+            failures.add(new ImageFailure(id, "ImageNotFound", "Image not found"));
+            return;
+        }
+        if (removedTags.isEmpty()) {
+            deleted.add(new ImageIdentifier(id.getImageTag(), digest));
+        } else {
+            for (String removedTag : removedTags) {
+                deleted.add(new ImageIdentifier(removedTag, digest));
+            }
+        }
+        imageMetaStore.delete(imageMetaKey(region, repo.getRegistryId(), repositoryName, digest));
+    }
+
+    /**
+     * The repository's tags, other than {@code exclude}, that resolve to {@code digest}. Both
+     * calls are strict, so a registry that answers an error fails the delete instead of quietly
+     * dropping a surviving tag from the set to restore.
+     */
+    private List<String> tagsReferencing(String internal, RegistryHttpClient http,
+                                         String digest, String exclude) throws Exception {
+        List<String> referencing = new ArrayList<>();
+        for (String tag : http.listTagsStrict(internal)) {
+            if (tag.equals(exclude)) {
+                continue;
+            }
+            if (digest.equals(http.headManifestDigestStrict(internal, tag, null))) {
+                referencing.add(tag);
+            }
+        }
+        return referencing;
+    }
+
+    /**
+     * Writes a manifest back under one of its tags after the digest-addressed delete removed
+     * them all. The requested tag is already gone when this runs, so its delete is reported as
+     * done; a restore that fails leaves the surviving tag broken, which is logged for the
+     * operator because no imageId can say it.
+     */
+    private void restoreTag(String internal, RegistryHttpClient http, String digest,
+                            RegistryHttpClient.ManifestResult manifest, String survivingTag,
+                            String deletedTag, String repositoryName) {
+        try {
+            String restored = http.putManifest(internal, survivingTag, manifest.mediaType(), manifest.body());
+            if (restored != null && !restored.equals(digest)) {
+                LOG.warnv("Restoring ECR tag {0} in repository {1} rewrote manifest {2} as {3}",
+                        survivingTag, repositoryName, digest, restored);
+            }
+        } catch (Exception e) {
+            LOG.warnv("Restoring ECR tag {0} of manifest {1} in repository {2} failed after deleting tag {3}: {4}",
+                    survivingTag, digest, repositoryName, deletedTag, e.getMessage());
+        }
     }
 
     // ============================================================
@@ -917,8 +1051,13 @@ public class EcrService implements ResourceProvider {
             throw imageTagAlreadyExists(imageTag, repositoryName);
         }
         try {
-            return callRegistry(() -> writeManifest(repo, repositoryName, storage, http, imageManifest, mediaType,
-                    imageTag, digest, guarded, region), EcrService::putImageError);
+            lockRepositoryWrites(storage);
+            try {
+                return callRegistry(() -> writeManifest(repo, repositoryName, storage, http, imageManifest, mediaType,
+                        imageTag, digest, guarded, region), EcrService::putImageError);
+            } finally {
+                unlockRepositoryWrites(storage);
+            }
         } finally {
             if (guarded != null) {
                 releaseImmutableTag(guarded);
@@ -1121,6 +1260,48 @@ public class EcrService implements ResourceProvider {
         inFlightImmutableTags.remove(key);
     }
 
+    /**
+     * The write lock every manifest write to one backing registry repository takes: the data
+     * plane's manifest PUTs and deletes, {@code PutImage}, and the BatchDeleteImage sequence
+     * that drops a shared manifest by digest and writes it back under its surviving tags. A
+     * write that lands between that sequence's steps would otherwise be overwritten by the
+     * restore of the older manifest. Keyed by the repository name as the backing registry
+     * stores it, the only namespace in which two writes address the same manifests. The
+     * lock's entry counting, its cross-thread release and its interruption behavior are
+     * {@link KeyedWriteLocks}' contract; the interruption surfaces here as a
+     * {@code ServerException}.
+     */
+    public void lockRepositoryWrites(String storageRepositoryName) {
+        try {
+            repositoryWriteLocks.acquire(storageRepositoryName);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new AwsException("ServerException",
+                    "Interrupted while waiting for the write lock on " + storageRepositoryName, 500);
+        }
+    }
+
+    /**
+     * One try at {@link #lockRepositoryWrites}, for callers that must not block a thread. The
+     * caller that succeeds owns the lock until its {@code unlockRepositoryWrites}.
+     */
+    public boolean tryLockRepositoryWrites(String storageRepositoryName) {
+        return repositoryWriteLocks.tryAcquire(storageRepositoryName);
+    }
+
+    /**
+     * Ends one writer's hold of the repository's write lock; see
+     * {@link #lockRepositoryWrites}.
+     */
+    public void unlockRepositoryWrites(String storageRepositoryName) {
+        repositoryWriteLocks.release(storageRepositoryName);
+    }
+
+    /** The repository write lock entries still counting writers, for tests. */
+    int liveRepositoryWriteLocks() {
+        return repositoryWriteLocks.size();
+    }
+
     /** The media type sent, else the manifest's own {@code mediaType}; with neither, the request is refused. */
     private static String manifestMediaType(String manifest, String given) {
         JsonNode root;
@@ -1258,6 +1439,51 @@ public class EcrService implements ResourceProvider {
         });
     }
 
+    public RegistrySettings.PullTimeUpdateExclusion registerPullTimeUpdateExclusion(String principalArn, String region) {
+        return updateRegistrySettings(region, settings -> {
+            List<RegistrySettings.PullTimeUpdateExclusion> exclusions = pullTimeExclusions(settings);
+            if (exclusions.stream().anyMatch(exclusion -> exclusion.principalArn().equals(principalArn))) {
+                throw new AwsException("ExclusionAlreadyExistsException", "The exclusion already exists.", 400);
+            }
+            if (exclusions.size() >= MAX_PULL_TIME_EXCLUSIONS) {
+                throw new AwsException("LimitExceededException", "A registry can have at most 100 exclusions.", 400);
+            }
+            RegistrySettings.PullTimeUpdateExclusion exclusion =
+                    new RegistrySettings.PullTimeUpdateExclusion(principalArn, Instant.now());
+            List<RegistrySettings.PullTimeUpdateExclusion> updated = new ArrayList<>(exclusions);
+            updated.add(exclusion);
+            settings.setPullTimeUpdateExclusions(List.copyOf(updated));
+            return exclusion;
+        });
+    }
+
+    public String deregisterPullTimeUpdateExclusion(String principalArn, String region) {
+        return updateRegistrySettings(region, settings -> {
+            List<RegistrySettings.PullTimeUpdateExclusion> exclusions = pullTimeExclusions(settings);
+            List<RegistrySettings.PullTimeUpdateExclusion> remaining = exclusions.stream()
+                    .filter(exclusion -> !exclusion.principalArn().equals(principalArn)).toList();
+            if (remaining.size() == exclusions.size()) {
+                throw new AwsException("ExclusionNotFoundException", "The exclusion was not found.", 400);
+            }
+            settings.setPullTimeUpdateExclusions(remaining);
+            return principalArn;
+        });
+    }
+
+    public PaginatedResult<String> listPullTimeUpdateExclusions(Integer maxResults, String nextToken, String region) {
+        synchronized (registryLock(region)) {
+            List<String> principals = pullTimeExclusions(registrySettings(region)).stream()
+                    .map(RegistrySettings.PullTimeUpdateExclusion::principalArn).toList();
+            return Pagination.paginate(principals, Function.identity(), maxResults == null ? 100 : maxResults,
+                    nextToken, "ecr-pull-time:" + registrySettingsKey(region),
+                    token -> new AwsException("InvalidParameterException", "Invalid nextToken.", 400));
+        }
+    }
+
+    private static List<RegistrySettings.PullTimeUpdateExclusion> pullTimeExclusions(RegistrySettings settings) {
+        return settings.getPullTimeUpdateExclusions() == null ? List.of() : settings.getPullTimeUpdateExclusions();
+    }
+
     /**
      * Stores the replication rules; an empty list clears them. The rules are checked against the
      * model before this is reached. Floci does not replicate images.
@@ -1312,6 +1538,37 @@ public class EcrService implements ResourceProvider {
     /** The registry ID of the caller's account. */
     public String registryId() {
         return regionResolver.getAccountId();
+    }
+
+    public String getAccountSetting(String name, String region) {
+        String defaultValue = accountSettingDefault(name);
+        synchronized (registryLock(region)) {
+            Map<String, String> values = registrySettings(region).getAccountSettings();
+            return values == null ? defaultValue : values.getOrDefault(name, defaultValue);
+        }
+    }
+
+    public String putAccountSetting(String name, String value, String region) {
+        String defaultValue = accountSettingDefault(name);
+        boolean valid = "BLOB_MOUNTING".equals(name)
+                ? "ENABLED".equals(value) || "DISABLED".equals(value) : defaultValue.equals(value);
+        if (!valid) {
+            throw new AwsException("ValidationException", "Invalid value for account setting " + name + ".", 400);
+        }
+        return updateRegistrySettings(region, settings -> {
+            Map<String, String> values = settings.getAccountSettings() == null
+                    ? new HashMap<>() : new HashMap<>(settings.getAccountSettings());
+            values.put(name, value);
+            settings.setAccountSettings(Map.copyOf(values));
+            return value;
+        });
+    }
+
+    private static String accountSettingDefault(String name) {
+        if (name == null || !ACCOUNT_SETTING_DEFAULTS.containsKey(name)) {
+            throw new AwsException("ValidationException", "Unsupported account setting name.", 400);
+        }
+        return ACCOUNT_SETTING_DEFAULTS.get(name);
     }
 
     private RegistrySettings registrySettings(String region) {

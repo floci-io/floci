@@ -45,6 +45,7 @@ public class S3Object {
     private Instant retainUntilDate;     // null if no retention
     private String legalHoldStatus;      // "ON" | "OFF" | null
     private String acl;
+    private String ownerAccountId;
 
     // Internal-only per-write stamp (not an S3 versionId, and set even when bucket versioning is
     // off - see S3Service#getLatestObject). A fresh value is assigned every time this key is
@@ -169,6 +170,9 @@ public class S3Object {
 
     public String getAcl() { return acl; }
     public void setAcl(String acl) { this.acl = acl; }
+
+    public String getOwnerAccountId() { return ownerAccountId; }
+    public void setOwnerAccountId(String ownerAccountId) { this.ownerAccountId = ownerAccountId; }
 
     public String getDataGeneration() { return dataGeneration; }
     public void setDataGeneration(String dataGeneration) { this.dataGeneration = dataGeneration; }

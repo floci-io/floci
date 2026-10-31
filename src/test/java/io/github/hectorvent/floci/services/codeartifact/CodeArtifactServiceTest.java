@@ -398,6 +398,8 @@ class CodeArtifactServiceTest {
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         when(reposiliteClient.packageExists(anyString(), eq("dom"), eq("repo"), eq("com.example"), eq("removed")))
                 .thenReturn(true);
+        when(reposiliteClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), eq("com.example"),
+                eq("removed"))).thenReturn(true);
         recordBytes("dom", "repo", "maven", "com.example", "kept", 40L);
         recordBytes("dom", "repo", "maven", "com.example", "removed", 60L);
         assertEquals(100L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
@@ -495,6 +497,8 @@ class CodeArtifactServiceTest {
                 "late");
         when(reposiliteClient.packageExists(anyString(), eq("dom"), eq("repo"), eq("com.example"), eq("late")))
                 .thenReturn(true);
+        when(reposiliteClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), eq("com.example"),
+                eq("late"))).thenReturn(true);
         service.deletePackage(REGION, "dom", null, "repo", "maven", "com.example", "late");
 
         service.recordContainerBackedAssetBytes(REGION, "dom", null, "repo", "maven", "com.example", "late", 999L,
@@ -517,6 +521,8 @@ class CodeArtifactServiceTest {
                 "late");
         when(reposiliteClient.packageExists(anyString(), eq("dom"), eq("repo"), eq("com.example"), eq("late")))
                 .thenReturn(true);
+        when(reposiliteClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), eq("com.example"),
+                eq("late"))).thenReturn(true);
         service.deletePackage(REGION, "dom", null, "repo", "maven", "com.example", "late");
         // The republish: a different publish, same coordinates, after the first one's snapshot.
         recordBytes("dom", "repo", "maven", "com.example", "late", 10L);
@@ -562,6 +568,8 @@ class CodeArtifactServiceTest {
         assertEquals(42L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
         when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my_package")))
                 .thenReturn(true);
+        when(pypiserverClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), isNull(), eq("my_package")))
+                .thenReturn(true);
 
         service.deletePackage(REGION, "dom", null, "repo", "pypi", null, "my_package");
 
@@ -581,6 +589,8 @@ class CodeArtifactServiceTest {
         recordBytes("dom", "repo", "nuget", null, "My.Package", 42L);
         assertEquals(42L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
         when(bagetterClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my.package")))
+                .thenReturn(true);
+        when(bagetterClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), isNull(), eq("my.package")))
                 .thenReturn(true);
 
         service.deletePackage(REGION, "dom", null, "repo", "nuget", null, "my.package");
@@ -1820,6 +1830,641 @@ class CodeArtifactServiceTest {
         assertEquals("BLOCK", second.upstreamRestriction());
     }
 
+    @Test
+    void isUpstreamRetentionBlockedIsFalseWithNoConfigurationAtAll() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget"));
+    }
+
+    @Test
+    void isUpstreamRetentionBlockedReflectsAnExplicitUpstreamBlock() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "maven", "com.example", "widget", "ALLOW",
+                "BLOCK");
+
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget"));
+    }
+
+    /**
+     * A standard import writes
+     * its first asset (making the package's real content exist) well before its own {@code
+     * finally} block saves {@code upstream: ALLOW} as the package's default, once every candidate
+     * is done. A concurrent request for a different file or version of that same in-progress
+     * import must not read that in-between state as a directly-published package and get wrongly
+     * refused, even though no configuration has been saved for it yet either.
+     */
+    @Test
+    void isUpstreamRetentionBlockedIsFalseWhileASiblingVersionsImportIsStillInFlight() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        // The first candidate of this same in-progress import already wrote real content, the
+        // same way packageExistsViaVersionsOrSidecar would see it mid-import.
+        when(reposiliteClient.packageExists(repoId, "dom", "repo", "com.example", "widget")).thenReturn(true);
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+        // Simulates tryImport's own claim for this version, still in flight (never finished): no
+        // configuration is saved yet, but real content from this same in-progress import exists.
+        service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                "public:maven-central", fence);
+
+        assertFalse(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget"));
+    }
+
+    /**
+     * The other side of the same fix: a package that really was directly published (real content,
+     * no claim ever taken for any version) must still default to blocked with no configuration
+     * saved, exactly as {@link #isUpstreamRetentionBlockedReflectsAnExplicitUpstreamBlock}'s own
+     * sibling test already covers for an explicit block.
+     */
+    @Test
+    void isUpstreamRetentionBlockedIsStillTrueForADirectlyPublishedPackageWithNoClaimAtAll() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.packageExists(repoId, "dom", "repo", "com.example", "widget")).thenReturn(true);
+
+        assertTrue(service.isUpstreamRetentionBlocked(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget"));
+    }
+
+    @Test
+    void ensureRetainedPackageOriginDefaultWritesTheIngestedFirstVersionDefault() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+
+        service.ensureRetainedPackageOriginDefault(REGION, "dom", null, "repo", "maven", "com.example", "widget",
+                fence);
+
+        CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
+                "maven", "com.example", "widget");
+        assertEquals("BLOCK", described.publishRestriction());
+        assertEquals("ALLOW", described.upstreamRestriction());
+    }
+
+    @Test
+    void ensureRetainedPackageOriginDefaultNeverOverwritesAnExistingConfiguration() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "maven", "com.example", "widget", "ALLOW",
+                "BLOCK");
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+
+        service.ensureRetainedPackageOriginDefault(REGION, "dom", null, "repo", "maven", "com.example", "widget",
+                fence);
+
+        CodeArtifactService.PackageDescription described = service.describePackage(REGION, "dom", null, "repo",
+                "maven", "com.example", "widget");
+        assertEquals("ALLOW", described.publishRestriction());
+        assertEquals("BLOCK", described.upstreamRestriction());
+    }
+
+    @Test
+    void ensureRetainedPackageOriginDefaultIsANoOpWhenTheFenceHasMoved() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long currentFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+        // A fence snapshot that no longer matches "current" simulates a DeletePackage/
+        // DeleteRepository that completed after the snapshot was taken, before this call runs.
+        long staleFence = currentFence + 1;
+
+        service.ensureRetainedPackageOriginDefault(REGION, "dom", null, "repo", "maven", "com.example", "widget",
+                staleFence);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null, "repo",
+                "maven", "com.example", "widget"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    /**
+     * {@code DeleteRepository} never bumps {@code containerBackedPackageDeletionFence}; it
+     * removes {@code packageOriginConfigs} entries directly instead, so the fence snapshot taken
+     * before an import started would still match after the repository was deleted. An import
+     * finishing in that gap must not write a dangling origin config that outlives the deleted
+     * repository and resurfaces the moment a repository is recreated under the same name: the
+     * repository-existence check this method also makes is what actually catches it.
+     */
+    @Test
+    void ensureRetainedPackageOriginDefaultIsANoOpOnceTheRepositoryIsDeleted() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+
+        service.deleteRepository(REGION, "dom", null, "repo");
+        service.ensureRetainedPackageOriginDefault(REGION, "dom", null, "repo", "maven", "com.example", "widget",
+                fence);
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> service.describePackage(REGION, "dom", null, "repo",
+                "maven", "com.example", "widget"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void claimMavenRetainedVersionOriginIsAtomicPerVersion() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+
+        assertEquals(Optional.empty(), service.mavenRetainedVersionOriginConnection(REGION, "dom", null, "repo",
+                "com.example", "widget", "1.0"));
+
+        CodeArtifactService.MavenClaimOutcome first = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
+                "repo", "com.example", "widget", "1.0", "public:maven-central", fence);
+        assertTrue(first.claimed());
+        // Same connection claiming again (an idempotent retry, or a concurrent request for the
+        // same version and source) succeeds too, and shares the same episode.
+        CodeArtifactService.MavenClaimOutcome second = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
+                "repo", "com.example", "widget", "1.0", "public:maven-central", fence);
+        assertTrue(second.claimed());
+        assertEquals(first.episodeId(), second.episodeId());
+        // A different connection trying to claim the same version loses: the origin never moves.
+        assertFalse(service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget",
+                "1.0", "public:maven-clojars", fence).claimed());
+        // Not reported as retained yet: two attempts are still in flight and neither has finished.
+        assertEquals(Optional.empty(), service.mavenRetainedVersionOriginConnection(REGION, "dom", null, "repo",
+                "com.example", "widget", "1.0"));
+
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                first.episodeId(), true);
+        assertEquals(Optional.of("public:maven-central"), service.mavenRetainedVersionOriginConnection(REGION, "dom",
+                null, "repo", "com.example", "widget", "1.0"));
+    }
+
+    @Test
+    void claimMavenRetainedVersionOriginFailsWhenTheFenceHasMoved() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long currentFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+        // A fence snapshot that no longer matches "current" simulates a DeletePackage/
+        // DeleteRepository that completed after the snapshot was taken, before this call runs.
+        long staleFence = currentFence + 1;
+
+        assertFalse(service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget",
+                "1.0", "public:maven-central", staleFence).claimed());
+        assertEquals(Optional.empty(), service.mavenRetainedVersionOriginConnection(REGION, "dom", null, "repo",
+                "com.example", "widget", "1.0"));
+    }
+
+    @Test
+    void finishMavenRetainedVersionOriginAttemptRemovesAnUnconfirmedClaimOnlyOnceEveryAttemptHasFinished() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+        // Two concurrent attempts under the same connection, both still in flight, same episode.
+        long episodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
+                "widget", "1.0", "public:maven-central", fence).episodeId();
+        service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                "public:maven-central", fence);
+
+        // The first attempt finishes having retained nothing; the second is still mid-fetch.
+        // A plain claim-or-reject check would let this exact finish remove the shared claim
+        // outright, opening a window for a third
+        // attempt to claim the version under a newly-swapped connection while the second attempt
+        // was still relying on the original one.
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                episodeId, false);
+        assertFalse(service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget",
+                "1.0", "public:maven-clojars", fence).claimed());
+
+        // The second attempt finishes, also empty: now nothing is left relying on the claim, and
+        // nothing was ever confirmed, so it is finally free for a different connection.
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                episodeId, false);
+        assertTrue(service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget",
+                "1.0", "public:maven-clojars", fence).claimed());
+    }
+
+    @Test
+    void finishMavenRetainedVersionOriginAttemptKeepsAConfirmedClaimEvenOnceEveryAttemptHasFinished() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+        long episodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
+                "widget", "1.0", "public:maven-central", fence).episodeId();
+
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                episodeId, true);
+
+        assertEquals(Optional.of("public:maven-central"), service.mavenRetainedVersionOriginConnection(REGION, "dom",
+                null, "repo", "com.example", "widget", "1.0"));
+        // A real retention happened under this connection: a different connection can never claim
+        // this exact version afterward, no matter how long ago every attempt finished.
+        assertFalse(service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget",
+                "1.0", "public:maven-clojars", fence).claimed());
+    }
+
+    @Test
+    void finishMavenRetainedVersionOriginAttemptIgnoresAStaleEpisode() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+        long realEpisodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
+                "widget", "1.0", "public:maven-central", fence).episodeId();
+
+        // A finish call carrying an episodeId that never matched any claim (made up here to
+        // stand in for one whose own episode was already torn down and replaced by this one)
+        // must not disturb the real claim.
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                realEpisodeId + 1000, false);
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                realEpisodeId, true);
+
+        assertEquals(Optional.of("public:maven-central"), service.mavenRetainedVersionOriginConnection(REGION, "dom",
+                null, "repo", "com.example", "widget", "1.0"));
+    }
+
+    /**
+     * Attempt A claims under X and stalls; a sibling under X finishes empty,
+     * leaving A as the only one still holding the episode; the whole episode is then torn down
+     * from under A (simulating a DeletePackageVersions wiping the map entry outright, the one
+     * path that does not go through finishMavenRetainedVersionOriginAttempt's own bookkeeping at
+     * all); a brand new attempt claims fresh under the exact same connection name X. A's own,
+     * long-stale finish call, carrying its original episodeId, must never be able to touch that
+     * brand new episode just because the connection name happens to match.
+     */
+    @Test
+    void aStaleFinishCanNeverReleaseAReplacementEpisodeClaimedUnderTheSameConnectionName() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+        long staleEpisodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
+                "widget", "1.0", "public:maven-central", fence).episodeId();
+
+        // The old episode is torn down entirely, not through a finish call: some real content
+        // already exists for this package (however it got there), so DeletePackage finds
+        // something real to delete and, as part of its own ordinary cleanup, wipes the origin map
+        // entry outright, the same way it already does today, regardless of any in-flight count.
+        when(reposiliteClient.packageExists(repoId, "dom", "repo", "com.example", "widget")).thenReturn(true);
+        when(reposiliteClient.hasAnyContentToDelete(repoId, "dom", "repo", "com.example", "widget"))
+                .thenReturn(true);
+        service.deletePackage(REGION, "dom", null, "repo", "maven", "com.example", "widget");
+
+        // A brand new episode is claimed fresh under the exact same connection name.
+        long freshFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+        long freshEpisodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
+                "widget", "1.0", "public:maven-central", freshFence).episodeId();
+        assertNotEquals(staleEpisodeId, freshEpisodeId);
+
+        // The old attempt's finish call, arriving late and carrying its own stale episodeId, must
+        // not release the fresh episode, even though both share the same connection name.
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                staleEpisodeId, false);
+
+        assertFalse(service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget",
+                "1.0", "public:maven-clojars", freshFence).claimed());
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                freshEpisodeId, true);
+        assertEquals(Optional.of("public:maven-central"), service.mavenRetainedVersionOriginConnection(REGION, "dom",
+                null, "repo", "com.example", "widget", "1.0"));
+    }
+
+    @Test
+    void deployMavenAssetUnderVersionFenceRecordsBytesAtomicallyWithTheWriteItself() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        byte[] content = "jar-content".getBytes(StandardCharsets.UTF_8);
+        String gav = "com/example/widget/1.0/widget-1.0.jar";
+        when(reposiliteClient.deployArtifact(repoId, gav, content))
+                .thenReturn(new ReposiliteSidecarClient.DeployOutcome(201, true));
+        long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget", "1.0");
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+        long episodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
+                "widget", "1.0", "public:maven-central", packageFence).episodeId();
+
+        CodeArtifactService.MavenDeployAttemptResult result = service.deployMavenAssetUnderVersionFence(REGION,
+                "dom", null, "repo", "com.example", "widget", "1.0", versionFence, packageFence, episodeId,
+                reposiliteClient, repoId, gav, content);
+
+        assertTrue(result.fenceMatched());
+        assertEquals(201, result.outcome().status());
+        // This must be true the instant this call returns, not after some separate later call,
+        // since byte accounting now happens inside this exact same locked call as the write itself.
+        assertEquals(content.length, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    @Test
+    void deployMavenAssetUnderVersionFenceDoesNotRecordBytesOnAnIdempotentMatch() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        byte[] content = "jar-content".getBytes(StandardCharsets.UTF_8);
+        String gav = "com/example/widget/1.0/widget-1.0.jar";
+        when(reposiliteClient.deployArtifact(repoId, gav, content))
+                .thenReturn(new ReposiliteSidecarClient.DeployOutcome(200, false));
+        long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget", "1.0");
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+        long episodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
+                "widget", "1.0", "public:maven-central", packageFence).episodeId();
+
+        service.deployMavenAssetUnderVersionFence(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                versionFence, packageFence, episodeId, reposiliteClient, repoId, gav, content);
+
+        assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    @Test
+    void deployMavenAssetUnderVersionFenceWritesNothingWhenTheVersionFenceHasMoved() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        String gav = "com/example/widget/1.0/widget-1.0.jar";
+        long currentVersionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget", "1.0");
+        long staleVersionFence = currentVersionFence + 1;
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+        long episodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
+                "widget", "1.0", "public:maven-central", packageFence).episodeId();
+
+        CodeArtifactService.MavenDeployAttemptResult result = service.deployMavenAssetUnderVersionFence(REGION,
+                "dom", null, "repo", "com.example", "widget", "1.0", staleVersionFence, packageFence, episodeId,
+                reposiliteClient, repoId, gav, "jar-content".getBytes(StandardCharsets.UTF_8));
+
+        assertFalse(result.fenceMatched());
+        verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any());
+    }
+
+    /**
+     * The fence comparison alone only proves nothing changed since the caller's own snapshot, not
+     * that the version was not already Disposed before that snapshot was ever taken, the one
+     * case a plain delete and reimport can never produce (a fresh fence value with no override
+     * at all). A request the controller's own isDownloadable check let through before this exact
+     * disposal landed, then delayed past it by the real public fetch, takes its own version-fence
+     * snapshot only after reaching this far, so the snapshot matches perfectly even though the
+     * version is already Disposed; the fence alone would wrongly let the write through.
+     */
+    @Test
+    void deployMavenAssetUnderVersionFenceRefusesToWriteIntoAnAlreadyDisposedVersionEvenWhenTheFenceMatches() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("widget"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000))));
+        when(reposiliteClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("widget"), eq("1.0"))).thenReturn(List.of());
+
+        service.disposePackageVersions(REGION, "dom", null, "repo", "maven", "com.example", "widget",
+                List.of("1.0"), null, null);
+
+        // Taken only after the disposal above, the same way an admitted-but-delayed download's
+        // own snapshot would be if it reached this far only after disposal already finished.
+        long versionFenceAfterDisposal = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo",
+                "maven", "com.example", "widget", "1.0");
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+        long episodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
+                "widget", "1.0", "public:maven-central", packageFence).episodeId();
+        String gav = "com/example/widget/1.0/widget-1.0.jar";
+
+        CodeArtifactService.MavenDeployAttemptResult result = service.deployMavenAssetUnderVersionFence(REGION,
+                "dom", null, "repo", "com.example", "widget", "1.0", versionFenceAfterDisposal, packageFence,
+                episodeId, reposiliteClient, repoId, gav, "jar-content".getBytes(StandardCharsets.UTF_8));
+
+        assertFalse(result.fenceMatched());
+        verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any());
+    }
+
+    /**
+     * The end-to-end proof for the same fix: before it, a write's byte accounting ran in a
+     * separate call after the lock this method now holds was already released, so a dispose
+     * landing in that exact gap could subtract these same bytes (as part of its own ordinary
+     * accounting) before the separate call added them, leaving the total permanently
+     * over-counted for an asset that, by then, no longer existed. With the write and the
+     * accounting now one atomic call, a dispose that runs any time after this one returns always
+     * sees the bytes it is actually supposed to subtract, so the net total lands at exactly zero.
+     */
+    @Test
+    void disposingAVersionJustDeployedThroughThisMethodNeverLeavesItsBytesOverCounted() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        byte[] content = "jar-content".getBytes(StandardCharsets.UTF_8);
+        String gav = "com/example/widget/1.0/widget-1.0.jar";
+        when(reposiliteClient.deployArtifact(repoId, gav, content))
+                .thenReturn(new ReposiliteSidecarClient.DeployOutcome(201, true));
+        long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget", "1.0");
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+        long episodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
+                "widget", "1.0", "public:maven-central", packageFence).episodeId();
+        service.deployMavenAssetUnderVersionFence(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                versionFence, packageFence, episodeId, reposiliteClient, repoId, gav, content);
+        assertEquals(content.length, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+
+        when(reposiliteClient.listPackageVersions(repoId, "dom", "repo", "com.example", "widget")).thenReturn(
+                List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000))));
+        when(reposiliteClient.listPackageVersionAssetNames(repoId, "dom", "repo", "com.example", "widget", "1.0"))
+                .thenReturn(List.of("widget-1.0.jar"));
+        when(reposiliteClient.fetchPackageVersionAsset(repoId, "dom", "repo", "com.example", "widget", "1.0",
+                "widget-1.0.jar")).thenReturn(Optional.of(content));
+
+        service.disposePackageVersions(REGION, "dom", null, "repo", "maven", "com.example", "widget",
+                List.of("1.0"), null, null);
+
+        verify(reposiliteClient).deletePackageVersionAsset(repoId, "dom", "repo", "com.example", "widget", "1.0",
+                "widget-1.0.jar");
+        assertEquals(0L, service.describeDomain(REGION, "dom", null).assetSizeBytes());
+    }
+
+    /**
+     * A failed attempt (nothing imported) releases its own claim through {@link
+     * CodeArtifactService#finishMavenRetainedVersionOriginAttempt} without touching either fence
+     * at all, so a fresh claim made afterward under a different connection leaves both fences
+     * exactly as they were. A very late, straggling write from the attempt that already reported
+     * itself finished (its own real network write's retry or duplicate, arriving well after its
+     * finish call already ran) would otherwise still see both fences match and write real bytes
+     * under whatever connection claimed the version next, mixing assets from two different public
+     * sources into one version; only the episode check catches this, since neither fence ever
+     * moved. {@link #deployMavenAssetUnderVersionFenceRefusesAStaleEpisodeAfterAnEmptyPackageDeleteAndFreshClaim}'s
+     * delete-based scenario now also gets caught by the package fence itself, since {@link
+     * CodeArtifactService#deletePackage} bumps it on an origin-config-only delete too; this
+     * scenario has no delete in it at all, so it keeps the episode check genuinely necessary.
+     */
+    @Test
+    void deployMavenAssetUnderVersionFenceRefusesAStaleEpisodeAfterAFailedAttemptReleasesItAndAFreshClaimFollows() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+        long versionFence = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget", "1.0");
+        // The stalled attempt: claims under the first connection, then takes no further action
+        // until after it finishes empty-handed and a fresh claim follows below (simulating a
+        // fetch still in flight for a real network write that arrives only after that).
+        long staleEpisodeId = service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example",
+                "widget", "1.0", "public:maven-central", packageFence).episodeId();
+
+        // Finds nothing from the public repository: releases its own claim, touching neither fence.
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                staleEpisodeId, false);
+        assertEquals(packageFence, service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget"));
+
+        // A fresh claim, under a different connection, succeeds because the old claim is gone.
+        service.claimMavenRetainedVersionOrigin(REGION, "dom", null, "repo", "com.example", "widget", "1.0",
+                "public:maven-clojars", packageFence);
+
+        // The stalled attempt's own late write finally arrives and tries to write under its own
+        // stale episode: both fences still match (neither was ever bumped), so only the episode
+        // check can refuse this write.
+        String gav = "com/example/widget/1.0/widget-1.0.jar";
+        CodeArtifactService.MavenDeployAttemptResult result = service.deployMavenAssetUnderVersionFence(REGION,
+                "dom", null, "repo", "com.example", "widget", "1.0", versionFence, packageFence, staleEpisodeId,
+                reposiliteClient, repoId, gav, "jar-content".getBytes(StandardCharsets.UTF_8));
+
+        assertFalse(result.fenceMatched());
+        verify(reposiliteClient, never()).deployArtifact(anyString(), anyString(), any());
+    }
+
+    /**
+     * {@link CodeArtifactService#mergeMavenMetadataUnderPackageFence}'s own version of the same
+     * race {@link #deployMavenAssetUnderVersionFenceWritesNothingWhenTheVersionFenceHasMoved}
+     * covers for a per-version write: a {@code DeletePackage} that finishes while the real,
+     * public-repository metadata fetch is still in flight must bump the package fence behind the
+     * snapshot the importer took before that fetch, so the merge that follows never lands.
+     */
+    @Test
+    void mergeMavenMetadataUnderPackageFenceWritesNothingWhenThePackageFenceHasMoved() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        long packageFenceSnapshot = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+        // The DeletePackage that lands while the importer's own real fetch is still in flight,
+        // simulated here the same way as every other fence test in this class.
+        when(reposiliteClient.hasAnyContentToDelete(repoId, "dom", "repo", "com.example", "widget"))
+                .thenReturn(true);
+        service.deletePackage(REGION, "dom", null, "repo", "maven", "com.example", "widget");
+
+        boolean merged = service.mergeMavenMetadataUnderPackageFence(REGION, "dom", null, "repo", "com.example",
+                "widget", packageFenceSnapshot, reposiliteClient, repoId, "<metadata/>".getBytes(
+                        StandardCharsets.UTF_8), v -> true);
+
+        assertFalse(merged);
+        verify(reposiliteClient, never()).mergeExternalConnectionReleaseVersions(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void mergeMavenMetadataUnderPackageFenceDelegatesToReposiliteWhenTheFenceStillMatches() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        long packageFenceSnapshot = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+        byte[] metadataBytes = "<metadata/>".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.mergeExternalConnectionReleaseVersions(eq(repoId), eq("com.example"), eq("widget"),
+                eq(metadataBytes), any())).thenReturn(true);
+
+        boolean merged = service.mergeMavenMetadataUnderPackageFence(REGION, "dom", null, "repo", "com.example",
+                "widget", packageFenceSnapshot, reposiliteClient, repoId, metadataBytes, v -> true);
+
+        assertTrue(merged);
+        verify(reposiliteClient).mergeExternalConnectionReleaseVersions(eq(repoId), eq("com.example"), eq("widget"),
+                eq(metadataBytes), any());
+    }
+
+    /**
+     * Raised by Greptile's review: an origin-config-only package (a {@code
+     * PutPackageOriginConfiguration} with no version ever actually published or retained) used to
+     * leave the package fence untouched on delete, since {@link
+     * CodeArtifactMavenExternalConnectionImporterTest} and {@link
+     * #mergeMavenMetadataUnderPackageFenceWritesNothingWhenThePackageFenceHasMoved} only ever cover
+     * a delete that found real content. A {@code DeletePackage} racing a metadata fetch still in
+     * flight for exactly that kind of package would otherwise leave the fence matching, letting the
+     * merge land afterward and resurrect a package {@code DeletePackage} had already told its
+     * caller was gone. See {@link CodeArtifactService#deletePackage}'s own javadoc for the fix.
+     */
+    @Test
+    void mergeMavenMetadataUnderPackageFenceWritesNothingAfterAnOriginConfigOnlyPackageIsDeleted() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "maven", "com.example", "widget",
+                "ALLOW", "ALLOW");
+        long packageFenceSnapshot = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+        // No real content exists for this package, only the origin configuration above, the same
+        // way the importer's own metadata fetch found nothing to retain yet either.
+        when(reposiliteClient.hasAnyContentToDelete(repoId, "dom", "repo", "com.example", "widget"))
+                .thenReturn(false);
+
+        service.deletePackage(REGION, "dom", null, "repo", "maven", "com.example", "widget");
+
+        boolean merged = service.mergeMavenMetadataUnderPackageFence(REGION, "dom", null, "repo", "com.example",
+                "widget", packageFenceSnapshot, reposiliteClient, repoId, "<metadata/>".getBytes(
+                        StandardCharsets.UTF_8), v -> true);
+
+        assertFalse(merged);
+        verify(reposiliteClient, never()).mergeExternalConnectionReleaseVersions(any(), any(), any(), any(), any());
+    }
+
+    /**
+     * Raised by Greptile's review: the package fence alone says nothing about {@link
+     * CodeArtifactService#deleteRepository} removing the whole repository, not just one package,
+     * while the same metadata fetch is in flight; {@code deleteRepository} never touches any
+     * individual package's fence, so the snapshot still matches even though the repository itself
+     * is gone. Without a separate check, the sidecar merge's own {@code ensureRepository} would
+     * transparently recreate the repository {@code deleteRepository} had just torn down.
+     */
+    @Test
+    void mergeMavenMetadataUnderPackageFenceWritesNothingAfterTheRepositoryItselfIsDeleted() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        long packageFenceSnapshot = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "widget");
+
+        service.deleteRepository(REGION, "dom", null, "repo");
+
+        boolean merged = service.mergeMavenMetadataUnderPackageFence(REGION, "dom", null, "repo", "com.example",
+                "widget", packageFenceSnapshot, reposiliteClient, repoId, "<metadata/>".getBytes(
+                        StandardCharsets.UTF_8), v -> true);
+
+        assertFalse(merged);
+        verify(reposiliteClient, never()).mergeExternalConnectionReleaseVersions(any(), any(), any(), any(), any());
+    }
+
     /**
      * Same coordinate-boundary collision as above, but for published version content rather than
      * origin configuration: without escaping, the second publish's bytes would be stored under the
@@ -2043,6 +2688,8 @@ class CodeArtifactServiceTest {
         String repoId = created.getSidecarContainerIds().get("maven");
         when(reposiliteClient.packageExists(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
                 eq("my-artifact"))).thenReturn(true);
+        when(reposiliteClient.hasAnyContentToDelete(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("my-artifact"))).thenReturn(true);
 
         CodeArtifactService.PackageDescription deleted = service.deletePackage(REGION, "dom", null, "repo", "maven",
                 "com.example", "my-artifact");
@@ -2077,6 +2724,8 @@ class CodeArtifactServiceTest {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(true);
+        when(pypiserverClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
                 .thenReturn(true);
         doThrow(new UnsupportedOperationException("pypi packages cannot be deleted through this sidecar"))
                 .when(pypiserverClient).deletePackage(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg"));
@@ -2316,6 +2965,142 @@ class CodeArtifactServiceTest {
                 eq("dst"), eq("com.example"), eq("a"), eq("1.0"), eq("a-1.0.pom"), eq(pomBytes));
         verify(reposiliteClient, never()).deletePackageVersionAsset(any(), any(), any(), any(), any(), any(),
                 any());
+    }
+
+    /**
+     * {@code copyContainerBackedPackageVersions} copies a version's real asset bytes without
+     * copying the source's own Maven retention claim, so without carrying it across separately,
+     * a copied EXTERNAL version would otherwise report INTERNAL at the destination even though
+     * its bytes genuinely came from a public connection.
+     */
+    @Test
+    void copyPackageVersionsCarriesTheSourcesMavenRetentionOriginToTheDestination() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        CodeArtifactRepository dst = service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        String dstRepoId = dst.getSidecarContainerIds().get("maven");
+        byte[] jarBytes = "jar-bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"), eq("a"),
+                eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.packageVersionExists(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"), eq("a"),
+                eq("1.0"))).thenReturn(false);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(jarBytes));
+        long srcPackageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "src", "maven",
+                "com.example", "a");
+        CodeArtifactService.MavenClaimOutcome srcClaim = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
+                "src", "com.example", "a", "1.0", "public:maven-central", srcPackageFence);
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "src", "com.example", "a", "1.0",
+                srcClaim.episodeId(), true);
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, false, false);
+
+        assertTrue(result.failedVersions().isEmpty());
+        assertEquals(Optional.of("public:maven-central"), service.mavenRetainedVersionOriginConnection(REGION, "dom",
+                null, "dst", "com.example", "a", "1.0"));
+        when(reposiliteClient.listPackageVersions(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"))).thenReturn(
+                        List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.0",
+                                Instant.ofEpochSecond(1000))));
+        CodeArtifactService.ListPackageVersionsResult listed = service.listPackageVersions(REGION, "dom", null,
+                "dst", "maven", "com.example", "a", null, null, null, null, null);
+        CodeArtifactService.PackageVersionSummary copied = listed.versions().stream()
+                .filter(v -> "1.0".equals(v.version())).findFirst().orElseThrow();
+        assertEquals("EXTERNAL", copied.originType());
+        assertEquals("public:maven-central", copied.externalConnectionName());
+    }
+
+    /**
+     * Overwriting a destination version already retained under one connection with a source
+     * retained under a different one must not leave the old connection recorded: the real bytes
+     * just became the source's, so the destination's origin has to follow them, not stay pointing
+     * at content that is no longer actually there.
+     */
+    @Test
+    void copyPackageVersionsOverwritingADifferentlyRetainedDestinationReplacesItsOriginRatherThanLeavingItStale() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        CodeArtifactRepository dst = service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        String dstRepoId = dst.getSidecarContainerIds().get("maven");
+        byte[] newJarBytes = "new-jar-bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"), eq("a"),
+                eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.packageVersionExists(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"), eq("a"),
+                eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.listPackageVersionAssetNames(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(newJarBytes));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar")))
+                .thenReturn(Optional.of("old-jar-bytes".getBytes(StandardCharsets.UTF_8)));
+        long srcPackageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "src", "maven",
+                "com.example", "a");
+        CodeArtifactService.MavenClaimOutcome srcClaim = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
+                "src", "com.example", "a", "1.0", "public:maven-clojars", srcPackageFence);
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "src", "com.example", "a", "1.0",
+                srcClaim.episodeId(), true);
+        long dstPackageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "dst", "maven",
+                "com.example", "a");
+        CodeArtifactService.MavenClaimOutcome dstClaim = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
+                "dst", "com.example", "a", "1.0", "public:maven-central", dstPackageFence);
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "dst", "com.example", "a", "1.0",
+                dstClaim.episodeId(), true);
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, true, false);
+
+        assertTrue(result.failedVersions().isEmpty());
+        assertEquals(Optional.of("public:maven-clojars"), service.mavenRetainedVersionOriginConnection(REGION, "dom",
+                null, "dst", "com.example", "a", "1.0"));
+    }
+
+    /**
+     * Overwriting a destination version retained under a connection with a source that was never
+     * retained from anywhere (a plain direct publish) must clear the destination's stale claim,
+     * not leave it reporting a connection whose bytes were just replaced by a direct publish.
+     */
+    @Test
+    void copyPackageVersionsOverwritingARetainedDestinationWithADirectlyPublishedSourceClearsItsOrigin() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository src = service.createRepository(REGION, "dom", null, "src", null, null, Map.of());
+        CodeArtifactRepository dst = service.createRepository(REGION, "dom", null, "dst", null, null, Map.of());
+        String srcRepoId = src.getSidecarContainerIds().get("maven");
+        String dstRepoId = dst.getSidecarContainerIds().get("maven");
+        byte[] newJarBytes = "new-jar-bytes".getBytes(StandardCharsets.UTF_8);
+        when(reposiliteClient.packageVersionExists(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"), eq("a"),
+                eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.packageVersionExists(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"), eq("a"),
+                eq("1.0"))).thenReturn(true);
+        when(reposiliteClient.listPackageVersionAssetNames(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.listPackageVersionAssetNames(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(srcRepoId), eq("dom"), eq("src"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar"))).thenReturn(Optional.of(newJarBytes));
+        when(reposiliteClient.fetchPackageVersionAsset(eq(dstRepoId), eq("dom"), eq("dst"), eq("com.example"),
+                eq("a"), eq("1.0"), eq("a-1.0.jar")))
+                .thenReturn(Optional.of("old-jar-bytes".getBytes(StandardCharsets.UTF_8)));
+        long dstPackageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "dst", "maven",
+                "com.example", "a");
+        CodeArtifactService.MavenClaimOutcome dstClaim = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
+                "dst", "com.example", "a", "1.0", "public:maven-central", dstPackageFence);
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "dst", "com.example", "a", "1.0",
+                dstClaim.episodeId(), true);
+
+        CodeArtifactService.CopyPackageVersionsResult result = service.copyPackageVersions(REGION, "dom", null,
+                "src", "dst", "maven", "com.example", "a", List.of("1.0"), null, true, false);
+
+        assertTrue(result.failedVersions().isEmpty());
+        assertEquals(Optional.empty(), service.mavenRetainedVersionOriginConnection(REGION, "dom", null, "dst",
+                "com.example", "a", "1.0"));
     }
 
     /**
@@ -3452,6 +4237,42 @@ class CodeArtifactServiceTest {
     }
 
     /**
+     * AWS's own {@code DomainEntryPoint} reference: a package ingested from an external source
+     * reports {@code externalConnectionName}, never {@code repositoryName}, which is reserved for
+     * one published directly. {@code ListPackageVersions} must surface which of the two applies
+     * per version, not just the {@code originType} flag.
+     */
+    @Test
+    void listPackageVersionsReportsTheExternalConnectionNameOnlyForARetainedVersion() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000)),
+                        new RepositorySidecarManager.PackageVersionTimestamp("2.0", Instant.ofEpochSecond(2000))));
+        long packageFence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "a");
+        CodeArtifactService.MavenClaimOutcome claim = service.claimMavenRetainedVersionOrigin(REGION, "dom", null,
+                "repo", "com.example", "a", "2.0", "public:maven-central", packageFence);
+        service.finishMavenRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "com.example", "a", "2.0",
+                claim.episodeId(), true);
+
+        CodeArtifactService.ListPackageVersionsResult result = service.listPackageVersions(REGION, "dom", null,
+                "repo", "maven", "com.example", "a", null, null, null, null, null);
+
+        CodeArtifactService.PackageVersionSummary retained = result.versions().stream()
+                .filter(v -> "2.0".equals(v.version())).findFirst().orElseThrow();
+        assertEquals("EXTERNAL", retained.originType());
+        assertEquals("public:maven-central", retained.externalConnectionName());
+
+        CodeArtifactService.PackageVersionSummary direct = result.versions().stream()
+                .filter(v -> "1.0".equals(v.version())).findFirst().orElseThrow();
+        assertEquals("INTERNAL", direct.originType());
+        assertEquals(null, direct.externalConnectionName());
+    }
+
+    /**
      * A sidecar that could not supply a timestamp for any version (every {@code
      * PackageVersionTimestamp.publishedTime} is {@code null}) must still report a deterministic
      * default rather than omitting {@code defaultDisplayVersion} entirely: it should be whichever
@@ -4020,6 +4841,32 @@ class CodeArtifactServiceTest {
         assertEquals(1, listed.versions().size());
         assertEquals("1.0", listed.versions().get(0).version());
         assertEquals("Disposed", listed.versions().get(0).status());
+    }
+
+    /**
+     * Disposing a container-backed version must invalidate any write already snapshotted against
+     * it, the same way deleting
+     * one already does, so a Maven external-connection import whose fetch was in flight when
+     * this runs can detect it and refuse to write the disposed version's bytes back.
+     */
+    @Test
+    void disposePackageVersionsBumpsThisVersionsOwnFenceOnceItActuallyDeletesRealAssets() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("maven");
+        when(reposiliteClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"))).thenReturn(List.of(
+                        new RepositorySidecarManager.PackageVersionTimestamp("1.0", Instant.ofEpochSecond(1000))));
+        when(reposiliteClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), eq("com.example"),
+                eq("a"), eq("1.0"))).thenReturn(List.of("a-1.0.jar"));
+        long fenceSnapshot = service.currentContainerBackedVersionFence(REGION, "dom", null, "repo", "maven",
+                "com.example", "a", "1.0");
+
+        service.disposePackageVersions(REGION, "dom", null, "repo", "maven", "com.example", "a", List.of("1.0"),
+                null, null);
+
+        assertNotEquals(fenceSnapshot, service.currentContainerBackedVersionFence(REGION, "dom", null, "repo",
+                "maven", "com.example", "a", "1.0"));
     }
 
     /**
@@ -5524,6 +6371,8 @@ class CodeArtifactServiceTest {
         recordReadme("dom", "repo", "pypi", null, "my-pkg", "1.0.0", "old text");
         when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
                 .thenReturn(true);
+        when(pypiserverClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(true);
 
         service.deletePackage(REGION, "dom", null, "repo", "pypi", null, "my-pkg");
 
@@ -5588,6 +6437,8 @@ class CodeArtifactServiceTest {
         long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "npm", null, "late");
         when(verdaccioClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("late")))
                 .thenReturn(true);
+        when(verdaccioClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), isNull(), eq("late")))
+                .thenReturn(true);
         service.deletePackage(REGION, "dom", null, "repo", "npm", null, "late");
 
         service.recordPublishedPackageVersionReadme(REGION, "dom", null, "repo", "npm", null, "late", "1.0.0",
@@ -5625,6 +6476,8 @@ class CodeArtifactServiceTest {
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         recordReadme("dom", "repo", "pypi", null, "My.Package", "1.0.0", "the readme");
         when(pypiserverClient.packageExists(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-package")))
+                .thenReturn(true);
+        when(pypiserverClient.hasAnyContentToDelete(anyString(), eq("dom"), eq("repo"), isNull(), eq("my-package")))
                 .thenReturn(true);
 
         service.deletePackage(REGION, "dom", null, "repo", "pypi", null, "my-package");

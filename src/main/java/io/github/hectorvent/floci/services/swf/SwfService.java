@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.swf.model.SwfActivityTask;
@@ -72,7 +73,7 @@ public class SwfService implements Resettable {
     private final StorageBackend<String, SwfDomain> domainStore;
     private final StorageBackend<String, SwfWorkflowType> workflowTypeStore;
     private final StorageBackend<String, SwfActivityType> activityTypeStore;
-    private final StorageBackend<String, SwfWorkflowExecution> executionStore;
+    private final AccountAwareStorageBackend<SwfWorkflowExecution> executionStore;
 
     private final Map<String, String> decisionTokens = new ConcurrentHashMap<>();
     private final Map<String, String> activityTokens = new ConcurrentHashMap<>();
@@ -1469,13 +1470,18 @@ public class SwfService implements Resettable {
 
     private void deliverCancelRequest(SwfWorkflowExecution execution, Map<String, String> externalExecution,
                                       Long externalInitiatedEventId, String cause) {
+        deliverCancelRequest(execution, externalExecution, externalInitiatedEventId, cause, executionStore.accountId());
+    }
+
+    private void deliverCancelRequest(SwfWorkflowExecution execution, Map<String, String> externalExecution,
+                                      Long externalInitiatedEventId, String cause, String accountId) {
         appendEvent(execution, "WorkflowExecutionCancelRequested")
                 .attr("externalWorkflowExecution", externalExecution)
                 .attr("externalInitiatedEventId", externalInitiatedEventId)
                 .attr("cause", cause);
         execution.setCancelRequested(true);
         scheduleDecisionTaskIfIdle(execution);
-        executionStore.put(executionKey(execution), execution);
+        executionStore.putForAccount(accountId, executionKey(execution), execution);
     }
 
     public void terminateWorkflowExecution(String region, String domainName, String workflowId, String runId,
@@ -1495,13 +1501,18 @@ public class SwfService implements Resettable {
 
     private void terminate(SwfWorkflowExecution execution, String reason, String details,
                            String childPolicy, String cause) {
+        terminate(execution, reason, details, childPolicy, cause, executionStore.accountId());
+    }
+
+    private void terminate(SwfWorkflowExecution execution, String reason, String details,
+                           String childPolicy, String cause, String accountId) {
         appendEvent(execution, "WorkflowExecutionTerminated")
                 .attr("reason", reason)
                 .attr("details", details)
                 .attr("childPolicy", childPolicy)
                 .attr("cause", cause);
-        closeExecution(execution, SwfConstants.CLOSE_STATUS_TERMINATED);
-        executionStore.put(executionKey(execution), execution);
+        closeExecution(execution, SwfConstants.CLOSE_STATUS_TERMINATED, accountId);
+        executionStore.putForAccount(accountId, executionKey(execution), execution);
     }
 
     // ──────────────────────────────── Tagging ────────────────────────────────
@@ -1546,8 +1557,9 @@ public class SwfService implements Resettable {
         }
         String name = resourceArn.substring(marker + "/domain/".length());
         // arn:aws:swf:<region>:<account>:/domain/<name>
-        String[] parts = resourceArn.split(":", 5);
-        String arnRegion = parts.length >= 4 ? parts[3] : regionResolver.getDefaultRegion();
+        String arnRegion = AwsArnUtils.isArn(resourceArn)
+                ? AwsArnUtils.parse(resourceArn).region()
+                : regionResolver.getDefaultRegion();
         return domainStore.get(domainKey(arnRegion, name))
                 .orElseThrow(() -> SwfFaults.unknownDomain(name));
     }
@@ -1564,22 +1576,25 @@ public class SwfService implements Resettable {
      */
     public void sweep() {
         double nowSeconds = now();
-        for (String key : executionStore.keys()) {
+        for (AccountAwareStorageBackend.AccountEntry<SwfWorkflowExecution> entry
+                : executionStore.scanAllAccountEntries(key -> true)) {
+            String accountId = entry.accountId();
+            String key = entry.key();
             synchronized (domainLockForKey(key)) {
-                SwfWorkflowExecution execution = executionStore.get(key).orElse(null);
+                SwfWorkflowExecution execution = executionStore.getForAccount(accountId, key).orElse(null);
                 if (execution == null || !execution.isOpen()) {
                     continue;
                 }
                 boolean changed = fireTimers(execution, nowSeconds)
                         | timeOutActivities(execution, nowSeconds)
                         | timeOutDecisionTask(execution, nowSeconds);
-                if (timeOutExecution(execution, nowSeconds)) {
+                if (timeOutExecution(execution, nowSeconds, accountId)) {
                     changed = true;
                 } else if (changed && execution.isOpen()) {
                     scheduleDecisionTaskIfIdle(execution);
                 }
                 if (changed) {
-                    executionStore.put(key, execution);
+                    executionStore.putForAccount(accountId, key, execution);
                 }
             }
         }
@@ -1675,7 +1690,7 @@ public class SwfService implements Resettable {
         return true;
     }
 
-    private boolean timeOutExecution(SwfWorkflowExecution execution, double nowSeconds) {
+    private boolean timeOutExecution(SwfWorkflowExecution execution, double nowSeconds, String accountId) {
         Double startToClose = timeoutSeconds(execution.getExecutionStartToCloseTimeout());
         if (startToClose == null || nowSeconds - execution.getStartTimestamp() < startToClose) {
             return false;
@@ -1683,7 +1698,7 @@ public class SwfService implements Resettable {
         appendEvent(execution, "WorkflowExecutionTimedOut")
                 .attr("timeoutType", "START_TO_CLOSE")
                 .attr("childPolicy", execution.getChildPolicy());
-        closeExecution(execution, SwfConstants.CLOSE_STATUS_TIMED_OUT);
+        closeExecution(execution, SwfConstants.CLOSE_STATUS_TIMED_OUT, accountId);
         return true;
     }
 
@@ -1768,6 +1783,10 @@ public class SwfService implements Resettable {
     }
 
     private void closeExecution(SwfWorkflowExecution execution, String closeStatus) {
+        closeExecution(execution, closeStatus, executionStore.accountId());
+    }
+
+    private void closeExecution(SwfWorkflowExecution execution, String closeStatus, String accountId) {
         execution.setExecutionStatus(SwfConstants.EXECUTION_STATUS_CLOSED);
         execution.setCloseStatus(closeStatus);
         execution.setCloseTimestamp(now());
@@ -1786,8 +1805,8 @@ public class SwfService implements Resettable {
         }
         execution.getTimers().clear();
 
-        notifyParent(execution);
-        applyChildPolicy(execution);
+        notifyParent(execution, accountId);
+        applyChildPolicy(execution, accountId);
     }
 
     /**
@@ -1795,7 +1814,7 @@ public class SwfService implements Resettable {
      * matching ChildWorkflowExecution* event. CONTINUED_AS_NEW is deliberately silent:
      * the continuation run carries the parent link and reports for itself.
      */
-    private void notifyParent(SwfWorkflowExecution execution) {
+    private void notifyParent(SwfWorkflowExecution execution, String accountId) {
         if (execution.getParentWorkflowId() == null || execution.getParentRunId() == null) {
             return;
         }
@@ -1804,7 +1823,7 @@ public class SwfService implements Resettable {
         }
         String parentKey = executionKey(execution.getRegion(), execution.getDomain(),
                 execution.getParentWorkflowId(), execution.getParentRunId());
-        SwfWorkflowExecution parent = executionStore.get(parentKey).orElse(null);
+        SwfWorkflowExecution parent = executionStore.getForAccount(accountId, parentKey).orElse(null);
         if (parent == null || !parent.isOpen()) {
             return;
         }
@@ -1840,7 +1859,7 @@ public class SwfService implements Resettable {
         }
 
         scheduleDecisionTaskIfIdle(parent);
-        executionStore.put(parentKey, parent);
+        executionStore.putForAccount(accountId, parentKey, parent);
     }
 
     private Object lastEventAttribute(SwfWorkflowExecution execution, String eventType, String attribute) {
@@ -1858,21 +1877,21 @@ public class SwfService implements Resettable {
      * TERMINATE ends them, REQUEST_CANCEL asks their deciders to wind down, and
      * ABANDON leaves them running.
      */
-    private void applyChildPolicy(SwfWorkflowExecution execution) {
+    private void applyChildPolicy(SwfWorkflowExecution execution, String accountId) {
         if (execution.getChildExecutions().isEmpty()
                 || SwfConstants.CHILD_POLICY_ABANDON.equals(execution.getChildPolicy())) {
             return;
         }
         for (Map.Entry<String, String> entry : execution.getChildExecutions().entrySet()) {
             String childKey = executionKey(execution.getRegion(), execution.getDomain(), entry.getKey(), entry.getValue());
-            SwfWorkflowExecution child = executionStore.get(childKey).orElse(null);
+            SwfWorkflowExecution child = executionStore.getForAccount(accountId, childKey).orElse(null);
             if (child == null || !child.isOpen()) {
                 continue;
             }
             if (SwfConstants.CHILD_POLICY_TERMINATE.equals(execution.getChildPolicy())) {
-                terminate(child, null, null, child.getChildPolicy(), "CHILD_POLICY_APPLIED");
+                terminate(child, null, null, child.getChildPolicy(), "CHILD_POLICY_APPLIED", accountId);
             } else {
-                deliverCancelRequest(child, null, null, "CHILD_POLICY_APPLIED");
+                deliverCancelRequest(child, null, null, "CHILD_POLICY_APPLIED", accountId);
             }
         }
     }

@@ -36,6 +36,37 @@ import static org.mockito.Mockito.*;
 class RedshiftQueryHandlerTest {
 
     @Test
+    void pauseAndResumeRequireClusterIdentifier() {
+        for (String action : List.of("PauseCluster", "ResumeCluster")) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> handler.handle(action, new MultivaluedHashMap<>()));
+            assertEquals("InvalidParameterValue", error.getErrorCode());
+        }
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void pauseAndResumeUseAwsQueryClusterWrappersAndNamespace() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("warehouse");
+        cluster.setClusterStatus("paused");
+        when(service.pauseCluster("warehouse")).thenReturn(cluster);
+        when(service.resumeCluster("warehouse")).thenReturn(cluster);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "warehouse");
+        for (String action : List.of("PauseCluster", "ResumeCluster")) {
+            Response response = handler.handle(action, params);
+            assertEquals(200, response.getStatus());
+            String xml = response.getEntity().toString();
+            assertTrue(xml.contains("<" + action + "Response xmlns=\"" + AwsNamespaces.REDSHIFT + "\">"));
+            assertTrue(xml.contains("<" + action + "Result><Cluster>"));
+            assertTrue(xml.contains("<ClusterIdentifier>warehouse</ClusterIdentifier>"));
+        }
+        verify(service).pauseCluster("warehouse");
+        verify(service).resumeCluster("warehouse");
+    }
+
+    @Test
     void eventSubscriptionResponsesUseTheRedshiftNamespace() {
         EventSubscription subscription = new EventSubscription();
         subscription.setCustSubscriptionId("watcher");

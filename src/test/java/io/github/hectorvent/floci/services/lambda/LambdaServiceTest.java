@@ -3282,6 +3282,24 @@ class LambdaServiceTest {
     }
 
     @Test
+    void addPermission_accountIdInUnpublishedRegion_usesDeploymentPartition() {
+        String region = "xx-nowhere-9";
+        LambdaFunctionStore store = new LambdaFunctionStore(new InMemoryStorage<String, LambdaFunction>());
+        service = new LambdaService(store, new WarmPool(), new CodeStore(Path.of("target/test-data/lambda-code")),
+                new ZipExtractor(), new RegionResolver("cn-north-1", "000000000000"));
+        Map<String, Object> request = baseRequest("perm-unpublished-principal-fn");
+        request.put("Role", "arn:aws-cn:iam::000000000000:role/test-role");
+        service.createFunction(region, request);
+
+        Map<String, Object> statement = service.addPermission(region, "perm-unpublished-principal-fn", null, Map.of(
+                "StatementId", "cross-account",
+                "Action", "lambda:InvokeFunction",
+                "Principal", "111122223333"));
+
+        assertEquals(Map.of("AWS", "arn:aws-cn:iam::111122223333:root"), statement.get("Principal"));
+    }
+
+    @Test
     void addPermission_functionUrlAuthTypeOutsideTheEnum_isRejectedAndLeavesNoStatement() {
         // Catches: an unknown FunctionUrlAuthType stored as a condition no function URL can ever match
         service.createFunction(REGION, baseRequest("perm-auth-type-fn"));

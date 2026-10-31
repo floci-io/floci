@@ -45,9 +45,11 @@ public class CloudWatchMetricsJsonHandler {
 
     /**
      * The operations served through the console's {@code CloudWatchVersion20130116.} target, each
-     * with the request members accepted there: the ones this handler honours, plus
+     * with the request members accepted there: some of the ones this handler honours, plus
      * {@code NextToken} and {@code MaxRecords}, which change nothing because every result comes
-     * back at once.
+     * back at once. DescribeAlarms' {@code StateValue}, {@code ActionPrefix},
+     * {@code ChildrenOfAlarmName} and {@code ParentsOfAlarmName} stay refused here until the
+     * console's API is known to give them the same shapes.
      */
     private static final Map<String, Set<String>> CONSOLE_TARGET_OPERATIONS = Map.of(
             "ListMetrics", Set.of("Namespace", "MetricName", "Dimensions", "NextToken"),
@@ -304,18 +306,26 @@ public class CloudWatchMetricsJsonHandler {
         if (namesNode.isArray()) {
             namesNode.forEach(n -> alarmNames.add(n.asText()));
         }
-        String prefix = request.has("AlarmNamePrefix") ? request.path("AlarmNamePrefix").asText() : null;
+        String prefix = request.path("AlarmNamePrefix").asText(null);
 
         List<String> types = new ArrayList<>();
         request.path("AlarmTypes").forEach(value -> types.add(value.asText()));
-        metricsService.validateAlarmTypes(types);
-        List<MetricAlarm> alarms = types.isEmpty() || types.contains("MetricAlarm")
-                ? metricsService.describeAlarms(alarmNames, prefix, region) : List.of();
+        String childrenOf = request.path("ChildrenOfAlarmName").asText(null);
+        String parentsOf = request.path("ParentsOfAlarmName").asText(null);
+        CloudWatchMetricsService.DescribedAlarms alarms = metricsService.describeAlarms(
+                new CloudWatchMetricsService.AlarmFilter(alarmNames, prefix, types,
+                        request.path("StateValue").asText(null), request.path("ActionPrefix").asText(null),
+                        childrenOf, parentsOf), region);
+        boolean related = childrenOf != null || parentsOf != null;
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode arr = response.putArray("MetricAlarms");
-        for (MetricAlarm a : alarms) {
+        for (MetricAlarm a : alarms.metricAlarms()) {
             ObjectNode node = arr.addObject();
+            if (related) {
+                relatedAlarmFields(node, a, childrenOf != null);
+                continue;
+            }
             describeAlarmFields(node, a);
             if (!a.getMetrics().isEmpty()) {
                 node.set("Metrics", objectMapper.valueToTree(a.getMetrics()));
@@ -352,15 +362,34 @@ public class CloudWatchMetricsJsonHandler {
 
         }
         ArrayNode composites = response.putArray("CompositeAlarms");
-        if (types.contains("CompositeAlarm")) {
-            for (CompositeAlarm alarm : metricsService.describeCompositeAlarms(alarmNames, prefix, region)) {
-                ObjectNode node = composites.addObject();
+        for (CompositeAlarm alarm : alarms.compositeAlarms()) {
+            ObjectNode node = composites.addObject();
+            if (related) {
+                relatedAlarmFields(node, alarm, childrenOf != null);
+            } else {
                 describeAlarmFields(node, alarm);
                 node.put("AlarmRule", alarm.getAlarmRule());
             }
         }
         response.putArray("LogAlarms");
         return Response.ok(response).build();
+    }
+
+    /**
+     * An alarm as DescribeAlarms lists it for ChildrenOfAlarmName, with only its name, ARN, state value and
+     * state update time, or for ParentsOfAlarmName, with only its name and ARN.
+     */
+    private static void relatedAlarmFields(ObjectNode node, Alarm a, boolean withState) {
+        node.put("AlarmName", a.getAlarmName());
+        if (a.getAlarmArn() != null) {
+            node.put("AlarmArn", a.getAlarmArn());
+        }
+        if (withState) {
+            if (a.getStateValue() != null) {
+                node.put("StateValue", a.getStateValue());
+            }
+            node.put("StateUpdatedTimestamp", a.getStateUpdatedTimestamp());
+        }
     }
 
     private void describeAlarmFields(ObjectNode node, Alarm a) {

@@ -278,20 +278,27 @@ public class CloudWatchMetricsQueryHandler {
             if (name == null) break;
             alarmNames.add(name);
         }
-        String prefix = params.getFirst("AlarmNamePrefix");
-
-        List<String> types = alarmMembers(params, "AlarmTypes");
-        metricsService.validateAlarmTypes(types);
-        List<MetricAlarm> alarms = types.isEmpty() || types.contains("MetricAlarm")
-                ? metricsService.describeAlarms(alarmNames, prefix, region) : List.of();
+        String childrenOf = params.getFirst("ChildrenOfAlarmName");
+        String parentsOf = params.getFirst("ParentsOfAlarmName");
+        CloudWatchMetricsService.DescribedAlarms alarms = metricsService.describeAlarms(
+                new CloudWatchMetricsService.AlarmFilter(alarmNames, params.getFirst("AlarmNamePrefix"),
+                        alarmMembers(params, "AlarmTypes"), params.getFirst("StateValue"),
+                        params.getFirst("ActionPrefix"), childrenOf, parentsOf), region);
+        boolean related = childrenOf != null || parentsOf != null;
 
         XmlBuilder xml = new XmlBuilder().start("MetricAlarms");
-        for (MetricAlarm a : alarms) {
-            toAlarmXml(xml, a);
+        for (MetricAlarm a : alarms.metricAlarms()) {
+            if (related) {
+                relatedAlarmXml(xml, a, childrenOf != null);
+            } else {
+                toAlarmXml(xml, a);
+            }
         }
         xml.end("MetricAlarms").start("CompositeAlarms");
-        if (types.contains("CompositeAlarm")) {
-            for (CompositeAlarm alarm : metricsService.describeCompositeAlarms(alarmNames, prefix, region)) {
+        for (CompositeAlarm alarm : alarms.compositeAlarms()) {
+            if (related) {
+                relatedAlarmXml(xml, alarm, childrenOf != null);
+            } else {
                 xml.start("member");
                 describeAlarmFields(xml, alarm);
                 xml.elem("AlarmRule", alarm.getAlarmRule()).end("member");
@@ -299,6 +306,19 @@ public class CloudWatchMetricsQueryHandler {
         }
         xml.end("CompositeAlarms").start("LogAlarms").end("LogAlarms");
         return Response.ok(AwsQueryResponse.envelope("DescribeAlarms", null, xml.build())).build();
+    }
+
+    /**
+     * An alarm as DescribeAlarms lists it for ChildrenOfAlarmName, with only its name, ARN, state value and
+     * state update time, or for ParentsOfAlarmName, with only its name and ARN.
+     */
+    private void relatedAlarmXml(XmlBuilder xml, Alarm a, boolean withState) {
+        xml.start("member").elem("AlarmName", a.getAlarmName()).elem("AlarmArn", a.getAlarmArn());
+        if (withState) {
+            xml.elem("StateValue", a.getStateValue())
+                    .elem("StateUpdatedTimestamp", Instant.ofEpochSecond(a.getStateUpdatedTimestamp()).toString());
+        }
+        xml.end("member");
     }
 
     private Response handleDeleteAlarms(MultivaluedMap<String, String> params, String region) {

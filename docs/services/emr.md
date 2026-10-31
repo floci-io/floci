@@ -131,6 +131,10 @@ but for its bootstrap actions.
   its own. A `spark-submit` they start runs in local mode on Floci's S3 with the cluster's
   `spark-defaults`, which Floci puts in a Spark configuration of its own, ahead of the image's EMR
   Serverless master; its own `--master yarn` or `--deploy-mode cluster` fails, as there is no YARN.
+* **HTTPS**: with [TLS](../configuration/tls.md) on, each step's container, and the bootstrap actions'
+  one, also gets Floci's CA bundle as a Java trust store, which every JVM in it uses, as an
+  [EMR Serverless job run](emr-serverless.md#running-spark-job-runs)'s do, so Java code reaches Floci
+  over HTTPS too, and through AWS's own endpoint names with `FLOCI_DNS_SPOOF_AWS_ENDPOINTS`.
 * **Bootstrap actions**: a cluster with `BootstrapActions` is `BOOTSTRAPPING` until they have run, one
   after the other, in one container of the release's image, whatever the second half of
   `cluster-startup-delay-seconds`. Each action's script is read from Floci's S3 (an `s3n://` or `s3a://`

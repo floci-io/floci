@@ -25,6 +25,7 @@ import jakarta.ws.rs.core.Response;
 
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamReader;
+
 import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -143,21 +144,19 @@ public class Route53Controller {
     public Response listHostedZones(@QueryParam("marker") String marker,
                                      @QueryParam("maxitems") @DefaultValue("100") int maxItems) {
         try {
-            List<HostedZone> zones = service.listHostedZones(marker, maxItems);
-            long total = service.getHostedZoneCount();
-            boolean truncated = zones.size() == maxItems && zones.size() < total;
+            Route53Pagination.Page<HostedZone> page = service.pageHostedZones(marker, maxItems);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("ListHostedZonesResponse", NS)
                     .start("HostedZones");
-            for (HostedZone zone : zones) {
+            for (HostedZone zone : page.items()) {
                 xml.raw(xmlHostedZone(zone));
             }
             xml.end("HostedZones")
                .elem("Marker", marker != null ? marker : "")
-               .elem("IsTruncated", String.valueOf(truncated));
-            if (truncated && !zones.isEmpty()) {
-                xml.elem("NextMarker", zones.get(zones.size() - 1).getId());
+               .elem("IsTruncated", String.valueOf(page.isTruncated()));
+            if (page.isTruncated()) {
+                xml.elem("NextMarker", page.nextMarker());
             }
             xml.elem("MaxItems", String.valueOf(maxItems))
                .end("ListHostedZonesResponse");
@@ -171,23 +170,32 @@ public class Route53Controller {
     @GET
     @Path("/hostedzonesbyname")
     public Response listHostedZonesByName(@QueryParam("dnsname") String dnsName,
+                                           @QueryParam("hostedzoneid") String hostedZoneId,
                                            @QueryParam("maxitems") @DefaultValue("100") int maxItems) {
         try {
-            List<HostedZone> zones = service.listHostedZonesByName(dnsName, maxItems);
-            long total = service.getHostedZoneCount();
-            boolean truncated = zones.size() == maxItems && zones.size() < total;
+            if (maxItems <= 0) {
+                throw new AwsException("InvalidInput", "MaxItems must be a positive integer.", 400);
+            }
+            Route53Pagination.Page<HostedZone> page = service.pageHostedZonesByName(dnsName, hostedZoneId, maxItems);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("ListHostedZonesByNameResponse", NS)
                     .start("HostedZones");
-            for (HostedZone zone : zones) {
+            for (HostedZone zone : page.items()) {
                 xml.raw(xmlHostedZone(zone));
             }
             xml.end("HostedZones")
-               .elem("IsTruncated", String.valueOf(truncated))
+               .elem("IsTruncated", String.valueOf(page.isTruncated()))
                .elem("MaxItems", String.valueOf(maxItems));
             if (dnsName != null && !dnsName.isEmpty()) {
                 xml.elem("DNSName", dnsName);
+            }
+            if (hostedZoneId != null && !hostedZoneId.isEmpty()) {
+                xml.elem("HostedZoneId", hostedZoneId);
+            }
+            if (page.isTruncated()) {
+                xml.elem("NextDNSName", page.nextItem().getName())
+                   .elem("NextHostedZoneId", page.nextMarker());
             }
             xml.end("ListHostedZonesByNameResponse");
 
@@ -511,19 +519,22 @@ public class Route53Controller {
     public Response listHealthChecks(@QueryParam("marker") String marker,
                                       @QueryParam("maxitems") @DefaultValue("100") int maxItems) {
         try {
-            List<HealthCheck> checks = service.listHealthChecks(marker, maxItems);
-            boolean truncated = checks.size() == maxItems;
+            int pageSize = Math.min(maxItems, 1000);
+            Route53Pagination.Page<HealthCheck> page = service.pageHealthChecks(marker, pageSize);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("ListHealthChecksResponse", NS)
                     .start("HealthChecks");
-            for (HealthCheck hc : checks) {
+            for (HealthCheck hc : page.items()) {
                 xml.raw(xmlHealthCheck(hc));
             }
             xml.end("HealthChecks")
                .elem("Marker", marker != null ? marker : "")
-               .elem("IsTruncated", String.valueOf(truncated))
-               .elem("MaxItems", String.valueOf(maxItems))
+               .elem("IsTruncated", String.valueOf(page.isTruncated()));
+            if (page.isTruncated()) {
+                xml.elem("NextMarker", page.nextMarker());
+            }
+            xml.elem("MaxItems", String.valueOf(maxItems))
                .end("ListHealthChecksResponse");
 
             return Response.ok(xml.build(), XML).build();

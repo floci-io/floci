@@ -1,0 +1,46 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_lambda_web_condition_keys.py",
+    "reference": "https://servicereference.us-east-1.amazonaws.com/v1/lambda/lambda.json",
+    "botocore": "botocore 1.43.113 (installed package)",
+    "note": "make lambda-web-condition-keys-check re-derives members from botocore; make lambda-web-condition-keys-verify checks actions against AWS."
+  },
+  "actions": {
+    "lambda:CreateWebFunction": [
+      "lambda:Request/WebFunctionAuthType"
+    ],
+    "lambda:CreateWebFunctionEndpoint": [
+      "lambda:Request/WebFunctionAuthType"
+    ],
+    "lambda:DeleteWebFunctionEndpoint": [
+      "lambda:Resource/WebFunctionAuthType"
+    ],
+    "lambda:GetWebFunctionEndpoint": [
+      "lambda:Resource/WebFunctionAuthType"
+    ],
+    "lambda:InvokeWebFunctionEndpoint": [
+      "lambda:Resource/WebFunctionAuthType"
+    ],
+    "lambda:UpdateWebFunctionEndpoint": [
+      "lambda:Request/WebFunctionAuthType",
+      "lambda:Resource/WebFunctionAuthType"
+    ]
+  },
+  "members": {
+    "lambda:CreateWebFunction": {
+      "lambda:Request/WebFunctionAuthType": [
+        "endpointConfig.authType"
+      ]
+    },
+    "lambda:CreateWebFunctionEndpoint": {
+      "lambda:Request/WebFunctionAuthType": [
+        "authType"
+      ]
+    },
+    "lambda:UpdateWebFunctionEndpoint": {
+      "lambda:Request/WebFunctionAuthType": [
+        "authType"
+      ]
+    }
+  }
+}

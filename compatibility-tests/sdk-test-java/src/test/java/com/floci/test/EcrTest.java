@@ -311,6 +311,56 @@ class EcrTest {
         assertThat(url).endsWith("/v2/" + repo + "/blobs/" + layerDigest);
     }
 
+    @Test
+    @Order(15)
+    @DisplayName("BatchDeleteImage removes only the named tag while another tag shares the manifest")
+    void batchDeleteImageRemovesOnlyTheNamedTag() throws Exception {
+        String repo = "floci-it/batch-delete-" + System.nanoTime();
+        ecr.createRepository(b -> b.repositoryName(repo));
+        reposToCleanup.add(repo);
+
+        String config = "{\"architecture\":\"amd64\",\"os\":\"linux\"}";
+        String layer = "floci batch delete layer bytes";
+        String configDigest = uploadLayer(repo, config.getBytes(StandardCharsets.UTF_8));
+        String layerDigest = uploadLayer(repo, layer.getBytes(StandardCharsets.UTF_8));
+        String manifest = "{\"schemaVersion\":2,\"mediaType\":\"application/vnd.oci.image.manifest.v1+json\","
+                + "\"config\":{\"mediaType\":\"application/vnd.oci.image.config.v1+json\",\"size\":"
+                + config.length() + ",\"digest\":\"" + configDigest + "\"},"
+                + "\"layers\":[{\"mediaType\":\"application/vnd.oci.image.layer.v1.tar\",\"size\":"
+                + layer.length() + ",\"digest\":\"" + layerDigest + "\"}]}";
+        String manifestDigest = sha256(manifest.getBytes(StandardCharsets.UTF_8));
+
+        ecr.putImage(b -> b.repositoryName(repo).imageTag("release").imageManifest(manifest));
+        ecr.putImage(b -> b.repositoryName(repo).imageTag("stable").imageManifest(manifest));
+
+        BatchDeleteImageResponse first = ecr.batchDeleteImage(b -> b.repositoryName(repo)
+                .imageIds(ImageIdentifier.builder().imageTag("release").build(),
+                        ImageIdentifier.builder().imageTag("missing").build()));
+        assertThat(first.imageIds()).hasSize(1);
+        assertThat(first.imageIds().get(0).imageTag()).isEqualTo("release");
+        assertThat(first.imageIds().get(0).imageDigest()).isEqualTo(manifestDigest);
+        assertThat(first.failures()).hasSize(1);
+        assertThat(first.failures().get(0).imageId().imageTag()).isEqualTo("missing");
+        assertThat(first.failures().get(0).failureCodeAsString()).isEqualTo("ImageNotFound");
+
+        BatchGetImageResponse survivor = ecr.batchGetImage(b -> b.repositoryName(repo)
+                .imageIds(ImageIdentifier.builder().imageTag("stable").build()));
+        assertThat(survivor.images()).hasSize(1);
+        assertThat(survivor.images().get(0).imageId().imageDigest()).isEqualTo(manifestDigest);
+
+        BatchDeleteImageResponse second = ecr.batchDeleteImage(b -> b.repositoryName(repo)
+                .imageIds(ImageIdentifier.builder().imageTag("stable").build()));
+        assertThat(second.imageIds()).hasSize(1);
+        assertThat(second.imageIds().get(0).imageTag()).isEqualTo("stable");
+        assertThat(second.imageIds().get(0).imageDigest()).isEqualTo(manifestDigest);
+
+        BatchGetImageResponse gone = ecr.batchGetImage(b -> b.repositoryName(repo)
+                .imageIds(ImageIdentifier.builder().imageTag("stable").build()));
+        assertThat(gone.images()).isEmpty();
+        assertThat(gone.failures()).hasSize(1);
+        assertThat(gone.failures().get(0).failureCodeAsString()).isEqualTo("ImageNotFound");
+    }
+
     private static String uploadLayer(String repo, byte[] bytes) throws Exception {
         String uploadId = ecr.initiateLayerUpload(b -> b.repositoryName(repo)).uploadId();
         UploadLayerPartResponse part = ecr.uploadLayerPart(b -> b.repositoryName(repo).uploadId(uploadId)

@@ -71,15 +71,8 @@ public class RedshiftEventSubscriptionCfnProvisioner implements CfnResourceProvi
     }
 
     @Override
-    public JsonNode attributeValue(String resourceType, String attributeName, String value) {
-        if ("SourceIdsList".equals(attributeName) || "EventCategoriesList".equals(attributeName)) {
-            try {
-                return MAPPER.readTree(value);
-            } catch (JsonProcessingException e) {
-                throw new IllegalStateException("Invalid stored Redshift event subscription attribute " + attributeName, e);
-            }
-        }
-        return CfnResourceProvisioner.super.attributeValue(resourceType, attributeName, value);
+    public Map<String, Set<String>> jsonAttributes() {
+        return Map.of(TYPE, Set.of("SourceIdsList", "EventCategoriesList"));
     }
 
     @Override

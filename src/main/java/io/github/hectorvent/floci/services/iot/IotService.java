@@ -2262,7 +2262,7 @@ public class IotService {
     }
 
     private Set<String> thingNamesForJobTarget(String target, String region) {
-        String resource = target.startsWith("arn:") ? resourceFromArn(target) : target;
+        String resource = AwsArnUtils.looksLikeArn(target) ? resourceFromArn(target) : target;
         if (resource.startsWith("thing/")) {
             String thingName = resource.substring("thing/".length());
             describeThing(thingName, region);

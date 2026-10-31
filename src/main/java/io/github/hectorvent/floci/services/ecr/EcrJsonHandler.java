@@ -47,6 +47,8 @@ public class EcrJsonHandler {
 
     /** The actions whose requests are checked against the vendored model constraints first. */
     private static final Set<String> MODEL_CHECKED = Set.of(
+            "GetAccountSetting", "PutAccountSetting",
+            "RegisterPullTimeUpdateExclusion", "DeregisterPullTimeUpdateExclusion", "ListPullTimeUpdateExclusions",
             "PutRegistryPolicy", "GetRegistryPolicy", "DeleteRegistryPolicy",
             "PutReplicationConfiguration", "DescribeRegistry",
             "PutRegistryScanningConfiguration", "GetRegistryScanningConfiguration",
@@ -59,6 +61,8 @@ public class EcrJsonHandler {
             EcrRequestShapes.check(action, request);
         }
         return switch (action) {
+            case "GetAccountSetting" -> handleAccountSetting(request, region, false);
+            case "PutAccountSetting" -> handleAccountSetting(request, region, true);
             case "CreateRepository" -> handleCreateRepository(request, region);
             case "CreatePullThroughCacheRule" -> handleCreatePullThroughCacheRule(request, region);
             case "DescribePullThroughCacheRules" -> handleDescribePullThroughCacheRules(request, region);
@@ -103,11 +107,25 @@ public class EcrJsonHandler {
             case "DescribeRegistry" -> handleDescribeRegistry(region);
             case "PutRegistryScanningConfiguration" -> handlePutRegistryScanningConfiguration(request, region);
             case "GetRegistryScanningConfiguration" -> handleGetRegistryScanningConfiguration(region);
+            case "RegisterPullTimeUpdateExclusion" -> handleRegisterPullTimeUpdateExclusion(request, region);
+            case "DeregisterPullTimeUpdateExclusion" -> Response.ok(objectMapper.createObjectNode().put("principalArn",
+                    service.deregisterPullTimeUpdateExclusion(request.path("principalArn").asText(null), region))).build();
+            case "ListPullTimeUpdateExclusions" -> handleListPullTimeUpdateExclusions(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation",
                             "Operation " + action + " is not supported."))
                     .build();
         };
+    }
+
+    private Response handleAccountSetting(JsonNode request, String region, boolean put) {
+        String name = request.path("name").asText(null);
+        String value = put ? service.putAccountSetting(name, request.path("value").asText(null), region)
+                : service.getAccountSetting(name, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("name", name);
+        response.put("value", value);
+        return Response.ok(response).build();
     }
 
     private Response handleCreateRepository(JsonNode request, String region) {
@@ -702,6 +720,26 @@ public class EcrJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("registryId", service.registryId());
         response.set("scanningConfiguration", buildScanningConfiguration(service.registryScanningConfiguration(region)));
+        return Response.ok(response).build();
+    }
+
+    private Response handleRegisterPullTimeUpdateExclusion(JsonNode request, String region) {
+        RegistrySettings.PullTimeUpdateExclusion exclusion = service.registerPullTimeUpdateExclusion(
+                request.path("principalArn").asText(null), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("principalArn", exclusion.principalArn());
+        response.put("createdAt", exclusion.createdAt().toEpochMilli() / 1000.0);
+        return Response.ok(response).build();
+    }
+
+    private Response handleListPullTimeUpdateExclusions(JsonNode request, String region) {
+        PaginatedResult<String> page = service.listPullTimeUpdateExclusions(parseMaxResults(request.path("maxResults")),
+                request.path("nextToken").asText(null), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("pullTimeUpdateExclusions", objectMapper.valueToTree(page.items()));
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 

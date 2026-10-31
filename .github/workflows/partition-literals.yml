@@ -16,6 +16,7 @@ on:
     paths:
       - 'src/main/java/**'
       - 'src/main/resources/aws/**'
+      - 'src/main/resources/eks/addon-versions.json'
       - 'tools/partition/**'
       - 'tools/java_sources.py'
       - 'tools/rename/**'
@@ -33,6 +34,7 @@ on:
     paths:
       - 'src/main/java/**'
       - 'src/main/resources/aws/**'
+      - 'src/main/resources/eks/addon-versions.json'
       - 'tools/partition/**'
       - 'tools/java_sources.py'
       - 'tools/rename/**'
@@ -107,6 +109,9 @@ jobs:
         run: make iam-condition-keys-check
       - name: Check S3 Control tag condition request members
         run: make s3control-tag-condition-keys-check
+
+      - name: Check Lambda Web condition request members
+        run: make lambda-web-condition-keys-check
 
       - name: Check partitions.json against a fresh generation
         run: make aws-data-check

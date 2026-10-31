@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.RequestResources;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SigV4CredentialScope;
 import io.github.hectorvent.floci.core.common.StoredResourceArns;
+import io.github.hectorvent.floci.core.common.auth.SigV4Canonicalization;
 import io.github.hectorvent.floci.services.cloudwatch.logs.LogGroupTagTarget;
 import io.github.hectorvent.floci.services.eks.EksController;
 import io.github.hectorvent.floci.services.eks.EksService;
@@ -38,6 +39,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -69,6 +71,16 @@ public class ResourceArnBuilder {
 
     /** Where an S3 Control tagging route carries the ARN of the resource it acts on. */
     private static final String S3_CONTROL_TAGS_PREFIX = "/v20180820/tags/";
+
+    /** The segment that starts an API Gateway v2 management path, and is not part of the resource it names. */
+    private static final String API_GATEWAY_V2_SEGMENT = "v2";
+
+    /** The segment a tagging route names before the ARN it tags, which it captures whole, slashes included. */
+    private static final String API_GATEWAY_TAGS_SEGMENT = "tags";
+
+    /** The SSM actions whose {@code ResourceArn} names the parameter they act on, in place of {@code Name}. */
+    private static final Set<String> SSM_RESOURCE_POLICY_ACTIONS =
+            Set.of("PutResourcePolicy", "GetResourcePolicies", "DeleteResourcePolicy");
 
     private final ObjectMapper objectMapper;
     /**
@@ -190,6 +202,7 @@ public class ResourceArnBuilder {
             case "pipes"          -> List.of(buildPipesArn(path, ctx, region, accountId, partition));
             case "dsql"           -> List.of(buildDsqlArn(path, ctx, region, accountId, partition));
             case "eks"            -> List.of(buildEksArn(path, ctx, region, accountId));
+            case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
             default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
         };
     }
@@ -232,7 +245,7 @@ public class ResourceArnBuilder {
         if (group.isEmpty()) {
             return "*";
         }
-        return group.startsWith("arn:") ? group
+        return AwsArnUtils.looksLikeArn(group) ? group
                 : AwsArnUtils.Arn.of("resource-groups", region, accountId, "group/" + group).toString();
     }
 
@@ -1094,7 +1107,7 @@ public class ResourceArnBuilder {
 
     /** An identifier's name: an ARN's part after its last {@code :}, as the MicroVM service unwraps it. */
     private static String trailingName(String identifier) {
-        return identifier.startsWith("arn:") ? identifier.substring(identifier.lastIndexOf(':') + 1) : identifier;
+        return AwsArnUtils.looksLikeArn(identifier) ? identifier.substring(identifier.lastIndexOf(':') + 1) : identifier;
     }
 
     /**
@@ -1119,7 +1132,7 @@ public class ResourceArnBuilder {
                         type + tagged.substring(tagged.lastIndexOf(':') + 1)).toString();
             }
         }
-        if (!tagged.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(tagged)) {
             return "*";
         }
         try {
@@ -1194,6 +1207,48 @@ public class ResourceArnBuilder {
             return new AwsArnUtils.Arn(partition, "pipes", region, accountId, "pipe/" + pipe).toString();
         }
         return taggedResource(ctx);
+    }
+
+    /**
+     * API Gateway authorizes a management call as its HTTP method on the path it names, in the Region serving
+     * it and with no account: {@code GET /restapis/abc/stages} acts on
+     * {@code arn:<partition>:apigateway:<region>::/restapis/abc/stages}. The path is read as the router reads
+     * it: each segment decoded, then {@code .} dropped and {@code ..} resolved, then empty segments dropped, so
+     * {@code /restapis/%61bc}, {@code /restapis/x/%2E%2E/abc} and {@code /restapis//abc} all act on
+     * {@code ::/restapis/abc}, the API they reach, and a stage keeps
+     * its name as written, {@code ::/apis/<id>/stages/$default}. The {@code /v2} that starts an HTTP or
+     * WebSocket API path is not part of its resource, so {@code GET /v2/apis} acts on {@code ::/apis}. Only the
+     * ARN a tagging route names, everything after {@code /tags/}, is re-encoded, in SigV4 canonical form, as AWS
+     * names that resource {@code /tags/<UrlEncodedResourceARN>}; elsewhere a decoded {@code %} or {@code /}
+     * stays escaped, so a segment cannot pass for more than one.
+     */
+    private static String buildApiGatewayArn(ContainerRequestContext ctx, String region, String partition) {
+        String[] raw = IamActionRegistry.routedPath(ctx.getUriInfo()).split("/", -1);
+        List<String> segments = new ArrayList<>();
+        for (int i = 1; i < raw.length; i++) {
+            String segment = pathSegment(raw[i]);
+            if (segment.equals("..")) {
+                if (!segments.isEmpty()) {
+                    segments.removeLast();
+                }
+            } else if (!segment.equals(".")) {
+                segments.add(segment);
+            }
+        }
+        segments.removeIf(String::isEmpty);
+        if (!segments.isEmpty() && segments.getFirst().equals(API_GATEWAY_V2_SEGMENT)) {
+            segments.removeFirst();
+        }
+        if (segments.size() > 1 && segments.getFirst().equals(API_GATEWAY_TAGS_SEGMENT)) {
+            String tagged = String.join("/", segments.subList(1, segments.size()));
+            return new AwsArnUtils.Arn(partition, "apigateway", region, "",
+                    "/" + API_GATEWAY_TAGS_SEGMENT + "/" + SigV4Canonicalization.uriEncode(tagged)).toString();
+        }
+        StringJoiner resource = new StringJoiner("/", "/", "");
+        for (String segment : segments) {
+            resource.add(segment.replace("%", "%25").replace("/", "%2F"));
+        }
+        return new AwsArnUtils.Arn(partition, "apigateway", region, "", resource.toString()).toString();
     }
 
     /**
@@ -1304,7 +1359,7 @@ public class ResourceArnBuilder {
     /** The ARN a shared tagging route names, or {@code *} for any other route. */
     private String taggedResource(ContainerRequestContext ctx) {
         String arn = taggedArn(ctx);
-        return arn != null && arn.startsWith("arn:") ? arn : "*";
+        return AwsArnUtils.looksLikeArn(arn) ? arn : "*";
     }
 
     /**
@@ -1348,14 +1403,14 @@ public class ResourceArnBuilder {
      * "Lambda Web Function permissions"). ListWebFunctions, GetWebAccountSettings and CreateWebFunction
      * name no resource. Null for every other Lambda route.
      */
-    private static String webFunctionArn(String path, String region, String accountId) {
+    public static String webFunctionArn(String path, String region, String accountId) {
         if (!path.startsWith("/2025-03-07/")) {
             return null;
         }
         String rest = path.substring("/2025-03-07/".length());
         if (rest.startsWith("tags/") || rest.startsWith("resource-policy/")) {
             String arn = rest.substring(rest.indexOf('/') + 1);
-            return arn.startsWith("arn:") ? arn : "*";
+            return AwsArnUtils.looksLikeArn(arn) ? arn : "*";
         }
         if (!rest.startsWith("web-functions/")) {
             return "*";
@@ -1365,7 +1420,7 @@ public class ResourceArnBuilder {
             return "*";
         }
         String functionArn;
-        if (segments.getFirst().startsWith("arn:") && segments.size() > 1) {
+        if (AwsArnUtils.looksLikeArn(segments.getFirst()) && segments.size() > 1) {
             // A function ARN carries one slash: arn:...:web-function/<name>.
             functionArn = segments.get(0) + "/" + segments.get(1);
             segments.subList(0, 2).clear();
@@ -1377,7 +1432,7 @@ public class ResourceArnBuilder {
         if (segments.size() >= 2 && ("revisions".equals(segments.get(0)) || "endpoints".equals(segments.get(0)))) {
             String child = "revisions".equals(segments.get(0)) ? "revision" : "endpoint";
             String id = String.join("/", segments.subList(1, segments.size()));
-            if (id.startsWith("arn:") && id.contains("/" + child + "/")) {
+            if (AwsArnUtils.looksLikeArn(id) && id.contains("/" + child + "/")) {
                 // A revision or endpoint ARN ends in its id: arn:...:web-function/<name>/revision/<id>.
                 id = id.substring(id.lastIndexOf('/') + 1);
             }
@@ -1395,7 +1450,7 @@ public class ResourceArnBuilder {
     private static boolean readsInTheAccountItNames(String path, String name,
                                                     LambdaArnUtils.ResolvedFunctionRef ref,
                                                     ContainerRequestContext ctx) {
-        if (!"GET".equals(ctx.getMethod()) || !name.startsWith("arn:")) {
+        if (!"GET".equals(ctx.getMethod()) || !AwsArnUtils.looksLikeArn(name)) {
             return false;
         }
         String route = path.substring(path.indexOf("/functions/" + name) + "/functions/".length() + name.length());
@@ -1708,6 +1763,14 @@ public class ResourceArnBuilder {
     private String buildSsmArn(ContainerRequestContext ctx, String region, String accountId) {
         JsonNode json = readJsonBody(ctx);
         if (json != null && json.isObject()) {
+            String operation = IamActionRegistry.targetOperation(ctx);
+            if (operation != null && SSM_RESOURCE_POLICY_ACTIONS.contains(operation)
+                    && json.hasNonNull("ResourceArn")) {
+                String resourceArn = json.get("ResourceArn").asText().trim();
+                if (AwsArnUtils.isArnFor(resourceArn, "ssm")) {
+                    return resourceArn;
+                }
+            }
             if (json.hasNonNull("Name")) {
                 String name = json.get("Name").asText().trim();
                 if (!name.isEmpty()) {

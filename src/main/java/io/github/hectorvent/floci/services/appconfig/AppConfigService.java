@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.appconfig;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -22,6 +23,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -44,6 +46,7 @@ public class AppConfigService {
     private static final int MAX_DEPLOYMENT_PAGE_TOKENS = 1000;
     private static final int MAX_MONITORS = 5;
     private static final int MAX_ARN_LENGTH = 2048;
+    private static final ObjectMapper COPIER = new ObjectMapper();
     private static final Pattern ROLE_ARN = Pattern.compile("arn:" + AwsArnUtils.PARTITION_REGEX + ":iam::\\d{12}:role/.*");
 
     @Inject
@@ -84,10 +87,44 @@ public class AppConfigService {
         return applicationStore.scan(k -> true);
     }
 
-    public void deleteApplication(String idOrName) {
+    /** The application whose ID is exactly {@code applicationId}; GetApplication also takes a name. */
+    public Optional<Application> findApplication(String applicationId) {
+        return applicationStore.get(applicationId);
+    }
+
+    private Application requireApplicationById(String applicationId) {
+        return applicationStore.get(applicationId)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Application not found", 404));
+    }
+
+    public synchronized void deleteApplication(String idOrName) {
         applicationStore.get(idOrName)
                 .or(() -> listApplications().stream().filter(a -> idOrName.equals(a.getName())).findFirst())
                 .ifPresent(application -> applicationStore.delete(application.getId()));
+    }
+
+    /**
+     * Deletes the application whose ID is exactly {@code applicationId}; nothing happens when there
+     * is no such application. Unlike {@link #deleteApplication}, it never falls back to a name, so a
+     * CloudFormation delete of an application already deleted through the API leaves another
+     * application named like its ID alone.
+     */
+    public synchronized void deleteApplicationById(String applicationId) {
+        applicationStore.get(applicationId).ifPresent(application -> applicationStore.delete(applicationId));
+    }
+
+    /**
+     * Sets the name and description of the application whose ID is {@code applicationId}, as a
+     * CloudFormation update of {@code AWS::AppConfig::Application} does: both are written, so a null
+     * description clears it. Floci serves no UpdateApplication route; the CloudFormation provisioner
+     * is the only caller.
+     */
+    public synchronized Application updateApplication(String applicationId, String name, String description) {
+        Application app = copy(requireApplicationById(applicationId));
+        app.setName(name);
+        app.setDescription(description);
+        applicationStore.put(app.getId(), app);
+        return app;
     }
 
     // ──────────────────────────── Environment ────────────────────────────
@@ -114,9 +151,21 @@ public class AppConfigService {
     public synchronized void deleteEnvironment(String applicationIdentifier, String environmentIdentifier) {
         Application application = resolveApplication(applicationIdentifier);
         Environment environment = resolveEnvironment(application.getId(), environmentIdentifier);
-        String appId = application.getId();
-        String envId = environment.getId();
+        removeEnvironment(application.getId(), environment.getId());
+    }
 
+    /**
+     * Deletes the environment whose ID is exactly {@code environmentId}, with its deployments,
+     * without resolving its application, which may already be deleted; nothing happens when there
+     * is no such environment. The CloudFormation provisioner deletes environments this way: an
+     * update that moves an environment to another application and removes the old one deletes that
+     * application before the environment it displaced.
+     */
+    public synchronized void deleteEnvironmentById(String environmentId) {
+        environmentStore.get(environmentId).ifPresent(env -> removeEnvironment(env.getApplicationId(), env.getId()));
+    }
+
+    private void removeEnvironment(String appId, String envId) {
         StorageOperations.deleteByPrefix(deploymentStore, appId + "::" + envId + "::");
         StorageOperations.deleteByPrefix(activeConfigStore, envId + "::");
 
@@ -140,6 +189,31 @@ public class AppConfigService {
         return environmentStore.scan(k -> true).stream()
                 .filter(e -> e.getApplicationId().equals(appId))
                 .toList();
+    }
+
+    /** The environment whose ID is exactly {@code environmentId}, in whichever application holds it. */
+    public Optional<Environment> findEnvironment(String environmentId) {
+        return environmentStore.get(environmentId);
+    }
+
+    /**
+     * Sets the name, description and monitors of an environment, as a CloudFormation update of
+     * {@code AWS::AppConfig::Environment} does: all three are written, so a null description or
+     * monitor list clears it. The monitors are checked as CreateEnvironment checks them, before
+     * anything is written. Floci serves no UpdateEnvironment route; the CloudFormation provisioner
+     * is the only caller.
+     */
+    public synchronized Environment updateEnvironment(String applicationId, String environmentId, String name,
+                                                      String description, Object monitors) {
+        List<Monitor> checked = monitors(monitors);
+        Environment env = copy(environmentStore.get(environmentId)
+                .filter(e -> applicationId.equals(e.getApplicationId()))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Environment not found", 404)));
+        env.setName(name);
+        env.setDescription(description);
+        env.setMonitors(checked);
+        environmentStore.put(env.getId(), env);
+        return env;
     }
 
     /** The request's Monitors, checked against the limits AWS documents for CreateEnvironment. */
@@ -212,7 +286,29 @@ public class AppConfigService {
                 .toList();
     }
 
-    public void deleteConfigurationProfile(String applicationIdentifier, String profileIdentifier) {
+    /** The configuration profile whose ID is exactly {@code profileId}, in whichever application holds it. */
+    public Optional<ConfigurationProfile> findConfigurationProfile(String profileId) {
+        return profileStore.get(profileId);
+    }
+
+    /**
+     * Sets the name and description of a configuration profile, as a CloudFormation update of
+     * {@code AWS::AppConfig::ConfigurationProfile} does: both are written, so a null description
+     * clears it. Floci serves no UpdateConfigurationProfile route; the CloudFormation provisioner is
+     * the only caller.
+     */
+    public synchronized ConfigurationProfile updateConfigurationProfile(String applicationId, String profileId,
+                                                                        String name, String description) {
+        ConfigurationProfile profile = copy(profileStore.get(profileId)
+                .filter(p -> applicationId.equals(p.getApplicationId()))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Configuration profile not found", 404)));
+        profile.setName(name);
+        profile.setDescription(description);
+        profileStore.put(profile.getId(), profile);
+        return profile;
+    }
+
+    public synchronized void deleteConfigurationProfile(String applicationIdentifier, String profileIdentifier) {
         String appId = resolveApplication(applicationIdentifier).getId();
         // Unlike deleteApplication (a single, unscoped ID), a profile is nested under an
         // application - a mismatched appId must not be able to delete another application's
@@ -233,7 +329,22 @@ public class AppConfigService {
         if (profile == null) {
             return;
         }
-        String profileId = profile.getId();
+        removeConfigurationProfile(appId, profile.getId());
+    }
+
+    /**
+     * Deletes the configuration profile whose ID is exactly {@code profileId}, with its hosted
+     * configuration versions, without resolving its application, which may already be deleted;
+     * nothing happens when there is no such profile. The CloudFormation provisioner deletes profiles
+     * this way: an update that moves a profile to another application and removes the old one
+     * deletes that application before the profile it displaced.
+     */
+    public synchronized void deleteConfigurationProfileById(String profileId) {
+        profileStore.get(profileId)
+                .ifPresent(profile -> removeConfigurationProfile(profile.getApplicationId(), profile.getId()));
+    }
+
+    private void removeConfigurationProfile(String appId, String profileId) {
         // A hosted configuration version isn't independently addressable outside its profile's
         // lifecycle - cascade the delete so a caller can't still fetch versions for a profile
         // that's supposedly gone.
@@ -343,7 +454,28 @@ public class AppConfigService {
         return result;
     }
 
-    public void deleteDeploymentStrategy(String id) {
+    /**
+     * Sets the mutable settings of a stored deployment strategy, as a CloudFormation update of
+     * {@code AWS::AppConfig::DeploymentStrategy} does; its name and {@code ReplicateTo} are
+     * create-only. The predefined strategies are not stored, so they are not found here. Floci
+     * serves no UpdateDeploymentStrategy route; the CloudFormation provisioner is the only caller.
+     */
+    public synchronized DeploymentStrategy updateDeploymentStrategy(String id, String description,
+                                                                    int deploymentDurationInMinutes,
+                                                                    int finalBakeTimeInMinutes, float growthFactor,
+                                                                    String growthType) {
+        DeploymentStrategy strategy = copy(strategyStore.get(id)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Deployment strategy not found", 404)));
+        strategy.setDescription(description);
+        strategy.setDeploymentDurationInMinutes(deploymentDurationInMinutes);
+        strategy.setFinalBakeTimeInMinutes(finalBakeTimeInMinutes);
+        strategy.setGrowthFactor(growthFactor);
+        strategy.setGrowthType(growthType);
+        strategyStore.put(strategy.getId(), strategy);
+        return strategy;
+    }
+
+    public synchronized void deleteDeploymentStrategy(String id) {
         // Predefined strategies aren't real stored resources (see builtinStrategy above) -
         // silently no-op'ing here would report success for a delete that did nothing, and the
         // "deleted" strategy would still show up in every subsequent Get/List call.
@@ -551,16 +683,40 @@ public class AppConfigService {
         return getApplication(appId).getTags();
     }
 
-    public void tagApplication(String appId, Map<String, String> tags) {
-        Application app = getApplication(appId);
+    public synchronized void tagApplication(String appId, Map<String, String> tags) {
+        Application app = copy(getApplication(appId));
         app.getTags().putAll(tags);
         applicationStore.put(app.getId(), app);
     }
 
-    public void untagApplication(String appId, List<String> tagKeys) {
-        Application app = getApplication(appId);
+    public synchronized void untagApplication(String appId, List<String> tagKeys) {
+        Application app = copy(getApplication(appId));
         tagKeys.forEach(app.getTags()::remove);
         applicationStore.put(app.getId(), app);
+    }
+
+    /**
+     * Sets the tags of the application whose ID is exactly {@code applicationId} to {@code tags},
+     * removing any other key, as a CloudFormation create or update of {@code Tags} does; {@code tags}
+     * is not null. Unlike {@link #tagApplication} (TagResource) it never falls back to a name, so tags
+     * for an application already deleted through the API fail with ResourceNotFoundException rather
+     * than land on another named like its ID.
+     */
+    public synchronized void setApplicationTags(String applicationId, Map<String, String> tags) {
+        Application app = copy(requireApplicationById(applicationId));
+        app.setTags(new HashMap<>(tags));
+        applicationStore.put(app.getId(), app);
+    }
+
+    /**
+     * A copy of a stored entity for a write to change and put back. The in-memory stores hand out the
+     * stored instance itself, so changing it in place would change an entity a caller read earlier,
+     * such as one a GetApplication is still serializing, under that caller. The models are plain
+     * Jackson beans, as storage persists them, so a round trip copies every field.
+     */
+    @SuppressWarnings("unchecked")
+    private static <T> T copy(T entity) {
+        return (T) COPIER.convertValue(entity, entity.getClass());
     }
 
     private static String shortId(int length) {

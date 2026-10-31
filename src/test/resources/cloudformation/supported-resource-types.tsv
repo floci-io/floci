@@ -20,6 +20,10 @@ AWS::ApiGatewayV2::Integration	ApiGatewayV2CfnProvisioner
 AWS::ApiGatewayV2::Route	ApiGatewayV2CfnProvisioner
 AWS::ApiGatewayV2::Stage	ApiGatewayV2CfnProvisioner
 AWS::ApiGatewayV2::VpcLink	ApiGatewayV2CfnProvisioner
+AWS::AppConfig::Application	AppConfigCfnProvisioner
+AWS::AppConfig::ConfigurationProfile	AppConfigCfnProvisioner
+AWS::AppConfig::DeploymentStrategy	AppConfigCfnProvisioner
+AWS::AppConfig::Environment	AppConfigCfnProvisioner
 AWS::AppSync::ApiKey	AppSyncCfnProvisioner
 AWS::AppSync::DataSource	AppSyncCfnProvisioner
 AWS::AppSync::FunctionConfiguration	AppSyncCfnProvisioner
@@ -172,6 +176,7 @@ AWS::S3::BucketPolicy	S3CfnProvisioner
 AWS::S3Vectors::Index	S3VectorsCfnProvisioner
 AWS::S3Vectors::VectorBucket	S3VectorsCfnProvisioner
 AWS::SES::EmailIdentity	SesCfnProvisioner
+AWS::SES::ReceiptRule	SesReceiptRuleCfnProvisioner
 AWS::SNS::Subscription	SnsCfnProvisioner
 AWS::SNS::Topic	SnsCfnProvisioner
 AWS::SNS::TopicPolicy	SnsCfnProvisioner

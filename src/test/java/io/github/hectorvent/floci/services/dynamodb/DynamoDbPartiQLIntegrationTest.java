@@ -9,6 +9,9 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
@@ -316,6 +319,216 @@ class DynamoDbPartiQLIntegrationTest {
             .body("Responses[1].TableName", equalTo(TABLE))
             .body("Responses[2].Error.Code", equalTo("ConditionalCheckFailed"))
             .body("Responses[2].TableName", equalTo(TABLE));
+    }
+
+    @Test
+    @Order(19)
+    void aFailedConditionReturnsTheItemWithAllOld() {
+        putItem("rvocf-upd", "\"val\":{\"S\":\"here\"}");
+        putItem("rvocf-del", "\"val\":{\"S\":\"here\"}");
+
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"UPDATE \\"%s\\" SET touched = 'yes' WHERE pk = 'rvocf-upd' AND val = 'wrong'",
+                 "ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"))
+            .body("Item.val.S", equalTo("here"));
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"DELETE FROM \\"%s\\" WHERE pk = 'rvocf-del' AND val = 'wrong'",
+                 "ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("Item.val.S", equalTo("here"));
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"UPDATE \\"%s\\" SET touched = 'yes' WHERE pk = 'rvocf-upd' AND val = 'wrong'",
+                 "ReturnValuesOnConditionCheckFailure":"NONE"}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("Item", nullValue());
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"UPDATE \\"%s\\" SET touched = 'yes' WHERE pk = 'rvocf-ghost'",
+                 "ReturnValuesOnConditionCheckFailure":"ALL_OLD"}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("Item", nullValue());
+    }
+
+    @Test
+    @Order(20)
+    void aFailedBatchMemberCarriesTheItemOnItsErrorWithAllOld() {
+        putItem("rvocf-batch", "\"val\":{\"S\":\"here\"}");
+        putItem("rvocf-batch-none", "\"val\":{\"S\":\"here\"}");
+
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[
+                  {"Statement":"UPDATE \\"%1$s\\" SET touched = 'yes' WHERE pk = 'rvocf-batch' AND val = 'wrong'",
+                   "ReturnValuesOnConditionCheckFailure":"ALL_OLD"},
+                  {"Statement":"DELETE FROM \\"%1$s\\" WHERE pk = 'rvocf-batch-none' AND val = 'wrong'"}]}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ConditionalCheckFailed"))
+            .body("Responses[0].Error.Item.val.S", equalTo("here"))
+            .body("Responses[0].Item", nullValue())
+            .body("Responses[1].Error.Code", equalTo("ConditionalCheckFailed"))
+            .body("Responses[1].Error.Item", nullValue());
+    }
+
+    @Test
+    @Order(21)
+    void aCancelledTransactionCarriesTheItemOfAFailedWriteWithAllOld() {
+        putItem("rvocf-tx-upd", "\"val\":{\"S\":\"here\"}");
+        putItem("rvocf-tx-del", "\"val\":{\"S\":\"here\"}");
+
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[
+                  {"Statement":"UPDATE \\"%1$s\\" SET touched = 'yes' WHERE pk = 'rvocf-tx-upd' AND val = 'wrong'",
+                   "ReturnValuesOnConditionCheckFailure":"ALL_OLD"},
+                  {"Statement":"DELETE FROM \\"%1$s\\" WHERE pk = 'rvocf-tx-del' AND val = 'wrong'",
+                   "ReturnValuesOnConditionCheckFailure":"ALL_OLD"},
+                  {"Statement":"EXISTS(SELECT * FROM \\"%1$s\\" WHERE pk = 'rvocf-upd' AND val = 'wrong')",
+                   "ReturnValuesOnConditionCheckFailure":"ALL_OLD"}]}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("CancellationReasons[0].Code", equalTo("ConditionalCheckFailed"))
+            .body("CancellationReasons[0].Item.val.S", equalTo("here"))
+            .body("CancellationReasons[1].Item.val.S", equalTo("here"))
+            .body("CancellationReasons[2].Code", equalTo("ConditionalCheckFailed"))
+            .body("CancellationReasons[2].Item", nullValue());
+    }
+
+    @Test
+    @Order(22)
+    void isTestsTheTypeOfAnAttribute() {
+        putItem("is-type", "\"flag\":{\"BOOL\":true},\"s\":{\"S\":\"str\"},\"n\":{\"N\":\"5\"},"
+                + "\"l\":{\"L\":[]},\"m\":{\"M\":{}},\"ss\":{\"SS\":[\"a\"]}");
+
+        statement("SELECT pk FROM \"" + TABLE + "\" WHERE pk = 'is-type' AND flag IS BOOL AND s IS STRING"
+                + " AND n IS NUMERIC(5, 2) AND l IS LIST AND m IS STRUCT AND ss IS NOT STRING AND nope IS NOT LIST")
+            .statusCode(200)
+            .body("Items.size()", equalTo(1));
+        statement("SELECT pk FROM \"" + TABLE + "\" WHERE pk = 'is-type' AND s IS BOOL")
+            .statusCode(200)
+            .body("Items.size()", equalTo(0));
+        statement("UPDATE \"" + TABLE + "\" SET touched = 'yes' WHERE pk = 'is-type' AND n IS STRING")
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"));
+        statement("UPDATE \"" + TABLE + "\" SET touched = 'yes' WHERE pk = 'is-type' AND n IS NUMERIC")
+            .statusCode(200);
+
+        String unsupported = "SELECT pk FROM \"" + TABLE + "\" WHERE pk = 'is-type' AND n IS DECIMAL";
+        statement(unsupported)
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Unsupported data type for IS operator: DecimalType. Supported data types are "
+                    + "[MISSING, NULL, BOOLEAN, BLOB, STRING, NUMERIC, STRUCT, TUPLE, LIST] at 1:"
+                    + (unsupported.indexOf("n IS") + 1) + ":1"));
+    }
+
+    @Test
+    @Order(23)
+    void aStatementThatBreaksOffNamesWhatItFoundWhereATermShouldStart() {
+        String notWellFormed = "Statement wasn't well formed, can't be processed: ";
+
+        statement("SELECT * FROM \"" + TABLE + "-never-created\" WHERE")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(notWellFormed + "Unexpected term"));
+        statement("DELETE FROM WHERE pk = 'x'")
+            .statusCode(400)
+            .body("message", equalTo(notWellFormed + "Expected identifier for simple path"));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"SELECT * FROM \\"%s\\" WHERE pk = 'x' AND"}]}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: " + notWellFormed
+                    + "Missing right-hand side expression of infix operator"));
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":"SELECT * FROM \\"%s\\" WHERE IS NULL"}]}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(notWellFormed + "Unexpected operator"));
+    }
+
+    @Test
+    @Order(24)
+    void aStatementOutsideOneTo8192CodePointsIsRefusedBeforeItIsParsed() {
+        String select = "SELECT * FROM \"" + TABLE + "-never-created\" WHERE pk = '";
+        String tooLong = select + "a".repeat(8192 - select.length()) + "'";
+        String badCapacity = "Value 'BAD' at 'returnConsumedCapacity' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]";
+
+        statement(select + "\\ud83d\\ude00" + "a".repeat(8190 - select.length()) + "'")
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+        request("DynamoDB_20120810.ExecuteStatement",
+                "{\"Statement\":\"" + tooLong.replace("\"", "\\\"") + "\",\"ReturnConsumedCapacity\":\"BAD\"}")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("2 validation errors detected: Value '" + tooLong + "' at 'statement' "
+                    + "failed to satisfy constraint: Member must have length less than or equal to 8192; "
+                    + badCapacity));
+        request("DynamoDB_20120810.ExecuteStatement", "{}")
+            .statusCode(400)
+            .body("message", equalTo("1 validation error detected: Value null at 'statement' "
+                    + "failed to satisfy constraint: Member must not be null"));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"SELECT"},{"Statement":""}],"ReturnConsumedCapacity":"BAD"}
+                """)
+            .statusCode(400)
+            .body("message", equalTo("2 validation errors detected: Value '' at 'transactStatements.2.member.statement' "
+                    + "failed to satisfy constraint: Member must have length greater than or equal to 1; "
+                    + badCapacity));
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":"SELECT"},{}],"ReturnConsumedCapacity":"BAD"}
+                """)
+            .statusCode(400)
+            .body("message", equalTo("2 validation errors detected: " + badCapacity
+                    + "; Value null at 'statements.2.member.statement' "
+                    + "failed to satisfy constraint: Member must not be null"));
+    }
+
+    @Test
+    @Order(25)
+    void requestMembersOutsideTheirConstraintsAreListedInDynamoDbOrderUpToTen() {
+        String atLeastOne = "' failed to satisfy constraint: Member must have length greater than or equal to 1";
+        String returnValues = "' failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, NONE]";
+        String badCapacity = "Value 'BAD' at 'returnConsumedCapacity' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]";
+
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"","Parameters":[],"NextToken":"","Limit":0,"ReturnConsumedCapacity":"BAD",
+                 "ReturnValuesOnConditionCheckFailure":"BAD"}
+                """)
+            .statusCode(400)
+            .body("message", equalTo("6 validation errors detected: "
+                    + "Value 'BAD' at 'returnValuesOnConditionCheckFailure" + returnValues
+                    + "; Value '' at 'nextToken" + atLeastOne
+                    + "; Value '0' at 'limit' failed to satisfy constraint: "
+                    + "Member must have value greater than or equal to 1"
+                    + "; Value '' at 'statement" + atLeastOne
+                    + "; " + badCapacity
+                    + "; Value '[]' at 'parameters" + atLeastOne));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"ClientRequestToken":"","ReturnConsumedCapacity":"BAD","TransactStatements":[
+                 {"Statement":"SELECT","ReturnValuesOnConditionCheckFailure":"BAD","Parameters":[]}%s]}
+                """.formatted(",{\"Statement\":\"\"}".repeat(9)))
+            .statusCode(400)
+            .body("message", equalTo("10 validation errors detected: "
+                    + "Value '' at 'clientRequestToken" + atLeastOne
+                    + "; Value 'BAD' at 'transactStatements.1.member.returnValuesOnConditionCheckFailure" + returnValues
+                    + "; Value '[]' at 'transactStatements.1.member.parameters" + atLeastOne
+                    + IntStream.rangeClosed(2, 8)
+                            .mapToObj(n -> "; Value '' at 'transactStatements." + n + ".member.statement" + atLeastOne)
+                            .collect(Collectors.joining())));
+        request("DynamoDB_20120810.ExecuteTransaction", "{\"TransactStatements\":[]}")
+            .statusCode(400)
+            .body("message", equalTo("1 validation error detected: Value '[]' at 'transactStatements" + atLeastOne));
+        request("DynamoDB_20120810.BatchExecuteStatement", "{\"ReturnConsumedCapacity\":\"BAD\"}")
+            .statusCode(400)
+            .body("message", equalTo("2 validation errors detected: " + badCapacity
+                    + "; Value null at 'statements' failed to satisfy constraint: Member must not be null"));
     }
 
     private static void putItem(String pk, String attributes) {

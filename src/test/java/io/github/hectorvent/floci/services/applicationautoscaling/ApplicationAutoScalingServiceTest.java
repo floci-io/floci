@@ -39,6 +39,7 @@ class ApplicationAutoScalingServiceTest {
     private static final String DIMENSION = "ecs:service:DesiredCount";
 
     private ApplicationAutoScalingService service;
+    private CloudWatchMetricsService cloudWatch;
 
     /** Alarm names currently registered in the stubbed CloudWatch. */
     private final Set<String> alarmsInCloudWatch = new LinkedHashSet<>();
@@ -48,7 +49,7 @@ class ApplicationAutoScalingServiceTest {
         RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
         alarmsInCloudWatch.clear();
 
-        CloudWatchMetricsService cloudWatch = mock(CloudWatchMetricsService.class);
+        cloudWatch = mock(CloudWatchMetricsService.class);
         doAnswer(invocation -> {
             MetricAlarm alarm = invocation.getArgument(0);
             alarm.setAlarmArn("arn:aws:cloudwatch:" + REGION + ":000000000000:alarm:" + alarm.getAlarmName());
@@ -425,6 +426,32 @@ class ApplicationAutoScalingServiceTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> service.deregisterScalableTarget(NAMESPACE, RESOURCE_ID, DIMENSION, REGION));
         assertEquals("ObjectNotFoundException", e.getErrorCode());
+    }
+
+    /**
+     * CloudWatch refuses a whole DeleteAlarms request that names an alarm a composite alarm still
+     * names, so the cleanup deletes the policy's alarms one by one and only the named one stays.
+     */
+    @Test
+    void policyCleanupKeepsOnlyTheAlarmACompositeAlarmNames() {
+        register();
+        ScalingPolicy policy = service.putScalingPolicy("cpu", "TargetTrackingScaling", NAMESPACE, RESOURCE_ID,
+                DIMENSION, targetTracking(65.0, "ECSServiceAverageCPUUtilization", null), null, REGION);
+        String referenced = policy.getAlarms().getFirst().getAlarmName();
+        doAnswer(invocation -> {
+            List<String> names = invocation.getArgument(0);
+            if (names.contains(referenced)) {
+                throw new AwsException("ValidationError",
+                        "Cannot delete " + referenced + " as there are composite alarm(s) depending on it.", 400);
+            }
+            alarmsInCloudWatch.removeAll(names);
+            return null;
+        }).when(cloudWatch).deleteAlarms(any(), anyString());
+
+        service.deleteScalingPolicy("cpu", NAMESPACE, RESOURCE_ID, DIMENSION, REGION);
+
+        assertEquals(0, service.describeScalingPolicies(NAMESPACE, null, null, null, REGION).size());
+        assertEquals(Set.of(referenced), alarmsInCloudWatch);
     }
 
     @Test

@@ -46,7 +46,8 @@ class RoleSessionPrincipalArnEnforcementIntegrationTest {
     void aRoleSessionsPrincipalArnIsItsRolesArnWithItsPath() {
         String role = "principal-arn-" + UUID.randomUUID().toString().substring(0, 8);
         String roleArn = "arn:aws:iam::" + ACCOUNT + ":role/team/" + role;
-        String sessionArn = "arn:aws:sts::" + ACCOUNT + ":assumed-role/" + role + "/s";
+        String sessionArn = "arn:aws:sts::" + ACCOUNT + ":assumed-role/" + role + "/"
+                + EnforcementFixtures.SESSION_NAME;
         createRole(role, """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Allow","Action":"iam:ListUsers","Resource":"*",

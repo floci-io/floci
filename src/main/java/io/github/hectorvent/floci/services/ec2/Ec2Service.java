@@ -4662,22 +4662,37 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * case the instance keeps it the way it keeps a synthesised address.
      */
     private void claimRequestedPrivateIp(String region, String subnetId, String address) {
+        if (requireRequestedPrivateIpFree(region, subnetId, address)) {
+            vpcNetworkManager.claimPrivateIp(region, subnetId, address);
+        }
+    }
+
+    /**
+     * The in-use half of {@link #claimRequestedPrivateIp}, without the lease. CreateNetworkInterface
+     * uses it alone: an interface has no container to hold the address on the VPC network, and
+     * DeleteNetworkInterface returns no lease, so one taken here would keep the address from
+     * automatic allocation after the interface is gone. {@link #assignPrivateIp} already steps
+     * around addresses stored interfaces hold. Callers must hold {@link #privateIpAllocationLock}.
+     *
+     * @return whether the address lies in a Docker-backed range, where a lease could be taken
+     */
+    private boolean requireRequestedPrivateIpFree(String region, String subnetId, String address) {
         if (privateIpsTaken(region, subnetId).contains(address)) {
             throw new AwsException("InvalidIPAddress.InUse", "Address " + address + " is in use.", 400);
         }
         if (vpcNetworkManager == null || subnetId == null) {
-            return;
+            return false;
         }
         boolean leasable = vpcNetworkManager.effectiveSubnetCidr(region, subnetId)
                 .filter(cidr -> Ipv4Cidrs.contains(cidr, address + "/32"))
                 .isPresent();
         if (!leasable) {
-            return;
+            return false;
         }
         if (privateIpsInUseInEveryAccount(region, subnetId).contains(address)) {
             throw new AwsException("InvalidIPAddress.InUse", "Address " + address + " is in use.", 400);
         }
-        vpcNetworkManager.claimPrivateIp(region, subnetId, address);
+        return true;
     }
 
     /** {@link #privateIpsInUse}, across every account rather than only the caller's. */
@@ -4777,8 +4792,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     private static void addIfSet(Set<String> addresses, String address) {
         if (address != null && !address.isBlank()) {
-            // CreateNetworkInterface keeps its address as given, so a zero-padded octet has to be
-            // folded here for the in-use checks to see one address rather than two.
+            // An interface persisted before CreateNetworkInterface canonicalised its address may
+            // still hold a zero-padded octet, so it is folded here for the in-use checks to see
+            // one address rather than two.
             addresses.add(canonicalIpv4(address).orElse(address));
         }
     }
@@ -6023,16 +6039,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return false;
         }
         return switch (optionKey) {
-            case "domain-name-servers" -> values.size() <= 4 &&
-                    (values.equals(List.of("AmazonProvidedDNS")) || values.stream().allMatch(this::isLiteralIp));
+            case "domain-name-servers" -> values.stream()
+                    .allMatch(value -> "AmazonProvidedDNS".equals(value) || isLiteralIp(value))
+                    && withinDhcpAddressLimits(values);
             case "ntp-servers" -> values.size() <= 8 && values.stream().allMatch(this::isLiteralIp)
-                    && values.stream().filter(value -> !value.contains(":")).count() <= 4
-                    && values.stream().filter(value -> value.contains(":")).count() <= 4;
+                    && withinDhcpAddressLimits(values);
             case "netbios-name-servers" -> values.size() <= 4 && values.stream().allMatch(this::isLiteralIp);
             case "netbios-node-type" -> values.size() == 1 && Set.of("1", "2", "4", "8").contains(values.getFirst());
             case "ipv6-address-preferred-lease-time" -> values.size() == 1 && validIpv6LeaseTime(values.getFirst());
             default -> true;
         };
+    }
+
+    private static boolean withinDhcpAddressLimits(List<String> values) {
+        return values.stream().filter(value -> !value.contains(":")).count() <= 4
+                && values.stream().filter(value -> value.contains(":")).count() <= 4;
     }
 
     private boolean isLiteralIp(String value) {
@@ -8155,9 +8176,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private boolean sameProtocolAndPorts(IpPermission a, IpPermission b) {
-        return Objects.equals(a.getIpProtocol(), b.getIpProtocol())
-                && Objects.equals(a.getFromPort(), b.getFromPort())
-                && Objects.equals(a.getToPort(), b.getToPort());
+        String protocol = SecurityGroupPolicy.normalizeProtocol(a.getIpProtocol());
+        if (!Objects.equals(protocol, SecurityGroupPolicy.normalizeProtocol(b.getIpProtocol()))) {
+            return false;
+        }
+        // "All traffic" has no ports, and AWS ignores any a request names: Terraform's
+        // aws_security_group revokes the default egress rule as -1 with FromPort=0, ToPort=0.
+        return "-1".equals(protocol)
+                || (Objects.equals(a.getFromPort(), b.getFromPort()) && Objects.equals(a.getToPort(), b.getToPort()));
     }
 
     private boolean hasSources(IpPermission perm) {
@@ -14425,10 +14451,29 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
 
+        // An explicit address is checked the way RunInstances checks its PrivateIpAddress: it must be
+        // one the subnet can assign, in canonical form, and no other resource may hold it. Unlike a
+        // launch it takes no lease on the VPC network (see requireRequestedPrivateIpFree).
+        String requestedIp = (privateIpAddress != null && !privateIpAddress.isBlank())
+                ? validateRequestedPrivateIp(privateIpAddress, subnet, null, 1) : null;
         synchronized (privateIpAllocationLock) {
             String eniId = "eni-" + randomHex(17);
-            String primaryIp = (privateIpAddress != null && !privateIpAddress.isBlank())
-                    ? privateIpAddress : assignPrivateIp(region, subnetId);
+            if (requestedIp != null) {
+                requireRequestedPrivateIpFree(region, subnetId, requestedIp);
+            }
+            // Secondaries are folded and checked before the primary is allocated, so a refused one
+            // leaves no lease behind on the VPC network. Their range is not checked, as before.
+            Set<String> secondaries = new LinkedHashSet<>();
+            for (String extra : privateIpAddresses == null ? List.<String>of() : privateIpAddresses) {
+                if (extra == null || extra.isBlank()) {
+                    continue;
+                }
+                String ip = canonicalIpv4(extra).orElse(extra);
+                if (!ip.equals(requestedIp) && secondaries.add(ip)) {
+                    requireRequestedPrivateIpFree(region, subnetId, ip);
+                }
+            }
+            String primaryIp = requestedIp != null ? requestedIp : assignPrivateIp(region, subnetId);
             String primaryDns = AwsRegions.ec2PrivateIpDnsName(primaryIp, region);
 
             NetworkInterface ni = new NetworkInterface();
@@ -14453,17 +14498,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             primary.setPrivateDnsName(primaryDns);
             primary.setPrimary(true);
             ipList.add(primary);
-            if (privateIpAddresses != null) {
-                for (String extra : privateIpAddresses) {
-                    if (extra == null || extra.isBlank() || extra.equals(primaryIp)) {
-                        continue;
-                    }
-                    NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
-                    secondary.setPrivateIpAddress(extra);
-                    secondary.setPrivateDnsName(AwsRegions.ec2PrivateIpDnsName(extra, region));
-                    secondary.setPrimary(false);
-                    ipList.add(secondary);
+            for (String extra : secondaries) {
+                if (extra.equals(primaryIp)) {
+                    continue;
                 }
+                NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
+                secondary.setPrivateIpAddress(extra);
+                secondary.setPrivateDnsName(AwsRegions.ec2PrivateIpDnsName(extra, region));
+                secondary.setPrimary(false);
+                ipList.add(secondary);
             }
             ni.setPrivateIpAddresses(ipList);
 

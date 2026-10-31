@@ -400,7 +400,7 @@ final class PassedRoles {
         List<String> arns = new ArrayList<>();
         for (String role : roles) {
             if (!role.isBlank()) {
-                arns.add(role.startsWith("arn:") ? role
+                arns.add(AwsArnUtils.looksLikeArn(role) ? role
                         : lookups.heldRoleArn(role).orElseGet(() -> lookups.roleArn(role)));
             }
         }
@@ -587,7 +587,7 @@ final class PassedRoles {
         List<String> arns = new ArrayList<>();
         for (String role : roles) {
             if (!role.isBlank()) {
-                arns.add(role.startsWith("arn:") ? role : lookups.roleArn(role));
+                arns.add(AwsArnUtils.looksLikeArn(role) ? role : lookups.roleArn(role));
             }
         }
         return passed(arns, service);
@@ -820,7 +820,7 @@ final class PassedRoles {
     }
 
     /** The strings at {@code path} in {@code node}, where a {@code []} step takes each element of an array. */
-    private static List<String> values(JsonNode node, String... path) {
+    static List<String> values(JsonNode node, String... path) {
         List<String> found = new ArrayList<>();
         collect(node, path, 0, found);
         return found;

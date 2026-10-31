@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.lambda;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.FileTrees;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -422,7 +421,7 @@ public class LambdaLayerService {
         if (arn == null || accountId == null || accountId.isBlank()
                 || functionRegion == null || functionRegion.isBlank()
                 || !"lambda".equals(arn.service())
-                || AwsArnUtils.isForeignPartition(arn, AwsRegions.partitionFor(functionRegion))
+                || AwsArnUtils.isForeignPartition(arn, regionResolver.partitionForRegion(functionRegion))
                 || AwsArnUtils.isForeignAccount(arn, accountId)) {
             return null;
         }

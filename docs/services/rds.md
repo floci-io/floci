@@ -44,6 +44,8 @@ existing failure path. The PostgreSQL restore SQL readiness retry policy is unch
 
 RDS Data API (`rds-data`) is documented separately because it uses REST JSON routes instead of the RDS Query protocol. See [RDS Data API](rds-data.md).
 
+RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all regions until regional values are captured. Floci Route 53 resolves aliases by DNS name and does not check this ID. The us-east-1 value is shown in the [AWS CLI RDS example](https://docs.aws.amazon.com/cli/v1/reference/rds/describe-db-instances.html).
+
 ## Supported Management Actions
 
 <!-- floci:actions:start -->
@@ -122,6 +124,10 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `ModifyDBSnapshot` | Change the engine version or option group of an available manual DB snapshot |
 | `RestoreDBInstanceFromDBSnapshot` | Create a new DB instance from a snapshot |
 | `RestoreDBInstanceToPointInTime` | Create a new DB instance from a source instance at a time in its restorable window; see [Point in time restore](#point-in-time-restore) |
+| `DescribeDBInstanceAutomatedBackups` | List the Region's instance automated backups: `active` for live instances, `retained` and `replicating` ones; see [Automated backups](#automated-backups) |
+| `DeleteDBInstanceAutomatedBackup` | Delete a retained instance automated backup by `DbiResourceId` or `DBInstanceAutomatedBackupsArn` |
+| `StartDBInstanceAutomatedBackupsReplication` | Replicate a source instance's automated backups from its Region to this one (metadata only) |
+| `StopDBInstanceAutomatedBackupsReplication` | Stop replicating to this Region; the replica is kept as `retained` |
 | `DescribeDBSnapshots` | List DB instance snapshots |
 | `DescribeDBSnapshotAttributes` | Return a snapshot's `restore` attribute (accounts authorized to copy/restore it) |
 | `ModifyDBSnapshotAttribute` | Add or remove accounts authorized to copy/restore a snapshot |
@@ -144,6 +150,8 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `CopyDBClusterSnapshot` | Copy an available cluster snapshot (by identifier or same-region ARN) to a new manual one with its data; `CopyTags` and `Tags`; the copy reports `SourceDBClusterSnapshotArn` |
 | `RestoreDBClusterFromSnapshot` | Create a cluster from a cluster snapshot's settings and data; `Engine` must match the snapshot's |
 | `RestoreDBClusterToPointInTime` | Create a cluster from a source cluster at a time in its restorable window; see [Point in time restore](#point-in-time-restore) |
+| `DescribeDBClusterAutomatedBackups` | List the Region's retained cluster automated backups; see [Automated backups](#automated-backups) |
+| `DeleteDBClusterAutomatedBackup` | Delete a retained cluster automated backup by `DbClusterResourceId` |
 | `DescribeDBClusterSnapshotAttributes` | Return the `restore` attribute of a cluster snapshot |
 | `ModifyDBClusterSnapshotAttribute` | Add or remove `restore` values (account ids or `all`) on a cluster snapshot |
 | `StartExportTask` | Start an export task for a DB snapshot or DB cluster snapshot; see [Exporting snapshots to Amazon S3](#exporting-snapshots-to-amazon-s3) |
@@ -771,6 +779,31 @@ Associations are recorded, not exercised: Floci does not check the role in IAM a
 role's credentials to the database, so an `aws_s3` import still needs credentials of its own. Deleting a cluster or instance drops its
 associations, and snapshots, restores and read replicas start without any.
 
+## Aurora managed password rotation
+
+`ModifyDBCluster` supports `RotateMasterUserPassword=true` for an existing
+RDS-managed master-user secret. Set `ApplyImmediately=true`; requests without it,
+without an existing managed secret, with `MasterUserPassword`, or disabling
+`ManageMasterUserPassword` in the same call are rejected before credentials change.
+
+The local operation completes synchronously: it changes the running database's
+password, publishes a new `AWSCURRENT` secret version, and updates the cluster and
+member proxy credentials. The preceding version becomes `AWSPREVIOUS`. If secret
+publication fails, Floci attempts to restore the previous database credential and
+secret version labels. A backend failure leaves the previous secret current.
+Metadata-only RDS mock mode updates the secret and stored credentials without
+starting a database. Scheduled RDS-owned rotation through Secrets Manager remains
+outside this `ModifyDBCluster` operation.
+
+```bash
+aws --endpoint-url http://localhost:4566 rds modify-db-cluster \
+  --db-cluster-identifier example --rotate-master-user-password --apply-immediately
+```
+
+Use the managed secret's new current value for subsequent SQL connections. Existing
+database sessions may remain connected after rotation, as with a normal password
+change; verify with fresh connections.
+
 ## Aurora managed password opt-out
 
 When `ModifyDBCluster` disables `ManageMasterUserPassword` while the managed secret has
@@ -805,11 +838,10 @@ retention period up to `LatestRestorableTime` on `DescribeDBInstances`; an insta
 window runs from its creation (`EarliestRestorableTime`) to `LatestRestorableTime` on
 `DescribeDBClusters`.
 
-An instance source is named by `SourceDBInstanceIdentifier` or `SourceDbiResourceId`, a cluster
-source by `SourceDBClusterIdentifier` (identifier or ARN) or `SourceDbClusterResourceId`. Restoring
-from retained automated backups (`SourceDBInstanceAutomatedBackupsArn`, used for a deleted instance)
-is not supported, since Floci keeps no automated backups, and answers
-`DBInstanceAutomatedBackupNotFound`. A restored instance takes the source's engine, version,
+An instance source is named by `SourceDBInstanceIdentifier`, `SourceDbiResourceId` or
+`SourceDBInstanceAutomatedBackupsArn`, a cluster source by `SourceDBClusterIdentifier` (identifier
+or ARN) or `SourceDbClusterResourceId`. A resource ID or backups ARN can also name a deleted source
+through the automated backup it kept; see [Automated backups](#automated-backups). A restored instance takes the source's engine, version,
 credentials, database name, storage and encryption, and its instance class unless the request names
 one; everything else is the request's or the default a new instance gets. A restored cluster takes
 the source's engine, version, credentials, database name and encryption, and has no instances until
@@ -820,6 +852,33 @@ target is seeded from a `pg_dumpall` of the source taken when the request arrive
 replicas use, so the restored data is the source's latest state whatever time in the window is
 asked for; this is also why `LatestRestorableTime` is always the current time. As with
 `CreateDBSnapshot`, only PostgreSQL sources are accepted.
+
+## Automated backups
+
+A standalone instance with `BackupRetentionPeriod` above 0 has an `active` automated backup, which
+`DescribeDBInstanceAutomatedBackups` builds from the instance: its `RestoreWindow` is the instance's
+restorable window, and its ARN is `auto-backup:ab-` followed by the `DbiResourceId` after `db-`.
+Aurora instances are not listed, since their backups belong to the cluster.
+
+`DeleteDBInstance` and `DeleteDBCluster` take `DeleteAutomatedBackups`. It defaults to `true`, which
+removes the backups with the resource, as on AWS. With `false`, a standalone instance with backups on
+leaves a `retained` backup, and a cluster leaves one that `DescribeDBClusterAutomatedBackups` lists.
+Its restore window ends at the deletion. Outside mock mode a PostgreSQL source's data is saved with
+the backup (a `pg_dumpall`, as for snapshots), so a point in time restore from it brings the data
+back; if that copy fails, the delete fails and nothing is deleted. A restore from a backup that holds
+no data, such as one kept in mock mode, fails outside mock mode. Floci does not expire retained
+backups: they stay until `DeleteDBInstanceAutomatedBackup` or `DeleteDBClusterAutomatedBackup`
+removes them, and a backup of a live resource cannot be deleted
+(`InvalidDBInstanceAutomatedBackupState`, `InvalidDBClusterAutomatedBackupStateFault`).
+
+`StartDBInstanceAutomatedBackupsReplication` is called in the destination Region with the source's
+ARN. The source must be a live standalone instance with backups on, in another Region. The replica
+is listed in the destination Region as `replicating`, with the `BackupRetentionPeriod` asked for (7
+days by default), and the source lists it under `DBInstanceAutomatedBackupsReplications` in
+`DescribeDBInstances`. Replication is metadata only: no data is copied between Regions, so a restore
+from a replica copies the live source. `StopDBInstanceAutomatedBackupsReplication`, or deleting the
+source, keeps the replica as `retained`; a stop with nothing replicating to the Region answers
+`InvalidDBInstanceState`.
 
 ## Exporting snapshots to Amazon S3
 

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -2967,16 +2968,15 @@ public class GlueService {
     }
 
     private void validateArn(String arn) {
-        if (arn == null || !arn.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(arn)) {
             throw new AwsException("InvalidInputException", "Invalid ARN", 400);
         }
     }
 
     private void validateResourceExists(String arn) {
         // At most six parts: a job, table or other name may itself contain ':'.
-        String[] parts = arn.split(":", 6);
-        if (parts.length >= 6) {
-            String resource = parts[5];
+        if (AwsArnUtils.isArn(arn)) {
+            String resource = AwsArnUtils.parse(arn).resource();
             if (resource.startsWith("job/")) {
                 getJob(resource.substring(4));
                 return;

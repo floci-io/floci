@@ -21,8 +21,10 @@ import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolic
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -286,6 +288,9 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
      * one after the update. Any other change updates the DEVELOPMENT stage in place, and
      * {@code AutoPublish: true} then publishes it to LIVE, which {@code Fn::GetAtt Stage} reports.
      * Floci has no Key Value Store, so {@code FunctionConfig.KeyValueStoreAssociations} is ignored.
+     * The template's {@code FunctionCode} is the raw code text, as in the CloudFormation example
+     * templates, and it is stored in the base64 form the CreateFunction API carries on the wire, so
+     * {@code GetFunction} serves the template text back.
      *
      * <p>When publishing or tagging fails, a function this call created is deleted again. An
      * in-place update is not reverted, the same limit as the policy types above.
@@ -305,7 +310,7 @@ public class CloudFrontCfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         CloudFrontFunction fn = new CloudFrontFunction();
         fn.setName(name);
-        fn.setFunctionCode(code);
+        fn.setFunctionCode(Base64.getEncoder().encodeToString(code.getBytes(StandardCharsets.UTF_8)));
         fn.setComment(text(config, "Comment"));
         fn.setRuntime(runtime);
 

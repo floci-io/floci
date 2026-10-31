@@ -25,6 +25,7 @@ For the upstream API shape, see the AWS documentation:
 | `GetStatementResult` | Page through a finished statement's rows as typed `Records` |
 | `GetStatementResultV2` | Same rows in the V2 envelope, with `CSVRecords` when the statement used `ResultFormat=CSV` |
 | `ListStatements` | List stored statements newest first, filtered by `StatementName` or `Status` |
+| `ListSessions` | List caller-owned session metadata, with lifecycle status, target filters and pagination |
 | `CancelStatement` | Cancel queued or running SQL; returns whether cancellation was accepted, and rejects terminal statements |
 | `ListDatabases` | List databases on the cluster (`pg_database`) |
 | `ListSchemas` | List schemas, optionally filtered by `SchemaPattern` |
@@ -91,12 +92,42 @@ Session ids appear in Execute, Batch, DescribeStatement and ListStatements respo
 is saved with statement metadata and idempotency receipts, but live connections are runtime-only:
 reset and shutdown close them, and restarting Floci never reopens a session. A session request
 with an existing receipt can still replay its original response after the connection expires or
-after restart, subject to the normal receipt lifetime and caller ownership. `ListSessions` is
-not implemented.
+after restart, subject to the normal receipt lifetime and caller ownership.
+
+### Listing sessions
+
+`ListSessions` returns session metadata created in the last 24 hours. It defaults to
+`AVAILABLE` and `BUSY` sessions; `Status=CLOSED` includes retained metadata for sessions
+closed explicitly, expired or retired after a connection failure. `SessionId` retrieves
+one visible session regardless of status and cannot be combined with `Status`,
+`ClusterIdentifier`, `WorkgroupName` or `Database`. A missing or foreign session id
+returns `ResourceNotFoundException`.
+
+Filter by `ClusterIdentifier` or `WorkgroupName` (name or ARN), optionally with
+`Database`. Cluster and workgroup filters are mutually exclusive. `MaxResults` accepts
+0 through 100; omitted or zero uses 100. Continue with `NextToken` and the same filters
+and ownership scope. Results are ordered by creation timestamp and session id; this
+ordering and the default page size are Floci choices, not claims about AWS.
+
+Sessions remain isolated by account and Region. `RoleLevel` defaults to true and
+lists sessions for the caller's IAM role across assumed-role sessions. False limits
+results to the current caller session. Unresolved credentials are isolated by access
+key; Floci does not model Identity Center identity-enhanced session restrictions.
+
+`CreatedAt`, `UpdatedAt` and `SessionTtl` are epoch-second timestamps with the same
+millisecond precision as statement timestamps.
+`CurrentStatementId` appears only while the session is `BUSY`, including admitted
+work waiting for a worker. `SessionAliveSeconds` reports the selected keep-alive.
+Closed history contains metadata only, does not consume the 500-live-session quota,
+and expires 24 hours after session creation. History is runtime-only: reset, shutdown
+and restart remove it even when statement persistence is enabled. Failed admissions
+do not create session history. The exact queued-state reporting and lifecycle timestamp
+choices have not been compared with live AWS.
 
 Unexpected synchronous connection-cleanup failures are reported to the affected operation.
 Reset still attempts to close the remaining sessions and clear statement and receipt state before
-reporting cleanup errors. Background expiration failures are logged without stopping later sweeps.
+reporting cleanup errors. Opportunistic expiration during `ListSessions` logs cleanup failures
+without failing the listing. Background expiration failures are logged without stopping later sweeps.
 An already-closed connection (`SQLSTATE 08003`) is a benign cleanup outcome.
 
 ```python

@@ -12,7 +12,11 @@ import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.IamActionRegistry;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.ResourceArnBuilder;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.IamUser;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebService;
 import io.github.hectorvent.floci.services.s3.S3ControlTagConditionKeys;
 import io.github.hectorvent.floci.services.s3.S3ObjectActions;
 import io.github.hectorvent.floci.services.s3.S3ObjectKeys;
@@ -83,11 +87,15 @@ public class IamConditionContextResolver {
     public static final String OBJECT_LOCK_RETAIN_UNTIL_DATE = "s3:object-lock-retain-until-date";
     public static final String OBJECT_LOCK_REMAINING_RETENTION_DAYS = "s3:object-lock-remaining-retention-days";
     public static final String OBJECT_LOCK_LEGAL_HOLD = "s3:object-lock-legal-hold";
+    static final String REQUEST_AUTH_TYPE = "lambda:Request/WebFunctionAuthType";
+    static final String RESOURCE_AUTH_TYPE = "lambda:Resource/WebFunctionAuthType";
 
     private final Instance<DynamoDbFacade> dynamoDbFacade;
     private final Instance<Ec2Service> ec2Service;
     private final Instance<S3Service> s3Service;
     private final Instance<CloudWatchLogsService> logsService;
+    private final Instance<IamService> iamService;
+    private final Instance<LambdaWebService> lambdaWebService;
     private final RequestContext requestContext;
     private final EmulatorConfig config;
     private final CurrentVertxRequest currentVertxRequest;
@@ -103,18 +111,22 @@ public class IamConditionContextResolver {
                                        Instance<Ec2Service> ec2Service,
                                        Instance<S3Service> s3Service,
                                        Instance<CloudWatchLogsService> logsService,
+                                       Instance<IamService> iamService,
+                                       Instance<LambdaWebService> lambdaWebService,
                                        RequestContext requestContext,
                                        EmulatorConfig config,
                                        CurrentVertxRequest currentVertxRequest,
                                        ResolvedServiceCatalog serviceCatalog) {
-        this(dynamoDbFacade, ec2Service, s3Service, logsService, requestContext, config, currentVertxRequest,
-                serviceCatalog, Clock.systemUTC());
+        this(dynamoDbFacade, ec2Service, s3Service, logsService, iamService, lambdaWebService, requestContext,
+                config, currentVertxRequest, serviceCatalog, Clock.systemUTC());
     }
 
     IamConditionContextResolver(Instance<DynamoDbFacade> dynamoDbFacade,
                                 Instance<Ec2Service> ec2Service,
                                 Instance<S3Service> s3Service,
                                 Instance<CloudWatchLogsService> logsService,
+                                Instance<IamService> iamService,
+                                Instance<LambdaWebService> lambdaWebService,
                                 RequestContext requestContext,
                                 EmulatorConfig config,
                                 CurrentVertxRequest currentVertxRequest,
@@ -123,6 +135,8 @@ public class IamConditionContextResolver {
         this.ec2Service = ec2Service;
         this.s3Service = s3Service;
         this.logsService = logsService;
+        this.iamService = iamService;
+        this.lambdaWebService = lambdaWebService;
         this.requestContext = requestContext;
         this.config = config;
         this.currentVertxRequest = currentVertxRequest;
@@ -138,6 +152,7 @@ public class IamConditionContextResolver {
             case "dynamodb" -> dynamoDbConditionContext(action, ctx);
             case "iam" -> iamConditionContext(action, ctx);
             case "logs" -> logsConditionContext(action, ctx);
+            case "lambda" -> lambdaConditionContext(action, ctx);
             default -> null;
         };
     }
@@ -209,9 +224,10 @@ public class IamConditionContextResolver {
         return conditions;
     }
 
-    private static Map<String, List<String>> iamConditionContext(String action, ContainerRequestContext ctx) {
+    private Map<String, List<String>> iamConditionContext(String action, ContainerRequestContext ctx) {
         Map<String, String> members = IamConditionKeys.members(action);
-        if (members.isEmpty()) {
+        Map<String, String> targets = IamConditionKeys.targets(action);
+        if (members.isEmpty() && targets.isEmpty()) {
             return null;
         }
         Map<String, String> form = formParameters(ctx);
@@ -222,7 +238,26 @@ public class IamConditionContextResolver {
                 conditions.put(key, List.of(value));
             }
         });
+        // iam:PermissionsBoundary on an existing role or user is the boundary stored on it, left off when it has none.
+        targets.forEach((key, target) -> {
+            String value = storedPermissionsBoundary(target, form.get(target));
+            if (value != null) {
+                conditions.put(key, List.of(value));
+            }
+        });
         return conditions.isEmpty() ? null : conditions;
+    }
+
+    private String storedPermissionsBoundary(String target, String name) {
+        if (name == null || !iamService.isResolvable()) {
+            return null;
+        }
+        String account = requestContext.getAccountId();
+        return switch (target) {
+            case "RoleName" -> iamService.get().findRole(account, name).map(IamRole::getPermissionsBoundaryArn).orElse(null);
+            case "UserName" -> iamService.get().findUser(account, name).map(IamUser::getPermissionsBoundaryArn).orElse(null);
+            default -> throw new IllegalStateException("Unknown IAM condition key target: " + target);
+        };
     }
 
     public static Map<String, List<String>> withGlobalContext(Map<String, List<String>> serviceContext,
@@ -236,7 +271,7 @@ public class IamConditionContextResolver {
         // the owner has to come from service state. When neither source knows it, the key is left
         // out rather than guessed: an absent key fails a Condition that tests it, whereas a wrong
         // one would silently authorize cross-account access the policy meant to refuse.
-        String resourceAccount = accountFromArn(resourceArn);
+        String resourceAccount = AwsArnUtils.accountOrDefault(resourceArn, null);
         if (resourceAccount == null || resourceAccount.isBlank()) {
             resourceAccount = resourceOwnerAccountId;
         }
@@ -273,24 +308,51 @@ public class IamConditionContextResolver {
                 && AwsArnUtils.isArnFor(resourceArn, "sns")) {
             putIfPresent(conditions, "aws:SourceOwner", sourceAccount);
         }
-        String resourceAccount = accountFromArn(resourceArn);
+        String resourceAccount = AwsArnUtils.accountOrDefault(resourceArn, null);
         putIfPresent(conditions, "aws:ResourceAccount",
                 resourceAccount == null || resourceAccount.isBlank() ? resourceOwnerAccountId : resourceAccount);
         putIfPresent(conditions, "aws:RequestedRegion", AwsArnUtils.regionOrDefault(resourceArn, null));
         return conditions;
     }
 
-    private static String accountFromArn(String arn) {
-        if (arn == null || !arn.startsWith("arn:")) {
-            return null;
-        }
-        String[] segments = arn.split(":", 6);
-        return segments.length > 4 ? segments[4] : null;
-    }
-
     private static void putIfPresent(Map<String, List<String>> conditions, String key, String value) {
         if (value != null && !value.isBlank()) {
             conditions.put(key, List.of(value));
+        }
+    }
+
+    // ── Lambda ──────────────────────────────────────────────────────────────────
+
+    /** The authType a web function endpoint request names, and the one the endpoint has before it. */
+    private Map<String, List<String>> lambdaConditionContext(String action, ContainerRequestContext ctx) {
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        for (String member : LambdaWebConditionKeys.members(action, REQUEST_AUTH_TYPE)) {
+            PassedRoles.values(PassedRoles.jsonBody(ctx), member.split("\\."))
+                    .forEach(value -> putIfPresent(conditions, REQUEST_AUTH_TYPE, value));
+        }
+        if (LambdaWebConditionKeys.takes(action, RESOURCE_AUTH_TYPE)) {
+            putIfPresent(conditions, RESOURCE_AUTH_TYPE, storedAuthType(ctx));
+        }
+        return conditions.isEmpty() ? null : conditions;
+    }
+
+    private String storedAuthType(ContainerRequestContext ctx) {
+        if (!lambdaWebService.isResolvable()) {
+            return null;
+        }
+        String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
+        String endpointArn = ResourceArnBuilder.webFunctionArn(ctx.getUriInfo().getPath(), region,
+                requestContext.getAccountId());
+        int child = endpointArn.lastIndexOf("/endpoint/");
+        if (child < 0) {
+            return null;
+        }
+        try {
+            return lambdaWebService.get().getEndpoint(region, endpointArn.substring(0, child),
+                    endpointArn.substring(child + "/endpoint/".length())).authType;
+        } catch (AwsException expected) {
+            // The handler refuses the same names, so the key is only left out, as for a missing endpoint on AWS.
+            return null;
         }
     }
 

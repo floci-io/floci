@@ -3520,8 +3520,87 @@ public class NativeDynamoDbJsonHandler {
         return Response.ok(response).build();
     }
 
+    private static final int MAX_STATEMENT_LENGTH = 8192;
+    private static final int MAX_NEXT_TOKEN_LENGTH = 32768;
+    private static final int MAX_CLIENT_REQUEST_TOKEN_LENGTH = 36;
+    private static final List<String> PARTIQL_RETURN_VALUES_ON_CONDITION_CHECK_FAILURE = List.of("ALL_OLD", "NONE");
+    // ExecuteTransaction and BatchExecuteStatement name only the first 10 violations.
+    private static final int MAX_PARTIQL_VIOLATIONS = 10;
+
+    private static void addStatementError(JsonNode member, String path, List<String> validationErrors) {
+        JsonNode statement = member.path("Statement");
+        if (statement.isMissingNode() || statement.isNull()) {
+            validationErrors.add(SmithyValidationErrors.notNull(path));
+            return;
+        }
+        addLengthError(member, "Statement", path, MAX_STATEMENT_LENGTH, validationErrors);
+    }
+
+    private static void addLengthError(JsonNode request, String member, String path, int max,
+                                       List<String> validationErrors) {
+        JsonNode value = request.get(member);
+        if (value == null || value.isNull()) {
+            return;
+        }
+        String error = SmithyValidationErrors.lengthOutOfRange(path, value.asText(), 1, max);
+        if (error != null) {
+            validationErrors.add(error);
+        }
+    }
+
+    private static void addLimitError(JsonNode request, List<String> validationErrors) {
+        JsonNode limit = request.get("Limit");
+        if (limit != null && !limit.isNull() && limit.asLong() < 1) {
+            validationErrors.add(SmithyValidationErrors.valueTooSmall("limit", limit.asText(), 1));
+        }
+    }
+
+    private static void addParametersError(JsonNode request, String path, List<String> validationErrors) {
+        JsonNode parameters = request.path("Parameters");
+        if (parameters.isArray() && parameters.isEmpty()) {
+            validationErrors.add(SmithyValidationErrors.lengthTooShort(path, "[]", 1));
+        }
+    }
+
+    private static void addPartiQLReturnValuesError(JsonNode request, String path, List<String> validationErrors) {
+        JsonNode value = request.get("ReturnValuesOnConditionCheckFailure");
+        if (value != null && !value.isNull()
+                && !PARTIQL_RETURN_VALUES_ON_CONDITION_CHECK_FAILURE.contains(value.asText())) {
+            validationErrors.add(SmithyValidationErrors.notInEnum(value.asText(), path,
+                    PARTIQL_RETURN_VALUES_ON_CONDITION_CHECK_FAILURE));
+        }
+    }
+
+    private static void addStatementListErrors(JsonNode statements, String path, List<String> validationErrors) {
+        if (!statements.isArray()) {
+            validationErrors.add(SmithyValidationErrors.notNull(path));
+            return;
+        }
+        if (statements.isEmpty()) {
+            validationErrors.add(SmithyValidationErrors.lengthTooShort(path, "[]", 1));
+        }
+        for (int i = 0; i < statements.size(); i++) {
+            JsonNode member = statements.get(i);
+            String memberPath = path + "." + (i + 1) + ".member.";
+            addPartiQLReturnValuesError(member, memberPath + "returnValuesOnConditionCheckFailure", validationErrors);
+            addStatementError(member, memberPath + "statement", validationErrors);
+            addParametersError(member, memberPath + "parameters", validationErrors);
+        }
+    }
+
+    private static void throwPartiQLValidationErrors(List<String> validationErrors) {
+        throwValidationErrors(validationErrors.subList(0, Math.min(validationErrors.size(), MAX_PARTIQL_VIOLATIONS)));
+    }
+
     private Response handleExecuteStatement(JsonNode request, String region) {
-        requireValidReturnConsumedCapacity(request);
+        List<String> validationErrors = new ArrayList<>();
+        addPartiQLReturnValuesError(request, "returnValuesOnConditionCheckFailure", validationErrors);
+        addLengthError(request, "NextToken", "nextToken", MAX_NEXT_TOKEN_LENGTH, validationErrors);
+        addLimitError(request, validationErrors);
+        addStatementError(request, "statement", validationErrors);
+        addReturnConsumedCapacityError(request, validationErrors);
+        addParametersError(request, "parameters", validationErrors);
+        throwValidationErrors(validationErrors);
         String statement = request.path("Statement").asText();
         List<JsonNode> parameters = toPartiQLParams(request.path("Parameters"));
         DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(statement, parameters);
@@ -3529,6 +3608,7 @@ public class NativeDynamoDbJsonHandler {
                 .limit(request.has("Limit") ? request.get("Limit").asInt() : null)
                 .nextToken(request.has("NextToken") ? request.get("NextToken").asText() : null)
                 .consistentRead(request.path("ConsistentRead").asBoolean(false))
+                .returnValuesOnConditionCheckFailure(request.path("ReturnValuesOnConditionCheckFailure").asText("NONE"))
                 .tokenBinding(partiQLHandler.tokenBinding(statement, parameters));
         DynamoDbPartiQLHandler.Result result = partiQLHandler.execute(stmt, ctx, region);
         ObjectNode response = result.body();
@@ -3542,12 +3622,12 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleExecuteTransaction(JsonNode request, String region) {
         JsonNode stmts = request.path("TransactStatements");
-        if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
-            throw new AwsException("ValidationException", "TransactStatements must not be empty", 400);
-        }
         List<String> validationErrors = new ArrayList<>();
+        addLengthError(request, "ClientRequestToken", "clientRequestToken", MAX_CLIENT_REQUEST_TOKEN_LENGTH,
+                validationErrors);
+        addStatementListErrors(stmts, "transactStatements", validationErrors);
         addReturnConsumedCapacityError(request, validationErrors);
-        throwValidationErrors(validationErrors);
+        throwPartiQLValidationErrors(validationErrors);
         try {
             List<DynamoDbPartiQLParser.Stmt> statements = new ArrayList<>();
             for (int i = 0; i < stmts.size(); i++) {
@@ -3569,7 +3649,10 @@ public class NativeDynamoDbJsonHandler {
             List<DynamoDbPartiQLHandler.TransactMember> members = new ArrayList<>();
             for (int i = 0; i < statements.size(); i++) {
                 DynamoDbPartiQLParser.Stmt stmt = statements.get(i);
-                members.add(inTransactStatement(i, () -> partiQLHandler.toTransactItem(stmt, region)));
+                String returnValuesOnConditionCheckFailure =
+                        stmts.get(i).path("ReturnValuesOnConditionCheckFailure").asText("NONE");
+                members.add(inTransactStatement(i,
+                        () -> partiQLHandler.toTransactItem(stmt, returnValuesOnConditionCheckFailure, region)));
             }
             List<JsonNode> transactItems = cancelOnMemberReasons(members);
             DynamoDbService.TransactWriteResult result = dynamoDbService.transactWriteItems(transactItems, region,
@@ -3667,11 +3750,11 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleBatchExecuteStatement(JsonNode request, String region) {
-        requireValidReturnConsumedCapacity(request);
         JsonNode stmts = request.path("Statements");
-        if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
-            throw new AwsException("ValidationException", "Statements must not be empty", 400);
-        }
+        List<String> validationErrors = new ArrayList<>();
+        addReturnConsumedCapacityError(request, validationErrors);
+        addStatementListErrors(stmts, "statements", validationErrors);
+        throwPartiQLValidationErrors(validationErrors);
         ArrayNode responses = objectMapper.createArrayNode();
         Map<String, DynamoDbWriteCapacity.Cost> capacity = new LinkedHashMap<>();
         for (JsonNode s : stmts) {
@@ -3694,7 +3777,9 @@ public class NativeDynamoDbJsonHandler {
                 requireBatchSelectReadsByKey(select, region);
             }
             DynamoDbPartiQLHandler.Result result = partiQLHandler.execute(stmt, PartiQLExecuteContext.builder()
-                    .consistentRead(statement.path("ConsistentRead").asBoolean(false)), region);
+                    .consistentRead(statement.path("ConsistentRead").asBoolean(false))
+                    .returnValuesOnConditionCheckFailure(
+                            statement.path("ReturnValuesOnConditionCheckFailure").asText("NONE")), region);
             JsonNode firstItem = result.body().path("Items").path(0);
             if (!firstItem.isMissingNode()) {
                 slot.set("Item", firstItem);
@@ -3705,6 +3790,9 @@ public class NativeDynamoDbJsonHandler {
             ObjectNode err = objectMapper.createObjectNode();
             err.put("Code", batchMemberErrorCode(e.getErrorCode()));
             err.put("Message", e.getMessage());
+            if (e instanceof ConditionalCheckFailedException failed && failed.getItem() != null) {
+                err.set("Item", failed.getItem());
+            }
             slot.set("Error", err);
             if (tableName != null && batchMemberReachedItsTable(e)) {
                 slot.put("TableName", tableName);

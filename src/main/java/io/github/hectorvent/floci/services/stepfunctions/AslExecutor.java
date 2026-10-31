@@ -2654,7 +2654,7 @@ public class AslExecutor {
 
     private static void renderRedshiftDataTimestamps(JsonNode node) {
         if (node instanceof ObjectNode object) {
-            for (String field : List.of("CreatedAt", "UpdatedAt")) {
+            for (String field : List.of("CreatedAt", "UpdatedAt", "SessionTtl")) {
                 JsonNode value = object.get(field);
                 if (value != null && value.isNumber()) {
                     object.put(field, sdkTimestamp(value.asDouble()));

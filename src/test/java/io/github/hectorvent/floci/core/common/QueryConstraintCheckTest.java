@@ -7,6 +7,7 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -55,6 +56,26 @@ class QueryConstraintCheckTest {
             }
             """;
 
+    private static final String MAP_MODEL = """
+            {
+              "operations": {"Acquire": "AcquireRequest"},
+              "shapes": {
+                "AcquireRequest": {"type": "structure", "required": ["Values"], "members": {
+                  "Values": "valueMap", "Nested": "nestedType", "Entries": "entryList"}},
+                "valueMap": {"type": "map", "key": "keyType", "value": "valueType", "max": 2},
+                "nestedType": {"type": "structure", "members": {
+                  "Arn": "arnType", "Parameters": "nameList"}},
+                "entryList": {"type": "list", "member": "entryType"},
+                "entryType": {"type": "structure", "members": {
+                  "Name": "keyType", "Values": "nameList"}},
+                "nameList": {"type": "list", "member": "keyType", "max": 2},
+                "keyType": {"type": "string", "min": 1, "max": 4},
+                "valueType": {"type": "string", "max": 3, "pattern": "[a-z]*"},
+                "arnType": {"type": "string", "min": 20, "max": 2048}
+              }
+            }
+            """;
+
     private static final String ARN = "arn:aws:iam::000000000000:role/r";
 
     private static QueryConstraintCheck check() throws Exception {
@@ -63,6 +84,10 @@ class QueryConstraintCheckTest {
 
     private static QueryConstraintCheck lists() throws Exception {
         return QueryConstraintCheck.of(MAPPER.readTree(LIST_MODEL));
+    }
+
+    private static QueryConstraintCheck maps() throws Exception {
+        return QueryConstraintCheck.of(MAPPER.readTree(MAP_MODEL));
     }
 
     private static MultivaluedMap<String, String> params(String... pairs) {
@@ -196,60 +221,59 @@ class QueryConstraintCheckTest {
     }
 
     /**
-     * A map is read from numbered entries whose key is a value of its own, and this package answers
-     * one today against the whole map rather than against an entry, so an operation carrying one is
-     * refused when the file loads rather than passed over without its constraints. So is anything
-     * nested deeper than a list of structures or a structure of scalars.
+     * Every member of every operation is read whatever it nests, so what the file refuses to load
+     * is a shape of a type this walk would pass over without reading: letting one through would
+     * answer a 200 for a request nothing checked. A shape that holds itself is read once rather
+     * than forever, which is what lets the walk go all the way down.
      */
     @Test
-    void anOperationCarryingAMapOrDeeperNestingIsRefusedWhenTheFileLoads() throws Exception {
-        JsonNode map = MAPPER.readTree("""
+    void aShapeOfATypeTheWalkCannotReadIsRefusedWhenTheFileLoads() throws Exception {
+        JsonNode unread = MAPPER.readTree("""
                 {
                   "operations": {"Put": "PutRequest"},
                   "shapes": {
-                    "PutRequest": {"type": "structure", "members": {"Properties": "propertyMap"}},
-                    "propertyMap": {"type": "map", "key": "nameType", "value": "nameType"},
-                    "nameType": {"type": "string", "min": 1}
+                    "PutRequest": {"type": "structure", "members": {"Body": "blobType"}},
+                    "blobType": {"type": "blob"}
                   }
                 }
                 """);
 
         IllegalStateException refused =
-                assertThrows(IllegalStateException.class, () -> QueryConstraintCheck.of(map));
-        assertTrue(refused.getMessage().contains("Put's Properties is a map"), refused.getMessage());
+                assertThrows(IllegalStateException.class, () -> QueryConstraintCheck.of(unread));
+        assertTrue(refused.getMessage().contains("Put's Body is a blob"), refused.getMessage());
 
-        JsonNode listOfLists = MAPPER.readTree("""
+        JsonNode nestedUnread = MAPPER.readTree("""
                 {
                   "operations": {"Put": "PutRequest"},
                   "shapes": {
                     "PutRequest": {"type": "structure", "members": {"Rows": "rowList"}},
-                    "rowList": {"type": "list", "member": "nameList"},
-                    "nameList": {"type": "list", "member": "nameType"},
-                    "nameType": {"type": "string", "min": 1}
-                  }
-                }
-                """);
-
-        IllegalStateException nested =
-                assertThrows(IllegalStateException.class, () -> QueryConstraintCheck.of(listOfLists));
-        assertTrue(nested.getMessage().contains("Put's Rows is a list of list"), nested.getMessage());
-
-        JsonNode structureInStructure = MAPPER.readTree("""
-                {
-                  "operations": {"Put": "PutRequest"},
-                  "shapes": {
-                    "PutRequest": {"type": "structure", "members": {"Target": "targetType"}},
-                    "targetType": {"type": "structure", "members": {"Inner": "innerType"}},
-                    "innerType": {"type": "structure", "members": {"Name": "nameType"}},
-                    "nameType": {"type": "string", "min": 1}
+                    "rowList": {"type": "list", "member": "rowType"},
+                    "rowType": {"type": "structure", "members": {"At": "stampType"}},
+                    "stampType": {"type": "timestamp"}
                   }
                 }
                 """);
 
         IllegalStateException deeper = assertThrows(IllegalStateException.class,
-                () -> QueryConstraintCheck.of(structureInStructure));
-        assertTrue(deeper.getMessage().contains("Put's Target.Inner is a structure"),
-                deeper.getMessage());
+                () -> QueryConstraintCheck.of(nestedUnread));
+        assertTrue(deeper.getMessage().contains("Put's Rows.At is a timestamp"), deeper.getMessage());
+
+        JsonNode holdsItself = MAPPER.readTree("""
+                {
+                  "operations": {"Put": "PutRequest"},
+                  "shapes": {
+                    "PutRequest": {"type": "structure", "members": {"Node": "nodeType"}},
+                    "nodeType": {"type": "structure", "members": {
+                      "Name": "nameType", "Children": "nodeList"}},
+                    "nodeList": {"type": "list", "member": "nodeType"},
+                    "nameType": {"type": "string", "min": 1}
+                  }
+                }
+                """);
+
+        assertEquals(List.of("Value '' at 'node.name' failed to satisfy constraint: Member must"
+                + " have length greater than or equal to 1"),
+                QueryConstraintCheck.of(holdsItself).violations("Put", params("Node.Name", "")));
     }
 
     /**
@@ -273,6 +297,17 @@ class QueryConstraintCheckTest {
                 + "Member must have length greater than or equal to 1"),
                 lists().violations("Vend", params("Audience.1", "", "Target.Arn", ARN)),
                 "the bare numbered form is a member too");
+    }
+
+    /**
+     * A scalar member's value lives at its own name, so an index the request numbered only under a
+     * deeper key is no member of the list: nothing reads a value there, and reading one would
+     * answer an empty string the request never sent.
+     */
+    @Test
+    void anIndexNumberedOnlyUnderADeeperKeyIsNoMemberOfAListOfScalars() throws Exception {
+        assertEquals(List.of(), lists().violations("Vend", params(
+                "Audience.member.1", "ok", "Target.Arn", ARN, "Names.member.1.Nested", "x")));
     }
 
     /**
@@ -373,5 +408,161 @@ class QueryConstraintCheckTest {
                         + " [User, Role, Group, LocalManagedPolicy, AWSManagedPolicy]"),
                 iam.violations("GetAccountAuthorizationDetails", params("Filter.member.1", "Users")),
                 "the one list this wave opts in resolves to its member's enum");
+    }
+
+    /**
+     * A constraint the service documents and the model declares nowhere is reported where that
+     * member's own violations would sit rather than after the members below it, and not at all
+     * where the member already breaks one it declares: a value a declared constraint refuses is
+     * not read against a documented set as well, which is how the checks these waves replace
+     * answered one.
+     */
+    @Test
+    void aDocumentedConstraintSitsInItsMembersPlaceAndYieldsToADeclaredOne() throws Exception {
+        Map<String, String> documented = Map.of("Name",
+                "Value 'a' at 'name' failed to satisfy constraint: Member must satisfy enum value"
+                        + " set: [b, c]");
+
+        assertEquals(List.of(
+                "Value 'a' at 'name' failed to satisfy constraint: Member must satisfy enum value"
+                        + " set: [b, c]",
+                "Value null at 'arn' failed to satisfy constraint: Member must not be null"),
+                check().violations("Put", params("Name", "a"), documented),
+                "Name is listed ahead of Arn, so what it is answered for is too");
+
+        assertEquals(List.of(
+                "Value 'a!' at 'name' failed to satisfy constraint: Member must satisfy regular"
+                        + " expression pattern: [\\w+=,.@-]+"),
+                check().violations("Take", params("Name", "a!"), documented),
+                "the shape refuses the value already, so the documented set is not read against it");
+
+        assertEquals(List.of(), check().violations("Take", params(), documented),
+                "an absent member sent no value, so there is nothing to read a set against");
+
+        assertEquals(List.of(
+                "Value null at 'name' failed to satisfy constraint: Member must not be null",
+                "Value null at 'arn' failed to satisfy constraint: Member must not be null"),
+                check().violations("Put", params(), documented),
+                "and a required one absent is answered for that alone");
+    }
+
+    /**
+     * The STS file this wave vendors, loaded as the handler loads it: the three operations resolve,
+     * their required members report in the model's order, and the two lists resolve to their
+     * members. {@code GetSessionToken} declares no required member, so a request naming none of
+     * them breaks nothing.
+     */
+    @Test
+    void theVendoredStsFileLoadsAndCarriesTheOperationsThisWaveClaims() {
+        QueryConstraintCheck sts =
+                QueryConstraintCheck.load("aws/sts-request-shapes.json", "STS request shapes");
+
+        assertEquals(List.of("Value null at 'accessKeyId' failed to satisfy constraint: Member must"
+                        + " not be null"),
+                sts.violations("GetAccessKeyInfo", params()));
+
+        assertEquals(List.of(
+                "Value null at 'audience' failed to satisfy constraint: Member must not be null",
+                "Value null at 'signingAlgorithm' failed to satisfy constraint: Member must not be"
+                        + " null"),
+                sts.violations("GetWebIdentityToken", params()));
+
+        assertEquals(List.of(), sts.violations("GetSessionToken", params()));
+        assertEquals(List.of("Value 'short' at 'serialNumber' failed to satisfy constraint: Member"
+                        + " must have length greater than or equal to 9"),
+                sts.violations("GetSessionToken", params("SerialNumber", "short")),
+                "a member nothing read until this wave resolves to its own shape");
+
+        assertEquals(List.of("Value null at 'tags.1.member.value' failed to satisfy constraint:"
+                        + " Member must not be null"),
+                sts.violations("GetWebIdentityToken", params("Audience.member.1", "app",
+                        "SigningAlgorithm", "RS256", "Tags.member.1.Key", "Team")),
+                "a tag is a list of structures, named under the index the request spelled");
+    }
+
+    /**
+     * A map's entries arrive numbered under its own name, and an entry's value is named under the
+     * key that entry carries rather than under the number it was sent with. The key and the value
+     * each carry their own shape, so an entry can break both, and the map's own bounds hold the
+     * count with the value left out of the message.
+     */
+    @Test
+    void aMapsValueIsNamedUnderTheKeyTheEntryCarries() throws Exception {
+        assertEquals(List.of(), maps().violations("Acquire",
+                params("Values.entry.1.key", "k", "Values.entry.1.value", "ok")));
+
+        assertEquals(List.of(
+                "Value 'toolong' at 'values' failed to satisfy constraint: Map keys must satisfy"
+                        + " constraint: [Member must have length less than or equal to 4, Member"
+                        + " must have length greater than or equal to 1]",
+                "Value 'NOPE' at 'values.toolong' failed to satisfy constraint: Member must"
+                        + " have length less than or equal to 3",
+                "Value 'NOPE' at 'values.toolong' failed to satisfy constraint: Member must"
+                        + " satisfy regular expression pattern: [a-z]*"),
+                maps().violations("Acquire",
+                        params("Values.entry.1.key", "toolong", "Values.entry.1.value", "NOPE")));
+
+        assertEquals(List.of("Value at 'values' failed to satisfy constraint: Member must have"
+                + " length less than or equal to 2"),
+                maps().violations("Acquire", params(
+                        "Values.entry.1.key", "a", "Values.entry.1.value", "x",
+                        "Values.entry.2.key", "b", "Values.entry.2.value", "y",
+                        "Values.entry.3.key", "c", "Values.entry.3.value", "z")));
+    }
+
+    /** A map the request names nowhere is the required member reading as null. */
+    @Test
+    void aMapNamedNowhereIsTheRequiredMemberReadingAsNull() throws Exception {
+        assertEquals(List.of("Value null at 'values' failed to satisfy constraint: Member must not"
+                + " be null"), maps().violations("Acquire", params()));
+    }
+
+    /**
+     * An entry is read off its key, so one numbered with a value and no key of its own is not an
+     * entry the map could hold: it is neither counted nor answered, and a map of nothing else is
+     * the required member reading as null.
+     */
+    @Test
+    void anEntryNumberedWithNoKeyIsNoEntryAtAll() throws Exception {
+        assertEquals(List.of("Value null at 'values' failed to satisfy constraint: Member must not"
+                + " be null"), maps().violations("Acquire", params("Values.entry.1.value", "ok")));
+
+        assertEquals(List.of(), maps().violations("Acquire", params(
+                "Values.entry.1.key", "k", "Values.entry.1.value", "ok",
+                "Values.entry.2.value", "x", "Values.entry.3.value", "y")),
+                "an entry with no key is not one of the two the map admits either");
+    }
+
+    /** The bare form the protocol also accepts, {@code Values.1.key}, reads the same way. */
+    @Test
+    void aMapEntryIsReadWithoutTheEntrySegmentToo() throws Exception {
+        assertEquals(List.of("Value 'toolong' at 'values' failed to satisfy constraint: Map keys"
+                + " must satisfy constraint: [Member must have length less than or equal to 4,"
+                + " Member must have length greater than or equal to 1]"),
+                maps().violations("Acquire", params("Values.1.key", "toolong", "Values.1.value", "x")));
+    }
+
+    /**
+     * A structure's field may be a list, and a list's member a structure holding one, each read
+     * under the name the request gives it and named the way the walk names a list anywhere.
+     */
+    @Test
+    void aListInsideAStructureAndInsideAListsMemberAreBothRead() throws Exception {
+        assertEquals(List.of(
+                "Value 'toolong' at 'nested.parameters.1.member' failed to satisfy constraint:"
+                        + " Member must have length less than or equal to 4"),
+                maps().violations("Acquire", params(
+                        "Values.entry.1.key", "k", "Values.entry.1.value", "ok",
+                        "Nested.Parameters.member.1", "toolong")));
+
+        assertEquals(List.of(
+                "Value at 'entries.1.member.values' failed to satisfy constraint: Member must have"
+                        + " length less than or equal to 2"),
+                maps().violations("Acquire", params(
+                        "Values.entry.1.key", "k", "Values.entry.1.value", "ok",
+                        "Entries.member.1.Name", "n",
+                        "Entries.member.1.Values.member.1", "a",
+                        "Entries.member.1.Values.member.2", "b",
+                        "Entries.member.1.Values.member.3", "c")));
     }
 }

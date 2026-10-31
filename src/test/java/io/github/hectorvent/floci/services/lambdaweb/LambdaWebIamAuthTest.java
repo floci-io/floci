@@ -20,6 +20,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,6 +29,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -41,6 +43,7 @@ class LambdaWebIamAuthTest {
     private static final String OTHER_ACCOUNT = "222222222222";
     private static final String HOST = "abcdefghijklmnop.001.lambda-web.us-east-1.localhost:4566";
     private static final String WEST_HOST = "abcdefghijklmnop.001.lambda-web.us-west-2.localhost:4566";
+    private static final String GLOBAL_HOST = "abcdefghijklmnop.lambda-web.global.localhost:4566";
     private static final String FUNCTION_ARN = "arn:aws:lambda:us-east-1:" + ACCOUNT + ":web-function/app";
     private static final String ENDPOINT_ARN = FUNCTION_ARN + "/endpoint/prod";
     private static final String USER_KEY = "AKIAUSERKEY000000001";
@@ -130,6 +133,59 @@ class LambdaWebIamAuthTest {
     void aRegionalDomainOfAnotherRegionTakesOnlyASignatureForThatRegion() {
         assertTrue(allows(signer().region("us-west-2").sign("GET", WEST_HOST, "/"), WEST_HOST, "us-west-2"));
         assertFalse(allows(signer().sign("GET", WEST_HOST, "/"), WEST_HOST, "us-west-2"));
+    }
+
+    @Test
+    void sigV4aPassesOnEveryEndpointWhenItsRegionSetCoversTheRegionThatServes() {
+        assertTrue(allows(signer().sigV4a("*").sign("GET", HOST, "/items?b=2&a=1")));
+        assertTrue(allows(signer().sigV4a("*").presigned().sign("GET", HOST, "/q?x=1")));
+        assertTrue(allows(signer().sigV4a("us-*").sign("GET", WEST_HOST, "/"), WEST_HOST, "us-west-2"));
+        assertTrue(allows(signer().sigV4a("us-west-2").sign("GET", GLOBAL_HOST, "/"), GLOBAL_HOST, "us-west-2"));
+        assertFalse(allows(signer().sigV4a("us-east-1").sign("GET", GLOBAL_HOST, "/"), GLOBAL_HOST, "us-west-2"));
+        assertFalse(allows(signer().sigV4a("us-east-1").presigned().sign("GET", GLOBAL_HOST, "/"),
+                GLOBAL_HOST, "us-west-2"));
+        assertFalse(allows(signer().sigV4a("*").service("execute-api").sign("GET", HOST, "/")));
+        assertFalse(allows(signer().sigV4a("*").credentials("test", "other", null).sign("GET", HOST, "/")));
+        assertFalse(allows(signer().sigV4a("*").sign("GET", HOST, "/").withHeader("X-Amz-Content-SHA256", null)));
+        assertFalse(allows(signer().sigV4a("*").signedAt(Instant.now().minus(Duration.ofMinutes(6)))
+                .sign("GET", HOST, "/")));
+    }
+
+    @Test
+    void aRegionSetIsCommaSeparatedPatternsWhereOnlyAStarIsAWildcard() {
+        for (String covering : List.of("*", "**", "us-*", "*-west-2", "us-*-2", "u*-w*-2", "us-west-2*", "US-WEST-2",
+                "us-east-1,us-west-2", "us-west-2, us-east-1", "eu-*,us-west-*")) {
+            assertTrue(LambdaWebIamAuth.regionSetCovers(covering, "us-west-2"), covering);
+        }
+        for (String other : Arrays.asList(null, "", "us-east-1", "us-east-*", "us-west-?", "us-west", "us-west-2a",
+                "aws-global", "us-west-2;us-east-1", "us-east-1, us-west-2", "us-west-2,", ",us-west-2")) {
+            assertFalse(LambdaWebIamAuth.regionSetCovers(other, "us-west-2"), other);
+        }
+        String manyStars = "*".repeat(5000) + "Z";
+        assertFalse(assertTimeoutPreemptively(Duration.ofSeconds(1),
+                () -> LambdaWebIamAuth.regionSetCovers(manyStars, "us-west-2")));
+    }
+
+    @Test
+    void theRegionSetIsReadFromWhereTheSignatureIs() {
+        assertTrue(allows(signer().sigV4a("*").sign("GET", GLOBAL_HOST, "/q?X-Amz-Region-Set=us-east-1"),
+                GLOBAL_HOST, "us-west-2"));
+        assertFalse(allows(signer().sigV4a("us-east-1").sign("GET", GLOBAL_HOST, "/q?X-Amz-Region-Set=us-west-2"),
+                GLOBAL_HOST, "us-west-2"));
+        assertTrue(allows(signer().sigV4a("*").presigned().sign("GET", GLOBAL_HOST, "/")
+                .withHeader("X-Amz-Region-Set", "us-east-1"), GLOBAL_HOST, "us-west-2"));
+        assertFalse(allows(signer().sigV4a("us-east-1").presigned().sign("GET", GLOBAL_HOST, "/")
+                .withHeader("X-Amz-Region-Set", "*"), GLOBAL_HOST, "us-west-2"));
+    }
+
+    @Test
+    void sigV4aFromTemporaryCredentialsIsRefused() {
+        assertTrue(allows(signer().credentials(SESSION_KEY, "session-secret", "token").sign("GET", HOST, "/")));
+        assertFalse(allows(signer().credentials(SESSION_KEY, "session-secret", "token").sigV4a("*")
+                .sign("GET", HOST, "/")));
+        assertFalse(allows(signer().credentials(SESSION_KEY, "session-secret", "token").sigV4a("*").presigned()
+                .sign("GET", HOST, "/")));
+        assertTrue(allows(signer().credentials(USER_KEY, USER_SECRET, null).sigV4a("*").sign("GET", HOST, "/")));
     }
 
     @Test
