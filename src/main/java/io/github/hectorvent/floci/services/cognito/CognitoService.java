@@ -2026,7 +2026,9 @@ public class CognitoService implements ResourceProvider {
 
     /**
      * AWS accepts only an issued ACM certificate from us-east-1 behind a custom domain, and answers
-     * anything else with this one message.
+     * anything else with this one message. ACM finds a certificate by its id alone, so the ARN's
+     * partition and account are checked here: a certificate in another partition or account is
+     * never the caller's.
      */
     private void requireUsableCertificate(String certificateArn) {
         AwsArnUtils.Arn arn;
@@ -2036,6 +2038,8 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
         }
         if (!"acm".equals(arn.service()) || !CERTIFICATE_REGION.equals(arn.region())
+                || !arn.partition().equals(regionResolver.getPartition())
+                || !arn.accountId().equals(regionResolver.getAccountId())
                 || !arn.resource().startsWith("certificate/")) {
             throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
         }
