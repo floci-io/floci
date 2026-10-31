@@ -53,6 +53,8 @@ public class LambdaMicrovmsService {
     private static final Pattern CONNECTOR_VERSION = Pattern.compile("[1-9][0-9]{0,17}");
     /** The one AWS-managed base image the catalog serves. */
     private static final String MANAGED_IMAGE = "al2023-1";
+    private static final String IMAGE_RESOURCE = "microvm-image:";
+    private static final String CONNECTOR_RESOURCE = "network-connector:";
 
     private final RegionResolver regionResolver;
     private final StorageFactory storageFactory;
@@ -708,9 +710,9 @@ public class LambdaMicrovmsService {
 
     /** True when the ARN names a MicroVM-family resource this service owns. */
     public static boolean ownsArn(String arn) {
-        return arn != null && (arn.contains(":microvm-image:")
-                || arn.contains(":microvm:")
-                || arn.contains(":network-connector:"));
+        String resource = AwsArnUtils.resourceIfArnFor(arn, "lambda").orElse("");
+        return resource.startsWith(IMAGE_RESOURCE) || resource.startsWith("microvm:")
+                || resource.startsWith(CONNECTOR_RESOURCE);
     }
 
     public Map<String, String> listTags(String region, String arn) {
@@ -734,14 +736,15 @@ public class LambdaMicrovmsService {
      * stored object, so mutating it alone would never reach the backend.
      */
     private void mutateTags(String region, String arn, Consumer<Map<String, String>> mutation) {
-        if (arn.contains(":microvm-image:")) {
-            MicrovmImage image = getImage(region, arn.substring(arn.lastIndexOf(':') + 1));
+        String resource = AwsArnUtils.resourceIfArnFor(arn, "lambda").orElse("");
+        if (resource.startsWith(IMAGE_RESOURCE)) {
+            MicrovmImage image = getImage(region, resource.substring(IMAGE_RESOURCE.length()));
             mutation.accept(image.tags);
             persist(images, region, image.name, image);
             return;
         }
-        if (arn.contains(":network-connector:")) {
-            NetworkConnector connector = getConnector(region, arn.substring(arn.lastIndexOf(':') + 1));
+        if (resource.startsWith(CONNECTOR_RESOURCE)) {
+            NetworkConnector connector = getConnector(region, resource.substring(CONNECTOR_RESOURCE.length()));
             mutation.accept(connector.tags);
             persist(connectors, region, connector.id, connector);
             return;
@@ -751,13 +754,12 @@ public class LambdaMicrovmsService {
     }
 
     private Map<String, String> taggable(String region, String arn) {
-        if (arn.contains(":microvm-image:")) {
-            String name = arn.substring(arn.lastIndexOf(':') + 1);
-            return getImage(region, name).tags;
+        String resource = AwsArnUtils.resourceIfArnFor(arn, "lambda").orElse("");
+        if (resource.startsWith(IMAGE_RESOURCE)) {
+            return getImage(region, resource.substring(IMAGE_RESOURCE.length())).tags;
         }
-        if (arn.contains(":network-connector:")) {
-            String id = arn.substring(arn.lastIndexOf(':') + 1);
-            return getConnector(region, id).tags;
+        if (resource.startsWith(CONNECTOR_RESOURCE)) {
+            return getConnector(region, resource.substring(CONNECTOR_RESOURCE.length())).tags;
         }
         throw new AwsException("ResourceNotFoundException",
                 "Resource not found: " + arn, 404);
