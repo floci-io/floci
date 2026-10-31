@@ -302,13 +302,16 @@ class OpenSearchIntegrationTest {
     void getCompatibleVersionsAndUpgradeAlongNewPaths() {
         for (String[] path : new String[][] {
                 {"OpenSearch_1.0", "OpenSearch_1.2"},
+                {"OpenSearch_1.3", "OpenSearch_2.3"},
                 {"OpenSearch_2.3", "OpenSearch_2.5"},
                 {"OpenSearch_2.19", "OpenSearch_3.7"},
-                {"OpenSearch_3.6", "OpenSearch_3.7"}
+                {"OpenSearch_3.6", "OpenSearch_3.7"},
+                {"Elasticsearch_7.8", "Elasticsearch_7.9"},
+                {"Elasticsearch_7.9", "OpenSearch_1.3"}
         }) {
             String source = path[0];
             String target = path[1];
-            String domainName = "upgrade-" + source.substring("OpenSearch_".length()).replace('.', '-');
+            String domainName = "upgrade-" + source.substring(source.indexOf('_') + 1).replace('.', '-');
             given()
                 .contentType("application/json")
                 .header("Authorization", AUTH_HEADER)

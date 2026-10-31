@@ -86,6 +86,10 @@ public final class OpenSearchVersions {
         // line, so non-2.19 2.x sources do NOT list any 3.x targets directly.
         // https://docs.aws.amazon.com/opensearch-service/latest/developerguide/version-migration.html
         COMPAT_MATRIX.put("Elasticsearch_7.10", List.of("OpenSearch_1.3", "OpenSearch_2.19"));
+        COMPAT_MATRIX.put("Elasticsearch_7.8", List.of("Elasticsearch_7.9", "Elasticsearch_7.10",
+                "OpenSearch_1.0", "OpenSearch_1.1", "OpenSearch_1.2", "OpenSearch_1.3"));
+        COMPAT_MATRIX.put("Elasticsearch_7.9", List.of("Elasticsearch_7.10",
+                "OpenSearch_1.0", "OpenSearch_1.1", "OpenSearch_1.2", "OpenSearch_1.3"));
         // The GetCompatibleVersions API example lists every later minor within
         // a major version. Derive those paths from the supported engine list so
         // newly added OpenSearch versions also become upgrade targets.
@@ -107,9 +111,10 @@ public final class OpenSearchVersions {
             }
         }
 
-        // Cross-major paths remain explicit, except that the 2.19 bridge uses
-        // every supported 3.x target and expands when the catalog does.
-        COMPAT_MATRIX.put("OpenSearch_1.3", List.of("OpenSearch_2.19", "OpenSearch_2.17", "OpenSearch_2.15", "OpenSearch_2.13"));
+        // Cross-major bridges use every supported target in the next major.
+        COMPAT_MATRIX.put("OpenSearch_1.3", openSearchVersions.stream()
+                .filter(version -> majorVersion(version) == 2)
+                .toList());
         COMPAT_MATRIX.put("OpenSearch_2.19", openSearchVersions.stream()
                 .filter(version -> majorVersion(version) == 3)
                 .toList());
