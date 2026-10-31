@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_iam_authorized_actions.py",
     "reference": "https://servicereference.us-east-1.amazonaws.com/",
-    "retrieved": "2026-10-24",
+    "retrieved": "2026-10-31",
     "note": "make iam-authorized-actions-verify checks every entry against AWS."
   },
   "authorizedActions": {
@@ -165,9 +165,6 @@
       "ListTables": "cassandra:Select",
       "ListTypes": "cassandra:Select"
     },
-    "cognito-idp": {
-      "DescribeTermsByClient": "cognito-idp:DescribeTerms"
-    },
     "connect": {
       "UpdateUserConfig": "connect:UpdateUserPhoneConfig"
     },
@@ -227,9 +224,11 @@
       "ListUtteranceMetrics": "lex:ListAggregatedUtterances"
     },
     "mediaconnect": {
+      "BatchGetDestinationEndpoint": "mediaconnect:GetDestinationEndpoint",
       "BatchGetRouterInput": "mediaconnect:GetRouterInput",
       "BatchGetRouterNetworkInterface": "mediaconnect:GetRouterNetworkInterface",
-      "BatchGetRouterOutput": "mediaconnect:GetRouterOutput"
+      "BatchGetRouterOutput": "mediaconnect:GetRouterOutput",
+      "BatchGetSourceEndpoint": "mediaconnect:GetSourceEndpoint"
     },
     "qapps": {
       "CreatePresignedUrl": "qapps:ImportDocument"
