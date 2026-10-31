@@ -132,6 +132,7 @@ quarkus:
     # been no-ops since GraalVM 22.1 (incomplete classpaths are the default, and Quarkus passes
     # --link-at-build-time itself, so a reachable class missing from the classpath fails the build).
     additional-build-args:
+      - -Os
       - --enable-url-protocols=http,https
       - --initialize-at-run-time=io.vertx.ext.mail.impl.sasl.NTLMEngineImpl
       - --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32
