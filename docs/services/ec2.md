@@ -236,7 +236,7 @@ Guests with an instance profile receive endpoint and region settings without Flo
 
 ### IMDS and SSM managed instances
 
-IMDS only knows about containers that Floci itself launched through `RunInstances`. That launch is what installs the link-local `169.254.169.254` proxy inside the container and maps the container's IP to its instance record.
+IMDS only knows about containers that Floci itself launched through `RunInstances`. That launch is what installs the link-local `169.254.169.254` proxy inside the container and maps the container's IP to its instance record. A restarted container (`StopInstances` then `StartInstances`) has a new network namespace, so once the instance is `running` `StartInstances` sets the proxy up again; an instance under security-group enforcement keeps its helper container's namespace, and the proxy with it.
 
 Registering a container with SSM is independent of this: an SSM agent that calls `UpdateInstanceInformation` becomes a managed instance, but that does not create an EC2 instance record, does not install the IMDS proxy, and does not register the container with IMDS. From such a container, `curl http://169.254.169.254/...` fails outright (no proxy), and a request sent straight to the host IMDS port returns `404` with a message explaining that no EC2 instance is registered for the source IP. Floci also logs a warning when an SSM agent registers from a container that is not backed by a Floci EC2 instance.
 
@@ -403,7 +403,7 @@ with `DryRunOperation` before any of these checks, and creates nothing either.
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
 | CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. Applies `image` and `snapshot` tags from `TagSpecification` to the AMI and its new snapshots. |
 | RegisterImage | Registers an AMI from supplied metadata and block device mappings, with `image` tags from `TagSpecification`. |
-| CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns, applying `image` and `snapshot` tags from `TagSpecification` to the copy and its new snapshots. |
+| CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns, applying `image` and `snapshot` tags from `TagSpecification` to the copy and its new snapshots. By default the source's tags are not copied. With `CopyImageTags=true` the copy also gets the caller's tags on the source AMI's own id, without its `aws:` system tags; tags put on a catalog alias such as `ami-amazonlinux2` stay behind. When a `TagSpecification` tag has the same key as a copied one, Floci keeps the `TagSpecification` value, and the copied and specified tags together may not exceed 50 (`TagLimitExceeded`, and nothing is created). |
 | DeregisterImage | Deregisters an AMI. Its snapshots are kept unless `DeleteAssociatedSnapshots=true`, and a snapshot another AMI still uses is kept either way. |
 
 Every resource EC2 creates is owned by the account the request resolves to, the same account
@@ -965,10 +965,9 @@ request's, field by field: a request entry for a `DeviceName` the template maps,
 only one side maps apply as given. A request entry that makes the device something else, an EBS
 volume (`Ebs`), an instance store volume (`VirtualName`) or nothing (`NoDevice`), replaces the
 template's choice for it, an `Ebs` block still merging member by member into the template's. An
-Auto Scaling group launching from a template gets its mappings the same way; one launching from a
-launch configuration does not pass the configuration's mappings yet. CloudFormation does not pass
-them yet: an `AWS::EC2::Instance` launches without the `BlockDeviceMappings` it or its launch
-template declares, and an `AWS::EC2::LaunchTemplate` or
+Auto Scaling group launching from a template or a launch configuration gets its mappings the same
+way. CloudFormation does not pass them yet: an `AWS::EC2::Instance` launches without the
+`BlockDeviceMappings` it or its launch template declares, and an `AWS::EC2::LaunchTemplate` or
 `AWS::AutoScaling::LaunchConfiguration` stores none, so instances launched from what a stack
 creates get the AMI's devices alone. A mapping naming a `VolumeType` outside the service model's
 enum fails with `InvalidParameterValue`, as `ModifyVolume` does; one with `NoDevice` set creates no

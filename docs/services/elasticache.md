@@ -52,9 +52,14 @@ are denied as well, preventing backend persistence operations and outbound key m
 These restrictions protect private backend credentials and key boundaries. AWS lists these among its
 [restricted cache commands](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/SupportedCommands.html).
 
-Access-string changes are installed on the next successful authentication; reconnect to
-apply changes promptly. Re-authentication on an already relayed connection uses the
-backend protocol directly, so reconnect through the proxy with frontend credentials.
+`ModifyUser` with `AccessString` or `AppendAccessString` is installed on the backend at once
+for every replication group and serverless cache that holds the user, so it applies to connections
+that are already open. A change that cannot be installed, such as one with a selector, is logged and
+the open sessions keep their old permissions until the user authenticates again. Other
+changes, such as adding a user to a group or associating a user group with a cache, are
+installed on the next successful authentication; reconnect to apply them promptly.
+Re-authentication on an already relayed connection uses the backend protocol directly, so
+reconnect through the proxy with frontend credentials.
 Revoked members' existing sessions are not proactively disconnected by this change.
 ACL selectors are rejected before backend changes: a selector can grant permissions
 independently of the root rules used to protect private backend credentials. Read-only

@@ -1636,7 +1636,8 @@ naming no workgroup is checked on `workgroup/primary`, where `StartQueryExecutio
 `ListQueryExecutions` and `ListNamedQueries` list, and `GetWorkGroup` answers. Athena's
 `ListDatabases`, `ListTableMetadata` and `GetTableMetadata` are checked on the catalog their
 `CatalogName` names and on `datacatalog/AwsDataCatalog`, the Glue Data Catalog Floci reads whichever
-catalog they name. Cost Explorer's cost and usage reads are checked on `*`, not on the billing view
+catalog they name, and a `GetDataCatalog` naming no catalog on `datacatalog/AwsDataCatalog`, the one it
+answers. Cost Explorer's cost and usage reads are checked on `*`, not on the billing view
 their `BillingViewArn` gives: Floci serves no billing views and answers the account's costs whichever
 one is named. Data Exports' `CreateExport` is not checked on the
 ARN its `Export.ExportArn` gives, which is the new export's own. CloudTrail's `StartLogging`,

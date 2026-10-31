@@ -129,7 +129,7 @@ but for its bootstrap actions.
   run with the step's other arguments; a path not in S3 is run as it is, a bare name from `/home/hadoop`
   when a file there has it, though nothing a former step wrote is there, each step having a container of
   its own. A `spark-submit` they start runs in local mode on Floci's S3 with the cluster's
-  `spark-defaults`, which Floci puts in a Spark configuration of its own, ahead of the image's EMR
+  `spark-defaults` and `spark-hive-site`, which Floci puts in a Spark configuration of its own, ahead of the image's EMR
   Serverless master; its own `--master yarn` or `--deploy-mode cluster` fails, as there is no YARN.
 * **HTTPS**: with [TLS](../configuration/tls.md) on, each step's container, and the bootstrap actions'
   one, also gets Floci's CA bundle as a Java trust store, which every JVM in it uses, as an
@@ -178,10 +178,20 @@ but for its bootstrap actions.
   driver, and start no other step; a driver a hard stop left running is removed when the EMR service
   starts, before any step can start, unless `reconcile-containers-on-startup` is off.
 * **What `spark-submit` gets**: the step's arguments, after the `spark-defaults` properties of the
-  cluster's `Configurations`. `s3://` and `s3a://` paths reach Floci's S3 through S3A, on releases
+  cluster's `Configurations` and its `spark-hive-site` ones as `spark.hadoop.` settings, which Spark's Hive
+  client reads as it would `hive-site.xml`, so the Management Guide's `hive.metastore.client.factory.class`
+  for the Glue Data Catalog applies; a `spark.hadoop.` setting in `spark-defaults` wins over the same one in
+  `spark-hive-site`. `s3://` and `s3a://` paths reach Floci's S3 through S3A, on releases
   before 7.10.0 too, where `s3://` would otherwise be EMRFS, so the application and its files can be read
   from there; the Glue Data Catalog client is pointed at Floci's Glue. A step's `Properties` are not
-  applied.
+  applied, nor are the other classifications (`core-site`, `hadoop-env`, `spark-log4j2` and the rest).
+* **`spark-env`**: the variables the cluster's `spark-env` exports, in its nested `export` classification,
+  are in each step's container environment, `PYSPARK_PYTHON` or `JAVA_HOME` say, replacing any of Floci's
+  own with the same name. They are set as given, with no shell expansion of a `$VARIABLE` in
+  them, and a command or script sees them too, where EMR writes them in `spark-env.sh`, which only Spark's
+  own scripts read. The image's `spark-env.sh` gives `PYSPARK_PYTHON`, `PYSPARK_DRIVER_PYTHON`,
+  `SPARK_HOME` and `HADOOP_CONF_DIR` only a default, so the exports win there, but a variable it sets
+  outright, such as `AWS_STS_REGIONAL_ENDPOINTS`, keeps the image's value in `spark-submit`.
 * **Credentials**: the container gets a session for the step's `ExecutionRoleArn`, or else for the role
   of the cluster's `JobFlowRole` instance profile, when IAM knows it and the profile holds one role,
   and otherwise the account's placeholder credentials, with `AWS_ENDPOINT_URL` pointing at Floci.

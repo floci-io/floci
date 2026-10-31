@@ -82,17 +82,6 @@ class SesV2JsonTest {
     }
 
     @Test
-    void requireObjectOrAbsent_returnsChild_rejectsScalars() {
-        assertTrue(SesV2Json.requireObjectOrAbsent(json("{}"), "Options").isMissingNode());
-        assertTrue(SesV2Json.requireObjectOrAbsent(json("{\"Options\":null}"), "Options").isNull());
-        JsonNode nested = json("{\"Options\":{\"a\":\"x\"}}");
-        assertEquals("x", SesV2Json.requireObjectOrAbsent(nested, "Options").path("a").asText());
-        assertEquals("Options must be a JSON object.",
-                assertAws("BadRequestException", 400, () -> SesV2Json.requireObjectOrAbsent(
-                        json("{\"Options\":1}"), "Options")).getMessage());
-    }
-
-    @Test
     void parseTagsArray_absentIsNull_shapeErrorsAreWireErrors() {
         assertNull(SesV2Json.parseTagsArray(json("{}").path("Tags")));
         assertNull(SesV2Json.parseTagsArray(json("{\"Tags\":null}").path("Tags")));

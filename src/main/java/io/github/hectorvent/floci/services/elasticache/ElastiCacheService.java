@@ -1654,7 +1654,7 @@ public class ElastiCacheService implements ResourceProvider {
         String id = original.getCacheClusterId();
         String account = original.getOwnerAccountId();
         return new ElastiCacheAuthProxy.PasswordValidator() {
-            private ElastiCacheUser member(String username) {
+            private ElastiCacheUser member(String username, boolean requireEnabled) {
                 String name = username == null || username.isEmpty() ? "default" : username;
                 synchronized (users) {
                     CacheCluster cluster = cacheClusters.getForAccount(account, id).orElse(null);
@@ -1666,14 +1666,14 @@ public class ElastiCacheService implements ResourceProvider {
                         return null;
                     }
                     return group.getUserIds().stream().map(userId -> users.getForAccount(account, userId).orElse(null))
-                            .filter(user -> user != null && name.equals(user.getUserName()) && user.isEnabled())
+                            .filter(user -> user != null && name.equals(user.getUserName()) && (!requireEnabled || user.isEnabled()))
                             .findFirst().orElse(null);
                 }
             }
 
             @Override
             public boolean validatePassword(String username, String password) {
-                ElastiCacheUser user = member(username);
+                ElastiCacheUser user = member(username, true);
                 return user != null && (user.getAuthMode() == AuthMode.NO_AUTH
                         || user.getAuthMode() == AuthMode.PASSWORD && user.getPasswords().contains(password));
             }
@@ -1686,7 +1686,7 @@ public class ElastiCacheService implements ResourceProvider {
 
             @Override
             public AuthMode memberAuthMode(String username) {
-                ElastiCacheUser user = member(username);
+                ElastiCacheUser user = member(username, true);
                 return user == null ? null : user.getAuthMode();
             }
 
@@ -1697,7 +1697,7 @@ public class ElastiCacheService implements ResourceProvider {
 
             @Override
             public String accessString(String username) {
-                ElastiCacheUser user = member(username);
+                ElastiCacheUser user = member(username, false);
                 return user == null ? null : user.getAccessString();
             }
 
@@ -2141,6 +2141,36 @@ public class ElastiCacheService implements ResourceProvider {
         // Storage backends hand back the live stored object, so validate everything
         // before the first setter — a rejected request must not leave changes behind.
         String normalizedEngine = (engine == null || engine.isBlank()) ? null : normalizeEngine(engine);
+        ElastiCacheUser modified = applyUserModification(userId, user, authMode, passwords, accessString,
+                appendAccessString, normalizedEngine);
+        if (accessString != null || appendAccessString != null) {
+            reapplyAccessString(userId, modified);
+        }
+        return modified;
+    }
+
+    /** Lets the open sessions of every cache the user can sign in to pick up its new access string. */
+    private void reapplyAccessString(String userId, ElastiCacheUser user) {
+        for (ReplicationGroup group : groups.scan(k -> true)) {
+            if (effectiveUserIds(groups.accountId(), group).contains(userId)) {
+                proxyManager.refreshUser(group.getReplicationGroupId(), user.getUserName());
+            }
+        }
+        for (CacheCluster cluster : cacheClusters.scan(k -> true)) {
+            if (cluster.getServerlessCacheName() != null && cluster.getUserGroupId() != null) {
+                String account = cluster.getOwnerAccountId() != null ? cluster.getOwnerAccountId() : cacheClusters.accountId();
+                ElastiCacheUserGroup group = userGroups.getForAccount(account,
+                        normalizeUserGroupId(cluster.getUserGroupId())).orElse(null);
+                if (group != null && group.getUserIds().contains(userId)) {
+                    proxyManager.refreshUser(cluster.getCacheClusterId(), user.getUserName());
+                }
+            }
+        }
+    }
+
+    private ElastiCacheUser applyUserModification(String userId, ElastiCacheUser user, AuthMode authMode,
+                                                  List<String> passwords, String accessString,
+                                                  String appendAccessString, String normalizedEngine) {
         synchronized (userGroupLock) {
             String nextEngine = normalizedEngine != null ? normalizedEngine : user.getEngine();
             AuthMode nextAuthMode = authMode != null ? authMode : user.getAuthMode();
@@ -2563,7 +2593,7 @@ public class ElastiCacheService implements ResourceProvider {
                 }
                 return effectiveUserIds(accountId, group).stream()
                         .map(id -> users.getForAccount(accountId, id).orElse(null))
-                        .filter(user -> user != null && user.isEnabled() && username.equals(user.getUserName()))
+                        .filter(user -> user != null && username.equals(user.getUserName()))
                         .map(ElastiCacheUser::getAccessString).findFirst().orElse(null);
             }
 

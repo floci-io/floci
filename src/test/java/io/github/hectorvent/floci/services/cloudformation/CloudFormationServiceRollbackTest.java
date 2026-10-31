@@ -421,6 +421,102 @@ class CloudFormationServiceRollbackTest {
     }
 
     @Test
+    void deleteStack_retainingResourcesOfADeleteFailedStack_skipsOnlyThose() throws Exception {
+        Stack stack = deleteFailedStack("retained-delete");
+        StackResource data = stack.getResources().get("Data");
+        StackResource spare = stack.getResources().get("Spare");
+
+        service.deleteStack("retained-delete", List.of("Data"), REGION, ACCOUNT).get(10, TimeUnit.SECONDS);
+
+        assertEquals("DELETE_COMPLETE", stack.getStatus());
+        verify(provisioner, never()).delete(eq(data), anyString());
+        verify(provisioner).delete(spare, REGION);
+        assertEquals("DELETE_SKIPPED", data.getStatus());
+        assertNull(data.getStatusReason());
+        assertTrue(stack.getEvents().stream().anyMatch(event -> "Data".equals(event.getLogicalResourceId())
+                && "DELETE_SKIPPED".equals(event.getResourceStatus())));
+    }
+
+    @Test
+    void deleteStack_retainingResourcesTheDeleteWouldNotTouch_skipsThemToo() throws Exception {
+        Stack stack = deleteFailedStack("retained-failed-create");
+        StackResource borrowed = resource("Borrowed", "existing-param", "AWS::SSM::Parameter", "CREATE_FAILED");
+        StackResource unnamed = resource("Unnamed", null, "AWS::SSM::Parameter", "CREATE_FAILED");
+        for (StackResource failed : List.of(borrowed, unnamed)) {
+            failed.setStatusReason("Error occurred during operation 'PutParameter'.");
+            stack.getResources().put(failed.getLogicalId(), failed);
+        }
+
+        service.deleteStack("retained-failed-create", List.of("Data", "Borrowed", "Unnamed"), REGION, ACCOUNT)
+                .get(10, TimeUnit.SECONDS);
+
+        assertEquals("DELETE_COMPLETE", stack.getStatus());
+        for (StackResource failed : List.of(borrowed, unnamed)) {
+            verify(provisioner, never()).delete(eq(failed), anyString());
+            assertEquals("DELETE_SKIPPED", failed.getStatus());
+            assertNull(failed.getStatusReason());
+            assertTrue(stack.getEvents().stream().anyMatch(event -> failed.getLogicalId()
+                    .equals(event.getLogicalResourceId()) && "DELETE_SKIPPED".equals(event.getResourceStatus())));
+        }
+    }
+
+    @Test
+    void deleteStack_retriedWhileDeleting_refusesADifferentRetainList() throws Exception {
+        Stack stack = deleteFailedStack("retain-retried");
+        StackResource spare = stack.getResources().get("Spare");
+        CountDownLatch deleting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            deleting.countDown();
+            release.await(30, TimeUnit.SECONDS);
+            return null;
+        }).when(provisioner).delete(eq(spare), eq(REGION));
+
+        Future<?> first = service.deleteStack("retain-retried", List.of("Data"), REGION, ACCOUNT);
+        assertTrue(deleting.await(10, TimeUnit.SECONDS));
+        service.deleteStack("retain-retried", List.of("Data"), REGION, ACCOUNT).get(5, TimeUnit.SECONDS);
+        for (List<String> other : List.of(List.<String>of(), List.of("Data", "Spare"))) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.deleteStack("retain-retried", other, REGION, ACCOUNT));
+            assertEquals("ValidationError", error.getErrorCode());
+            assertEquals("A delete stack operation is already in progress for stack [" + stack.getStackId()
+                    + "]. Do not submit another delete stack request specifying different resources to retain"
+                    + " or resources to retain in a different order.", error.getMessage());
+        }
+        release.countDown();
+        first.get(10, TimeUnit.SECONDS);
+
+        verify(provisioner, times(1)).delete(spare, REGION);
+        assertEquals("DELETE_COMPLETE", stack.getStatus());
+    }
+
+    @Test
+    void deleteStack_retriedOnAChildItsParentIsDeleting_isANoOp() throws Exception {
+        Stack child = deleteFailedStack("retain-child");
+        child.setRetainResources(List.of("Data"));
+        Stack parent = liveStack("retain-parent");
+        parent.getResources().clear();
+        parent.getResources().put("Child",
+                resource("Child", child.getStackId(), "AWS::CloudFormation::Stack", "CREATE_COMPLETE"));
+        StackResource spare = child.getResources().get("Spare");
+        CountDownLatch deleting = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            deleting.countDown();
+            release.await(30, TimeUnit.SECONDS);
+            return null;
+        }).when(provisioner).delete(eq(spare), eq(REGION));
+
+        Future<?> parentDelete = service.deleteStack("retain-parent", REGION, ACCOUNT);
+        assertTrue(deleting.await(10, TimeUnit.SECONDS));
+        service.deleteStack("retain-child", List.of(), REGION, ACCOUNT).get(5, TimeUnit.SECONDS);
+        release.countDown();
+        parentDelete.get(10, TimeUnit.SECONDS);
+
+        assertEquals("DELETE_COMPLETE", child.getStatus());
+    }
+
+    @Test
     void executeChangeSet_onStackBeingDeleted_isRefused() {
         Stack stack = liveStack("executed-while-deleting");
         service.createChangeSet("executed-while-deleting", "update", "UPDATE",
@@ -1771,6 +1867,21 @@ class CloudFormationServiceRollbackTest {
         Stack stack = service.describeStacks(stackName, REGION, ACCOUNT).getFirst();
         stack.getChangeSets().clear();
         stack.setStatus("CREATE_COMPLETE");
+        return stack;
+    }
+
+    /** A live stack whose delete failed on both of its buckets, Data and Spare. */
+    private Stack deleteFailedStack(String stackName) {
+        Stack stack = liveStack(stackName);
+        stack.setStatus("DELETE_FAILED");
+        stack.getResources().clear();
+        for (String logicalId : List.of("Data", "Spare")) {
+            StackResource bucket = resource(logicalId, logicalId.toLowerCase() + "-bucket", "AWS::S3::Bucket",
+                    "DELETE_FAILED");
+            bucket.setStatusReason("The bucket you tried to delete is not empty");
+            stack.getResources().put(logicalId, bucket);
+        }
+        when(provisioner.completeDeleteCleanup(any())).thenReturn(UpdateCleanupResult.notApplicable());
         return stack;
     }
 

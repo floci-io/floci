@@ -60,13 +60,14 @@ public interface SparkJobRunner {
      * gets Floci's settings and the {@code spark-defaults} as defaults (its {@code application} is then
      * empty); how long it may run
      * ({@link Duration#ZERO} for no limit); the S3 folder its driver's {@code stdout.gz} and
-     * {@code stderr.gz} go to once it ends, ending in a slash (null for none); and where in CloudWatch Logs
-     * its driver's output goes while it runs (null for nowhere but Floci's log).
+     * {@code stderr.gz} go to once it ends, ending in a slash (null for none); where in CloudWatch Logs
+     * its driver's output goes while it runs (null for nowhere but Floci's log); and the environment variables
+     * its container gets besides Floci's own, which they replace where a name is the same (empty for none).
      */
     record Job(String service, String runId, String accountId, String region, String releaseLabel,
                String imageTemplate, String customImage, String dockerNetwork, String executionRole,
                Map<String, String> sparkDefaults, List<String> application, List<String> command, Duration timeout,
-               String logFolder, CloudWatchLogs cloudWatchLogs) {
+               String logFolder, CloudWatchLogs cloudWatchLogs, Map<String, String> environment) {
     }
 
     /**

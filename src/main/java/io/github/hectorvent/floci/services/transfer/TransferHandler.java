@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.transfer.model.HomeDirectoryMapping;
 import io.github.hectorvent.floci.services.transfer.model.Server;
 import io.github.hectorvent.floci.services.transfer.model.SshPublicKey;
@@ -98,15 +99,16 @@ public class TransferHandler {
     private Response listServers(JsonNode req) {
         String nextToken = textOrNull(req, "NextToken");
         int maxResults = req.path("MaxResults").asInt(100);
-        List<Server> servers = service.listServers(nextToken, maxResults);
+        requirePageSize(maxResults);
+        PaginatedResult<Server> page = service.listServers(nextToken, maxResults);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = resp.putArray("Servers");
-        for (Server s : servers) {
+        for (Server s : page.items()) {
             arr.add(buildServerListEntry(s));
         }
-        if (servers.size() == maxResults) {
-            resp.put("NextToken", servers.get(servers.size() - 1).getServerId());
+        if (page.nextToken() != null) {
+            resp.put("NextToken", page.nextToken());
         }
         return Response.ok(resp).build();
     }
@@ -185,18 +187,25 @@ public class TransferHandler {
         String serverId = req.path("ServerId").asText();
         String nextToken = textOrNull(req, "NextToken");
         int maxResults = req.path("MaxResults").asInt(100);
-        List<User> users = service.listUsers(serverId, nextToken, maxResults);
+        requirePageSize(maxResults);
+        PaginatedResult<User> page = service.listUsers(serverId, nextToken, maxResults);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.put("ServerId", serverId);
         ArrayNode arr = resp.putArray("Users");
-        for (User u : users) {
+        for (User u : page.items()) {
             arr.add(buildUserListEntry(u));
         }
-        if (users.size() == maxResults) {
-            resp.put("NextToken", users.get(users.size() - 1).getUserName());
+        if (page.nextToken() != null) {
+            resp.put("NextToken", page.nextToken());
         }
         return Response.ok(resp).build();
+    }
+
+    private static void requirePageSize(int maxResults) {
+        if (maxResults < 1 || maxResults > 1000) {
+            throw new AwsException("InvalidRequestException", "MaxResults must be between 1 and 1000", 400);
+        }
     }
 
     private Response updateUser(JsonNode req) {

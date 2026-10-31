@@ -1575,7 +1575,7 @@ public class S3Controller {
                 if (result.isDeleteMarker()) {
                     resp.header("x-amz-delete-marker", "true");
                 }
-                resp.header("x-amz-version-id", result.getVersionId());
+                resp.header("x-amz-version-id", result.getVersionId() != null ? result.getVersionId() : "null");
             }
             emitCloudTrailEvent("DeleteObject", bucket, key, 0L, 0L, null, null);
             return resp.build();
@@ -2175,7 +2175,7 @@ public class S3Controller {
             if (obj.isDeleteMarker()) {
                 xml.start("DeleteMarker")
                    .elem("Key", maybeEncode(obj.getKey(), encodingType))
-                   .elem("VersionId", obj.getVersionId())
+                   .elem("VersionId", obj.getVersionId() != null ? obj.getVersionId() : "null")
                    .elem("IsLatest", obj.isLatest())
                    .elem("LastModified", ISO_FORMAT.format(obj.getLastModified()))
                    .end("DeleteMarker");

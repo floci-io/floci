@@ -819,6 +819,28 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An Athena catalog request naming no catalog, or a JSON null, is checked on {@code AwsDataCatalog}, the one
+     * {@code GetDataCatalog} answers and the catalog reads read, so a grant on it reaches them and a deny on it applies.
+     */
+    @Test
+    void aCatalogRequestNamingNoCatalogIsCheckedOnTheGlueOne() {
+        String glue = "arn:aws:athena:" + REGION + ":" + ACCOUNT + ":datacatalog/AwsDataCatalog";
+        User user = user("res-glue-catalog");
+        user.policy(allowOn("athena:GetDataCatalog", glue) + "," + allowOn("athena:ListDatabases", glue));
+        send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{}").statusCode(200)
+                .body("DataCatalog.Name", equalTo("AwsDataCatalog"));
+        send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":null}").statusCode(200)
+                .body("DataCatalog.Name", equalTo("AwsDataCatalog"));
+        send(user, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":null}").statusCode(200);
+        refusedJson(send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":\"res-other\"}"),
+                "athena:GetDataCatalog");
+        User denied = user("res-glue-denied");
+        denied.policy(allowOn("athena:GetDataCatalog", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"athena:GetDataCatalog\",\"Resource\":\"" + glue + "\"}");
+        refusedJson(send(denied, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{}"), "athena:GetDataCatalog");
+    }
+
+    /**
      * A Data Exports export is checked on its ARN, and a create not on the ARN its {@code Export.ExportArn} gives,
      * which is the new export's own, so a table's there checks nothing.
      */

@@ -54,6 +54,17 @@ class CognitoReplaceMfaConfigTest {
     }
 
     @Test
+    void smsThatIsNotGivenStaysOnUntilMfaIsTurnedOff() {
+        service.replaceUserPoolMfaConfig(poolId, "OPTIONAL", true, Map.of("SmsAuthenticationMessage", "{####}"), null);
+
+        service.replaceUserPoolMfaConfig(poolId, "OPTIONAL", true, null, null);
+        assertEquals("{####}", service.describeUserPool(poolId).getSmsMfaConfiguration().get("SmsAuthenticationMessage"));
+
+        service.replaceUserPoolMfaConfig(poolId, "OFF", null, null, null);
+        assertNull(service.describeUserPool(poolId).getSmsMfaConfiguration());
+    }
+
+    @Test
     void thePoolAReaderAlreadyHoldsKeepsItsSettings() {
         UserPool before = service.describeUserPool(poolId);
 

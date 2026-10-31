@@ -7524,11 +7524,10 @@ public class RdsService implements Resettable, ResourceProvider {
 
     public Collection<DbParameterGroup> listDbParameterGroups(
             String filterName, String region) {
-        String effectiveRegion = effectiveRegion(region);
         if (filterName != null && !filterName.isBlank()) {
-            DbParameterGroup group = findParameterGroupForRegion(filterName, effectiveRegion);
-            return group != null ? List.of(group) : List.of();
+            return List.of(getDbParameterGroup(filterName, region));
         }
+        String effectiveRegion = effectiveRegion(region);
         Map<String, DbParameterGroup> unique = new LinkedHashMap<>();
         List<DbParameterGroup> storedGroups;
         if (parameterGroups instanceof AccountAwareStorageBackend<DbParameterGroup> aware) {

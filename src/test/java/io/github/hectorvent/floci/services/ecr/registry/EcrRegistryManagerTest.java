@@ -742,7 +742,9 @@ class EcrRegistryManagerTest {
     @Test
     void anImageOutsideEcrHasNoRegion() {
         for (String image : List.of("public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest", "python:3.12",
-                "localhost:5000/spark/custom:7.5.0", "registry.internal/123456789012/us-east-1/spark:7.5.0")) {
+                "localhost:5000/spark/custom:7.5.0", "registry.internal/123456789012/us-east-1/spark:7.5.0",
+                "123456789012.dkr.ecr.us-east-1.registry.internal/spark/custom:7.5.0",
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com.example.com/spark/custom:7.5.0")) {
             assertEquals(Optional.empty(), EcrRegistryManager.imageRegion(image), image);
         }
         assertEquals(Optional.empty(), EcrRegistryManager.imageRegion(null));

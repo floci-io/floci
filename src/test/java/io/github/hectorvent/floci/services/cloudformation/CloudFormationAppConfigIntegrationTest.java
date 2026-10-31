@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -12,6 +13,10 @@ import io.restassured.path.xml.XmlPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -47,6 +52,39 @@ class CloudFormationAppConfigIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void sdkStackDeletePreservesApplicationNamedAfterItsPhysicalId(boolean removeApplicationFirst) throws Exception {
+        String stack = unique("cfn-appconfig-exact-delete");
+        try (CloudFormationClient client = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1);
+                AutoCloseable stackCleanup = () -> {
+                    client.deleteStack(request -> request.stackName(stack));
+                    CfnStackWaits.awaitStackDeleted(stack);
+                }) {
+            client.createStack(request -> request.stackName(stack).templateBody("""
+                    {"Resources":{"Application":{"Type":"AWS::AppConfig::Application",
+                    "Properties":{"Name":"stack-original-application"}}}}
+                    """));
+            assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack).status());
+            String original = client.describeStackResource(request -> request.stackName(stack)
+                    .logicalResourceId("Application")).stackResourceDetail().physicalResourceId();
+            String other = appconfig().body(Map.of("Name", original)).post("/applications")
+                    .then().statusCode(201).extract().path("Id");
+            try (AutoCloseable applicationCleanup = () -> appconfig().delete("/applications/" + other)
+                    .then().statusCode(204)) {
+                assertNotEquals(original, other);
+                if (removeApplicationFirst) {
+                    appconfig().delete("/applications/" + original).then().statusCode(204);
+                }
+                client.deleteStack(request -> request.stackName(stack));
+                CfnStackWaits.awaitStackDeleted(stack);
+                appconfig().get("/applications/" + other).then().statusCode(200)
+                        .body("Id", equalTo(other), "Name", equalTo(original));
+            }
+        }
     }
 
     @Test

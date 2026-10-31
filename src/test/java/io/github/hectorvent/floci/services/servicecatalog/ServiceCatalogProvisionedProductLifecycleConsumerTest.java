@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.servicecatalog;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -9,10 +10,13 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Wire-level tests for {@code DescribeProvisionedProduct},
@@ -39,6 +43,9 @@ class ServiceCatalogProvisionedProductLifecycleConsumerTest {
 
     @Inject
     ObjectMapper objectMapper;
+
+    @Inject
+    MutableClock clock;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -241,7 +248,8 @@ class ServiceCatalogProvisionedProductLifecycleConsumerTest {
         double originalCreatedTime = objectMapper.readTree(originalProduct.asString())
                 .path("ProvisionedProductDetail").path("CreatedTime").asDouble();
 
-        Thread.sleep(25);
+        clock.advance(Duration.ofSeconds(1));
+        double beforeTermination = clock.instant().toEpochMilli() / 1000.0;
         Response terminated = call("TerminateProvisionedProduct", "{\"ProvisionedProductId\":\""
                 + provisionedId + "\",\"TerminateToken\":\"tok-terminate-pp\"}")
         .then()
@@ -250,6 +258,7 @@ class ServiceCatalogProvisionedProductLifecycleConsumerTest {
             .body("RecordDetail.Status", equalTo("SUCCEEDED"))
             .body("RecordDetail.RecordType", equalTo("TERMINATE_PROVISIONED_PRODUCT"))
             .extract().response();
+        double afterTermination = clock.instant().toEpochMilli() / 1000.0;
         JsonNode terminationRecord = objectMapper.readTree(terminated.asString()).path("RecordDetail");
         String recordId = terminationRecord.path("RecordId").asText();
 
@@ -260,6 +269,11 @@ class ServiceCatalogProvisionedProductLifecycleConsumerTest {
             .extract().response();
         assertEquals(originalCreatedTime, objectMapper.readTree(terminatedProduct.asString())
                 .path("ProvisionedProductDetail").path("CreatedTime").asDouble());
+        double updatedTime = objectMapper.readTree(terminatedProduct.asString())
+                .path("ProvisionedProductDetail").path("UpdatedTime").asDouble();
+        assertTrue(updatedTime > originalCreatedTime);
+        assertTrue(updatedTime >= beforeTermination && updatedTime <= afterTermination);
+        assertEquals(updatedTime, terminationRecord.path("CreatedTime").asDouble());
 
         Response described = call("DescribeRecord", "{\"Id\":\"" + recordId + "\"}")
         .then()

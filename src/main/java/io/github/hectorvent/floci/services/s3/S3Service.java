@@ -1025,10 +1025,10 @@ public class S3Service implements Resettable, ResourceProvider {
                     writeVersionedFile(bucketOwnerAccount, bucketName, key, versionId, data);
                     writeFile(bucketOwnerAccount, bucketName, key, data);
                 }
-                if (previous != null && previous.getVersionId() != null) {
+                if (previous != null && (previous.getVersionId() != null || previous.isDeleteMarker())) {
                     previous.setLatest(false);
                     putObjectForAccount(bucketOwnerAccount,
-                            versionedKey(bucketName, key, previous.getVersionId()), previous);
+                            versionedKey(bucketName, key, storedVersionId(previous)), previous);
                 }
                 if (nullVersionToArchive != null) {
                     nullVersionToArchive.setLatest(false);
@@ -2422,9 +2422,9 @@ public class S3Service implements Resettable, ResourceProvider {
                     S3Object archivedNull = copyObject(previous);
                     archivedNull.setLatest(false);
                     objectStore.put(versionedKey(bucketName, key, "null"), archivedNull);
-                } else if (previous != null && previous.getVersionId() != null) {
+                } else if (previous != null && (previous.getVersionId() != null || previous.isDeleteMarker())) {
                     previous.setLatest(false);
-                    objectStore.put(versionedKey(bucketName, key, previous.getVersionId()), previous);
+                    objectStore.put(versionedKey(bucketName, key, storedVersionId(previous)), previous);
                 }
                 objectStore.put(versionedKey(bucketName, key, markerId), deleteMarker);
                 objectStore.put(objectKey(bucketName, key), deleteMarker);
@@ -2439,12 +2439,41 @@ public class S3Service implements Resettable, ResourceProvider {
             LOG.debugv("Created delete marker: {0}/{1} v={2}", bucketName, key, markerId);
             fireNotifications(bucketName, key, removalEvent + ":DeleteMarkerCreated", deleteMarker);
             return deleteMarker;
+        } else if (versionId == null && bucket.getVersioningStatus() != null) {
+            // A suspended bucket replaces the null version, or a null delete marker, with a null delete marker.
+            S3Object previous = objectStore.get(objectKey(bucketName, key)).orElse(null);
+            if (previous != null && previous.getVersionId() == null && !previous.isDeleteMarker()) {
+                checkLockProtection(previous, bypassGovernance);
+            }
+            checkArchivedNullLock(ownerId(), bucketName, key, bypassGovernance);
+            S3Object deleteMarker = new S3Object(bucketName, key, new byte[0], null);
+            deleteMarker.setDeleteMarker(true);
+            deleteMarker.setLatest(true);
+            deleteMarker.setEventSequencer(nextEventSequencer());
+            if (previous != null && previous.getVersionId() != null) {
+                previous.setLatest(false);
+                objectStore.put(versionedKey(bucketName, key, previous.getVersionId()), previous);
+            }
+            deleteArchivedNullVersion(ownerId(), bucketName, key, true);
+            objectStore.put(objectKey(bucketName, key), deleteMarker);
+            deleteFile(bucketName, key);
+            deleteAllAnnotationsFor(annotationParentKey(bucketName, key, null));
+            LOG.debugv("Created null delete marker: {0}/{1}", bucketName, key);
+            fireNotifications(bucketName, key, removalEvent + ":DeleteMarkerCreated", deleteMarker);
+            return deleteMarker;
         } else if (versionId != null) {
             String historyKey = versionedKey(bucketName, key, versionId);
             S3Object toDelete = objectStore.get(historyKey)
                     .filter(existing -> !"null".equals(versionId) || key.equals(existing.getKey()))
                     .filter(existing -> isNamedVersion(existing, versionId))
                     .orElse(null);
+            if (toDelete == null && "null".equals(versionId)) {
+                // A current null delete marker exists only at the plain latest key.
+                toDelete = objectStore.get(objectKey(bucketName, key))
+                        .filter(candidate -> key.equals(candidate.getKey()))
+                        .filter(candidate -> candidate.isDeleteMarker() && candidate.getVersionId() == null)
+                        .orElse(null);
+            }
             if (toDelete == null && "null".equals(versionId)) {
                 // Before the null version is archived it exists only at the plain latest key.
                 S3Object existing = objectStore.get(objectKey(bucketName, key))
@@ -3241,7 +3270,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 S3Object result = deleteObject(bucketName, entry.key(), entry.versionId(),
                         bypassGovernance.test(entry), entry.eTag());
                 if (result != null && result.isDeleteMarker()) {
-                    deleted.add(new DeleteResult(entry.key(), entry.versionId(), true, result.getVersionId()));
+                    deleted.add(new DeleteResult(entry.key(), entry.versionId(), true, storedVersionId(result)));
                 } else {
                     deleted.add(new DeleteResult(entry.key(), entry.versionId(), false, null));
                 }
@@ -6065,9 +6094,9 @@ public class S3Service implements Resettable, ResourceProvider {
             return new LifecyclePlan(deletions, false);
         }
         if (current.isDeleteMarker()) {
-            if (currentVersionId != null && noncurrent.isEmpty()
+            if (noncurrent.isEmpty()
                     && lifecycle.removesExpiredObjectDeleteMarker(key, current.getLastModified(), now)) {
-                deletions.add(currentVersionId);
+                deletions.add(storedVersionId(current));
             }
             return new LifecyclePlan(deletions, false);
         }
@@ -6088,8 +6117,8 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /**
      * Expires as DeleteObject would, reported as a lifecycle expiration: a null {@code versionId}
-     * expires the current version, a delete marker in a versioning-enabled bucket and a deletion
-     * otherwise, and a version id deletes that version permanently.
+     * expires the current version, a delete marker in a versioning-enabled or suspended bucket and a
+     * deletion otherwise, and a version id deletes that version permanently.
      */
     private void expireByLifecycle(Bucket bucket, String bucketName, String key, String versionId) {
         try {

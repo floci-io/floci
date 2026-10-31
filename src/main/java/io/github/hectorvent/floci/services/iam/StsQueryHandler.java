@@ -373,6 +373,12 @@ public class StsQueryHandler {
             }
         }
 
+        if (durationSeconds > role.getMaxSessionDuration()) {
+            return AwsQueryResponse.error("ValidationError",
+                    "The requested DurationSeconds exceeds the MaxSessionDuration set for this role.",
+                    AwsNamespaces.STS, 400);
+        }
+
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);

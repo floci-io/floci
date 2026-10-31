@@ -52,7 +52,7 @@ public class MskService implements ResourceProvider {
     private static final Logger LOG = Logger.getLogger(MskService.class);
     private static final String DEFAULT_KAFKA_VERSION = "3.6.0";
     private static final String DEFAULT_ENHANCED_MONITORING = "DEFAULT";
-    private static final String DEFAULT_CLIENT_BROKER_ENCRYPTION = "TLS_PLAINTEXT";
+    private static final String DEFAULT_CLIENT_BROKER_ENCRYPTION = "TLS";
     private static final String PROVISIONED_CLUSTER_TYPE = "PROVISIONED";
     private static final String SERVERLESS_CLUSTER_TYPE = "SERVERLESS";
     private static final int MAX_PAGE = 100;
@@ -305,7 +305,7 @@ public class MskService implements ResourceProvider {
 
     /**
      * Fills in the encryption-in-transit defaults AWS applies when CreateCluster omits them:
-     * {@code clientBroker} defaults to TLS_PLAINTEXT and {@code inCluster} to true. An
+     * {@code clientBroker} defaults to TLS and {@code inCluster} to true. An
      * explicitly supplied value is never overwritten. {@code encryptionAtRest} is left alone -
      * real MSK creates a KMS key for you there, which the emulator has no equivalent of, so
      * inventing an ARN would be worse than omitting the member.

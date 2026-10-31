@@ -11,7 +11,7 @@
 | `DescribeStacks` | Get stack status, parameters, and outputs |
 | `CreateStack` | Deploy a CloudFormation template |
 | `UpdateStack` | Update an existing stack |
-| `DeleteStack` | Delete a stack and its resources |
+| `DeleteStack` | Delete a stack and its resources, keeping those named in `RetainResources` once a delete has failed (see [Deletion Policies](#deletion-policies)) |
 | `ContinueUpdateRollback` | Retry the rollback of a stack in `UPDATE_ROLLBACK_FAILED`, optionally skipping resources or forcing past every failed one (see [Failed update rollbacks](#failed-update-rollbacks)) |
 | `UpdateTerminationProtection` | - |
 | `CreateChangeSet` | Create a change set |
@@ -203,7 +203,7 @@ cross-resource references.
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | CodeBuild | `Project` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
-| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`; `EnabledMfas` is applied with `SetUserPoolMfaConfig`, as on AWS), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolResourceServer`, `UserPoolUser`, `UserPoolUserToGroupAttachment` |
+| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`; `EnabledMfas` is applied with `SetUserPoolMfaConfig`, as on AWS, and once `SMS_MFA` is on only `MfaConfiguration: OFF` turns it off), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolResourceServer`, `UserPoolUser`, `UserPoolUserToGroupAttachment` |
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy`, `ApiDestination`, `Archive` (`KmsKeyIdentifier` is ignored) |
 | EventBridge Scheduler | `Schedule`, `ScheduleGroup` |
@@ -432,6 +432,20 @@ status, named with its stack or by its ARN alone; a `StackName` that names no st
 - S3-backed code stays linked through `S3Bucket` / `S3Key`, so Lambda's reactive S3 sync continues to work for functions created by CloudFormation or CDK.
 - Hot-reload code (`S3Bucket: hot-reload`) is compared by host path: the same path is a no-op, a different path updates the bind mount in place.
 - `Tags` are applied when the function is created, including a replacement function. On `UpdateStack` the template's tags are applied and only the keys the previous template set and the new one drops are removed, so a tag added outside the template is kept, as in AWS.
+
+## SAM layers
+
+`AWS::Serverless::LayerVersion` expands into `AWS::Lambda::LayerVersion`. Packaged
+`ContentUri` values accept an S3 URI (including `?versionId=`) or a `Bucket`/`Key`/
+optional `Version` object. Local directories must first be packaged with the SAM CLI.
+The transform preserves layer metadata, runtime and architecture compatibility, and
+license information. `Ref` returns the published layer version ARN.
+
+As in SAM, the generated logical id changes with the layer definition, while the
+default layer name remains the original logical id. References and dependencies
+follow the generated resource. Layers default to `DeletionPolicy: Retain`;
+`RetentionPolicy: Delete` deletes the published version when the stack is deleted.
+An explicit resource `DeletionPolicy` is preserved unless `RetentionPolicy` overrides it.
 
 ## SAM published aliases
 
@@ -694,6 +708,15 @@ properties are listed with the reason in `src/test/resources/cloudformation/writ
 Where the registry schema corpus is present under `local/aws/cfn-resource-schemas/us-east-1/`
 (gitignored, so not in CI), `CfnSchemaCoverageTest` fails when a writable property is neither read
 nor listed, and when a listed property has started to be read, so closing a gap deletes its row.
+
+On AppSync resources, a property the previous template declared and the new template drops is cleared
+on `UpdateStack`; one the stack never declared keeps the value set outside it. A few members go back to
+their create default (`XrayEnabled`, `AdditionalAuthenticationProviders`, a function's `FunctionVersion`,
+a resolver's `Kind`). Not cleared: the identifiers, `Tags` and `EnvironmentVariables`, which the
+provisioner already drives to the template, required members (`AuthenticationType`, `Type`, a function's
+`DataSourceName`), create-only members, an API key's `Expires`, a GraphQL API's `ApiType` and
+`Visibility`, and a UNIT resolver's `DataSourceName`. Other services follow
+[#6606](https://github.com/floci-io/floci/issues/6606).
 
 ## Template URLs
 
@@ -1018,6 +1041,12 @@ statuses:
 Resources in any other status (`DELETE_COMPLETE`, `DELETE_SKIPPED`, an in-progress status) and
 resources without a physical id are skipped. A resource that cannot be deleted leaves the stack in
 `DELETE_FAILED`, named in the status reason.
+
+A `DELETE_FAILED` stack can be deleted again with `RetainResources` naming the resources to keep:
+they stay in place and are reported as `DELETE_SKIPPED`, and the rest are deleted. As on AWS, the
+parameter is refused when the stack is in any other status, when it names a resource the stack does
+not have or has already deleted, or when it names one twice. A retry while that delete is still
+running must repeat the same list in the same order.
 
 Deviations from AWS to be aware of:
 

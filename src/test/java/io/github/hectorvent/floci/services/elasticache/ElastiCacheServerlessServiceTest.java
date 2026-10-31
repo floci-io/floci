@@ -203,6 +203,25 @@ class ElastiCacheServerlessServiceTest {
     }
 
     @Test
+    void modifyUserAccessStringIsAppliedToOpenSessionsOfServerlessCache() {
+        ServerlessCache cache = service.createServerlessCache(create("cache", "valkey", "team"));
+        ArgumentCaptor<ElastiCacheAuthProxy.PasswordValidator> validator = ArgumentCaptor.forClass(
+                ElastiCacheAuthProxy.PasswordValidator.class);
+        verify(proxies).startProxy(eq(cache.getBackingCacheClusterId()), any(), anyInt(), anyString(), anyInt(),
+                validator.capture(), eq("cache"));
+
+        runtime.modifyUser("alice", null, null, "on ~allowed:* -@all +get", null, null);
+        verify(proxies).refreshUser(cache.getBackingCacheClusterId(), "alice");
+        assertEquals("on ~allowed:* -@all +get", validator.getValue().accessString("alice"));
+
+        runtime.modifyUser("alice", null, null, "off -@all", null, null);
+        verify(proxies, times(2)).refreshUser(cache.getBackingCacheClusterId(), "alice");
+        assertEquals("off -@all", validator.getValue().accessString("alice"));
+        assertFalse(validator.getValue().validatePassword("alice", "password-a"));
+        assertNull(validator.getValue().memberAuthMode("alice"));
+    }
+
+    @Test
     void validationAndFailedAllocationLeaveNoAssociationOrRecord() {
         error("UserGroupNotFound", () -> service.createServerlessCache(create("missing", "valkey", "absent")));
         error("InvalidParameterCombination", () -> service.createServerlessCache(create("memcached", "memcached", "team")));

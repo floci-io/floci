@@ -551,6 +551,33 @@ class StsQueryHandlerTest {
         assertTrue(body.contains("less than or equal to 129600"), body);
     }
 
+    @ParameterizedTest
+    @CsvSource({"3600,3601,400", "7200,7201,400", "3600,3600,200", "7200,7200,200",
+            "3600,900,200", "43200,43200,200", "3600,0,200"})
+    void webIdentityDurationUsesTheRoleLimitBeforeRegistering(int maximum, int requested, int status) {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        role.setMaxSessionDuration(maximum);
+        IamService service = mock(IamService.class);
+        when(service.findRole(anyString(), anyString())).thenReturn(Optional.of(role));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", role.getArn());
+        params.putSingle("RoleSessionName", "duration");
+        params.putSingle("WebIdentityToken", "opaque-token");
+        if (requested != 0) {
+            params.putSingle("DurationSeconds", Integer.toString(requested));
+        }
+        Response response = newHandler(service, new RegionResolver(REGION, "000000000000"))
+                .handle("AssumeRoleWithWebIdentity", params);
+        assertEquals(status, response.getStatus(), (String) response.getEntity());
+        if (status == 400) {
+            assertTrue(((String) response.getEntity()).contains("ValidationError"));
+            verify(service, never()).registerSession(anyString(), anyString(), anyString(), anyString(),
+                    any(), any(), anyString(), anyString(), anyString());
+        }
+    }
+
     @Test
     void assumeRoleWithWebIdentityRejectsDurationSecondsBelowMinimum() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();

@@ -338,10 +338,16 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
                                "workgroup 'continue running queries in the primary workgroup'), and Floci's "
                                "GetWorkGroup answers the primary one for a request naming none")
        for operation in ("GetWorkGroup", "ListNamedQueries", "ListQueryExecutions", "StartQueryExecution")},
-    **{f"athena:{operation}": ([{"type": "datacatalog", "fill": {"DataCatalogName": "CatalogName"}},
+    "athena:GetDataCatalog": ([{"type": "datacatalog", "fill": {"DataCatalogName": "Name"},
+                                "absent": {"Name": "AwsDataCatalog"}}],
+                              "Floci's GetDataCatalog answers the account's Glue Data Catalog, AwsDataCatalog, for a "
+                              "request naming no catalog, so that is the one checked"),
+    **{f"athena:{operation}": ([{"type": "datacatalog", "fill": {"DataCatalogName": "CatalogName"},
+                                 "absent": {"CatalogName": "AwsDataCatalog"}},
                                 {"type": "datacatalog", "fill": {}, "fixed": {"DataCatalogName": "AwsDataCatalog"}}],
                                "Floci's handler reads the account's Glue Data Catalog, AwsDataCatalog, whichever "
-                               "catalog CatalogName names, so that one is checked as well as the one named")
+                               "catalog CatalogName names, so that one is checked as well as the one named, and a "
+                               "request naming none is read as naming it")
        for operation in ("GetTableMetadata", "ListDatabases", "ListTableMetadata")},
     **{f"ce:{operation}": ([], "Floci serves no billing views: it answers the account's costs whichever view "
                                "BillingViewArn names, so the request is checked on `*`, as one naming no view, and a "

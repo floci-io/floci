@@ -155,7 +155,7 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `ModifyEventSubscription` | Update the specified subscription filters, topic or enabled state |
 | `DeleteEventSubscription` | Delete an event notification subscription |
 | `DescribeEventSubscriptions` | List event subscriptions filtered by name or tags |
-| `EnableSnapshotCopy` | Record cross-region snapshot copy on a cluster (`RetentionPeriod` defaults to 7, `ManualSnapshotRetentionPeriod` to -1); `DescribeClusters` then reports `ClusterSnapshotCopyStatus`. A `DestinationRegion` that is not an AWS region is refused with `UnknownSnapshotCopyRegionFault`. No snapshot is copied |
+| `EnableSnapshotCopy` | Record cross-region snapshot copy on a cluster (`RetentionPeriod` defaults to 7, `ManualSnapshotRetentionPeriod` to -1); `DescribeClusters` then reports `ClusterSnapshotCopyStatus`. A `DestinationRegion` that is not an AWS region is refused with `UnknownSnapshotCopyRegionFault`. A background sweep then copies the cluster's snapshots to that Region, see [Cross-region snapshot copy](#cross-region-snapshot-copy) |
 | `DisableSnapshotCopy` | Clear a cluster's snapshot copy configuration |
 | `ModifySnapshotCopyRetentionPeriod` | Change the automated (or, with `Manual`, the manual) snapshot copy retention period |
 | `CreateSnapshotSchedule` | Create a UTC rate or cron schedule that takes automated snapshots on associated clusters, with optional tags |
@@ -305,6 +305,18 @@ and [COPY authorization parameters](https://docs.aws.amazon.com/redshift/latest/
   `SnapshotCopyGrantNotFoundFault`, which the Redshift model pins at HTTP 400.
   `CreateTags`/`DeleteTags`/`DescribeTags` do not list that fault at all and return
   `ResourceNotFoundFault` (HTTP 404) for any missing resource, grants included.
+
+## Cross-region snapshot copy
+
+`EnableSnapshotCopy` makes a background sweep (`FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_SWEEP_INTERVAL_SECONDS`, 60 by default) copy the cluster's snapshots to the destination Region.
+
+- **Only newer snapshots are copied.** A snapshot taken before copy was enabled stays where it is, as does a snapshot of a cluster whose copy was later disabled.
+- **A copy is a separate snapshot in the destination Region.** It keeps the source's identifier, cluster identifier and type, gets an ARN in the destination Region, reports `SourceRegion`, and carries the copy grant's `KmsKeyId` when the cluster has one. `DescribeClusterSnapshots`, `DeleteClusterSnapshot`, `RestoreFromClusterSnapshot` and the tagging actions use the copy when the request's Region has one, and the snapshot itself otherwise.
+- **The dump is copied to its own file.** Copies live under `<persistent-path>/redshift-dumps/<account>/copies/<region>/`.
+- **Copies are independent of the source.** Deleting the source snapshot leaves the copy, and deleting a copy does not bring it back: the source remembers the Regions it was carried to. A copy interrupted by a restart is finished by the next sweep without a second dump.
+- **Hybrid storage can lose a copy after a crash.** The copy is written before the source is marked, but hybrid storage flushes in the background and does not report a failed write. If the copy's write fails and the source's succeeds, a crash before the next flush leaves the source marked as copied without a copy, and later sweeps skip it. Persistent and WAL storage report the failed write before the source is marked, so a crash there leaves the snapshot to be copied again.
+- **Retention.** Copied automated snapshots follow the cluster's current `RetentionPeriod`, so `ModifySnapshotCopyRetentionPeriod` changes existing ones. Copied manual snapshots keep the `ManualSnapshotRetentionPeriod` they were copied with; `-1` keeps them until deleted. Retention counts from the source snapshot's creation time.
+- **The cluster store has no Region.** A cluster restored from a copy is created in the same store as every other cluster, as before.
 
 ## Automated snapshots
 
@@ -481,6 +493,8 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 | `FLOCI_SERVICES_REDSHIFT_AUTOMATED_SNAPSHOTS_ENABLED` | `true` | Run background automated snapshot and retention sweeps |
 | `FLOCI_SERVICES_REDSHIFT_CLOUDWATCH_METRICS_ENABLED` | `true` | Publish the `AWS/Redshift` metrics of available clusters to CloudWatch once a minute, see [CloudWatch metrics](#cloudwatch-metrics) |
 | `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_SWEEP_INTERVAL_SECONDS` | `60` | Delay between background snapshot sweeps |
+| `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_ENABLED` | `true` | Run the background sweep that copies snapshots of copy-enabled clusters to their destination Region |
+| `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_SWEEP_INTERVAL_SECONDS` | `60` | Delay between snapshot copy sweeps |
 | `FLOCI_SERVICES_REDSHIFT_IMAGE_VERSION` | `postgres:15-alpine` | PostgreSQL Docker image backing each cluster |
 | `FLOCI_SERVICES_REDSHIFT_DEFAULT_PORT` | `5439` | Reported Redshift port hint (the real host port is dynamic and comes from `DescribeClusters`) |
 | `FLOCI_SERVICES_REDSHIFT_PROXY_BASE_PORT` | `7100` | Lowest host port the per-cluster auth proxies bind |
@@ -892,7 +906,7 @@ These views expose the documented Redshift column names, types, and ordering map
 - Multi-node clusters: `NodeType` and `NumberOfNodes` are stored as metadata; every cluster is a single PostgreSQL container.
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
 - Subnet groups, VPC routing, and security groups are metadata only.
-- Resize, pause/resume, and IAM authentication. Cross-region snapshot copy is stored and reported, but no snapshot is copied to another region.
+- Resize, pause/resume, and IAM authentication.
 - Cross-account role ARNs are not supported for COPY or UNLOAD.
 - The auth proxy validates the master user's password and any live `GetClusterCredentials` credential. Other non-master users pass straight through to PostgreSQL, which remains the authority for their credentials.
 - A cluster using `ManageMasterPassword` keeps its generated password in sync with the

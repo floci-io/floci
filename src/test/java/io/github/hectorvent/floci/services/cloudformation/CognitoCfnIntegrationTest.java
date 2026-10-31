@@ -528,6 +528,40 @@ class CognitoCfnIntegrationTest {
         CfnStackWaits.awaitStackDeleted(stack);
     }
 
+    /** Once SMS_MFA is enabled, only MfaConfiguration OFF turns it off, per the template reference. */
+    @Test
+    void anUpdateKeepsSmsMfaUntilMfaIsTurnedOff() throws Exception {
+        String stack = "cognito-cfn-enabled-mfas-keep-sms-it";
+        String smsConfiguration = "\"SmsConfiguration\": {\"SnsCallerArn\": \"arn:aws:iam::000000000000:role/sms\"}";
+        cloudFormation(stack, "CreateStack", enabledMfasTemplate(
+            "\"MfaConfiguration\": \"OPTIONAL\", \"EnabledMfas\": [\"SMS_MFA\", \"SOFTWARE_TOKEN_MFA\"], "
+                + smsConfiguration));
+        String poolId = outputValue(describeStacks(stack, "CREATE_COMPLETE"), "PoolId");
+
+        cloudFormation(stack, "UpdateStack", enabledMfasTemplate(
+            "\"MfaConfiguration\": \"OPTIONAL\", \"EnabledMfas\": [\"SOFTWARE_TOKEN_MFA\"], "
+                + "\"SmsAuthenticationMessage\": \"New code {####}\", "
+                + "\"SmsConfiguration\": {\"SnsCallerArn\": \"arn:aws:iam::000000000000:role/sms-v2\"}"));
+        describeStacks(stack, "UPDATE_COMPLETE");
+        cognitoAction("GetUserPoolMfaConfig", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("MfaConfiguration", equalTo("OPTIONAL"))
+            .body("SoftwareTokenMfaConfiguration.Enabled", equalTo(true))
+            .body("SmsMfaConfiguration.SmsAuthenticationMessage", equalTo("New code {####}"))
+            .body("SmsMfaConfiguration.SmsConfiguration.SnsCallerArn", equalTo("arn:aws:iam::000000000000:role/sms-v2"));
+        cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("UserPool.SmsAuthenticationMessage", equalTo("New code {####}"))
+            .body("UserPool.SmsConfiguration.SnsCallerArn", equalTo("arn:aws:iam::000000000000:role/sms-v2"));
+
+        cloudFormation(stack, "UpdateStack", enabledMfasTemplate("\"MfaConfiguration\": \"OFF\""));
+        describeStacks(stack, "UPDATE_COMPLETE");
+        assertMfa(poolId, "OFF", false, false);
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
     /** OFF with a listed factor is refused by SetUserPoolMfaConfig after the pool exists. */
     @Test
     void aRefusedEnabledMfasOnCreateRemovesThePool() throws Exception {

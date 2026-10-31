@@ -498,8 +498,9 @@ public class LambdaLayerService {
             if (s3Service == null) {
                 throw new AwsException("ServiceUnavailableException", "S3 service not available", 503);
             }
+            String s3ObjectVersion = (String) content.get("S3ObjectVersion");
             try {
-                return DeploymentPackage.read(s3Service.openObject(s3Bucket, s3Key, null), stagingDir);
+                return DeploymentPackage.read(s3Service.openObject(s3Bucket, s3Key, s3ObjectVersion), stagingDir);
             } catch (Exception e) {
                 throw new AwsException("InvalidParameterValueException",
                         "Unable to fetch layer content from s3://" + s3Bucket + "/" + s3Key + ": " + e.getMessage(), 400);

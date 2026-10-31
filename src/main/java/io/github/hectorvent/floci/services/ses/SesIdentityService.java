@@ -631,7 +631,7 @@ public class SesIdentityService implements SesTaggable {
         }
         Identity identity = identityStore.get(identityKey(region, identityValue))
                 .orElseThrow(() -> new AwsException("NotFoundException",
-                        "Email identity " + identityValue + " does not exist.", 404));
+                        "The specified email identity, " + identityValue + ", does not exist.", 404));
         if ("EXTERNAL".equals(origin)) {
             identity.setDkimSigningAttributesOrigin("EXTERNAL");
             // Clear the Easy DKIM tokens and reset the status: Floci can't verify a BYODKIM selector,

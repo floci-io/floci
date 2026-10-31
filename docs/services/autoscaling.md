@@ -56,8 +56,22 @@ scale-in behavior, and do not complete an instance refresh. Unexpected runtime
 failures in ordinary scale-out, and save and cleanup failures, still propagate.
 Refresh launch failures retain the original replacement attempt and appear as
 failed scaling activities while other replacements can continue. Refresh and
-ordinary launches share the same launch settings, including template block-device
-mappings; accepted refresh launches keep their recorded source identity.
+ordinary launches share the same launch settings, including the block device mappings
+of the launch template or launch configuration; accepted refresh launches keep their
+recorded source identity. A launch template or launch configuration a CloudFormation
+stack creates carries no block device mappings yet, so its instances get the AMI's
+devices alone. `CreateLaunchConfiguration` refuses a block device mapping without a
+`DeviceName`, or with a Boolean or integer member it cannot parse, and stores the rest as
+given; the mappings are otherwise checked only when a group launches from the
+configuration, by the checks `RunInstances` applies. Neither step applies the ranges the
+Auto Scaling model sets for `VolumeSize`, `Iops` and `Throughput`, and the volume types a
+launch accepts are EC2's, `io2` included. A mapping EC2 refuses, such as an invalid device
+name or a snapshot that does not exist, fails that launch and is recorded as a failed
+scaling activity.
+
+An EBS mapping supplied by a launch configuration defaults `DeleteOnTermination` to
+`true`, even when the AMI's mapping sets it to `false`. An explicit `false` in the
+launch configuration keeps the volume after termination.
 
 For groups configured only with Availability Zones, Floci preserves its unpinned
 EC2 launch behavior and counts each member under the requested zone. This permits

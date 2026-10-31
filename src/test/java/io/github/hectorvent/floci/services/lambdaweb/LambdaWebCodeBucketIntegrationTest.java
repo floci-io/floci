@@ -127,6 +127,26 @@ class LambdaWebCodeBucketIntegrationTest {
         accepted(older);
     }
 
+    @Test
+    void aRevisionFailsForGoodOnceLambdaCanNoLongerReadItsCode() {
+        s3Service.putBucketVersioning(bucket, "Enabled");
+        put(bucket);
+        LambdaWebCodeBuckets.allowLambda(s3Service, bucket);
+        String revisionId = createRevision(null).statusCode(202).extract().path("revisionId");
+        String revision = BASE + "/web-functions/" + functionName + "/revisions/" + revisionId;
+        given().header("Authorization", ROOT).when().get(revision)
+                .then().statusCode(200).body("state", equalTo("Active"));
+
+        s3Service.deleteBucketPolicy(bucket);
+        given().header("Authorization", ROOT).when().get(revision)
+                .then().statusCode(200)
+                .body("state", equalTo("Failed"))
+                .body("stateReason", equalTo(lambdaRefusal()));
+        LambdaWebCodeBuckets.allowLambda(s3Service, bucket);
+        given().header("Authorization", ROOT).when().get(revision)
+                .then().statusCode(200).body("state", equalTo("Failed"));
+    }
+
     private String lambdaRefusal() {
         return "Lambda service principal lambda.amazonaws.com does not have s3:GetObject and s3:GetObjectVersion"
                 + " permission on s3://" + bucket + "/app.zip. Update the bucket policy to grant the Lambda service"

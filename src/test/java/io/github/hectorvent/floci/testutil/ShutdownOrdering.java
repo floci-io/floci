@@ -15,14 +15,25 @@ public final class ShutdownOrdering {
     private ShutdownOrdering() {
     }
 
-    /** The class's {@code onStop(ShutdownEvent)} observer must carry a priority below APPLICATION. */
+    /** The class's {@code onStop(ShutdownEvent)} observer, declared or inherited, must carry a priority below APPLICATION. */
     public static void assertStopsBeforeStorageCloses(Class<?> owner) throws NoSuchMethodException {
-        Method onStop = owner.getDeclaredMethod("onStop", ShutdownEvent.class);
+        Method onStop = findOnStop(owner);
         Annotation priority = Arrays.stream(onStop.getParameterAnnotations()[0])
                 .filter(Priority.class::isInstance)
                 .findFirst()
                 .orElseThrow(() -> new AssertionError(owner.getSimpleName() + ".onStop has no @Priority"));
         assertTrue(((Priority) priority).value() < Interceptor.Priority.APPLICATION,
                 owner.getSimpleName() + ".onStop must run before EmulatorLifecycle.onStop");
+    }
+
+    private static Method findOnStop(Class<?> owner) throws NoSuchMethodException {
+        for (Class<?> type = owner; type != null; type = type.getSuperclass()) {
+            try {
+                return type.getDeclaredMethod("onStop", ShutdownEvent.class);
+            } catch (NoSuchMethodException ignored) {
+                // Not declared here: an observer shared through a base class sits further up.
+            }
+        }
+        throw new NoSuchMethodException(owner.getName() + ".onStop(ShutdownEvent)");
     }
 }

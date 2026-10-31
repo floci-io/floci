@@ -130,6 +130,59 @@ Gateway Load Balancer listeners require omitted `Port` and `Protocol` fields on 
 - `routing.http.preserve_host_header.enabled` (default `false`) controls whether the original client Host header is forwarded to targets unchanged, or replaced with the target's `host:port`.
 - `RegisterTargets` rejects link-local and cloud instance-metadata addresses (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`) with `InvalidTarget`, and the load balancer and its health checks refuse to connect to them. Loopback and private addresses stay reachable so a load balancer can front a neighbouring container.
 
+## Forwarding and network-security boundaries
+
+An accepted NLB, listener, or target-group declaration confirms control-plane storage.
+It does not establish that the declared transport is implemented. ELBv2 currently runs
+an HTTP proxy on its listener sockets, including sockets declared as NLB listeners.
+
+| Declared listener protocol | Local forwarding behavior | Target types and transport |
+|---|---|---|
+| `HTTP` | Parses and forwards HTTP requests; supports WebSocket upgrades. | `instance` resolves an EC2 private address; `ip` uses the registered address. Backend requests use plain HTTP. `lambda` invokes the registered function with an ALB event. |
+| `HTTPS` | Terminates TLS with an ACM or IAM certificate, then handles HTTP as above. | Same targets as HTTP; an HTTPS target-group setting does not enable TLS to the backend. |
+| `TCP` | Stored, but the local socket still parses HTTP. Arbitrary TCP byte forwarding is unsupported. | A successful HTTP request through a TCP-labelled listener proves only HTTP forwarding. |
+| `TLS` | Stored; certificate references are checked, but only `HTTPS` enables TLS on the local socket. TLS termination and TLS pass-through for NLB listeners are unsupported. | No NLB TLS backend transport is implemented. |
+| `UDP`, `TCP_UDP` | Stored declarations do not create UDP sockets or UDP forwarding. | Datagram targets are unsupported. |
+| Gateway `GENEVE` | Portless control-plane metadata only. | No GENEVE packet forwarding. |
+
+`alb` target-type declarations do not implement NLB-to-ALB chaining. Use the HTTP/HTTPS
+rows for local application routing. Do not use a successful registration or an HTTP
+smoke test as evidence of TCP, TLS, UDP, or NLB target-type compatibility. There is no
+supported non-HTTP TCP echo recipe for this implementation. Unsupported transports
+are not consistently rejected by the management API: clients can instead see HTTP
+parse errors, failed TLS handshakes, or timeouts on the listener socket.
+
+### Health checks
+
+For non-Lambda targets, the checker sends a **plain HTTP GET** to `HealthCheckPath`
+on `HealthCheckPort`, or the target's traffic port when configured as `traffic-port`.
+The response-code matcher and healthy/unhealthy thresholds affect target health.
+`HealthCheckProtocol=TCP` does not perform a TCP-only probe, and `HTTPS` does not enable
+TLS for the probe. Lambda targets are not actively probed. In ELBv2 mock mode, sockets
+and active monitoring are disabled. The proxy can route to initial targets and fails
+open to registered targets when none are healthy, so a successful request alone does
+not prove that a health check passed.
+
+### Security groups and PrivateLink
+
+Load-balancer security-group IDs are stored and returned by `CreateLoadBalancer`,
+`DescribeLoadBalancers`, and `SetSecurityGroups`. The ELBv2 proxy and health checker do
+not evaluate security-group ingress or egress rules, target security-group references,
+network ACLs, or VPC/subnet routing. An `internal` scheme does not create a private
+network boundary on the host. These declarations do not isolate reachable targets.
+
+`EnforceSecurityGroupInboundRulesOnPrivateLinkTraffic` is not handled by
+`SetSecurityGroups`, is not returned as an enforcement setting, and does not filter
+traffic. PrivateLink endpoint declarations do not add a separate ELBv2 ingress path
+or apply the AWS client-IP-based filtering contract. On AWS, security groups filter
+both client and target traffic, and the PrivateLink setting controls inbound-rule
+application; see [NLB security groups](https://docs.aws.amazon.com/elasticloadbalancing/latest/network/load-balancer-security-groups.html).
+
+No allowed/denied traffic checks are claimed for these unimplemented controls.
+Use host firewalls, Docker network isolation, and published-port restrictions to
+control access to the emulator. Test AWS security-group and PrivateLink enforcement
+against AWS when that behavior is part of the application contract.
+
 ## ARN Format
 
 ```

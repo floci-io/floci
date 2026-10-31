@@ -157,7 +157,7 @@ public class TargetDispatcher implements Resettable {
 
     private void attempt(Delivery delivery, Target target, Instant now) {
         try {
-            invoker.invokeTarget(target, delivery.eventJson(), delivery.region());
+            invoker.invokeTarget(target, delivery.eventJson(), delivery.region(), delivery.ruleArn());
         } catch (Exception e) {
             if (delivery.generation() != generation.get()) {
                 return;

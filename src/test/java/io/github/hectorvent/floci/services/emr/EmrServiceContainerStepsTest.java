@@ -63,7 +63,10 @@ class EmrServiceContainerStepsTest {
     void aStepRunsInAContainerFromWhenItStartsUntilItsDriverExits() {
         EmrCluster requested = cluster("real", true, sparkStep("report", "CONTINUE"));
         requested.setConfigurations("""
-                [{"Classification": "spark-defaults", "Properties": {"spark.executor.cores": "2"}}]""");
+                [{"Classification": "spark-defaults", "Properties": {"spark.executor.cores": "2"}},
+                 {"Classification": "spark-hive-site", "Properties": {"hive.metastore.glue.catalogid": "111122223333"}},
+                 {"Classification": "spark-env", "Configurations": [
+                   {"Classification": "export", "Properties": {"PYSPARK_PYTHON": "/usr/bin/python3.11"}}]}]""");
         EmrCluster cluster = service.runJobFlow(requested, REGION);
         String stepId = cluster.getSteps().get(0).getId();
 
@@ -88,10 +91,12 @@ class EmrServiceContainerStepsTest {
         assertNull(job.dockerNetwork());
         assertEquals(List.of(REPORT, "s3://bucket/out/"), job.application());
         assertNull(job.command());
-        assertEquals(Map.of("spark.executor.cores", "2"), job.sparkDefaults());
+        assertEquals(Map.of("spark.executor.cores", "2", "spark.hadoop.hive.metastore.glue.catalogid", "111122223333"),
+                job.sparkDefaults());
         assertEquals(Duration.ZERO, job.timeout());
         assertNull(job.logFolder());
         assertNull(job.cloudWatchLogs());
+        assertEquals(Map.of("PYSPARK_PYTHON", "/usr/bin/python3.11"), job.environment());
     }
 
     @Test

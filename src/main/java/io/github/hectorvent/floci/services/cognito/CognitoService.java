@@ -850,6 +850,10 @@ public class CognitoService implements ResourceProvider {
      * how CloudFormation applies a user pool's EnabledMfas. The settings are built on a copy and
      * stored in one write, so a concurrent sign-in never reads the pool between its old and new
      * MFA settings, and under the pool lock, so a concurrent tag or update is kept.
+     * SMS is the exception: once enabled, only MfaConfiguration OFF turns it off, as the
+     * AWS::Cognito::UserPool reference documents, so an SMS setting that is not given is kept,
+     * with the pool's current message and SMS configuration rather than the ones it was enabled
+     * with, since an update may have just changed them.
      */
     public UserPool replaceUserPoolMfaConfig(String id, String mfaConfiguration,
                                              Boolean softwareTokenMfaEnabled,
@@ -857,6 +861,16 @@ public class CognitoService implements ResourceProvider {
                                              Map<String, Object> emailMfaConfiguration) {
         synchronized (poolLock(id)) {
             UserPool pool = MAPPER.convertValue(describeUserPool(id), UserPool.class);
+            if (smsMfaConfiguration == null && mfaConfiguration != null && !"OFF".equals(mfaConfiguration)
+                    && pool.getSmsMfaConfiguration() != null) {
+                smsMfaConfiguration = new LinkedHashMap<>(pool.getSmsMfaConfiguration());
+                if (pool.getSmsAuthenticationMessage() != null) {
+                    smsMfaConfiguration.put("SmsAuthenticationMessage", pool.getSmsAuthenticationMessage());
+                }
+                if (pool.getSmsConfiguration() != null) {
+                    smsMfaConfiguration.put("SmsConfiguration", pool.getSmsConfiguration());
+                }
+            }
             applyMfaConfig(pool, mfaConfiguration, softwareTokenMfaEnabled, smsMfaConfiguration,
                     emailMfaConfiguration, null, true);
             poolStore.put(id, pool);
@@ -2012,7 +2026,9 @@ public class CognitoService implements ResourceProvider {
 
     /**
      * AWS accepts only an issued ACM certificate from us-east-1 behind a custom domain, and answers
-     * anything else with this one message.
+     * anything else with this one message. ACM finds a certificate by its id alone, so the ARN's
+     * partition and account are checked here: a certificate in another partition or account is
+     * never the caller's.
      */
     private void requireUsableCertificate(String certificateArn) {
         AwsArnUtils.Arn arn;
@@ -2022,6 +2038,8 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
         }
         if (!"acm".equals(arn.service()) || !CERTIFICATE_REGION.equals(arn.region())
+                || !arn.partition().equals(regionResolver.getPartition())
+                || !arn.accountId().equals(regionResolver.getAccountId())
                 || !arn.resource().startsWith("certificate/")) {
             throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
         }
