@@ -955,11 +955,33 @@ public class RedshiftService implements ManagedSecretRotator {
             createSnapshot(finalSnapshotIdentifier, identifier, retentionPeriod);
         }
 
-        Cluster removed = mutate(() -> removeCluster(identifier, cluster));
+        Cluster removed;
+        try {
+            removed = mutate(() -> removeCluster(identifier, cluster));
+        } catch (RuntimeException e) {
+            if (!skipSnapshot) {
+                discardFinalSnapshotOfSurvivingCluster(identifier, finalSnapshotIdentifier, e);
+            }
+            throw e;
+        }
         emitEvent(RedshiftEventCatalog.CLUSTER_DELETED, identifier, "Amazon Redshift cluster '" + identifier
                 + "' has been deleted at " + eventTime() + ". A final snapshot was "
                 + (skipSnapshot ? "not " : "") + "saved.");
         return removed;
+    }
+
+    // The cluster is still there, so the caller will retry with the same final snapshot identifier;
+    // a leftover snapshot would turn that retry into ClusterSnapshotAlreadyExists.
+    private void discardFinalSnapshotOfSurvivingCluster(String identifier, String finalSnapshotIdentifier,
+                                                        RuntimeException deletionFailure) {
+        if (clusters.get(identifier).isEmpty()) {
+            return;
+        }
+        try {
+            mutate(() -> removeSnapshot(finalSnapshotIdentifier));
+        } catch (RuntimeException cleanupFailure) {
+            deletionFailure.addSuppressed(cleanupFailure);
+        }
     }
 
     private Cluster removeCluster(String identifier, Cluster cluster) {

@@ -98,6 +98,20 @@ class RedshiftFinalSnapshotStorageTest {
         verifyNoInteractions(fixture.proxy());
     }
 
+    @Test
+    void deleteClusterRetryAfterProxyStopFailureReusesFinalSnapshotIdentifier() {
+        Fixture fixture = fixture();
+        seedCluster(fixture);
+        doThrow(new IllegalStateException("proxy stop failed")).doNothing()
+                .when(fixture.proxy()).stopProxy(anyString());
+
+        assertThrows(AwsException.class, () -> delete(fixture));
+        assertEquals("available", fixture.service().describeClusters("final-cluster").getFirst().getClusterStatus());
+
+        assertDoesNotThrow(() -> delete(fixture));
+        assertTrue(fixture.service().describeClusters(null).isEmpty());
+    }
+
     private Fixture fixture() {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.storage().persistentPath()).thenReturn(directory.toString());
