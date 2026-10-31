@@ -1484,7 +1484,9 @@ public class RdsQueryHandler {
             DbCluster cluster = service.modifyDbCluster(id, newPassword, iamEnabled,
                     serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
                     manageMasterUserPassword, masterUserSecretKmsKeyId,
-                    params.getFirst("DBClusterParameterGroupName"), region);
+                    params.getFirst("DBClusterParameterGroupName"),
+                    Boolean.TRUE.equals(parseOptionalBoolean(params, "RotateMasterUserPassword")),
+                    Boolean.TRUE.equals(parseOptionalBoolean(params, "ApplyImmediately")), region);
             if (enableHttpEndpoint != null) {
                 cluster = service.setHttpEndpoint(region, id, enableHttpEndpoint);
             }
@@ -1556,9 +1558,9 @@ public class RdsQueryHandler {
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBParameterGroupName is required.", AwsNamespaces.RDS, 400);
         }
-        Map<String, String> parameters = parseParameterOverrides(params);
+        Map<String, String> parameters = parseParameterMember(params, "ParameterValue");
         try {
-            DbParameterGroup group = service.modifyDbParameterGroup(name, parameters, region);
+            DbParameterGroup group = service.modifyDbParameterGroup(name, parameters, parseApplyMethods(params), region);
             String result = new XmlBuilder()
                     .elem("DBParameterGroupName", group.getDbParameterGroupName())
                     .build();
@@ -1569,26 +1571,43 @@ public class RdsQueryHandler {
     }
 
     /**
-     * Parses the {@code Parameters} list of a modify request. The RDS model declares the list
+     * ApplyMethod of each modified parameter; omitted means the provider default. The RDS model
+     * declares the {@code ApplyMethod} enum as {@code immediate | pending-reboot}, so anything else
+     * is refused before the group is touched.
+     */
+    private static Map<String, String> parseApplyMethods(MultivaluedMap<String, String> params) {
+        Map<String, String> methods = parseParameterMember(params, "ApplyMethod");
+        for (Map.Entry<String, String> e : methods.entrySet()) {
+            if (!"immediate".equals(e.getValue()) && !"pending-reboot".equals(e.getValue())) {
+                throw new AwsException("InvalidParameterValue", "Invalid ApplyMethod '" + e.getValue()
+                        + "' for parameter " + e.getKey() + ". Valid values: immediate, pending-reboot.", 400);
+            }
+        }
+        return methods;
+    }
+
+    /**
+     * Parses {@code member} of each entry in the {@code Parameters} list of a modify request, keyed
+     * by name; entries without it are skipped. The RDS model declares the list
      * with {@code locationName: Parameter}, so every SDK and the CLI send
      * {@code Parameters.Parameter.N.*}; the {@code Parameters.member.N.*} form is the plain Query
      * encoding older or hand-built callers use, and is accepted as well.
      */
-    private static Map<String, String> parseParameterOverrides(MultivaluedMap<String, String> params) {
-        Map<String, String> parameters = new LinkedHashMap<>();
+    private static Map<String, String> parseParameterMember(MultivaluedMap<String, String> params, String member) {
+        Map<String, String> values = new LinkedHashMap<>();
         for (String prefix : List.of("Parameters.Parameter", "Parameters.member")) {
             for (int n = 1; ; n++) {
                 String paramName = params.getFirst(prefix + "." + n + ".ParameterName");
                 if (paramName == null) {
                     break;
                 }
-                String paramValue = params.getFirst(prefix + "." + n + ".ParameterValue");
-                if (paramValue != null) {
-                    parameters.put(paramName, paramValue);
+                String value = params.getFirst(prefix + "." + n + "." + member);
+                if (value != null) {
+                    values.put(paramName, value);
                 }
             }
         }
-        return parameters;
+        return values;
     }
 
     private Response handleCopyDbParameterGroup(
@@ -1662,6 +1681,8 @@ public class RdsQueryHandler {
                 xml.start("member")
                    .elem("ParameterName", entry.getKey())
                    .elem("ParameterValue", entry.getValue())
+                   .elem("Source", "user")
+                   .elem("ApplyMethod", group.getApplyMethods().getOrDefault(entry.getKey(), "immediate"))
                    .elem("IsModifiable", true)
                    .end("member");
             }
@@ -1733,10 +1754,10 @@ public class RdsQueryHandler {
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBClusterParameterGroupName is required.", AwsNamespaces.RDS, 400);
         }
-        Map<String, String> parameters = parseParameterOverrides(params);
+        Map<String, String> parameters = parseParameterMember(params, "ParameterValue");
         try {
             DbClusterParameterGroup group = service.modifyDbClusterParameterGroup(
-                    name, parameters, region);
+                    name, parameters, parseApplyMethods(params), region);
             String result = new XmlBuilder()
                     .elem("DBClusterParameterGroupName", group.getDbClusterParameterGroupName())
                     .build();
@@ -1802,6 +1823,8 @@ public class RdsQueryHandler {
                 xml.start("member")
                    .elem("ParameterName", entry.getKey())
                    .elem("ParameterValue", entry.getValue())
+                   .elem("Source", "user")
+                   .elem("ApplyMethod", group.getApplyMethods().getOrDefault(entry.getKey(), "immediate"))
                    .elem("IsModifiable", true)
                    .end("member");
             }

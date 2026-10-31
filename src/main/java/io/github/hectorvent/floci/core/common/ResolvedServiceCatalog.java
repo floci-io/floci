@@ -829,6 +829,11 @@ public class ResolvedServiceCatalog {
     }
 
     public Optional<ServiceDescriptor> byCredentialScope(String credentialScope) {
+        // IoT also accepts execute-api signatures, but its explicit REST routes identify IoT.
+        // Without a matched service route, this signing scope belongs to API Gateway.
+        if ("execute-api".equals(credentialScope)) {
+            return catalog.byExternalKey("apigateway");
+        }
         return catalog.byCredentialScope(credentialScope);
     }
 

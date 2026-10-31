@@ -128,6 +128,7 @@ class SamTransformProcessor {
         // AWS::Serverless::HttpApi via ApiId: {Ref: <logicalId>}) before either side is expanded,
         // so expansion order between the Function and the HttpApi resource doesn't matter.
         List<HttpApiRoute> httpApiRoutes = collectHttpApiRoutes(samLogicalIds, resources);
+        Map<String, String> generatedReferences = new LinkedHashMap<>();
 
         for (String logicalId : samLogicalIds) {
             JsonNode resDef = resources.get(logicalId);
@@ -141,8 +142,11 @@ class SamTransformProcessor {
             // copyResourceLevelAttributes runs once per arm, right after that arm builds its node.
             switch (type) {
                 case "AWS::Serverless::Function" -> {
-                    expandServerlessFunction(logicalId, mergeGlobals(globals, "Function", properties),
+                    String aliasId = expandServerlessFunction(logicalId, mergeGlobals(globals, "Function", properties),
                             resDef, expanded, expandedResources, parameterValues);
+                    if (aliasId != null) {
+                        generatedReferences.put(logicalId + ".Alias", aliasId);
+                    }
                     copyResourceLevelAttributes(resDef, (ObjectNode) expandedResources.path(logicalId));
                 }
                 case "AWS::Serverless::SimpleTable" -> {
@@ -180,7 +184,26 @@ class SamTransformProcessor {
             generateImplicitApi(apiRoutes, globals(template), expandedResources);
         }
 
+        rewriteGeneratedReferences(expanded, generatedReferences);
         return expanded;
+    }
+
+    private void rewriteGeneratedReferences(JsonNode node, Map<String, String> generatedReferences) {
+        if (node.isObject()) {
+            ObjectNode object = (ObjectNode) node;
+            if (object.size() == 1 && object.path("Ref").isTextual()) {
+                String generatedId = generatedReferences.get(object.path("Ref").asText());
+                if (generatedId != null) {
+                    object.put("Ref", generatedId);
+                }
+                return;
+            }
+            object.elements().forEachRemaining(child -> rewriteGeneratedReferences(child, generatedReferences));
+        } else if (node.isArray()) {
+            for (JsonNode child : node) {
+                rewriteGeneratedReferences(child, generatedReferences);
+            }
+        }
     }
 
     private JsonNode globals(JsonNode template) {
@@ -952,7 +975,7 @@ class SamTransformProcessor {
         return base;
     }
 
-    private void expandServerlessFunction(String logicalId, JsonNode properties, JsonNode source,
+    private String expandServerlessFunction(String logicalId, JsonNode properties, JsonNode source,
                                           ObjectNode template, ObjectNode resources,
                                           Map<String, String> parameterValues) {
         resources.remove(logicalId);
@@ -984,6 +1007,7 @@ class SamTransformProcessor {
                 expandFunctionEvent(logicalId, entry.getKey(), entry.getValue(), resources);
             }
         }
+        return aliasLogicalId;
     }
 
     /**

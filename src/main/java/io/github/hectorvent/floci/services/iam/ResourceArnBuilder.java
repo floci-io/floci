@@ -203,6 +203,10 @@ public class ResourceArnBuilder {
             case "dsql"           -> List.of(buildDsqlArn(path, ctx, region, accountId, partition));
             case "eks"            -> List.of(buildEksArn(path, ctx, region, accountId));
             case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
+            case "route53"        -> "route53:GetReusableDelegationSet".equals(operation)
+                    || "route53:DeleteReusableDelegationSet".equals(operation)
+                    ? List.of(buildRoute53DelegationSetArn(ctx, partition))
+                    : namedResources(credentialScope, operation, ctx, region, accountId, partition);
             default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
         };
     }
@@ -231,6 +235,17 @@ public class ResourceArnBuilder {
             }
         }
         return null;
+    }
+
+    private String buildRoute53DelegationSetArn(ContainerRequestContext ctx, String partition) {
+        String id = ctx.getUriInfo().getPathParameters().getFirst("Id");
+        if (id == null) {
+            return "*";
+        }
+        if (id.startsWith("/delegationset/")) {
+            id = id.substring(15);
+        }
+        return AwsArnUtils.Arn.global(partition, "route53", "", "delegationset/" + id).toString();
     }
 
     private String buildResourceGroupArn(ContainerRequestContext ctx, String region, String accountId) {

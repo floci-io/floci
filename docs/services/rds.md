@@ -779,6 +779,31 @@ Associations are recorded, not exercised: Floci does not check the role in IAM a
 role's credentials to the database, so an `aws_s3` import still needs credentials of its own. Deleting a cluster or instance drops its
 associations, and snapshots, restores and read replicas start without any.
 
+## Aurora managed password rotation
+
+`ModifyDBCluster` supports `RotateMasterUserPassword=true` for an existing
+RDS-managed master-user secret. Set `ApplyImmediately=true`; requests without it,
+without an existing managed secret, with `MasterUserPassword`, or disabling
+`ManageMasterUserPassword` in the same call are rejected before credentials change.
+
+The local operation completes synchronously: it changes the running database's
+password, publishes a new `AWSCURRENT` secret version, and updates the cluster and
+member proxy credentials. The preceding version becomes `AWSPREVIOUS`. If secret
+publication fails, Floci attempts to restore the previous database credential and
+secret version labels. A backend failure leaves the previous secret current.
+Metadata-only RDS mock mode updates the secret and stored credentials without
+starting a database. Scheduled RDS-owned rotation through Secrets Manager remains
+outside this `ModifyDBCluster` operation.
+
+```bash
+aws --endpoint-url http://localhost:4566 rds modify-db-cluster \
+  --db-cluster-identifier example --rotate-master-user-password --apply-immediately
+```
+
+Use the managed secret's new current value for subsequent SQL connections. Existing
+database sessions may remain connected after rotation, as with a normal password
+change; verify with fresh connections.
+
 ## Aurora managed password opt-out
 
 When `ModifyDBCluster` disables `ManageMasterUserPassword` while the managed secret has

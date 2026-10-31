@@ -7,5 +7,5 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * {@code {"sourceContainer": ..., "readOnly": ...}}.
  */
 @RegisterForReflection
-public record VolumeFrom(String sourceContainer, boolean readOnly) {
+public record VolumeFrom(String sourceContainer, Boolean readOnly) {
 }

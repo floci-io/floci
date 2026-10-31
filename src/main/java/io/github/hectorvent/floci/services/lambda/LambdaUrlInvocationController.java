@@ -96,8 +96,9 @@ public class LambdaUrlInvocationController {
     @DELETE
     @Path("/{proxy: .*}")
     public Response handleDelete(@PathParam("urlId") String urlId, @PathParam("proxy") String proxy,
-                                 @Context HttpHeaders headers, @Context UriInfo uriInfo) {
-        return invoke("DELETE", urlId, proxy, headers, uriInfo, null);
+                                 @Context HttpHeaders headers, @Context UriInfo uriInfo,
+                                 byte[] body) {
+        return invoke("DELETE", urlId, proxy, headers, uriInfo, body);
     }
 
     @PATCH

@@ -149,6 +149,31 @@ class IamEnforcementFilterTest {
                 catalog, scpProvider, sessionAccountLookup, null, null, clock, resourceInfo);
     }
 
+    @ParameterizedTest
+    @CsvSource({"aws-cn,GetReusableDelegationSet", "aws-cn,DeleteReusableDelegationSet",
+            "aws-us-gov,GetReusableDelegationSet", "aws-us-gov,DeleteReusableDelegationSet"})
+    void delegationSetAuthorizationKeepsTheRequestPartitionForAnUnknownRegion(String partition, String operation) {
+        ContainerRequestContext request = mock(ContainerRequestContext.class);
+        String action = "route53:" + operation;
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASESSION/20260629/future-1/route53/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("222233334444");
+        requestContext.setRegion("future-1");
+        requestContext.setPartition(partition);
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASESSION");
+        when(request.getHeaderString("Authorization")).thenReturn(auth);
+        when(actionRegistry.resolve("route53", request)).thenReturn(action);
+        when(iamService.resolveCallerContext(eq("ASIASESSION"), any())).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"route53:*","Resource":"*"}]}
+                """)));
+        when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), eq(action), any(), isNull()))
+                .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
+
+        newFilter().filter(request);
+
+        verify(arnBuilder).buildResources("route53", action, request, "future-1", "222233334444", partition);
+    }
+
     @Test
     void filterBuildsResourceArnWithRequestContextAccount() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
@@ -2048,6 +2073,31 @@ class IamEnforcementFilterTest {
         assertTrue(body.contains("<Type>Sender</Type>"), body);
         assertTrue(body.contains("User is not authorized to perform: iam:ListUsers"), body);
         assertTrue(body.contains("<RequestId>"), body);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"REST_XML, application/xml", "REST_JSON, application/json"})
+    void restDenialUsesTheServiceCatalogProtocol(ServiceProtocol serviceProtocol, String expectedContentType) {
+        ContainerRequestContext request = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20261030/us-east-1/catalog-service/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        ServiceDescriptor descriptor = descriptor("catalog-service", serviceProtocol, Set.of("catalog-service"), null);
+        requestContext.setAccountId("000000000000");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(request.getHeaderString("Authorization")).thenReturn(auth);
+        stubClaim(request, WireProtocol.REST, descriptor);
+        when(catalog.byCredentialScope("catalog-service")).thenReturn(Optional.of(descriptor));
+        when(actionRegistry.resolveRoute("catalog-service", request)).thenReturn("catalog-service:Read");
+        when(iamService.resolveCallerContext(eq("AKIAUSER"), any())).thenReturn(CallerContext.of(List.of()));
+        when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), eq("catalog-service:Read"), any(), any()))
+                .thenReturn(IamPolicyEvaluator.Decision.DENY);
+
+        newFilter().filter(request);
+
+        ArgumentCaptor<Response> response = ArgumentCaptor.captor();
+        verify(request).abortWith(response.capture());
+        assertEquals(403, response.getValue().getStatus());
+        assertEquals(MediaType.valueOf(expectedContentType), response.getValue().getMediaType());
     }
 
     /**

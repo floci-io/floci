@@ -132,6 +132,48 @@ class LambdaWebDataPlaneIntegrationTest {
     }
 
     @Test
+    void aRevisionWhoseCodeVersionIsDeletedFailsForGood() {
+        String functionName = "dp-lost-" + Long.toString(System.nanoTime(), 36);
+        String domain = createFunction(functionName);
+        String versionId = s3Service.headObject(BUCKET, "app.zip").getVersionId();
+        String endpoint = BASE + "/web-functions/" + functionName + "/endpoints/dev";
+        String revisionId = given().when().get(endpoint).then().statusCode(200)
+                .extract().path("revisionWeights[0].revisionId");
+        String revision = BASE + "/web-functions/" + functionName + "/revisions/" + revisionId;
+
+        // A delete marker leaves the version the revision runs.
+        s3Service.deleteObject(BUCKET, "app.zip");
+        given().when().get(revision).then().statusCode(200).body("state", equalTo("Active"));
+
+        s3Service.deleteObject(BUCKET, "app.zip", versionId);
+        Response response = given().header("Host", domain).when().get("/");
+        response.then().statusLine("HTTP/1.1 409 Conflict")
+                .header("content-type", "text/html")
+                .header("connection", "keep-alive")
+                .header("lambda-web-error-type", "Platform.RevisionNotActive")
+                .header("content-length", "225")
+                .body(equalTo(LambdaWebErrorPages.html(LambdaWebErrorPages.REVISION_NOT_ACTIVE,
+                        response.header("lambda-web-request-id"))));
+        String reason = "The specified S3 object does not exist: s3://" + BUCKET + "/app.zip (versionId=" + versionId
+                + "). Verify the object exists and the versionId is correct.";
+        given().when().get(revision).then().statusCode(200)
+                .body("state", equalTo("Failed"))
+                .body("stateReason", equalTo(reason));
+
+        s3Service.putObject(BUCKET, "app.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of());
+        given().when().get(revision).then().statusCode(200).body("state", equalTo("Failed"));
+        given().contentType("application/json")
+                .body("{\"autoDeploymentMode\": \"Disabled\", \"revisionWeights\": [{\"revisionId\": \"" + revisionId
+                        + "\", \"weight\": 100}]}")
+                .when().patch(endpoint)
+                .then().statusCode(409)
+                .body("message", equalTo("The revision " + revisionId + " is in Failed state and cannot be deployed."
+                        + " Only revisions in Active state can be deployed."));
+
+        given().when().delete(BASE + "/web-functions/" + functionName).then().statusCode(204);
+    }
+
+    @Test
     void anEnvironmentDoesNotStartWhenLambdaCanNoLongerAssumeTheRole() {
         String functionName = "dp-role-" + Long.toString(System.nanoTime(), 36);
         String domain = createFunction(functionName, "ApplicationManaged", LambdaWebZips.indexJs(""),

@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.glue.model.ConnectionPasswordEncrypti
 import io.github.hectorvent.floci.services.glue.model.Crawler;
 import io.github.hectorvent.floci.services.glue.model.CrawlerTargets;
 import io.github.hectorvent.floci.services.glue.model.DataCatalogEncryptionSettings;
+import io.github.hectorvent.floci.services.glue.model.DataQualityRuleset;
 import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.EncryptionAtRest;
 import io.github.hectorvent.floci.services.glue.model.GluePolicy;
@@ -112,6 +113,7 @@ class GlueServiceTest {
                 new InMemoryStorage<String, GluePolicy>(),
                 new InMemoryStorage<String, DataCatalogEncryptionSettings>(),
                 new InMemoryStorage<String, SecurityConfiguration>(),
+                new InMemoryStorage<String, DataQualityRuleset>(),
                 new InMemoryStorage<String, Trigger>(),
                 new InMemoryStorage<String, Workflow>(),
                 schemaRegistryService, regionResolver, new ResourceGroupsTaggingService(null), kmsService);

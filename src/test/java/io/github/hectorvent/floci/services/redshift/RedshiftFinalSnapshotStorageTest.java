@@ -98,6 +98,51 @@ class RedshiftFinalSnapshotStorageTest {
         verifyNoInteractions(fixture.proxy());
     }
 
+    @Test
+    void deleteClusterRetryAfterProxyStopFailureReusesFinalSnapshotIdentifier() {
+        Fixture fixture = fixture();
+        seedCluster(fixture);
+        doThrow(new IllegalStateException("proxy stop failed")).doNothing()
+                .when(fixture.proxy()).stopProxy(anyString());
+
+        assertThrows(AwsException.class, () -> delete(fixture));
+        assertEquals("available", fixture.service().describeClusters("final-cluster").getFirst().getClusterStatus());
+
+        assertDoesNotThrow(() -> delete(fixture));
+        assertTrue(fixture.service().describeClusters(null).isEmpty());
+    }
+
+    @Test
+    void deleteClusterKeepsFinalSnapshotWhenContainerTeardownFails() {
+        Fixture fixture = fixture();
+        seedCluster(fixture);
+        doThrow(new IllegalStateException("container removal failed"))
+                .when(fixture.manager()).stop(anyString(), anyString());
+
+        assertThrows(IllegalStateException.class, () -> delete(fixture));
+
+        assertTrue(fixture.service().getSnapshot("final-backup").isPresent());
+        assertTrue(Files.exists(directory.resolve("redshift-dumps").resolve(ACCOUNT).resolve("final-backup.sql")));
+    }
+
+    @Test
+    void deleteClusterAttachesFinalSnapshotCleanupFailureToTheProxyStopFailure() {
+        Fixture fixture = fixture();
+        seedCluster(fixture);
+        IllegalStateException proxyFailure = new IllegalStateException("proxy stop failed");
+        doAnswer(invocation -> {
+            fixture.service().deleteSnapshot("final-backup");
+            throw proxyFailure;
+        }).when(fixture.proxy()).stopProxy(anyString());
+
+        AwsException failure = assertThrows(AwsException.class, () -> delete(fixture));
+
+        assertEquals("InternalFailure", failure.getErrorCode());
+        assertEquals(1, failure.getSuppressed().length);
+        assertInstanceOf(AwsException.class, failure.getSuppressed()[0]);
+        assertEquals("ClusterSnapshotNotFound", ((AwsException) failure.getSuppressed()[0]).getErrorCode());
+    }
+
     private Fixture fixture() {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.storage().persistentPath()).thenReturn(directory.toString());

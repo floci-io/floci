@@ -243,6 +243,9 @@ public class LambdaWebDataPlane {
             if (dead != null) {
                 environments.discard(dead);
             }
+            if (!service.isRevisionActive(target, revision.revisionId)) {
+                throw new StartFailure(LambdaWebErrorPages.REVISION_NOT_ACTIVE);
+            }
             Integer maxEnvironments = target.endpoint().scalingConfig == null
                     ? null : target.endpoint().scalingConfig.maxEnvironments;
             return environments.acquire(target.accountId(), target.servingRegion(), target.function(),

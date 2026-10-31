@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -28,6 +30,7 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 class SamTransformIntegrationTest {
@@ -107,6 +110,73 @@ class SamTransformIntegrationTest {
         assertThat(resourcesXml, containsString("<ResourceType>AWS::Lambda::Function</ResourceType>"));
         assertThat(resourcesXml, containsString("<ResourceType>AWS::IAM::Role</ResourceType>"));
         assertThat(resourcesXml, not(containsString("AWS::Serverless::Function")));
+    }
+
+    @Test
+    void samAutoPublishAliasReferenceCreatesLambdaPermission() throws Exception {
+        String stackName = "sam-ref-alias-" + Long.toString(System.nanoTime(), 36);
+        String functionName = stackName + "-fn";
+        stacksToDelete.add(stackName);
+
+        String template = """
+            Transform: AWS::Serverless-2016-10-31
+            Resources:
+              Fn:
+                Type: AWS::Serverless::Function
+                Properties:
+                  FunctionName: %s
+                  Runtime: nodejs22.x
+                  Handler: index.handler
+                  InlineCode: "exports.handler = async () => ({ ok: true });"
+                  AutoPublishAlias: live
+              FnPermission:
+                Type: AWS::Lambda::Permission
+                Properties:
+                  Action: lambda:InvokeFunction
+                  FunctionName: !Ref Fn.Alias
+                  Principal: events.amazonaws.com
+            Outputs:
+              AliasArn:
+                Value: !Ref Fn.Alias
+            """.formatted(functionName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
+        String stackXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        assertThat(stackXml, containsString(":function:" + functionName + ":live"));
+
+        String functionArn = given().when().get("/2015-03-31/functions/" + functionName)
+                .then().statusCode(200).extract().path("Configuration.FunctionArn");
+        String policyJson = given()
+        .when()
+            .get("/2015-03-31/functions/" + functionName + "/policy?Qualifier=live")
+        .then()
+            .statusCode(200)
+            .extract().path("Policy");
+        JsonNode statements = new ObjectMapper().readTree(policyJson).path("Statement");
+        assertEquals(1, statements.size());
+        JsonNode statement = statements.get(0);
+        assertEquals("lambda:InvokeFunction", statement.path("Action").asText());
+        assertEquals("events.amazonaws.com", statement.path("Principal").path("Service").asText());
+        assertEquals(functionArn + ":live", statement.path("Resource").asText());
     }
 
     @Test

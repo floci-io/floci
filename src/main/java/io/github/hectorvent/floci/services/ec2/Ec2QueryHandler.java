@@ -2280,7 +2280,7 @@ public class Ec2QueryHandler {
                 .start("DescribeIpamPoolsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("ipamPoolSet");
-        for (IpamPool pool : ipamService.describeIpamPools(region, ids)) {
+        for (IpamPool pool : ipamService.describeIpamPools(region, ids, getFiltersList(p))) {
             writeIpamPool(xml, "item", pool);
         }
         xml.end("ipamPoolSet").end("DescribeIpamPoolsResponse");
@@ -4451,11 +4451,15 @@ public class Ec2QueryHandler {
     // ─── NAT Gateway handlers ─────────────────────────────────────────────────
 
     private Response handleCreateNatGateway(MultivaluedMap<String, String> p, String region) {
+        Ec2Service.requireZonalNatGateway(p.getFirst("AvailabilityMode"));
+        Ec2Service.requireNoSecondaryNatGatewayAddresses(getList(p, "SecondaryAllocationId"),
+                getList(p, "SecondaryPrivateIpAddress"), p.getFirst("SecondaryPrivateIpAddressCount"));
         NatGateway natGateway = service.createNatGateway(
                 region,
                 p.getFirst("SubnetId"),
                 p.getFirst("AllocationId"),
                 p.getFirst("ConnectivityType"),
+                p.getFirst("PrivateIpAddress"),
                 parseTagsForResource(p, "natgateway"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateNatGatewayResponse", AwsNamespaces.EC2)
@@ -5142,12 +5146,31 @@ public class Ec2QueryHandler {
         String description = p.getFirst("Description");
         String privateIpAddress = p.getFirst("PrivateIpAddress");
         List<String> privateIpAddresses = new ArrayList<>();
+        String primaryFromList = null;
         for (int i = 1; ; i++) {
-            String addr = p.getFirst("PrivateIpAddresses." + i + ".PrivateIpAddress");
+            String entry = "PrivateIpAddresses." + i;
+            String addr = p.getFirst(entry + ".PrivateIpAddress");
             if (addr == null) {
                 break;
             }
-            privateIpAddresses.add(addr);
+            if (Boolean.parseBoolean(p.getFirst(entry + ".Primary"))) {
+                if (primaryFromList != null) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Only one private IP address can be designated as primary", 400);
+                }
+                primaryFromList = addr;
+            } else {
+                privateIpAddresses.add(addr);
+            }
+        }
+        // AWS: "If you specify an IP address, you cannot indicate any IP addresses specified in
+        // privateIpAddresses as primary (only one IP address can be designated as primary)."
+        if (primaryFromList != null) {
+            if (privateIpAddress != null && !privateIpAddress.isBlank()) {
+                throw new AwsException("InvalidParameterCombination",
+                        "PrivateIpAddress cannot be combined with a PrivateIpAddresses entry marked Primary", 400);
+            }
+            privateIpAddress = primaryFromList;
         }
         List<String> securityGroupIds = getList(p, "SecurityGroupId");
         if (securityGroupIds.isEmpty()) {
@@ -5595,7 +5618,10 @@ public class Ec2QueryHandler {
                 .elem("state", natGateway.getState())
                 .elem("failureCode", natGateway.getFailureCode())
                 .elem("failureMessage", natGateway.getFailureMessage())
-                .elem("connectivityType", natGateway.getConnectivityType());
+                .elem("connectivityType", natGateway.getConnectivityType())
+                // Every gateway Floci creates sits in one subnet. The Terraform AWS provider reads
+                // network_interface_id, private_ip and public_ip only from a gateway reported as zonal.
+                .elem("availabilityMode", "zonal");
         if (natGateway.getCreateTime() != null) {
             xml.elem("createTime", ISO_FMT.format(natGateway.getCreateTime()));
         }

@@ -261,6 +261,7 @@ public class DynamoDbPartiQLParser {
     // --- Tokenizer ---
 
     private static final String NOT_WELL_FORMED = "Statement wasn't well formed, can't be processed: ";
+    private static final String UNEXPECTED_TOKEN = NOT_WELL_FORMED + "Unexpected token after expression";
 
     static List<Token> tokenize(String input) {
         List<Token> tokens = new ArrayList<>();
@@ -446,6 +447,8 @@ public class DynamoDbPartiQLParser {
     private final List<JsonNode> parameters;
     private int pos = 0;
     private int paramIdx = 0;
+    // DynamoDB checks the FROM clause once the whole statement parses, before any literal in it.
+    private String fromClauseError;
     // DynamoDB reports these only once the whole statement parses, and the first one in the statement wins.
     private String deferredError;
 
@@ -463,7 +466,10 @@ public class DynamoDbPartiQLParser {
             parser.advance();
         }
         if (parser.peek().type() != TType.EOF) {
-            throw validationEx("Statement wasn't well formed, can't be processed: Unexpected token after expression");
+            throw validationEx(UNEXPECTED_TOKEN);
+        }
+        if (parser.fromClauseError != null) {
+            throw validationEx(parser.fromClauseError);
         }
         if (parser.deferredError != null) {
             throw validationEx(parser.deferredError);
@@ -478,6 +484,11 @@ public class DynamoDbPartiQLParser {
                     throw validationEx("The IN operator is provided with too many operands; number of operands: "
                             + in.values().size());
                 });
+        if (stmt instanceof Stmt.Delete delete
+                && delete.returning() != Returning.NONE && delete.returning() != Returning.ALL_OLD) {
+            throw validationEx("Invalid returning clause: " + delete.returning().clause()
+                    + ". Only RETURNING ALL OLD * is allowed in DELETE statements.");
+        }
         return stmt;
     }
 
@@ -516,9 +527,128 @@ public class DynamoDbPartiQLParser {
             case DELETE -> parseDelete();
             default -> {
                 requireTermStart();
-                throw validationEx(NOT_WELL_FORMED + "Expected data manipulation");
+                throw validationEx(expressionStatementRefusal());
             }
         };
+    }
+
+    // DynamoDB reads any other statement as one expression and refuses it by the kind of that expression.
+    private String expressionStatementRefusal() {
+        String kind = parseTermKind();
+        if (kind == null || continuesExpression(peek())) {
+            return NOT_WELL_FORMED + "Expected data manipulation";
+        }
+        if (peek().type() == TType.SEMICOLON) {
+            advance();
+        }
+        if (peek().type() != TType.EOF) {
+            return UNEXPECTED_TOKEN;
+        }
+        return OPERATOR.equals(kind) ? NOT_WELL_FORMED + "Expected data manipulation" : "Unsupported operation: " + kind;
+    }
+
+    // A sign on anything but a number, or IS NOT. DynamoDB refuses it with a message of its own.
+    private static final String OPERATOR = "Operator";
+
+    // A sign folds into the number it applies to. It binds tighter than IS and looser than a path step.
+    private String parseTermKind() {
+        Deque<Boolean> signedGroups = new ArrayDeque<>();
+        boolean signed = skipSigns();
+        while (peek().type() == TType.LPAREN) {
+            advance();
+            requireTermStart();
+            signedGroups.push(signed);
+            signed = skipSigns();
+        }
+        Token primary = peek();
+        String kind = parsePrimaryKind();
+        if (kind == null) {
+            return null;
+        }
+        boolean number = primary.type() == TType.NUMBER;
+        signed |= number && primary.value().startsWith("-");
+        while (true) {
+            if (addPathSteps(new ArrayList<>())) {
+                kind = "Path";
+                number = false;
+            }
+            if (signed) {
+                kind = number ? "Lit" : OPERATOR;
+            }
+            while (peek().type() == TType.IS) {
+                advance();
+                boolean negated = peek().type() == TType.NOT;
+                if (negated) {
+                    advance();
+                }
+                parseTypeName(negated);
+                kind = negated ? OPERATOR : "IsType";
+                number = false;
+            }
+            if (signedGroups.isEmpty() || peek().type() != TType.RPAREN) {
+                break;
+            }
+            advance();
+            signed = signedGroups.pop();
+        }
+        if (signedGroups.isEmpty()) {
+            return kind;
+        }
+        if (continuesExpression(peek())) {
+            return null;
+        }
+        throw validationEx(NOT_WELL_FORMED + "Expected RIGHT_PAREN");
+    }
+
+    private boolean skipSigns() {
+        boolean signed = false;
+        while (peek().type() == TType.PLUS || peek().type() == TType.MINUS) {
+            advance();
+            signed = true;
+        }
+        return signed;
+    }
+
+    private String parsePrimaryKind() {
+        Token t = peek();
+        return switch (t.type()) {
+            case QUESTION -> {
+                advance();
+                yield "Parameter";
+            }
+            case MISSING -> {
+                advance();
+                yield "Missing";
+            }
+            case STRING, NUMBER, BOOL, NULL -> {
+                advance();
+                yield "Lit";
+            }
+            case LBRACKET, LBRACE, LBAG -> {
+                parseValue();
+                yield switch (t.type()) {
+                    case LBRACKET -> "List";
+                    case LBRACE -> "Struct";
+                    default -> "Bag";
+                };
+            }
+            case IDENT -> {
+                if (isBareWord(t) && KEYWORDS.contains(t.value().toLowerCase(Locale.ROOT))
+                        || tokens.get(pos + 1).type() == TType.LPAREN) {
+                    yield null;
+                }
+                yield parsePath().segments().size() == 1 ? "Id" : "Path";
+            }
+            default -> null;
+        };
+    }
+
+    private static final Set<TType> EXPRESSION_CONTINUATIONS = EnumSet.of(TType.EQ, TType.NE, TType.LT, TType.LE,
+            TType.GT, TType.GE, TType.AND, TType.OR, TType.NOT, TType.IN, TType.BETWEEN, TType.PLUS, TType.MINUS);
+
+    private boolean continuesExpression(Token t) {
+        return EXPRESSION_CONTINUATIONS.contains(t.type()) || isStar(t)
+                || Stream.of("LIKE", "UNION", "INTERSECT", "EXCEPT").anyMatch(word -> isWord(t, word));
     }
 
     // SELECT col [, col …] | * FROM "Table"["." "Index"] [WHERE cond [AND cond …]]
@@ -536,11 +666,10 @@ public class DynamoDbPartiQLParser {
         }
         consume(TType.FROM);
         requireTermStart();
-        String table = expectTableName();
-        String index = parseIndexQualifier();
+        Target target = parseTarget();
         List<Cond> where = new ArrayList<>();
         if (peek().type() == TType.WHERE) { advance(); where = parseConditions(); }
-        return new Stmt.Select(table, index, cols, where, parseOrderBy());
+        return new Stmt.Select(target.table(), target.index(), cols, where, parseOrderBy());
     }
 
     private static final String STAR_WITH_OTHER_ITEMS =
@@ -590,12 +719,21 @@ public class DynamoDbPartiQLParser {
         }
         if (peek().type() != TType.VALUE) {
             requireTermStart();
+            // DynamoDB reads what follows the table name as the items to insert.
+            parseOperand();
+            if (peek().type() == TType.SEMICOLON) {
+                advance();
+            }
+            throw validationEx(peek().type() == TType.EOF ? INSERTING_MULTIPLE_ITEMS : UNEXPECTED_TOKEN);
         }
         consume(TType.VALUE);
         requireTermStart();
         consume(TType.LBRACE);
         return new Stmt.Insert(table, parseTupleFields());
     }
+
+    private static final String INSERTING_MULTIPLE_ITEMS = "Unsupported operation: Inserting multiple items in a "
+            + "single statement is not supported, use \"INSERT INTO tableName VALUE item\" instead";
 
     private Map<String, PVal> parseTupleFields() {
         Map<String, PVal> fields = new LinkedHashMap<>();
@@ -614,8 +752,7 @@ public class DynamoDbPartiQLParser {
     private Stmt.Update parseUpdate() {
         consume(TType.UPDATE);
         requireSimplePathStart();
-        String table = expectTableName();
-        String index = parseIndexQualifier();
+        Target target = parseTarget();
         Edits edits = parseEdits();
         // DynamoDB checks the WHERE clause before the SET values.
         String setError = deferredError;
@@ -623,19 +760,18 @@ public class DynamoDbPartiQLParser {
         consume(TType.WHERE);
         List<Cond> where = parseConditions();
         defer(setError);
-        return new Stmt.Update(table, index, edits.sets(), edits.removes(), where, parseReturning());
+        return new Stmt.Update(target.table(), target.index(), edits.sets(), edits.removes(), where, parseReturning());
     }
 
     // FROM "Table" [WHERE …] SET attr=val [, …] [REMOVE attr [, …]], an UPDATE with the clauses in PartiQL's order
     private Stmt.Update parseFromFirstUpdate() {
         consume(TType.FROM);
         requireTermStart();
-        String table = expectTableName();
-        String index = parseIndexQualifier();
+        Target target = parseTarget();
         List<Cond> where = List.of();
         if (peek().type() == TType.WHERE) { advance(); where = parseConditions(); }
         Edits edits = parseEdits();
-        return new Stmt.Update(table, index, edits.sets(), edits.removes(), where, parseReturning());
+        return new Stmt.Update(target.table(), target.index(), edits.sets(), edits.removes(), where, parseReturning());
     }
 
     private record Edits(List<SetClause> sets, List<Path> removes) {}
@@ -664,16 +800,11 @@ public class DynamoDbPartiQLParser {
         consume(TType.DELETE);
         consume(TType.FROM);
         requireSimplePathStart();
-        String table = expectTableName();
-        String index = parseIndexQualifier();
+        Target target = parseTarget();
         consume(TType.WHERE);
         List<Cond> where = parseConditions();
         Returning returning = parseReturning();
-        if (returning != Returning.NONE && returning != Returning.ALL_OLD) {
-            throw validationEx("Invalid returning clause: " + returning.clause()
-                    + ". Only RETURNING ALL OLD * is allowed in DELETE statements.");
-        }
-        return new Stmt.Delete(table, index, where, returning);
+        return new Stmt.Delete(target.table(), target.index(), where, returning);
     }
 
     private String expectTableName() {
@@ -682,22 +813,95 @@ public class DynamoDbPartiQLParser {
         return table;
     }
 
-    private String parseIndexQualifier() {
-        if (peek().type() != TType.DOT) {
-            return null;
+    private record Target(String table, String index) {}
+
+    // "Table"["." "Index"] [[AS] alias] [AT alias] [BY alias]
+    private Target parseTarget() {
+        List<String> components = new ArrayList<>();
+        components.add(expectIdent());
+        while (peek().type() == TType.DOT) {
+            advance();
+            components.add(expectIdent());
+        }
+        if (components.contains("")) {
+            fromClauseError = EMPTY_PATH_COMPONENT;
+        } else if (2 < components.size()) {
+            fromClauseError = "A path may contain at most 2 components in the FROM clause";
+        }
+        if (parseAliases()) {
+            fromClauseError = "Aliasing is not supported";
+        }
+        return new Target(components.getFirst(), 1 < components.size() ? components.get(1) : null);
+    }
+
+    private boolean parseAliases() {
+        boolean aliased = false;
+        if (isAliasName(peek())) {
+            advance();
+            aliased = true;
+        } else if (isWord(peek(), "AS")) {
+            expectAlias();
+            aliased = true;
+        }
+        if (isWord(peek(), "AT")) {
+            expectAlias();
+            aliased = true;
+        }
+        if (peek().type() == TType.BY) {
+            expectAlias();
+            aliased = true;
+        }
+        return aliased;
+    }
+
+    private void expectAlias() {
+        String keyword = advance().value().toUpperCase(Locale.ROOT);
+        if (!isAliasName(peek())) {
+            throw validationEx(NOT_WELL_FORMED + "Expected identifier for " + keyword + "-alias");
         }
         advance();
-        String index = expectIdent();
-        requireNonEmptyPathComponent(index);
-        if (peek().type() == TType.DOT) {
-            throw validationEx("A path may contain at most 2 components in the FROM clause");
-        }
-        return index;
     }
+
+    private boolean isAliasName(Token token) {
+        return token.type() == TType.IDENT && !isStar(token)
+                && !(isBareWord(token) && KEYWORDS.contains(token.value().toLowerCase(Locale.ROOT)));
+    }
+
+    // DynamoDB never reads one of these words as a name.
+    private static final Set<String> KEYWORDS = Set.of(
+            "absolute", "action", "add", "all", "allocate", "alter", "and", "any", "are", "as", "asc", "assertion",
+            "at", "authorization", "avg", "bag", "begin", "between", "bigint", "bit", "bit_length", "blob", "bool",
+            "boolean", "by", "can_cast", "can_lossless_cast", "cascade", "cascaded", "case", "cast", "catalog",
+            "char", "char_length", "character", "character_length", "check", "clob", "close", "coalesce", "collate",
+            "collation", "column", "commit", "conflict", "connect", "connection", "constraint", "constraints",
+            "continue", "convert", "corresponding", "count", "create", "cross", "current", "current_date",
+            "current_time", "current_timestamp", "current_user", "cursor", "date", "date_add", "date_diff",
+            "deallocate", "dec", "decimal", "declare", "default", "deferrable", "deferred", "delete", "desc",
+            "describe", "descriptor", "diagnostics", "disconnect", "distinct", "do", "domain", "double", "drop",
+            "else", "end", "escape", "except", "exception", "exec", "execute", "exists", "external", "extract",
+            "false", "fetch", "first", "float", "for", "foreign", "found", "from", "full", "get", "global", "go",
+            "goto", "grant", "group", "having", "identity", "immediate", "in", "index", "indicator", "initially",
+            "inner", "input", "insensitive", "insert", "int", "int2", "int4", "int8", "integer", "integer2",
+            "integer4", "integer8", "intersect", "interval", "into", "is", "isolation", "join", "key", "language",
+            "last", "left", "let", "level", "like", "limit", "list", "local", "lower", "match", "max", "min",
+            "missing", "modified", "module", "names", "national", "natural", "nchar", "new", "next", "no", "not",
+            "nothing", "null", "nullif", "numeric", "octet_length", "of", "offset", "old", "on", "only", "open",
+            "option", "or", "order", "outer", "output", "overlaps", "pad", "partial", "pivot", "position",
+            "precision", "prepare", "preserve", "primary", "prior", "privileges", "procedure", "public", "read",
+            "real", "references", "relative", "remove", "restrict", "returning", "revoke", "right", "rollback",
+            "rows", "schema", "scroll", "section", "select", "session", "session_user", "set", "sexp", "size",
+            "smallint", "some", "space", "sql", "sqlcode", "sqlerror", "sqlstate", "string", "struct", "substring",
+            "sum", "symbol", "system_user", "table", "temporary", "then", "time", "timestamp", "to", "transaction",
+            "translate", "translation", "trim", "true", "tuple", "union", "unique", "unknown", "unpivot", "update",
+            "upper", "usage", "user", "using", "value", "values", "varchar", "varying", "view", "when", "whenever",
+            "where", "with", "work", "write", "zone"
+    );
+
+    private static final String EMPTY_PATH_COMPONENT = "Path component cannot be an empty string";
 
     private static void requireNonEmptyPathComponent(String component) {
         if (component.isEmpty()) {
-            throw validationEx("Path component cannot be an empty string");
+            throw validationEx(EMPTY_PATH_COMPONENT);
         }
     }
 
@@ -1116,7 +1320,8 @@ public class DynamoDbPartiQLParser {
             case EOF, SEMICOLON, RPAREN, RBRACKET, RBRACE, RBAG, COMMA, COLON, DOT, BY, ASC, DESC -> "Unexpected term";
             case WHERE, ORDER, VALUE, INTO, RETURNING, ALL, MODIFIED, OLD, NEW -> "Unexpected keyword";
             case EQ, NE, LT, LE, GT, GE, AND, OR, IS, IN, BETWEEN -> "Unexpected operator";
-            case IDENT -> isStar(t) ? "Unexpected term" : isWord(t, "LIKE") ? "Unexpected operator" : null;
+            case IDENT -> isStar(t) || isWord(t, "AS") || isWord(t, "AT") ? "Unexpected term"
+                    : isWord(t, "LIKE") ? "Unexpected operator" : null;
             default -> null;
         };
     }
@@ -1129,7 +1334,7 @@ public class DynamoDbPartiQLParser {
 
     private void requireSimplePathStart() {
         Token t = peek();
-        if (t.type() != TType.IDENT || isStar(t) || isWord(t, "LIKE")) {
+        if (t.type() != TType.IDENT || isStar(t) || isWord(t, "LIKE") || isWord(t, "AS") || isWord(t, "AT")) {
             throw validationEx(NOT_WELL_FORMED + "Expected identifier for simple path");
         }
     }
@@ -1241,6 +1446,12 @@ public class DynamoDbPartiQLParser {
         requireTermStart();
         List<Seg> segments = new ArrayList<>();
         segments.add(new Seg.Name(expectIdent()));
+        addPathSteps(segments);
+        return new Path(List.copyOf(segments));
+    }
+
+    private boolean addPathSteps(List<Seg> segments) {
+        int start = segments.size();
         while (true) {
             switch (peek().type()) {
                 case DOT -> {
@@ -1253,7 +1464,7 @@ public class DynamoDbPartiQLParser {
                     consume(TType.RBRACKET);
                 }
                 default -> {
-                    return new Path(List.copyOf(segments));
+                    return start < segments.size();
                 }
             }
         }
@@ -1473,9 +1684,9 @@ public class DynamoDbPartiQLParser {
         return new PVal.Bag(bag.memberType + "S", List.copyOf(bag.items));
     }
 
-    // DynamoDB checks operand types only after every literal converts, so a literal error wins.
+    // DynamoDB checks operand types only after the FROM clause and every literal, so an error in either wins.
     private boolean literalErrorPending() {
-        return deferredError != null;
+        return fromClauseError != null || deferredError != null;
     }
 
     private void defer(String message) {

@@ -89,8 +89,9 @@ public class ApiGatewayController {
     @Path("/{proxy: .*}")
     public Response handleDelete(@Context HttpHeaders headers, @Context UriInfo uriInfo,
                                   @PathParam("functionName") String functionName,
-                                  @PathParam("proxy") String proxy) {
-        return proxyRequest("DELETE", functionName, proxy, headers, uriInfo, null);
+                                  @PathParam("proxy") String proxy,
+                                  byte[] body) {
+        return proxyRequest("DELETE", functionName, proxy, headers, uriInfo, body);
     }
 
     @PATCH

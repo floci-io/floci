@@ -17,6 +17,9 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.elb.ElbClassicService;
+import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
+import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.iam.PassedRoleLookup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -125,6 +128,19 @@ public class AutoScalingService implements PassedRoleLookup {
 
     @Inject
     Ec2Service ec2Service;
+
+    private final ElbV2Service elbV2Service;
+    private final ElbClassicService elbClassicService;
+
+    @Inject
+    public AutoScalingService(ElbV2Service elbV2Service, ElbClassicService elbClassicService) {
+        this.elbV2Service = elbV2Service;
+        this.elbClassicService = elbClassicService;
+    }
+
+    AutoScalingService() {
+        this(null, null);
+    }
 
     // region :: name → resource
     private Map<String, LaunchConfiguration> launchConfigs = new ConcurrentHashMap<>();
@@ -940,6 +956,39 @@ public class AutoScalingService implements PassedRoleLookup {
         }
     }
 
+    static void deregisterFromTargetGroups(ElbV2Service elb, AutoScalingGroup asg, List<String> instanceIds) {
+        List<TargetDescription> targets = instanceIds.stream().map(id -> {
+            TargetDescription target = new TargetDescription();
+            target.setId(id);
+            return target;
+        }).toList();
+        for (String targetGroup : asg.getTargetGroupARNs()) {
+            try {
+                elb.deregisterTargets(asg.getRegion(), targetGroup, targets);
+            } catch (AwsException e) {
+                if (!"TargetGroupNotFound".equals(e.getErrorCode())) {
+                    throw e;
+                }
+                LOG.debugv("ASG {0}: target group {1} is already deleted", asg.getAutoScalingGroupName(), targetGroup);
+            }
+        }
+    }
+
+    static void deregisterFromClassicLoadBalancers(ElbClassicService elb, AutoScalingGroup asg,
+                                                    List<String> instanceIds) {
+        for (String loadBalancer : asg.getLoadBalancerNames()) {
+            try {
+                elb.deregisterInstances(asg.getRegion(), loadBalancer, instanceIds);
+            } catch (AwsException e) {
+                if (!"LoadBalancerNotFound".equals(e.getErrorCode())) {
+                    throw e;
+                }
+                LOG.debugv("ASG {0}: Classic load balancer {1} is already deleted",
+                        asg.getAutoScalingGroupName(), loadBalancer);
+            }
+        }
+    }
+
     public void detachInstances(String region, String name, List<String> instanceIds,
                                  boolean decrementDesiredCapacity) {
         String key = asgKey(region, name);
@@ -959,6 +1008,8 @@ public class AutoScalingService implements PassedRoleLookup {
             List<String> detached = asg.getInstances().stream().map(AsgInstance::getInstanceId)
                     .filter(instanceIds::contains).toList();
             if (!detached.isEmpty()) {
+                deregisterFromTargetGroups(elbV2Service, asg, detached);
+                deregisterFromClassicLoadBalancers(elbClassicService, asg, detached);
                 // Detaching removes only the group-name tag, and only where it still names this group.
                 ec2Service.deleteSystemTag(region, detached, GROUP_NAME_TAG, name);
             }

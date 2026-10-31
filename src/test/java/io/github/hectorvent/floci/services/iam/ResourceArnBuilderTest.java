@@ -24,6 +24,8 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -54,6 +56,22 @@ class ResourceArnBuilderTest {
     private UriInfo uriInfo;
     private MultivaluedMap<String, String> queryParams;
     private Map<String, Object> contextProperties;
+
+    @ParameterizedTest
+    @CsvSource({"aws,us-east-1", "aws-us-gov,us-gov-west-1", "aws-cn,cn-north-1"})
+    void delegationSetResourcesAreGlobalAndUseTheDecodedId(String partition, String region) {
+        for (String id : List.of("N1", "%2Fdelegationset%2FN1")) {
+            when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/2013-04-01/delegationset/" + id));
+            when(uriInfo.getBaseUri()).thenReturn(URI.create("http://localhost/"));
+            MultivaluedMap<String, String> parameters = new MultivaluedHashMap<>();
+            parameters.putSingle("Id", id.equals("N1") ? "N1" : "/delegationset/N1");
+            when(uriInfo.getPathParameters()).thenReturn(parameters);
+            for (String operation : List.of("GetReusableDelegationSet", "DeleteReusableDelegationSet")) {
+                assertEquals(List.of("arn:" + partition + ":route53:::delegationset/N1"),
+                        builder.buildResources("route53", "route53:" + operation, ctx, region, ACCOUNT, partition));
+            }
+        }
+    }
 
     @BeforeEach
     void setUp() {
