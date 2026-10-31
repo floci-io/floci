@@ -1926,7 +1926,7 @@ public class S3Service implements Resettable, ResourceProvider {
                     .orElseThrow(() -> new AwsException(
                             "NoSuchVersion", "The specified version does not exist.", 404));
             if (stored.object().isDeleteMarker()) {
-                throw new AwsException("NoSuchKey", "The specified key does not exist.", 404);
+                throw new S3DeleteMarkerException(stored.object());
             }
             S3Object object = copyObject(stored.object());
             boolean archived = stored.storeKey().equals(versionedKey(bucketName, key, "null"));
@@ -2225,7 +2225,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         ? new AwsException("NoSuchVersion", "The specified version does not exist.", 404)
                         : new AwsException("NoSuchKey", "The specified key does not exist.", 404));
         if (object.isDeleteMarker()) {
-            throw new AwsException("NoSuchKey", "The specified key does not exist.", 404);
+            throw new S3DeleteMarkerException(object);
         }
         return new AccountAwareStorageBackend.OwnedEntry<>(ownedBucket.account(), object);
     }

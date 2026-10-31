@@ -1137,7 +1137,8 @@ public class S3Controller {
                     closeQuietly(read);
                 }
             }
-        } catch (AwsException e) {
+        } catch (AwsException caught) {
+            AwsException e = deleteMarkerRefusal(caught, versionId, "GET");
             emitCloudTrailEvent("GetObject", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
             if (S3Service.isWebsiteErrorDocumentTrigger(e) && isWebsiteRequest(httpHeaders, uriInfo)) {
                 Response websiteError = serveWebsiteErrorResponse(bucket, authorization, e);
@@ -1145,7 +1146,7 @@ public class S3Controller {
                     return websiteError;
                 }
             }
-            return xmlErrorResponse(e, bucket);
+            return withDeleteMarkerHeaders(xmlErrorResponse(e, bucket), e);
         }
     }
 
@@ -1442,7 +1443,8 @@ public class S3Controller {
                     checksumDescribesRange && checksumMode);
             emitCloudTrailEvent("HeadObject", bucket, key, 0L, obj.getSize(), null, null);
             return resp.build();
-        } catch (AwsException e) {
+        } catch (AwsException caught) {
+            AwsException e = deleteMarkerRefusal(caught, versionId, "HEAD");
             emitCloudTrailEvent("HeadObject", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
             if (S3Service.isWebsiteErrorDocumentTrigger(e) && isWebsiteRequest(httpHeaders, uriInfo)) {
                 Response websiteError = serveWebsiteErrorResponse(bucket, authorization, e);
@@ -1450,7 +1452,7 @@ public class S3Controller {
                     return headOnlyResponse(websiteError);
                 }
             }
-            return xmlErrorResponse(e, bucket);
+            return withDeleteMarkerHeaders(xmlErrorResponse(e, bucket), e);
         }
     }
 
@@ -3797,6 +3799,27 @@ public class S3Controller {
             response.header("x-amz-delete-marker", "true");
         }
         return response.build();
+    }
+
+    /** A GET or HEAD that names a delete marker by its version id is refused instead of answered as a missing key. */
+    private static AwsException deleteMarkerRefusal(AwsException e, String versionId, String method) {
+        return e instanceof S3DeleteMarkerException marker && versionId != null ? marker.named(method) : e;
+    }
+
+    /** S3 sends the id of the delete marker a GET or HEAD reached, and for one the request named, its time. */
+    private static Response withDeleteMarkerHeaders(Response response, AwsException e) {
+        if (!(e instanceof S3DeleteMarkerException marker)) {
+            return response;
+        }
+        Response.ResponseBuilder builder = Response.fromResponse(response)
+                .header("x-amz-version-id", marker.versionId());
+        if (e.getHttpStatus() == 405) {
+            // xmlErrorResponse already sends x-amz-delete-marker for this refusal.
+            return builder.header("Last-Modified", RFC_822.format(marker.lastModified()))
+                    .header("Allow", "DELETE")
+                    .build();
+        }
+        return builder.header("x-amz-delete-marker", "true").build();
     }
 
     private Response checkPreconditions(S3Object obj, String ifMatch, String ifNoneMatch,
