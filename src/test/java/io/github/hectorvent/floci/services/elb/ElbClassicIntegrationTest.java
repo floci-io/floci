@@ -622,4 +622,74 @@ class ElbClassicIntegrationTest {
                                 + ".LoadBalancerDescriptions.member.SourceSecurityGroup.GroupName",
                         equalTo("elb-source-sg"));
     }
+    @Test
+    @Order(20)
+    void vpcLoadBalancerCreatedWithoutSecurityGroupsGetsTheVpcDefaultGroup() {
+        String account = "444444444444";
+        String ec2Auth = "AWS4-HMAC-SHA256 Credential=" + account
+                + "/20260427/us-east-1/ec2/aws4_request";
+        String elbAuth = "AWS4-HMAC-SHA256 Credential=" + account
+                + "/20260427/us-east-1/elasticloadbalancing/aws4_request";
+
+        String vpcId = given()
+                .formParam("Action", "CreateVpc").formParam("Version", "2016-11-15")
+                .formParam("CidrBlock", "10.77.0.0/16")
+                .header("Authorization", ec2Auth)
+            .when().post("/")
+            .then().statusCode(200)
+                .extract().xmlPath().getString("CreateVpcResponse.vpc.vpcId");
+        String subnetId = given()
+                .formParam("Action", "CreateSubnet").formParam("Version", "2016-11-15")
+                .formParam("VpcId", vpcId).formParam("CidrBlock", "10.77.1.0/24")
+                .formParam("AvailabilityZone", "us-east-1a")
+                .header("Authorization", ec2Auth)
+            .when().post("/")
+            .then().statusCode(200)
+                .extract().xmlPath().getString("CreateSubnetResponse.subnet.subnetId");
+        // A second, non-default group in the VPC, so an unfiltered lookup cannot pass by luck.
+        given()
+                .formParam("Action", "CreateSecurityGroup").formParam("Version", "2016-11-15")
+                .formParam("GroupName", "elb-other").formParam("GroupDescription", "other")
+                .formParam("VpcId", vpcId)
+                .header("Authorization", ec2Auth)
+            .when().post("/")
+            .then().statusCode(200);
+        String defaultGroupId = given()
+                .formParam("Action", "DescribeSecurityGroups").formParam("Version", "2016-11-15")
+                .formParam("Filter.1.Name", "vpc-id").formParam("Filter.1.Value.1", vpcId)
+                .formParam("Filter.2.Name", "group-name").formParam("Filter.2.Value.1", "default")
+                .header("Authorization", ec2Auth)
+            .when().post("/")
+            .then().statusCode(200)
+                .extract().xmlPath().getString(
+                        "DescribeSecurityGroupsResponse.securityGroupInfo.item.groupId");
+        assertTrue(defaultGroupId != null && defaultGroupId.startsWith("sg-"), defaultGroupId);
+
+        String name = "classic-elb-vpc-default-sg";
+        given()
+                .formParam("Action", "CreateLoadBalancer").formParam("Version", V1)
+                .formParam("LoadBalancerName", name)
+                .formParam("Subnets.member.1", subnetId)
+                .formParam("Listeners.member.1.Protocol", "HTTP")
+                .formParam("Listeners.member.1.LoadBalancerPort", "80")
+                .formParam("Listeners.member.1.InstanceProtocol", "HTTP")
+                .formParam("Listeners.member.1.InstancePort", "8080")
+                .header("Authorization", elbAuth)
+            .when().post("/")
+            .then().statusCode(200);
+
+        String described = "DescribeLoadBalancersResponse.DescribeLoadBalancersResult"
+                + ".LoadBalancerDescriptions.member.";
+        given()
+                .formParam("Action", "DescribeLoadBalancers").formParam("Version", V1)
+                .formParam("LoadBalancerNames.member.1", name)
+                .header("Authorization", elbAuth)
+            .when().post("/")
+            .then().statusCode(200)
+                .body(described + "VPCId", equalTo(vpcId))
+                .body(described + "SecurityGroups.member.size()", equalTo(1))
+                .body(described + "SecurityGroups.member", equalTo(defaultGroupId))
+                .body(described + "SourceSecurityGroup.OwnerAlias", equalTo(account))
+                .body(described + "SourceSecurityGroup.GroupName", equalTo("default"));
+    }
 }
