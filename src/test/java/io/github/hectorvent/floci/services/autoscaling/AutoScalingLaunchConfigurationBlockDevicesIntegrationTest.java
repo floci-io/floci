@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.autoscaling;
 
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
-import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -10,7 +9,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.QueryRequests.request;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
@@ -229,14 +228,7 @@ class AutoScalingLaunchConfigurationBlockDevicesIntegrationTest {
     }
 
     private static XmlPath call(String account, String service, String action, String... params) {
-        RequestSpecification request = given()
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + account
-                        + "/20261022/us-east-1/" + service + "/aws4_request, SignedHeaders=host, Signature=abc")
-                .formParam("Action", action);
-        for (int i = 0; i < params.length; i += 2) {
-            request = request.formParam(params[i], params[i + 1]);
-        }
-        return request.post("/").then().statusCode(200).extract().xmlPath();
+        return request(account, service, action, params).post("/").then().statusCode(200).extract().xmlPath();
     }
 
     private record Group(String account, String name) {}
