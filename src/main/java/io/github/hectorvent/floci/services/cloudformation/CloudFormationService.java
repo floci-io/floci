@@ -3622,14 +3622,14 @@ public class CloudFormationService implements ResourceProvider {
                 failedResources.add(displacedFailure.logicalId());
             }
             for (StackResource resource : resources) {
-                if (resource.getPhysicalId() == null || !isDeletableOnStackDelete(resource)) {
-                    continue;
-                }
                 if (retainResources.contains(resource.getLogicalId())) {
                     resource.setStatus("DELETE_SKIPPED");
                     resource.setStatusReason(null);
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "DELETE_SKIPPED", null);
+                    continue;
+                }
+                if (resource.getPhysicalId() == null || !isDeletableOnStackDelete(resource)) {
                     continue;
                 }
                 if (skipRetainedResource(stack, resource, false)) {

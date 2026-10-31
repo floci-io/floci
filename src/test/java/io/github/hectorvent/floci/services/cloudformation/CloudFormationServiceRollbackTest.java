@@ -438,6 +438,29 @@ class CloudFormationServiceRollbackTest {
     }
 
     @Test
+    void deleteStack_retainingResourcesTheDeleteWouldNotTouch_skipsThemToo() throws Exception {
+        Stack stack = deleteFailedStack("retained-failed-create");
+        StackResource borrowed = resource("Borrowed", "existing-param", "AWS::SSM::Parameter", "CREATE_FAILED");
+        StackResource unnamed = resource("Unnamed", null, "AWS::SSM::Parameter", "CREATE_FAILED");
+        for (StackResource failed : List.of(borrowed, unnamed)) {
+            failed.setStatusReason("Error occurred during operation 'PutParameter'.");
+            stack.getResources().put(failed.getLogicalId(), failed);
+        }
+
+        service.deleteStack("retained-failed-create", List.of("Data", "Borrowed", "Unnamed"), REGION, ACCOUNT)
+                .get(10, TimeUnit.SECONDS);
+
+        assertEquals("DELETE_COMPLETE", stack.getStatus());
+        for (StackResource failed : List.of(borrowed, unnamed)) {
+            verify(provisioner, never()).delete(eq(failed), anyString());
+            assertEquals("DELETE_SKIPPED", failed.getStatus());
+            assertNull(failed.getStatusReason());
+            assertTrue(stack.getEvents().stream().anyMatch(event -> failed.getLogicalId()
+                    .equals(event.getLogicalResourceId()) && "DELETE_SKIPPED".equals(event.getResourceStatus())));
+        }
+    }
+
+    @Test
     void deleteStack_retriedWhileDeleting_refusesADifferentRetainList() throws Exception {
         Stack stack = deleteFailedStack("retain-retried");
         StackResource spare = stack.getResources().get("Spare");
