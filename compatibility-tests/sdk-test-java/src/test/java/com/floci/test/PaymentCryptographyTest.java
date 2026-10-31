@@ -15,6 +15,7 @@ import software.amazon.awssdk.services.paymentcryptography.model.KeyCheckValueAl
 import software.amazon.awssdk.services.paymentcryptography.model.KeyClass;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyState;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyUsage;
+import software.amazon.awssdk.services.paymentcryptography.model.ListKeysResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.Tag;
 
 import java.util.ArrayList;
@@ -110,6 +111,42 @@ class PaymentCryptographyTest {
         assertThat(read.keyAttributes().keyModesOfUse().encrypt()).isTrue();
         assertThat(read.keyAttributes().keyModesOfUse().decrypt()).isTrue();
         assertThat(read.keyCheckValue()).isEqualTo(created.keyCheckValue());
+    }
+
+    @Test
+    void aKeyIsCreatedDisabledAndWithTags() {
+        Key key = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyModesOfUse(m -> m.encrypt(true)))
+                .exportable(false)
+                .enabled(false)
+                .tags(Tag.builder().key("owner").value("team").build()))
+                .key();
+        keyArns.add(key.keyArn());
+
+        assertThat(key.enabled()).isFalse();
+        assertThat(key.exportable()).isFalse();
+
+        Map<String, String> tags = client.listTagsForResource(t -> t.resourceArn(key.keyArn())).tags()
+                .stream()
+                .collect(Collectors.toMap(Tag::key, Tag::value, (a, b) -> a));
+        assertThat(tags).containsEntry("owner", "team");
+    }
+
+    @Test
+    void theKeysAreListedAPageAtATime() {
+        createAesKey();
+        createAesKey();
+
+        ListKeysResponse first = client.listKeys(r -> r.maxResults(1));
+        assertThat(first.keys()).hasSize(1);
+        assertThat(first.nextToken()).isNotNull();
+
+        ListKeysResponse second = client.listKeys(r -> r.maxResults(1).nextToken(first.nextToken()));
+        assertThat(second.keys()).hasSize(1);
     }
 
     @Test

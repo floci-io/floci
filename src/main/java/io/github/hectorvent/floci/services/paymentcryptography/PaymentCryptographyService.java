@@ -12,9 +12,11 @@ import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryp
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -74,7 +76,8 @@ public class PaymentCryptographyService implements Resettable {
 
     /** Creates a key with fresh AES-256 material. */
     public PaymentCryptographyKey createKey(String region, Map<String, Object> attributes,
-                                            Map<String, Boolean> modesOfUse, boolean exportable) {
+                                            Map<String, Boolean> modesOfUse, boolean exportable,
+                                            boolean enabled, Map<String, String> tags) {
         PaymentCryptographyKey key = new PaymentCryptographyKey();
         key.setKeyId(UUID.randomUUID().toString().replace("-", ""));
         key.setRegion(region);
@@ -84,7 +87,8 @@ public class PaymentCryptographyService implements Resettable {
         key.setKeyUsage(string(attributes, "KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"));
         key.setKeyModesOfUse(modesOfUse);
         key.setExportable(exportable);
-        key.setEnabled(true);
+        key.setEnabled(enabled);
+        key.setTags(new LinkedHashMap<>(tags));
         key.setKeyState("CREATE_COMPLETE");
         key.setKeyMaterialHex(PaymentCryptographyCrypto.randomAes256Hex(secureRandom));
         key.setKeyCheckValue(PaymentCryptographyCrypto.checkValue(key.getKeyMaterialHex()));
@@ -117,6 +121,16 @@ public class PaymentCryptographyService implements Resettable {
         return byId != null && region.equals(byId.getRegion()) ? byId : null;
     }
 
+    /**
+     * The keys of a region, a page at a time.
+     *
+     * <p>The service answers with as many keys as the caller asks for, and a
+     * token that asks for the page after that one.
+     */
+    public Page<PaymentCryptographyKey> listKeys(String region, Integer maxResults, String nextToken) {
+        return page(listKeys(region), maxResults, nextToken);
+    }
+
     /** The keys of a region. */
     public List<PaymentCryptographyKey> listKeys(String region) {
         List<PaymentCryptographyKey> out = new ArrayList<>();
@@ -128,8 +142,13 @@ public class PaymentCryptographyService implements Resettable {
         return out;
     }
 
-    /** Removes a key. The service deletes a key the moment it is asked to. */
-    public void deleteKey(PaymentCryptographyKey key) {
+    /**
+     * Removes a key. The service deletes a key the moment it is asked to.
+     *
+     * <p>The lock is the same one the tagging operations take, so a key that
+     * is being tagged cannot be written back after it was deleted.
+     */
+    public synchronized void deleteKey(PaymentCryptographyKey key) {
         keyStore.delete(key.getKeyId());
         for (PaymentCryptographyAlias alias : aliasStore.scan(a -> true)) {
             if (key.getKeyId().equals(alias.getKeyId())) {
@@ -152,6 +171,7 @@ public class PaymentCryptographyService implements Resettable {
 
     /** Points a name at a key. The name must be free in the key's region. */
     public synchronized PaymentCryptographyAlias createAlias(String aliasName, PaymentCryptographyKey key) {
+        liveKey(key);
         if (findAlias(key.getRegion(), aliasName) != null) {
             throw new AwsException("ConflictException",
                     "Alias " + aliasName + " already exists", 400);
@@ -164,6 +184,7 @@ public class PaymentCryptographyService implements Resettable {
 
     /** Points a name at another key, in the same region. */
     public synchronized PaymentCryptographyAlias updateAlias(String aliasName, PaymentCryptographyKey key) {
+        liveKey(key);
         PaymentCryptographyAlias existing = findAlias(key.getRegion(), aliasName);
         if (existing == null) {
             throw new AwsException("ResourceNotFoundException",
@@ -182,6 +203,17 @@ public class PaymentCryptographyService implements Resettable {
                     "Alias " + aliasName + " is not found", 400);
         }
         aliasStore.delete(aliasKey(aliasName, region));
+    }
+
+    /**
+     * The aliases of a region, or of one key, a page at a time.
+     *
+     * <p>The service answers with as many aliases as the caller asks for, and
+     * a token that asks for the page after that one.
+     */
+    public Page<PaymentCryptographyAlias> listAliases(String region, String keyArn,
+                                                       Integer maxResults, String nextToken) {
+        return page(listAliases(region, keyArn), maxResults, nextToken);
     }
 
     /** The aliases of a region, or of one key. */
@@ -207,22 +239,106 @@ public class PaymentCryptographyService implements Resettable {
      * <p>The tags are the region's: they are not part of the replication
      * process, so a key in another region carries its own tag set.
      */
-    public void tag(PaymentCryptographyKey key, Map<String, String> tags) {
-        key.getTags().putAll(tags);
-        keyStore.put(key.getKeyId(), key);
+    public synchronized void tag(PaymentCryptographyKey key, Map<String, String> tags) {
+        PaymentCryptographyKey current = liveKey(key);
+        current.getTags().putAll(tags);
+        keyStore.put(current.getKeyId(), current);
+    }
+
+    /**
+     * The key as it is in the store now.
+     *
+     * <p>The caller looked the key up before it asked for the change, and the
+     * key may be gone by the time the change is made. Writing the looked-up
+     * object back would put a deleted key into the store again, so the key is
+     * read again under the lock and the request fails if it is not there.
+     */
+    private PaymentCryptographyKey liveKey(PaymentCryptographyKey key) {
+        PaymentCryptographyKey current = keyStore.get(key.getKeyId()).orElse(null);
+        if (current == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Key " + key.getArn() + " is not found", 400);
+        }
+        return current;
     }
 
     /** Removes tags from a key, in this region only. */
-    public void untag(PaymentCryptographyKey key, List<String> tagKeys) {
+    public synchronized void untag(PaymentCryptographyKey key, List<String> tagKeys) {
+        PaymentCryptographyKey current = liveKey(key);
         for (String tagKey : tagKeys) {
-            key.getTags().remove(tagKey);
+            current.getTags().remove(tagKey);
         }
-        keyStore.put(key.getKeyId(), key);
+        keyStore.put(current.getKeyId(), current);
     }
 
     /** The tags of a key. */
     public Map<String, String> listTags(PaymentCryptographyKey key) {
         return new LinkedHashMap<>(key.getTags());
+    }
+
+    /**
+     * The tags of a key, a page at a time.
+     *
+     * <p>The service answers with as many tags as the caller asks for, and a
+     * token that asks for the page after that one.
+     */
+    public Page<Map.Entry<String, String>> listTags(PaymentCryptographyKey key,
+                                                     Integer maxResults, String nextToken) {
+        return page(new ArrayList<>(listTags(key).entrySet()), maxResults, nextToken);
+    }
+
+    // ---- pages --------------------------------------------------------------
+
+    /**
+     * A page of results and the token that asks for the one after it.
+     *
+     * @param <T> what the page holds
+     */
+    public static final class Page<T> {
+        private final List<T> items;
+        private final String nextToken;
+
+        Page(List<T> items, String nextToken) {
+            this.items = items;
+            this.nextToken = nextToken;
+        }
+
+        /** The results of this page. */
+        public List<T> items() {
+            return items;
+        }
+
+        /** The token that asks for the page after this one, or null when this is the last. */
+        public String nextToken() {
+            return nextToken;
+        }
+    }
+
+    /**
+     * The page of a list that starts at the token and holds at most the
+     * number of results asked for.
+     *
+     * <p>The token is the place in the list where the page starts. The service
+     * keeps it to itself, so it is written down in a form the caller cannot
+     * read as a count.
+     */
+    private static <T> Page<T> page(List<T> all, Integer maxResults, String nextToken) {
+        int start = 0;
+        if (nextToken != null && !nextToken.isEmpty()) {
+            try {
+                start = Integer.parseInt(new String(Base64.getDecoder().decode(nextToken), StandardCharsets.UTF_8));
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("ValidationException", "NextToken is not valid", 400);
+            }
+        }
+        if (start < 0 || start > all.size()) {
+            throw new AwsException("ValidationException", "NextToken is not valid", 400);
+        }
+        int end = maxResults == null || maxResults <= 0 ? all.size() : Math.min(all.size(), start + maxResults);
+        String next = end < all.size()
+                ? Base64.getEncoder().encodeToString(String.valueOf(end).getBytes(StandardCharsets.UTF_8))
+                : null;
+        return new Page<>(new ArrayList<>(all.subList(start, end)), next);
     }
 
     // ---- helpers ------------------------------------------------------------
