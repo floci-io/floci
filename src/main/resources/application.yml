@@ -232,6 +232,8 @@ floci:
         flush-interval-ms: 15000
       cloudwatchmetrics:
         flush-interval-ms: 5000
+      paymentcryptography:
+        flush-interval-ms: 5000
       secretsmanager:
         flush-interval-ms: 5000
       acm:
@@ -621,6 +623,8 @@ floci:
       max-events-per-query: 10000
       max-stored-events: 20000
     cloudwatchmetrics:
+      enabled: true
+    paymentcryptography:
       enabled: true
     secretsmanager:
       enabled: true

@@ -45,7 +45,8 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "ecr", "ecs", "efs", "eks", "elasticache", "elasticbeanstalk", "elb", "elbv2", "emr", "emrserverless",
             "eventbridge", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "lambda",
             "lambdamicrovms", "lambdaweb", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
-            "pipes", "ram", "rds", "redshift", "redshiftserverless", "resourceexplorer2", "resourcegroups", "route53resolver",
+            "paymentcryptography", "pipes", "ram", "rds", "redshift", "redshiftserverless",
+            "resourceexplorer2", "resourcegroups", "route53resolver",
             "s3tables", "s3vectors", "sagemaker", "scheduler", "secretsmanager", "servicequotas", "ses", "sns", "sqs",
             "stepfunctions", "timestreaminfluxdb", "transfer", "verifiedpermissions", "wafv2");
 
@@ -74,6 +75,27 @@ class PartitionCrossServiceSmokeIntegrationTest {
                 .when().post("/groups").then().statusCode(200).extract().path("Group.GroupArn");
         cleanup.register(() -> signed(region, "resource-groups").contentType(JSON)
                 .body("{\"Group\":\"" + arn + "\"}").when().post("/delete-group"));
+        PartitionMatrix.assertArnIn(partitionCase, arn);
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void paymentCryptographyKeyArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "payment-cryptography");
+        String arn = signed(region, "payment-cryptography")
+            .header("X-Amz-Target", "PaymentCryptography.CreateKey")
+            .contentType("application/x-amz-json-1.1")
+            .body("{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\"},"
+                + "\"Exportable\":true}")
+        .when().post("/").then().statusCode(200)
+            .extract().path("Key.KeyArn");
+        cleanup.register(() -> signed(region, "payment-cryptography")
+            .header("X-Amz-Target", "PaymentCryptography.DeleteKey")
+            .contentType("application/x-amz-json-1.1")
+            .body("{\"KeyIdentifier\":\"" + arn + "\"}")
+        .when().post("/"));
         PartitionMatrix.assertArnIn(partitionCase, arn);
     }
 
