@@ -258,6 +258,11 @@ as the account root, as the key itself does.
 `AssumeRole` and `AssumeRoleWithWebIdentity` require the target role to exist in IAM, returning `AccessDenied` (403)
 if it does not.
 
+`AssumeRole` rejects a `DurationSeconds` above the role's `MaxSessionDuration` with
+`ValidationError` (400), after trust validation and before registering credentials. The exact
+role limit is accepted; an omitted duration defaults to 3600 seconds. This role setting is
+checked even when IAM policy enforcement is disabled.
+
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, `AssumeRole` also evaluates the target role's trust policy
 (`AssumeRolePolicyDocument`) against the caller and returns `AccessDenied` if it is not permitted. AWS principal
 forms are matched: `"*"`, an account id, an account-root ARN (`arn:aws:iam::<acct>:root`), and exact principal ARNs;

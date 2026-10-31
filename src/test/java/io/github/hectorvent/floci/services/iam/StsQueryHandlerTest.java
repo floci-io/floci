@@ -469,7 +469,11 @@ class StsQueryHandlerTest {
         params.putSingle("RoleSessionName", "test-session");
         params.putSingle("DurationSeconds", durationSeconds);
 
-        Response response = newHandler().handle("AssumeRole", params);
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setArn(params.getFirst("RoleArn"));
+        role.setMaxSessionDuration(43200);
+        Response response = newHandler(role).handle("AssumeRole", params);
 
         assertEquals(200, response.getStatus(), (String) response.getEntity());
     }
@@ -495,6 +499,56 @@ class StsQueryHandlerTest {
         Response response = newHandler().handle("GetFederationToken", params);
 
         assertEquals(200, response.getStatus(), (String) response.getEntity());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"3600,3601,400", "7200,7201,400", "3600,3600,200", "7200,7200,200",
+            "3600,900,200", "43200,43200,200", "3600,0,200"})
+    void assumeRoleDurationUsesTheRoleLimitBeforeRegistering(int maximum, int requested, int status) {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        role.setMaxSessionDuration(maximum);
+        IamService service = mock(IamService.class);
+        when(service.findRole(anyString(), anyString())).thenReturn(Optional.of(role));
+        Instant now = Instant.parse("2026-01-01T00:00:00Z");
+        StsQueryHandler handler = newHandler(service, new RegionResolver(REGION, "000000000000"),
+                Clock.fixed(now, ZoneOffset.UTC));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", role.getArn());
+        params.putSingle("RoleSessionName", "duration");
+        if (requested != 0) {
+            params.putSingle("DurationSeconds", Integer.toString(requested));
+        }
+        Response response = handler.handle("AssumeRole", params);
+        String body = (String) response.getEntity();
+        assertEquals(status, response.getStatus(), body);
+        if (status == 400) {
+            assertTrue(body.contains("<Code>ValidationError</Code>"), body);
+            assertTrue(body.contains("The requested DurationSeconds exceeds the MaxSessionDuration set for this role."), body);
+            verify(service, never()).registerSession(anyString(), anyString(), anyString(), anyString(),
+                    any(), any(), anyString(), anyString(), anyString());
+        } else {
+            Instant expiry = now.plusSeconds(requested == 0 ? 3600 : requested);
+            assertEquals(expiry.toString(), extract(EXPIRATION, body));
+            verify(service).registerSession(anyString(), anyString(), anyString(), eq(role.getArn()),
+                    eq(expiry), isNull(), eq("000000000000"), eq("duration"), anyString());
+        }
+    }
+
+    @Test
+    void missingRoleIsDeniedBeforeItsDurationIsChecked() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", "arn:aws:iam::000000000000:role/MissingRole");
+        params.putSingle("RoleSessionName", "duration");
+        params.putSingle("DurationSeconds", "43200");
+        IamService service = mock(IamService.class);
+        Response response = newHandler(service, new RegionResolver(REGION, "000000000000"))
+                .handle("AssumeRole", params);
+        assertEquals(403, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<Code>AccessDenied</Code>"));
+        verify(service, never()).registerSession(anyString(), anyString(), anyString(), anyString(),
+                any(), any(), anyString(), anyString(), anyString());
     }
 
     @Test
