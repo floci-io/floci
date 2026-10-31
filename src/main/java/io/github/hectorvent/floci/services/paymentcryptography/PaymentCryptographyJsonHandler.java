@@ -57,8 +57,13 @@ public class PaymentCryptographyJsonHandler {
             throw new AwsException("ValidationException", "KeyAttributes is required", 400);
         }
         Map<String, Object> declared = new LinkedHashMap<>();
-        attributes.fields().forEachRemaining(entry ->
-                declared.put(entry.getKey(), entry.getValue().asText()));
+        attributes.fields().forEachRemaining(entry -> {
+            // KeyModesOfUse is a nested structure, not a name: it is read below
+            // as its own map, and stringifying it here would lose the modes.
+            if (!"KeyModesOfUse".equals(entry.getKey())) {
+                declared.put(entry.getKey(), entry.getValue().asText());
+            }
+        });
         PaymentCryptographyKey key = service.createKey(region, declared, modesOfUse(attributes),
                 request.path("Exportable").asBoolean(false));
         return Map.of("Key", keyObject(key));
