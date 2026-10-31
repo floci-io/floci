@@ -1312,6 +1312,10 @@ public class RdsQueryHandler {
 
         Integer backupRetentionPeriodParam = parseIntegerParam(params, "BackupRetentionPeriod");
         int backupRetentionPeriod = backupRetentionPeriodParam != null ? backupRetentionPeriodParam : 1;
+        if (backupRetentionPeriod < 0) {
+            throw new AwsException("InvalidParameterValue",
+                    "BackupRetentionPeriod must be a non-negative integer.", 400);
+        }
         Map<String, String> createTags = parseTags(params);
 
         if (engineVersion == null) {
@@ -1490,6 +1494,10 @@ public class RdsQueryHandler {
                     params, "ServerlessV2ScalingConfiguration.SecondsUntilAutoPause");
             Boolean enableHttpEndpoint = parseOptionalBoolean(params, "EnableHttpEndpoint");
             Integer modifyBackupRetentionPeriod = parseIntegerParam(params, "BackupRetentionPeriod");
+            if (modifyBackupRetentionPeriod != null && modifyBackupRetentionPeriod < 0) {
+                throw new AwsException("InvalidParameterValue",
+                        "BackupRetentionPeriod must be a non-negative integer.", 400);
+            }
             if (Boolean.TRUE.equals(enableHttpEndpoint)) {
                 RdsService.requireDataApiEngine(service.getDbCluster(id, region).getEngineIdentifier());
             }

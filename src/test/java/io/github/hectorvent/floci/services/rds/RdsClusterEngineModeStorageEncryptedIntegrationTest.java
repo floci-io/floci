@@ -88,4 +88,85 @@ class RdsClusterEngineModeStorageEncryptedIntegrationTest {
                 .body(containsString("<EngineMode>provisioned</EngineMode>"))
                 .body(containsString("<StorageEncrypted>true</StorageEncrypted>"));
     }
+
+    @Test
+    void backupRetentionPeriodAndCreateTagsPersistAndSurviveModify() {
+        String id = "backup-retention-tags-cluster";
+        rds("CreateDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("Engine", "aurora-postgresql")
+                .formParam("EngineVersion", "16.3")
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "secret99password")
+                .formParam("BackupRetentionPeriod", "7")
+                .formParam("Tags.Tag.1.Key", "Environment")
+                .formParam("Tags.Tag.1.Value", "test")
+                .formParam("Tags.Tag.2.Key", "Owner")
+                .formParam("Tags.Tag.2.Value", "team-a")
+                .when().post("/").then().statusCode(200)
+                .body(containsString("<BackupRetentionPeriod>7</BackupRetentionPeriod>"))
+                .body(containsString("<TagList>"))
+                .body(containsString("<Key>Environment</Key>"))
+                .body(containsString("<Value>test</Value>"))
+                .body(containsString("<Key>Owner</Key>"))
+                .body(containsString("<Value>team-a</Value>"));
+
+        // Verify via ListTagsForResource
+        rds("ListTagsForResource")
+                .formParam("ResourceName", "arn:aws:rds:us-east-1:000000000000:cluster:" + id)
+                .when().post("/").then().statusCode(200)
+                .body(containsString("<Key>Environment</Key>"))
+                .body(containsString("<Value>test</Value>"));
+
+        // Modify without BackupRetentionPeriod - it should keep the original value
+        rds("ModifyDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("MasterUserPassword", "newsecret99password")
+                .when().post("/").then().statusCode(200)
+                .body(containsString("<BackupRetentionPeriod>7</BackupRetentionPeriod>"));
+
+        // Verify tags still present after modify
+        rds("DescribeDBClusters").formParam("DBClusterIdentifier", id)
+                .when().post("/").then().statusCode(200)
+                .body(containsString("<BackupRetentionPeriod>7</BackupRetentionPeriod>"))
+                .body(containsString("<Key>Environment</Key>"))
+                .body(containsString("<Value>team-a</Value>"));
+
+        rds("DeleteDBCluster").formParam("DBClusterIdentifier", id)
+                .formParam("SkipFinalSnapshot", "true").when().post("/");
+    }
+
+    @Test
+    void createDbClusterRejectsNegativeBackupRetentionPeriod() {
+        rds("CreateDBCluster")
+                .formParam("DBClusterIdentifier", "bad-retention")
+                .formParam("Engine", "aurora-postgresql")
+                .formParam("EngineVersion", "16.3")
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "secret99password")
+                .formParam("BackupRetentionPeriod", "-1")
+                .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"));
+    }
+
+    @Test
+    void modifyDbClusterRejectsNegativeBackupRetentionPeriod() {
+        String id = "bad-modify-retention";
+        rds("CreateDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("Engine", "aurora-postgresql")
+                .formParam("EngineVersion", "16.3")
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "secret99password")
+                .when().post("/").then().statusCode(200);
+
+        rds("ModifyDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("BackupRetentionPeriod", "-5")
+                .when().post("/").then().statusCode(400)
+                .body(containsString("<Code>InvalidParameterValue</Code>"));
+
+        rds("DeleteDBCluster").formParam("DBClusterIdentifier", id)
+                .formParam("SkipFinalSnapshot", "true").when().post("/");
+    }
 }
