@@ -112,6 +112,8 @@ existing single-node Valkey container and shared proxy port range. Memcached cac
 existing Memcached container runtime. Their internal backing clusters are hidden from ordinary
 cluster management APIs. `Endpoint` and `ReaderEndpoint` identify the same local runtime.
 
+Every account has a built-in user with id and name `default` (no password, `on ~* +@all`) that
+cannot be modified or deleted; a custom user named `default` can take its place in a group.
 User groups support create, describe, modify and delete. Redis groups require a `default` user;
 Valkey groups can be empty and accept authenticated Redis or Valkey users. Caches read the current
 group membership and user credentials on each authentication. An attached empty group still
