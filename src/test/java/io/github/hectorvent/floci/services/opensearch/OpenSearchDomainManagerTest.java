@@ -21,6 +21,7 @@ import org.mockito.InOrder;
 import org.mockito.MockMakers;
 import org.mockito.MockedStatic;
 
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
@@ -576,6 +577,70 @@ class OpenSearchDomainManagerTest {
         verify(portAllocator).release(9400);
         verify(lifecycleManager, never()).createAndStart(any());
         assertNull(domain.getHostPort());
+    }
+
+    /**
+     * Legacy host-path mode binds one directory per account and region, so two domains sharing
+     * a name across regions (or accounts) never share one data directory, which would corrupt
+     * both clusters.
+     */
+    @ParameterizedTest
+    @ValueSource(strings = {"", "team-a"})
+    void hostPathStorageSeparatesAccountsAndRegions(String namespace, @TempDir Path hostRoot) {
+        when(storage.hostPersistentPath()).thenReturn(hostRoot.toString());
+        when(docker.resourceNamespace()).thenReturn(Optional.of(namespace));
+        List<Domain> domains = List.of(domain("000000000000", "us-east-1"),
+                domain("111111111111", "us-east-1"), domain("000000000000", "eu-west-1"));
+        for (Domain domain : domains) {
+            domain.setRegion(AwsArnUtils.parse(domain.getArn()).region());
+        }
+
+        for (Domain domain : domains) {
+            manager.startDomain(domain);
+        }
+
+        String prefix = namespace.isEmpty() ? "floci-aws-opensearch-" : "floci-aws-team-a-opensearch-";
+        Path serviceRoot = namespace.isEmpty()
+                ? hostRoot.resolve("opensearch")
+                : hostRoot.resolve("team-a").resolve("opensearch");
+        List<String> expectedBinds = List.of(
+                serviceRoot.resolve(prefix + "000000000000-us-east-1-my-domain"),
+                serviceRoot.resolve(prefix + "111111111111-us-east-1-my-domain"),
+                serviceRoot.resolve(prefix + "000000000000-eu-west-1-my-domain"))
+                .stream().map(path -> path.toAbsolutePath().normalize().toString()).toList();
+        ArgumentCaptor<String> binds = ArgumentCaptor.forClass(String.class);
+        verify(builder, times(3)).withBind(binds.capture(), anyString());
+        assertEquals(expectedBinds, binds.getAllValues());
+    }
+
+    /**
+     * A record persisted before the region marker keeps the bare-name directory while that
+     * directory still exists, since that is where its data lives.
+     */
+    @Test
+    void hostPathKeepsTheBareDirectoryForARecordPredatingTheRegionMarker(
+            @TempDir Path hostRoot) throws IOException {
+        when(storage.hostPersistentPath()).thenReturn(hostRoot.toString());
+        Path legacyDir = hostRoot.resolve("opensearch").resolve("my-domain");
+        Files.createDirectories(legacyDir);
+        Domain domain = domain("000000000000", "us-east-1");
+
+        manager.startDomain(domain);
+
+        verify(builder).withBind(legacyDir.toAbsolutePath().normalize().toString(), "/usr/share/opensearch/data");
+    }
+
+    /** With no bare-name directory on disk, even a marker-less record starts on the scoped one. */
+    @Test
+    void hostPathUsesTheScopedDirectoryWhenNoBareDirectoryExists(@TempDir Path hostRoot) {
+        when(storage.hostPersistentPath()).thenReturn(hostRoot.toString());
+        Domain domain = domain("000000000000", "us-east-1");
+
+        manager.startDomain(domain);
+
+        verify(builder).withBind(hostRoot.resolve("opensearch")
+                .resolve("floci-aws-opensearch-000000000000-us-east-1-my-domain")
+                .toAbsolutePath().normalize().toString(), "/usr/share/opensearch/data");
     }
 
     private Domain domain(String accountId, String region) {

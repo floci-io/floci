@@ -525,16 +525,17 @@ public class Ec2ContainerManager {
 
                 refreshMetadataAddresses(instance, containerId);
 
-                if (!markRunning(instance)) {
-                    failLaunch(instance, leasedPrivateIp);
-                    return;
-                }
-
                 // Set public-facing addresses only for instances due one, by the rule mock instances
                 // follow too, or holding an Elastic IP their interface carries, which RunInstances
                 // recorded. Private-subnet instances have no public IP/DNS, matching real EC2.
                 if (instance.getPublicIpAddress() != null || AutomaticPublicAddress.isDue(instance, false)) {
                     exposeReachablePublicAddress(instance);
+                }
+
+                // Published before the state flips, so a poller that sees running never sees it without the address.
+                if (!markRunning(instance)) {
+                    failLaunch(instance, leasedPrivateIp);
+                    return;
                 }
 
                 LOG.infov("EC2 instance {0} running in container {1} (SSH host port {2})",
@@ -559,7 +560,13 @@ public class Ec2ContainerManager {
                 // key-pair association) - starting it only when a key was present meant
                 // run-instances without --key-name produced a "connection refused" instead of AWS's
                 // actual behavior: a running daemon with simply nothing to authenticate against.
-                startSshd(containerId, instanceId);
+                // A systemd guest is the exception: its init starts sshd from the image's own unit,
+                // as it does on EC2. A second sshd launched here raced that unit for port 22, and
+                // whichever lost left either the unit failed or a daemon outside systemd that a
+                // later `systemctl restart ssh` could not replace.
+                if (!image.systemd()) {
+                    startSshd(containerId, instanceId);
+                }
 
                 // Execute UserData
                 String userData = instance.getUserData();
@@ -740,6 +747,9 @@ public class Ec2ContainerManager {
         String containerIp;
         boolean alreadyCleaned;
         synchronized (instance) {
+            // A launch cancelled after its address was published must not keep it.
+            instance.setPublicIpAddress(null);
+            instance.setPublicDnsName(null);
             alreadyCleaned = isLaunchCancelledState(instance)
                     && instance.getDockerContainerId() == null
                     && instance.getSshHostPort() <= 0
@@ -1232,7 +1242,7 @@ public class Ec2ContainerManager {
      *                          attachment unknown rather than known to be absent
      */
     private String bridgeNetworkIp(String containerId) {
-        var inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
         if (inspect.getNetworkSettings() == null || inspect.getNetworkSettings().getNetworks() == null) {
             return null;
         }
@@ -1735,9 +1745,9 @@ public class Ec2ContainerManager {
 
     private String getContainerBridgeIp(String containerId) {
         try {
-            var inspect = dockerClient.inspectContainerCmd(containerId).exec();
+            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
             if (inspect.getNetworkSettings() != null) {
-                var networks = inspect.getNetworkSettings().getNetworks();
+                Map<String, ContainerNetwork> networks = inspect.getNetworkSettings().getNetworks();
                 if (networks != null) {
                     Optional<String> preferredIp = preferredMetadataSourceIp(networks);
                     if (preferredIp.isPresent()) {

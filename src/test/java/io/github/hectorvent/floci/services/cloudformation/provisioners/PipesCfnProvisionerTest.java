@@ -17,6 +17,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -165,7 +166,7 @@ class PipesCfnProvisionerTest {
     }
 
     /** UpdatePipe reads an absent value as "leave this one alone", which the stub mirrors. */
-    private static <T> void applyIfPresent(T value, java.util.function.Consumer<T> setter) {
+    private static <T> void applyIfPresent(T value, Consumer<T> setter) {
         if (value != null) {
             setter.accept(value);
         }

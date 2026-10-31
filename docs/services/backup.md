@@ -89,6 +89,13 @@
 |---|---|---|---|
 | `GetSupportedResourceTypes` | `GET` | `/supported-resource-types` | List resource types supported for backup |
 
+## Plan Tags
+
+`CreateBackupPlan` stores `BackupPlanTags`. `TagResource`, `ListTags` and `UntagResource`
+accept the plan ARN returned at creation. Adding tags merges keys, an existing key's value
+is replaced, and removing absent keys is harmless. Tags survive plan updates and are stored
+with the plan in persistent modes. Plans stored before tag support start with an empty tag map.
+
 ## Job Lifecycle
 
 Backup jobs transition through states automatically after `StartBackupJob`:
@@ -247,12 +254,21 @@ Actual backup is simulated — no data is read from or written to the referenced
 - Report plans (`CreateReportPlan`, `DescribeReportPlan`, etc.)
 - Framework operations (`CreateFramework`, etc.)
 - Legal holds
-- Pagination tokens on list operations other than `ListBackupVaults`
+- Pagination tokens on list operations other than `ListBackupVaults` and `ListBackupPlans`
 
 `ListBackupVaults` accepts `maxResults` from 1 to 1000 and returns `NextToken` when
 more vaults remain. Pass it as `nextToken` with the same region and `vaultType`
 filter to continue. Floci uses vault-name order and a page size of 1000 when the
 size is omitted; AWS does not document a default order or page size.
+
+`ListBackupPlans` also accepts `maxResults` from 1 to 1000. Floci uses plan-ID
+order and defaults to 1000; AWS does not document a default order or page size.
+Continue with `nextToken` in the same account and region, keeping `includeDeleted`
+unchanged. Region and deletion-date filters apply before paging. Final pages omit
+`NextToken`, and deleting or renaming the cursor plan does not skip the next plan.
+`includeDeleted` defaults to false. When true, retained records include their
+`DeletionDate`; normal plan deletion still removes the record, so deleted history
+is not retained.
 
 ## Examples
 

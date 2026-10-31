@@ -22,6 +22,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -197,7 +198,7 @@ public class SqsEventSourcePoller implements Resettable {
                 int wanted = Math.max(1, esm.getBatchSize() - alreadyBuffered);
 
                 List<Message> received = sqsService.receiveMessage(
-                        esm.getQueueUrl(), wanted, visibilityTimeout, 0, esm.getRegion());
+                        esm.getQueueUrl(), Math.min(10, wanted), visibilityTimeout, 0, esm.getRegion());
 
                 List<Message> messages;
                 if (window <= 0) {
@@ -463,7 +464,7 @@ public class SqsEventSourcePoller implements Resettable {
                 attrNode.put("dataType", val.getDataType() != null ? val.getDataType() : "String");
                 if (val.getBinaryValue() != null) {
                     attrNode.put("binaryValue",
-                            java.util.Base64.getEncoder().encodeToString(val.getBinaryValue()));
+                            Base64.getEncoder().encodeToString(val.getBinaryValue()));
                 } else if (val.getStringValue() != null) {
                     attrNode.put("stringValue", val.getStringValue());
                 }

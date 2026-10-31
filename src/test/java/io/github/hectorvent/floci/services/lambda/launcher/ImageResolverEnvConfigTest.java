@@ -27,6 +27,25 @@ class ImageResolverEnvConfigTest {
     }
 
     @Test
+    void platformRuntimeKeysBindFromEnvironment() {
+        SmallRyeConfig config = new SmallRyeConfigBuilder()
+                .withSources(new EnvConfigSource(Map.of(
+                        "FLOCI_SERVICES_LAMBDA_RUNTIME_IMAGES__PROVIDED_AL2023_LINUX_AMD64__",
+                        "registry.example/provided:amd64",
+                        "FLOCI_SERVICES_LAMBDA_RUNTIME_IMAGES__PROVIDED_AL2023_LINUX_ARM64__",
+                        "registry.example/provided:arm64",
+                        "FLOCI_SERVICES_LAMBDA_RUNTIME_IMAGES__PROVIDED_AL2023__",
+                        "registry.example/provided:fallback"), 300))
+                .withMapping(EmulatorConfig.class)
+                .build();
+        ImageResolver resolver = new ImageResolver(config.getConfigMapping(EmulatorConfig.class));
+
+        assertEquals("registry.example/provided:amd64", resolver.resolve("provided.al2023", "linux/amd64"));
+        assertEquals("registry.example/provided:arm64", resolver.resolve("provided.al2023", "linux/arm64"));
+        assertEquals("registry.example/provided:fallback", resolver.resolve("provided.al2023"));
+    }
+
+    @Test
     void unquotedRuntimeKeyDoesNotBind() {
         SmallRyeConfig config = new SmallRyeConfigBuilder()
                 .withSources(new EnvConfigSource(Map.of(

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.appsync.graphql;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.AppSyncAuth;
 import org.junit.jupiter.api.Test;
 
@@ -10,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 class AppSyncVtlContextTest {
 
-    private final com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+    private final ObjectMapper mapper = new ObjectMapper();
 
     @Test
     void nullIdentityStaysNullNotEmptyMap() {

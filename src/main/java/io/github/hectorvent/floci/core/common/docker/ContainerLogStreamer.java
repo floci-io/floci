@@ -14,6 +14,7 @@ import org.jboss.logging.Logger;
 import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -33,6 +34,7 @@ import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 /**
@@ -108,16 +110,39 @@ public class ContainerLogStreamer {
             String region, String logPrefix, Instant since) {
         ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
 
-        // Trim trailing whitespace and drop blank lines, then fan each reassembled line out to the
-        // console logger and CloudWatch Logs.
+        // Fan each reassembled line that is not blank out to the console logger and CloudWatch Logs.
         Consumer<String> emitter = line -> {
-            String trimmed = line.stripTrailing();
-            if (!trimmed.isEmpty()) {
-                LOG.infov("[{0}] {1}", logPrefix, trimmed);
-                forwardToCloudWatchLogs(accountId, logGroup, logStream, region, trimmed);
+            String logged = logToConsole(logPrefix, line);
+            if (logged != null) {
+                forwardToCloudWatchLogs(accountId, logGroup, logStream, region, logged);
             }
         };
         return follow(containerId, since, emitter);
+    }
+
+    /**
+     * Like {@link #attachForAccount}, but forwards the container's standard output and standard error to
+     * log streams of their own in {@code logGroup}, {@code stdoutStream} and {@code stderrStream}, either
+     * of which may be null to forward that output nowhere. A container with a terminal has no standard
+     * error of its own: all of its output is standard output. Every line still goes to the console logger.
+     */
+    public Closeable attachByStreamForAccount(
+            String accountId, String containerId, String logGroup, String stdoutStream, String stderrStream,
+            String region, String logPrefix) {
+        for (String logStream : new String[] {stdoutStream, stderrStream}) {
+            if (logStream != null) {
+                ensureLogGroupAndStreamForAccount(accountId, logGroup, logStream, region);
+            }
+        }
+        BiConsumer<StreamType, String> emitter = (stream, line) -> {
+            String logged = logToConsole(logPrefix, line);
+            String logStream = stream == StreamType.STDERR ? stderrStream : stdoutStream;
+            if (logged != null && logStream != null) {
+                forwardToCloudWatchLogs(accountId, logGroup, logStream, region, logged);
+            }
+        };
+        return follow(containerId, null,
+                new LogReassemblyCallback(LogReassemblyCallback.DEFAULT_CLOSE_GRACE_MILLIS, emitter));
     }
 
     /**
@@ -126,18 +151,54 @@ public class ContainerLogStreamer {
      * destination, such as an ECS container without an {@code awslogs} log configuration.
      */
     public Closeable attachConsoleOnly(String containerId, String logPrefix) {
-        Consumer<String> emitter = line -> {
-            String trimmed = line.stripTrailing();
-            if (!trimmed.isEmpty()) {
-                LOG.infov("[{0}] {1}", logPrefix, trimmed);
+        return follow(containerId, null, line -> logToConsole(logPrefix, line));
+    }
+
+    /**
+     * A stream that logs each line written to it to the console logger as it arrives, as the attach methods
+     * log a container's: for the output of a command run in a container. A line is held only until its
+     * newline, or split at {@link LogLineBuffer}'s cap, so output without a newline holds no more than that.
+     * Closing it logs a last line that has no newline.
+     */
+    public static OutputStream consoleLines(String logPrefix) {
+        LogLineBuffer buffer = new LogLineBuffer();
+        return new OutputStream() {
+            @Override
+            public synchronized void write(int b) {
+                write(new byte[] {(byte) b}, 0, 1);
+            }
+
+            @Override
+            public synchronized void write(byte[] bytes, int offset, int length) {
+                byte[] payload = offset == 0 && length == bytes.length
+                        ? bytes : Arrays.copyOfRange(bytes, offset, offset + length);
+                buffer.append(payload).forEach(line -> logToConsole(logPrefix, line));
+            }
+
+            @Override
+            public synchronized void close() {
+                buffer.flush().ifPresent(line -> logToConsole(logPrefix, line));
             }
         };
-        return follow(containerId, null, emitter);
+    }
+
+    // Logs a line of a container's output, prefixed, without its trailing whitespace; returns what it logged,
+    // or null for a blank line, which it drops.
+    private static String logToConsole(String logPrefix, String line) {
+        String trimmed = line.stripTrailing();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        LOG.infov("[{0}] {1}", logPrefix, trimmed);
+        return trimmed;
     }
 
     private Closeable follow(String containerId, Instant since, Consumer<String> emitter) {
+        return follow(containerId, since, new LogReassemblyCallback(emitter));
+    }
+
+    private Closeable follow(String containerId, Instant since, LogReassemblyCallback callback) {
         try {
-            LogReassemblyCallback callback = new LogReassemblyCallback(emitter);
             LogContainerCmd command = dockerClient.logContainerCmd(containerId)
                     .withStdOut(true)
                     .withStdErr(true)
@@ -279,9 +340,9 @@ public class ContainerLogStreamer {
 
     /**
      * Docker frame callback that reassembles multiplexed stdout/stderr frames into newline-delimited
-     * lines and forwards each to {@code lineConsumer}. One logical line can span several frames and one
-     * frame can carry several lines, so bytes are buffered per stream and emitted one line at a time
-     * (matching real AWS Lambda).
+     * lines and forwards each, with the stream it came from, to {@code lineConsumer}. One logical line can
+     * span several frames and one frame can carry several lines, so bytes are buffered per stream and
+     * emitted one line at a time (matching real AWS Lambda).
      */
     static final class LogReassemblyCallback extends ResultCallback.Adapter<Frame> {
 
@@ -304,12 +365,12 @@ public class ContainerLogStreamer {
 
         private final Map<StreamType, LogLineBuffer> buffers = new EnumMap<>(StreamType.class);
         private final Map<StreamType, Long> tailSequences = new EnumMap<>(StreamType.class);
-        private final Deque<String> pendingLines = new ArrayDeque<>();
+        private final Deque<PendingLine> pendingLines = new ArrayDeque<>();
         private final Object emissionLock = new Object();
         // A fair write lock makes fallback finalization wait for callbacks already in progress, then blocks
         // any later callback until the transport has been closed and the final tail has been flushed.
         private final ReentrantReadWriteLock callbackGate = new ReentrantReadWriteLock(true);
-        private final Consumer<String> lineConsumer;
+        private final BiConsumer<StreamType, String> lineConsumer;
         private final long closeGraceMillis;
         // Guarded by 'buffers'. Set only by the Docker transport terminal callback; afterwards onNext
         // refuses to append, so nothing is ever buffered past the final flush.
@@ -327,6 +388,10 @@ public class ContainerLogStreamer {
         }
 
         LogReassemblyCallback(Consumer<String> lineConsumer, long closeGraceMillis) {
+            this(closeGraceMillis, (stream, line) -> lineConsumer.accept(line));
+        }
+
+        LogReassemblyCallback(long closeGraceMillis, BiConsumer<StreamType, String> lineConsumer) {
             this.lineConsumer = lineConsumer;
             this.closeGraceMillis = closeGraceMillis;
         }
@@ -342,7 +407,9 @@ public class ContainerLogStreamer {
                             return; // the final drain has run; never append into a buffer that won't be flushed
                         }
                         LogLineBuffer buffer = buffers.computeIfAbsent(frame.getStreamType(), t -> new LogLineBuffer());
-                        pendingLines.addAll(buffer.append(frame.getPayload()));
+                        for (String line : buffer.append(frame.getPayload())) {
+                            pendingLines.addLast(new PendingLine(frame.getStreamType(), line));
+                        }
                         if (buffer.hasPendingBytes()) {
                             tailSequences.put(frame.getStreamType(), nextTailSequence++);
                         } else {
@@ -411,7 +478,8 @@ public class ContainerLogStreamer {
                     buffers.entrySet().stream()
                             .sorted(Comparator.comparingLong(entry -> tailSequences.getOrDefault(
                                     entry.getKey(), Long.MAX_VALUE)))
-                            .forEach(entry -> entry.getValue().flush().ifPresent(pendingLines::addLast));
+                            .forEach(entry -> entry.getValue().flush()
+                                    .ifPresent(line -> pendingLines.addLast(new PendingLine(entry.getKey(), line))));
                     tailSequences.clear();
                 }
                 emit = startEmissionIfNeeded();
@@ -458,18 +526,22 @@ public class ContainerLogStreamer {
 
         private void emitPendingLines() {
             while (true) {
-                String line;
+                PendingLine pending;
                 synchronized (emissionLock) {
                     synchronized (buffers) {
-                        line = pendingLines.pollFirst();
-                        if (line == null) {
+                        pending = pendingLines.pollFirst();
+                        if (pending == null) {
                             emitting = false;
                             return;
                         }
                     }
                 }
-                lineConsumer.accept(line);
+                lineConsumer.accept(pending.stream(), pending.line());
             }
+        }
+
+        /** A reassembled line waiting to be emitted, and the stream it came from. */
+        private record PendingLine(StreamType stream, String line) {
         }
     }
 

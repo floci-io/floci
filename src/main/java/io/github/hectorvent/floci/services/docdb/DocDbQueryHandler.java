@@ -265,7 +265,7 @@ public class DocDbQueryHandler {
     }
 
     private static List<String> memberList(MultivaluedMap<String, String> params, String prefix) {
-        List<String> values = new java.util.ArrayList<>();
+        List<String> values = new ArrayList<>();
         for (int i = 1; ; i++) {
             String value = params.getFirst(prefix + i);
             if (value == null) {

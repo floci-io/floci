@@ -32,6 +32,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * CloudFormation provisioning for the EC2 networking types: {@code AWS::EC2::Subnet},
@@ -527,7 +528,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         String egressOnlyInternetGatewayId = ctx.resolveOptional(props, "EgressOnlyInternetGatewayId");
         String vpcPeeringConnectionId = ctx.resolveOptional(props, "VpcPeeringConnectionId");
         require(ROUTE, "RouteTableId", routeTableId);
-        long destinations = java.util.stream.Stream.of(destinationCidr, destinationIpv6Cidr, destinationPrefixListId)
+        long destinations = Stream.of(destinationCidr, destinationIpv6Cidr, destinationPrefixListId)
                 .filter(value -> value != null && !value.isBlank()).count();
         if (destinations != 1) {
             throw new AwsException("ValidationError", ROUTE + " requires exactly one of DestinationCidrBlock,"
@@ -702,6 +703,9 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
             throw new AwsException("ValidationError", PREFIX_LIST + " cannot change the AddressFamily of prefix list "
                     + existing.getPrefixListId() + " from " + existing.getAddressFamily() + " to " + family, 400);
         }
+        if (entries != null) {
+            entries.forEach(entry -> ec2Service.validatePrefixListEntry(entry, family));
+        }
         List<PrefixListEntry> desired = entries != null ? entries
                 : ctx.previouslyDeclared("Entries") ? List.of() : existing.currentEntries();
         EntryChanges changes = EntryChanges.between(existing.currentEntries(), desired);
@@ -800,9 +804,8 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
     /**
      * What takes a prefix list from its current entries to the desired ones: the entries to add and the
      * CIDRs to remove, with an entry whose block is both removed and added back (a changed description)
-     * kept apart as a CIDR to {@code redescribe} and an entry to {@code readd}. An entry matches when its
-     * CIDR is the same block and its description is the same, so a CIDR written with host bits does not
-     * read as a change.
+     * kept apart as a CIDR to {@code redescribe} and an entry to {@code readd}. Validated entries match
+     * when their CIDRs identify the same block and their descriptions are the same.
      */
     private record EntryChanges(List<PrefixListEntry> add, List<String> remove, List<String> redescribe,
                                 List<PrefixListEntry> readd) {

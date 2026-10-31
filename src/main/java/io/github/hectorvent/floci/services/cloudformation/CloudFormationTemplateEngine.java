@@ -563,7 +563,7 @@ public class CloudFormationTemplateEngine {
         requireStringAttribute(join.get(1),
                 "Template error: every Fn::Join object requires two parameters, (1) a string delimiter"
                         + " and (2) a list of strings to be joined or a function that returns a list"
-                        + " of strings (such as Fn::GetAZs) to be joined.");
+                        + " of strings (such as Fn::GetAZs) to be joined.", true);
         // CDK splices a dynamic reference across fragments, for example
         // ["{{resolve:secretsmanager:", {"Ref": "Secret"}, ":SecretString:password::}}"], so the
         // fragments are only intrinsic-resolved here and the caller resolves dynamic references on
@@ -572,14 +572,26 @@ public class CloudFormationTemplateEngine {
     }
 
     private void requireStringAttribute(JsonNode node, String message) {
+        requireStringAttribute(node, message, false);
+    }
+
+    private void requireStringAttribute(JsonNode node, String message, boolean listSource) {
         if (node == null) {
             return;
         }
         if (node.has("Fn::GetAtt") && !isStringAttribute(node.get("Fn::GetAtt"))) {
-            throw new AwsException("ValidationError", message, 400);
+            JsonNode value = resolveGetAttNode(node.get("Fn::GetAtt"));
+            if (!listSource || !value.isArray()) {
+                throw new AwsException("ValidationError", message, 400);
+            }
+            for (JsonNode member : value) {
+                if (!member.isTextual()) {
+                    throw new AwsException("ValidationError", message, 400);
+                }
+            }
         }
         if (node.has("Fn::If")) {
-            requireStringAttribute(selectIfBranch(node.get("Fn::If")), message);
+            requireStringAttribute(selectIfBranch(node.get("Fn::If")), message, listSource);
         } else if (node.has("Fn::Select")) {
             requireStringAttribute(selectedElement(node.get("Fn::Select")), message);
         } else if (node.isArray()) {
@@ -651,6 +663,13 @@ public class CloudFormationTemplateEngine {
             return resolveListElements(node, resolveDynamicReferences);
         }
         if (node.isObject()) {
+            if (node.has("Fn::GetAtt")) {
+                JsonNode attribute = resolveGetAttNode(node.get("Fn::GetAtt"));
+                if (attribute.isArray()) {
+                    attribute.forEach(member -> out.add(member.asText()));
+                    return out;
+                }
+            }
             if (node.has("Fn::If")) {
                 // Fn::If's branch can itself be any of the shapes this method already handles
                 // (literal array, Fn::Split, ...), so recurse into it rather than falling through

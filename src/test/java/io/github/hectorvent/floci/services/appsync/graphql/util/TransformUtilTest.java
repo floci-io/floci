@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -89,7 +90,7 @@ class TransformUtilTest {
     @Test
     void toSubscriptionFilter_withFilterKeys() {
         Map<String, Object> input = Map.of("filter", Map.of("field", "value"));
-        Map<String, Object> result = transform.toSubscriptionFilter(input, java.util.List.of("key1"));
+        Map<String, Object> result = transform.toSubscriptionFilter(input, List.of("key1"));
         assertThat(result, hasKey("filterKeys"));
     }
 
@@ -97,7 +98,7 @@ class TransformUtilTest {
     void toSubscriptionFilter_withHeaderOverrides() {
         Map<String, Object> input = Map.of("filter", Map.of("field", "value"));
         Map<String, Object> result = transform.toSubscriptionFilter(
-                input, java.util.List.of("key1"), Map.of("header", "value"));
+                input, List.of("key1"), Map.of("header", "value"));
         assertThat(result, hasKey("headerOverrides"));
     }
 }

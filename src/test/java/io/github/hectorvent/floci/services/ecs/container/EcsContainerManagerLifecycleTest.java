@@ -36,6 +36,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.doAnswer;
@@ -239,11 +240,11 @@ class EcsContainerManagerLifecycleTest {
 
         assertTrue(manager(lifecycleManager, namespacedConfig()).removeLeftoverContainers("current"));
 
-        verify(lifecycleManager).removeIfExistsStrict("new-only");
-        verify(lifecycleManager).removeIfExistsStrict("legacy-only");
-        verify(lifecycleManager).removeIfExistsStrict("both");
-        verify(lifecycleManager, never()).removeIfExistsStrict("current-run");
-        verify(lifecycleManager, never()).removeIfExistsStrict("legacy-current-run");
+        verify(lifecycleManager).removeIfExistsStrict("new-only", true);
+        verify(lifecycleManager).removeIfExistsStrict("legacy-only", true);
+        verify(lifecycleManager).removeIfExistsStrict("both", true);
+        verify(lifecycleManager, never()).removeIfExistsStrict("current-run", true);
+        verify(lifecycleManager, never()).removeIfExistsStrict("legacy-current-run", true);
     }
 
     @Test
@@ -263,7 +264,7 @@ class EcsContainerManagerLifecycleTest {
 
         assertTrue(manager(lifecycleManager, namespacedConfig()).removeLeftoverContainers("current"));
 
-        verify(lifecycleManager, never()).removeIfExistsStrict(anyString());
+        verify(lifecycleManager, never()).removeIfExistsStrict(anyString(), eq(true));
     }
 
     @Test
@@ -297,7 +298,7 @@ class EcsContainerManagerLifecycleTest {
         stubLeftoverListing(lifecycle, Map.of("old-container", leftover("old-container",
                 Map.of("io.floci.service", "ecs", "io.floci.owner", "alpha/4566", "io.floci.ecs.run", "previous"))),
                 Map.of());
-        doThrow(new IllegalStateException("busy")).when(lifecycle).removeIfExistsStrict("old-container");
+        doThrow(new IllegalStateException("busy")).when(lifecycle).removeIfExistsStrict("old-container", true);
         assertFalse(manager(lifecycle, namespacedConfig()).removeLeftoverContainers("current"));
         verify(lifecycle.getDockerClient(), never()).listVolumesCmd();
     }

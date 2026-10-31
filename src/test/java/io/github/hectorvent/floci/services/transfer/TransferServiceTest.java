@@ -17,6 +17,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -199,7 +200,7 @@ class TransferServiceTest {
         Server server = service.createServer("us-east-1", null, null, null, null,
                 null, null, null, null, Map.of("resource", "tag"));
         tagStore.putForAccount("111111111111", "server/" + server.getServerId(),
-                new java.util.HashMap<>(Map.of("legacy", "tag")));
+                new HashMap<>(Map.of("legacy", "tag")));
 
         service.tagResource(server.getArn(), Map.of("new", "tag"));
 

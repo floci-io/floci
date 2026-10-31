@@ -3,8 +3,12 @@ package io.github.hectorvent.floci.services.servicecatalog;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -68,7 +72,7 @@ class ServiceCatalogServiceActionConsumerTest {
             .statusCode(200)
             .body("ServiceActionDetail.ServiceActionSummary.Name", equalTo("ab-create-action"))
             .body("ServiceActionDetail.ServiceActionSummary.DefinitionType", equalTo("SSM_AUTOMATION"))
-            .body("ServiceActionDetail.ServiceActionSummary.Id", org.hamcrest.Matchers.notNullValue());
+            .body("ServiceActionDetail.ServiceActionSummary.Id", Matchers.notNullValue());
     }
 
     /**
@@ -83,7 +87,7 @@ class ServiceCatalogServiceActionConsumerTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidParametersException"))
-            .body("message", org.hamcrest.Matchers.startsWith("DefinitionType must be one of"));
+            .body("message", Matchers.startsWith("DefinitionType must be one of"));
     }
 
     // ---------- DeleteServiceAction ----------
@@ -99,7 +103,7 @@ class ServiceCatalogServiceActionConsumerTest {
         call("ListServiceActions", "{}")
         .then()
             .statusCode(200)
-            .body("ServiceActionSummaries.Id", org.hamcrest.Matchers.not(hasItem(id)));
+            .body("ServiceActionSummaries.Id", Matchers.not(hasItem(id)));
     }
 
     @Test
@@ -131,9 +135,9 @@ class ServiceCatalogServiceActionConsumerTest {
 
         Response list = call("ListServiceActions", "{}");
         list.then().statusCode(200);
-        java.util.List<String> ids = list.jsonPath().getList("ServiceActionSummaries.Id", String.class);
+        List<String> ids = list.jsonPath().getList("ServiceActionSummaries.Id", String.class);
         long matches = ids.stream().filter(id::equals).count();
-        org.junit.jupiter.api.Assertions.assertEquals(1L, matches,
+        Assertions.assertEquals(1L, matches,
                 "expected exactly one entry for " + id + " after update, found " + matches);
     }
 
@@ -162,10 +166,10 @@ class ServiceCatalogServiceActionConsumerTest {
 
         Response list = call("ListServiceActions", "{}");
         list.then().statusCode(200);
-        java.util.List<String> ids = list.jsonPath().getList("ServiceActionSummaries.Id", String.class);
-        org.junit.jupiter.api.Assertions.assertFalse(ids.contains(""),
+        List<String> ids = list.jsonPath().getList("ServiceActionSummaries.Id", String.class);
+        Assertions.assertFalse(ids.contains(""),
                 "association row leaked into ListServiceActions with an empty Id: " + ids);
-        org.junit.jupiter.api.Assertions.assertTrue(ids.contains(actionId),
+        Assertions.assertTrue(ids.contains(actionId),
                 "the real service action should still be listed: " + ids);
     }
 

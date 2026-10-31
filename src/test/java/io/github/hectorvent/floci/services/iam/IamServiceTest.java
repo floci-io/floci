@@ -93,6 +93,26 @@ class IamServiceTest {
     }
 
     @Test
+    void aPrincipalArnNamesTheRootOrTheRoleOrUserIamHoldsAtItsOwnPath() {
+        iamService.createRole("reader", "/team/", "{}", null, 3600, null);
+        iamService.createUser("writer", "/team/");
+        String role = "arn:aws:iam::000000000000:role/team/reader";
+        String user = "arn:aws:iam::000000000000:user/team/writer";
+
+        assertEquals(Optional.of(role), iamService.heldPrincipalArn(role));
+        assertEquals(Optional.of(role), iamService.heldPrincipalArn("arn:aws:iam::000000000000:role/reader"));
+        assertEquals(Optional.of(user), iamService.heldPrincipalArn("arn:aws:iam::000000000000:user/x/writer"));
+        assertEquals(Optional.of("arn:aws:iam::111122223333:root"),
+                iamService.heldPrincipalArn("arn:aws:iam::111122223333:root"));
+        assertEquals(Optional.of("arn:aws-cn:iam::000000000000:role/team/reader"),
+                iamService.heldPrincipalArn("arn:aws-cn:iam::000000000000:role/reader"));
+        for (String none : List.of("arn:aws:iam::000000000000:role/gone", "arn:aws:iam::000000000000:group/team",
+                "arn:aws:sts::000000000000:assumed-role/reader/s", "AROAREADER")) {
+            assertEquals(Optional.empty(), iamService.heldPrincipalArn(none), none);
+        }
+    }
+
+    @Test
     void updateRoleDescriptionAnswersTheRoleAndMovesNothingElse() {
         // "This operation performs the same function as the Description parameter in the UpdateRole
         // operation", and UpdateRole answers no shape at all, so the role comes back from here.

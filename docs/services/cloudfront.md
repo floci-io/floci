@@ -223,10 +223,15 @@ PUT, PATCH and DELETE).
   them). Device-type, geolocation, TLS, JA3/JA4 and header-order headers are not generated.
 - The eight AWS managed origin request policies are available by their AWS IDs through
   `GetOriginRequestPolicy` and `ListOriginRequestPolicies` (`Type` is `managed` or `custom`), and
-  cannot be updated or deleted. AWS managed cache policies are not modeled: a behavior that
-  references one forwards nothing on its account, which matches `CachingDisabled`,
-  `CachingOptimized` and `CachingOptimizedForUncompressedObjects` but not `Amplify`,
-  `Elemental-MediaPackage` or the `UseOriginCacheControlHeaders` policies.
+  cannot be updated or deleted. The seven AWS managed cache policies with published settings
+  (`Managed-Amplify`, `Managed-CachingDisabled`, `Managed-CachingOptimized`,
+  `Managed-CachingOptimizedForUncompressedObjects`, `Managed-Elemental-MediaPackage`,
+  `Managed-UseOriginCacheControlHeaders` and `Managed-UseOriginCacheControlHeaders-QueryStrings`)
+  are available by their AWS IDs through `GetCachePolicy`, `GetCachePolicyConfig` and
+  `ListCachePolicies` (`Type` is `managed` or `custom`), and cannot be updated or deleted. A
+  behavior that references one forwards what its settings select. The four Amplify-only managed
+  cache policies (`Amplify-Default`, `Amplify-DefaultNoCookies`, `Amplify-ImageOptimization` and
+  `Amplify-StaticContent`) are not modeled: a behavior that references one forwards nothing.
 - In-process S3 origins do not apply forwarding settings: viewer query strings, cookies and headers
   do not change the S3 read, apart from the viewer's `Range` and `If-Range` on a GET or HEAD.
 - Origin responses are streamed to the viewer, from in-process S3 origins and custom origins alike,
@@ -260,6 +265,22 @@ PUT, PATCH and DELETE).
   keeps a connection to the origin after the last packet of a response. An origin that does not
   answer in time is answered 504, "The origin didn't respond before the request expired", as on AWS.
 - Custom origins that resolve to loopback, private, link-local, carrier-grade NAT, or other non-routable addresses are rejected by default. Development-only private origins must be explicitly allowlisted by exact hostname.
+  A refused origin is logged with the host and the setting that allows it.
+- A custom origin that names this Floci itself, as `localhost`, `127.0.0.1`, `::1` or the configured
+  `floci.hostname`, on a port Floci listens on (its own port, or `floci.tls.aws-https-port` with TLS on)
+  for the protocol the request uses, is served by Floci itself, so neither DNS nor the private address check applies. This is the usual local setup for a
+  single-page app: a path-style S3 bucket as the origin path, fronted by the distribution's custom error
+  responses. The request reaches Floci with the origin's domain as its `Host`, and dot segments cannot
+  leave the origin path. A forwarded viewer `Host` is a 502, since it would route the request back to the
+  distribution. The same hosts on any other port are still refused unless allowlisted.
+- A custom origin whose domain is an execute-api endpoint (`{apiId}.execute-api.{region}.amazonaws.com`) of an
+  HTTP or REST API that exists in this Floci is served by Floci itself, at the address the viewer reached,
+  through the same host routing as a direct call. The origin path names the stage, as on AWS. Neither DNS nor
+  the private address check applies. A forwarded viewer `Host` is a 502, so use an origin request policy
+  such as `Managed-AllViewerExceptHostHeader`. An execute-api domain of an API that does not exist in this
+  Floci is fetched like any other custom origin. A request that the host routing would not send to the API
+  (a WebSocket API, a disabled endpoint, a missing stage, or a region other than the API's) is answered 404
+  `{"message":"Not Found"}` and never reaches Floci's other endpoints.
 - A custom origin whose domain is a [Lambda Web Function](lambda-web-functions.md) endpoint of this Floci is
   served by Floci itself, at the address the viewer reached. The origin names the endpoint's
   `domainName` with or without its port, and its protocol and ports do not matter, so neither DNS nor
@@ -288,6 +309,9 @@ PUT, PATCH and DELETE).
 - `ViewerCertificate.IAMCertificateId` must be the `ServerCertificateId` of an uploaded IAM server
   certificate: distribution create and update reject an unknown one with `InvalidViewerCertificate`,
   and `DeleteServerCertificate` returns `DeleteConflict` while a distribution references it.
+- `ViewerCertificate.ACMCertificateArn` must name an existing ACM certificate: distribution create and
+  update reject an unknown one with `InvalidViewerCertificate`. ACM lists the distribution's ARN under
+  `InUseBy`, and `DeleteCertificate` returns `ResourceInUseException` while a distribution references it.
 - Up to 20 custom response headers policies can be created, and one policy can be associated with
   up to 100 distributions.
 - The five AWS managed response headers policy IDs are available and can be selected with

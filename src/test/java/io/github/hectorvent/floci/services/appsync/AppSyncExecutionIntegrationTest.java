@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.appsync;
 
 import io.github.hectorvent.floci.services.appsync.graphql.AppSyncErrorFormatter;
+import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaRegistry;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
@@ -425,9 +426,9 @@ class AppSyncExecutionIntegrationTest {
     }
 
     @Inject
-    io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker schemaCreationWorker;
+    SchemaCreationWorker schemaCreationWorker;
 
-    private io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker rehydrateWorker() {
+    private SchemaCreationWorker rehydrateWorker() {
         return schemaCreationWorker;
     }
 

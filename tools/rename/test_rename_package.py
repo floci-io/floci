@@ -78,6 +78,14 @@ def test_non_java_files_count_rewritten_forms_and_flag_the_rest():
     assert Counter(h.category for h in r.classify_other("README.md", readme)) == Counter({"other": 2})
 
 
+def test_quarkus_env_var_form_is_rewritten_and_its_group_alone_is_flagged():
+    docs = (
+        "QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_FLOCI_SERVICES_SQS__LEVEL=TRACE\n"
+        "QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_OTHER__LEVEL=TRACE\n"
+    )
+    assert [(h.line, h.category) for h in r.classify_other("docs/a.md", docs)] == [(1, "non-java"), (2, "other")]
+
+
 def test_old_group_alone_in_java_is_other():
     assert categories('String g = "io.github.hectorvent";\n') == Counter({"other": 1})
 
@@ -120,6 +128,7 @@ FIXTURE = {
         f"<x>{OLD}.arn.fail-on-blank-region</x></project>\n"
     ),
     "tools/docs/services.yaml": f"path: src/main/java/{OLD_PATH}/services/sqs/SqsService.java\n",
+    "docs/logging.md": "QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_FLOCI_SERVICES_SQS__LEVEL=TRACE\n",
     "CHANGELOG.md": f"- moved {OLD}\n",
     "tools/rename/notes.txt": f"the old package is {OLD}\n",
     "src/main/java/com/floci/test/Untouched.java": "package com.floci.test;\n",
@@ -146,7 +155,7 @@ def repo(tmp_path: Path) -> Path:
 def test_report_counts_the_fixture(repo: Path, capsys):
     hits = r.scan(repo)
     assert Counter(hit.category for hit in hits) == Counter(
-        {"package": 4, "import": 1, "code": 1, "string": 2, "comment": 1, "non-java": 5})
+        {"package": 4, "import": 1, "code": 1, "string": 2, "comment": 1, "non-java": 6})
     assert all(not hit.path.startswith(("CHANGELOG.md", "tools/rename/")) for hit in hits)
     r.main(["--root", str(repo), "report", "--files", "3"])
     out = capsys.readouterr().out
@@ -167,7 +176,7 @@ def test_moves_only_renames_without_touching_content(repo: Path):
 def test_full_apply_leaves_only_the_excluded_files(repo: Path):
     r.main(["--root", str(repo), "apply"])
     assert r.scan(repo) == []
-    leftovers = git(repo, "grep", "-l", "-e", "io.github.hectorvent", "-e", "io/github/hectorvent").split()
+    leftovers = git(repo, "grep", "-il", "-e", "io.github.hectorvent", "-e", "io/github/hectorvent").split()
     assert sorted(leftovers) == ["CHANGELOG.md", "tools/rename/notes.txt"]
     service = (repo / "src/main/java/io/floci/aws/services/sqs/SqsService.java").read_text()
     assert service.startswith("package io.floci.aws.services.sqs;\n\nimport io.floci.aws.core.common.AwsException;")
@@ -175,6 +184,7 @@ def test_full_apply_leaves_only_the_excluded_files(repo: Path):
     assert "<groupId>io.floci</groupId><artifactId>floci</artifactId>" in (repo / "pom.xml").read_text()
     assert "io.floci.aws.arn.fail-on-blank-region" in (repo / "pom.xml").read_text()
     assert "src/main/java/io/floci/aws/services/sqs" in (repo / "tools/docs/services.yaml").read_text()
+    assert (repo / "docs/logging.md").read_text() == "QUARKUS_LOG_CATEGORY__IO_FLOCI_AWS_SERVICES_SQS__LEVEL=TRACE\n"
     assert (repo / "src/main/java/com/floci/test/Untouched.java").read_text() == "package com.floci.test;\n"
 
 

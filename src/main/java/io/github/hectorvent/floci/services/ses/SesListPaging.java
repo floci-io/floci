@@ -147,6 +147,12 @@ public enum SesListPaging {
             token -> badRequest("Failed to deserialize token. "),
             true),
 
+    /** Probed 2026-10-27: 68 recommendations came back as 50 and a token without a PageSize. */
+    V2_LIST_RECOMMENDATIONS(Namespace.RECOMMENDATION, 50, 1000,
+            size -> badRequest("The PageSize should be between 1 and 1000"),
+            token -> badRequest("Failed to deserialize token."),
+            true),
+
     /**
      * The request has no size member; the model documents "up to 100 receipt rule sets at a time".
      * SES allows 40 rule sets per region, so a second page could not be observed.
@@ -173,6 +179,7 @@ public enum SesListPaging {
         static final String SUPPRESSED_DESTINATION = "suppressed-destination";
         static final String RECEIPT_RULE_SET = "receipt-rule-set";
         static final String REPUTATION_ENTITY = "reputation-entity";
+        static final String RECOMMENDATION = "recommendation";
     }
 
     /** What the tenant lists share, and ListImportJobs borrows: the bound and Smithy's messages. */

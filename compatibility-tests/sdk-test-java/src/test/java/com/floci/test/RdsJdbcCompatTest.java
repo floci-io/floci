@@ -25,8 +25,6 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Duration;
-import java.time.Instant;
 import java.util.Properties;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -414,17 +412,7 @@ class RdsJdbcCompatTest {
     }
 
     private static Connection awaitPostgresConnection(String username, String password, int port) throws Exception {
-        Instant deadline = Instant.now().plus(Duration.ofSeconds(60));
-        SQLException last = null;
-        while (Instant.now().isBefore(deadline)) {
-            try {
-                return openPostgresConnection(username, password, port);
-            } catch (SQLException e) {
-                last = e;
-                Thread.sleep(1000);
-            }
-        }
-        throw last != null ? last : new SQLException("Timed out waiting for RDS proxy connection");
+        return TestFixtures.awaitJdbcConnection(postgresUrl(port), postgresProperties(username, password));
     }
 
     private static Connection openPostgresConnection(String username, String password) throws SQLException {
@@ -432,14 +420,20 @@ class RdsJdbcCompatTest {
     }
 
     private static Connection openPostgresConnection(String username, String password, int port) throws SQLException {
+        return DriverManager.getConnection(postgresUrl(port), postgresProperties(username, password));
+    }
+
+    private static String postgresUrl(int port) {
+        return "jdbc:postgresql://" + TestFixtures.proxyHost() + ":" + port + "/" + DATABASE;
+    }
+
+    private static Properties postgresProperties(String username, String password) {
         Properties properties = new Properties();
         properties.setProperty("user", username);
         properties.setProperty("password", password);
         properties.setProperty("sslmode", "disable");
         properties.setProperty("connectTimeout", "5");
-        return DriverManager.getConnection(
-                "jdbc:postgresql://" + TestFixtures.proxyHost() + ":" + port + "/" + DATABASE,
-                properties);
+        return properties;
     }
 
     private static int selectOne(Connection connection) throws SQLException {

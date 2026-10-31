@@ -93,7 +93,7 @@ class StsIssuedSessionEnforcementIntegrationTest {
                   "Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"sts:AssumeRole"}]}""".formatted(ACCOUNT));
         iam("PutRolePolicy", "RoleName", role, "PolicyName", "s3", "PolicyDocument", ALL_S3);
         given().filter(tokenOnlySession).formParam("Action", "AssumeRole")
-                .formParam("RoleArn", "arn:aws:iam::" + ACCOUNT + ":role/" + role).formParam("RoleSessionName", "s")
+                .formParam("RoleArn", "arn:aws:iam::" + ACCOUNT + ":role/" + role).formParam("RoleSessionName", "sx")
                 .when().post("/").then().statusCode(403);
 
         S3RequestSigner readerSession = sessionToken(reader);
@@ -271,7 +271,7 @@ class StsIssuedSessionEnforcementIntegrationTest {
 
     private static void assumeRole(S3RequestSigner caller, String role, int status) {
         given().filter(caller).formParam("Action", "AssumeRole")
-                .formParam("RoleArn", "arn:aws:iam::" + ACCOUNT + ":role/" + role).formParam("RoleSessionName", "s")
+                .formParam("RoleArn", "arn:aws:iam::" + ACCOUNT + ":role/" + role).formParam("RoleSessionName", "sx")
                 .when().post("/").then().statusCode(status);
     }
 

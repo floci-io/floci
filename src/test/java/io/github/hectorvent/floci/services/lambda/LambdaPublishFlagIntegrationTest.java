@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -153,7 +154,7 @@ class LambdaPublishFlagIntegrationTest {
             .statusCode(200)
             .extract().path("Versions.find { it.Version == '1' }.CodeSha256");
 
-        org.junit.jupiter.api.Assertions.assertNotEquals(latestSha, versionOneSha);
+        Assertions.assertNotEquals(latestSha, versionOneSha);
     }
 
     @Test

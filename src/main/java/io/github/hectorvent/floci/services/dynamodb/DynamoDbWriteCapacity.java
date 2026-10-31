@@ -29,9 +29,6 @@ final class DynamoDbWriteCapacity {
     /** The smallest figure VectorWriteRequestBytes reports for an entry a write changes. */
     private static final double VECTOR_WRITE_FLOOR_BYTES = 1024;
 
-    /** What the index stores per vector component, whatever the written decimal text costs. */
-    private static final int VECTOR_COMPONENT_BYTES = 4;
-
     private DynamoDbWriteCapacity() {}
 
     record Cost(double table, Map<String, Double> gsi, Map<String, Double> lsi,
@@ -72,7 +69,7 @@ final class DynamoDbWriteCapacity {
 
     /** oldItem and newItem are the stored images before and after the write; either may be null. */
     static Cost forWrite(TableDefinition table, JsonNode oldItem, JsonNode newItem) {
-        double tableUnits = (double) Math.max(1, Math.max(sizeUnits(oldItem), sizeUnits(newItem)));
+        double tableUnits = (double) Math.max(1, Math.max(tableUnits(table, oldItem), tableUnits(table, newItem)));
         LinkedHashMap<String, Double> gsiUnits = new LinkedHashMap<>();
         List<GlobalSecondaryIndex> gsis = table.getGlobalSecondaryIndexes();
         if (gsis != null) {
@@ -128,7 +125,7 @@ final class DynamoDbWriteCapacity {
     private static double entryBytes(VectorIndex index, JsonNode view) {
         String vectorAttribute = index.getVectorAttributeName();
         double bytes = DynamoDbItemSize.utf8Length(vectorAttribute)
-                + VECTOR_COMPONENT_BYTES * index.getDimensions();
+                + DynamoDbItemSize.VECTOR_COMPONENT_BYTES * index.getDimensions();
         for (Map.Entry<String, JsonNode> field : view.properties()) {
             if (!vectorAttribute.equals(field.getKey())) {
                 bytes += DynamoDbItemSize.utf8Length(field.getKey())
@@ -249,10 +246,15 @@ final class DynamoDbWriteCapacity {
         return false;
     }
 
+    private static long tableUnits(TableDefinition table, JsonNode item) {
+        return item == null ? 0 : units(DynamoDbItemSize.billedItemSize(table, item));
+    }
+
     private static long sizeUnits(JsonNode image) {
-        if (image == null) {
-            return 0;
-        }
-        return Math.max(1, (DynamoDbItemSize.calculateItemSize(image) + 1023) / 1024);
+        return image == null ? 0 : units(DynamoDbItemSize.calculateItemSize(image));
+    }
+
+    private static long units(int bytes) {
+        return Math.max(1, (bytes + 1023) / 1024);
     }
 }

@@ -97,6 +97,38 @@ class SamRestApiAuthIntegrationTest {
         });
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "{}", "{\"ApiKeyRequired\":false}"})
+    void importedApiUsesRelocatedSchemesWithoutDefaults(String auth) throws Exception {
+        ObjectNode template = template(false);
+        ObjectNode properties = (ObjectNode) template.at("/Resources/Api/Properties");
+        if ("missing".equals(auth)) {
+            properties.remove("Auth");
+        } else {
+            properties.set("Auth", mapper.readTree(auth));
+        }
+        ObjectNode body = (ObjectNode) properties.get("DefinitionBody");
+        body.set("components", mapper.readTree("{\"securitySchemes\":{}}"));
+        body.set("securityDefinitions", mapper.readTree("""
+                {"declaredKey":{"type":"apiKey","name":"x-api-key","in":"header"}}
+                """));
+        ((ObjectNode) body.at("/paths/~1items/post")).set("security",
+                mapper.readTree("[{\"declaredKey\":[]}]"));
+        try (ApiGatewayClient client = ApiGatewayClient.builder().endpointOverride(endpoint)
+                .region(Region.US_EAST_1).httpClientBuilder(UrlConnectionHttpClient.builder())
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
+                .build()) {
+            withDeployedApi(template, "sam-relocated-key-", apiId -> {
+                String resourceId = client.getResources(request -> request.restApiId(apiId)).items().stream()
+                        .filter(resource -> "/items".equals(resource.path())).findFirst().orElseThrow().id();
+                GetMethodResponse method = client.getMethod(request -> request.restApiId(apiId)
+                        .resourceId(resourceId).httpMethod("POST"));
+                assertEquals("NONE", method.authorizationType());
+                assertEquals(true, method.apiKeyRequired());
+            });
+        }
+    }
+
     @Test
     void undeclaredInlineApiKeyDoesNotSurviveSamOpenApiPostProcessing() throws Exception {
         ObjectNode template = template(false);

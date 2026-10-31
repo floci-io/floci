@@ -17,6 +17,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -53,7 +54,7 @@ class CognitoAttributeVerificationConcurrencyTest {
         Harness harness = harness(codes, dispatcher);
         AtomicInteger issues = new AtomicInteger();
         AtomicReference<String> latestCode = new AtomicReference<>();
-        Map<String, String> destinationByCode = new java.util.concurrent.ConcurrentHashMap<>();
+        Map<String, String> destinationByCode = new ConcurrentHashMap<>();
         CountDownLatch firstIssueEntered = new CountDownLatch(1);
         CountDownLatch releaseFirstIssue = new CountDownLatch(1);
         CountDownLatch secondStarted = new CountDownLatch(1);

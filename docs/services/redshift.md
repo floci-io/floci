@@ -14,6 +14,110 @@ Snapshot-dump and catalog-seed uploads retry transient Docker I/O failures for u
 
 For running SQL without a PostgreSQL wire connection (the way Lambda and Step Functions do), see the [Redshift Data API](redshift-data.md).
 
+## Pausing and resuming provisioned clusters
+
+`PauseCluster` accepts an `available` cluster and returns it as `paused`.
+It closes the auth proxy and stops PostgreSQL without removing the container or its
+data volume. Existing SQL connections are disconnected. `ResumeCluster` accepts a
+`paused` cluster, starts the same container, waits for PostgreSQL readiness, and
+restores the auth proxy with the same endpoint and authentication settings.
+Both operations complete synchronously in Floci. Repeating either operation in the
+wrong state returns `InvalidClusterState`; an unknown identifier returns `ClusterNotFound`.
+Clusters with automated snapshots disabled cannot be paused. Resume the cluster
+before modifying it, rebooting it, or creating a snapshot.
+
+Floci preserves the original container directly instead of creating an additional
+automated snapshot for pause. It retains all user tables and views, including
+no-backup tables, and does not simulate maintenance-version upgrades on resume.
+
+The proxy port remains reserved while paused, including after a Floci restart with
+persistent cluster metadata. Startup leaves paused clusters stopped. Resume requires
+the original container to still exist: if it was removed externally, Floci returns
+an error instead of creating an empty replacement database. A failed resume attempts
+to stop the container again so it can be retried. If that rollback also fails, the
+cluster is marked `unavailable` and its data-bearing container is retained.
+Failure to close the proxy during pause also marks the cluster `unavailable`,
+because its listener may have partially stopped. Resume rollback attempts proxy
+shutdown and database shutdown independently and keeps the proxy port reserved.
+Delete a paused cluster with `SkipFinalClusterSnapshot=true`, or resume it before
+requesting a final snapshot.
+
+Zero-ETL polling skips paused targets without consuming stream records or changing
+their checkpoints. Polling continues after resume; a healthy poll clears an earlier
+integration failure even when the stream has no new records.
+Healthy idle polls do not rewrite integration state; recovery persists only changed
+health fields and retains the stored stream checkpoints.
+
+```bash
+aws --endpoint-url http://localhost:4566 redshift pause-cluster --cluster-identifier warehouse
+aws --endpoint-url http://localhost:4566 redshift resume-cluster --cluster-identifier warehouse
+```
+
+## Events and notifications
+
+`DescribeEvents` returns the last hour by default, accepts `StartTime`, `EndTime`,
+`Duration`, and a paired `SourceType`/`SourceIdentifier` filter, and retains the last
+14 days. `MaxRecords` accepts 20 through 100; continue with the returned `Marker`.
+These bounds follow the [AWS DescribeEvents API](https://docs.aws.amazon.com/redshift/latest/APIReference/API_DescribeEvents.html).
+History and event subscriptions are isolated by account and region and use the
+configured Redshift storage mode, including persistent, hybrid and WAL storage.
+
+Floci records cluster creation, deletion, reboot, restore, password changes,
+parameter-group association and security-group changes. Snapshot operations record
+start, completion and failure, including final snapshots. Parameter-group creation,
+update, reset and deletion also produce events. The IDs, categories and severities
+come from the [AWS event catalog](https://docs.aws.amazon.com/redshift/latest/mgmt/working-with-event-notifications.html).
+`DescribeEventCategories` lists the event IDs implemented by Floci, grouped by source
+type. It does not advertise hardware failures, maintenance or other conditions Floci
+does not simulate. Security-group and scheduled-action source types are accepted as
+filters, but Floci does not model resources or generate events for those source types.
+
+Use `CreateEventSubscription`, `ModifyEventSubscription`, `DescribeEventSubscriptions`
+and `DeleteEventSubscription` to manage SNS delivery. A subscription can filter source
+type, source IDs, categories and severity. Omitted severity receives both INFO and
+ERROR; explicit severity selects only that severity. All specified filters must match.
+Only standard SNS topics are accepted, as required by
+[AWS subscription rules](https://docs.aws.amazon.com/redshift/latest/mgmt/working-with-event-notifications-subscribe.html).
+Subscriptions default to enabled; set `Enabled=false` to stop delivery without deleting
+the subscription. The limit is 20 subscriptions per account and region.
+
+Matching events are published to SNS with subject `Amazon Redshift Notification`.
+The JSON message includes `Event Source`, `Event Time`, `Source ID`, `Event ID`,
+`Event Categories`, `Severity` and `Event Message`. AWS does not specify a stable
+notification-body schema in the API reference; this message format is Floci's
+representation of the event details, not a claim of byte-for-byte AWS parity.
+With IAM enforcement on, the topic's policy must allow the `redshift.amazonaws.com`
+principal to `sns:Publish` (conditions on `aws:SourceArn`, the subscription's ARN, and
+`aws:SourceAccount` apply); otherwise nothing is published and the subscription becomes
+`no-permission`. A deleted topic changes subscription status to `topic-not-exist`;
+other authorization failures also change it to `no-permission`. Notification delivery failures are logged
+and do not roll back the Redshift operation.
+
+For example, parameter-group events work without a database container:
+
+```bash
+TOPIC=$(aws --endpoint-url http://localhost:4566 sns create-topic \
+  --name redshift-events --query TopicArn --output text)
+aws --endpoint-url http://localhost:4566 redshift create-event-subscription \
+  --subscription-name parameter-events --sns-topic-arn "$TOPIC" \
+  --source-type cluster-parameter-group --event-categories configuration
+aws --endpoint-url http://localhost:4566 redshift create-cluster-parameter-group \
+  --parameter-group-name event-demo --parameter-group-family redshift-1.0 \
+  --description 'Event example'
+aws --endpoint-url http://localhost:4566 redshift describe-events \
+  --source-type cluster-parameter-group --source-identifier event-demo
+```
+
+### CloudFormation
+
+`AWS::Redshift::EventSubscription` creates a real subscription. `Ref` returns its
+name; `Fn::GetAtt` supports `CustomerAwsId`, `CustSubscriptionId`, `Status`,
+`SubscriptionCreationTime`, `SourceIdsList` and `EventCategoriesList`, with the last
+two returned as lists. Updating filters, enabled state, topic and tags reconciles the
+existing subscription; changing `SubscriptionName` replaces it. Removing optional
+filters from the template clears them. Stack deletion removes the subscription.
+The attributes follow the [CloudFormation resource schema](https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-redshift-eventsubscription.html).
+
 ## Supported Actions
 
 <!-- floci:actions:start -->
@@ -45,6 +149,12 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `CreateSnapshotCopyGrant` | Register a snapshot copy grant, defaulting `KmsKeyId` to the AWS-managed Redshift key. `SnapshotCopyGrantName` must be 1-63 characters, start with a lowercase letter, and contain only lowercase letters, digits and non-consecutive hyphens |
 | `DescribeSnapshotCopyGrants` | List snapshot copy grants, optionally filtered by name, paged with `MaxRecords` and `Marker` |
 | `DeleteSnapshotCopyGrant` | Remove a snapshot copy grant |
+| `DescribeEvents` | Return retained events filtered by source and time, with marker pagination |
+| `DescribeEventCategories` | List implemented event IDs, categories and severities by source type |
+| `CreateEventSubscription` | Create an enabled or disabled subscription delivering matching events to a standard SNS topic |
+| `ModifyEventSubscription` | Update the specified subscription filters, topic or enabled state |
+| `DeleteEventSubscription` | Delete an event notification subscription |
+| `DescribeEventSubscriptions` | List event subscriptions filtered by name or tags |
 | `EnableSnapshotCopy` | Record cross-region snapshot copy on a cluster (`RetentionPeriod` defaults to 7, `ManualSnapshotRetentionPeriod` to -1); `DescribeClusters` then reports `ClusterSnapshotCopyStatus`. A `DestinationRegion` that is not an AWS region is refused with `UnknownSnapshotCopyRegionFault`. No snapshot is copied |
 | `DisableSnapshotCopy` | Clear a cluster's snapshot copy configuration |
 | `ModifySnapshotCopyRetentionPeriod` | Change the automated (or, with `Manual`, the manual) snapshot copy retention period |
@@ -60,6 +170,8 @@ For running SQL without a PostgreSQL wire connection (the way Lambda and Step Fu
 | `DescribeLoggingStatus` | Return a cluster's stored audit-logging configuration |
 | `EnableLogging` | Store audit-logging configuration and deliver the selected connection, user, and user-activity audit records to CloudWatch Logs for provisioned clusters |
 | `DisableLogging` | Clear a cluster's audit-logging configuration |
+| `PauseCluster` | Stop a provisioned cluster and its auth proxy while retaining the container and data |
+| `ResumeCluster` | Restart a paused cluster and restore its auth proxy on the same endpoint |
 | `RebootCluster` | Restart a cluster's container |
 | `GetClusterCredentials` | Issue a short-lived DbUser / DbPassword pair the auth proxy and Data API accept for a non-master user |
 | `GetClusterCredentialsWithIAM` | Issue short-lived credentials with the DbUser derived from the caller's IAM identity |
@@ -225,6 +337,30 @@ are coalesced to one current backup, which contains the data at dump time, rathe
 as historical backups. Older persisted clusters acquire their initial scheduling anchor on the
 first sweep. Cleanup after deleting a cluster runs on the next sweep.
 
+## CloudWatch metrics
+
+Floci publishes metrics for every `available` cluster to the `AWS/Redshift` CloudWatch namespace once a minute, each stamped with the minute that ended. The only dimension is `ClusterIdentifier`.
+
+Each minute is attempted at most once per publisher lifetime. After a pause, overdue ticks skip minutes already attempted instead of publishing duplicate samples. Failed writes are not retried within the same minute because they may already have stored some samples.
+
+| Metric | Unit | Value |
+| --- | --- | --- |
+| `HealthStatus` | `Count` | `1` while the cluster is `available` |
+| `MaintenanceMode` | `Count` | `0`; Floci models no maintenance windows |
+| `DatabaseConnections` | `Count` | Clients currently connected through the cluster's auth proxy |
+
+A cluster that is not `available` (for example `creating`, `deleting` or `failed`) publishes nothing, and `DatabaseConnections` is omitted for a cluster whose proxy is not running. A reboot keeps the status `available`, so `HealthStatus` stays `1` during it and `DatabaseConnections` is omitted until the proxy is back. `DatabaseConnections` counts PostgreSQL wire-protocol clients only: the [Redshift Data API](redshift-data.md) reaches the database around the proxy, so its connections are not counted. Datapoints older than 15 days are dropped hourly.
+
+```bash
+aws --endpoint-url http://localhost:4566 cloudwatch get-metric-statistics \
+  --namespace AWS/Redshift --metric-name HealthStatus \
+  --dimensions Name=ClusterIdentifier,Value=my-cluster \
+  --start-time "$(date -u -d '-10 minutes' +%FT%TZ)" --end-time "$(date -u +%FT%TZ)" \
+  --period 60 --statistics Sum
+```
+
+Set `FLOCI_SERVICES_REDSHIFT_CLOUDWATCH_METRICS_ENABLED=false` to turn publishing off. Publishing also requires the CloudWatch Metrics service to be enabled.
+
 ## DynamoDB zero-ETL
 
 The supported zero-ETL path is DynamoDB Streams to a provisioned Redshift cluster. The source ARN
@@ -247,6 +383,32 @@ restart. While the backfill runs, `DescribeIntegrations` reports `Status` as `sy
 approximation to indicate that initial backfill is in progress); it becomes `active` once the scan is
 exhausted. The landing table is an append-only log, so an item changed while its table is still being
 backfilled can appear twice: once from the scan and once from the stream.
+
+### EventBridge events
+
+As an integration changes state, Floci sends `aws.redshift` events to the default EventBridge bus
+of the integration's account and Region, as AWS does for zero-ETL integrations. No subscription is
+needed: a rule on `source = aws.redshift` receives them. The `detail-type` is
+`Redshift Integration Monitoring`, and the event IDs, severities and messages follow the
+[AWS event table](https://docs.aws.amazon.com/redshift/latest/mgmt/integration-event-notifications.html).
+`resources` holds the integration ARN.
+
+| Event ID | Severity | Sent when |
+| --- | --- | --- |
+| `REDSHIFT-INTEGRATION-EVENT-0003` | INFO | The integration starts or resumes synchronizing (`syncing`) |
+| `REDSHIFT-INTEGRATION-EVENT-0000` | INFO | The initial backfill finishes and the integration becomes `active` |
+| `REDSHIFT-INTEGRATION-EVENT-0013` | INFO | The integration returns to `active` after a failure |
+| `REDSHIFT-INTEGRATION-EVENT-0007` | ERROR | The consumer fails to write and the integration becomes `failed` |
+| `REDSHIFT-INTEGRATION-EVENT-0002` | INFO | `DeleteIntegration` starts |
+| `REDSHIFT-INTEGRATION-EVENT-0001` | INFO | `DeleteIntegration` finishes |
+
+The `detail` object carries `eventId`, `severity`, `category`, `message` and `integrationArn`.
+AWS does not publish a JSON example of the `detail` of these events, so these field names are
+Floci's representation of the table's columns, not a claim of byte-for-byte AWS parity.
+Floci sends only the events its DynamoDB integration can raise: the Aurora, primary-key,
+data-type, pause and resume, serverless restore and modification events do not occur here. Delivery
+is best effort. It is skipped when the EventBridge service is disabled, a refused or failed
+delivery is logged, and neither changes the outcome of the Redshift operation.
 
 Serverless Redshift targets, schema inference, and relational projection are not supported in this
 first implementation.
@@ -317,6 +479,7 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 |----------|---------|-------------|
 | `FLOCI_SERVICES_REDSHIFT_ENABLED` | `true` | Enable or disable Redshift |
 | `FLOCI_SERVICES_REDSHIFT_AUTOMATED_SNAPSHOTS_ENABLED` | `true` | Run background automated snapshot and retention sweeps |
+| `FLOCI_SERVICES_REDSHIFT_CLOUDWATCH_METRICS_ENABLED` | `true` | Publish the `AWS/Redshift` metrics of available clusters to CloudWatch once a minute, see [CloudWatch metrics](#cloudwatch-metrics) |
 | `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_SWEEP_INTERVAL_SECONDS` | `60` | Delay between background snapshot sweeps |
 | `FLOCI_SERVICES_REDSHIFT_IMAGE_VERSION` | `postgres:15-alpine` | PostgreSQL Docker image backing each cluster |
 | `FLOCI_SERVICES_REDSHIFT_DEFAULT_PORT` | `5439` | Reported Redshift port hint (the real host port is dynamic and comes from `DescribeClusters`) |

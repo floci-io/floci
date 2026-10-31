@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -19,6 +20,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
@@ -109,7 +111,7 @@ class PipesTargetInvokerTest {
     void invoke_keepsTheQualifierOfTheTargetFunctionArn() {
         Pipe pipe = createPipe("arn:aws:lambda:us-east-1:000000000000:function:my-fn:PROD", null);
         when(lambdaService.invoke(anyString(), anyString(), any(byte[].class), any(InvocationType.class)))
-                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, null, "{}".getBytes(), null, "req"));
+                .thenReturn(new InvokeResult(200, null, "{}".getBytes(), null, "req"));
 
         invoker.invoke(pipe, "{}", "us-east-1");
 
@@ -359,9 +361,9 @@ class PipesTargetInvokerTest {
     void applyEnrichment_invokesLambdaAndReturnsResponse() {
         String region = "us-east-1";
         Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
-        byte[] resp = "{\"systemId\":\"S1\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        byte[] resp = "{\"systemId\":\"S1\"}".getBytes(StandardCharsets.UTF_8);
         when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, null, resp, null, "req"));
+                .thenReturn(new InvokeResult(200, null, resp, null, "req"));
 
         String out = invoker.applyEnrichment(pipe, "[{\"body\":\"{}\"}]", region);
 
@@ -369,7 +371,7 @@ class PipesTargetInvokerTest {
         ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
         verify(lambdaService).invoke(eq(region), eq("enrich-fn"), payloadCaptor.capture(), eq(InvocationType.RequestResponse));
         assertEquals("[{\"body\":\"{}\"}]",
-                new String(payloadCaptor.getValue(), java.nio.charset.StandardCharsets.UTF_8));
+                new String(payloadCaptor.getValue(), StandardCharsets.UTF_8));
     }
 
     @Test
@@ -377,7 +379,7 @@ class PipesTargetInvokerTest {
         String region = "us-east-1";
         Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn:PROD");
         when(lambdaService.invoke(eq(region), eq("enrich-fn:PROD"), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, null, "{}".getBytes(), null, "req"));
+                .thenReturn(new InvokeResult(200, null, "{}".getBytes(), null, "req"));
 
         invoker.applyEnrichment(pipe, "[]", region);
 
@@ -397,7 +399,7 @@ class PipesTargetInvokerTest {
         String region = "us-east-1";
         Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
         when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, null, new byte[0], null, "req"));
+                .thenReturn(new InvokeResult(200, null, new byte[0], null, "req"));
         assertNull(invoker.applyEnrichment(pipe, "[]", region));
     }
 
@@ -408,8 +410,8 @@ class PipesTargetInvokerTest {
         Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
         for (String body : new String[]{"{}", "[]", "  { }  ", "[ ]"}) {
             when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
-                    .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(
-                            200, null, body.getBytes(java.nio.charset.StandardCharsets.UTF_8), null, "req"));
+                    .thenReturn(new InvokeResult(
+                            200, null, body.getBytes(StandardCharsets.UTF_8), null, "req"));
             assertNull(invoker.applyEnrichment(pipe, "[]", region),
                     "enrichment response " + body + " should skip the target");
         }
@@ -421,8 +423,8 @@ class PipesTargetInvokerTest {
         String region = "us-east-1";
         Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
         when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(
-                        200, null, "[{}]".getBytes(java.nio.charset.StandardCharsets.UTF_8), null, "req"));
+                .thenReturn(new InvokeResult(
+                        200, null, "[{}]".getBytes(StandardCharsets.UTF_8), null, "req"));
         assertEquals("[{}]", invoker.applyEnrichment(pipe, "[]", region));
     }
 
@@ -441,7 +443,7 @@ class PipesTargetInvokerTest {
         String region = "us-east-1";
         Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
         when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, "Unhandled", "boom".getBytes(), null, "req"));
+                .thenReturn(new InvokeResult(200, "Unhandled", "boom".getBytes(), null, "req"));
         assertThrows(RuntimeException.class, () -> invoker.applyEnrichment(pipe, "[]", region));
     }
 
@@ -452,7 +454,7 @@ class PipesTargetInvokerTest {
         String region = "us-east-1";
         Pipe pipe = createPipe("arn:aws:lambda:" + region + ":000000000000:function:my-fn", null);
         when(lambdaService.invoke(eq(region), eq("my-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
-                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, "Unhandled", "boom".getBytes(), null, "req"));
+                .thenReturn(new InvokeResult(200, "Unhandled", "boom".getBytes(), null, "req"));
         assertThrows(RuntimeException.class, () -> invoker.invoke(pipe, "{}", region));
     }
 

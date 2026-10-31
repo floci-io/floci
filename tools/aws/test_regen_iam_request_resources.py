@@ -127,6 +127,22 @@ def test_an_arn_inside_a_structure_or_a_lists_structures_is_read_by_its_path():
     assert r.creates_for("svc:CreateThing", ["thing"], FORMATS, {"Parts[].ThingArn": "Parts[].ThingArn"}) == []
 
 
+def test_a_create_naming_others_marks_what_it_makes():
+    formats = {"webhook": "arn:${Partition}:svc:${Region}:${Account}:webhook:${WebhookName}",
+               "pipeline": "arn:${Partition}:svc:${Region}:${Account}:${PipelineName}",
+               "lb": FORMATS["lb"], "lb/app/": FORMATS["lb/app/"]}
+    webhook = {"type": "webhook", "fill": {"WebhookName": "webhook.name"}}
+    pipeline = {"type": "pipeline", "fill": {"PipelineName": "webhook.targetPipeline"}}
+    assert r.with_made([webhook, pipeline], "svc:PutWebhook", formats) == [dict(webhook, made=True), pipeline]
+    # A type made by its ARN format's leading resource word, so every load balancer type is made; with every
+    # resource made, or none, or for no create, nothing is marked.
+    classic = {"type": "lb", "fill": {"LoadBalancerName": "LoadBalancerName"}}
+    app = {"type": "lb/app/", "fill": {"LoadBalancerName": "Name"}}
+    assert r.with_made([classic, app], "svc:CreateLoadBalancer", formats) == [classic, app]
+    assert r.with_made([pipeline], "svc:PutWebhook", formats) == [pipeline]
+    assert r.with_made([webhook, pipeline], "svc:DescribeWebhook", formats) == [webhook, pipeline]
+
+
 def test_stems_drop_the_suffixes_names_carry():
     assert r.stem("TargetGroupArns") == "targetgroup"
     assert r.stem("DBInstanceIdentifier") == "dbinstance"
@@ -275,6 +291,22 @@ def test_a_member_taking_an_arn_before_a_name_is_read_as_the_variable_of_that_ty
         dict(rules[0], arnOf={"BusName": "bus"}), dict(rules[1], arnOf={"BusName": "bus"}), rules[2]]
 
 
+def test_a_field_of_each_of_a_lists_structures_taking_an_arn_before_a_name_is_read_by_its_path():
+    shapes = {"String": {"type": "string"},
+              "BusNameOrArn": {"type": "string", "pattern": "(arn:aws[\\w-]*:svc:[a-z]+-[a-z]+-[\\w-]+:[0-9]{12}:bus\\/)?[\\.\\-_A-Za-z0-9]+"},
+              "Entry": {"type": "structure", "members": {"Source": {"shape": "String"}, "BusName": {"shape": "BusNameOrArn"}}},
+              "Entries": {"type": "list", "member": {"shape": "Entry"}},
+              "Config": {"type": "structure", "members": {"BusName": {"shape": "BusNameOrArn"}}},
+              "In": {"type": "structure", "members": {"Entries": {"shape": "Entries"}, "Config": {"shape": "Config"}}}}
+    models = {"svc": {"metadata": {"protocol": "json"}, "operations": {"PutEvents": {"input": {"shape": "In"}}}, "shapes": shapes}}
+    # Only a list's structures give one value for each, so a lone structure's field is not read.
+    assert r.name_or_arn_members(models, "PutEvents") == {"Entries[].BusName": "bus"}
+    formats = {"bus": "arn:${Partition}:svc:${Region}:${Account}:bus/${BusName}"}
+    buses = [{"type": "bus", "fill": {"BusName": "Entries[].BusName"}, "absent": {"Entries[].BusName": "default"}}]
+    assert r.with_arn_of(buses, formats, r.name_or_arn_members(models, "PutEvents")) == [
+        dict(buses[0], arnOf={"Entries[].BusName": "bus"})]
+
+
 def test_a_correction_for_an_operation_the_file_does_not_read_fails(corrections, tmp_path):
     corrections.setattr(r, "CORRECTIONS", {"svc:Gone": ([], "no longer there")})
     with pytest.raises(ValueError, match="svc:Gone"):
@@ -301,8 +333,21 @@ def test_a_well_formed_document_validates():
     document["operations"]["svc:B"]["resources"][0]["absent"] = {"Bus": "default"}
     document["operations"]["svc:B"]["resources"][0]["arnOf"] = {"Bus": "thing"}
     document["operations"]["svc:A"]["resources"][0]["before"] = "#"
+    # A member filling a variable read up to a character, as a CodeBuild build id names its project before ':'.
+    document["operations"]["svc:B"]["resources"][0]["before"] = ":"
     assert r.validate(document) == []
     assert r.validate(with_a_create()) == []
+    # A field of each of a list's structures fills a variable, read as given when absent, or as an ARN.
+    document = good_document()
+    document["operations"]["svc:B"]["resources"][0].update(
+        fill={"GroupName": "Groups[].Name"}, absent={"Groups[].Name": "default"}, arnOf={"Groups[].Name": "thing"})
+    assert r.validate(document) == []
+    # A field of a structure fills a variable, read as one value, and a variable no member fills may be fixed.
+    document = good_document()
+    document["operations"]["svc:B"]["resources"][0].update(
+        fill={"GroupName": "Group.Name"}, absent={"Group.Name": "default"}, fixed={"GroupId": "g-1"}, made=True)
+    document["operations"]["svc:A"]["resources"][0]["made"] = True
+    assert r.validate(document) == []
 
 
 def with_a_create() -> dict:
@@ -316,7 +361,20 @@ def with_a_create() -> dict:
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(types=["pool"]), "not resource types"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a.b.c"), "no member"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(arn="a[][]"), "no member"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="Groups[].Name"), "no variables"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="Group.Names[]"), "no variables"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="A.B.Name"), "no variables"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed={"Other": "x"}), "fixes"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed={"GroupName": "x"}), "fixes"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed={"GroupId": ""}), "fixes"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed={"GroupId": 1}), "fixes"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fixed=["GroupId"]), "fixes"),
+    (lambda d: d["operations"]["svc:A"]["resources"][0].update(fixed={"GroupId": "x"}), "neither an ARN member"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(made=False), "not true"),
+    (lambda d: d["operations"]["svc:A"]["resources"][0].update(made="true"), "not true"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupName="Groups[].Names[]"), "no variables"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupId="Groups[].Id"), "more than one list"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(absent={"Groups[].Name": "default"}), "absent members"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(arnOf={"Groups[].Name": "thing"}), "types of one variable"),
     (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(Other="Name"), "no variables"),
     (lambda d: d["operations"]["svc:B"]["resources"][0]["fill"].update(GroupId="Ids[]"), "more than one list"),
     (lambda d: d["operations"]["svc:A"].update(action="other:A"), "no action of its namespace"),
@@ -329,7 +387,9 @@ def with_a_create() -> dict:
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(when={"Types[]": ["a"]}), "no member's values"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(when={"Type": [1]}), "no member's values"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(before="##"), "no one character"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0].update(before="#"), "neither an ARN member"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(before="##"), "no one character"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(before=":", fill={"GroupName": "Names[]"}) or
+     d["operations"]["svc:B"]["resources"][0].update(before=1), "no one character"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(account="Ids[]"), "no account of its ARN"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(account="a.b"), "no account of its ARN"),
     (lambda d: d["arnFormats"]["svc"].update(group="arn:${Partition}:svc:::group/${GroupName}")
@@ -388,8 +448,9 @@ def test_every_correction_is_the_vendored_entry_of_an_operation_the_file_reads()
     assert r.CORRECTIONS
     for operation, (resources, reason) in r.CORRECTIONS.items():
         assert operation in operations and reason, operation
-        # A resource's account and the ARNs its members may give are botocore's, on top of the correction.
-        assert [{key: value for key, value in resource.items() if key not in ("account", "arnOf")}
+        # A resource's account and the ARNs its members may give are botocore's, and whether a create makes it the
+        # rule's, on top of the correction.
+        assert [{key: value for key, value in resource.items() if key not in ("account", "arnOf", "made")}
                 for resource in operations[operation]["resources"]] == resources, operation
 
 
@@ -428,6 +489,10 @@ def test_the_vendored_file_is_well_formed():
          "unless": {"EventBusName": ["default"]}, "absent": {"EventBusName": "default"}, "arnOf": {"EventBusName": "event-bus"}}]
     assert operations["events:DescribeEventBus"]["resources"] == [
         {"type": "event-bus", "fill": {"EventBusName": "Name"}, "absent": {"Name": "default"}, "arnOf": {"Name": "event-bus"}}]
+    # Each PutEvents entry is on the bus it names, by name or ARN, or the default one when it names none.
+    assert operations["events:PutEvents"]["resources"] == [
+        {"type": "event-bus", "fill": {"EventBusName": "Entries[].EventBusName"},
+         "absent": {"Entries[].EventBusName": "default"}, "arnOf": {"Entries[].EventBusName": "event-bus"}}]
     assert document["namespaces"]["events"] == ["events"] and "eventbridgev2" in document["clientsNotRead"]
     # A state machine's version or alias is checked on the state machine.
     assert document["unqualified"] == {"states": ["statemachine"]}

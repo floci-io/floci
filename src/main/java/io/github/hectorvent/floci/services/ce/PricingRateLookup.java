@@ -9,6 +9,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -109,13 +110,13 @@ public class PricingRateLookup {
         if (!onDemand.isObject()) {
             return 0.0;
         }
-        java.util.Iterator<java.util.Map.Entry<String, JsonNode>> termIter = onDemand.fields();
+        Iterator<Map.Entry<String, JsonNode>> termIter = onDemand.fields();
         while (termIter.hasNext()) {
             JsonNode dimensions = termIter.next().getValue().path("priceDimensions");
             if (!dimensions.isObject()) {
                 continue;
             }
-            java.util.Iterator<java.util.Map.Entry<String, JsonNode>> dimIter = dimensions.fields();
+            Iterator<Map.Entry<String, JsonNode>> dimIter = dimensions.fields();
             while (dimIter.hasNext()) {
                 JsonNode dim = dimIter.next().getValue();
                 String usd = dim.path("pricePerUnit").path("USD").asText("0");

@@ -4,8 +4,12 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
+import com.github.dockerjava.api.command.InspectImageCmd;
+import com.github.dockerjava.api.command.InspectImageResponse;
 import com.github.dockerjava.api.command.RemoveContainerCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.ContainerConfig;
+import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsConfigSource;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
@@ -36,6 +40,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -270,20 +275,205 @@ class ContainerLifecycleManagerCaBundleTest {
         verify(dockerClient, times(1)).copyArchiveToContainerCmd(anyString());
     }
 
+    @Test
+    void theJavaTrustStoreIsCopiedBesideTheBundleWhenALauncherAsks() throws Exception {
+        when(tlsConfig.enabled()).thenReturn(true);
+        byte[] trustStore = {0x30, (byte) 0x82, 0x01, 0x02};
+        Files.write(Files.createDirectories(tempDir.resolve("tls")).resolve("floci-ca-bundle.p12"), trustStore);
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("container-id")).thenReturn(copyCmd);
+        List<InputStream> streams = new ArrayList<>();
+        when(copyCmd.withTarInputStream(any(InputStream.class))).thenAnswer(invocation -> {
+            streams.add(invocation.getArgument(0));
+            return copyCmd;
+        });
+        when(copyCmd.exec()).thenAnswer(invocation -> {
+            assertSingleFileArchive(streams.getLast(), "floci-ca-bundle.p12", trustStore);
+            return null;
+        });
+
+        assertTrue(manager().copyJavaTrustStore("container-id"));
+
+        verify(copyCmd).withRemotePath("/etc");
+        verify(copyCmd).exec();
+    }
+
+    @Test
+    void noJavaTrustStoreIsCopiedWithTlsOffOrWithoutOneFromTheBoot() throws Exception {
+        when(tlsConfig.enabled()).thenReturn(true);
+        writeBundle();
+
+        assertFalse(manager().copyJavaTrustStore("container-id"), "the boot wrote no trust store");
+        Files.write(tempDir.resolve("tls").resolve("floci-ca-bundle.p12"), new byte[] {1});
+        when(tlsConfig.enabled()).thenReturn(false);
+        assertFalse(manager().copyJavaTrustStore("container-id"), "TLS is off");
+        verify(dockerClient, never()).copyArchiveToContainerCmd(anyString());
+    }
+
+    @Test
+    void aJavaTrustStoreThatCannotBeCopiedIsReportedMissing() throws Exception {
+        when(tlsConfig.enabled()).thenReturn(true);
+        Files.write(Files.createDirectories(tempDir.resolve("tls")).resolve("floci-ca-bundle.p12"), new byte[] {1});
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("container-id")).thenReturn(copyCmd);
+        when(copyCmd.exec()).thenThrow(new NotFoundException("Could not find the file /etc in container"));
+
+        assertFalse(manager().copyJavaTrustStore("container-id"));
+    }
+
+    @Test
+    void aSpecAskingForTheJavaTrustStoreGetsItBesideTheBundleWithJavaToolOptionsAheadOfTheImages() throws Exception {
+        when(tlsConfig.enabled()).thenReturn(true);
+        writeBundle();
+        byte[] trustStore = writeJavaTrustStore();
+        CreateContainerCmd createCmd = stubCreateContainer();
+        stubImageEnv("PATH=/usr/bin", "JAVA_TOOL_OPTIONS=-Dimage=1");
+        List<byte[]> archives = stubCopies();
+
+        assertEquals("container-id", manager().create(javaSpecWithEnv(List.of("FOO=bar"))));
+
+        List<String> expected = new ArrayList<>(List.of("FOO=bar"));
+        expected.addAll(ContainerCaBundle.env());
+        expected.add("JAVA_TOOL_OPTIONS=-Djavax.net.ssl.trustStore=/etc/floci-ca-bundle.p12 -Dimage=1");
+        assertEquals(expected, capturedEnv(createCmd));
+        assertEquals(2, archives.size());
+        assertBundleArchive(new ByteArrayInputStream(archives.get(0)));
+        assertSingleFileArchive(new ByteArrayInputStream(archives.get(1)), "floci-ca-bundle.p12", trustStore);
+    }
+
+    @Test
+    void aSpecThatDoesNotAskLeavesItsJvmsOnTheImagesTrustStore() throws Exception {
+        when(tlsConfig.enabled()).thenReturn(true);
+        writeBundle();
+        writeJavaTrustStore();
+        CreateContainerCmd createCmd = stubCreateContainer();
+        List<byte[]> archives = stubCopies();
+
+        manager().create(specWithEnv(List.of("FOO=bar")));
+
+        assertTrue(capturedEnv(createCmd).stream().noneMatch(entry -> entry.startsWith("JAVA_TOOL_OPTIONS")));
+        assertEquals(1, archives.size());
+        verify(dockerClient, never()).inspectImageCmd(anyString());
+    }
+
+    @Test
+    void withoutATrustStoreFromTheBootASpecAskingForOneGetsTheBundleAlone() throws Exception {
+        when(tlsConfig.enabled()).thenReturn(true);
+        writeBundle();
+        CreateContainerCmd createCmd = stubCreateContainer();
+        List<byte[]> archives = stubCopies();
+
+        manager().create(javaSpecWithEnv(List.of("FOO=bar")));
+
+        assertEquals(6, capturedEnv(createCmd).size());
+        assertEquals(1, archives.size());
+        verify(dockerClient, never()).inspectImageCmd(anyString());
+    }
+
+    @Test
+    void anImageWhoseEnvironmentCannotBeReadKeepsItsJvmsOnItsOwnTrustStore() throws Exception {
+        // Floci's JAVA_TOOL_OPTIONS would replace the image's, which it could not read to keep.
+        when(tlsConfig.enabled()).thenReturn(true);
+        writeBundle();
+        writeJavaTrustStore();
+        CreateContainerCmd createCmd = stubCreateContainer();
+        InspectImageCmd inspectCmd = mock(InspectImageCmd.class);
+        when(dockerClient.inspectImageCmd("busybox:stable")).thenReturn(inspectCmd);
+        when(inspectCmd.exec()).thenThrow(new NotFoundException("No such image"));
+        List<byte[]> archives = stubCopies();
+
+        manager().create(javaSpecWithEnv(List.of("FOO=bar")));
+
+        List<String> env = capturedEnv(createCmd);
+        assertEquals(6, env.size());
+        assertTrue(env.containsAll(ContainerCaBundle.env()));
+        assertEquals(1, archives.size());
+    }
+
+    @Test
+    void aTrustStoreThatCannotBeCopiedRecreatesTheContainerWithoutAnyTrustVariables() throws Exception {
+        // JAVA_TOOL_OPTIONS must never name a trust store that is not there: the JVM would trust nothing.
+        when(tlsConfig.enabled()).thenReturn(true);
+        writeBundle();
+        writeJavaTrustStore();
+        CreateContainerCmd createCmd = mock(CreateContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.createContainerCmd("busybox:stable")).thenReturn(createCmd);
+        CreateContainerResponse first = mock(CreateContainerResponse.class);
+        when(first.getId()).thenReturn("container-id");
+        CreateContainerResponse second = mock(CreateContainerResponse.class);
+        when(second.getId()).thenReturn("container-id-2");
+        when(createCmd.exec()).thenReturn(first, second);
+        stubImageEnv();
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("container-id")).thenReturn(copyCmd);
+        // The bundle goes in; its trust store does not.
+        when(copyCmd.exec()).thenAnswer(copied -> null)
+                .thenThrow(new NotFoundException("Could not find the file /etc"));
+        RemoveContainerCmd removeCmd = mock(RemoveContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.removeContainerCmd("container-id")).thenReturn(removeCmd);
+
+        assertEquals("container-id-2", manager().create(javaSpecWithEnv(List.of("FOO=bar"))));
+
+        verify(removeCmd).exec();
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<String>> env = ArgumentCaptor.forClass((Class<List<String>>) (Class<?>) List.class);
+        verify(createCmd, times(2)).withEnv(env.capture());
+        assertEquals(7, env.getAllValues().get(0).size(), "the first attempt carried the trust variables");
+        assertEquals(List.of("FOO=bar"), env.getAllValues().get(1), "the retry carries only the spec's own");
+        verify(dockerClient, never()).copyArchiveToContainerCmd("container-id-2");
+    }
+
     private Path writeBundle() throws Exception {
         Path tlsDir = Files.createDirectories(tempDir.resolve("tls"));
         return Files.writeString(tlsDir.resolve("floci-ca-bundle.pem"), BUNDLE_PEM);
     }
 
+    private byte[] writeJavaTrustStore() throws Exception {
+        byte[] trustStore = {0x30, (byte) 0x82, 0x01, 0x02};
+        Files.write(Files.createDirectories(tempDir.resolve("tls")).resolve("floci-ca-bundle.p12"), trustStore);
+        return trustStore;
+    }
+
+    private void stubImageEnv(String... env) {
+        InspectImageCmd inspectCmd = mock(InspectImageCmd.class);
+        when(dockerClient.inspectImageCmd("busybox:stable")).thenReturn(inspectCmd);
+        InspectImageResponse image = mock(InspectImageResponse.class);
+        when(inspectCmd.exec()).thenReturn(image);
+        ContainerConfig imageConfig = mock(ContainerConfig.class);
+        when(image.getConfig()).thenReturn(imageConfig);
+        when(imageConfig.getEnv()).thenReturn(env);
+    }
+
+    // Every archive copied into "container-id", in the order they went in.
+    private List<byte[]> stubCopies() {
+        CopyArchiveToContainerCmd copyCmd = mock(CopyArchiveToContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.copyArchiveToContainerCmd("container-id")).thenReturn(copyCmd);
+        List<InputStream> streams = new ArrayList<>();
+        when(copyCmd.withTarInputStream(any(InputStream.class))).thenAnswer(invocation -> {
+            streams.add(invocation.getArgument(0));
+            return copyCmd;
+        });
+        List<byte[]> archives = new ArrayList<>();
+        when(copyCmd.exec()).thenAnswer(invocation -> {
+            archives.add(streams.getLast().readAllBytes());
+            return null;
+        });
+        return archives;
+    }
+
     private static void assertBundleArchive(InputStream stream) throws IOException {
+        assertSingleFileArchive(stream, "floci-ca-bundle.pem", BUNDLE_PEM.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static void assertSingleFileArchive(InputStream stream, String name, byte[] content) throws IOException {
         byte[] archive = stream.readAllBytes();
         try (TarArchiveInputStream in = new TarArchiveInputStream(new ByteArrayInputStream(archive))) {
             TarArchiveEntry entry = in.getNextEntry();
             assertNotNull(entry, "every attempt must begin with a complete tar header");
-            assertEquals("floci-ca-bundle.pem", entry.getName());
+            assertEquals(name, entry.getName());
             assertEquals(0644, entry.getMode() & 0777, "world-readable, so a non-root USER can read it");
-            assertArrayEquals(BUNDLE_PEM.getBytes(StandardCharsets.UTF_8), in.readAllBytes());
-            assertNull(in.getNextEntry(), "the archive holds only the bundle");
+            assertArrayEquals(content, in.readAllBytes());
+            assertNull(in.getNextEntry(), "the archive holds only " + name);
         }
     }
 
@@ -294,6 +484,13 @@ class ContainerLifecycleManagerCaBundleTest {
     private static ContainerSpec specWithEnv(List<String> env) {
         return new ContainerSpec("busybox:stable", null, env, null, null, null, Map.of(), List.of(), null,
                 List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(), null, null, List.of());
+    }
+
+    // As ContainerBuilder.Builder.withJavaTrustStore() builds it.
+    private static ContainerSpec javaSpecWithEnv(List<String> env) {
+        return new ContainerSpec("busybox:stable", null, env, null, null, null, Map.of(), List.of(), List.of(), null,
+                List.of(), List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(), null, null,
+                List.of(), List.of(), null, null, false, List.of(), Map.of(), false, LinuxOptions.NONE, true);
     }
 
     private CreateContainerCmd stubCreateContainer() {

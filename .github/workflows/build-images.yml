@@ -162,7 +162,9 @@ jobs:
     name: Build native artifact (amd64)
     if: inputs.publish-native
     needs: prepare
-    runs-on: ubuntu-latest
+    # Pinned, like the arm64 jobs. Built on ubuntu-26.04 the binary asks glibc for x86-64-v3
+    # whatever -march says, and no longer starts on x86-64-v2 CPUs.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read

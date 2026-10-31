@@ -27,6 +27,7 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -269,7 +270,7 @@ public class FlowLogService {
         // endpoint — which is how traffic to an AWS service over PrivateLink shows
         // up in flow logs. The endpoint's service is recorded in pkt-dst-aws-service.
         List<String> endpointIps = new ArrayList<>();
-        Map<String, String> endpointService = new java.util.HashMap<>(); // ip -> service short name (e.g. S3)
+        Map<String, String> endpointService = new HashMap<>(); // ip -> service short name (e.g. S3)
         String resourceVpc = vpcOfFlowLogResource(fl);
         for (NetworkInterface ni : ec2Service.endpointNetworkInterfaces(fl.getRegion())) {
             if (ni.getPrivateIpAddress() == null || ni.getPrivateIpAddress().isBlank()) {

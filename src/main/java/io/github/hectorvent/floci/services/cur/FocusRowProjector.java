@@ -8,6 +8,7 @@ import jakarta.inject.Inject;
 import java.time.Instant;
 import java.time.YearMonth;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -48,7 +49,7 @@ public class FocusRowProjector {
     public List<FocusRow> project(List<UsageLine> lines) {
         // Cache per-(service, region) rate lookups for the request scope.
         Map<String, Map<String, Double>> rateCache = new HashMap<>();
-        List<FocusRow> rows = new java.util.ArrayList<>(lines.size());
+        List<FocusRow> rows = new ArrayList<>(lines.size());
         for (UsageLine line : lines) {
             rows.add(projectOne(line, rateCache));
         }

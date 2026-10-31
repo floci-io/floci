@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.List;
 import java.util.function.Function;
@@ -65,6 +67,50 @@ class PaginationTest {
     @Test
     void namespacedPaging_refusesALimitBelowOne() {
         assertThrows(IllegalArgumentException.class, () -> page(0, null, "ns"));
+    }
+
+    @Test
+    void signedPaging_resumesWithAnIssuedMarkerAndRejectsForeignOrChangedMarkers() {
+        SignedMarkers markers = new SignedMarkers();
+        PaginatedResult<String> first = signedPage(markers, 1, null, "account:region:");
+        assertThat(first.items(), contains("a"));
+        assertEquals("account:region:a", markers.cursorOf(first.nextToken()));
+
+        PaginatedResult<String> second = signedPage(markers, 2, first.nextToken(), "account:region:");
+        assertThat(second.items(), contains("b", "c"));
+        assertNull(second.nextToken());
+
+        assertSame(INVALID, assertThrows(AwsException.class,
+                () -> signedPage(markers, 1, first.nextToken(), "other:region:")));
+        assertSame(INVALID, assertThrows(AwsException.class,
+                () -> signedPage(new SignedMarkers(), 1, first.nextToken(), "account:region:")));
+        assertSame(INVALID, assertThrows(AwsException.class,
+                () -> signedPage(markers, 1, first.nextToken() + "x", "account:region:")));
+    }
+
+    @Test
+    void signedPaging_rejectsAnEmptyOrMalformedMarker() {
+        SignedMarkers markers = new SignedMarkers();
+        assertSame(INVALID, assertThrows(AwsException.class,
+                () -> signedPage(markers, 1, "", "")));
+        assertSame(INVALID, assertThrows(AwsException.class,
+                () -> signedPage(markers, 1, "!!!", "")));
+    }
+
+    @Test
+    void expiringPaging_validatesTheTokenBeforeLoadingItems() {
+        SignedMarkers markers = new SignedMarkers();
+        Clock clock = Clock.systemUTC();
+        Duration lifetime = Duration.ofDays(1);
+
+        assertSame(INVALID, assertThrows(AwsException.class,
+                () -> Pagination.paginateExpiring(() -> {
+                    throw new AssertionError("items loaded before token validation");
+                }, Function.identity(), 1, "not-a-token", "scope", clock, lifetime, markers, INVALID_TOKEN)));
+
+        PaginatedResult<String> first = Pagination.paginateExpiring(() -> ITEMS, Function.identity(),
+                1, null, "scope", clock, lifetime, markers, INVALID_TOKEN);
+        assertThat(first.items(), contains("a"));
     }
 
     @Test
@@ -129,7 +175,8 @@ class PaginationTest {
     @Test
     void boundedNamespacedPaging_refusesOutOfRangeSizes() {
         for (int size : new int[] {-1, 0, 4}) {
-            assertInvalid(() -> bounded(size, null));
+            AwsException error = assertInvalid(() -> bounded(size, null));
+            assertEquals("Page size must be between 1 and 3.", error.getMessage());
         }
     }
 
@@ -141,13 +188,44 @@ class PaginationTest {
         assertTrue(bounded(1, boundary).items().isEmpty());
         String token = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(("ns:" + "a".repeat(100)).getBytes(StandardCharsets.UTF_8));
-        assertInvalid(() -> bounded(1, token));
+        AwsException error = assertInvalid(() -> bounded(1, token));
+        assertEquals("Pagination token must not exceed 32 characters.", error.getMessage());
+    }
+
+    @Test
+    void boundedNamespacedPaging_treatsAnEmptyTokenAsTheFirstPage() {
+        assertThat(bounded(1, "").items(), contains("a"));
     }
 
     @Test
     void boundedNamespacedPaging_refusesMalformedAndForeignTokens() {
         assertInvalid(() -> bounded(1, "!!!"));
         assertInvalid(() -> bounded(1, page(1, null, "other").nextToken()));
+    }
+
+    @Test
+    void unencodedPagingReturnsTheRawCursorAndResumesAfterItIsDeleted() {
+        PaginatedResult<String> first = Pagination.paginateUnencoded(ITEMS, Function.identity(),
+                1, null, 2, 3, 128, "InvalidInput");
+        assertThat(first.items(), contains("a"));
+        assertEquals("a", first.nextToken());
+
+        PaginatedResult<String> rest = Pagination.paginateUnencoded(List.of("b", "c"),
+                Function.identity(), 1, first.nextToken(), 2, 3, 128, "InvalidInput");
+        assertThat(rest.items(), contains("b"));
+        assertEquals("b", rest.nextToken());
+    }
+
+    @Test
+    void unencodedPagingValidatesBoundsAndTokenLength() {
+        AwsException pageSizeError = assertInvalid(() -> Pagination.paginateUnencoded(ITEMS,
+                Function.identity(), 0, null, 2, 3, 128, "InvalidInput"));
+        assertEquals("Page size must be between 1 and 3.", pageSizeError.getMessage());
+        for (String token : List.of("", "x".repeat(129))) {
+            AwsException tokenError = assertInvalid(() -> Pagination.paginateUnencoded(ITEMS,
+                    Function.identity(), 1, token, 2, 3, 128, "InvalidInput"));
+            assertEquals("Pagination token must be between 1 and 128 characters.", tokenError.getMessage());
+        }
     }
 
     @Test
@@ -186,14 +264,20 @@ class PaginationTest {
         return Pagination.paginate(ITEMS, Function.identity(), size, token, 2, 3, 32, "InvalidInput", "ns");
     }
 
-    private static void assertInvalid(Executable call) {
+    private static AwsException assertInvalid(Executable call) {
         AwsException error = assertThrows(AwsException.class, call);
         assertEquals("InvalidInput", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
+        return error;
     }
 
     private static PaginatedResult<String> page(int limit, String token, String namespace) {
         return Pagination.paginate(ITEMS, Function.identity(), limit, token, namespace, INVALID_TOKEN);
+    }
+
+    private static PaginatedResult<String> signedPage(SignedMarkers markers, int limit,
+                                                       String marker, String scope) {
+        return Pagination.paginate(ITEMS, Function.identity(), limit, marker, markers, scope, INVALID_TOKEN);
     }
 
     private static String decode(String token) {

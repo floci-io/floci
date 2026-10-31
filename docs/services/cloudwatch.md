@@ -74,7 +74,8 @@ One action is currently simplified:
 `FilterLogEvents` reads `filterPattern` with the filter pattern syntax described below, the one
 metric filters and subscription filters use: terms, quoted phrases, `?` alternatives, `-`
 exclusions, JSON and space-delimited patterns. An invalid pattern is refused with
-`InvalidParameterException`.
+`InvalidParameterException`, and so is a request that names no log group by `logGroupName` or
+`logGroupIdentifier`.
 
 ### Subscription filters {#subscription-filters}
 
@@ -403,6 +404,7 @@ returns HTTP 404.
 | `DescribeAlarms` | List alarms |
 | `DeleteAlarms` | Delete alarms |
 | `SetAlarmState` | Manually set alarm state |
+| `DescribeAlarmHistory` | List alarm state transitions and configuration changes (see [Alarm history](#alarm-history)) |
 | `PutMetricStream` | Create or update a metric stream definition |
 | `GetMetricStream` | Read a metric stream definition |
 | `ListMetricStreams` | List metric streams |
@@ -430,14 +432,48 @@ rejected with `ValidationError`.
 
 ### Metric alarm updates
 
-Updating a metric alarm preserves its current state, state reason, state timestamp and tags.
+Updating a metric alarm preserves its current state, state reason, state timestamps and tags.
 Tags supplied to `PutMetricAlarm` apply only when creating an alarm; use `TagResource` and
 `UntagResource` to change existing tags. `SetAlarmState` requires `StateReason` and rejects
 missing or unknown state values before changing the alarm.
 
+`StateTransitionedTimestamp` records when an alarm's `StateValue` last changed, while
+`StateUpdatedTimestamp` moves on every state update, including one that keeps the value.
+Alarms stored before Floci recorded it report their last state update.
+
 `SetAlarmState` enforces the modeled maximum lengths of 1023 characters for
 `StateReason` and 4000 characters for `StateReasonData` before changing alarm state.
 Length checks count Unicode code points and preserve empty and whitespace values.
+
+### Composite alarm evaluation
+
+A composite alarm is evaluated when it is created, when `PutCompositeAlarm` updates it, and when
+one of its children changes state, up through nested composite alarms. `PutMetricAlarm` on an
+existing child, or a `SetAlarmState` to the state a child already has, is not a change of state,
+so a composite alarm set with `SetAlarmState` keeps that state until a child really changes. An
+update that leaves the state unchanged also keeps the state reason, reason data and timestamps.
+A composite alarm on a cycle of rules is not evaluated, not even by the update that closes the
+cycle, where CloudWatch evaluates that alarm and the ones after it. One above a cycle is still
+evaluated when one of its children changes state. A change of state records the `StateReason`
+CloudWatch writes:
+
+- `<alarm ARN> was created and its alarm rule evaluates to OK` when the alarm is created,
+- `<alarm ARN> was updated and its new alarm rule evaluates to ALARM` when an update changes it,
+- `<child ARN> transitioned to ALARM at Monday 14 September, 2026 06:29:58 UTC` when a child does.
+
+`StateReasonData` lists under `triggeringAlarms` the children whose state agrees with the new one,
+the most recently changed first, each with its state and when it took it. After a child's change
+it lists only the children that changed state since the composite alarm last did. The list stops
+before the 4000 characters `StateReasonData` can hold, counted in Unicode code points like the
+length checks. Floci keeps state times to the second, so the timestamps end in `.000`.
+
+Every alarm a rule names must exist, or `PutCompositeAlarm` fails with `ValidationError` and
+`Could not save the composite alarm as alarms [<ARN>] in the alarm rule do not exist`.
+`DeleteAlarms` deletes nothing when it names more than one composite alarm
+(`Cannot delete [2] Composite Alarms as only one composite alarm delete is allowed in single request`)
+or an alarm that a composite alarm's rule names, even when it deletes that composite alarm too
+(`Cannot delete <name> as there are composite alarm(s) depending on it.`), so delete composite
+alarms before their children. Names that match no alarm are ignored.
 
 ### SNS alarm actions
 
@@ -458,6 +494,42 @@ metric does not retain the previous definition.
 
 This is management-plane support: the alarm evaluator currently evaluates only single-metric
 alarms, not metric-math expressions. `SetAlarmState` remains available for manual transitions.
+
+### DescribeAlarms filters {#describealarms-filters}
+
+`DescribeAlarms` applies every filter a request gives: `AlarmNames` or `AlarmNamePrefix`,
+`AlarmTypes`, `StateValue` and `ActionPrefix`. `StateValue` and `ActionPrefix` narrow metric and
+composite alarms alike. The API reference calls `ActionPrefix` a prefix for any action, so an alarm
+matches when one of its `AlarmActions`, `OKActions` or `InsufficientDataActions` starts with it.
+
+`ChildrenOfAlarmName` lists the metric and composite alarms a composite alarm's rule names, by name
+or ARN, with only their name, ARN, `StateValue` and `StateUpdatedTimestamp`. `ParentsOfAlarmName`
+lists the composite alarms whose rules name an alarm, with only their name and ARN. Neither lists
+the alarm it names. Either one with any other member except `MaxRecords` and `NextToken` is refused
+with `ValidationError`, as is a `StateValue` outside `OK`, `ALARM` and `INSUFFICIENT_DATA`, an
+empty or over-long `ActionPrefix`, and an empty or over-long alarm name in either member.
+`MaxRecords` and `NextToken` are accepted, but every match comes back in one response.
+
+### Alarm history {#alarm-history}
+
+`DescribeAlarmHistory` lists two kinds of items, newest first unless `ScanBy` is
+`TimestampAscending`:
+
+- `StateUpdate` for every real state transition, whether it comes from `SetAlarmState`, the alarm
+  evaluator or a composite alarm's rule. Setting an alarm to the state it already has records
+  nothing. `HistoryData` carries the old and new state with their reasons and reason data.
+- `ConfigurationUpdate` when `PutMetricAlarm` or `PutCompositeAlarm` creates or updates an alarm,
+  and when `DeleteAlarms` deletes one. An update lists the previous value of each changed field
+  under `originalUpdatedFields`.
+
+History survives the deletion of its alarm and is kept for 30 days. Without `AlarmTypes` only
+metric alarm history is listed; request `CompositeAlarm` to include composite alarms. `Action`,
+`AlarmContributorStateUpdate` and `AlarmContributorAction` are accepted filters, but Floci never
+records those items, so they match nothing. `MaxRecords` defaults to 50, and a `NextToken` issued
+for the other `ScanBy` direction returns an empty page, as on AWS.
+
+The alarm snapshots in `ConfigurationUpdate` items use Floci's field names, such as `okActions`
+and `statistic`, where AWS uses its internal ones, such as `okactions` and `extendedStatistic`.
 
 ### Examples
 

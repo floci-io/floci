@@ -8,8 +8,8 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * A Redshift Serverless scheduled action. Floci stores and echoes it but never runs it, so no
- * snapshot is taken on the schedule. The same type carries an update request, in which a null member
+ * A Redshift Serverless scheduled action. The activation and invocation members are internal: the
+ * scheduler keeps them, and no AWS response shows them. The same type carries an update request, in which a null member
  * means the caller left it out.
  */
 @RegisterForReflection
@@ -33,12 +33,20 @@ public class ScheduledAction {
     private String ownerId;
     private boolean scheduleSpecified;
     private boolean targetSpecified;
+    private Instant activatedAt;
+    private Instant lastClaimedInvocation;
+    private Instant lastCompletedInvocation;
+    private String lastFailure;
 
     public ScheduledAction() {
     }
 
     public ScheduledAction(ScheduledAction other) {
         this.ownerId = other.ownerId;
+        this.activatedAt = other.activatedAt;
+        this.lastClaimedInvocation = other.lastClaimedInvocation;
+        this.lastCompletedInvocation = other.lastCompletedInvocation;
+        this.lastFailure = other.lastFailure;
         this.scheduleSpecified = other.scheduleSpecified;
         this.targetSpecified = other.targetSpecified;
         this.scheduledActionName = other.scheduledActionName;
@@ -191,5 +199,39 @@ public class ScheduledAction {
 
     public void setTargetSpecified(boolean targetSpecified) {
         this.targetSpecified = targetSpecified;
+    }
+
+    /** When the current schedule began counting, so no invocation before it is replayed. */
+    public Instant getActivatedAt() {
+        return activatedAt;
+    }
+
+    public void setActivatedAt(Instant activatedAt) {
+        this.activatedAt = activatedAt;
+    }
+
+    /** The latest scheduled time whose snapshot was started; it is never attempted twice. */
+    public Instant getLastClaimedInvocation() {
+        return lastClaimedInvocation;
+    }
+
+    public void setLastClaimedInvocation(Instant lastClaimedInvocation) {
+        this.lastClaimedInvocation = lastClaimedInvocation;
+    }
+
+    public Instant getLastCompletedInvocation() {
+        return lastCompletedInvocation;
+    }
+
+    public void setLastCompletedInvocation(Instant lastCompletedInvocation) {
+        this.lastCompletedInvocation = lastCompletedInvocation;
+    }
+
+    public String getLastFailure() {
+        return lastFailure;
+    }
+
+    public void setLastFailure(String lastFailure) {
+        this.lastFailure = lastFailure;
     }
 }

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshiftserverless;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -10,6 +11,7 @@ import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.redshift.TempCredential;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessSnapshotCopyService.CopyRule;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
 import io.github.hectorvent.floci.services.redshiftserverless.model.PricePerformanceTarget;
@@ -29,8 +31,11 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -42,6 +47,7 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @ApplicationScoped
 public class RedshiftServerlessService implements Resettable {
@@ -563,9 +569,13 @@ public class RedshiftServerlessService implements Resettable {
 
     /** Absolute, normalised {@code <persistentPath>/redshift-serverless-dumps/<accountId>/<region>} directory. */
     private Path dumpDir(String region) {
+        return dumpDir(workgroups.accountId(), region);
+    }
+
+    private Path dumpDir(String accountId, String region) {
         return Paths.get(config.storage().persistentPath())
                 .resolve("redshift-serverless-dumps")
-                .resolve(workgroups.accountId())
+                .resolve(accountId)
                 .resolve(region)
                 .toAbsolutePath()
                 .normalize();
@@ -635,6 +645,12 @@ public class RedshiftServerlessService implements Resettable {
         return namespaceName == null ? Optional.empty() : namespaces.get(storageKey(region, namespaceName));
     }
 
+    /** Like {@link #findNamespace}, for a background sweep that acts for an account other than the ambient one. */
+    Optional<Namespace> findNamespaceForAccount(String accountId, String namespaceName, String region) {
+        return namespaceName == null ? Optional.empty()
+                : namespaces.getForAccount(accountId, storageKey(region, namespaceName));
+    }
+
     /** The snapshot called {@code snapshotName} in {@code region}, empty when there is none. */
     public Optional<RedshiftServerlessSnapshot> findSnapshot(String snapshotName, String region) {
         return snapshotName == null ? Optional.empty() : snapshots.get(storageKey(region, snapshotName));
@@ -648,6 +664,7 @@ public class RedshiftServerlessService implements Resettable {
     public synchronized RedshiftServerlessSnapshot updateSnapshot(String snapshotName, Integer retentionPeriod,
                                                                   String region) {
         RedshiftServerlessSnapshot snapshot = new RedshiftServerlessSnapshot(getSnapshot(snapshotName, region));
+        requireAvailableSnapshot(snapshot);
         if (retentionPeriod != null) {
             snapshot.setRetentionPeriod(validateRetentionPeriod(retentionPeriod));
             snapshots.put(storageKey(region, snapshotName), snapshot);
@@ -657,9 +674,213 @@ public class RedshiftServerlessService implements Resettable {
 
     public synchronized RedshiftServerlessSnapshot deleteSnapshot(String snapshotName, String region) {
         RedshiftServerlessSnapshot deleted = getSnapshot(snapshotName, region);
+        requireAvailableSnapshot(deleted);
         snapshots.delete(storageKey(region, snapshotName));
         trustedDump(deleted, region).ifPresent(RedshiftServerlessService::deleteDumpQuietly);
         return deleted;
+    }
+
+    /** The monitor also protects restore, retention changes and snapshot creation from cleanup. */
+    synchronized void expireSnapshots(Instant now,
+            Consumer<AccountAwareStorageBackend.AccountEntry<RedshiftServerlessSnapshot>> deletePolicy) {
+        for (AccountAwareStorageBackend.AccountEntry<RedshiftServerlessSnapshot> entry
+                : snapshots.scanAllAccountEntries(key -> true)) {
+            try {
+                // The scan assigns unprefixed entries to the default account; never claim them for another account.
+                RedshiftServerlessSnapshot snapshot = snapshots.getForAccountMigratingLegacy(
+                        entry.accountId(), entry.key(), legacy -> snapshots
+                                .getLegacyForAccount(entry.accountId(), entry.key()).isPresent())
+                        .orElse(null);
+                if (snapshot == null || !isExpired(snapshot, now)) {
+                    continue;
+                }
+                RedshiftServerlessSnapshot deleting = new RedshiftServerlessSnapshot(snapshot);
+                deleting.setStatus("DELETED");
+                snapshots.putAllAtomicallyForAccount(entry.accountId(), Map.of(entry.key(), deleting));
+                deleteExpiredDump(deleting, entry.accountId(), regionOf(entry.key()));
+                deletePolicy.accept(new AccountAwareStorageBackend.AccountEntry<>(
+                        entry.accountId(), entry.key(), deleting));
+                snapshots.deleteAllAtomicallyForAccounts(Map.of(entry.accountId(), Set.of(entry.key())));
+            } catch (IOException | RuntimeException e) {
+                LOG.warnv(e, "Could not expire Redshift Serverless snapshot {0} for account {1}; will retry",
+                        entry.key(), entry.accountId());
+            }
+        }
+    }
+
+    /**
+     * Copies the snapshots each rule has not yet carried to its destination Region. One snapshot
+     * failing is logged and retried by the next sweep without stopping the rest. The monitor keeps
+     * a copy from racing a delete, a retention change or an expiration of the same snapshot.
+     */
+    synchronized void copySnapshots(Instant now, List<CopyRule> rules) {
+        for (CopyRule rule : rules) {
+            boolean sameNamespace = findNamespaceForAccount(rule.accountId(), rule.namespaceName(), rule.sourceRegion())
+                    .map(namespace -> Objects.equals(namespace.getNamespaceId(), rule.namespaceId())).orElse(false);
+            if (!sameNamespace) {
+                continue;
+            }
+            for (RedshiftServerlessSnapshot snapshot : snapshots.scanForAccount(rule.accountId(),
+                    key -> key.startsWith(rule.sourceRegion() + "::"))) {
+                if (!isCopyCandidate(snapshot, rule)) {
+                    continue;
+                }
+                try {
+                    copyToRegion(snapshot, rule, now);
+                } catch (IOException | RuntimeException e) {
+                    // Without the stack: a snapshot that cannot be copied fails again every sweep.
+                    LOG.warnv("Could not copy Redshift Serverless snapshot {0} of account {1} to {2}; will retry: {3}",
+                            snapshot.getSnapshotName(), rule.accountId(), rule.destinationRegion(), e.getMessage());
+                    LOG.debugv(e, "Copy failure of snapshot {0}", snapshot.getSnapshotName());
+                }
+            }
+        }
+    }
+
+    /** A copy is never copied on, and a snapshot taken before the configuration existed stays where it is. */
+    private static boolean isCopyCandidate(RedshiftServerlessSnapshot snapshot, CopyRule rule) {
+        return "AVAILABLE".equals(snapshot.getStatus())
+                && snapshot.getCopiedFromSnapshotArn() == null
+                && rule.namespaceName().equals(snapshot.getNamespaceName())
+                && !snapshot.getCopiedToRegions().contains(rule.destinationRegion())
+                && (rule.createdAt() == null || (snapshot.getSnapshotCreateTime() != null
+                        && !snapshot.getSnapshotCreateTime().isBefore(rule.createdAt())));
+    }
+
+    private void copyToRegion(RedshiftServerlessSnapshot source, CopyRule rule, Instant now) throws IOException {
+        String name = source.getSnapshotName();
+        String destinationKey = storageKey(rule.destinationRegion(), name);
+        RedshiftServerlessSnapshot existing = snapshots.getForAccount(rule.accountId(), destinationKey).orElse(null);
+        if (existing != null) {
+            boolean copyOfThisName = source.getSnapshotArn().equals(existing.getCopiedFromSnapshotArn());
+            if (copyOfThisName && Objects.equals(source.getSnapshotCreateTime(),
+                    existing.getCopiedFromSnapshotCreateTime())) {
+                // A previous sweep committed this very copy and died before marking the source.
+                markCopied(rule, name);
+                return;
+            }
+            if (!copyOfThisName) {
+                // The name belongs to a snapshot someone else made there, which the copy must not overwrite.
+                LOG.warnv("Snapshot {0} of account {1} was not copied to {2}: a snapshot of that name is already there",
+                        name, rule.accountId(), rule.destinationRegion());
+                markCopied(rule, name);
+                return;
+            }
+            // Otherwise it is the copy of an earlier snapshot that had the same name: replace it.
+        }
+
+        Path destinationDump = copyDump(source, rule);
+        RedshiftServerlessSnapshot copy = new RedshiftServerlessSnapshot(source);
+        copy.setRegion(rule.destinationRegion());
+        copy.setSnapshotArn(AwsArnUtils.Arn.of("redshift-serverless", rule.destinationRegion(), rule.accountId(),
+                "snapshot/" + name).toString());
+        copy.setStatus("AVAILABLE");
+        copy.setSnapshotCreateTime(now);
+        copy.setKmsKeyId(rule.destinationKmsKeyId());
+        copy.setRetentionPeriod(rule.retentionPeriod() == null || rule.retentionPeriod() == -1
+                ? null : rule.retentionPeriod());
+        copy.setSqlDump(destinationDump == null ? null : destinationDump.toString());
+        copy.setCopiedFromSnapshotArn(source.getSnapshotArn());
+        copy.setCopiedFromSnapshotCreateTime(source.getSnapshotCreateTime());
+        copy.setCopiedToRegions(Set.of());
+        try {
+            snapshots.putAllAtomicallyForAccount(rule.accountId(), Map.of(destinationKey, copy));
+        } catch (RuntimeException e) {
+            if (destinationDump != null) {
+                deleteDumpQuietly(destinationDump);
+            }
+            throw e;
+        }
+        if (existing != null) {
+            // Only now that the new record is saved is the replaced copy's dump unreferenced.
+            deleteReplacedDump(existing, rule, destinationDump);
+        }
+        markCopied(rule, name);
+    }
+
+    /** Removes the dump of a replaced copy, if it still lies in the rule account's destination directory. */
+    private void deleteReplacedDump(RedshiftServerlessSnapshot replaced, CopyRule rule, Path keep) {
+        String stored = replaced.getSqlDump();
+        if (stored == null || stored.isBlank()) {
+            return;
+        }
+        Path old = Paths.get(stored).toAbsolutePath().normalize();
+        if (old.startsWith(dumpDir(rule.accountId(), rule.destinationRegion())) && !old.equals(keep)) {
+            deleteDumpQuietly(old);
+        }
+    }
+
+    /** Copies the source dump beside the destination snapshot, or returns {@code null} for a metadata-only snapshot. */
+    private Path copyDump(RedshiftServerlessSnapshot source, CopyRule rule) throws IOException {
+        String stored = source.getSqlDump();
+        if (stored == null || stored.isBlank()) {
+            return null;
+        }
+        Path sourceDirectory = dumpDir(rule.accountId(), rule.sourceRegion());
+        Path from = Paths.get(stored).toAbsolutePath().normalize();
+        if (!from.startsWith(sourceDirectory) || from.equals(sourceDirectory) || !Files.isRegularFile(from)) {
+            throw new IOException("Snapshot dump is missing or outside its account and Region directory: " + from);
+        }
+        Path destinationDirectory = dumpDir(rule.accountId(), rule.destinationRegion());
+        // Each copy gets its own file, so replacing an earlier copy never touches the dump it still points to.
+        // The name is left out: a 255-character snapshot name plus a suffix would exceed filesystem filename limits.
+        String copyFileName = UUID.randomUUID().toString();
+        Path to = destinationDirectory.resolve(copyFileName + ".sql").normalize();
+        Path staging = destinationDirectory.resolve(copyFileName + ".sql.copying").normalize();
+        if (!to.startsWith(destinationDirectory) || !staging.startsWith(destinationDirectory)) {
+            throw new IOException("Invalid snapshot name: " + source.getSnapshotName());
+        }
+        Files.createDirectories(destinationDirectory);
+        try {
+            Files.copy(from, staging, StandardCopyOption.REPLACE_EXISTING);
+            Files.move(staging, to, StandardCopyOption.ATOMIC_MOVE);
+        } catch (IOException e) {
+            deleteDumpQuietly(staging);
+            throw e;
+        }
+        return to;
+    }
+
+    /** Records that the snapshot has been carried to the rule's Region, so a deleted or expired copy stays gone. */
+    private void markCopied(CopyRule rule, String snapshotName) {
+        String key = storageKey(rule.sourceRegion(), snapshotName);
+        RedshiftServerlessSnapshot current = snapshots.getForAccount(rule.accountId(), key).orElse(null);
+        if (current == null || !"AVAILABLE".equals(current.getStatus())) {
+            return;
+        }
+        RedshiftServerlessSnapshot marked = new RedshiftServerlessSnapshot(current);
+        marked.getCopiedToRegions().add(rule.destinationRegion());
+        snapshots.putAllAtomicallyForAccount(rule.accountId(), Map.of(key, marked));
+    }
+
+    private static boolean isExpired(RedshiftServerlessSnapshot snapshot, Instant now) {
+        if ("DELETED".equals(snapshot.getStatus())) {
+            return true;
+        }
+        Integer retention = snapshot.getRetentionPeriod();
+        return "AVAILABLE".equals(snapshot.getStatus()) && retention != null && retention > 0
+                && snapshot.getSnapshotCreateTime() != null
+                && !now.isBefore(snapshot.getSnapshotCreateTime().plus(retention, ChronoUnit.DAYS));
+    }
+
+    private void deleteExpiredDump(RedshiftServerlessSnapshot snapshot, String accountId, String region)
+            throws IOException {
+        String stored = snapshot.getSqlDump();
+        if (stored == null || stored.isBlank()) {
+            return;
+        }
+        Path dump = Paths.get(stored).toAbsolutePath().normalize();
+        Path directory = dumpDir(accountId, region);
+        if (!dump.startsWith(directory) || dump.equals(directory)) {
+            throw new IOException("Snapshot dump is outside its account and Region directory: " + dump);
+        }
+        Files.deleteIfExists(dump);
+    }
+
+    private static void requireAvailableSnapshot(RedshiftServerlessSnapshot snapshot) {
+        if (!"AVAILABLE".equals(snapshot.getStatus())) {
+            throw ServerlessSupport.conflict("The snapshot " + snapshot.getSnapshotName() + " is not available.");
+        }
     }
 
     /**
@@ -703,6 +924,7 @@ public class RedshiftServerlessService implements Resettable {
         validateManagedPassword(manageAdminPassword, null, adminPasswordSecretKmsKeyId);
         validateNamespaceName(namespaceName);
         RedshiftServerlessSnapshot snapshot = getSnapshot(snapshotName, region);
+        requireAvailableSnapshot(snapshot);
         if (ownerAccount != null && !ownerAccount.isBlank() && !ownerAccount.equals(snapshot.getOwnerAccount())) {
             throw snapshotNotFound(snapshotName);
         }
@@ -1029,7 +1251,7 @@ public class RedshiftServerlessService implements Resettable {
         if (nameOrArn == null || nameOrArn.isBlank()) {
             throw ServerlessSupport.validation("workgroupName is required.");
         }
-        if (!nameOrArn.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(nameOrArn)) {
             return getWorkgroup(nameOrArn, region);
         }
         return workgroupByArn(nameOrArn, region).orElseThrow(() -> workgroupNotFound(nameOrArn));
@@ -1158,6 +1380,26 @@ public class RedshiftServerlessService implements Resettable {
             }
         }
         snapshots.clear();
+        deleteDumpTree();
+    }
+
+    /**
+     * Reset empties the stores before it calls {@link #clear()}, so the loop above finds no snapshot
+     * left to name a dump. Every dump lives under this one directory, copies included.
+     */
+    private void deleteDumpTree() {
+        Path root = Paths.get(config.storage().persistentPath()).resolve("redshift-serverless-dumps")
+                .toAbsolutePath().normalize();
+        if (!Files.isDirectory(root)) {
+            return;
+        }
+        try (Stream<Path> paths = Files.walk(root)) {
+            for (Path path : paths.sorted(Comparator.reverseOrder()).toList()) {
+                Files.deleteIfExists(path);
+            }
+        } catch (IOException e) {
+            LOG.warnv(e, "Could not delete the snapshot dump directory {0} while clearing state", root);
+        }
     }
 
     private static void requireSnapshotName(String snapshotName) {
@@ -1166,7 +1408,7 @@ public class RedshiftServerlessService implements Resettable {
         }
     }
 
-    private static void validateSnapshotName(String snapshotName) {
+    static void validateSnapshotName(String snapshotName) {
         requireSnapshotName(snapshotName);
         if (snapshotName.length() < 3 || snapshotName.length() > 255 || !SNAPSHOT_NAME.matcher(snapshotName).matches()) {
             throw ServerlessSupport.validation("snapshotName must be 3-255 characters of lowercase letters, numbers, and hyphens.");

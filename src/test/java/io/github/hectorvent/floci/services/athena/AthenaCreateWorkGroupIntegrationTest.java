@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.athena;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -37,7 +38,7 @@ class AthenaCreateWorkGroupIntegrationTest {
             .statusCode(200)
             .extract().asString();
 
-        org.junit.jupiter.api.Assertions.assertEquals("{}", responseBody);
+        Assertions.assertEquals("{}", responseBody);
     }
 
     @Test

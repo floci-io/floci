@@ -17,6 +17,8 @@ public class MultipartUpload {
     private String contentType;
     private String storageClass;
     private String contentDisposition;
+    private String contentEncoding;
+    private String cacheControl;
     private String serverSideEncryption;
     private String sseKmsKeyId;
     private String sseCustomerAlgorithm;
@@ -72,6 +74,12 @@ public class MultipartUpload {
 
     public String getContentDisposition() { return contentDisposition; }
     public void setContentDisposition(String contentDisposition) { this.contentDisposition = contentDisposition; }
+
+    public String getContentEncoding() { return contentEncoding; }
+    public void setContentEncoding(String contentEncoding) { this.contentEncoding = contentEncoding; }
+
+    public String getCacheControl() { return cacheControl; }
+    public void setCacheControl(String cacheControl) { this.cacheControl = cacheControl; }
 
     public String getServerSideEncryption() { return serverSideEncryption; }
     public void setServerSideEncryption(String serverSideEncryption) { this.serverSideEncryption = serverSideEncryption; }

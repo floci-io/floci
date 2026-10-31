@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService.StoredMapping;
+import io.github.hectorvent.floci.services.apigateway.model.Account;
 import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
 import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
 import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
@@ -22,6 +23,7 @@ import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
 import io.github.hectorvent.floci.services.apigateway.model.GatewayResponse;
 import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
 import io.github.hectorvent.floci.services.apigateway.model.MethodResponse;
+import io.github.hectorvent.floci.services.apigateway.model.MethodSetting;
 import io.github.hectorvent.floci.services.apigateway.model.RequestValidator;
 import io.github.hectorvent.floci.services.apigateway.model.RestApi;
 import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
@@ -57,6 +59,7 @@ import jakarta.ws.rs.core.Response;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -346,13 +349,13 @@ public class ApiGatewayController {
             if (body == null || body.isBlank()) {
                 throw new AwsException("BadRequestException", "Request body is required", 400);
             }
-            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
+            JsonNode node = objectMapper.readTree(body).path("patchOperations");
             if (!node.isArray()) {
                 throw new AwsException("BadRequestException", "patchOperations must be an array", 400);
             }
 
             List<Map<String, String>> patchOperations = new ArrayList<>();
-            for (com.fasterxml.jackson.databind.JsonNode operationNode : node) {
+            for (JsonNode operationNode : node) {
                 if (operationNode == null || operationNode.isNull() || !operationNode.isObject()) {
                     throw new AwsException("BadRequestException", "Each patch operation must be an object", 400);
                 }
@@ -1423,7 +1426,7 @@ public class ApiGatewayController {
             throw new AwsException("BadRequestException", "Body is required for OpenAPI import", 400);
         }
         try {
-            com.fasterxml.jackson.databind.JsonNode root = objectMapper.readTree(payload);
+            JsonNode root = objectMapper.readTree(payload);
             if (root.isObject() && root.hasNonNull("body") && root.get("body").isTextual()) {
                 return root.get("body").asText();
             }
@@ -2212,7 +2215,7 @@ public class ApiGatewayController {
                                   @PathParam("resourceArn") String resourceArn,
                                   @QueryParam("tagKeys") List<String> tagKeys) {
         v2Service.untagResource(resourceArn,
-                tagKeys != null ? tagKeys : java.util.Collections.emptyList());
+                tagKeys != null ? tagKeys : Collections.emptyList());
         return Response.noContent().build();
     }
 
@@ -2451,7 +2454,7 @@ public class ApiGatewayController {
         return node;
     }
 
-    private ObjectNode toMethodSettingNode(io.github.hectorvent.floci.services.apigateway.model.MethodSetting setting) {
+    private ObjectNode toMethodSettingNode(MethodSetting setting) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("metricsEnabled", setting.isMetricsEnabled());
         node.put("loggingLevel", setting.getLoggingLevel());
@@ -2695,7 +2698,7 @@ public class ApiGatewayController {
         return node;
     }
 
-    private ObjectNode toAccountNode(io.github.hectorvent.floci.services.apigateway.model.Account account) {
+    private ObjectNode toAccountNode(Account account) {
         ObjectNode node = objectMapper.createObjectNode();
         if (account.getApiKeyVersion() != null) {
             node.put("apiKeyVersion", account.getApiKeyVersion());
@@ -2725,7 +2728,7 @@ public class ApiGatewayController {
         node.put("name", api.getName());
         node.put("protocolType", api.getProtocolType());
         node.put("apiEndpoint", api.getApiEndpoint());
-        node.put("createdDate", java.time.Instant.ofEpochMilli(api.getCreatedDate()).toString());
+        node.put("createdDate", Instant.ofEpochMilli(api.getCreatedDate()).toString());
         node.put("disableExecuteApiEndpoint", api.isDisableExecuteApiEndpoint());
         if (api.getRouteSelectionExpression() != null) node.put("routeSelectionExpression", api.getRouteSelectionExpression());
         if (api.getDescription() != null) node.put("description", api.getDescription());
@@ -2797,6 +2800,9 @@ public class ApiGatewayController {
         if (i.getConnectionType() != null) node.put("connectionType", i.getConnectionType());
         if (i.getConnectionId() != null) node.put("connectionId", i.getConnectionId());
         node.put("payloadFormatVersion", i.getPayloadFormatVersion());
+        if (i.getCredentialsArn() != null) {
+            node.put("credentialsArn", i.getCredentialsArn());
+        }
         if (i.getIntegrationUri() != null) node.put("integrationUri", i.getIntegrationUri());
         if (i.getRequestTemplates() != null) {
             ObjectNode requestTemplates = node.putObject("requestTemplates");
@@ -2850,8 +2856,8 @@ public class ApiGatewayController {
         node.put("stageName", s.getStageName());
         if (s.getDeploymentId() != null) node.put("deploymentId", s.getDeploymentId());
         node.put("autoDeploy", s.isAutoDeploy());
-        node.put("createdDate", java.time.Instant.ofEpochMilli(s.getCreatedDate()).toString());
-        node.put("lastUpdatedDate", java.time.Instant.ofEpochMilli(s.getLastUpdatedDate()).toString());
+        node.put("createdDate", Instant.ofEpochMilli(s.getCreatedDate()).toString());
+        node.put("lastUpdatedDate", Instant.ofEpochMilli(s.getLastUpdatedDate()).toString());
         if (s.getStageVariables() != null) {
             ObjectNode stageVariables = node.putObject("stageVariables");
             s.getStageVariables().forEach(stageVariables::put);
@@ -2907,7 +2913,7 @@ public class ApiGatewayController {
         node.put("deploymentId", d.getDeploymentId());
         node.put("deploymentStatus", d.getDeploymentStatus());
         if (d.getDescription() != null) node.put("description", d.getDescription());
-        node.put("createdDate", java.time.Instant.ofEpochMilli(d.getCreatedDate()).toString());
+        node.put("createdDate", Instant.ofEpochMilli(d.getCreatedDate()).toString());
         return node;
     }
 
@@ -2929,6 +2935,9 @@ public class ApiGatewayController {
             if (a.getJwtConfiguration().issuer() != null) {
                 jwt.put("issuer", a.getJwtConfiguration().issuer());
             }
+        }
+        if (a.getAuthorizerCredentialsArn() != null) {
+            node.put("authorizerCredentialsArn", a.getAuthorizerCredentialsArn());
         }
         if (a.getAuthorizerUri() != null) {
             node.put("authorizerUri", a.getAuthorizerUri());

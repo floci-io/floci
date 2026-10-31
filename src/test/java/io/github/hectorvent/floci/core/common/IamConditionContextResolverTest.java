@@ -13,6 +13,11 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
+import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.model.IamUser;
+import io.github.hectorvent.floci.services.lambdaweb.LambdaWebService;
+import io.github.hectorvent.floci.services.lambdaweb.model.WebFunctionEndpoint;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -60,6 +65,8 @@ class IamConditionContextResolverTest {
     private Ec2Service ec2Service;
     private S3Service s3Service;
     private CloudWatchLogsService logsService;
+    private IamService iamService;
+    private LambdaWebService lambdaWebService;
     private RequestContext requestContext;
     private EmulatorConfig config;
     private IamConditionContextResolver resolver;
@@ -86,7 +93,16 @@ class IamConditionContextResolverTest {
         Instance<CloudWatchLogsService> logsServiceInstance = mock(Instance.class);
         when(logsServiceInstance.isResolvable()).thenReturn(true);
         when(logsServiceInstance.get()).thenReturn(logsService);
+        iamService = mock(IamService.class);
+        Instance<IamService> iamServiceInstance = mock(Instance.class);
+        when(iamServiceInstance.isResolvable()).thenReturn(true);
+        when(iamServiceInstance.get()).thenReturn(iamService);
+        lambdaWebService = mock(LambdaWebService.class);
+        Instance<LambdaWebService> lambdaWebServiceInstance = mock(Instance.class);
+        when(lambdaWebServiceInstance.isResolvable()).thenReturn(true);
+        when(lambdaWebServiceInstance.get()).thenReturn(lambdaWebService);
         requestContext = new RequestContext();
+        requestContext.setAccountId("123456789012");
         requestContext.setRegion("us-east-1");
         config = mock(EmulatorConfig.class);
         when(config.defaultRegion()).thenReturn("us-east-1");
@@ -98,8 +114,47 @@ class IamConditionContextResolverTest {
         ServiceCatalog catalog = new ServiceCatalog(List.of(dynamo));
         when(serviceCatalog.matchTarget(any())).thenAnswer(call -> catalog.matchTarget(call.getArgument(0)));
         resolver = new IamConditionContextResolver(
-                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance, requestContext, config,
+                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance, iamServiceInstance,
+                lambdaWebServiceInstance,
+                requestContext, config,
                 null, serviceCatalog);
+    }
+
+    @Test
+    void aWebFunctionEndpointRequestCarriesTheAuthTypeItNamesAndTheOneItHas() throws Exception {
+        String function = "arn:aws:lambda:us-east-1:123456789012:web-function/app";
+        WebFunctionEndpoint stored = new WebFunctionEndpoint();
+        stored.authType = "ApplicationManaged";
+        when(lambdaWebService.getEndpoint("us-east-1", function, "dev")).thenReturn(stored);
+        when(lambdaWebService.getEndpoint("us-east-1", function, "gone"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "The endpoint gone does not exist.", 404));
+        String request = "lambda:Request/WebFunctionAuthType";
+        String resource = "lambda:Resource/WebFunctionAuthType";
+
+        assertEquals(Map.of(request, List.of("IamAuth")), resolver.resolve("lambda", "lambda:CreateWebFunction",
+                webRequest("/2025-03-07/web-functions", "{\"endpointConfig\":{\"authType\":\"IamAuth\"}}")));
+        assertEquals(Map.of(request, List.of("IamAuth")), resolver.resolve("lambda",
+                "lambda:CreateWebFunctionEndpoint", webRequest("/2025-03-07/web-functions/app/endpoints",
+                        "{\"authType\":\"IamAuth\"}")));
+        assertEquals(Map.of(request, List.of("IamAuth"), resource, List.of("ApplicationManaged")),
+                resolver.resolve("lambda", "lambda:UpdateWebFunctionEndpoint",
+                        webRequest("/2025-03-07/web-functions/app/endpoints/dev", "{\"authType\":\"IamAuth\"}")));
+        assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda",
+                "lambda:UpdateWebFunctionEndpoint", webRequest("/2025-03-07/web-functions/app/endpoints/dev",
+                        "{\"description\":\"d\"}")), "an update without authType names none");
+        for (String action : List.of("lambda:GetWebFunctionEndpoint", "lambda:DeleteWebFunctionEndpoint")) {
+            assertEquals(Map.of(resource, List.of("ApplicationManaged")), resolver.resolve("lambda", action,
+                    webRequest("/2025-03-07/web-functions/" + function + "/endpoints/" + function + "/endpoint/dev",
+                            "")));
+            assertNull(resolver.resolve("lambda", action,
+                    webRequest("/2025-03-07/web-functions/app/endpoints/gone", "")), "a missing endpoint has none");
+        }
+        assertNull(resolver.resolve("lambda", "lambda:GetWebFunctionEndpoint",
+                webRequest("/2025-03-07/web-functions/arn:bad/endpoints/dev", "")), "a malformed ARN has none");
+        assertNull(resolver.resolve("lambda", "lambda:GetWebFunction",
+                webRequest("/2025-03-07/web-functions/app", "")));
+        assertNull(resolver.resolve("lambda", "lambda:ListWebFunctionEndpoints",
+                webRequest("/2025-03-07/web-functions/app/list-endpoints", "{}")));
     }
 
     @Test
@@ -151,6 +206,16 @@ class IamConditionContextResolverTest {
         return containerRequest;
     }
 
+    private ContainerRequestContext webRequest(String path, String body) throws Exception {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(containerRequest.getUriInfo()).thenReturn(uriInfo);
+        when(uriInfo.getPath()).thenReturn(path);
+        when(containerRequest.getProperty("floci.bufferedJsonBody"))
+                .thenReturn(body.isEmpty() ? null : mapper.readTree(body));
+        return containerRequest;
+    }
+
     private static ContainerRequestContext s3Request(String path, String body) {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         UriInfo uriInfo = mock(UriInfo.class);
@@ -199,6 +264,142 @@ class IamConditionContextResolverTest {
         assertEquals(Map.of("iam:PolicyARN", List.of("arn:aws:iam::123456789012:policy/Team/A+B%2F")),
                 resolver.resolve("iam", "iam:AttachGroupPolicy",
                         formRequest("PolicyArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Apolicy%2FTeam%2FA%2BB%252F")));
+    }
+
+    @Test
+    void iamPermissionsBoundaryComesFromTheBoundaryParameterOfEachActionThatTakesIt() {
+        for (String action : List.of("iam:CreateRole", "iam:CreateUser", "iam:PutRolePermissionsBoundary",
+                "iam:PutUserPermissionsBoundary")) {
+            assertEquals(Map.of("iam:PermissionsBoundary", List.of("arn:aws:iam::123456789012:policy/Boundary")),
+                    resolver.resolve("iam", action,
+                            formRequest("PermissionsBoundary=arn%3Aaws%3Aiam%3A%3A123456789012%3Apolicy%2FBoundary")),
+                    action);
+            assertNull(resolver.resolve("iam", action, formRequest("RoleName=r&UserName=u")), action);
+        }
+        assertNull(resolver.resolve("iam", "iam:GetRole", formRequest("PermissionsBoundary=example")));
+    }
+
+    @Test
+    void iamPermissionsBoundaryOfAnExistingRoleOrUserIsTheBoundaryStoredOnIt() {
+        IamRole bounded = new IamRole();
+        bounded.setPermissionsBoundaryArn("arn:aws:iam::123456789012:policy/Boundary");
+        IamUser boundedUser = new IamUser();
+        boundedUser.setPermissionsBoundaryArn("arn:aws:iam::123456789012:policy/UserBoundary");
+        when(iamService.findRole("123456789012", "bounded")).thenReturn(Optional.of(bounded));
+        when(iamService.findRole("123456789012", "open")).thenReturn(Optional.of(new IamRole()));
+        when(iamService.findUser("123456789012", "bounded")).thenReturn(Optional.of(boundedUser));
+        for (String action : List.of("iam:AttachRolePolicy", "iam:DeleteRole", "iam:DeleteRolePermissionsBoundary",
+                "iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:GetRole", "iam:PutRolePolicy",
+                "iam:UpdateAssumeRolePolicy", "iam:UpdateRole", "iam:UpdateRoleDescription")) {
+            assertEquals(List.of("arn:aws:iam::123456789012:policy/Boundary"),
+                    resolver.resolve("iam", action, formRequest("RoleName=bounded")).get("iam:PermissionsBoundary"),
+                    action);
+            assertNull(resolver.resolve("iam", action, formRequest("RoleName=open")), action);
+            assertNull(resolver.resolve("iam", action, formRequest("RoleName=missing")), action);
+        }
+        for (String action : List.of("iam:AttachUserPolicy", "iam:DeleteUserPermissionsBoundary",
+                "iam:DeleteUserPolicy", "iam:DetachUserPolicy", "iam:PutUserPolicy")) {
+            assertEquals(List.of("arn:aws:iam::123456789012:policy/UserBoundary"),
+                    resolver.resolve("iam", action, formRequest("UserName=bounded")).get("iam:PermissionsBoundary"),
+                    action);
+            assertNull(resolver.resolve("iam", action, formRequest("UserName=missing")), action);
+        }
+    }
+
+    @Test
+    void iamPermissionsBoundaryOnAPutBoundaryIsTheRequestedOneAndAttachKeepsItsPolicyArn() {
+        IamRole bounded = new IamRole();
+        bounded.setPermissionsBoundaryArn("arn:aws:iam::123456789012:policy/Old");
+        when(iamService.findRole("123456789012", "bounded")).thenReturn(Optional.of(bounded));
+        assertEquals(Map.of("iam:PermissionsBoundary", List.of("arn:aws:iam::123456789012:policy/New")),
+                resolver.resolve("iam", "iam:PutRolePermissionsBoundary", formRequest(
+                        "RoleName=bounded&PermissionsBoundary=arn%3Aaws%3Aiam%3A%3A123456789012%3Apolicy%2FNew")));
+        assertEquals(Map.of("iam:PolicyARN", List.of("arn:aws:iam::aws:policy/ReadOnlyAccess"),
+                        "iam:PermissionsBoundary", List.of("arn:aws:iam::123456789012:policy/Old")),
+                resolver.resolve("iam", "iam:AttachRolePolicy", formRequest(
+                        "RoleName=bounded&PolicyArn=arn%3Aaws%3Aiam%3A%3Aaws%3Apolicy%2FReadOnlyAccess")));
+    }
+
+    @Test
+    void iamAwsServiceNameComesFromCreateServiceLinkedRole() {
+        assertEquals(Map.of("iam:AWSServiceName", List.of("replication.ecr.amazonaws.com")),
+                resolver.resolve("iam", "iam:CreateServiceLinkedRole",
+                        formRequest("AWSServiceName=replication.ecr.amazonaws.com")));
+        assertNull(resolver.resolve("iam", "iam:CreateServiceLinkedRole", formRequest("Description=d")));
+        assertNull(resolver.resolve("iam", "iam:DeleteServiceLinkedRole",
+                formRequest("AWSServiceName=replication.ecr.amazonaws.com")));
+    }
+
+    @Test
+    void iamNotificationChannelComesFromCreateDelegationRequest() {
+        assertEquals(Map.of("iam:NotificationChannel", List.of("arn:aws:sns:us-east-1:123456789012:t")),
+                resolver.resolve("iam", "iam:CreateDelegationRequest",
+                        formRequest("NotificationChannel=arn%3Aaws%3Asns%3Aus-east-1%3A123456789012%3At")));
+        assertNull(resolver.resolve("iam", "iam:CreateDelegationRequest", formRequest("Description=d")));
+    }
+
+    @Test
+    void iamDelegationDurationAndTemplateArnComeFromCreateDelegationRequest() {
+        assertEquals(Map.of("iam:DelegationDuration", List.of("43200"),
+                        "iam:TemplateArn", List.of("arn:aws:iam::aws:template/partner/t")),
+                resolver.resolve("iam", "iam:CreateDelegationRequest", formRequest(
+                        "SessionDuration=43200&Permissions.PolicyTemplateArn=arn%3Aaws%3Aiam%3A%3Aaws%3Atemplate%2Fpartner%2Ft")));
+    }
+
+    @Test
+    void iamServiceSpecificCredentialKeysComeFromCreateServiceSpecificCredential() {
+        assertEquals(Map.of("iam:ServiceSpecificCredentialServiceName", List.of("bedrock.amazonaws.com"),
+                        "iam:ServiceSpecificCredentialAgeDays", List.of("90")),
+                resolver.resolve("iam", "iam:CreateServiceSpecificCredential",
+                        formRequest("UserName=u&ServiceName=bedrock.amazonaws.com&CredentialAgeDays=90")));
+        assertEquals(Map.of("iam:ServiceSpecificCredentialServiceName", List.of("codecommit.amazonaws.com")),
+                resolver.resolve("iam", "iam:CreateServiceSpecificCredential",
+                        formRequest("UserName=u&ServiceName=codecommit.amazonaws.com")));
+        assertNull(resolver.resolve("iam", "iam:UpdateServiceSpecificCredential",
+                formRequest("ServiceSpecificCredentialId=ACCA1234567890EXAMPLE&Status=Inactive")));
+    }
+
+    @Test
+    void aCredentialAgeConditionMatchesTheNumericOperators() {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                  "Action":"iam:CreateServiceSpecificCredential","Resource":"*","Condition":
+                  {"NumericLessThanEquals":{"iam:ServiceSpecificCredentialAgeDays":"90"}}}]}""";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(List.of(policy),
+                "iam:CreateServiceSpecificCredential", "*", resolver.resolve("iam",
+                        "iam:CreateServiceSpecificCredential",
+                        formRequest("ServiceName=bedrock.amazonaws.com&CredentialAgeDays=30"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy),
+                "iam:CreateServiceSpecificCredential", "*", resolver.resolve("iam",
+                        "iam:CreateServiceSpecificCredential",
+                        formRequest("ServiceName=bedrock.amazonaws.com&CredentialAgeDays=365"))));
+    }
+
+    @Test
+    void iamOrganizationsPolicyIdComesFromGenerateOrganizationsAccessReport() {
+        assertEquals(Map.of("iam:OrganizationsPolicyId", List.of("p-12345678")),
+                resolver.resolve("iam", "iam:GenerateOrganizationsAccessReport",
+                        formRequest("EntityPath=o-a%2Fr-b&OrganizationsPolicyId=p-12345678")));
+        assertNull(resolver.resolve("iam", "iam:GenerateOrganizationsAccessReport",
+                formRequest("EntityPath=o-a%2Fr-b")));
+    }
+
+    @Test
+    void aPermissionsBoundaryConditionAllowsOnlyACreateRoleThatSetsThatBoundary() {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"iam:CreateRole",
+                  "Resource":"*","Condition":{"StringEquals":
+                  {"iam:PermissionsBoundary":"arn:aws:iam::123456789012:policy/Boundary"}}}]}""";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(List.of(policy), "iam:CreateRole", "*",
+                resolver.resolve("iam", "iam:CreateRole", formRequest(
+                        "RoleName=r&PermissionsBoundary=arn%3Aaws%3Aiam%3A%3A123456789012%3Apolicy%2FBoundary"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), "iam:CreateRole", "*",
+                resolver.resolve("iam", "iam:CreateRole", formRequest(
+                        "RoleName=r&PermissionsBoundary=arn%3Aaws%3Aiam%3A%3A123456789012%3Apolicy%2FOther"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), "iam:CreateRole", "*",
+                resolver.resolve("iam", "iam:CreateRole", formRequest("RoleName=r"))));
     }
 
     @Test
@@ -404,7 +605,8 @@ class IamConditionContextResolverTest {
     @SuppressWarnings("unchecked")
     private IamConditionContextResolver resolverAt(Instant now) {
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                mock(Instance.class), requestContext, config, null, serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
+                mock(Instance.class), mock(Instance.class), mock(Instance.class), requestContext, config, null,
+                serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
     }
 
     @Test
@@ -419,7 +621,7 @@ class IamConditionContextResolverTest {
 
         assertEquals(List.of("USER_alice"), conditions.get("dynamodb:LeadingKeys"));
         assertEquals(List.of("PK"), conditions.get("dynamodb:Attributes"));
-        assertFalse(conditions.containsKey("dynamodb:Select"));
+        assertEquals(List.of("ALL_ATTRIBUTES"), conditions.get("dynamodb:Select"));
     }
 
     @Test
@@ -453,6 +655,26 @@ class IamConditionContextResolverTest {
 
         assertEquals(List.of("USER_alice"), conditions.get("dynamodb:LeadingKeys"));
         assertEquals(List.of("COUNT"), conditions.get("dynamodb:Select"));
+    }
+
+    @Test
+    void transactionGetContextUsesOnlySupportedMembersWithoutChangingTheRequest() {
+        when(dynamoDbService.findTable("FgacTable", "us-east-1")).thenReturn(Optional.of(fgacTable()));
+        for (String extra : List.of("\"AttributesToGet\":[\"ignored\"]", "\"Select\":\"SPECIFIC_ATTRIBUTES\"",
+                "\"IndexName\":\"ignored\"")) {
+            ContainerRequestContext request = mock(ContainerRequestContext.class);
+            JsonNode body = json("{\"TransactItems\":[{\"Get\":{\"TableName\":\"FgacTable\","
+                    + "\"Key\":{\"PK\":{\"S\":\"USER_alice\"}}," + extra + "}}]}");
+            JsonNode original = body.deepCopy();
+            when(request.getProperty("floci.bufferedJsonBody")).thenReturn(body);
+            Map<String, List<String>> context = resolver.dynamoDbTransactionItems("dynamodb:TransactGetItems",
+                    request, "us-east-1", "000000000000").getFirst().context();
+            assertEquals(List.of("ALL_ATTRIBUTES"), context.get("dynamodb:Select"));
+            assertEquals(List.of("PK"), context.get("dynamodb:Attributes"));
+            assertEquals(List.of("USER_alice"), context.get("dynamodb:LeadingKeys"));
+            assertEquals(List.of("TransactGetItems"), context.get("dynamodb:EnclosingOperation"));
+            assertEquals(original, body);
+        }
     }
 
     @Test
@@ -536,7 +758,7 @@ class IamConditionContextResolverTest {
         when(request.getHeaderString("X-Amz-Target")).thenReturn("DynamoDB_20120810.Query");
         Map<String, List<String>> modern = resolver.resolve("dynamodb", "dynamodb:Query", request);
         assertEquals(List.of("USER_alice"), modern.get("dynamodb:LeadingKeys"));
-        assertFalse(modern.containsKey("dynamodb:Select"));
+        assertEquals(List.of("SPECIFIC_ATTRIBUTES"), modern.get("dynamodb:Select"));
     }
 
     @Test
@@ -576,6 +798,26 @@ class IamConditionContextResolverTest {
                 resolver.resolve("dynamodb", "dynamodb:BatchGetItem", containerRequest);
 
         assertEquals(List.of("USER_alice", "USER_bob"), conditions.get("dynamodb:LeadingKeys"));
+    }
+
+    @Test
+    void batchAliasesRetainIndependentSelections() {
+        ContainerRequestContext request = mock(ContainerRequestContext.class);
+        String arn = "arn:aws:dynamodb:us-east-1:000000000000:table/FgacTable";
+        when(request.getProperty("floci.bufferedJsonBody")).thenReturn(json("""
+                {"RequestItems":{
+                  "FgacTable":{"Keys":[{"PK":{"S":"USER_alice"}}],"ProjectionExpression":"PK"},
+                  "%s":{"Keys":[{"PK":{"S":"USER_bob"}}]}}}
+                """.formatted(arn)));
+        when(dynamoDbService.findTable("FgacTable", "us-east-1")).thenReturn(Optional.of(fgacTable()));
+        when(dynamoDbService.findTable(arn, "us-east-1")).thenReturn(Optional.of(fgacTable()));
+        List<Map<String, List<String>>> contexts = resolver.dynamoDbBatchConditionContexts(
+                "dynamodb:BatchGetItem", request, arn);
+        assertEquals(2, contexts.size());
+        assertEquals(List.of("SPECIFIC_ATTRIBUTES"), contexts.get(0).get("dynamodb:Select"));
+        assertEquals(List.of("ALL_ATTRIBUTES"), contexts.get(1).get("dynamodb:Select"));
+        assertEquals(List.of("USER_alice"), contexts.get(0).get("dynamodb:LeadingKeys"));
+        assertEquals(List.of("USER_bob"), contexts.get(1).get("dynamodb:LeadingKeys"));
     }
 
     @Test

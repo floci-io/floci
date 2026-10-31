@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.account;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -56,19 +57,19 @@ class AccountAlternateContactIntegrationTest {
         delete().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
     }
 
-    private static io.restassured.response.ValidatableResponse put(String email) {
+    private static ValidatableResponse put(String email) {
         return given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"AlternateContactType\":\"SECURITY\",\"Name\":\"Security\",\"Title\":\"Owner\",\"EmailAddress\":\"" + email + "\",\"PhoneNumber\":\"+12025550123\"}")
                 .post("/putAlternateContact").then();
     }
 
-    private static io.restassured.response.ValidatableResponse get() {
+    private static ValidatableResponse get() {
         return given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"AlternateContactType\":\"SECURITY\"}")
                 .post("/getAlternateContact").then();
     }
 
-    private static io.restassured.response.ValidatableResponse delete() {
+    private static ValidatableResponse delete() {
         return given().contentType("application/json").header("Authorization", AUTH)
                 .body("{\"AlternateContactType\":\"SECURITY\"}")
                 .post("/deleteAlternateContact").then();

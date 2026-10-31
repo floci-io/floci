@@ -6,7 +6,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -37,6 +39,9 @@ public class BackupPlan {
     @JsonProperty("Rules")
     private List<BackupRule> rules = new ArrayList<>();
 
+    @JsonProperty("Tags")
+    private Map<String, String> tags = new HashMap<>();
+
     public BackupPlan() {}
 
     public String getBackupPlanId() { return backupPlanId; }
@@ -59,6 +64,9 @@ public class BackupPlan {
 
     public String getVersionId() { return versionId; }
     public void setVersionId(String versionId) { this.versionId = versionId; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags != null ? new HashMap<>(tags) : new HashMap<>(); }
 
     public List<BackupRule> getRules() { return rules; }
     public void setRules(List<BackupRule> rules) { this.rules = rules != null ? rules : new ArrayList<>(); }

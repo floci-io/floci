@@ -9,8 +9,12 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+import java.util.Optional;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * What {@code CreateResolverEndpoint} does when a stored endpoint has no recorded
@@ -109,5 +113,51 @@ class Route53ResolverReplayFallbackTest {
         ObjectNode first = service.createResolverEndpoint(createRequest(token, "10.0.0.5"), REGION, ACCOUNT);
         ObjectNode second = service.createResolverEndpoint(createRequest(token, "10.0.0.5"), REGION, ACCOUNT);
         assertEquals(first.get("Id").asText(), second.get("Id").asText());
+    }
+
+    @Test
+    void aRecordFromBeforeEndpointsHadInterfacesStillListsAndDeletes() {
+        ObjectNode created = service.createResolverEndpoint(createRequest("tok-legacy", "10.0.0.5"), REGION, ACCOUNT);
+        String id = created.get("Id").asText();
+        ObjectNode legacy = objectMapper.createObjectNode();
+        legacy.set("IpAddressRequests", endpointIpRequests.get(id).orElseThrow().get("IpAddressRequests"));
+        endpointIpRequests.put(id, legacy);
+
+        assertEquals(List.of("10.0.0.5", "10.0.0.6"), service.listResolverEndpointIpAddresses(id).stream()
+                .map(a -> a.get("Ip").asText()).sorted().toList());
+        assertEquals("DELETING", service.deleteResolverEndpoint(id).get("Status").asText());
+        assertTrue(endpointIpRequests.get(id).isEmpty());
+    }
+
+    @Test
+    void listingTakesTheAddressesAndTheirInterfacesFromOneRead() {
+        // A delete landing between two reads must not leave ATTACHED addresses without their Ip.
+        InMemoryStorage<String, ObjectNode> readOnce = new InMemoryStorage<>() {
+            private boolean read;
+
+            @Override
+            public Optional<ObjectNode> get(String key) {
+                if (read) {
+                    return Optional.empty();
+                }
+                read = true;
+                return super.get(key);
+            }
+        };
+        Route53ResolverService racing = new Route53ResolverService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), readOnce, new InMemoryStorage<>(), objectMapper);
+        ObjectNode created = racing.createResolverEndpoint(createRequest("tok-race", "10.0.0.5"), REGION, ACCOUNT);
+        String id = created.get("Id").asText();
+        ObjectNode record = objectMapper.createObjectNode();
+        ArrayNode requests = record.putArray("IpAddressRequests");
+        requests.addObject().put("SubnetId", "subnet-aaa");
+        requests.addObject().put("SubnetId", "subnet-aaa");
+        ArrayNode interfaces = record.putArray("NetworkInterfaces");
+        interfaces.addObject().put("NetworkInterfaceId", "eni-1").put("Ip", "10.0.0.20");
+        interfaces.addObject().put("NetworkInterfaceId", "eni-2").put("Ip", "10.0.0.21");
+        readOnce.put(id, record);
+
+        assertEquals(List.of("10.0.0.20", "10.0.0.21"), racing.listResolverEndpointIpAddresses(id).stream()
+                .map(a -> a.path("Ip").asText("missing")).sorted().toList());
     }
 }

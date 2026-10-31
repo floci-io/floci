@@ -25,6 +25,7 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatchers;
 
 import java.util.List;
 import java.util.Map;
@@ -626,23 +627,23 @@ class AutoScalingReconcilerTest {
         assertEquals("i-pending", asg.getInstances().getFirst().getInstanceId());
         verify(ec2Service, never()).runInstances(
                 eq("us-east-1"),
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.anyInt(),
-                org.mockito.ArgumentMatchers.anyInt(),
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any(),
-                org.mockito.ArgumentMatchers.any(),
+                ArgumentMatchers.any(),
+                ArgumentMatchers.any(),
+                ArgumentMatchers.anyInt(),
+                ArgumentMatchers.anyInt(),
+                ArgumentMatchers.any(),
+                ArgumentMatchers.any(),
+                ArgumentMatchers.any(),
+                ArgumentMatchers.any(),
+                ArgumentMatchers.any(),
+                ArgumentMatchers.any(),
+                ArgumentMatchers.any(),
+                ArgumentMatchers.any(),
                 isNull(), eq(0), isNull(), isNull(), isNull(), any(),
-                org.mockito.ArgumentMatchers.anyBoolean(),
-                org.mockito.ArgumentMatchers.isNull(),
-                org.mockito.ArgumentMatchers.isNull(),
-                org.mockito.ArgumentMatchers.any(), eq(false), isNull(), isNull());
+                ArgumentMatchers.anyBoolean(),
+                ArgumentMatchers.isNull(),
+                ArgumentMatchers.isNull(),
+                ArgumentMatchers.any(), eq(false), isNull(), isNull());
     }
 
     @Test
@@ -916,6 +917,76 @@ class AutoScalingReconcilerTest {
                 eq("Terminating EC2 instance(s) for refresh: [i-term]"),
                 eq("An instance refresh requested replacement of active instances."),
                 eq("Successful"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Pending", "Terminating"})
+    void memberEc2HasNoRecordOfIsPrunedAsStale(String lifecycleState) {
+        AutoScalingService asgService = scalingService();
+        stubActivityRecording(asgService);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, mock(ElbV2Service.class));
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(0);
+        asg.getInstances().add(instance("i-gone", lifecycleState));
+        // Ec2Service answers an id it has no record of with InvalidInstanceID.NotFound, not with an empty list.
+        AwsException notFound = new AwsException("InvalidInstanceID.NotFound",
+                "The instance ID 'i-gone' does not exist", 400);
+        when(ec2Service.describeInstances("us-east-1", List.of("i-gone"), null)).thenThrow(notFound);
+        when(ec2Service.terminateInstances("us-east-1", List.of("i-gone"))).thenThrow(notFound);
+
+        reconciler.reconcile(asg);
+
+        assertEquals(0, asg.getInstances().size());
+        verify(asgService).recordActivity(
+                eq("us-east-1"),
+                eq("app-asg"),
+                eq("Removing stale EC2 instance reference(s): [i-gone]"),
+                eq("Persisted Auto Scaling state referenced instance containers that are no longer running."),
+                eq("Successful"));
+        verify(asgService, never()).recordActivity(anyString(), anyString(),
+                ArgumentMatchers.startsWith("Terminating EC2 instance(s) for refresh"), anyString(), eq("Failed"));
+    }
+
+    @Test
+    void aTerminatingBatchWithAMemberEc2HasNoRecordOfStillTerminatesTheRest() {
+        AutoScalingService asgService = scalingService();
+        stubActivityRecording(asgService);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, mock(ElbV2Service.class));
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(0);
+        asg.getInstances().add(instance("i-gone", "Terminating"));
+        asg.getInstances().add(instance("i-alive", "Terminating"));
+        AwsException notFound = new AwsException("InvalidInstanceID.NotFound",
+                "The instance ID 'i-gone' does not exist", 400);
+        when(ec2Service.describeInstances("us-east-1", List.of("i-gone"), null)).thenThrow(notFound);
+        when(ec2Service.describeInstances("us-east-1", List.of("i-alive"), null))
+                .thenReturn(List.of(reservation(runningEc2Instance("i-alive"))));
+        // Ec2Service terminates a batch in order and stops at the first id it has no record of.
+        when(ec2Service.terminateInstances("us-east-1", List.of("i-gone", "i-alive"))).thenThrow(notFound);
+
+        reconciler.reconcile(asg);
+
+        verify(ec2Service).terminateInstances("us-east-1", List.of("i-alive"));
+        assertEquals(0, asg.getInstances().size());
+        verify(asgService).recordActivity(
+                eq("us-east-1"),
+                eq("app-asg"),
+                eq("Terminating EC2 instance(s) for refresh: [i-alive]"),
+                eq("An instance refresh requested replacement of active instances."),
+                eq("Successful"));
+        verify(asgService).recordActivity(
+                eq("us-east-1"),
+                eq("app-asg"),
+                eq("Removing stale EC2 instance reference(s): [i-gone]"),
+                anyString(),
+                eq("Successful"));
+        verify(asgService, never()).recordActivity(anyString(), anyString(), anyString(), anyString(), eq("Failed"));
     }
 
     @Test

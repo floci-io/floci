@@ -18,6 +18,7 @@ import java.nio.file.Path;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -26,9 +27,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 /**
- * Covers the connection bounds (handshake timeout, backend-connect deferral, permit pool) added
- * to {@link RdsAuthProxy} for the POSTGRES engine, mirroring the equivalent coverage in
- * {@code RedshiftAuthProxyTest}.
+ * Covers the connection bounds (handshake timeout, backend-connect deferral, permit pool,
+ * accept backlog) added to {@link RdsAuthProxy} for the POSTGRES engine, mirroring the
+ * equivalent coverage in {@code RedshiftAuthProxyTest}.
  */
 class RdsAuthProxyBoundsTest {
 
@@ -144,6 +145,24 @@ class RdsAuthProxyBoundsTest {
         }
         assertEquals("runtime:db-1", enteredRuntime.get());
         assertTrue(released.await(5, TimeUnit.SECONDS), "the lease is released when the connection ends");
+    }
+
+    @Test
+    void bindsWithABurstTolerantAcceptBacklog() throws Exception {
+        AtomicInteger acceptBacklog = new AtomicInteger();
+        proxy = new RdsAuthProxy("db-1", "localhost", 1, "runtime:db-1",
+                DatabaseEngine.POSTGRES, false, "admin", "Secret123", "dev",
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> true,
+                5000, 5000, 100) {
+            @Override
+            ServerSocket listenSocket(int proxyPort, int backlog) throws IOException {
+                acceptBacklog.set(backlog);
+                return super.listenSocket(proxyPort, backlog);
+            }
+        };
+        proxy.start(0);
+        assertEquals(4096, acceptBacklog.get(),
+                "a connection burst must not overflow the proxy's accept queue");
     }
 
     private RdsAuthProxy newProxy(int handshakeTimeoutMillis, int backendConnectTimeoutMillis,

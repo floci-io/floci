@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.organizations.model.OrganizationalUni
 import io.github.hectorvent.floci.services.organizations.model.Root;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
+import org.mockito.Mockito;
 
 import java.time.Instant;
 import java.util.HashMap;
@@ -520,7 +521,7 @@ class OrganizationsCfnProvisionerTest {
     void deleteToleratesAResourceThatDisappearedBetweenLookupAndDelete() {
         when(organizations.findManagementAccountForResource("ou-ab12-abcd1234"))
                 .thenReturn(Optional.of(ACCOUNT));
-        org.mockito.Mockito.doThrow(new AwsException("OrganizationalUnitNotFoundException", "gone", 400))
+        Mockito.doThrow(new AwsException("OrganizationalUnitNotFoundException", "gone", 400))
                 .when(organizations).deleteOrganizationalUnit(ACCOUNT, "ou-ab12-abcd1234");
 
         provisioner.delete("AWS::Organizations::OrganizationalUnit", "ou-ab12-abcd1234", "us-east-1");
@@ -530,7 +531,7 @@ class OrganizationsCfnProvisionerTest {
     void deleteRethrowsARealFailure() {
         when(organizations.findManagementAccountForResource("ou-ab12-abcd1234"))
                 .thenReturn(Optional.of(ACCOUNT));
-        org.mockito.Mockito.doThrow(new AwsException("OrganizationalUnitNotEmptyException", "busy", 400))
+        Mockito.doThrow(new AwsException("OrganizationalUnitNotEmptyException", "busy", 400))
                 .when(organizations).deleteOrganizationalUnit(ACCOUNT, "ou-ab12-abcd1234");
 
         AwsException error = assertThrows(AwsException.class, () -> provisioner.delete(

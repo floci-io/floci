@@ -18,6 +18,7 @@ import jakarta.inject.Inject;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
 public class BedrockAgentCoreCredentialProviderService {
@@ -349,7 +350,7 @@ public class BedrockAgentCoreCredentialProviderService {
     }
 
     private static void validateOauthVendor(String vendor) {
-        if (vendor == null || !java.util.Set.of(
+        if (vendor == null || !Set.of(
                 "GoogleOauth2", "GithubOauth2", "SlackOauth2", "SalesforceOauth2", "MicrosoftOauth2",
                 "CustomOauth2", "AtlassianOauth2", "LinkedinOauth2", "XOauth2", "OktaOauth2",
                 "OneLoginOauth2", "PingOneOauth2", "FacebookOauth2", "YandexOauth2", "RedditOauth2",

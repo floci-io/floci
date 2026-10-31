@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.redshiftdata;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.ResolvedServiceCatalog;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import org.junit.jupiter.api.Test;
@@ -24,7 +26,7 @@ class RedshiftDataEventPublisherTest {
         ObjectMapper mapper = new ObjectMapper();
         EventBridgeService events = mock(EventBridgeService.class);
         ServiceRegistry registry = mock(ServiceRegistry.class);
-        when(registry.isServiceEnabled("eventbridge")).thenReturn(true);
+        when(registry.isServiceEnabled("events")).thenReturn(true);
         when(events.putEvents(anyList(), anyString(), anyString()))
                 .thenReturn(new EventBridgeService.PutEventsResult(0, List.of()));
         RedshiftDataEventPublisher publisher = new RedshiftDataEventPublisher(events, mapper, registry);
@@ -57,7 +59,7 @@ class RedshiftDataEventPublisherTest {
     void rejectedEntriesAndRefusalsDoNotFailSqlCompletion() {
         EventBridgeService events = mock(EventBridgeService.class);
         ServiceRegistry registry = mock(ServiceRegistry.class);
-        when(registry.isServiceEnabled("eventbridge")).thenReturn(true);
+        when(registry.isServiceEnabled("events")).thenReturn(true);
         RedshiftDataEventPublisher publisher = new RedshiftDataEventPublisher(events, new ObjectMapper(), registry);
         RedshiftDataStatementStore.StoredStatement statement = new RedshiftDataStatementStore.StoredStatement();
         statement.id = "id";
@@ -72,5 +74,24 @@ class RedshiftDataEventPublisherTest {
         assertDoesNotThrow(() -> publisher.publish(statement));
         assertDoesNotThrow(() -> publisher.publish(statement));
         assertThrows(IllegalStateException.class, () -> publisher.publish(statement));
+    }
+
+    @Test
+    void aDisabledEventBridgeDropsTheEventWithoutFailing() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().eventbridge().enabled()).thenReturn(false);
+        ServiceRegistry registry = new ServiceRegistry(new ResolvedServiceCatalog(config));
+        EventBridgeService events = mock(EventBridgeService.class);
+        RedshiftDataEventPublisher publisher = new RedshiftDataEventPublisher(events, new ObjectMapper(), registry);
+        RedshiftDataStatementStore.StoredStatement statement = new RedshiftDataStatementStore.StoredStatement();
+        statement.id = "id";
+        statement.accountId = "111111111111";
+        statement.region = "us-east-1";
+        statement.status = RedshiftDataStatementStore.Status.FINISHED;
+        statement.expiresAt = Instant.now();
+
+        assertDoesNotThrow(() -> publisher.publish(statement));
+
+        verifyNoInteractions(events);
     }
 }

@@ -83,7 +83,8 @@ public final class XmlBuilder {
     }
 
     /**
-     * Escapes the five XML special characters: {@code & < > " '}.
+     * Escapes the five XML special characters: {@code & < > " '}, and a carriage return as
+     * {@code &#13;}, which an XML parser would otherwise read back as a line feed.
      * Returns an empty string for null or empty input.
      */
     public static String escape(String s) {
@@ -100,6 +101,7 @@ public final class XmlBuilder {
                 case '>'  -> "&gt;";
                 case '"'  -> "&quot;";
                 case '\'' -> "&apos;";
+                case '\r' -> "&#13;";
                 default   -> null;
             };
             if (replacement != null) {

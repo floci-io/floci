@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
@@ -614,6 +615,44 @@ class Ec2QueryHandlerTest {
         Response response = handler(service, regionResolver)
                 .handle("DescribeRegions", new MultivaluedHashMap<>(), region);
         return (String) response.getEntity();
+    }
+
+    /** A rejected tag specification keeps its error on a dry run: the tags are read before DryRun is answered. */
+    @ParameterizedTest
+    @CsvSource({"CreateVpc,vpc,InvalidParameter", "CreateSubnet,subnet,InvalidParameter",
+            "CreateSecurityGroup,security-group,InvalidParameterValue"})
+    void aDryRunKeepsTheErrorOfAReservedTagKey(String action, String resourceType, String code) {
+        Ec2Service service = mock(Ec2Service.class);
+        MultivaluedMap<String, String> params = createSubnetParams("10.38.1.0/24");
+        params.putSingle("GroupName", "test");
+        params.putSingle("GroupDescription", "test");
+        params.putSingle("DryRun", "true");
+        params.putSingle("TagSpecification.1.ResourceType", resourceType);
+        params.putSingle("TagSpecification.1.Tag.1.Key", "aws:reserved");
+        params.putSingle("TagSpecification.1.Tag.1.Value", "invalid");
+
+        Response response = handler(service).handle(action, params, "us-east-1");
+
+        assertEquals(400, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<Code>" + code + "</Code>"));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void aSecurityGroupDryRunWithoutAVpcIdNeedsTheDefaultVpcToExist() {
+        Ec2Service service = mock(Ec2Service.class);
+        when(service.requireSecurityGroupVpc("us-east-1", null)).thenThrow(new AwsException(
+                "InvalidVpcID.NotFound", "The vpc ID 'vpc-default-us-east-1' does not exist", 400));
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("GroupName", "test");
+        params.putSingle("GroupDescription", "test");
+        params.putSingle("DryRun", "true");
+
+        Response response = handler(service).handle("CreateSecurityGroup", params, "us-east-1");
+
+        assertEquals(400, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<Code>InvalidVpcID.NotFound</Code>"));
+        verify(service, never()).createSecurityGroup(any(), any(), any(), any());
     }
 
     private Ec2QueryHandler handler(Ec2Service service) {

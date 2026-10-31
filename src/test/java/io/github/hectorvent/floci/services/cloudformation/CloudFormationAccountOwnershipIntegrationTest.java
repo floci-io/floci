@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -179,7 +180,7 @@ class CloudFormationAccountOwnershipIntegrationTest {
                 .when().post("/").then().statusCode(200);
     }
 
-    private static io.restassured.response.ValidatableResponse describeStack(
+    private static ValidatableResponse describeStack(
             String account, String region, String name) {
         return given().header("Authorization", auth(account, region))
                 .contentType("application/x-www-form-urlencoded")
@@ -188,7 +189,7 @@ class CloudFormationAccountOwnershipIntegrationTest {
                 .when().post("/").then();
     }
 
-    private static io.restassured.response.ValidatableResponse describeStackResources(
+    private static ValidatableResponse describeStackResources(
             String account, String region, String name) {
         return given().header("Authorization", auth(account, region))
                 .contentType("application/x-www-form-urlencoded")
@@ -197,14 +198,14 @@ class CloudFormationAccountOwnershipIntegrationTest {
                 .when().post("/").then();
     }
 
-    private static io.restassured.response.ValidatableResponse listStacks(String accessKeyId, String region) {
+    private static ValidatableResponse listStacks(String accessKeyId, String region) {
         return given().header("Authorization", auth(accessKeyId, region))
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "ListStacks")
                 .when().post("/").then();
     }
 
-    private static io.restassured.response.ValidatableResponse listExports(String account, String region) {
+    private static ValidatableResponse listExports(String account, String region) {
         return given().header("Authorization", auth(account, region))
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "ListExports")

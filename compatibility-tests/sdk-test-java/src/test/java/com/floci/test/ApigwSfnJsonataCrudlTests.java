@@ -1,6 +1,8 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.client.config.ClientOverrideConfiguration;
 import software.amazon.awssdk.core.client.config.SdkAdvancedClientOption;
 import software.amazon.awssdk.regions.Region;
@@ -89,14 +91,14 @@ class ApigwSfnJsonataCrudlTests {
             ddb = DynamoDbClient.builder()
                     .endpointOverride(endpoint)
                     .region(region)
-                    .credentialsProvider(software.amazon.awssdk.auth.credentials.StaticCredentialsProvider.create(
-                            software.amazon.awssdk.auth.credentials.AwsBasicCredentials.create("test", "test")))
+                    .credentialsProvider(StaticCredentialsProvider.create(
+                            AwsBasicCredentials.create("test", "test")))
                     .build();
             sfn = SfnClient.builder()
                     .endpointOverride(endpoint)
                     .region(region)
-                    .credentialsProvider(software.amazon.awssdk.auth.credentials.StaticCredentialsProvider.create(
-                            software.amazon.awssdk.auth.credentials.AwsBasicCredentials.create("test", "test")))
+                    .credentialsProvider(StaticCredentialsProvider.create(
+                            AwsBasicCredentials.create("test", "test")))
                     .overrideConfiguration(ClientOverrideConfiguration.builder()
                             .putAdvancedOption(SdkAdvancedClientOption.DISABLE_HOST_PREFIX_INJECTION, true)
                             .build())
@@ -104,8 +106,8 @@ class ApigwSfnJsonataCrudlTests {
             apigw = ApiGatewayClient.builder()
                     .endpointOverride(endpoint)
                     .region(region)
-                    .credentialsProvider(software.amazon.awssdk.auth.credentials.StaticCredentialsProvider.create(
-                            software.amazon.awssdk.auth.credentials.AwsBasicCredentials.create("test", "test")))
+                    .credentialsProvider(StaticCredentialsProvider.create(
+                            AwsBasicCredentials.create("test", "test")))
                     .build();
         }
 

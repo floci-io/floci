@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.appsync.graphql.auth;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.Base64Url;
@@ -82,12 +83,12 @@ class OidcAuthValidatorTest {
         server.stop(0);
     }
 
-    private void discovery(com.sun.net.httpserver.HttpExchange exchange) throws IOException {
+    private void discovery(HttpExchange exchange) throws IOException {
         String body = "{\"issuer\":\"" + issuer + "\",\"jwks_uri\":\"" + issuer + "/jwks\"}";
         respond(exchange, body);
     }
 
-    private void jwks(com.sun.net.httpserver.HttpExchange exchange) throws IOException {
+    private void jwks(HttpExchange exchange) throws IOException {
         String n = base64UrlUnsigned(publicKey.getModulus());
         String e = base64UrlUnsigned(publicKey.getPublicExponent());
         String body = "{\"keys\":[{\"kty\":\"RSA\",\"kid\":\"" + KEY_ID + "\",\"alg\":\"RS256\",\"use\":\"sig\","
@@ -95,7 +96,7 @@ class OidcAuthValidatorTest {
         respond(exchange, body);
     }
 
-    private static void respond(com.sun.net.httpserver.HttpExchange exchange, String body) throws IOException {
+    private static void respond(HttpExchange exchange, String body) throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().add("Content-Type", "application/json");
         exchange.sendResponseHeaders(200, bytes.length);

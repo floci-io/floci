@@ -85,4 +85,41 @@ class SmithyValidationErrorsTest {
                 SmithyValidationErrors.lengthOutOfRange("name", value.repeat(2), 0, 1));
     }
 
+    /**
+     * A service's own form decides whether the offending value is quoted beside the member, which
+     * is the only thing the two differ in. The statics are the quoting form, so every service that
+     * calls them keeps the message it answered.
+     */
+    @Test
+    void aServicesFormDecidesWhetherTheValueIsQuoted() {
+        SmithyValidationErrors.Violations quoted = SmithyValidationErrors.Violations.QUOTED;
+        SmithyValidationErrors.Violations without = SmithyValidationErrors.Violations.WITHOUT_VALUES;
+
+        assertEquals("Value 'ab' at 'userName' failed to satisfy constraint: "
+                        + "Member must have length greater than or equal to 3",
+                quoted.lengthOutOfRange("userName", "ab", 3, 10));
+        assertEquals("Value at 'userName' failed to satisfy constraint: "
+                        + "Member must have length greater than or equal to 3",
+                without.lengthOutOfRange("userName", "ab", 3, 10));
+
+        assertEquals(SmithyValidationErrors.lengthOutOfRange("userName", "ab", 3, 10),
+                quoted.lengthOutOfRange("userName", "ab", 3, 10));
+        assertEquals(SmithyValidationErrors.pattern("userName", "a b", "[a-z]+"),
+                quoted.pattern("userName", "a b", "[a-z]+"));
+        assertEquals(SmithyValidationErrors.notInEnum("Users", "filter", List.of("User")),
+                quoted.notInEnum("Users", "filter", List.of("User")));
+        assertEquals(SmithyValidationErrors.outOfRange("maxItems", 1001, 1, 1000),
+                quoted.outOfRange("maxItems", 1001, 1, 1000));
+
+        assertEquals("Value at 'filter' failed to satisfy constraint: "
+                        + "Member must satisfy enum value set: [User]",
+                without.notInEnum("Users", "filter", List.of("User")));
+        assertEquals("Value at 'maxItems' failed to satisfy constraint: "
+                        + "Member must have value less than or equal to 1000",
+                without.outOfRange("maxItems", 1001, 1, 1000));
+
+        // A value inside its bounds is no violation in either form.
+        assertNull(without.lengthOutOfRange("userName", "abc", 3, 10));
+        assertNull(without.outOfRange("maxItems", 1000, 1, 1000));
+    }
 }

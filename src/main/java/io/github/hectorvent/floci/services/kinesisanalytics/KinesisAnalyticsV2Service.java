@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -243,6 +245,14 @@ public class KinesisAnalyticsV2Service {
             }
         }
         return storage.scan(key -> key.startsWith(prefix));
+    }
+
+    public PaginatedResult<FlinkApplication> listApplications(String region, Integer limit, String nextToken) {
+        if (nextToken != null && !nextToken.isEmpty() && !APPLICATION_NAME.matcher(nextToken).matches()) {
+            throw new AwsException("InvalidRequestException", "Invalid NextToken.", 400);
+        }
+        return Pagination.paginateUnencoded(listApplications(region), FlinkApplication::getApplicationName,
+                limit, nextToken, 50, 50, 128, "InvalidRequestException");
     }
 
     public FlinkApplication startApplication(String applicationName) {

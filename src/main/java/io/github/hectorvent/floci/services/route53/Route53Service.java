@@ -26,6 +26,7 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -162,44 +163,65 @@ public class Route53Service implements Resettable {
     }
 
     public List<HostedZone> listHostedZones(String marker, int maxItems) {
+        return pageHostedZones(marker, maxItems).items();
+    }
+
+    Route53Pagination.Page<HostedZone> pageHostedZones(String marker, int maxItems) {
         List<HostedZone> all = new ArrayList<>(zoneStore.scan(k -> true));
-        all.sort((a, b) -> a.getName().compareTo(b.getName()));
+        all.sort(Comparator.comparing(HostedZone::getName).thenComparing(HostedZone::getId));
         for (HostedZone zone : all) {
             zone.setResourceRecordSetCount(recordCount(zone.getId()));
         }
-        if (marker != null && !marker.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getId().equals(marker)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
-        }
-        return all;
+        return Route53Pagination.page(all, marker, maxItems, HostedZone::getId);
     }
 
     public List<HostedZone> listHostedZonesByName(String dnsName, int maxItems) {
+        return pageHostedZonesByName(dnsName, null, maxItems).items();
+    }
+
+    Route53Pagination.Page<HostedZone> pageHostedZonesByName(String dnsName, String hostedZoneId, int maxItems) {
         List<HostedZone> all = new ArrayList<>(zoneStore.scan(k -> true));
-        all.sort((a, b) -> a.getName().compareTo(b.getName()));
+        all.sort(Comparator.comparing((HostedZone zone) -> reversedDnsName(zone.getName()))
+                .thenComparing(HostedZone::getId));
         for (HostedZone zone : all) {
             zone.setResourceRecordSetCount(recordCount(zone.getId()));
         }
         if (dnsName != null && !dnsName.isEmpty()) {
-            String normalized = normalizeName(dnsName);
-            all = all.stream()
-                    .filter(z -> z.getName().compareTo(normalized) >= 0)
-                    .toList();
-            all = new ArrayList<>(all);
+            String startName = reversedDnsName(normalizeName(dnsName));
+            all.removeIf(zone -> {
+                int comparison = reversedDnsName(zone.getName()).compareTo(startName);
+                return comparison < 0 || (comparison == 0 && hostedZoneId != null && !hostedZoneId.isEmpty()
+                        && zone.getId().compareTo(hostedZoneId) < 0);
+            });
         }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
+        int pageSize = maxItems <= 0 ? maxItems : Math.min(maxItems, 100);
+        return Route53Pagination.page(all, null, pageSize, HostedZone::getId);
+    }
+
+    static String reversedDnsName(String name) {
+        String normalized = normalizeName(name);
+        List<String> labels = new ArrayList<>();
+        int labelStart = 0;
+        boolean escaped = false;
+        for (int i = 0; i < normalized.length(); i++) {
+            char character = normalized.charAt(i);
+            if (character == '.' && !escaped) {
+                if (i > labelStart) {
+                    labels.add(normalized.substring(labelStart, i));
+                }
+                labelStart = i + 1;
+            }
+            if (character == '\\' && !escaped) {
+                escaped = true;
+            } else {
+                escaped = false;
+            }
         }
-        return all;
+        StringBuilder reversed = new StringBuilder(normalized.length());
+        for (int i = labels.size() - 1; i >= 0; i--) {
+            reversed.append(labels.get(i)).append('.');
+        }
+        return reversed.toString();
     }
 
     public long getHostedZoneCount() {
@@ -503,21 +525,13 @@ public class Route53Service implements Resettable {
     }
 
     public List<HealthCheck> listHealthChecks(String marker, int maxItems) {
+        return pageHealthChecks(marker, maxItems).items();
+    }
+
+    Route53Pagination.Page<HealthCheck> pageHealthChecks(String marker, int maxItems) {
         List<HealthCheck> all = new ArrayList<>(healthCheckStore.scan(k -> true));
-        if (marker != null && !marker.isEmpty()) {
-            int idx = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (all.get(i).getId().equals(marker)) {
-                    idx = i + 1;
-                    break;
-                }
-            }
-            all = all.subList(idx, all.size());
-        }
-        if (maxItems > 0 && all.size() > maxItems) {
-            return all.subList(0, maxItems);
-        }
-        return all;
+        all.sort(Comparator.comparing(HealthCheck::getId));
+        return Route53Pagination.page(all, marker, maxItems, HealthCheck::getId);
     }
 
     public HealthCheck updateHealthCheck(String id, HealthCheckConfig cfg) {
@@ -829,9 +843,9 @@ public class Route53Service implements Resettable {
         return regionResolver != null ? regionResolver.getAccountId() : defaultAccountId;
     }
 
-    private java.util.Optional<String> resolveVpcOwnerAccount(VpcAssociation vpc) {
+    private Optional<String> resolveVpcOwnerAccount(VpcAssociation vpc) {
         if (vpc == null || ec2Service == null) {
-            return java.util.Optional.empty();
+            return Optional.empty();
         }
         return ec2Service.findVpcOwnerAccount(vpc.getVpcRegion(), vpc.getVpcId());
     }
@@ -840,7 +854,7 @@ public class Route53Service implements Resettable {
         if (vpc == null) {
             return;
         }
-        java.util.Optional<String> owner = resolveVpcOwnerAccount(vpc);
+        Optional<String> owner = resolveVpcOwnerAccount(vpc);
         if (owner.isPresent() && !owner.get().equals(callerAccountId)) {
             throw new AwsException("InvalidVPCId",
                     "The VPC ID that you specified either isn't a valid ID or the current account is not authorized to access this VPC.",
@@ -972,6 +986,13 @@ public class Route53Service implements Resettable {
 
     private void validateChange(String action, ResourceRecordSet rrs,
                                 List<ResourceRecordSet> current, String zoneName) {
+        String recordName = normalizeRecordName(rrs.getName());
+        String zone = normalizeRecordName(zoneName);
+        if (!".".equals(zone) && !DomainNames.isWithin(recordName, zone)) {
+            throw new AwsException("InvalidChangeBatch",
+                    "RRSet with DNS name " + normalizeName(rrs.getName()) + " is not permitted in zone "
+                            + normalizeName(zoneName), 400);
+        }
         if ("DELETE".equals(action) && isApexSoaOrNs(rrs, zoneName)) {
             throw new AwsException("InvalidChangeBatch",
                     "Invalid resource record set: Deleting the SOA or NS record at the zone apex is not permitted.", 400);

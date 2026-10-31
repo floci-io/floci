@@ -17,6 +17,7 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.StreamSupport;
 
 /** HTTP client for the stateless Cedar 4 sidecar. */
 @ApplicationScoped
@@ -81,7 +82,7 @@ public class CedarSidecarClient {
         if (!node.isArray()) {
             return List.of();
         }
-        return java.util.stream.StreamSupport.stream(node.spliterator(), false)
+        return StreamSupport.stream(node.spliterator(), false)
                 .map(JsonNode::asText)
                 .toList();
     }

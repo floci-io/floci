@@ -16,7 +16,9 @@ public final class LogsAuthorizationFixtures {
 
     public static String user(PartitionCleanup cleanup, int port, String account, String prefix,
                               String policyName, String statements) {
-        String name = prefix + UUID.randomUUID();
+        // Eight characters of a UUID rather than a whole one: a user name is held to the 64
+        // characters its shape declares, which a prefix plus a whole UUID can break.
+        String name = prefix + UUID.randomUUID().toString().substring(0, 8);
         String root = EnforcementFixtures.auth(account, "iam");
         String key = EnforcementFixtures.createUser(cleanup, port, root, name).accessKeyId();
         given().port(port).header("Authorization", root).formParam("Action", "PutUserPolicy")

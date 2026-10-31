@@ -1272,7 +1272,8 @@ class ApiGatewayOpenApiImportTest {
                                                   AtomicInteger integrationCalls) {
         int calls = integrationCalls.get();
         given().spec(request).contentType(ContentType.JSON).body(body).post(endpoint)
-                .then().statusCode(400).body("message", equalTo("Invalid request body"));
+                .then().statusCode(400).body("message", equalTo("Invalid request body"))
+                .header("x-amzn-ErrorType", equalTo("BadRequestException"));
         assertEquals(calls, integrationCalls.get(), "Rejected requests must not reach the integration");
     }
 

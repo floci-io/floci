@@ -434,7 +434,7 @@ floci:
       # Extra Docker create flags for Lambda containers, for example: --env KEY=VALUE --volume /host:/container:ro
       docker-flags: ""
       ecr-base-uri: public.ecr.aws            # FLOCI_SERVICES_LAMBDA_ECR_BASE_URI — registry for Lambda runtime images (legacy: floci.ecr-base-uri / FLOCI_ECR_BASE_URI)
-      # runtime-images:                   # Optional full image references keyed by Lambda runtime
+      # runtime-images:                   # Optional full references keyed by runtime or runtime.os.arch
       #   "python3.12": "public.ecr.aws/lambda/python:3.12@sha256:<digest>"
       honour-architectures: false             # Select the Lambda architecture for Docker pull and create
       default-memory-mb: 128
@@ -534,6 +534,7 @@ floci:
     redshift:
       enabled: true
       automated-snapshots-enabled: true
+      cloudwatch-metrics-enabled: true
       snapshot-sweep-interval-seconds: 60
       default-port: 5439
       image-version: postgres:15-alpine
@@ -582,6 +583,12 @@ floci:
       shutdown-timeout-seconds: ${FLOCI_SERVICES_REDSHIFT_DATA_SHUTDOWN_TIMEOUT_SECONDS:10}
     redshift-serverless:
       enabled: true
+      snapshot-expiration-enabled: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SNAPSHOT_EXPIRATION_ENABLED:true}
+      snapshot-expiration-sweep-interval-seconds: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SNAPSHOT_EXPIRATION_SWEEP_INTERVAL_SECONDS:60}
+      snapshot-copy-enabled: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SNAPSHOT_COPY_ENABLED:true}
+      snapshot-copy-sweep-interval-seconds: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SNAPSHOT_COPY_SWEEP_INTERVAL_SECONDS:60}
+      scheduled-actions-enabled: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SCHEDULED_ACTIONS_ENABLED:true}
+      scheduled-action-sweep-interval-seconds: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SCHEDULED_ACTION_SWEEP_INTERVAL_SECONDS:60}
     neptune:
       enabled: true
       proxy-base-port: 8182
@@ -598,11 +605,12 @@ floci:
       cluster-startup-delay-seconds: 0      # 0 = a cluster is ready as soon as it is created
       step-duration-seconds: 0              # 0 = a step completes as soon as it starts
       cluster-termination-delay-seconds: 0  # 0 = a cluster is TERMINATED as soon as it is TERMINATING
-      runner-mode: immediate                # docker = run each Spark step's spark-submit in a container
+      runner-mode: immediate                # docker = run bootstrap actions and steps in containers
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
-      # Remove the step drivers a previous run of this deployment left on the daemon when the EMR
-      # service starts. Scoped to this deployment's own containers.
+      # Remove the step drivers a previous run of this deployment left on the daemon, and the images
+      # bootstrap actions left for clusters that are gone or have ended, when the EMR service starts.
+      # Scoped to this deployment's own containers and images.
       reconcile-containers-on-startup: true
     wafv2:
       enabled: true
@@ -754,6 +762,7 @@ floci:
       host-port-bind-address: "127.0.0.1"
       host-volume-roots: []
       allow-unsafe-host-volumes: false
+      allow-privileged-containers: false
       # Remove the ECS containers a previous run of this deployment left on the daemon before
       # the service scheduler starts replacements. Scoped to this deployment's own containers.
       reconcile-containers-on-startup: true

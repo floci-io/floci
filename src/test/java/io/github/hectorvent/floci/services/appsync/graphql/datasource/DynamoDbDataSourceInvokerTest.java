@@ -9,7 +9,9 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -47,7 +49,7 @@ class DynamoDbDataSourceInvokerTest {
 
     private JsonNode captureRequest(String action) throws Exception {
         ArgumentCaptor<JsonNode> captor = ArgumentCaptor.forClass(JsonNode.class);
-        org.mockito.Mockito.verify(handler).handle(eq(action), captor.capture(), anyString());
+        Mockito.verify(handler).handle(eq(action), captor.capture(), anyString());
         return captor.getValue();
     }
 
@@ -187,7 +189,7 @@ class DynamoDbDataSourceInvokerTest {
                 """), "eu-west-1");
         String nextToken = (String) first.get("nextToken");
 
-        org.mockito.Mockito.reset(handler);
+        Mockito.reset(handler);
         answers("{\"Items\": []}");
         invoker.invoke(dataSource(), request("""
                 {"operation": "Scan", "nextToken": "%s"}
@@ -227,7 +229,7 @@ class DynamoDbDataSourceInvokerTest {
     /** Drops the null-valued entries a NULL attribute produces, for a tidy comparison. */
     private Object stripNulls(Object value) {
         if (value instanceof Map<?, ?> map) {
-            java.util.Map<Object, Object> copy = new java.util.LinkedHashMap<>();
+            Map<Object, Object> copy = new LinkedHashMap<>();
             map.forEach((k, v) -> {
                 if (v != null) {
                     copy.put(k, stripNulls(v));

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -44,6 +45,7 @@ public class S3Object {
     private Instant retainUntilDate;     // null if no retention
     private String legalHoldStatus;      // "ON" | "OFF" | null
     private String acl;
+    private String ownerAccountId;
 
     // Internal-only per-write stamp (not an S3 versionId, and set even when bucket versioning is
     // off - see S3Service#getLatestObject). A fresh value is assigned every time this key is
@@ -169,6 +171,9 @@ public class S3Object {
     public String getAcl() { return acl; }
     public void setAcl(String acl) { this.acl = acl; }
 
+    public String getOwnerAccountId() { return ownerAccountId; }
+    public void setOwnerAccountId(String ownerAccountId) { this.ownerAccountId = ownerAccountId; }
+
     public String getDataGeneration() { return dataGeneration; }
     public void setDataGeneration(String dataGeneration) { this.dataGeneration = dataGeneration; }
 
@@ -185,7 +190,7 @@ public class S3Object {
             }
             sb.append("\"");
             return sb.toString();
-        } catch (java.security.NoSuchAlgorithmException e) {
+        } catch (NoSuchAlgorithmException e) {
             return "\"\"";
         }
     }

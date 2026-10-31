@@ -1,13 +1,17 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.xml.XmlPath;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 /**
  * CreateSubnet never read AvailabilityZoneId and hardcoded every new subnet's zone id to the
@@ -108,6 +112,42 @@ class Ec2SubnetAvailabilityZoneIdIntegrationTest {
             .statusCode(200)
             .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.zoneId",
                     hasItem("use1-az3"));
+    }
+
+    /**
+     * Issue #5580: the AWS Load Balancer Controller resolves each subnet's zone by passing its
+     * AvailabilityZoneId to DescribeAvailabilityZones --zone-ids, the default VPC's subnets
+     * included, so every id a subnet reports has to be accepted there.
+     */
+    @Test
+    void everyDefaultSubnetZoneIdCanBeLookedUpByZoneId() {
+        String auth = "AWS4-HMAC-SHA256 Credential=test/20260205/ap-southeast-1/ec2/aws4_request";
+        XmlPath subnets = given()
+            .formParam("Action", "DescribeSubnets")
+            .formParam("Filter.1.Name", "default-for-az")
+            .formParam("Filter.1.Value.1", "true")
+            .header("Authorization", auth)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath();
+        List<String> zoneNames = subnets.getList("DescribeSubnetsResponse.subnetSet.item.availabilityZone");
+        List<String> zoneIds = subnets.getList("DescribeSubnetsResponse.subnetSet.item.availabilityZoneId");
+
+        assertFalse(zoneIds.isEmpty());
+        for (int i = 0; i < zoneIds.size(); i++) {
+            given()
+                .formParam("Action", "DescribeAvailabilityZones")
+                .formParam("ZoneId.1", zoneIds.get(i))
+                .header("Authorization", auth)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.zoneName",
+                        equalTo(zoneNames.get(i)));
+        }
     }
 
     @Test

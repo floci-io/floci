@@ -32,6 +32,15 @@ public final class ContainerExecStubs {
     /** Returns the commands run in {@code containerId}, in order, as the stubbed execs see them. */
     public static List<List<String>> completeEveryExec(DockerClient dockerClient, String containerId, long exitCode,
                                                        String stdout, String stderr) {
+        return completeEveryExec(dockerClient, containerId, List.of(exitCode), stdout, stderr);
+    }
+
+    /**
+     * As {@link #completeEveryExec(DockerClient, String, long, String, String)}, the execs exiting with
+     * {@code exitCodes} in turn, and every one after them with the last.
+     */
+    public static List<List<String>> completeEveryExec(DockerClient dockerClient, String containerId,
+                                                       List<Long> exitCodes, String stdout, String stderr) {
         String execId = "exec-" + containerId;
         List<List<String>> commands = new ArrayList<>();
 
@@ -61,7 +70,8 @@ public final class ContainerExecStubs {
 
         InspectExecCmd inspectCmd = mock(InspectExecCmd.class);
         InspectExecResponse inspectResponse = mock(InspectExecResponse.class);
-        when(inspectResponse.getExitCodeLong()).thenReturn(exitCode);
+        when(inspectResponse.getExitCodeLong())
+                .thenReturn(exitCodes.getFirst(), exitCodes.subList(1, exitCodes.size()).toArray(Long[]::new));
         when(inspectCmd.exec()).thenReturn(inspectResponse);
         when(dockerClient.inspectExecCmd(execId)).thenReturn(inspectCmd);
         return commands;

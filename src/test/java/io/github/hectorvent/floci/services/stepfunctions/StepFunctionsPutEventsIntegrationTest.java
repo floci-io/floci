@@ -203,8 +203,7 @@ class StepFunctionsPutEventsIntegrationTest {
                       "Arguments": {
                         "Entries": [
                           {"Source": "floci.unrouted", "DetailType": "t", "Detail": "{}"},
-                          {"EventBusName": "no-such-bus", "Source": "floci.unrouted",
-                           "DetailType": "t", "Detail": "{}"}
+                          {"DetailType": "t", "Detail": "{}"}
                         ]
                       },
                       "End": true
@@ -236,8 +235,7 @@ class StepFunctionsPutEventsIntegrationTest {
                       "Type": "Task",
                       "Resource": "RESOURCE_ARN",
                       "Arguments": {
-                        "Entries": [{"EventBusName": "no-such-bus", "Source": "floci.unrouted",
-                                     "DetailType": "t", "Detail": "{}"}]
+                        "Entries": [{"DetailType": "t", "Detail": "{}"}]
                       },
                       "Catch": [{"ErrorEquals": ["EventBridge.FailedEntry"], "Next": "Recovered"}],
                       "End": true
@@ -252,6 +250,32 @@ class StepFunctionsPutEventsIntegrationTest {
                 """.replace("RESOURCE_ARN", RESOURCE));
 
         assertTrue(mapper.readTree(succeedingOutputOf(smArn)).path("recovered").asBoolean());
+    }
+
+    @Test
+    @Order(7)
+    void anEntryForAnEventBusThatDoesNotExistIsAcceptedAndDoesNotFailTheTask() throws Exception {
+        String smArn = createStateMachine("put-events-missing-bus", """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Publish",
+                  "States": {
+                    "Publish": {
+                      "Type": "Task",
+                      "Resource": "RESOURCE_ARN",
+                      "Arguments": {
+                        "Entries": [{"EventBusName": "no-such-bus", "Source": "floci.unrouted",
+                                     "DetailType": "t", "Detail": "{}"}]
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """.replace("RESOURCE_ARN", RESOURCE));
+
+        JsonNode result = mapper.readTree(succeedingOutputOf(smArn));
+        assertEquals(0, result.path("FailedEntryCount").asInt());
+        assertFalse(result.path("Entries").get(0).path("EventId").asText().isBlank());
     }
 
     private static List<String> fieldNames(JsonNode node) {

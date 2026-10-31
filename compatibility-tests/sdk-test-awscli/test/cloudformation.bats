@@ -368,3 +368,47 @@ EOF
     assert_success
     [ "$(json_get "$output" '[.Versions[].Version] | join(",")')" = '$LATEST,1,2' ]
 }
+
+sam_version_description_template() {
+    cat << EOF
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Fn:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: $1
+      Runtime: nodejs20.x
+      Handler: index.handler
+      AutoPublishAlias: live
+      VersionDescription: release $2
+      InlineCode: "exports.handler = async () => ({ release: '$2' });"
+EOF
+}
+
+@test "CloudFormation: SAM VersionDescription describes each published version" {
+    local fn
+    fn=$(unique_name bats-sam-version-description)
+    sam_version_description_template "$fn" first > "$TEMPLATE_FILE"
+    run aws_cmd cloudformation deploy \
+        --stack-name "$STACK_NAME" \
+        --template-file "$TEMPLATE_FILE" \
+        --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND
+    assert_success
+
+    run aws_cmd lambda get-function-configuration --function-name "$fn" --qualifier live
+    assert_success
+    [ "$(json_get "$output" '.Version')" = "1" ]
+    [ "$(json_get "$output" '.Description')" = "release first" ]
+
+    # The next version takes the new description, and the first keeps its own.
+    sam_version_description_template "$fn" second > "$TEMPLATE_FILE"
+    run aws_cmd cloudformation deploy \
+        --stack-name "$STACK_NAME" \
+        --template-file "$TEMPLATE_FILE" \
+        --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND
+    assert_success
+
+    run aws_cmd lambda list-versions-by-function --function-name "$fn"
+    assert_success
+    [ "$(json_get "$output" '[.Versions[] | select(.Version != "$LATEST") | .Version + "=" + .Description] | join(",")')" = '1=release first,2=release second' ]
+}

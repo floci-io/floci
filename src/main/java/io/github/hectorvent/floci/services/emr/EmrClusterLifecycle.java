@@ -10,6 +10,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -22,7 +23,9 @@ import java.util.regex.Pattern;
  * every change due by a given time, in the order they fall due, queuing the event of each state the
  * guide's event tables report. With the durations at 0, every change falls due at the time of the call
  * that leads to it. Without a {@link StepExecution} nothing runs and a step completes by time; with one,
- * a step runs for real, and ends, COMPLETED or FAILED, when {@link #stepEnded} says so.
+ * a step runs for real, and ends, COMPLETED or FAILED, when {@link #stepEnded} says so. Likewise, with a
+ * {@link BootstrapExecution} a cluster with bootstrap actions runs them for real, and is BOOTSTRAPPING until
+ * {@link #bootstrapEnded} says they are done.
  */
 final class EmrClusterLifecycle {
 
@@ -41,6 +44,10 @@ final class EmrClusterLifecycle {
     // the failure, it returns "Unknown Error" as a reason." Floci never determines it.
     private static final String UNKNOWN_ERROR = "Unknown Error";
     private static final String STEP_FAILURE = "STEP_FAILURE";
+    static final String BOOTSTRAP_FAILURE = "BOOTSTRAP_FAILURE";
+    static final String INTERNAL_ERROR = "INTERNAL_ERROR";
+    // "If a cluster terminates because of a failure, ... the cluster state is set to TERMINATED_WITH_ERRORS."
+    private static final Set<String> FAILURES = Set.of(STEP_FAILURE, BOOTSTRAP_FAILURE, INTERNAL_ERROR);
     // The reason a cluster a failed step ends gives: the console's for a Snowplow cluster on its forum, and
     // mrjob's mock EMR.
     private static final String SHUT_DOWN_AS_STEP_FAILED = "Shut down as step failed";
@@ -52,6 +59,8 @@ final class EmrClusterLifecycle {
     private final EmrEventPublisher events;
     // Null when steps complete by time.
     private final StepExecution execution;
+    // Null when a cluster's bootstrap actions are done by time.
+    private final BootstrapExecution bootstrapping;
 
     /**
      * Runs the steps a cluster starts, in the {@code docker} runner mode. Each call only sets work going
@@ -66,13 +75,27 @@ final class EmrClusterLifecycle {
         void stop(EmrStep step);
     }
 
+    /**
+     * Runs the bootstrap actions of the clusters that have some, in the {@code docker} runner mode. Each call
+     * only sets work going and returns: their end comes back later through {@link #bootstrapEnded}.
+     */
+    interface BootstrapExecution {
+
+        /** {@code cluster}, which has bootstrap actions, has just gone BOOTSTRAPPING. */
+        void start(EmrCluster cluster, String region);
+
+        /** {@code cluster} is ending while its bootstrap actions still run. */
+        void stop(EmrCluster cluster);
+    }
+
     EmrClusterLifecycle(int startupDelaySeconds, int stepDurationSeconds, int terminationDelaySeconds,
-                        EmrEventPublisher events, StepExecution execution) {
+                        EmrEventPublisher events, StepExecution execution, BootstrapExecution bootstrapping) {
         this.startup = seconds("cluster-startup-delay-seconds", startupDelaySeconds);
         this.stepRun = seconds("step-duration-seconds", stepDurationSeconds);
         this.termination = seconds("cluster-termination-delay-seconds", terminationDelaySeconds);
         this.events = events;
         this.execution = execution;
+        this.bootstrapping = bootstrapping;
     }
 
     private static Duration seconds(String setting, int value) {
@@ -116,6 +139,9 @@ final class EmrClusterLifecycle {
      * "When a job flow is shut down, any step not yet completed is canceled".
      */
     void terminate(EmrCluster cluster, String code, String message, Instant now, String region) {
+        if (BOOTSTRAPPING.equals(cluster.getState()) && !bootstrapTimed(cluster)) {
+            bootstrapping.stop(cluster);
+        }
         cluster.setState(TERMINATING);
         cluster.setStateChangeReasonCode(code);
         cluster.setStateChangeMessage(message);
@@ -169,7 +195,7 @@ final class EmrClusterLifecycle {
     Instant nextChange(EmrCluster cluster) {
         return switch (cluster.getState()) {
             case STARTING -> cluster.getCreationDateTime().plus(startup.dividedBy(2));
-            case BOOTSTRAPPING -> cluster.getCreationDateTime().plus(startup);
+            case BOOTSTRAPPING -> bootstrapTimed(cluster) ? cluster.getCreationDateTime().plus(startup) : null;
             case RUNNING -> cluster.getSteps().stream()
                     .filter(step -> RUNNING.equals(step.getState()) && timed(step))
                     .map(step -> step.getStartDateTime().plus(stepRun))
@@ -182,12 +208,14 @@ final class EmrClusterLifecycle {
 
     private void change(EmrCluster cluster, Instant at, String region) {
         switch (cluster.getState()) {
-            case STARTING -> cluster.setState(BOOTSTRAPPING);
-            case BOOTSTRAPPING -> {
-                cluster.setReadyDateTime(at);
-                cluster.setState(RUNNING);
-                runSteps(cluster, at, region);
+            case STARTING -> {
+                cluster.setState(BOOTSTRAPPING);
+                if (bootstrapping != null && cluster.getBootstrapActions() != null) {
+                    cluster.setBootstrapInContainer(true);
+                    bootstrapping.start(cluster, region);
+                }
             }
+            case BOOTSTRAPPING -> ready(cluster, at, region);
             case RUNNING -> {
                 for (EmrStep step : cluster.getSteps()) {
                     if (RUNNING.equals(step.getState()) && timed(step)
@@ -200,9 +228,7 @@ final class EmrClusterLifecycle {
                 runSteps(cluster, at, region);
             }
             case TERMINATING -> {
-                // "If a cluster terminates because of a failure, ... the cluster state is set to
-                // TERMINATED_WITH_ERRORS."
-                String ended = STEP_FAILURE.equals(cluster.getStateChangeReasonCode())
+                String ended = FAILURES.contains(cluster.getStateChangeReasonCode())
                         ? TERMINATED_WITH_ERRORS : TERMINATED;
                 cluster.setState(ended);
                 cluster.setEndDateTime(at);
@@ -211,6 +237,29 @@ final class EmrClusterLifecycle {
             }
             default -> throw new IllegalStateException("Nothing falls due for a " + cluster.getState() + " cluster");
         }
+    }
+
+    /**
+     * The bootstrap actions a cluster ran for real have ended: when {@code failureCode} is null they all
+     * succeeded and left {@code image}, which its steps run in, and the cluster is ready to run them;
+     * otherwise the cluster ends, for {@code failureCode} and {@code message}.
+     */
+    void bootstrapEnded(EmrCluster cluster, String image, String failureCode, String message, Instant at,
+                        String region) {
+        cluster.setBootstrapInContainer(false);
+        if (failureCode != null) {
+            terminate(cluster, failureCode, message, at, region);
+            return;
+        }
+        cluster.setBootstrapImage(image);
+        ready(cluster, at, region);
+    }
+
+    // Bootstrapping is done: the cluster runs its steps.
+    private void ready(EmrCluster cluster, Instant at, String region) {
+        cluster.setReadyDateTime(at);
+        cluster.setState(RUNNING);
+        runSteps(cluster, at, region);
     }
 
     /**
@@ -334,6 +383,15 @@ final class EmrClusterLifecycle {
      */
     private boolean timed(EmrStep step) {
         return execution == null || !step.isRunInContainer();
+    }
+
+    /**
+     * Whether a BOOTSTRAPPING cluster is done by time: every one without a {@link BootstrapExecution} or
+     * without bootstrap actions, including one a {@code docker} runner mode started before a restart into the
+     * {@code immediate} one.
+     */
+    private boolean bootstrapTimed(EmrCluster cluster) {
+        return bootstrapping == null || !cluster.isBootstrapInContainer();
     }
 
     /** TERMINATED, or TERMINATED_WITH_ERRORS: the cluster has ended. */

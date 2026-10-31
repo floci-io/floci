@@ -16,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
@@ -185,7 +186,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
 
         service.deregisterImage(EAST, image.getImageId(), false);
 
-        Instance instance = service.describeInstances(EAST, List.of(instanceId), java.util.Map.of()).getFirst()
+        Instance instance = service.describeInstances(EAST, List.of(instanceId), Map.of()).getFirst()
                 .getInstances().getFirst();
         assertEquals("running", instance.getState().getName());
         assertEquals(image.getImageId(), instance.getImageId());
@@ -332,7 +333,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
         String instanceId = service.runInstances(WEST, copy.getImageId(), "t3.micro",
                 1, 1, null, List.of(), null, null, List.of(), null, null, null)
                 .getInstances().getFirst().getInstanceId();
-        assertEquals(copy.getImageId(), service.describeInstances(WEST, List.of(instanceId), java.util.Map.of())
+        assertEquals(copy.getImageId(), service.describeInstances(WEST, List.of(instanceId), Map.of())
                 .getFirst().getInstances().getFirst().getImageId());
     }
 
@@ -418,7 +419,7 @@ class Ec2DeregisterAndCopyImageIntegrationTest {
                 }
             });
 
-            List<Image> winners = created.stream().filter(java.util.Objects::nonNull).toList();
+            List<Image> winners = created.stream().filter(Objects::nonNull).toList();
             assertEquals(1, winners.size(),
                     "exactly one copy may claim the name; round " + round + " produced " + winners.size());
             assertEquals(RACE_THREADS - 1, duplicates.get());

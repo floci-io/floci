@@ -293,6 +293,38 @@ class RequestResourcesTest {
     }
 
     /**
+     * Each {@code PutEvents} entry is published to the event bus it names, by name or ARN, in the account and Region
+     * that ARN gives, or to the default one when it names none, gives a null or a blank; a request publishing nothing
+     * names no bus.
+     */
+    @Test
+    void eachEntryIsOnTheEventBusItNames() {
+        String events = "arn:aws:events:us-east-1:000000000000:";
+        assertEquals(List.of(events + "event-bus/orders", events + "event-bus/default", events + "event-bus/audit"),
+                of("events:PutEvents", json("{\"Entries\":[{\"EventBusName\":\"orders\"},{\"Source\":\"s\"},"
+                        + "{\"EventBusName\":\"audit\"},{\"EventBusName\":\"orders\"}]}")));
+        assertEquals(List.of(events + "event-bus/default"), of("events:PutEvents",
+                json("{\"Entries\":[{\"EventBusName\":null},{\"EventBusName\":\"\"},{\"EventBusName\":\" \"}]}")));
+        // Each ARN puts its entry's bus in its own account and Region, checked as the caller's too.
+        assertEquals(List.of("arn:aws:events:eu-west-1:111122223333:event-bus/orders",
+                "arn:aws:events:us-east-1:111122223333:event-bus/orders",
+                "arn:aws:events:eu-west-1:000000000000:event-bus/orders", events + "event-bus/orders",
+                events + "event-bus/audit", "arn:aws:events:us-east-1:444455556666:event-bus/billing",
+                events + "event-bus/billing"), of("events:PutEvents", json("{\"Entries\":["
+                + "{\"EventBusName\":\"arn:aws:events:eu-west-1:111122223333:event-bus/orders\"},"
+                + "{\"EventBusName\":\"audit\"},"
+                + "{\"EventBusName\":\"arn:aws:events:us-east-1:444455556666:event-bus/billing\"}]}")));
+        assertEquals(List.of(events + "event-bus/orders"), of("events:PutEvents",
+                json("{\"Entries\":[{\"EventBusName\":\"arn:aws:events:::event-bus/orders\"}]}")));
+        assertEquals(List.of(), of("events:PutEvents", json("{\"Entries\":[]}")));
+        assertEquals(List.of(), of("events:PutEvents", json("{}")));
+        // A form's entries run from 1 to the first it gives nothing of.
+        assertEquals(List.of(events + "event-bus/orders", events + "event-bus/default"), of("events:PutEvents",
+                form("Action=PutEvents&Entries.member.1.EventBusName=orders&Entries.member.2.Source=s"
+                        + "&Entries.member.4.EventBusName=late")));
+    }
+
+    /**
      * A connection or an API destination, whose ARN EventBridge follows with an id it mints after the name, is the
      * one stored under the name the request gives, and has that id open when none is or nothing looks it up.
      */
@@ -330,6 +362,80 @@ class RequestResourcesTest {
         assertEquals(List.of("arn:aws:ecr:us-east-1:000000000000:repository/${Account}"),
                 of("ecr:DescribeRepositories", json(
                 "{\"repositoryNames\":[\"${Account}\"]}")));
+    }
+
+    /**
+     * A pipeline is the one its request's {@code pipeline.name} names; its {@code roleArn}, the role CodePipeline
+     * assumes, names none, even when it holds a pipeline's ARN. A webhook is the one {@code webhook.name} names, on
+     * the pipeline {@code webhook.targetPipeline} names, and its tags go on the webhook alone.
+     */
+    @Test
+    void aPipelineIsTheOneItsStructuresNameNames() {
+        String codePipeline = "arn:aws:codepipeline:us-east-1:000000000000:";
+        assertEquals(List.of(codePipeline + "b"), of("codepipeline:UpdatePipeline",
+                json("{\"pipeline\":{\"name\":\"b\",\"roleArn\":\"" + codePipeline + "a\"}}")));
+        assertEquals(List.of(codePipeline + "b"), of("codepipeline:CreatePipeline", form("Action=CreatePipeline"
+                + "&pipeline.name=b&pipeline.roleArn=" + codePipeline + "a")));
+        assertEquals(List.of(), of("codepipeline:UpdatePipeline", json("{\"pipeline\":{\"roleArn\":\"" + codePipeline
+                + "a\"}}")));
+        assertEquals(List.of(codePipeline + "webhook:w", codePipeline + "p"), of("codepipeline:PutWebhook",
+                json("{\"webhook\":{\"name\":\"w\",\"targetPipeline\":\"p\"}}")));
+        // A webhook's tags go on the webhook, not on the pipeline it connects to.
+        assertEquals(List.of(codePipeline + "webhook:w"), created("codepipeline:PutWebhook",
+                json("{\"webhook\":{\"name\":\"w\",\"targetPipeline\":\"p\"}}")));
+    }
+
+    /** A custom action type is {@code Custom}'s, the owner CodePipeline gives every one, which its request does not. */
+    @Test
+    void aCustomActionTypeIsCustoms() {
+        assertEquals(List.of("arn:aws:codepipeline:us-east-1:000000000000:actiontype:Custom/Build/MyProvider/1"),
+                of("codepipeline:CreateCustomActionType",
+                        json("{\"category\":\"Build\",\"provider\":\"MyProvider\",\"version\":\"1\"}")));
+        assertEquals(List.of("arn:aws:codepipeline:us-east-1:000000000000:actiontype:Custom/Build/MyProvider/1"),
+                of("codepipeline:DeleteCustomActionType",
+                        json("{\"category\":\"Build\",\"provider\":\"MyProvider\",\"version\":\"1\"}")));
+        assertEquals(List.of(), of("codepipeline:DeleteCustomActionType", json("{}")));
+    }
+
+    /**
+     * A Cloud Map service is created in the namespace {@code NamespaceId} names, or {@code DnsConfig.NamespaceId}
+     * when it names none or gives a JSON null, as the handler reads them, and tags go on the service it creates,
+     * not on the namespace.
+     */
+    @Test
+    void aServiceIsCreatedInTheNamespaceItsHandlerReads() {
+        String cloudMap = "arn:aws:servicediscovery:us-east-1:000000000000:";
+        assertEquals(List.of(cloudMap + "namespace/ns-a", cloudMap + "service/*"), of("servicediscovery:CreateService",
+                json("{\"Name\":\"s\",\"NamespaceId\":\"ns-a\"}")));
+        assertEquals(List.of(cloudMap + "namespace/ns-b", cloudMap + "service/*"), of("servicediscovery:CreateService",
+                json("{\"Name\":\"s\",\"DnsConfig\":{\"NamespaceId\":\"ns-b\"}}")));
+        assertEquals(List.of(cloudMap + "namespace/ns-a", cloudMap + "service/*"), of("servicediscovery:CreateService",
+                json("{\"Name\":\"s\",\"NamespaceId\":\"ns-a\",\"DnsConfig\":{\"NamespaceId\":\"ns-b\"}}")));
+        // A JSON null is no namespace, as the handler reads it, which then takes DnsConfig's.
+        assertEquals(List.of(cloudMap + "namespace/ns-b", cloudMap + "service/*"), of("servicediscovery:CreateService",
+                json("{\"Name\":\"s\",\"NamespaceId\":null,\"DnsConfig\":{\"NamespaceId\":\"ns-b\"}}")));
+        assertEquals(List.of(cloudMap + "service/*"), created("servicediscovery:CreateService",
+                json("{\"Name\":\"s\",\"NamespaceId\":\"ns-a\"}")));
+    }
+
+    /** A CodeBuild build is checked on its project, which its id names before its {@code :}. */
+    @Test
+    void aBuildIsCheckedOnItsProject() {
+        String project = "arn:aws:codebuild:us-east-1:000000000000:project/";
+        assertEquals(List.of(project + "a"), of("codebuild:StopBuild", json("{\"id\":\"a:1\"}")));
+        assertEquals(List.of(project + "a", project + "b"), of("codebuild:BatchGetBuilds",
+                json("{\"ids\":[\"a:1\",\"b:2\",\"a:3\"]}")));
+        assertEquals(List.of(project + "a"), of("codebuild:RetryBuild", form("Action=RetryBuild&id=a:1")));
+    }
+
+    /** A list taking a name or an ARN for each value names each value's resource, whichever it gives. */
+    @Test
+    void aListMixingNamesAndArnsNamesEachValuesResource() {
+        String project = "arn:aws:codebuild:us-east-1:000000000000:project/";
+        assertEquals(List.of(project + "b", project + "a"), of("codebuild:BatchGetProjects",
+                json("{\"names\":[\"a\",\"" + project + "b\"]}")));
+        assertEquals(List.of(project + "a", project + "b"), of("codebuild:BatchGetProjects",
+                json("{\"names\":[\"" + project + "a\",\"" + project + "b\"]}")));
     }
 
     @Test

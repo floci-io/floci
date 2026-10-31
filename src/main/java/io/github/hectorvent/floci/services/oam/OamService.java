@@ -17,6 +17,7 @@ import jakarta.inject.Inject;
 
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -81,7 +82,7 @@ public class OamService {
     public List<OamSink> listSinks(String region) {
         return sinks.scan(_ -> true).stream()
                 .filter(s -> region.equals(s.getRegion()))
-                .sorted(java.util.Comparator.comparing(OamSink::getArn)).toList();
+                .sorted(Comparator.comparing(OamSink::getArn)).toList();
     }
 
     public void putSinkPolicy(String sinkIdentifier, String policy) {
@@ -138,7 +139,7 @@ public class OamService {
 
     public List<OamLink> listLinks(String region) {
         return links.scan(_ -> true).stream().filter(l -> region.equals(l.getRegion()))
-                .sorted(java.util.Comparator.comparing(OamLink::getArn)).toList();
+                .sorted(Comparator.comparing(OamLink::getArn)).toList();
     }
 
     public List<OamLink> listAttachedLinks(String sinkIdentifier) {
@@ -152,7 +153,7 @@ public class OamService {
             all = links.scan(_ -> true);
         }
         return all.stream().filter(l -> sink.getArn().equals(l.getSinkArn()))
-                .sorted(java.util.Comparator.comparing(OamLink::getArn)).toList();
+                .sorted(Comparator.comparing(OamLink::getArn)).toList();
     }
 
     public OamLink updateLink(String identifier, List<String> resourceTypes,

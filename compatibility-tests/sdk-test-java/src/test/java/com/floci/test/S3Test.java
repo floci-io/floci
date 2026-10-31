@@ -671,6 +671,46 @@ class S3Test {
         }
     }
 
+    @Test
+    @Order(36)
+    void multipartUploadKeepsContentEncodingAndCacheControl() throws IOException {
+        String bucket = TestFixtures.uniqueName("mpu-encoding-bucket");
+        String key = "encoded.bin";
+        byte[] body;
+        try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
+             GZIPOutputStream gz = new GZIPOutputStream(baos)) {
+            gz.write("version: 1.0.0".getBytes(StandardCharsets.UTF_8));
+            gz.finish();
+            body = baos.toByteArray();
+        }
+        s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+        try {
+            String uploadId = s3.createMultipartUpload(CreateMultipartUploadRequest.builder()
+                    .bucket(bucket).key(key)
+                    .contentType("text/plain")
+                    .contentEncoding("gzip")
+                    .cacheControl("no-cache")
+                    .build()).uploadId();
+            String eTag = s3.uploadPart(UploadPartRequest.builder()
+                    .bucket(bucket).key(key).uploadId(uploadId).partNumber(1).build(),
+                    RequestBody.fromBytes(body)).eTag();
+            s3.completeMultipartUpload(CompleteMultipartUploadRequest.builder()
+                    .bucket(bucket).key(key).uploadId(uploadId)
+                    .multipartUpload(CompletedMultipartUpload.builder()
+                            .parts(CompletedPart.builder().partNumber(1).eTag(eTag).build()).build())
+                    .build());
+
+            HeadObjectResponse head = s3.headObject(HeadObjectRequest.builder()
+                    .bucket(bucket).key(key).build());
+
+            assertThat(head.contentEncoding()).isEqualTo("gzip");
+            assertThat(head.cacheControl()).isEqualTo("no-cache");
+            assertThat(head.contentType()).isEqualTo("text/plain");
+        } finally {
+            deleteObjectAndBucketQuietly(bucket, key);
+        }
+    }
+
     private void assertInlineTaggingHeaderRejected(String rawTaggingHeader, int expectedStatus, String expectedErrorCode) {
         String bucket = TestFixtures.uniqueName("inline-tag-reject");
         String key = "rejected.txt";

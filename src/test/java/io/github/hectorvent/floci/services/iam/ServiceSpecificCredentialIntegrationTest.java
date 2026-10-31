@@ -221,10 +221,10 @@ class ServiceSpecificCredentialIntegrationTest {
             .when().post("/").then().statusCode(400)
                 .body(containsString("ValidationError"))
                 .body(containsString("credentialAgeDays"))
-                // The range report builds its message across two string literals, so a sweep
-                // for the phrase missed it while every other one was prefixed.
+                // The range comes from the model now, in the words every other range violation
+                // carries, where this operation wrote one of its own.
                 .body(containsString("1 validation error detected"))
-                .body(containsString("Member must be between"));
+                .body(containsString("Member must have value"));
         }
 
         // And both ends of the range are accepted, so the bounds are not off by one.

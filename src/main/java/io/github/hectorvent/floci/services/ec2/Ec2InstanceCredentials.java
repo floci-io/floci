@@ -109,26 +109,35 @@ final class Ec2InstanceCredentials {
         return heldProfile(arn)
                 .filter(profile -> profile.getRoleNames() != null && profile.getRoleNames().size() == 1)
                 .flatMap(profile -> {
-                    String[] parts = arn.split(":", 6);
-                    return iam.findRole(parts[4], profile.getRoleNames().getFirst())
-                            .filter(role -> role.getArn() != null && role.getArn().startsWith(
-                                    "arn:" + parts[1] + ":iam::" + parts[4] + ":role/"))
+                    AwsArnUtils.Arn profileArn = AwsArnUtils.parse(arn);
+                    return iam.findRole(profileArn.accountId(), profile.getRoleNames().getFirst())
+                            .filter(role -> isRoleOf(role.getArn(), profileArn))
                             .map(role -> new AttachedProfile(profile, role));
                 });
     }
 
+    /** A role ARN in the profile's own partition and account. */
+    private static boolean isRoleOf(String roleArn, AwsArnUtils.Arn profileArn) {
+        if (!AwsArnUtils.isArn(roleArn)) {
+            return false;
+        }
+        AwsArnUtils.Arn role = AwsArnUtils.parse(roleArn);
+        return role.partition().equals(profileArn.partition()) && "iam".equals(role.service())
+                && role.region().isEmpty() && role.accountId().equals(profileArn.accountId())
+                && role.resource().startsWith("role/");
+    }
+
     private Optional<InstanceProfile> heldProfile(String arn) {
-        if (arn == null) {
+        if (!AwsArnUtils.isArn(arn)) {
             return Optional.empty();
         }
-        String[] parts = arn.split(":", 6);
-        if (parts.length != 6 || !"arn".equals(parts[0]) || !"iam".equals(parts[2])
-                || !parts[3].isEmpty() || !parts[4].matches("[0-9]{12}")
-                || !parts[5].startsWith("instance-profile/")) {
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!"iam".equals(parsed.service()) || !parsed.region().isEmpty()
+                || !parsed.accountId().matches("[0-9]{12}") || !parsed.resource().startsWith("instance-profile/")) {
             return Optional.empty();
         }
         String name = arn.substring(arn.lastIndexOf('/') + 1);
-        return iam.findInstanceProfile(parts[4], name).filter(profile -> arn.equals(profile.getArn()));
+        return iam.findInstanceProfile(parsed.accountId(), name).filter(profile -> arn.equals(profile.getArn()));
     }
 
     synchronized Optional<SessionCredential> get(Instance instance, String roleName, Instant now) {
@@ -157,7 +166,7 @@ final class Ec2InstanceCredentials {
             }
         }
         IamRole role = resolved.get();
-        String account = role.getArn().split(":", 6)[4];
+        String account = AwsArnUtils.parse(role.getArn()).accountId();
         SessionCredential session = new SessionCredential(newAccessKey(), randomString(30), randomString(48),
                 role.getArn(), now.plusSeconds(3600), null, account);
         session.setEc2InstanceId(instance.getInstanceId());

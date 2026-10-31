@@ -46,14 +46,19 @@ import software.amazon.awssdk.services.secretsmanager.model.RotateSecretResponse
 import software.amazon.awssdk.services.secretsmanager.model.RotationRulesType;
 import software.amazon.awssdk.services.secretsmanager.model.SecretVersionsListEntry;
 import software.amazon.awssdk.services.secretsmanager.model.SecretsManagerException;
+import software.amazon.awssdk.services.secretsmanager.model.Tag;
 import software.amazon.awssdk.services.secretsmanager.model.TagResourceRequest;
 import software.amazon.awssdk.services.secretsmanager.model.UntagResourceRequest;
 import software.amazon.awssdk.services.secretsmanager.model.UpdateSecretRequest;
 
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -95,7 +100,7 @@ class SecretsManagerTest {
                 .name(secretName)
                 .secretString(SECRET_VALUE)
                 .description("Test secret")
-                .tags(software.amazon.awssdk.services.secretsmanager.model.Tag.builder().key("env").value("test").build())
+                .tags(Tag.builder().key("env").value("test").build())
                 .build());
 
         secretArn = response.arn();
@@ -191,7 +196,7 @@ class SecretsManagerTest {
     void tagResource() {
         sm.tagResource(TagResourceRequest.builder()
                 .secretId(secretName)
-                .tags(software.amazon.awssdk.services.secretsmanager.model.Tag.builder().key("team").value("backend").build())
+                .tags(Tag.builder().key("team").value("backend").build())
                 .build());
 
         DescribeSecretResponse response = sm.describeSecret(DescribeSecretRequest.builder()
@@ -241,10 +246,10 @@ class SecretsManagerTest {
     void rotateSecretStub() throws Exception {
         String lambdaName = "RotationLambda-" + System.currentTimeMillis();
         try (LambdaClient lambda = TestFixtures.lambdaClient()) {
-            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
-            try (java.util.zip.ZipOutputStream zos = new java.util.zip.ZipOutputStream(baos)) {
-                zos.putNextEntry(new java.util.zip.ZipEntry("index.js"));
-                zos.write("exports.handler = async (event) => { return 'ok'; };".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+                zos.putNextEntry(new ZipEntry("index.js"));
+                zos.write("exports.handler = async (event) => { return 'ok'; };".getBytes(StandardCharsets.UTF_8));
                 zos.closeEntry();
             }
 

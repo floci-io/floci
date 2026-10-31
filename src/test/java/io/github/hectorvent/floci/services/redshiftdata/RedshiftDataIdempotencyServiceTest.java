@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.testing.ManualClock;
 import org.h2.Driver;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -22,8 +23,6 @@ import java.sql.Statement;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -540,7 +539,7 @@ class RedshiftDataIdempotencyServiceTest {
         private final RedshiftDataConnectionFactory factory = mock(RedshiftDataConnectionFactory.class);
         private final RedshiftDataEventPublisher publisher = mock(RedshiftDataEventPublisher.class);
         private final RedshiftDataExecutor executor = new RedshiftDataExecutor(2, 16, 1);
-        private final MutableClock clock = new MutableClock();
+        private final ManualClock clock = new ManualClock(Instant.now());
         private final RedshiftDataStatementStore statements = spy(new RedshiftDataStatementStore(1, clock));
         private final RedshiftDataIdempotencyStore receipts = spy(new RedshiftDataIdempotencyStore(
                 AccountAwareStorageBackend.inMemory("000000000000"), clock));
@@ -579,29 +578,6 @@ class RedshiftDataIdempotencyServiceTest {
         @Override
         public void close() {
             executor.close();
-        }
-    }
-
-    private static final class MutableClock extends Clock {
-        private Instant now = Instant.now();
-
-        private void advance(Duration duration) {
-            now = now.plus(duration);
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return Clock.fixed(now, zone);
-        }
-
-        @Override
-        public Instant instant() {
-            return now;
         }
     }
 }

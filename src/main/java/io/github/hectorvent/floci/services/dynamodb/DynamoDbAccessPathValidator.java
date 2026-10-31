@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.dynamodb.ExpressionEvaluator.AndExpr;
 import io.github.hectorvent.floci.services.dynamodb.ExpressionEvaluator.BetweenExpr;
 import io.github.hectorvent.floci.services.dynamodb.ExpressionEvaluator.CompareExpr;
@@ -57,11 +58,20 @@ final class DynamoDbAccessPathValidator {
 
     static void validateSelection(String select, String indexName,
                                   String projectionExpression, JsonNode attributesToGet) {
+        validateAttributesToGet(attributesToGet);
         rejectWithSelect("ProjectionExpression", projectionExpression != null, select);
         rejectWithSelect("AttributesToGet", attributesToGet != null, select);
         if ("ALL_PROJECTED_ATTRIBUTES".equals(select) && indexName == null) {
             throw validationException("1 validation error detected: "
                     + "ALL_PROJECTED_ATTRIBUTES can be used only when Querying using an IndexName");
+        }
+    }
+
+    static void validateAttributesToGet(JsonNode attributesToGet) {
+        int minimum = DynamoDbConditionKeyMembers.attributesToGetMinimum();
+        if (attributesToGet != null && attributesToGet.isArray() && attributesToGet.size() < minimum) {
+            throw validationException("1 validation error detected: " + SmithyValidationErrors.lengthTooShort(
+                    "attributesToGet", attributesToGet.toString(), minimum));
         }
     }
 
@@ -78,7 +88,7 @@ final class DynamoDbAccessPathValidator {
         }
 
         Set<String> requestedAttributes = new LinkedHashSet<>();
-        if (projectionExpression != null) {
+        if (ProjectionEvaluator.hasProjection(projectionExpression)) {
             requestedAttributes.addAll(ProjectionEvaluator.topLevelAttributes(
                     projectionExpression, expressionAttributeNames));
         }

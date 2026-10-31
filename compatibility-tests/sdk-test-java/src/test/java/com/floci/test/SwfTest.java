@@ -48,6 +48,7 @@ import software.amazon.awssdk.services.swf.model.WorkflowExecution;
 import software.amazon.awssdk.services.swf.model.WorkflowExecutionAlreadyStartedException;
 import software.amazon.awssdk.services.swf.model.WorkflowType;
 
+import java.time.Instant;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -365,13 +366,13 @@ class SwfTest {
     void countsAndListing() {
         assertThat(swf.countClosedWorkflowExecutions(builder -> builder
                         .domain(DOMAIN)
-                        .startTimeFilter(filter -> filter.oldestDate(java.time.Instant.EPOCH)))
+                        .startTimeFilter(filter -> filter.oldestDate(Instant.EPOCH)))
                 .count())
                 .isGreaterThanOrEqualTo(2);
 
         assertThat(swf.listClosedWorkflowExecutions(builder -> builder
                         .domain(DOMAIN)
-                        .startTimeFilter(filter -> filter.oldestDate(java.time.Instant.EPOCH)))
+                        .startTimeFilter(filter -> filter.oldestDate(Instant.EPOCH)))
                 .executionInfos())
                 .extracting(info -> info.execution().workflowId())
                 .contains("sdk-wf-1", "sdk-wf-2");

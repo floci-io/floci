@@ -248,6 +248,29 @@ class AwsArnUtilsTest {
         assertFalse(AwsArnUtils.isArn(null));
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"arn:aws:sqs:us-east-1:000000000000:q", "arn:aws-cn:rds", "arn:"})
+    void looksLikeArnAcceptsAnyValueMeantAsAnArn(String value) {
+        assertTrue(AwsArnUtils.looksLikeArn(value));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"my-queue", "", "  ", "ARN:aws:sqs:us-east-1:000000000000:q", " arn:aws:sqs"})
+    void looksLikeArnRejectsNames(String value) {
+        assertFalse(AwsArnUtils.looksLikeArn(value));
+    }
+
+    @Test
+    void looksLikeArnRejectsNullRatherThanThrowing() {
+        assertFalse(AwsArnUtils.looksLikeArn(null));
+    }
+
+    @Test
+    void looksLikeArnAcceptsAMalformedArnThatIsArnRejects() {
+        assertTrue(AwsArnUtils.looksLikeArn("arn:aws:rds:us-east-1"));
+        assertFalse(AwsArnUtils.isArn("arn:aws:rds:us-east-1"));
+    }
+
     /**
      * The shape the {@code startsWith("arn:aws:dynamodb:")} probes were reaching for: is this
      * identifier an ARN for my service, whatever partition it came from.

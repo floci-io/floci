@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService;
 import io.github.hectorvent.floci.services.scheduler.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.scheduler.model.EcsParameters;
@@ -31,6 +32,7 @@ import org.mockito.ArgumentCaptor;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -42,6 +44,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.AdditionalMatchers.aryEq;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -280,7 +283,7 @@ class ScheduleInvokerTest {
                         attrs != null
                         && attrs.containsKey("BinAttr")
                         && "Binary".equals(attrs.get("BinAttr").getDataType())
-                        && java.util.Arrays.equals("hello".getBytes(), attrs.get("BinAttr").getBinaryValue())),
+                        && Arrays.equals("hello".getBytes(), attrs.get("BinAttr").getBinaryValue())),
                 isNull(), isNull(), eq("us-east-1"));
     }
 
@@ -555,9 +558,9 @@ class ScheduleInvokerTest {
 
         verify(lambdaService).invokeArn(
                 eq(arn),
-                org.mockito.AdditionalMatchers.aryEq(
+                aryEq(
                         "{\"detail\":{\"job\":\"workflow-recovery\"}}".getBytes()),
-                eq(io.github.hectorvent.floci.services.lambda.model.InvocationType.Event));
+                eq(InvocationType.Event));
     }
 
     @Test
@@ -679,6 +682,7 @@ class ScheduleInvokerTest {
 
         invoke(target, "us-west-2");
 
+        // two NetworkConfiguration and AwsVpcConfiguration types: the scheduler model's are imported.
         ArgumentCaptor<io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration> networkCaptor =
                 ArgumentCaptor.forClass(io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration.class);
         verify(ecsService).runTask(
@@ -693,9 +697,9 @@ class ScheduleInvokerTest {
                 eq("us-east-1"));
         io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration awsvpc =
                 networkCaptor.getValue().getAwsvpcConfiguration();
-        org.junit.jupiter.api.Assertions.assertEquals(List.of("subnet-a", "subnet-b"), awsvpc.getSubnets());
-        org.junit.jupiter.api.Assertions.assertEquals(List.of("sg-a"), awsvpc.getSecurityGroups());
-        org.junit.jupiter.api.Assertions.assertEquals("DISABLED", awsvpc.getAssignPublicIp());
+        assertEquals(List.of("subnet-a", "subnet-b"), awsvpc.getSubnets());
+        assertEquals(List.of("sg-a"), awsvpc.getSecurityGroups());
+        assertEquals("DISABLED", awsvpc.getAssignPublicIp());
     }
 
     @Test

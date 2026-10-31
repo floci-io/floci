@@ -32,6 +32,7 @@ public class CognitoUser {
     private String softwareTokenMfaDeviceName;
     private String pendingSoftwareTokenMfaSecret;
     private Integer pendingSoftwareTokenMfaAttemptsRemaining;
+    private Long lastSoftwareTokenMfaStep;
     private List<WebAuthnCredential> webAuthnCredentials = new ArrayList<>();
     private boolean webAuthnMfaEnabled;
     private String federatedProviderName;
@@ -117,6 +118,10 @@ public class CognitoUser {
 
     public String getPendingSoftwareTokenMfaSecret() { return pendingSoftwareTokenMfaSecret; }
     public void setPendingSoftwareTokenMfaSecret(String secret) { this.pendingSoftwareTokenMfaSecret = secret; }
+
+    /** The TOTP step of the last code that answered a SOFTWARE_TOKEN_MFA challenge, or null when none has. */
+    public Long getLastSoftwareTokenMfaStep() { return lastSoftwareTokenMfaStep; }
+    public void setLastSoftwareTokenMfaStep(Long step) { this.lastSoftwareTokenMfaStep = step; }
 
     public Integer getPendingSoftwareTokenMfaAttemptsRemaining() { return pendingSoftwareTokenMfaAttemptsRemaining; }
     public void setPendingSoftwareTokenMfaAttemptsRemaining(Integer attempts) {

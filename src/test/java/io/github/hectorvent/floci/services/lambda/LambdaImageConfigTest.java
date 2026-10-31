@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerLauncher;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageResolver;
+import io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
@@ -30,6 +31,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
@@ -251,8 +254,8 @@ class LambdaImageConfigTest {
             LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
             launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
                     runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
-                    mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class), awsEnv,
-                    mock(io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials.class));
+                    mock(LambdaLayerService.class), awsEnv,
+                    mock(LambdaExecutionRoleCredentials.class));
 
             when(runtimeApiServerFactory.create()).thenReturn(runtimeApiServer);
             when(runtimeApiServer.getPort()).thenReturn(9000);
@@ -264,7 +267,7 @@ class LambdaImageConfigTest {
 
             lenient().when(dockerClient.copyArchiveToContainerCmd(any())).thenAnswer(inv -> {
                 CopyArchiveToContainerCmd cmd = mock(CopyArchiveToContainerCmd.class);
-                final java.io.InputStream[] captured = {null};
+                final InputStream[] captured = {null};
                 when(cmd.withRemotePath(any())).thenReturn(cmd);
                 when(cmd.withTarInputStream(any())).thenAnswer(streamInv -> {
                     captured[0] = streamInv.getArgument(0);
@@ -272,7 +275,7 @@ class LambdaImageConfigTest {
                 });
                 doAnswer(execInv -> {
                     if (captured[0] != null) {
-                        try { captured[0].transferTo(java.io.OutputStream.nullOutputStream()); }
+                        try { captured[0].transferTo(OutputStream.nullOutputStream()); }
                         catch (Exception ignored) {}
                     }
                     return null;
@@ -360,7 +363,7 @@ class LambdaImageConfigTest {
             // of starting an empty container. This test covers cmd construction, so any real
             // directory will do.
             fn.setCodeLocalPath(codeDir.toString());
-            when(imageResolver.resolve("nodejs20.x")).thenReturn("public.ecr.aws/lambda/nodejs:20");
+            when(imageResolver.resolve("nodejs20.x", null)).thenReturn("public.ecr.aws/lambda/nodejs:20");
 
             launcher.launch(fn);
 

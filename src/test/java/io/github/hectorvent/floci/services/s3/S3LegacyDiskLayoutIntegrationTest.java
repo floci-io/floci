@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -100,7 +101,7 @@ class S3LegacyDiskLayoutIntegrationTest {
         Path dataRoot = tempDir.resolve("s3");
         S3Service s3Service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), dataRoot, false);
 
-        assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+        assertThrows(AwsException.class,
                 () -> s3Service.createBucket(".accounts", "us-east-1"),
                 "a bucket named exactly like the reserved account-storage root must be rejected, "
                         + "since Floci doesn't otherwise validate bucket name format at all");

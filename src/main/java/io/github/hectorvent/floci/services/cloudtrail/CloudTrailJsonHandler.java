@@ -65,7 +65,9 @@ public class CloudTrailJsonHandler {
         Map<String, String> tags = parseTagsList(req.path("TagsList"));
 
         Trail trail = service.createTrail(region, name, s3BucketName, s3KeyPrefix, snsTopicArn,
-                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail, tags);
+                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail, tags,
+                textOrNull(req, "KmsKeyId"), textOrNull(req, "CloudWatchLogsLogGroupArn"),
+                textOrNull(req, "CloudWatchLogsRoleArn"));
 
         ObjectNode resp = mapper.createObjectNode();
         resp.put("Name", trail.name());
@@ -80,6 +82,9 @@ public class CloudTrailJsonHandler {
         resp.put("TrailARN", trail.trailArn());
         resp.put("LogFileValidationEnabled", trail.logFileValidationEnabled());
         resp.put("IsOrganizationTrail", trail.isOrganizationTrail());
+        putIfSet(resp, "KmsKeyId", trail.kmsKeyId());
+        putIfSet(resp, "CloudWatchLogsLogGroupArn", trail.cloudWatchLogsLogGroupArn());
+        putIfSet(resp, "CloudWatchLogsRoleArn", trail.cloudWatchLogsRoleArn());
         return Response.ok(resp).build();
     }
 
@@ -87,6 +92,17 @@ public class CloudTrailJsonHandler {
         String name = req.path("Name").asText(null);
         service.deleteTrail(region, name);
         return Response.ok(mapper.createObjectNode()).build();
+    }
+
+    /** The member's text when present (an empty string included: UpdateTrail uses it to clear a setting). */
+    private static String textOrNull(JsonNode req, String field) {
+        return req.has(field) && !req.get(field).isNull() ? req.get(field).asText() : null;
+    }
+
+    private static void putIfSet(ObjectNode node, String field, String value) {
+        if (value != null) {
+            node.put(field, value);
+        }
     }
 
     private Response updateTrail(JsonNode req, String region) {
@@ -105,7 +121,9 @@ public class CloudTrailJsonHandler {
                 ? req.path("IsOrganizationTrail").asBoolean() : null;
 
         Trail trail = service.updateTrail(region, name, s3BucketName, s3KeyPrefix, snsTopicName,
-                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail);
+                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail,
+                textOrNull(req, "KmsKeyId"), textOrNull(req, "CloudWatchLogsLogGroupArn"),
+                textOrNull(req, "CloudWatchLogsRoleArn"));
 
         ObjectNode resp = mapper.createObjectNode();
         resp.put("Name", trail.name());
@@ -120,6 +138,9 @@ public class CloudTrailJsonHandler {
         resp.put("TrailARN", trail.trailArn());
         resp.put("LogFileValidationEnabled", trail.logFileValidationEnabled());
         resp.put("IsOrganizationTrail", trail.isOrganizationTrail());
+        putIfSet(resp, "KmsKeyId", trail.kmsKeyId());
+        putIfSet(resp, "CloudWatchLogsLogGroupArn", trail.cloudWatchLogsLogGroupArn());
+        putIfSet(resp, "CloudWatchLogsRoleArn", trail.cloudWatchLogsRoleArn());
         return Response.ok(resp).build();
     }
 

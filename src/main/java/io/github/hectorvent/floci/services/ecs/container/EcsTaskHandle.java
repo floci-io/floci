@@ -74,6 +74,9 @@ public class EcsTaskHandle {
         this.networkInterfaceId = networkInterfaceId;
         this.region = region;
         this.taskVolumeNames = new LinkedHashSet<>(taskVolumeNames);
+        if (firelensVolumeName != null) {
+            this.taskVolumeNames.add(firelensVolumeName);
+        }
         this.stopTimeouts = new LinkedHashMap<>(stopTimeouts);
     }
 

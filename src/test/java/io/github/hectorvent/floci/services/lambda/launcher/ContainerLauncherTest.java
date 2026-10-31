@@ -40,6 +40,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
@@ -47,17 +48,23 @@ import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
@@ -96,7 +103,7 @@ class ContainerLauncherTest {
 
     ContainerLauncher launcher;
     /** Collects remote paths passed to withRemotePath across all copy mocks. */
-    final java.util.List<String> capturedRemotePaths = new java.util.ArrayList<>();
+    final List<String> capturedRemotePaths = new ArrayList<>();
     String capturedRuntimeBootstrap;
     final Map<String, String> capturedLayerFiles = new LinkedHashMap<>();
 
@@ -139,14 +146,7 @@ class ContainerLauncherTest {
         lenient().when(ecrRegistryManager.rewriteImageUri(any()))
                 .thenAnswer(inv -> inv.getArgument(0));
 
-        ContainerBuilder containerBuilder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
-        ContainerReachableEndpoint reachableEndpoint =
-                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566);
-        LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
-        launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
-                runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
-                layerService, awsEnv,
-                executionRoleCredentials);
+        launcher = newLauncher(imageResolver);
 
         when(runtimeApiServerFactory.create()).thenReturn(runtimeApiServer);
         when(runtimeApiServer.getPort()).thenReturn(9000);
@@ -175,7 +175,7 @@ class ContainerLauncherTest {
         capturedLayerFiles.clear();
         lenient().when(dockerClient.copyArchiveToContainerCmd(any())).thenAnswer(inv -> {
             CopyArchiveToContainerCmd cmd = mock(CopyArchiveToContainerCmd.class);
-            final java.io.InputStream[] captured = {null};
+            final InputStream[] captured = {null};
             String[] remote = {null};
             when(cmd.withRemotePath(any())).thenAnswer(pathInv -> {
                 capturedRemotePaths.add(pathInv.getArgument(0));
@@ -207,7 +207,7 @@ class ContainerLauncherTest {
                         }
                         return null;
                     }
-                    try { captured[0].transferTo(java.io.OutputStream.nullOutputStream()); }
+                    try { captured[0].transferTo(OutputStream.nullOutputStream()); }
                     catch (Exception ignored) {}
                 }
                 return null;
@@ -333,6 +333,30 @@ class ContainerLauncherTest {
                         .filter(value -> value.startsWith("AWS_LAMBDA_FUNCTION_VERSION=")).toList());
     }
 
+    @ParameterizedTest
+    @CsvSource({"JSON, DEBUG, DEBUG", "JSON, , INFO", "Text, , "})
+    void launchPassesTheLoggingConfigToTheRuntime(String logFormat, String level, String runtimeLevel) {
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("logging-config-fn");
+        fn.setHotReloadHostPath("/home/ci/code");
+        fn.setRuntime("python3.13");
+        fn.setHandler("fn.handler");
+        fn.setLogFormat(logFormat);
+        fn.setApplicationLogLevel(level);
+
+        launcher.launch(fn);
+
+        List<String> expected = new ArrayList<>(List.of("AWS_LAMBDA_LOG_FORMAT=" + logFormat));
+        if (runtimeLevel != null) {
+            expected.add("AWS_LAMBDA_LOG_LEVEL=" + runtimeLevel);
+        }
+        assertEquals(expected,
+                captureRealContainerSpec().env().stream()
+                        .filter(value -> value.startsWith("AWS_LAMBDA_LOG_FORMAT=")
+                                || value.startsWith("AWS_LAMBDA_LOG_LEVEL="))
+                        .toList());
+    }
+
     @Test
     void launchFunction_hotReloadMountsTheHostDirectoryReadOnlyAtVarTask() {
         LambdaFunction fn = new LambdaFunction();
@@ -422,6 +446,57 @@ class ContainerLauncherTest {
         verify(lifecycleManager, never()).create(any(ContainerSpec.class), anyString());
     }
 
+    private ContainerLauncher newLauncher(ImageResolver selectedResolver) {
+        ContainerBuilder builder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
+        ContainerReachableEndpoint endpoint =
+                new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer, 4566);
+        return new ContainerLauncher(builder, lifecycleManager, logStreamer, selectedResolver,
+                runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
+                layerService, new LaunchedContainerAwsEnv(endpoint),
+                executionRoleCredentials);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "arm64, true, , linux/arm64, arm64",
+            "x86_64, true, , linux/amd64, amd64",
+            ", true, , linux/amd64, amd64",
+            "arm64, false, , , fallback",
+            "arm64, true, --platform linux/amd64, linux/amd64, amd64",
+            "x86_64, false, --platform linux/arm64, linux/arm64, arm64"
+    })
+    void launchFunction_selectsRuntimePinForEffectiveContainerPlatform(
+            String architecture, boolean honourArchitecture, String flags,
+            String expectedPlatform, String expectedImage) throws Exception {
+        EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
+        lenient().when(lambda.honourArchitectures()).thenReturn(honourArchitecture);
+        when(lambda.dockerFlags()).thenReturn(Optional.ofNullable(flags));
+        when(lambda.runtimeImages()).thenReturn(Map.of(
+                "nodejs20.x", "registry.example/node:fallback",
+                "nodejs20.x.linux.amd64", "registry.example/node:amd64",
+                "nodejs20.x.linux.arm64", "registry.example/node:arm64"));
+        launcher = newLauncher(new ImageResolver(config));
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("runtime-pin-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(Files.createDirectory(tempDir.resolve("runtime-pin-code")).toString());
+        if (architecture != null) {
+            fn.setArchitectures(List.of(architecture));
+        }
+
+        launcher.launch(fn);
+
+        ArgumentCaptor<ContainerSpec> spec = ArgumentCaptor.forClass(ContainerSpec.class);
+        if (expectedPlatform == null) {
+            verify(lifecycleManager).create(spec.capture());
+            verify(lifecycleManager, never()).create(any(ContainerSpec.class), anyString());
+        } else {
+            verify(lifecycleManager).create(spec.capture(), eq(expectedPlatform));
+        }
+        assertEquals("registry.example/node:" + expectedImage, spec.getValue().image());
+    }
+
     @ParameterizedTest
     @MethodSource("invalidPersistedArchitectures")
     void launchFunction_rejectsInvalidPersistedArchitecturesBeforeCreatingContainer(
@@ -454,10 +529,13 @@ class ContainerLauncherTest {
                 List.of("arm64", "x86_64"));
     }
 
-    @Test
-    void launchFunction_usesArm64DockerPlatformForCodeVolumeHelper() throws Exception {
+    @ParameterizedTest
+    @CsvSource({"arm64, ", "x86_64, --platform linux/arm64"})
+    void launchFunction_usesArm64DockerPlatformForCodeVolumeHelper(String architecture, String flags)
+            throws Exception {
         EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
-        when(lambda.honourArchitectures()).thenReturn(true);
+        lenient().when(lambda.honourArchitectures()).thenReturn(true);
+        when(lambda.dockerFlags()).thenReturn(Optional.ofNullable(flags));
         Path codePath = Files.createDirectory(tempDir.resolve("large-arm64-code"));
         Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]);
 
@@ -467,7 +545,7 @@ class ContainerLauncherTest {
         fn.setHandler("index.handler");
         fn.setCodeLocalPath(codePath.toString());
         fn.setCodeSha256("large-arm64-code-sha");
-        fn.setArchitectures(List.of("arm64"));
+        fn.setArchitectures(List.of(architecture));
 
         withLoweredCodeVolumeThreshold(() -> {
             launcher.launch(fn);
@@ -500,6 +578,31 @@ class ContainerLauncherTest {
                 "io.floci.account", "222222222222",
                 "io.floci.region", "us-west-2"),
                 spec.labels());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"java21, true", "java8.al2, true", "java17, true", "nodejs20.x, false", "python3.13, false",
+            "provided.al2023, false"})
+    void launchFunction_hasTheJvmsOfAJavaRuntimeTrustFlocisCa(String runtime, boolean javaTrustStore)
+            throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("runtime-fn");
+        fn.setRuntime(runtime);
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        assertEquals(javaTrustStore, captureRealContainerSpec().javaTrustStore());
+    }
+
+    @Test
+    void launchFunction_hasTheJvmsOfAContainerImageTrustFlocisCa() {
+        launcher.launch(imageFunction());
+
+        assertTrue(captureRealContainerSpec().javaTrustStore());
     }
 
     @Test
@@ -1109,7 +1212,7 @@ class ContainerLauncherTest {
         assertTrue(spec.binds().stream()
                         .anyMatch(b -> b.getPath().equals("/home/user/.aws")
                                 && b.getVolume().getPath().equals("/opt/aws-config")
-                                && b.getAccessMode() == com.github.dockerjava.api.model.AccessMode.ro),
+                                && b.getAccessMode() == AccessMode.ro),
                 "awsConfigPath should be bind-mounted read-only to /opt/aws-config");
 
         // Should set explicit file paths for SDK discovery
@@ -1663,12 +1766,12 @@ class ContainerLauncherTest {
 
         when(lifecycleManager.volumeExists(volumeV1)).thenReturn(true);
 
-        java.util.concurrent.CountDownLatch cleanupHoldingLock = new java.util.concurrent.CountDownLatch(1);
-        java.util.concurrent.CountDownLatch releaseCleanup = new java.util.concurrent.CountDownLatch(1);
+        CountDownLatch cleanupHoldingLock = new CountDownLatch(1);
+        CountDownLatch releaseCleanup = new CountDownLatch(1);
         doAnswer(inv -> {
             cleanupHoldingLock.countDown();
             // Blocks here while still holding volumeV1's per-volume lock, simulating a slow delete.
-            assertTrue(releaseCleanup.await(5, java.util.concurrent.TimeUnit.SECONDS),
+            assertTrue(releaseCleanup.await(5, TimeUnit.SECONDS),
                     "test did not release cleanup in time");
             return null;
         }).when(lifecycleManager).removeVolume(volumeV1);
@@ -1682,11 +1785,11 @@ class ContainerLauncherTest {
 
                 Thread cleanupThread = new Thread(launcher::cleanupSupersededVolumes);
                 cleanupThread.start();
-                assertTrue(cleanupHoldingLock.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                assertTrue(cleanupHoldingLock.await(5, TimeUnit.SECONDS),
                         "cleanup never reached removeVolume");
 
-                java.util.concurrent.atomic.AtomicBoolean rollbackReturned =
-                        new java.util.concurrent.atomic.AtomicBoolean(false);
+                AtomicBoolean rollbackReturned =
+                        new AtomicBoolean(false);
                 Thread rollbackThread = new Thread(() -> {
                     launcher.launch(v1);
                     rollbackReturned.set(true);
@@ -1749,16 +1852,16 @@ class ContainerLauncherTest {
                 // helper-container create() call instead of the real container's.
                 launcher.launch(v1);
 
-                java.util.concurrent.CountDownLatch launchReachedCreate = new java.util.concurrent.CountDownLatch(1);
-                java.util.concurrent.CountDownLatch releaseLaunch = new java.util.concurrent.CountDownLatch(1);
-                java.util.concurrent.atomic.AtomicBoolean blockedOnce = new java.util.concurrent.atomic.AtomicBoolean(false);
+                CountDownLatch launchReachedCreate = new CountDownLatch(1);
+                CountDownLatch releaseLaunch = new CountDownLatch(1);
+                AtomicBoolean blockedOnce = new AtomicBoolean(false);
                 doAnswer(inv -> {
                     if (blockedOnce.compareAndSet(false, true)) {
                         // Only the delayed re-launch of v1 (the first caller after this stub is
                         // installed) blocks here; v2's later launch below must not, or the test would
                         // deadlock itself waiting on its own main thread to release the latch.
                         launchReachedCreate.countDown();
-                        assertTrue(releaseLaunch.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                        assertTrue(releaseLaunch.await(5, TimeUnit.SECONDS),
                                 "test did not release the delayed launch in time");
                     }
                     return "container-123";
@@ -1766,7 +1869,7 @@ class ContainerLauncherTest {
 
                 Thread launchThread = new Thread(() -> launcher.launch(v1));
                 launchThread.start();
-                assertTrue(launchReachedCreate.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                assertTrue(launchReachedCreate.await(5, TimeUnit.SECONDS),
                         "v1's delayed re-launch never reached create()");
 
                 assertEquals(1, launcher.inFlightCount(volumeV1),
@@ -1821,13 +1924,13 @@ class ContainerLauncherTest {
         withLoweredCodeVolumeThreshold(() -> {
 
             Object functionLock = launcher.functionVolumeTransitionLockFor("xfn");
-            java.util.concurrent.CountDownLatch testHoldingLock = new java.util.concurrent.CountDownLatch(1);
-            java.util.concurrent.CountDownLatch releaseLock = new java.util.concurrent.CountDownLatch(1);
+            CountDownLatch testHoldingLock = new CountDownLatch(1);
+            CountDownLatch releaseLock = new CountDownLatch(1);
             Thread holderThread = new Thread(() -> {
                 synchronized (functionLock) {
                     testHoldingLock.countDown();
                     try {
-                        assertTrue(releaseLock.await(5, java.util.concurrent.TimeUnit.SECONDS),
+                        assertTrue(releaseLock.await(5, TimeUnit.SECONDS),
                                 "test did not release the function lock in time");
                     } catch (InterruptedException e) {
                         Thread.currentThread().interrupt();
@@ -1835,7 +1938,7 @@ class ContainerLauncherTest {
                 }
             });
             holderThread.start();
-            assertTrue(testHoldingLock.await(5, java.util.concurrent.TimeUnit.SECONDS),
+            assertTrue(testHoldingLock.await(5, TimeUnit.SECONDS),
                     "test thread never acquired the function lock");
 
             AtomicBoolean launchReturned = new AtomicBoolean(false);
@@ -1921,7 +2024,7 @@ class ContainerLauncherTest {
      *  (name -> executable), so filtering logic (non-executable files, nested paths) can be
      *  exercised. Names containing "/" are written as-is (not prefixed), to model entries nested
      *  more than one level below the extensions directory. */
-    private static byte[] tarOfRaw(java.util.Map<String, Boolean> nameToExecutable) throws IOException {
+    private static byte[] tarOfRaw(Map<String, Boolean> nameToExecutable) throws IOException {
         ByteArrayOutputStream bos = new ByteArrayOutputStream();
         try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
             TarArchiveEntry dir = new TarArchiveEntry("extensions/");
@@ -1952,16 +2055,16 @@ class ContainerLauncherTest {
      *  calling {@code launch()} to assert on exactly which discovered names were (and weren't) launched. */
     private List<ExecCreateCmd> stubExtensionDiscoveryFromTar(byte[] tar) {
         CopyArchiveFromContainerCmd copyCmd = mock(CopyArchiveFromContainerCmd.class);
-        when(copyCmd.exec()).thenReturn(new java.io.ByteArrayInputStream(tar));
+        when(copyCmd.exec()).thenReturn(new ByteArrayInputStream(tar));
         when(dockerClient.copyArchiveFromContainerCmd("container-123", "/opt/extensions"))
                 .thenReturn(copyCmd);
 
-        List<ExecCreateCmd> launchCmds = new java.util.ArrayList<>();
+        List<ExecCreateCmd> launchCmds = new ArrayList<>();
         lenient().when(dockerClient.execCreateCmd("container-123"))
                 .thenAnswer(invocation -> {
                     ExecCreateCmd launchCmd = mock(ExecCreateCmd.class, withSettings().defaultAnswer(RETURNS_SELF));
                     ExecCreateCmdResponse launchResponse = mock(ExecCreateCmdResponse.class);
-                    when(launchResponse.getId()).thenReturn("exec-launch-" + java.util.UUID.randomUUID());
+                    when(launchResponse.getId()).thenReturn("exec-launch-" + UUID.randomUUID());
                     when(launchCmd.exec()).thenReturn(launchResponse);
                     launchCmds.add(launchCmd);
                     return launchCmd;
@@ -2003,7 +2106,7 @@ class ContainerLauncherTest {
      *  via {@code withCmd(String...)}, in call order — the {@code /opt/extensions/<name>} path
      *  each discovered extension binary was launched with. */
     private static List<String> capturedLaunchPaths(List<ExecCreateCmd> launchCmds) {
-        List<String> paths = new java.util.ArrayList<>();
+        List<String> paths = new ArrayList<>();
         for (ExecCreateCmd cmd : launchCmds) {
             ArgumentCaptor<String[]> captor = ArgumentCaptor.forClass(String[].class);
             verify(cmd).withCmd(captor.capture());
@@ -2055,7 +2158,7 @@ class ContainerLauncherTest {
                 new ContainerLogStreamer(dockerClient, cloudWatchLogs),
                 imageResolver, runtimeApiServerFactory, dockerHostResolver, config,
                 ecrRegistryManager,
-                mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class),
+                mock(LambdaLayerService.class),
                 new LaunchedContainerAwsEnv(reachableEndpoint),
                 executionRoleCredentials);
 

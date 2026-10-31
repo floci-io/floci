@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -387,7 +388,8 @@ public class ScheduleInvoker {
         }
     }
 
-    private static io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration ecsNetworkConfiguration(
+    // two NetworkConfiguration types: the ECS model's is imported, the scheduler model's is qualified.
+    private static NetworkConfiguration ecsNetworkConfiguration(
             io.github.hectorvent.floci.services.scheduler.model.NetworkConfiguration source) {
         if (source == null || source.getAwsvpcConfiguration() == null) {
             return null;
@@ -400,8 +402,7 @@ public class ScheduleInvoker {
         targetVpc.setSecurityGroups(sourceVpc.getSecurityGroups());
         targetVpc.setAssignPublicIp(sourceVpc.getAssignPublicIp());
 
-        io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration target =
-                new io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration();
+        NetworkConfiguration target = new NetworkConfiguration();
         target.setAwsvpcConfiguration(targetVpc);
         return target;
     }

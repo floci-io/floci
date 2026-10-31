@@ -143,6 +143,17 @@ public final class AwsArnUtils {
     }
 
     /**
+     * True when {@code value} is meant as an ARN: it starts with {@code arn:}, whether or not the
+     * rest is well formed. For a parameter that takes a name or an ARN, where AWS answers a
+     * malformed ARN with its own error (an {@code InvalidParameterValue}, a {@code ValidationError},
+     * a not-found) instead of looking it up as a name. {@link #isArn} needs all six segments, so it
+     * would send {@code arn:aws:rds} down the name path and change the error the caller sees.
+     */
+    public static boolean looksLikeArn(String value) {
+        return value != null && value.startsWith("arn:"); // partition-literal: the one attempted-ARN check
+    }
+
+    /**
      * True when {@code value} is an ARN naming {@code service}, in any partition. The common use
      * is telling an identifier that may be either a bare name or a full ARN apart, e.g. a
      * DynamoDB {@code TableName} that clients are allowed to give either way.

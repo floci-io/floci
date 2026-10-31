@@ -405,10 +405,18 @@ public class LaunchTemplateData {
         public Ebs getEbs() { return ebs; }
         public void setEbs(Ebs ebs) { this.ebs = ebs; }
 
+        /** Whether this entry names an instance store volume: a non-blank {@code VirtualName}. */
+        public boolean namesInstanceStore() {
+            return virtualName != null && !virtualName.isBlank();
+        }
+
         /**
          * A launch's mappings, as EC2 documents template overrides: a request entry for a device the
          * template maps changes only the members it sets, and every other device keeps its own
-         * entry. The template's stored entries are never modified.
+         * entry. A device is an EBS volume, an instance store volume or suppressed, so a request
+         * entry naming any of the three replaces the template's choice for that device, an EBS
+         * entry still merging member by member into the template's. The template's stored entries
+         * are never modified.
          */
         public static List<BlockDeviceMapping> merge(List<BlockDeviceMapping> template,
                                                      List<BlockDeviceMapping> request) {
@@ -421,9 +429,15 @@ public class LaunchTemplateData {
         private static BlockDeviceMapping overlaid(BlockDeviceMapping base, BlockDeviceMapping override) {
             BlockDeviceMapping merged = new BlockDeviceMapping();
             merged.deviceName = base.deviceName;
-            merged.virtualName = override.virtualName != null ? override.virtualName : base.virtualName;
-            merged.noDevice = override.noDevice != null ? override.noDevice : base.noDevice;
-            merged.ebs = Ebs.overlaid(base.ebs, override.ebs);
+            if (override.ebs == null && !override.namesInstanceStore() && override.noDevice == null) {
+                merged.virtualName = base.virtualName;
+                merged.noDevice = base.noDevice;
+                merged.ebs = base.ebs;
+            } else {
+                merged.virtualName = override.virtualName;
+                merged.noDevice = override.noDevice;
+                merged.ebs = override.ebs == null ? null : Ebs.overlaid(base.ebs, override.ebs);
+            }
             return merged;
         }
     }

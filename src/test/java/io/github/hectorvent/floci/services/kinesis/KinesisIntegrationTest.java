@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -15,8 +16,10 @@ import org.junit.jupiter.api.TestMethodOrder;
 import java.math.BigDecimal;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -667,7 +670,7 @@ class KinesisIntegrationTest {
                 """)
         .when().post("/").then().statusCode(200);
 
-        java.util.Set<String> reported = new java.util.HashSet<>();
+        Set<String> reported = new HashSet<>();
         // Probe enough partition keys that hash(pk) % 2 hits both shards. With 50 keys the
         // odds of single-shard routing are ~1 in 2^49, so this is effectively deterministic.
         for (int i = 0; i < 50 && reported.size() < 2; i++) {
@@ -682,7 +685,7 @@ class KinesisIntegrationTest {
                 .extract().jsonPath().getString("ShardId");
             reported.add(shardId);
         }
-        org.junit.jupiter.api.Assertions.assertEquals(2, reported.size(),
+        Assertions.assertEquals(2, reported.size(),
                 "PutRecord should report distinct ShardIds across partition keys on a 2-shard stream");
     }
 
@@ -704,7 +707,7 @@ class KinesisIntegrationTest {
         }
         body.append("]}");
 
-        java.util.List<String> shardIds = given()
+        List<String> shardIds = given()
             .header("X-Amz-Target", "Kinesis_20131202.PutRecords")
             .contentType(KINESIS_CONTENT_TYPE)
             .body(body.toString())
@@ -714,11 +717,11 @@ class KinesisIntegrationTest {
             .body("Records.size()", equalTo(10))
             .extract().jsonPath().getList("Records.ShardId", String.class);
 
-        java.util.Set<String> distinct = new java.util.HashSet<>(shardIds);
-        org.junit.jupiter.api.Assertions.assertTrue(distinct.size() >= 2,
+        Set<String> distinct = new HashSet<>(shardIds);
+        Assertions.assertTrue(distinct.size() >= 2,
                 "PutRecords should route 10 mixed partition keys across at least 2 shards, got: " + distinct);
         for (String sid : shardIds) {
-            org.junit.jupiter.api.Assertions.assertTrue(sid != null && sid.startsWith("shardId-"),
+            Assertions.assertTrue(sid != null && sid.startsWith("shardId-"),
                     "Each record must report a real shardId, got: " + sid);
         }
     }
@@ -1227,7 +1230,7 @@ class KinesisIntegrationTest {
         .when().post("/")
         .then().statusCode(200);
 
-        String oversized = java.util.Base64.getEncoder().encodeToString(new byte[1_048_577]);
+        String oversized = Base64.getEncoder().encodeToString(new byte[1_048_577]);
         given()
             .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
             .contentType(KINESIS_CONTENT_TYPE)
@@ -1250,7 +1253,7 @@ class KinesisIntegrationTest {
         .when().post("/")
         .then().statusCode(200);
 
-        String oversized = java.util.Base64.getEncoder().encodeToString(new byte[1_048_577]);
+        String oversized = Base64.getEncoder().encodeToString(new byte[1_048_577]);
         given()
             .header("X-Amz-Target", "Kinesis_20131202.PutRecords")
             .contentType(KINESIS_CONTENT_TYPE)

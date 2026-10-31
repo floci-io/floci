@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -97,12 +98,12 @@ class CloudFormationDynamoDbReplicaIntegrationTest {
         // Add a replica via UpdateTable ReplicaUpdates -> Create.
         String added = ddb("UpdateTable", "{\"TableName\":\"" + tableName + "\","
                 + "\"ReplicaUpdates\":[{\"Create\":{\"RegionName\":\"" + REPLICA_REGION + "\"}}]}");
-        org.junit.jupiter.api.Assertions.assertTrue(added.contains("\"RegionName\":\"" + REPLICA_REGION + "\""),
+        Assertions.assertTrue(added.contains("\"RegionName\":\"" + REPLICA_REGION + "\""),
                 "UpdateTable response should report the new replica");
 
         // DescribeTable reports it as an ACTIVE replica on a 2019.11.21 global table.
         String afterAdd = ddb("DescribeTable", "{\"TableName\":\"" + tableName + "\"}");
-        org.junit.jupiter.api.Assertions.assertTrue(
+        Assertions.assertTrue(
                 afterAdd.contains("\"RegionName\":\"" + REPLICA_REGION + "\"")
                         && afterAdd.contains("\"ReplicaStatus\":\"ACTIVE\"")
                         && afterAdd.contains("\"GlobalTableVersion\":\"2019.11.21\""),
@@ -112,7 +113,7 @@ class CloudFormationDynamoDbReplicaIntegrationTest {
         ddb("UpdateTable", "{\"TableName\":\"" + tableName + "\","
                 + "\"ReplicaUpdates\":[{\"Delete\":{\"RegionName\":\"" + REPLICA_REGION + "\"}}]}");
         String afterRemove = ddb("DescribeTable", "{\"TableName\":\"" + tableName + "\"}");
-        org.junit.jupiter.api.Assertions.assertFalse(afterRemove.contains(REPLICA_REGION),
+        Assertions.assertFalse(afterRemove.contains(REPLICA_REGION),
                 "DescribeTable should no longer list the removed replica, was: " + afterRemove);
     }
 

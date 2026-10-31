@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreControlService;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreControlService.EndpointLocation;
@@ -355,7 +356,7 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
 
     /** The memory a prior physical id names, or null when it names none (gone, or a dispatcher stub). */
     private Memory findMemory(String arn, String region) {
-        if (!arn.startsWith("arn:")) {
+        if (!AwsArnUtils.isArn(arn)) {
             return null;
         }
         try {
@@ -398,7 +399,7 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
                             physicalId));
             case MEMORY -> {
                 // A dispatcher stub from before this provisioner existed is not an ARN and names no memory.
-                if (!physicalId.startsWith("arn:")) {
+                if (!AwsArnUtils.isArn(physicalId)) {
                     return;
                 }
                 CfnDeletes.safeDelete("AgentCore memory", physicalId,

@@ -25,10 +25,9 @@ import static io.restassured.RestAssured.given;
  * made it and is visible to the next class that lists users or buckets unscoped. Registered with
  * {@link PartitionCleanup} as each fixture is made.
  *
- * <p>Both read back what is attached rather than taking it as an argument, and both return
- * quietly when the thing is not there. That is what makes them safe to register before the create
- * runs: a setup that fails part way through still has the whole fixture taken away, and one that
- * created nothing leaves these with nothing to do.
+ * <p>Removal reads back what is attached and returns quietly when the resource is absent.
+ * Register removal only after creation succeeds: a rejected create may refer to a resource
+ * owned by another fixture. Once creation succeeds, cleanup also covers later setup failures.
  *
  * <p>The port is passed in because Quarkus points RestAssured at the application only for the
  * duration of a test method and resets the port afterwards, so a teardown has to say where the
@@ -36,6 +35,13 @@ import static io.restassured.RestAssured.given;
  * URI as the only place to read it from.
  */
 public final class EnforcementFixtures {
+
+    /**
+     * The name {@link #assumeRole} opens its session under, which a caller asserting on the
+     * session's ARN or on {@code aws:userid} reads from here rather than spelling again. Two
+     * characters because the model declares {@code roleSessionNameType} as 2 to 64.
+     */
+    public static final String SESSION_NAME = "sx";
 
     private static final DateTimeFormatter AMZ_DATE =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
@@ -95,16 +101,16 @@ public final class EnforcementFixtures {
 
     /**
      * Creates an IAM user holding one access key, registering its {@link #removeUser} with
-     * {@code cleanup} before the create runs, so the user and its key go after the test whatever
-     * the test does with them.
+     * {@code cleanup} after user creation succeeds, so a later key-creation failure still removes
+     * the owned user without deleting a pre-existing user after a rejected create.
      *
      * @param authorization an IAM-scoped header for the account the user belongs to, as for
      *                      {@link #removeUser}, which is handed the same one
      */
     public static UserCredentials createUser(PartitionCleanup cleanup, int port, String authorization,
                                              String userName) {
-        cleanup.register(() -> removeUser(port, authorization, userName));
         iam(port, authorization, "CreateUser", "UserName", userName).statusCode(200);
+        cleanup.register(() -> removeUser(port, authorization, userName));
         XmlPath key = iam(port, authorization, "CreateAccessKey", "UserName", userName)
                 .statusCode(200).extract().xmlPath();
         return new UserCredentials(
@@ -126,8 +132,8 @@ public final class EnforcementFixtures {
 
     /**
      * Creates a role under {@code path} that the root of its own {@code account} may assume, with
-     * {@code policy} inline, registering its {@link #removeRole} with {@code cleanup} before the
-     * create runs, and returns the role's ARN.
+     * {@code policy} inline, registering its {@link #removeRole} with {@code cleanup} after role
+     * creation succeeds and before attaching the policy, and returns the role's ARN.
      */
     public static String createRole(PartitionCleanup cleanup, int port, String account, String path,
                                     String roleName, String policy) {
@@ -144,9 +150,9 @@ public final class EnforcementFixtures {
     public static String createRole(PartitionCleanup cleanup, int port, String account, String path,
                                     String roleName, String trustPolicy, String policy) {
         String authorization = auth(account, "iam");
-        cleanup.register(() -> removeRole(port, authorization, roleName));
         iam(port, authorization, "CreateRole", "RoleName", roleName, "Path", path,
                 "AssumeRolePolicyDocument", trustPolicy).statusCode(200);
+        cleanup.register(() -> removeRole(port, authorization, roleName));
         iam(port, authorization, "PutRolePolicy", "RoleName", roleName, "PolicyName", "p",
                 "PolicyDocument", policy).statusCode(200);
         return "arn:aws:iam::" + account + ":role" + path + roleName;
@@ -157,12 +163,13 @@ public final class EnforcementFixtures {
     }
 
     /**
-     * Assumes {@code roleArn} as {@code callerAccessKeyId}, in a session named {@code s}, and returns
-     * the session's credentials. The role's trust policy has to admit the caller.
+     * Assumes {@code roleArn} as {@code callerAccessKeyId}, in a session named
+     * {@link #SESSION_NAME}, and returns the session's credentials. The role's trust policy has to
+     * admit the caller.
      */
     public static Session assumeRole(int port, String callerAccessKeyId, String roleArn) {
         XmlPath credentials = query(port, auth(callerAccessKeyId, "sts"), "AssumeRole",
-                "RoleArn", roleArn, "RoleSessionName", "s")
+                "RoleArn", roleArn, "RoleSessionName", SESSION_NAME)
                 .statusCode(200).extract().xmlPath();
         return new Session(
                 credentials.getString("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId"),
@@ -210,8 +217,8 @@ public final class EnforcementFixtures {
 
     /**
      * Deletes a managed policy, and first the versions and attachments IAM wants gone before it
-     * will. Returns quietly when the policy is already absent, so a caller can register the
-     * removal before creating it.
+     * will. Returns quietly when the policy is already absent. Register removal only after
+     * successfully creating the policy.
      */
     public static void removePolicy(int port, String authorization, String policyArn) {
         if (iam(port, authorization, "GetPolicy", "PolicyArn", policyArn)
@@ -398,7 +405,7 @@ public final class EnforcementFixtures {
     private record ObjectVersion(String key, String versionId) {
     }
 
-    private static ValidatableResponse iam(int port, String authorization, String action,
+    static ValidatableResponse iam(int port, String authorization, String action,
                                            String... params) {
         return query(port, authorization, action, params);
     }

@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
@@ -264,7 +265,7 @@ class Ec2ModifyVpcEndpointTest {
         ec2("ModifyVpcEndpoint", "VpcEndpointId", f.endpointId(), "PolicyDocument", POLICY);
 
         String xml = describe(f.endpointId());
-        org.junit.jupiter.api.Assertions.assertTrue(xml.contains("s3:GetObject"),
+        Assertions.assertTrue(xml.contains("s3:GetObject"),
                 "expected the policy document to be reported back, got: " + xml);
     }
 
@@ -275,7 +276,7 @@ class Ec2ModifyVpcEndpointTest {
         ec2("ModifyVpcEndpoint", "VpcEndpointId", f.endpointId(), "ResetPolicy", "true");
 
         String xml = describe(f.endpointId());
-        org.junit.jupiter.api.Assertions.assertFalse(xml.contains("s3:GetObject"),
+        Assertions.assertFalse(xml.contains("s3:GetObject"),
                 "expected ResetPolicy to clear the document, got: " + xml);
     }
 
@@ -290,7 +291,7 @@ class Ec2ModifyVpcEndpointTest {
                 "PolicyDocument", POLICY), "vpcEndpointId");
 
         String xml = describe(endpointId);
-        org.junit.jupiter.api.Assertions.assertTrue(xml.contains("s3:GetObject"),
+        Assertions.assertTrue(xml.contains("s3:GetObject"),
                 "expected the create-time policy to be reported back, got: " + xml);
     }
 

@@ -54,7 +54,7 @@ class ApiGatewayExecuteControllerTest {
         return new ApiGatewayExecuteController(
                 null, null, null, null,
                 regionResolver, objectMapper, null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null, null, null);
     }
 
     @Test
@@ -457,7 +457,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
                 apiGatewayService, null, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null, null, null);
 
         Response response = controller.dispatch("GET", "abc123", "prod", "hello", headers, null, null);
 
@@ -489,7 +489,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
                 apiGatewayService, null, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, requestContext, null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, requestContext, null, null, null, null);
 
         controller.dispatch("GET", "abc123", "prod", "hello", headers, null, null);
 
@@ -524,7 +524,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = new ApiGatewayExecuteController(
                 apiGatewayService, null, apiGatewayV2Service, null,
                 regionResolver, new ObjectMapper(), null,
-                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null, null);
+                null, null, null, null, new ApiGatewayExecuteRouteContext(), null, null, null, null, null, null);
 
         controller.dispatch("GET", "restapi1", "prod", "hello", headers, null, null);
 
@@ -767,7 +767,7 @@ class ApiGatewayExecuteControllerTest {
         ApiGatewayExecuteController controller = controller(new ObjectMapper());
         assertEnglishUtcTimeUnderNonUtcHost(() -> controller.buildRequestAuthorizerEventV2("GET", "/items",
                 "GET /items", "api1", "$default", "us-east-1", emptyHeaders(),
-                uriInfoFor("http://localhost/items"), null));
+                uriInfoFor("http://localhost/items"), null).toString());
     }
 
     private static HttpHeaders emptyHeaders() {

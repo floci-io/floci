@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.identitystore;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -801,8 +802,8 @@ class ScimIntegrationTest {
             .then()
                 .statusCode(200)
                 .body("itemsPerPage", equalTo(1))
-                .body("totalResults", org.hamcrest.Matchers.nullValue())
-                .body("startIndex", org.hamcrest.Matchers.nullValue())
+                .body("totalResults", Matchers.nullValue())
+                .body("startIndex", Matchers.nullValue())
                 .body("nextCursor", notNullValue())
                 .extract().path("nextCursor");
 
@@ -882,8 +883,8 @@ class ScimIntegrationTest {
             .then()
                 .statusCode(200)
                 .body("itemsPerPage", equalTo(1))
-                .body("totalResults", org.hamcrest.Matchers.nullValue())
-                .body("startIndex", org.hamcrest.Matchers.nullValue())
+                .body("totalResults", Matchers.nullValue())
+                .body("startIndex", Matchers.nullValue())
                 .body("nextCursor", notNullValue())
                 .extract().path("nextCursor");
 

@@ -38,6 +38,7 @@ import jakarta.inject.Inject;
 import org.apache.james.mime4j.dom.Message;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -1030,7 +1031,7 @@ public class SesService {
             return false;
         }
         try {
-            java.net.URI uri = java.net.URI.create(url);
+            URI uri = URI.create(url);
             String scheme = uri.getScheme();
             return uri.getHost() != null
                     && ("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme));
@@ -1180,24 +1181,24 @@ public class SesService {
         if (tenant == null) {
             return;
         }
-        String arnPrefix = "arn:" + AwsRegions.partitionFor(region) + ":ses:" + region + ":" + callerAccountId()
-                + ":";
+        String accountId = callerAccountId();
         List<SesTenantService.AssociationResource> used = new ArrayList<>();
         if (source != null && !source.isBlank()) {
             String identityName = sendIdentityName(source, region);
             used.add(new SesTenantService.AssociationResource(
                     SesTenantService.RESOURCE_TYPE_IDENTITY, identityName,
-                    arnPrefix + "identity/" + identityName));
+                    AwsArnUtils.Arn.of("ses", region, accountId, "identity/" + identityName).toString()));
         }
         if (effectiveConfigSet != null && !effectiveConfigSet.isBlank()) {
             used.add(new SesTenantService.AssociationResource(
                     SesTenantService.RESOURCE_TYPE_CONFIGURATION_SET, effectiveConfigSet,
-                    arnPrefix + "configuration-set/" + effectiveConfigSet));
+                    AwsArnUtils.Arn.of("ses", region, accountId, "configuration-set/" + effectiveConfigSet)
+                            .toString()));
         }
         if (templateName != null && !templateName.isBlank()) {
             used.add(new SesTenantService.AssociationResource(
                     SesTenantService.RESOURCE_TYPE_TEMPLATE, templateName,
-                    arnPrefix + "template/" + templateName));
+                    AwsArnUtils.Arn.of("ses", region, accountId, "template/" + templateName).toString()));
         }
         tenantService.requireResourcesAssociated(tenant, used, region);
     }
@@ -1699,14 +1700,14 @@ public class SesService {
                 ? requireSendingTenant(request.tenantName(), request.region(), null, () -> null)
                 : null;
         configSetService.validateForSending(request.configurationSetName(), request.region());
-        for (BulkEmailEntry entry : request.entries()) {
-            int recipientCount = sizeOf(entry.toAddresses())
-                    + sizeOf(entry.ccAddresses())
-                    + sizeOf(entry.bccAddresses());
-            if (recipientCount > MAX_RECIPIENTS_PER_DESTINATION) {
-                throw new AwsException("MessageRejected",
-                        "Recipient count (" + recipientCount + ") in a destination exceeds the maximum of "
-                                + MAX_RECIPIENTS_PER_DESTINATION + ".", 400);
+        if (!request.recipientLimitPerEntry()) {
+            for (BulkEmailEntry entry : request.entries()) {
+                int recipientCount = recipientCount(entry);
+                if (recipientCount > MAX_RECIPIENTS_PER_DESTINATION) {
+                    throw new AwsException("MessageRejected",
+                            "Recipient count (" + recipientCount + ") in a destination exceeds the maximum of "
+                                    + MAX_RECIPIENTS_PER_DESTINATION + ".", 400);
+                }
             }
         }
 
@@ -1733,7 +1734,15 @@ public class SesService {
         List<BulkEmailEntryResult> results = new ArrayList<>(request.entries().size());
         for (BulkEmailEntry entry : request.entries()) {
             try {
+                // An address syntax error wins over the entry's other failures (probe-confirmed on v1).
                 SesAddressSyntax.requireBulkDestination(entry, request.replyToAddresses());
+                if (entry.rejection() != null) {
+                    throw new AwsException("InvalidParameterValue", entry.rejection(), 400);
+                }
+                if (request.recipientLimitPerEntry() && recipientCount(entry) > MAX_RECIPIENTS_PER_DESTINATION) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Recipient count exceeds " + MAX_RECIPIENTS_PER_DESTINATION + ".", 400);
+                }
                 // An entry with no recipient beside entries with one fails on its own (probe-confirmed
                 // on v1 and v2).
                 if (!anyBulkRecipient(List.of(entry))) {
@@ -1799,6 +1808,10 @@ public class SesService {
     // which the controller validated, are published for a rejected message.
     private static List<MessageTag> requestTags(List<MessageTag> emailTags) {
         return emailTags == null ? List.of() : emailTags;
+    }
+
+    private static int recipientCount(BulkEmailEntry entry) {
+        return sizeOf(entry.toAddresses()) + sizeOf(entry.ccAddresses()) + sizeOf(entry.bccAddresses());
     }
 
     private static int sizeOf(List<?> list) {

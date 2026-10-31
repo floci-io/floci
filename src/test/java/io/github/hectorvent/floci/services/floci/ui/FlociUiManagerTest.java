@@ -27,6 +27,7 @@ import java.io.OutputStream;
 import java.net.BindException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -572,7 +573,7 @@ class FlociUiManagerTest {
         when(ui.containerName()).thenReturn("floci-ui");
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.findByName("floci-ui"))
-                .thenThrow(new com.github.dockerjava.api.exception.DockerClientException(
+                .thenThrow(new DockerClientException(
                         "Cannot connect to the Docker daemon"));
 
         FlociUiManager manager = new FlociUiManager(
@@ -689,7 +690,14 @@ class FlociUiManagerTest {
         assertTrue(env.contains("AWS_REGION=us-east-1"), env.toString());
         assertTrue(env.contains("AWS_DEFAULT_REGION=us-east-1"), env.toString());
         assertTrue(env.contains("FLOCI_CLOUD=aws"), env.toString());
+        assertTrue(env.contains("FLOCI_INFO_URL=http://floci:4566/_floci/info"), env.toString());
         assertTrue(env.contains("PORT=4500"), env.toString());
+    }
+
+    @Test
+    void theManifestUrlNeverDoublesTheSlash() {
+        assertEquals("http://floci:4566/_floci/info", FlociUiManager.infoUrl("http://floci:4566/"));
+        assertEquals("http://floci:4566/_floci/info", FlociUiManager.infoUrl("http://floci:4566"));
     }
 
     @Test
@@ -828,7 +836,7 @@ class FlociUiManagerTest {
         LinkedHashMap<String, String> env = new LinkedHashMap<>();
         env.put("PORT", "4500");
 
-        FlociUiManager.applyExtraEnv(env, Optional.of(java.util.Arrays.asList(
+        FlociUiManager.applyExtraEnv(env, Optional.of(Arrays.asList(
                 "NOT_A_PAIR", "=orphan", "  ", null, "GOOD=yes")));
 
         assertEquals(Map.of("PORT", "4500", "GOOD", "yes"), env);

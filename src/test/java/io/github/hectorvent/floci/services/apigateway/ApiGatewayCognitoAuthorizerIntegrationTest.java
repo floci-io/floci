@@ -74,6 +74,7 @@ class ApiGatewayCognitoAuthorizerIntegrationTest {
                     .when().get(base + "secured").then().statusCode(401);
             given().header("X-Id-Token", "Bearer " + idToken)
                     .when().get(base + "secured").then().statusCode(401)
+                    .header("x-amzn-ErrorType", equalTo("UnauthorizedException"))
                     .body("message", equalTo("Unauthorized"));
             given().header("X-Id-Token", "Bearer " + accessToken)
                     .when().get(base + "missing-scope").then().statusCode(401)

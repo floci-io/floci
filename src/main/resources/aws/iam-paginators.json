@@ -1,0 +1,440 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_iam_paginators.py",
+    "botocore": "botocore 1.43.113 (installed package)"
+  },
+  "operations": {
+    "GetAccountAuthorizationDetails": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "UserDetailList",
+        "GroupDetailList",
+        "RoleDetailList",
+        "Policies"
+      ],
+      "defaultItems": 100
+    },
+    "GetGroup": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Users"
+      ],
+      "defaultItems": 100
+    },
+    "GetOrganizationsAccessReport": {
+      "paginator": false,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [],
+      "defaultItems": 100
+    },
+    "GetServiceLastAccessedDetails": {
+      "paginator": false,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [],
+      "defaultItems": 100
+    },
+    "GetServiceLastAccessedDetailsWithEntities": {
+      "paginator": false,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [],
+      "defaultItems": 100
+    },
+    "ListAccessKeys": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "AccessKeyMetadata"
+      ],
+      "defaultItems": 100
+    },
+    "ListAccountAliases": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "AccountAliases"
+      ],
+      "defaultItems": 100
+    },
+    "ListAttachedGroupPolicies": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "AttachedPolicies"
+      ],
+      "defaultItems": 100
+    },
+    "ListAttachedRolePolicies": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "AttachedPolicies"
+      ],
+      "defaultItems": 100
+    },
+    "ListAttachedUserPolicies": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "AttachedPolicies"
+      ],
+      "defaultItems": 100
+    },
+    "ListDelegationRequests": {
+      "paginator": false,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "isTruncated",
+      "resultKeys": [],
+      "defaultItems": 100
+    },
+    "ListEntitiesForPolicy": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "PolicyGroups",
+        "PolicyUsers",
+        "PolicyRoles"
+      ],
+      "defaultItems": 100
+    },
+    "ListGroupPolicies": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "PolicyNames"
+      ],
+      "defaultItems": 100
+    },
+    "ListGroups": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Groups"
+      ],
+      "defaultItems": 100
+    },
+    "ListGroupsForUser": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Groups"
+      ],
+      "defaultItems": 100
+    },
+    "ListInstanceProfileTags": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Tags"
+      ],
+      "defaultItems": 100
+    },
+    "ListInstanceProfiles": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "InstanceProfiles"
+      ],
+      "defaultItems": 100
+    },
+    "ListInstanceProfilesForRole": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "InstanceProfiles"
+      ],
+      "defaultItems": 100
+    },
+    "ListMFADeviceTags": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Tags"
+      ],
+      "defaultItems": 100
+    },
+    "ListMFADevices": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "MFADevices"
+      ],
+      "defaultItems": 100
+    },
+    "ListOpenIDConnectProviderTags": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Tags"
+      ],
+      "defaultItems": 100
+    },
+    "ListPolicies": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Policies"
+      ],
+      "defaultItems": 100
+    },
+    "ListPoliciesGrantingServiceAccess": {
+      "paginator": false,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": null,
+      "moreResults": "IsTruncated",
+      "resultKeys": []
+    },
+    "ListPolicyTags": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Tags"
+      ],
+      "defaultItems": 100
+    },
+    "ListPolicyVersions": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Versions"
+      ],
+      "defaultItems": 100
+    },
+    "ListRolePolicies": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "PolicyNames"
+      ],
+      "defaultItems": 100
+    },
+    "ListRoleTags": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Tags"
+      ],
+      "defaultItems": 100
+    },
+    "ListRoles": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Roles"
+      ],
+      "defaultItems": 100
+    },
+    "ListSAMLProviderTags": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Tags"
+      ],
+      "defaultItems": 100
+    },
+    "ListSSHPublicKeys": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "SSHPublicKeys"
+      ],
+      "defaultItems": 100
+    },
+    "ListServerCertificateTags": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Tags"
+      ],
+      "defaultItems": 100
+    },
+    "ListServerCertificates": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "ServerCertificateMetadataList"
+      ],
+      "defaultItems": 100
+    },
+    "ListServiceSpecificCredentials": {
+      "paginator": false,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [],
+      "defaultItems": null
+    },
+    "ListSigningCertificates": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Certificates"
+      ],
+      "defaultItems": 100
+    },
+    "ListUserPolicies": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "PolicyNames"
+      ],
+      "defaultItems": 100
+    },
+    "ListUserTags": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Tags"
+      ],
+      "defaultItems": 100
+    },
+    "ListUsers": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "Users"
+      ],
+      "defaultItems": 100
+    },
+    "ListVirtualMFADevices": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "VirtualMFADevices"
+      ],
+      "defaultItems": 100
+    },
+    "SimulateCustomPolicy": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "EvaluationResults"
+      ],
+      "defaultItems": 100
+    },
+    "SimulatePrincipalPolicy": {
+      "paginator": true,
+      "inputToken": "Marker",
+      "outputToken": "Marker",
+      "limitKey": "MaxItems",
+      "moreResults": "IsTruncated",
+      "resultKeys": [
+        "EvaluationResults"
+      ],
+      "defaultItems": 100
+    }
+  }
+}

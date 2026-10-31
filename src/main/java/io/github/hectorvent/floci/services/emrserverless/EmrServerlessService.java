@@ -11,11 +11,14 @@ import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.emrserverless.model.Application;
 import io.github.hectorvent.floci.services.emrserverless.model.ApplicationSummary;
 import io.github.hectorvent.floci.services.emrserverless.model.CreateApplicationRequest;
+import io.github.hectorvent.floci.services.emrserverless.model.ImageConfiguration;
 import io.github.hectorvent.floci.services.emrserverless.model.ListApplicationsRequest;
 import io.github.hectorvent.floci.services.emrserverless.model.UpdateApplicationRequest;
+import io.github.hectorvent.floci.services.emrserverless.model.WorkerTypeSpecification;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -27,6 +30,7 @@ import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -83,6 +87,7 @@ public class EmrServerlessService {
         if (request.getClientToken() == null || request.getClientToken().isBlank()) {
             throw new AwsException("ValidationException", "clientToken is required", 400);
         }
+        validateImages(request.getImageConfiguration(), request.getWorkerTypeSpecifications(), true);
 
         String region = regionResolver.getRegion();
         if (request.getClientToken() != null) {
@@ -169,6 +174,7 @@ public class EmrServerlessService {
     }
 
     public synchronized Application updateApplication(String applicationId, UpdateApplicationRequest request) {
+        validateImages(request.getImageConfiguration(), request.getWorkerTypeSpecifications(), false);
         Application app = getApplication(applicationId);
         
         String state = app.getState();
@@ -198,9 +204,14 @@ public class EmrServerlessService {
             app.setArchitecture(request.getArchitecture());
         }
         if (request.getImageConfiguration() != null) {
-            app.setImageConfiguration(request.getImageConfiguration());
+            app.setImageConfiguration(imageOrNone(request.getImageConfiguration()));
         }
         if (request.getWorkerTypeSpecifications() != null) {
+            for (WorkerTypeSpecification specification : request.getWorkerTypeSpecifications().values()) {
+                if (specification != null) {
+                    specification.setImageConfiguration(imageOrNone(specification.getImageConfiguration()));
+                }
+            }
             app.setWorkerTypeSpecifications(request.getWorkerTypeSpecifications());
         }
         if (request.getMonitoringConfiguration() != null) {
@@ -349,7 +360,21 @@ public class EmrServerlessService {
 
     /** Whether the application exists and has not been deleted, which leaves it TERMINATED. */
     public synchronized boolean isLive(String applicationId) {
-        return storage.get(applicationId).filter(app -> !"TERMINATED".equals(app.getState())).isPresent();
+        return live(applicationId).isPresent();
+    }
+
+    /**
+     * Runs {@code use} on the application when it exists and has not been deleted, under this service's
+     * lock, so that it cannot be deleted meanwhile, as with {@link #admitJobRun}; returns whether it ran.
+     */
+    public synchronized boolean whileLive(String applicationId, Consumer<Application> use) {
+        Optional<Application> app = live(applicationId);
+        app.ifPresent(use);
+        return app.isPresent();
+    }
+
+    private Optional<Application> live(String applicationId) {
+        return storage.get(applicationId).filter(app -> !"TERMINATED".equals(app.getState()));
     }
 
     static AwsException resourceNotFound(String arn) {
@@ -410,6 +435,48 @@ public class EmrServerlessService {
             violations.add(SmithyValidationErrors.notAllInEnum(states, "states", allowed));
         }
         return violations;
+    }
+
+    /**
+     * Refuses an image configuration, the application's or a worker type's, that a new application leaves
+     * without an {@code imageUri} ("This field is required when you create a new application"), or whose image
+     * is in an ECR repository of another Region ("The Amazon ECR repository must be in the same AWS Region that
+     * you use to launch EMR Serverless applications"). No source words either refusal, so both are Floci's. An
+     * image outside ECR has no Region to compare.
+     */
+    private void validateImages(ImageConfiguration image, Map<String, WorkerTypeSpecification> workerTypes,
+                                boolean creating) {
+        validateImage("imageConfiguration", image, creating);
+        if (workerTypes != null) {
+            workerTypes.forEach((workerType, specification) -> validateImage(
+                    "workerTypeSpecifications." + workerType + ".imageConfiguration",
+                    specification != null ? specification.getImageConfiguration() : null, creating));
+        }
+    }
+
+    private void validateImage(String member, ImageConfiguration image, boolean creating) {
+        if (image == null) {
+            return;
+        }
+        String uri = image.getImageUri();
+        if (uri == null) {
+            if (creating) {
+                throw new AwsException("ValidationException", member + ".imageUri is required", 400);
+            }
+            return;
+        }
+        String region = regionResolver.getRegion();
+        Optional<String> imageRegion = EcrRegistryManager.imageRegion(uri);
+        if (imageRegion.isPresent() && !imageRegion.get().equals(region)) {
+            throw new AwsException("ValidationException", "Image " + uri + " is in an Amazon ECR repository in "
+                    + imageRegion.get() + "; it must be in the application's Region, " + region + ".", 400);
+        }
+    }
+
+    // An update's image configuration, or none when it leaves imageUri out: "If you leave this field blank in an
+    // update, Amazon EMR will remove the image configuration."
+    private static ImageConfiguration imageOrNone(ImageConfiguration image) {
+        return image != null && image.getImageUri() != null ? image : null;
     }
 
     /** At most 50 tags, each key and value within TagKey and TagValue and free of the reserved prefix. */

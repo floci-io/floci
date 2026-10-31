@@ -9,11 +9,11 @@
 | `GetFirewallDomainList` | Returns a single DNS Firewall domain list by id, whether AWS-managed or custom. |
 | `CreateFirewallDomainList` | Creates a custom DNS Firewall domain list with a random-suffix `rslvr-fdl-` id. |
 | `DeleteFirewallDomainList` | Deletes a custom DNS Firewall domain list; AWS-managed lists cannot be deleted. |
-| `CreateResolverEndpoint` | Creates an inbound (`rslvr-in-`) or outbound (`rslvr-out-`) resolver endpoint, returned immediately as `OPERATIONAL`. |
-| `DeleteResolverEndpoint` | Deletes a resolver endpoint and returns its final description. |
+| `CreateResolverEndpoint` | Creates an inbound (`rslvr-in-`) or outbound (`rslvr-out-`) resolver endpoint, returned immediately as `OPERATIONAL`. `HostVPCId` is the VPC of its subnets. Each address in a subnet EC2 knows gets its own EC2 network interface, with the requested `Ip` or one EC2 picks and the endpoint's security groups, held `in-use` for the endpoint; an `Ip` already in use is refused with `InvalidRequestException`. |
+| `DeleteResolverEndpoint` | Deletes a resolver endpoint and its network interfaces, and returns its final description. |
 | `GetResolverEndpoint` | Returns a resolver endpoint by id. |
 | `ListResolverEndpoints` | Lists all resolver endpoints. |
-| `ListResolverEndpointIpAddresses` | Lists a resolver endpoint's IP addresses from those it was created with, each `ATTACHED`; an address left for AWS to choose has no `Ip`. Not paginated. |
+| `ListResolverEndpointIpAddresses` | Lists a resolver endpoint's IP addresses, each `ATTACHED`, with the address of the network interface behind it; an address in a subnet EC2 does not know keeps the requested `Ip`, or none. Not paginated. |
 | `UpdateResolverEndpoint` | Updates a resolver endpoint's `Name` and `ResolverEndpointType`; `IpAddresses` changes are not modelled. |
 | `CreateResolverRule` | Creates a resolver rule, returned immediately as `COMPLETE`; `ResolverEndpointId` is not validated against an existing endpoint. |
 | `DeleteResolverRule` | Deletes a resolver rule and returns its final description. |

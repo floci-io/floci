@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.services.ses;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -199,7 +201,7 @@ public class SesTemplateService implements SesTaggable {
             throw new AwsException("InvalidParameterValue", "TemplateArn is required.", 400);
         }
         int marker = arn.indexOf(":template/");
-        if (!arn.startsWith("arn:") || marker < 0) {
+        if (!AwsArnUtils.looksLikeArn(arn) || marker < 0) {
             throw new AwsException("InvalidParameterValue",
                     "TemplateArn is not a valid SES template ARN: " + arn, 400);
         }
@@ -262,7 +264,7 @@ public class SesTemplateService implements SesTaggable {
         JsonNode node;
         try {
             node = mapper.readTree(raw);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+        } catch (JsonProcessingException e) {
             throw new AwsException("InvalidRenderingParameter",
                     "Template rendering data is invalid: " + e.getOriginalMessage(), 400);
         }

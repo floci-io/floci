@@ -9,6 +9,7 @@ import io.restassured.config.RestAssuredConfig;
 import io.restassured.path.json.config.JsonPathConfig;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -127,7 +128,7 @@ public class EmrServerlessIntegrationTest {
             .statusCode(200)
             .extract().path("applicationId");
             
-        org.junit.jupiter.api.Assertions.assertEquals(applicationId, retryApplicationId, "Idempotent create should return the same application ID");
+        Assertions.assertEquals(applicationId, retryApplicationId, "Idempotent create should return the same application ID");
     }
 
     @Test
@@ -427,5 +428,32 @@ public class EmrServerlessIntegrationTest {
             .body("application.identityCenterConfiguration.identityCenterInstanceArn",
                     equalTo("arn:aws:sso:::instance/ssoins-1234567890abcdef"))
             .body("application.jobLevelCostAllocationConfiguration.enabled", equalTo(true));
+    }
+
+    @Test
+    @Order(12)
+    void createApplicationRefusesACustomImageInAnotherRegion() {
+        givenReq()
+            .body("""
+                {
+                    "releaseLabel": "emr-7.5.0",
+                    "type": "SPARK",
+                    "clientToken": "%s",
+                    "workerTypeSpecifications": {
+                        "Driver": {
+                            "imageConfiguration": {
+                                "imageUri": "000000000000.dkr.ecr.eu-west-1.amazonaws.com/spark/custom:7.5.0"
+                            }
+                        }
+                    }
+                }
+                """.formatted(UUID.randomUUID()))
+        .when()
+            .post("/applications")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Image 000000000000.dkr.ecr.eu-west-1.amazonaws.com/spark/custom:7.5.0 is in "
+                    + "an Amazon ECR repository in eu-west-1; it must be in the application's Region, us-east-1."));
     }
 }

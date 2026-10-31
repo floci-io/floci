@@ -32,7 +32,7 @@ import static org.mockito.Mockito.when;
  * recording the {@code aws.emr} events it publishes. Each event is handed to {@link #target} as it is
  * published, as EventBridge's first delivery is, and checked to be published once the service is let go,
  * and, for a wakeup's, after it, as the timer's own thread never sends them. In the {@code docker} runner
- * mode a step's thread is one the test runs, with {@link #runStepThread}.
+ * mode a step's thread, and a bootstrap's, is one the test runs, with {@link #runStepThread}.
  */
 final class EmrServiceFixture {
 
@@ -61,6 +61,7 @@ final class EmrServiceFixture {
     private boolean waking;
     private final InMemoryStorageFactory storage;
     private final SparkJobRunner runner;
+    private final BootstrapRunner bootstrap;
     private final IamService iam;
     private final int[] durations;
 
@@ -70,20 +71,27 @@ final class EmrServiceFixture {
     }
 
     EmrServiceFixture(int startupDelaySeconds, int stepDurationSeconds, int terminationDelaySeconds) {
-        this(new InMemoryStorageFactory(ACCOUNT), new MutableClock(), null, null,
+        this(new InMemoryStorageFactory(ACCOUNT), new MutableClock(), null, null, null,
                 startupDelaySeconds, stepDurationSeconds, terminationDelaySeconds);
     }
 
     /** The service in the {@code docker} runner mode, every duration 0, its steps run by {@code runner}. */
     static EmrServiceFixture docker(SparkJobRunner runner, IamService iam) {
-        return new EmrServiceFixture(new InMemoryStorageFactory(ACCOUNT), new MutableClock(), runner, iam, 0, 0, 0);
+        return docker(runner, null, iam);
+    }
+
+    /** As {@link #docker(SparkJobRunner, IamService)}, its clusters' bootstrap actions run by {@code bootstrap}. */
+    static EmrServiceFixture docker(SparkJobRunner runner, BootstrapRunner bootstrap, IamService iam) {
+        return new EmrServiceFixture(new InMemoryStorageFactory(ACCOUNT), new MutableClock(), runner, bootstrap, iam,
+                0, 0, 0);
     }
 
     private EmrServiceFixture(InMemoryStorageFactory storage, MutableClock clock, SparkJobRunner runner,
-                              IamService iam, int... durations) {
+                              BootstrapRunner bootstrap, IamService iam, int... durations) {
         this.storage = storage;
         this.clock = clock;
         this.runner = runner;
+        this.bootstrap = bootstrap;
         this.iam = iam;
         this.durations = durations;
         EventBridgeService eventBridge = mock(EventBridgeService.class);
@@ -110,12 +118,12 @@ final class EmrServiceFixture {
             public void deliver(Runnable delivery) {
                 deliveries.add(delivery);
             }
-        }, runner, stepThreads::add, iam);
+        }, runner, bootstrap, stepThreads::add, iam);
     }
 
     /** A new service on the same storage and clock, as after a restart of Floci with persistent storage. */
     EmrServiceFixture restart() {
-        return new EmrServiceFixture(storage, clock, runner, iam, durations);
+        return new EmrServiceFixture(storage, clock, runner, bootstrap, iam, durations);
     }
 
     /**
@@ -124,7 +132,7 @@ final class EmrServiceFixture {
      */
     EmrService restartReconciling(SparkJobRunner runner, EmrService.Wakeups wakeups) {
         return new EmrService(storage, config(true), new RegionResolver(REGION, ACCOUNT), publisher, clock, wakeups,
-                runner, stepThreads::add, iam);
+                runner, bootstrap, stepThreads::add, iam);
     }
 
     private EmulatorConfig config(boolean reconcile) {

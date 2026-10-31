@@ -274,7 +274,8 @@ public class SqsQueryHandler {
 
     private Response handleReceiveMessage(MultivaluedMap<String, String> params, String region) {
         String queueUrl = getParam(params, "QueueUrl");
-        int maxMessages = getIntParam(params, "MaxNumberOfMessages", 1);
+        Integer requestedMax = getOptionalIntParam(params, "MaxNumberOfMessages");
+        int maxMessages = requestedMax == null ? 1 : requestedMax;
         int visibilityTimeout = getIntParam(params, "VisibilityTimeout", -1);
         Integer waitTimeSeconds = getOptionalIntParam(params, "WaitTimeSeconds");
 

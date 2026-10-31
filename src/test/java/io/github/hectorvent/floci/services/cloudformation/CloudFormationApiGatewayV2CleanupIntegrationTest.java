@@ -17,6 +17,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -173,7 +174,7 @@ class CloudFormationApiGatewayV2CleanupIntegrationTest {
     private static String httpApiTemplate(String apiName, List<String> paths) {
         String pathDefinitions = paths.stream()
                 .map(path -> "\"" + path + "\":{\"get\":{}}")
-                .collect(java.util.stream.Collectors.joining(","));
+                .collect(Collectors.joining(","));
         return """
                 {"AWSTemplateFormatVersion":"2010-09-09",
                  "Transform":"AWS::Serverless-2016-10-31",

@@ -51,6 +51,38 @@ class AwsQueryListsTest {
     }
 
     @Test
+    void membersCarryThePrefixTheirFieldsArriveUnderAndTheIndexAsSpelled() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("Tags.member.7.Key", "team");
+        params.putSingle("Tags.member.7.Value", "platform");
+        params.putSingle("Tags.member.2.Key", "owner");
+        params.putSingle("Audience.1", "");
+        params.putSingle("Audience.member.3", "second");
+        params.putSingle("OtherTags.member.1.Key", "another list");
+
+        assertEquals(List.of(new AwsQueryLists.IndexedMember("Tags.member.2", "2"),
+                        new AwsQueryLists.IndexedMember("Tags.member.7", "7")),
+                AwsQueryLists.members(params, "Tags", null),
+                "one member per index, in the order the indexes read");
+        assertEquals(List.of(new AwsQueryLists.IndexedMember("Audience.1", "1"),
+                        new AwsQueryLists.IndexedMember("Audience.member.3", "3")),
+                AwsQueryLists.members(params, "Audience", null),
+                "the bare numbered form is a member too, empty value and all");
+        assertEquals(List.of(), AwsQueryLists.members(params, "Filter", null));
+    }
+
+    @Test
+    void aMemberIsReadUnderTheNameItsShapeGivesItToo() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("SubnetIds.SubnetIdentifier.4", "fourth");
+
+        assertEquals(List.of(new AwsQueryLists.IndexedMember("SubnetIds.SubnetIdentifier.4", "4")),
+                AwsQueryLists.members(params, "SubnetIds", "SubnetIdentifier"));
+        assertEquals(List.of(), AwsQueryLists.members(params, "SubnetIds", null),
+                "without the name, the generic and bare forms only");
+    }
+
+    @Test
     void aMemberIndexIsTheNumberTheKeyEndsIn() {
         assertEquals(12, AwsQueryLists.memberIndex("Filters.Filter.3.Values.Value.12"));
         assertEquals(Integer.MAX_VALUE, AwsQueryLists.memberIndex("Name"));

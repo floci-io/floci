@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.RequestContext;
@@ -24,11 +25,11 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 import org.jboss.resteasy.reactive.server.ServerExceptionMapper;
 
-import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 
 /**
@@ -75,8 +76,9 @@ public class S3ControlController {
             @HeaderParam("x-amz-account-id") String accountId) {
 
         try {
-            String bucketName = extractBucketName(resourceArn);
-            Map<String, String> tags = s3Service.getBucketTagging(bucketName);
+            AwsArnUtils.Arn arn = taggedBucketArn(resourceArn);
+            Map<String, String> tags = s3Service.getBucketTaggingForAccount(arn.accountId(),
+                    S3ControlArnUtils.bucketName(arn));
 
             XmlBuilder xml = new XmlBuilder()
                     .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
@@ -278,10 +280,10 @@ public class S3ControlController {
             byte[] body) {
 
         try {
-            String bucketName = extractBucketName(resourceArn);
+            AwsArnUtils.Arn arn = taggedBucketArn(resourceArn);
             String xml = new String(body, StandardCharsets.UTF_8);
             Map<String, String> tags = XmlParser.extractPairs(xml, "Tag", "Key", "Value");
-            s3Service.putBucketTagging(bucketName, tags);
+            s3Service.putBucketTaggingForAccount(arn.accountId(), S3ControlArnUtils.bucketName(arn), tags);
             return Response.noContent().build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -302,10 +304,12 @@ public class S3ControlController {
             @QueryParam("tagKeys") List<String> tagKeys) {
 
         try {
-            String bucketName = extractBucketName(resourceArn);
-            Map<String, String> existing = new HashMap<>(s3Service.getBucketTagging(bucketName));
+            AwsArnUtils.Arn arn = taggedBucketArn(resourceArn);
+            String bucketName = S3ControlArnUtils.bucketName(arn);
+            Map<String, String> existing =
+                    new HashMap<>(s3Service.getBucketTaggingForAccount(arn.accountId(), bucketName));
             tagKeys.forEach(existing::remove);
-            s3Service.putBucketTagging(bucketName, existing);
+            s3Service.putBucketTaggingForAccount(arn.accountId(), bucketName, existing);
             return Response.noContent().build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -313,47 +317,24 @@ public class S3ControlController {
     }
 
     /**
-     * Parse the bucket name out of an S3 bucket ARN path parameter.
-     *
-     * <p>The AWS Go SDK v2 (used by Terraform) percent-encodes the ARN's
-     * colons and slashes in the request path, while the Java SDK sends them
-     * literally. We decode defensively so both forms work, and so routing
-     * frameworks that leave {@code %2F} encoded in path segments don't break
-     * us.
-     *
-     * <p>Two valid ARN forms are accepted:
-     * <ul>
-     *   <li>S3 Control ARN: {@code arn:aws:s3:<region>:<account>:bucket/<name>}</li>
-     *   <li>Plain S3 ARN:   {@code arn:aws:s3:::<name>} — sent by Go SDK v2 / Terraform provider v6</li>
-     * </ul>
+     * The bucket ARN a tagging route names, decoded and parsed the one way every reader of it
+     * shares: the handler here, the IAM resource the request is checked against, and the bucket
+     * policy lookup. The regional form carries the account and region of the bucket it names, and
+     * the global form the caller's own account, so a request naming another account's bucket acts
+     * on that account's bucket, never on the caller's same-named one.
      */
-    private String extractBucketName(String resourceArn) {
-        String decoded;
+    private static AwsArnUtils.Arn taggedBucketArn(String resourceArn) {
+        Optional<AwsArnUtils.Arn> arn;
         try {
-            decoded = URLDecoder.decode(resourceArn, StandardCharsets.UTF_8);
+            arn = S3ControlArnUtils.parse(resourceArn);
         } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidRequest",
                     "Malformed percent-encoding in resource ARN: " + e.getMessage(), 400);
         }
-
-        // Form 1: arn:<partition>:s3:<region>:<account>:bucket/<name>
-        int idx = decoded.lastIndexOf(":bucket/");
-        if (idx >= 0) {
-            return decoded.substring(idx + ":bucket/".length());
-        }
-
-        // Form 2: arn:<partition>:s3:::<name>  (plain S3 ARN — no region, no account)
-        // Go SDK v2 / Terraform provider v6 sends this form for general-purpose buckets.
-        String[] parts = decoded.split(":", 6);
-        if (parts.length == 6 && "s3".equals(parts[2])
-                && parts[3].isEmpty() && parts[4].isEmpty()
-                && !parts[5].isEmpty() && !parts[5].contains("/")) {
-            return parts[5];
-        }
-
-        throw new AwsException("InvalidRequest",
-                "Unsupported resource type. Only S3 bucket ARNs are supported " +
-                "(arn:aws:s3:<region>:<account>:bucket/<name> or arn:aws:s3:::<name>).", 400); // partition-literal: AWS's message text
+        return arn.filter(S3ControlArnUtils::namesBucket)
+                .orElseThrow(() -> new AwsException("InvalidRequest",
+                        "Unsupported resource type. Only S3 bucket ARNs are supported " +
+                        "(arn:aws:s3:<region>:<account>:bucket/<name> or arn:aws:s3:::<name>).", 400)); // partition-literal: AWS's message text
     }
 
     /**

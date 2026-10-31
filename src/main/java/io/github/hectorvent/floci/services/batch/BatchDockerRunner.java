@@ -104,6 +104,7 @@ public class BatchDockerRunner implements ContainerTeardown {
                     .withHostDockerInternalOnLinux()
                     .withEmbeddedDns()
                     .withLogRotation()
+                    .withJavaTrustStore()
                     .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                             "batch", job.getJobId(), job.getAccountId(), job.getRegion()));
 

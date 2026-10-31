@@ -5,6 +5,9 @@ import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.athena.AthenaClient;
 import software.amazon.awssdk.services.athena.model.*;
 import software.amazon.awssdk.services.firehose.FirehoseClient;
+import software.amazon.awssdk.services.firehose.model.BufferingHints;
+import software.amazon.awssdk.services.firehose.model.CreateDeliveryStreamRequest;
+import software.amazon.awssdk.services.firehose.model.ExtendedS3DestinationConfiguration;
 import software.amazon.awssdk.services.firehose.model.PutRecordRequest;
 import software.amazon.awssdk.services.firehose.model.Record;
 import software.amazon.awssdk.services.glue.GlueClient;
@@ -75,15 +78,15 @@ class DataLakeTest {
         // 3. Firehose Stream delivering under the Glue table location. The static
         // prefix gets yyyy/MM/dd/HH/ appended like real Firehose, which stays
         // inside the table location since Athena reads it recursively.
-        firehose.createDeliveryStream(software.amazon.awssdk.services.firehose.model.CreateDeliveryStreamRequest.builder()
+        firehose.createDeliveryStream(CreateDeliveryStreamRequest.builder()
                 .deliveryStreamName(STREAM_NAME)
-                .extendedS3DestinationConfiguration(software.amazon.awssdk.services.firehose.model.ExtendedS3DestinationConfiguration.builder()
+                .extendedS3DestinationConfiguration(ExtendedS3DestinationConfiguration.builder()
                         .bucketARN("arn:aws:s3:::floci-firehose-results")
                         .roleARN("arn:aws:iam::000000000000:role/datalake-firehose-role")
                         .prefix(STREAM_NAME + "/")
                         // Floci does not enforce AWS's 60s minimum interval, which keeps
                         // the delivery wait short (would need 60+ against real AWS).
-                        .bufferingHints(software.amazon.awssdk.services.firehose.model.BufferingHints.builder()
+                        .bufferingHints(BufferingHints.builder()
                                 .sizeInMBs(1)
                                 .intervalInSeconds(5)
                                 .build())

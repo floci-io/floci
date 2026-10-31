@@ -521,8 +521,7 @@ public class SesReceiptRuleService {
     private static void requireMember(List<String> violations, ReceiptAction action,
                                       String member, String path) {
         if (action.property(member) == null) {
-            violations.add("Value at '" + path + "' failed to satisfy constraint: "
-                    + "Member must not be null");
+            violations.add(SmithyValidationErrors.notNullWithoutValue(path));
         }
     }
 
@@ -733,8 +732,7 @@ public class SesReceiptRuleService {
             // Probed: an absent FilterName is the one case the wire rejects; deleting a missing
             // or malformed name succeeds without error.
             throw SmithyValidationErrors.validationError(
-                    "Value at 'filterName' failed to satisfy "
-                            + "constraint: Member must not be null");
+                    SmithyValidationErrors.notNullWithoutValue("filterName"));
         }
         receiptFilterStore.delete(receiptFilterKey(region, filterName));
         LOG.infov("Deleted SES receipt filter: {0} in region {1}", filterName, region);

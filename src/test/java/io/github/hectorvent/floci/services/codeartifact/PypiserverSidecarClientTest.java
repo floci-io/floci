@@ -511,6 +511,23 @@ class PypiserverSidecarClientTest {
         });
     }
 
+    /**
+     * Raised by hectorvent's review: every CodeArtifact repository gets a pypi sidecar id at
+     * creation regardless of whether it is ever actually used through pypi, so {@code
+     * ListPackages} with no format filter must not start this repository's own pypiserver
+     * container just to find out it was never used. No context is registered on {@code backend}
+     * at all here: a real container start would have nothing to connect to and throw.
+     */
+    @Test
+    void listPackagesReturnsEmptyWithoutStartingAContainerThatWasNeverUsed() {
+        PypiserverSidecarManager manager = manager();
+
+        List<RepositorySidecarManager.PackageIdentifier> packages = client(manager).listPackages("pypi-repo-1",
+                "dom", "repo");
+
+        assertTrue(packages.isEmpty());
+    }
+
     private PypiserverSidecarManager manager() {
         return new PypiserverSidecarManager(containerBuilder, lifecycleManager, config);
     }

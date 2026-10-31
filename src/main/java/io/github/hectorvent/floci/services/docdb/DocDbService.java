@@ -33,6 +33,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 @ApplicationScoped
@@ -558,7 +559,7 @@ public class DocDbService {
      * name in one comparison, as the db-cluster-id filter already does.
      */
     public boolean hasResourceWithArn(String arn) {
-        if (arn == null || !arn.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(arn)) {
             return false;
         }
         return clusters.scan(k -> true).stream()
@@ -585,7 +586,7 @@ public class DocDbService {
             // full ARN against each cluster's stored ARN rather than reducing it to
             // the bare identifier, so a cross-account or cross-region ARN does not
             // resolve a same-named local cluster.
-            if (filterId.startsWith("arn:")) {
+            if (AwsArnUtils.looksLikeArn(filterId)) {
                 return inRegion(clusters, region, DocDbCluster::getDbClusterIdentifier).stream()
                         .map(c -> filled(c, region))
                         .filter(c -> filterId.equalsIgnoreCase(c.getDbClusterArn()))
@@ -745,7 +746,7 @@ public class DocDbService {
         if (filterId != null && !filterId.isBlank()) {
             // The db-instance-id filter accepts ARNs as well as identifiers; see
             // listDbClusters for why the match is against the stored ARN.
-            if (filterId.startsWith("arn:")) {
+            if (AwsArnUtils.looksLikeArn(filterId)) {
                 return inRegion(instances, region, DocDbInstance::getDbInstanceIdentifier).stream()
                         .map(i -> filled(i, region))
                         .filter(i -> filterId.equalsIgnoreCase(i.getDbInstanceArn()))
@@ -813,7 +814,7 @@ public class DocDbService {
 
     /** A resolved tag target: the record's key, its tags, and a sink that persists an update. */
     private record TagTarget(String lockKey, Map<String, String> tags,
-                             java.util.function.Consumer<Map<String, String>> save) {}
+                             Consumer<Map<String, String>> save) {}
 
     public Map<String, String> listTagsForResource(String resourceName) {
         return Map.copyOf(resolveTagTarget(resourceName).tags());
@@ -828,7 +829,7 @@ public class DocDbService {
         updateTags(resourceName, current -> tagKeys.forEach(current::remove));
     }
 
-    private void updateTags(String resourceName, java.util.function.Consumer<Map<String, String>> change) {
+    private void updateTags(String resourceName, Consumer<Map<String, String>> change) {
         // Resolve once to learn which record is meant, then do the read-modify-write under that
         // record's monitor and resolve again inside it: the record can be deleted in between, and
         // saving what the first read returned would put it back.

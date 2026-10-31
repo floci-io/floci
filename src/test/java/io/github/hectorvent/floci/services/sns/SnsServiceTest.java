@@ -604,8 +604,8 @@ class SnsServiceTest {
     void publish_messagePlusAttributesExceedsLimit_throwsInvalidParameter() {
         Topic topic = snsService.createTopic("size-topic", null, null, REGION);
         String body = "x".repeat(262_100);
-        Map<String, io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue> attrs = Map.of(
-                "longAttribute", new io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue(
+        Map<String, MessageAttributeValue> attrs = Map.of(
+                "longAttribute", new MessageAttributeValue(
                         "y".repeat(200), "String"));
         AwsException ex = assertThrows(AwsException.class, () ->
                 snsService.publish(topic.getTopicArn(), null, null, body, null, attrs, REGION));
@@ -1014,10 +1014,10 @@ class SnsServiceTest {
     @Test
     void filterPolicy_messageAttributes_unchanged() {
         Subscription sub = subscriptionWithPolicy("{\"event\":[\"order\"]}", null);
-        Map<String, io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue> matching = Map.of(
-                "event", new io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue("order", "String"));
-        Map<String, io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue> nonMatching = Map.of(
-                "event", new io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue("refund", "String"));
+        Map<String, MessageAttributeValue> matching = Map.of(
+                "event", new MessageAttributeValue("order", "String"));
+        Map<String, MessageAttributeValue> nonMatching = Map.of(
+                "event", new MessageAttributeValue("refund", "String"));
         assertTrue(snsService.matchesFilterPolicy(sub, null, matching));
         assertFalse(snsService.matchesFilterPolicy(sub, null, nonMatching));
     }

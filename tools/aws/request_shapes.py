@@ -7,6 +7,8 @@
 shape of every operation, reduced to the members carried in the JSON body, and for every shape
 reachable from one, its type and the shapes of its members, list elements or map values.
 `regen_emr_serverless_shapes.py` keeps every operation's output shape too, with `outputs=True`.
+`regen_iam_shapes.py` and `regen_sts_shapes.py` name their operations instead, which switches
+`main()` to `build_constraints()`.
 
 Members bound to the URI, the query string or a header are left out: they never reach the body.
 A model without such members, as DynamoDB's, comes out whole.
@@ -16,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from regen_partitions import load_model as load_json_model
@@ -119,7 +122,19 @@ def generator_name(script: str) -> str:
 
 
 def main(argv: list[str] | None, *, script: str, model: Path, output: Path, description: str,
-         outputs: bool = False) -> int:
+         outputs: bool = False, operations: tuple[str, ...] | None = None,
+         prepare: Callable[[dict], dict] | None = None) -> int:
+    """Drives one generator: parse the flags, read the model, write or check the vendored file.
+
+    `operations` picks the constraints flavour, keeping those operations' declared constraints
+    through `build_constraints` where the default keeps every operation's member types through
+    `build`. The two vendor different things and are driven the same way, which is why the
+    Query-protocol generators share this too rather than each repeating the flags and the
+    staleness check.
+
+    `prepare` is the one thing a generator may do to the model before any of that, for an operation
+    it vendors in part: IAM reduces a paged request to its paging members, the rest of it keeping
+    the reading it has today."""
     parser = argparse.ArgumentParser(description=description, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--check", action="store_true", help="exit 1 when the vendored file differs from a fresh generation")
     parser.add_argument("--botocore-data", type=Path, help="botocore data directory")
@@ -127,7 +142,12 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path, desc
     args = parser.parse_args(argv)
 
     data, provenance = resolve_botocore_data(args.botocore_data)
-    fresh = render(build(load_model(data, model), provenance, generator_name(script), outputs))
+    loaded = load_model(data, model)
+    if prepare is not None:
+        loaded = prepare(loaded)
+    generator = generator_name(script)
+    fresh = render(build_constraints(loaded, operations, provenance, generator) if operations is not None
+                   else build(loaded, provenance, generator, outputs))
 
     if args.check:
         current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""

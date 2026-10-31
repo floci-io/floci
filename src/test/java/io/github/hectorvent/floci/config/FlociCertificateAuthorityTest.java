@@ -214,34 +214,34 @@ class FlociCertificateAuthorityTest {
         assertTrue(cert.getExtensionValue(Extension.subjectKeyIdentifier.getId()) != null);
         assertTrue(cert.getExtensionValue(Extension.authorityKeyIdentifier.getId()) != null);
         assertTrue(ca.isIssuedByUs(cert));
-        assertEquals(java.time.Instant.parse("2049-12-31T23:59:59Z"), cert.getNotAfter().toInstant(), "AWS's fixed expiry");
-        assertEquals(java.time.Instant.parse("2050-12-31T23:59:59Z"), ca.certificate().getNotAfter().toInstant(),
+        assertEquals(Instant.parse("2049-12-31T23:59:59Z"), cert.getNotAfter().toInstant(), "AWS's fixed expiry");
+        assertEquals(Instant.parse("2050-12-31T23:59:59Z"), ca.certificate().getNotAfter().toInstant(),
                 "a new CA outlives the device certificates it signs");
     }
 
     @Test
     void expiryRulesStayValidAfterTheFixedDates() {
-        java.time.Instant in2051 = java.time.Instant.parse("2051-06-01T00:00:00Z");
-        assertEquals(in2051.plus(3650, java.time.temporal.ChronoUnit.DAYS), FlociCertificateAuthority.caNotAfter(in2051),
+        Instant in2051 = Instant.parse("2051-06-01T00:00:00Z");
+        assertEquals(in2051.plus(3650, ChronoUnit.DAYS), FlociCertificateAuthority.caNotAfter(in2051),
                 "a CA created after 2050 lives ten years instead of being born expired");
-        assertEquals(java.time.Instant.parse("2050-12-31T23:59:59Z"),
-                FlociCertificateAuthority.caNotAfter(java.time.Instant.parse("2026-09-05T00:00:00Z")));
+        assertEquals(Instant.parse("2050-12-31T23:59:59Z"),
+                FlociCertificateAuthority.caNotAfter(Instant.parse("2026-09-05T00:00:00Z")));
 
         FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
         assertEquals(ca.certificate().getNotAfter().toInstant(),
-                ca.deviceCertificateNotAfter(java.time.Instant.parse("2050-06-01T00:00:00Z")),
+                ca.deviceCertificateNotAfter(Instant.parse("2050-06-01T00:00:00Z")),
                 "after 2049 a device certificate lives a year, capped at the CA's expiry: never born expired");
-        assertTrue(ca.deviceCertificateNotAfter(java.time.Instant.parse("2050-06-01T00:00:00Z"))
-                .isAfter(java.time.Instant.parse("2050-06-01T00:00:00Z")));
-        assertEquals(java.time.Instant.parse("2049-12-31T23:59:59Z"),
-                ca.deviceCertificateNotAfter(java.time.Instant.parse("2026-09-05T00:00:00Z")));
+        assertTrue(ca.deviceCertificateNotAfter(Instant.parse("2050-06-01T00:00:00Z"))
+                .isAfter(Instant.parse("2050-06-01T00:00:00Z")));
+        assertEquals(Instant.parse("2049-12-31T23:59:59Z"),
+                ca.deviceCertificateNotAfter(Instant.parse("2026-09-05T00:00:00Z")));
     }
 
     @Test
     void deviceCertificateNeverOutlivesAShortLivedCa() throws Exception {
         CertificateGenerator gen = new CertificateGenerator();
         CertificateGenerator.GeneratedCertificate shortLived = gen.generateCaCertificate(FlociCertificateAuthority.COMMON_NAME,
-                java.time.Instant.now().plus(30, java.time.temporal.ChronoUnit.DAYS));
+                Instant.now().plus(30, ChronoUnit.DAYS));
         Files.writeString(tempDir.resolve("floci-root-ca.crt"), shortLived.certificatePem());
         Files.writeString(tempDir.resolve("floci-root-ca.key"), shortLived.privateKeyPem());
         FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
@@ -279,7 +279,7 @@ class FlociCertificateAuthorityTest {
     @Test
     void signsACsrAsAClientLeafWithTheCsrSubjectAndKey() throws Exception {
         FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tempDir);
-        java.security.KeyPair deviceKey = rsaKeyPair(2048);
+        KeyPair deviceKey = rsaKeyPair(2048);
 
         X509Certificate cert = ca.signClientCsr(csrPem("CN=device-42,O=Example", deviceKey));
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Vendor ECR request constraints from botocore's Apache-2.0 service model.
 
-`EcrRequestShapes` checks the registry setting actions against the vendored file through the
-shared `RequestConstraintCheck`: member types, required members, lengths and counts, patterns and
+`EcrRequestShapes` checks the registry setting and repository creation template actions against
+the vendored file through the shared `RequestConstraintCheck`: member types, required members, lengths and counts, patterns and
 enum values, as the model states them.
 
 Run from anywhere in the repo:
@@ -22,10 +22,14 @@ from request_shapes import REPO_ROOT, build_constraints, load_model
 OUTPUT = REPO_ROOT / "src/main/resources/aws/ecr-request-shapes.json"
 MODEL = Path("ecr/2015-09-21")
 OPERATIONS = (
+    "GetAccountSetting", "PutAccountSetting",
+    "RegisterPullTimeUpdateExclusion", "DeregisterPullTimeUpdateExclusion", "ListPullTimeUpdateExclusions",
     "PutRegistryPolicy", "GetRegistryPolicy", "DeleteRegistryPolicy",
     "PutReplicationConfiguration", "DescribeRegistry",
     "PutRegistryScanningConfiguration", "GetRegistryScanningConfiguration",
     "BatchGetRepositoryScanningConfiguration",
+    "CreateRepositoryCreationTemplate", "UpdateRepositoryCreationTemplate",
+    "DescribeRepositoryCreationTemplates", "DeleteRepositoryCreationTemplate",
 )
 
 

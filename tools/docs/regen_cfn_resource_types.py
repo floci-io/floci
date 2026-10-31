@@ -23,11 +23,14 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from java_sources import SERVICES_PACKAGE_DIR  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY = REPO_ROOT / "src/test/resources/cloudformation/supported-resource-types.tsv"
 CONFIG = Path(__file__).resolve().parent / "cfn_resource_types.yaml"
 DOC = REPO_ROOT / "docs/services/cloudformation.md"
-PROVISIONER_DIR = REPO_ROOT / "src/main/java/io/github/hectorvent/floci/services/cloudformation/provisioners"
+PROVISIONER_DIR = REPO_ROOT / SERVICES_PACKAGE_DIR / "cloudformation/provisioners"
 
 MARKER_START = "<!-- floci:cfn-types:start -->"
 MARKER_END = "<!-- floci:cfn-types:end -->"

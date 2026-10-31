@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -220,7 +221,7 @@ class CloudFormationDynamicReferenceIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("cfn-dynref-resolved-topic"))
-            .body(org.hamcrest.Matchers.not(containsString("{{resolve:ssm:")));
+            .body(Matchers.not(containsString("{{resolve:ssm:")));
     }
 
     @Test

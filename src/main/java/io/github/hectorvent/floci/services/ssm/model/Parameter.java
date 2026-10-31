@@ -53,6 +53,9 @@ public class Parameter {
     @JsonProperty("Policies")
     private List<JsonNode> policies;
 
+    @JsonProperty("ResourcePolicy")
+    private ParameterResourcePolicy resourcePolicy;
+
     @JsonProperty("Tags")
     @JsonAlias({"tags", "Tags"})
     private Map<String, String> tags = new HashMap<>();
@@ -110,6 +113,9 @@ public class Parameter {
 
     public List<JsonNode> getPolicies() { return policies; }
     public void setPolicies(List<JsonNode> policies) { this.policies = policies; }
+
+    public ParameterResourcePolicy getResourcePolicy() { return resourcePolicy; }
+    public void setResourcePolicy(ParameterResourcePolicy resourcePolicy) { this.resourcePolicy = resourcePolicy; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

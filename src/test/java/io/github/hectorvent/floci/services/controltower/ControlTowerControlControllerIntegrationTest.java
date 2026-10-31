@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.controltower;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -81,7 +82,7 @@ class ControlTowerControlControllerIntegrationTest {
                 .then().statusCode(400).body("__type", containsString("ValidationException"));
     }
 
-    private static io.restassured.response.Response post(String path, String body) {
+    private static Response post(String path, String body) {
         return given().contentType("application/json").header("Authorization", auth()).body(body).post(path);
     }
 

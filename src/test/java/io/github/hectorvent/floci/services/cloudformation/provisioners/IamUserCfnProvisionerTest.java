@@ -17,6 +17,7 @@ import org.mockito.InOrder;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -97,7 +98,7 @@ class IamUserCfnProvisionerTest {
 
     @Test
     void declaresIamUserResourceType() {
-        assertEquals(java.util.Set.of("AWS::IAM::User"), provisioner.resourceTypes());
+        assertEquals(Set.of("AWS::IAM::User"), provisioner.resourceTypes());
     }
 
     @Test

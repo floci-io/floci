@@ -6,9 +6,13 @@ import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.sso.SsoClient;
+import software.amazon.awssdk.services.sso.model.AccountInfo;
 import software.amazon.awssdk.services.sso.model.ListAccountRolesResponse;
 import software.amazon.awssdk.services.sso.model.ListAccountsResponse;
+import software.amazon.awssdk.services.sso.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.sso.model.RoleCredentials;
+import software.amazon.awssdk.services.sso.model.RoleInfo;
+import software.amazon.awssdk.services.sso.model.UnauthorizedException;
 import software.amazon.awssdk.services.ssoadmin.SsoAdminClient;
 import software.amazon.awssdk.services.ssoadmin.model.InstanceMetadata;
 import software.amazon.awssdk.services.ssoadmin.model.PrincipalType;
@@ -18,6 +22,7 @@ import software.amazon.awssdk.services.ssooidc.model.RegisterClientResponse;
 import software.amazon.awssdk.services.ssooidc.model.StartDeviceAuthorizationResponse;
 import software.amazon.awssdk.services.sts.StsClient;
 
+import java.io.IOException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpRequest;
@@ -77,7 +82,7 @@ class SsoPortalTest {
                     .accessToken(accessToken)
                     .maxResults(100));
             assertThat(response.accountList())
-                    .extracting(software.amazon.awssdk.services.sso.model.AccountInfo::accountId)
+                    .extracting(AccountInfo::accountId)
                     .contains(accountId);
 
             ListAccountRolesResponse roles = portal.listAccountRoles(request -> request
@@ -85,7 +90,7 @@ class SsoPortalTest {
                     .accountId(accountId)
                     .maxResults(100));
             assertThat(roles.roleList())
-                    .extracting(software.amazon.awssdk.services.sso.model.RoleInfo::roleName)
+                    .extracting(RoleInfo::roleName)
                     .contains("PortalSdk" + suffix);
 
             RoleCredentials credentials = portal.getRoleCredentials(request -> request
@@ -111,11 +116,11 @@ class SsoPortalTest {
                     .accessToken(accessToken)
                     .accountId(accountId)
                     .roleName("NotAssigned")))
-                    .isInstanceOf(software.amazon.awssdk.services.sso.model.ResourceNotFoundException.class);
+                    .isInstanceOf(ResourceNotFoundException.class);
 
             portal.logout(request -> request.accessToken(accessToken));
             assertThatThrownBy(() -> portal.listAccounts(request -> request.accessToken(accessToken)))
-                    .isInstanceOf(software.amazon.awssdk.services.sso.model.UnauthorizedException.class);
+                    .isInstanceOf(UnauthorizedException.class);
 
             try (StsClient sts = StsClient.builder()
                     .endpointOverride(TestFixtures.endpoint())
@@ -127,7 +132,7 @@ class SsoPortalTest {
             }
 
             assertThatThrownBy(() -> portal.listAccounts(request -> request.accessToken("invalid")))
-                    .isInstanceOf(software.amazon.awssdk.services.sso.model.UnauthorizedException.class);
+                    .isInstanceOf(UnauthorizedException.class);
         }
     }
 
@@ -140,7 +145,7 @@ class SsoPortalTest {
             HttpResponse<String> response = TestFixtures.emulatorHttpClient().send(
                     HttpRequest.newBuilder(uri).GET().build(), HttpResponse.BodyHandlers.ofString());
             assertThat(response.statusCode()).isEqualTo(200);
-        } catch (java.io.IOException e) {
+        } catch (IOException e) {
             throw new RuntimeException(e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();

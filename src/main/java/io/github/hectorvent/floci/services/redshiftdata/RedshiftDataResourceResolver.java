@@ -79,7 +79,8 @@ class RedshiftDataResourceResolver {
         }
         if (!hasText(request, "SecretArn")) {
             return new DatabaseTarget(workgroup.arn(), workgroup.host(), workgroup.port(), database,
-                    workgroup.masterUsername(), workgroup.masterPassword(), spectrum);
+                    workgroup.masterUsername(), workgroup.masterPassword(), spectrum, null,
+                    workgroup.masterUsername(), workgroup.workgroupName());
         }
         String secretArn = request.get("SecretArn").asText();
         DatabaseSecretCredentials creds = secretCredentials(secretArn, region);
@@ -88,7 +89,7 @@ class RedshiftDataResourceResolver {
             user = workgroup.masterUsername();
         }
         return new DatabaseTarget(workgroup.arn(), workgroup.host(), workgroup.port(), database,
-                user, creds.password(), spectrum);
+                user, creds.password(), spectrum, null, user, workgroup.workgroupName());
     }
 
     private boolean isManagedAdminSecret(String secretArn, String managedSecretArn, String region) {
@@ -203,7 +204,12 @@ class RedshiftDataResourceResolver {
     }
 
     record DatabaseTarget(String arn, String host, int port, String database, String user, String password,
-                          SpectrumSession spectrum, Cluster cluster, String auditUser) {
+                          SpectrumSession spectrum, Cluster cluster, String auditUser, String workgroupName) {
+        DatabaseTarget(String arn, String host, int port, String database, String user, String password,
+                       SpectrumSession spectrum, Cluster cluster, String auditUser) {
+            this(arn, host, port, database, user, password, spectrum, cluster, auditUser, null);
+        }
+
         DatabaseTarget(String arn, String host, int port, String database, String user, String password,
                        SpectrumSession spectrum, Cluster cluster) {
             this(arn, host, port, database, user, password, spectrum, cluster, user);

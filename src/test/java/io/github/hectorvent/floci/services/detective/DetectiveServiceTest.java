@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.services.organizations.model.OrganizationAccou
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -42,7 +44,7 @@ class DetectiveServiceTest {
         OrganizationAccount member = new OrganizationAccount();
         member.setId(MEMBER_ACCOUNT);
         when(organizationsService.describeOrganization(MANAGEMENT_ACCOUNT)).thenReturn(organization);
-        when(organizationsService.listAccounts(MANAGEMENT_ACCOUNT)).thenReturn(java.util.List.of(management, member));
+        when(organizationsService.listAccounts(MANAGEMENT_ACCOUNT)).thenReturn(List.of(management, member));
 
         service = new DetectiveService(
                 AccountAwareStorageBackend.inMemory(MANAGEMENT_ACCOUNT), regionResolver, organizationsService);

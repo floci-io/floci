@@ -486,8 +486,50 @@ public class CodeArtifactController {
             node.put("revision", summary.revision());
             node.put("status", summary.status());
             ObjectNode origin = node.putObject("origin");
-            origin.put("originType", "INTERNAL");
-            origin.putObject("domainEntryPoint").put("repositoryName", repository);
+            origin.put("originType", summary.originType());
+            ObjectNode domainEntryPoint = origin.putObject("domainEntryPoint");
+            if (summary.externalConnectionName() != null) {
+                domainEntryPoint.put("externalConnectionName", summary.externalConnectionName());
+            } else {
+                domainEntryPoint.put("repositoryName", repository);
+            }
+        });
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return ok(response);
+    }
+
+    @POST
+    @Path("/v1/packages")
+    @Consumes(MediaType.WILDCARD)
+    public Response listPackages(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                  @QueryParam("domain-owner") String domainOwner,
+                                  @QueryParam("repository") String repository,
+                                  @QueryParam("format") String format,
+                                  @QueryParam("namespace") String namespace,
+                                  @QueryParam("package-prefix") String packagePrefix,
+                                  @QueryParam("max-results") String maxResults,
+                                  @QueryParam("next-token") String nextToken,
+                                  @QueryParam("publish") String publish,
+                                  @QueryParam("upstream") String upstream) {
+        String region = regionResolver.resolveRegion(headers);
+        CodeArtifactService.ListPackagesResult result = service.listPackages(region, domain, domainOwner,
+                repository, format, namespace, packagePrefix,
+                Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken, publish, upstream);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode packages = response.putArray("packages");
+        result.packages().forEach(summary -> {
+            ObjectNode node = packages.addObject();
+            node.put("format", summary.format());
+            if (summary.namespace() != null) {
+                node.put("namespace", summary.namespace());
+            }
+            node.put("package", summary.packageName());
+            ObjectNode origin = node.putObject("originConfiguration");
+            ObjectNode restrictions = origin.putObject("restrictions");
+            restrictions.put("publish", summary.publishRestriction());
+            restrictions.put("upstream", summary.upstreamRestriction());
         });
         if (result.nextToken() != null) {
             response.put("nextToken", result.nextToken());
@@ -781,7 +823,7 @@ public class CodeArtifactController {
             node.put("publishedTime", pv.getPublishedTime());
         }
         ObjectNode origin = node.putObject("origin");
-        origin.put("originType", "INTERNAL");
+        origin.put("originType", pv.getOriginType());
         node.putArray("licenses");
         return node;
     }

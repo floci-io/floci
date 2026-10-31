@@ -43,6 +43,80 @@ class SamRestApiAuthTest {
         assertEquals("x-api-key", schemes.path("api_key").path("name").asText());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"missing", "null", "{}", "{\"ApiKeyRequired\":false}"})
+    void relocatesDeclaredSchemesWithoutAuthDefaults(String auth) throws Exception {
+        ObjectNode template = template(false);
+        ObjectNode properties = (ObjectNode) template.at("/Resources/Api/Properties");
+        if ("missing".equals(auth)) {
+            properties.remove("Auth");
+        } else {
+            properties.set("Auth", mapper.readTree(auth));
+        }
+        ObjectNode body = (ObjectNode) properties.get("DefinitionBody");
+        body.set("components", mapper.readTree("""
+                {"schemas":{"Example":{"type":"string"}},"securitySchemes":{"old":{"type":"apiKey"}}}
+                """));
+        JsonNode definitions = existingSchemes();
+        body.set("securityDefinitions", definitions.deepCopy());
+        body.set("security", mapper.readTree("[{\"existingKey\":[]}]"));
+        JsonNode original = template.deepCopy();
+        JsonNode expanded = processor.expandSamTemplate(template).at("/Resources/Api/Properties/Body");
+        assertFalse(expanded.has("securityDefinitions"));
+        assertEquals(definitions, expanded.at("/components/securitySchemes"));
+        assertEquals(body.at("/components/schemas"), expanded.at("/components/schemas"));
+        assertEquals(body.get("security"), expanded.get("security"));
+        assertEquals(body.get("paths"), expanded.get("paths"));
+        assertEquals(original, template);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"3.0.1", "3.1.0", "3.0"})
+    void relocatesSchemesIntoAbsentOrNullComponents(String version) throws Exception {
+        ObjectNode template = template(false);
+        ObjectNode properties = (ObjectNode) template.at("/Resources/Api/Properties");
+        properties.remove("Auth");
+        ObjectNode body = (ObjectNode) properties.get("DefinitionBody");
+        body.put("openapi", version);
+        for (boolean nullComponents : new boolean[] {false, true}) {
+            if (nullComponents) {
+                body.putNull("components");
+            } else {
+                body.remove("components");
+            }
+            body.set("securityDefinitions", existingSchemes());
+            JsonNode expanded = processor.expandSamTemplate(template).at("/Resources/Api/Properties/Body");
+            assertEquals(existingSchemes(), expanded.at("/components/securitySchemes"));
+            assertFalse(expanded.has("securityDefinitions"));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"swagger", "both", "invalidVersion", "nullVersion", "emptyDefinitions",
+            "nullDefinitions", "missingDefinitions", "intrinsic"})
+    void leavesDocumentsOutsideRelocationScopeUnchanged(String shape) throws Exception {
+        ObjectNode template = template(false);
+        ObjectNode properties = (ObjectNode) template.at("/Resources/Api/Properties");
+        properties.remove("Auth");
+        ObjectNode body = (ObjectNode) properties.get("DefinitionBody");
+        body.set("securityDefinitions", existingSchemes());
+        switch (shape) {
+            case "swagger" -> {
+                body.remove("openapi");
+                body.put("swagger", "2.0");
+            }
+            case "both" -> body.put("swagger", "2.0");
+            case "invalidVersion" -> body.put("openapi", "3.invalid");
+            case "nullVersion" -> body.putNull("openapi");
+            case "emptyDefinitions" -> body.set("securityDefinitions", mapper.createObjectNode());
+            case "nullDefinitions" -> body.putNull("securityDefinitions");
+            case "missingDefinitions" -> body.remove("securityDefinitions");
+            default -> properties.set("DefinitionBody", mapper.readTree("{\"Ref\":\"Document\"}"));
+        }
+        JsonNode expanded = processor.expandSamTemplate(template).at("/Resources/Api/Properties/Body");
+        assertEquals(properties.get("DefinitionBody"), expanded);
+    }
+
     @Test
     void leavesOperationsAndRootSecurityAsWrittenWhenNoDefaultApplies() throws Exception {
         ObjectNode template = template(false);

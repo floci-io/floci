@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -313,7 +314,7 @@ class OrganizationsCfnIntegrationTest {
 
         organizations("DescribeResourcePolicy", "{}")
                 .then().statusCode(200)
-                .body("ResourcePolicy.Content", org.hamcrest.Matchers.containsString("organizations:Describe*"));
+                .body("ResourcePolicy.Content", Matchers.containsString("organizations:Describe*"));
     }
 
     @Test

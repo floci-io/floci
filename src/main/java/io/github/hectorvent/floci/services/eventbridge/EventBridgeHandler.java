@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJson11Controller;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.eventbridge.model.ApiDestination;
 import io.github.hectorvent.floci.services.eventbridge.model.Archive;
 import io.github.hectorvent.floci.services.eventbridge.model.ArchiveState;
@@ -392,7 +393,7 @@ public class EventBridgeHandler {
                 entries.add(entry);
             }
         }
-        EventBridgeService.PutEventsResult result = eventBridgeService.putEvents(entries, region);
+        EventBridgeService.PutEventsResult result = eventBridgeService.putEventsFromRequest(entries, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("FailedEntryCount", result.failedCount());
         ArrayNode resultEntries = response.putArray("Entries");
@@ -588,11 +589,16 @@ public class EventBridgeHandler {
     private Response handleListConnections(JsonNode request, String region) {
         String namePrefix = request.path("NamePrefix").asText(null);
         ConnectionState state = parseConnectionState(request.path("ConnectionState").asText(null));
-        List<Connection> connections = eventBridgeService.listConnections(namePrefix, state, region);
+        Integer limit = readLimit(request.path("Limit"));
+        String nextToken = Pagination.parseNextToken(request, "NextToken", "SerializationException");
+        PaginatedResult<Connection> page = eventBridgeService.listConnections(namePrefix, state, limit, nextToken, region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode connectionsArray = response.putArray("Connections");
-        for (Connection connection : connections) {
+        for (Connection connection : page.items()) {
             connectionsArray.add(buildConnectionNode(connection, false));
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }

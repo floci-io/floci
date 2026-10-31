@@ -286,6 +286,12 @@ class OrganizationsAccessReportIntegrationTest {
                 .body("ErrorResponse.Error.Code", equalTo("AccessDenied"));
     }
 
+    /**
+     * The whole message rather than the code alone, because the form it takes is the thing worth
+     * pinning: this operation names the member with no value beside it, as every other IAM check
+     * does, and the member that never arrived is the one place a word still stands where a value
+     * would.
+     */
     @Test
     void anEntityPathTheModelRejectsIsAValidationError() {
         organizationWithScpsEnabled();
@@ -293,7 +299,25 @@ class OrganizationsAccessReportIntegrationTest {
         iam(MANAGEMENT_ACCOUNT, "GenerateOrganizationsAccessReport")
                 .formParam("EntityPath", "o-a1b2c3d4e5")
         .when().post("/").then().statusCode(400)
-                .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", equalTo("2 validation errors detected: Value"
+                        + " at 'entityPath' failed to satisfy constraint: Member must have length"
+                        + " greater than or equal to 19; Value at 'entityPath' failed to satisfy"
+                        + " constraint: Member must satisfy regular expression pattern:"
+                        + " ^o-[0-9a-z]{10,32}\\/r-[0-9a-z]{4,32}[0-9a-z-\\/]*"));
+
+        iam(MANAGEMENT_ACCOUNT, "GenerateOrganizationsAccessReport")
+                .formParam("EntityPath", "o-a1b2c3d4e5/x-0000/not a path")
+        .when().post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at"
+                        + " 'entityPath' failed to satisfy constraint: Member must satisfy regular"
+                        + " expression pattern: ^o-[0-9a-z]{10,32}\\/r-[0-9a-z]{4,32}[0-9a-z-\\/]*"));
+
+        iam(MANAGEMENT_ACCOUNT, "GenerateOrganizationsAccessReport")
+        .when().post("/").then().statusCode(400)
+                .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value"
+                        + " null at 'entityPath' failed to satisfy constraint: Member must not be"
+                        + " null"));
     }
 
     @Test
@@ -491,7 +515,7 @@ class OrganizationsAccessReportIntegrationTest {
             .statusCode(400)
             .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
             .body("ErrorResponse.Error.Message", equalTo(
-                    "1 validation error detected: Value '1001' at 'maxItems' failed to satisfy "
+                    "1 validation error detected: Value at 'maxItems' failed to satisfy "
                             + "constraint: Member must have value less than or equal to 1000"));
     }
 }

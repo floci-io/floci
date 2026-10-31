@@ -29,11 +29,15 @@
 # generated from the certificate bundles AWS publishes by tools/aws/regen_rds_ca_certificates.py.
 # src/main/resources/aws/iam-request-shapes.json, the IAM request constraints of the operations
 # read from the model, is generated from botocore's IAM model by tools/aws/regen_iam_shapes.py.
+# src/main/resources/aws/sts-request-shapes.json, the same for STS, is generated from botocore's
+# STS model by tools/aws/regen_sts_shapes.py.
 # src/main/resources/aws/emr-serverless-shapes.json, the shapes the Step Functions emr-serverless
 # integrations recase against, is generated from botocore's EMR Serverless model by
 # tools/aws/regen_emr_serverless_shapes.py.
 # src/test/resources/aws/rest-routes.json, the REST routes IamRestRouteCoverageTest checks, is
 # generated from botocore's models by tools/aws/regen_rest_routes.py.
+# src/main/resources/aws/iam-paginators.json, what each paged IAM list pages by, is generated
+# from botocore's IAM model and paginators by tools/aws/regen_iam_paginators.py.
 
 PYTHON ?= python3
 
@@ -65,13 +69,15 @@ PREFIX ?= $(HOME)/.local
 .PHONY: help dev build test native native-host run-native native-install native-image native-up native-down native-logs clean-sidecars clean-volumes compat docker-tests \
         docs-sync docs-check docs-test partition-check partition-baseline partition-audit partition-test rename-test \
         slr-check slr-table slr-audit slr-test \
-        aws-data-sync aws-data-check aws-data-test \
+        aws-data-sync aws-data-check aws-data-test eks-addons-sync \
         iam-namespaces-sync iam-namespaces-check iam-namespaces-verify iam-namespaces-test \
         iam-action-resources-sync iam-action-resources-check iam-action-resources-verify \
         iam-action-resources-test iam-authorized-actions-sync iam-authorized-actions-check \
         cfn-property-types-sync cfn-property-types-check cfn-property-types-verify cfn-property-types-test \
         iam-authorized-actions-verify iam-authorized-actions-test iam-passed-roles-sync iam-passed-roles-check \
-        iam-passed-roles-verify iam-passed-roles-test iam-tag-on-create-sync iam-tag-on-create-check \
+        iam-passed-roles-verify iam-passed-roles-test iam-passed-network-connectors-sync \
+        iam-passed-network-connectors-check iam-passed-network-connectors-verify \
+        iam-passed-network-connectors-test iam-tag-on-create-sync iam-tag-on-create-check \
         iam-tag-on-create-verify iam-tag-on-create-test iam-request-resources-sync iam-request-resources-check \
         iam-request-resources-verify iam-request-resources-test iam-data-verify
 
@@ -236,6 +242,7 @@ aws-data-sync: ## Regenerate src/main/resources/aws/*.json and the IAM managed-p
 	$(PYTHON) tools/aws/regen_resource_groups_shapes.py
 	$(PYTHON) tools/aws/regen_ecr_shapes.py
 	$(PYTHON) tools/aws/regen_iam_shapes.py
+	$(PYTHON) tools/aws/regen_sts_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_types.py
 	$(PYTHON) tools/aws/regen_sesv2_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_shapes.py
@@ -243,6 +250,7 @@ aws-data-sync: ## Regenerate src/main/resources/aws/*.json and the IAM managed-p
 	$(PYTHON) tools/aws/regen_emr_serverless_shapes.py
 	$(PYTHON) tools/aws/regen_query_services.py
 	$(PYTHON) tools/aws/regen_rest_routes.py
+	$(PYTHON) tools/aws/regen_iam_paginators.py
 	$(PYTHON) tools/aws/regen_managed_policies.py
 
 aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
@@ -273,6 +281,12 @@ aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 	@$(PYTHON) tools/aws/regen_iam_shapes.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/iam-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_sts_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/sts-request-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}
@@ -332,6 +346,12 @@ aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}
+	@$(PYTHON) tools/aws/regen_iam_paginators.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/iam-paginators.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
 	@$(PYTHON) tools/aws/regen_managed_policies.py --check || { \
 		echo ""; \
 		echo "error: the IAM managed-policy catalog (src/main/resources/iam/managed-polic*) is out of date or malformed."; \
@@ -339,8 +359,18 @@ aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 		exit 1; \
 	}
 	@$(MAKE) --no-print-directory iam-passed-roles-check
+	@$(MAKE) --no-print-directory iam-passed-network-connectors-check
 	@$(MAKE) --no-print-directory iam-tag-on-create-check
 	@$(MAKE) --no-print-directory iam-request-resources-check
+	@$(PYTHON) tools/aws/regen_eks_addon_versions.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/eks/addon-versions.json is malformed or misses an add-on or Kubernetes version."; \
+		echo "       Run 'make eks-addons-sync' and commit the result."; \
+		exit 1; \
+	}
+
+eks-addons-sync: ## Regenerate src/main/resources/eks/addon-versions.json from EKS (needs AWS credentials; commit the result)
+	$(PYTHON) tools/aws/regen_eks_addon_versions.py
 
 aws-data-test: ## Run the AWS data generators' unit tests
 	$(PYTHON) -m pytest tools/aws -q
@@ -397,19 +427,88 @@ iam-action-resources-verify: ## CI gate (online): every vendored IAM action reso
 		exit 1; \
 	fi
 
-iam-data-verify: ## CI gate (online): every vendored IAM file must still match AWS
-	@# Both halves run even when the first fails, so one file's drift cannot hide the other's
+# The paths each upstream check covers: its vendored file, its tests, its generator and every
+# module that generator imports. Given CHANGED, the paths a pull request changes, iam-data-verify
+# runs only the checks covering one of them, so a pull request is not failed by drift in a file it
+# leaves alone; without it, as on the weekly run, it runs every check.
+IAM_PASSED_ROLES_GENERATOR := tools/aws/regen_iam_passed_roles.py tools/aws/regen_iam_authorized_actions.py \
+	tools/aws/regen_partitions.py tools/aws/regen_query_services.py
+IAM_NAMESPACES_PATHS := src/main/resources/aws/iam-service-namespaces.json \
+	tools/aws/regen_service_namespaces.py tools/aws/test_regen_service_namespaces.py
+IAM_ACTION_RESOURCES_PATHS := src/main/resources/aws/iam-action-resources.json \
+	tools/aws/regen_iam_action_resources.py tools/aws/test_regen_iam_action_resources.py
+IAM_AUTHORIZED_ACTIONS_PATHS := src/main/resources/aws/iam-authorized-actions.json \
+	tools/aws/regen_iam_authorized_actions.py tools/aws/test_regen_iam_authorized_actions.py
+IAM_PASSED_ROLES_PATHS := src/main/resources/aws/iam-passed-roles.json $(IAM_PASSED_ROLES_GENERATOR) \
+	tools/aws/test_regen_iam_passed_roles.py
+IAM_PASSED_NETWORK_CONNECTORS_PATHS := src/main/resources/aws/iam-passed-network-connectors.json \
+	tools/aws/regen_iam_passed_network_connectors.py $(IAM_PASSED_ROLES_GENERATOR) \
+	tools/aws/test_regen_iam_passed_network_connectors.py
+IAM_TAG_ON_CREATE_PATHS := src/main/resources/aws/iam-tag-on-create.json tools/aws/regen_iam_tag_on_create.py \
+	$(IAM_PASSED_ROLES_GENERATOR) tools/aws/test_regen_iam_tag_on_create.py
+DYNAMODB_CONDITION_KEYS_PATHS := src/main/resources/aws/dynamodb-condition-keys.json \
+	tools/aws/regen_dynamodb_condition_keys.py tools/aws/test_regen_dynamodb_condition_keys.py \
+	tools/aws/regen_partitions.py tools/aws/regen_query_services.py
+IAM_CONDITION_KEYS_PATHS := src/main/resources/aws/iam-condition-keys.json \
+	tools/aws/regen_iam_condition_keys.py tools/aws/test_regen_iam_condition_keys.py \
+	tools/aws/regen_partitions.py tools/aws/regen_query_services.py
+S3CONTROL_TAG_CONDITION_KEYS_PATHS := src/main/resources/aws/s3control-tag-condition-keys.json \
+	tools/aws/regen_s3control_tag_condition_keys.py tools/aws/test_regen_s3control_tag_condition_keys.py \
+	tools/aws/regen_iam_tag_on_create.py $(IAM_PASSED_ROLES_GENERATOR)
+LAMBDA_WEB_CONDITION_KEYS_PATHS := src/main/resources/aws/lambda-web-condition-keys.json \
+	tools/aws/regen_lambda_web_condition_keys.py tools/aws/test_regen_lambda_web_condition_keys.py \
+	tools/aws/regen_dynamodb_condition_keys.py tools/aws/regen_iam_tag_on_create.py $(IAM_PASSED_ROLES_GENERATOR)
+IAM_REQUEST_RESOURCES_PATHS := src/main/resources/aws/iam-request-resources.json \
+	tools/aws/regen_iam_request_resources.py $(IAM_PASSED_ROLES_GENERATOR) \
+	tools/aws/test_regen_iam_request_resources.py
+
+iam-data-verify: ## CI gate (online): every vendored IAM file must still match AWS; CHANGED="<paths>" checks only the ones they cover
+	@# Every check runs even when an earlier one fails, so one file's drift cannot hide another's
 	@# state. Sequential steps in CI stop at the first failure, which once left the action
 	@# resource gate unexercised while the namespace list was stale.
-	@namespaces=0; actions=0; authorized=0; passed=0; tagged=0; requested=0; \
-	$(MAKE) --no-print-directory iam-namespaces-verify || namespaces=$$?; \
-	$(MAKE) --no-print-directory iam-action-resources-verify || actions=$$?; \
-	$(MAKE) --no-print-directory iam-authorized-actions-verify || authorized=$$?; \
-	$(MAKE) --no-print-directory iam-passed-roles-verify || passed=$$?; \
-	$(MAKE) --no-print-directory iam-tag-on-create-verify || tagged=$$?; \
-	$(MAKE) --no-print-directory iam-request-resources-verify || requested=$$?; \
+	@namespaces=0; actions=0; authorized=0; passed=0; connectors=0; tagged=0; requested=0; dynamodb=0; conditionkeys=0; s3control=0; lambdaweb=0; \
+	covers() { \
+		[ -z "$(strip $(CHANGED))" ] && return 0; \
+		for path in $(CHANGED); do case " $$1 " in *" $$path "*) return 0;; esac; done; \
+		echo "not checked, as the change touches none of its files: $$2"; \
+		return 1; \
+	}; \
+	if covers "$(IAM_NAMESPACES_PATHS)" "the service namespace list"; then \
+		$(MAKE) --no-print-directory iam-namespaces-verify || namespaces=$$?; \
+	fi; \
+	if covers "$(IAM_ACTION_RESOURCES_PATHS)" "the action resource map"; then \
+		$(MAKE) --no-print-directory iam-action-resources-verify || actions=$$?; \
+	fi; \
+	if covers "$(IAM_AUTHORIZED_ACTIONS_PATHS)" "the map of operations to their IAM actions"; then \
+		$(MAKE) --no-print-directory iam-authorized-actions-verify || authorized=$$?; \
+	fi; \
+	if covers "$(IAM_PASSED_ROLES_PATHS)" "the table of the roles operations pass"; then \
+		$(MAKE) --no-print-directory iam-passed-roles-verify || passed=$$?; \
+	fi; \
+	if covers "$(IAM_PASSED_NETWORK_CONNECTORS_PATHS)" "the table of the network connectors operations pass"; then \
+		$(MAKE) --no-print-directory iam-passed-network-connectors-verify || connectors=$$?; \
+	fi; \
+	if covers "$(IAM_TAG_ON_CREATE_PATHS)" "the table of the tagging actions creates need"; then \
+		$(MAKE) --no-print-directory iam-tag-on-create-verify || tagged=$$?; \
+	fi; \
+	if covers "$(IAM_REQUEST_RESOURCES_PATHS)" "the table of the resources requests name"; then \
+		$(MAKE) --no-print-directory iam-request-resources-verify || requested=$$?; \
+	fi; \
+	if covers "$(DYNAMODB_CONDITION_KEYS_PATHS)" "the DynamoDB condition key table"; then \
+		$(MAKE) --no-print-directory dynamodb-condition-keys-verify || dynamodb=$$?; \
+	fi; \
+	if covers "$(IAM_CONDITION_KEYS_PATHS)" "the IAM condition key table"; then \
+		$(MAKE) --no-print-directory iam-condition-keys-verify || conditionkeys=$$?; \
+	fi; \
+	if covers "$(S3CONTROL_TAG_CONDITION_KEYS_PATHS)" "the S3 Control tag condition key table"; then \
+		$(MAKE) --no-print-directory s3control-tag-condition-keys-verify || s3control=$$?; \
+	fi; \
+	if covers "$(LAMBDA_WEB_CONDITION_KEYS_PATHS)" "the Lambda Web condition key table"; then \
+		$(MAKE) --no-print-directory lambda-web-condition-keys-verify || lambdaweb=$$?; \
+	fi; \
 	if [ $$namespaces -ne 0 ] || [ $$actions -ne 0 ] || [ $$authorized -ne 0 ] || [ $$passed -ne 0 ] \
-			|| [ $$tagged -ne 0 ] || [ $$requested -ne 0 ]; then \
+			|| [ $$connectors -ne 0 ] || [ $$tagged -ne 0 ] || [ $$requested -ne 0 ] || [ $$dynamodb -ne 0 ] \
+			|| [ $$conditionkeys -ne 0 ] || [ $$s3control -ne 0 ] || [ $$lambdaweb -ne 0 ]; then \
 		echo ""; \
 		echo "error: vendored IAM data does not match upstream:"; \
 		if [ $$namespaces -ne 0 ]; then \
@@ -424,12 +523,19 @@ iam-data-verify: ## CI gate (online): every vendored IAM file must still match A
 		if [ $$passed -ne 0 ]; then \
 			echo "       the table of the roles operations pass, see its message above"; \
 		fi; \
+		if [ $$connectors -ne 0 ]; then \
+			echo "       the table of the network connectors operations pass, see its message above"; \
+		fi; \
 		if [ $$tagged -ne 0 ]; then \
 			echo "       the table of the tagging actions creates need, see its message above"; \
 		fi; \
 		if [ $$requested -ne 0 ]; then \
 			echo "       the table of the resources requests name, see its message above"; \
 		fi; \
+		if [ $$dynamodb -ne 0 ]; then echo "       the DynamoDB condition key table"; fi; \
+		if [ $$conditionkeys -ne 0 ]; then echo "       the IAM condition key table"; fi; \
+		if [ $$s3control -ne 0 ]; then echo "       the S3 Control tag condition key table"; fi; \
+		if [ $$lambdaweb -ne 0 ]; then echo "       the Lambda Web condition key table"; fi; \
 		exit 1; \
 	fi
 
@@ -490,6 +596,33 @@ iam-passed-roles-verify: ## CI gate (online): every vendored operation must stil
 
 iam-passed-roles-test: ## Run the IAM passed role generator's unit tests
 	$(PYTHON) -m pytest tools/aws/test_regen_iam_passed_roles.py -q
+
+iam-passed-network-connectors-sync: ## Regenerate src/main/resources/aws/iam-passed-network-connectors.json from AWS and botocore (commit the result)
+	$(PYTHON) tools/aws/regen_iam_passed_network_connectors.py
+
+iam-passed-network-connectors-check: ## CI gate (offline): every vendored connector member must be what the pinned botocore gives
+	@$(PYTHON) tools/aws/regen_iam_passed_network_connectors.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/iam-passed-network-connectors.json is malformed or out of date."; \
+		echo "       Run 'make iam-passed-network-connectors-sync' and commit the result."; \
+		exit 1; \
+	}
+
+iam-passed-network-connectors-verify: ## CI gate (online): every vendored operation must still pass a connector as AWS says
+	@$(PYTHON) tools/aws/regen_iam_passed_network_connectors.py --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not reach AWS's service reference, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: the vendored table reads a connector from an operation AWS does not check it for."; \
+		echo "       Run 'make iam-passed-network-connectors-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+iam-passed-network-connectors-test: ## Run the IAM passed network connector generator's unit tests
+	$(PYTHON) -m pytest tools/aws/test_regen_iam_passed_network_connectors.py -q
 
 iam-tag-on-create-sync: ## Regenerate src/main/resources/aws/iam-tag-on-create.json from AWS and botocore (commit the result)
 	$(PYTHON) tools/aws/regen_iam_tag_on_create.py
@@ -572,3 +705,35 @@ cfn-property-types-verify: ## CI gate (online): the vendored CloudFormation prop
 
 cfn-property-types-test: ## Run the CloudFormation property type generator's unit tests
 	$(PYTHON) -m pytest tools/aws/test_regen_cfn_property_types.py -q
+
+.PHONY: dynamodb-condition-keys-sync dynamodb-condition-keys-check dynamodb-condition-keys-verify
+dynamodb-condition-keys-sync: ## Regenerate DynamoDB IAM condition keys from AWS and botocore
+	$(PYTHON) tools/aws/regen_dynamodb_condition_keys.py
+dynamodb-condition-keys-check: ## Check DynamoDB condition request members against pinned botocore
+	$(PYTHON) tools/aws/regen_dynamodb_condition_keys.py --check
+dynamodb-condition-keys-verify: ## Check DynamoDB condition action keys against AWS
+	$(PYTHON) tools/aws/regen_dynamodb_condition_keys.py --verify
+
+.PHONY: iam-condition-keys-sync iam-condition-keys-check iam-condition-keys-verify
+iam-condition-keys-sync: ## Regenerate the IAM condition keys requests carry from AWS and botocore
+	$(PYTHON) tools/aws/regen_iam_condition_keys.py
+iam-condition-keys-check: ## Check the IAM condition key request members against pinned botocore
+	$(PYTHON) tools/aws/regen_iam_condition_keys.py --check
+iam-condition-keys-verify: ## Check every IAM condition key and action pair against AWS
+	$(PYTHON) tools/aws/regen_iam_condition_keys.py --verify
+
+.PHONY: s3control-tag-condition-keys-sync s3control-tag-condition-keys-check s3control-tag-condition-keys-verify
+s3control-tag-condition-keys-sync: ## Regenerate the S3 Control tag condition keys from AWS and botocore
+	$(PYTHON) tools/aws/regen_s3control_tag_condition_keys.py
+s3control-tag-condition-keys-check: ## Check the S3 Control tag condition request members against pinned botocore
+	$(PYTHON) tools/aws/regen_s3control_tag_condition_keys.py --check
+s3control-tag-condition-keys-verify: ## Check the S3 Control tag condition action keys against AWS
+	$(PYTHON) tools/aws/regen_s3control_tag_condition_keys.py --verify
+
+.PHONY: lambda-web-condition-keys-sync lambda-web-condition-keys-check lambda-web-condition-keys-verify
+lambda-web-condition-keys-sync: ## Regenerate the Lambda Web condition keys from AWS and botocore
+	$(PYTHON) tools/aws/regen_lambda_web_condition_keys.py
+lambda-web-condition-keys-check: ## Check the Lambda Web condition request members against pinned botocore
+	$(PYTHON) tools/aws/regen_lambda_web_condition_keys.py --check
+lambda-web-condition-keys-verify: ## Check the Lambda Web condition action keys against AWS
+	$(PYTHON) tools/aws/regen_lambda_web_condition_keys.py --verify

@@ -120,14 +120,37 @@ public class CodeArtifactPypiController {
                 .build();
     }
 
+    /**
+     * pypi's real download route is a bare filename with no package name or version anywhere in
+     * the URL, unlike Maven's GAV path or nuget's content route, so there is nothing in a download
+     * request itself to resolve the coordinate {@link #archivedOrDisposedVersionFromFilename}
+     * needs. Resolving it against this repository's own status overrides, the same way the upload
+     * guard above already does, rather than a separate map recorded only at upload time: raised by
+     * Greptile's review, an earlier version of this check used exactly that kind of map, recorded
+     * only by a native twine upload, so a version {@code CopyPackageVersions} wrote straight to the
+     * destination sidecar (never touching this controller's own upload handler at all) had no
+     * recorded identity, and archiving it afterward never blocked the download. Resolving against
+     * the override records instead needs no write-time bookkeeping at all: whichever path put the
+     * real file there, an override written later by {@code UpdatePackageVersionsStatus}/{@code
+     * DisposePackageVersions} is found the same way regardless.
+     */
     @GET
     @Path("packages/{filename}")
     @Produces(MediaType.WILDCARD)
     public Response downloadFile(@Context HttpHeaders headers, @PathParam("domain") String domain,
                                   @PathParam("repository") String repository,
                                   @PathParam("filename") String filename) {
-        String baseUrl = requireRepository(headers, domain, repository).baseUrl();
-        return proxyGet(baseUrl, "/packages/" + SidecarUriUtils.encodeSegment(filename));
+        RepositoryHandle handle = requireRepository(headers, domain, repository);
+        ArchivedOrDisposedMatch match = archivedOrDisposedVersionFromFilename(handle, domain, repository, filename);
+        if (match != null) {
+            try {
+                service.requireContainerBackedVersionDownloadable(handle.owner(), handle.region(), domain,
+                        repository, "pypi", null, match.packageName(), match.version(), handle.repoId());
+            } catch (AwsException e) {
+                return Response.status(404).build();
+            }
+        }
+        return proxyGet(handle.baseUrl(), "/packages/" + SidecarUriUtils.encodeSegment(filename));
     }
 
     /**

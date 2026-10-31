@@ -92,20 +92,22 @@ public class Ec2NetworkAclCfnProvisioner implements CfnResourceProvisioner {
 
     private void provisionNetworkAclEntry(StackResource r, JsonNode props, ProvisionContext ctx) {
         String aclId = ctx.resolveOptional(props, "NetworkAclId");
-        String ruleNumberValue = ctx.resolveOptional(props, "RuleNumber");
-        int ruleNumber = ruleNumberValue != null ? Integer.parseInt(ruleNumberValue) : 100;
+        Integer ruleNumberValue = ctx.resolveOptionalInt(props, "RuleNumber");
+        int ruleNumber = ruleNumberValue != null ? ruleNumberValue : 100;
         boolean egress = Boolean.parseBoolean(ctx.resolveOptional(props, "Egress"));
         JsonNode portRange = props != null && props.hasNonNull("PortRange") ? props.get("PortRange") : null;
-        String fromValue = ctx.resolveOptional(portRange, "From");
-        String toValue = ctx.resolveOptional(portRange, "To");
-        Integer from = fromValue != null ? Integer.valueOf(fromValue) : null;
-        Integer to = toValue != null ? Integer.valueOf(toValue) : null;
+        Integer from = ctx.resolveOptionalInt(portRange, "From");
+        Integer to = ctx.resolveOptionalInt(portRange, "To");
+        JsonNode icmp = props != null && props.hasNonNull("Icmp") ? props.get("Icmp") : null;
         String protocol = ctx.resolveOptional(props, "Protocol");
         ec2Service.createNetworkAclEntry(ctx.region(), aclId, ruleNumber,
                 protocol != null ? protocol : "-1",
                 ctx.resolveOptional(props, "RuleAction"),
                 egress,
                 ctx.resolveOptional(props, "CidrBlock"),
+                ctx.resolveOptional(props, "Ipv6CidrBlock"),
+                ctx.resolveOptionalInt(icmp, "Type"),
+                ctx.resolveOptionalInt(icmp, "Code"),
                 // RuleNumber, Egress and NetworkAclId are the createOnly key, so re-provisioning
                 // the same key is an update. replace=false would raise NetworkAclEntryAlreadyExists
                 // on every stack update.

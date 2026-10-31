@@ -15,6 +15,7 @@ import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -370,7 +371,7 @@ public class RuntimeApiServer {
         if (latch == null) {
             return true;
         }
-        return latch.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+        return latch.await(timeoutMs, TimeUnit.MILLISECONDS);
     }
 
     /**
@@ -1125,7 +1126,7 @@ public class RuntimeApiServer {
                 .put("errorType", "Runtime.ExitError")
                 .put("errorMessage", message)
                 .encode()
-                .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                .getBytes(StandardCharsets.UTF_8);
     }
 
     private void handleExtensionFatalError(RoutingContext ctx, String phase) {

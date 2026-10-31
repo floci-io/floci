@@ -1,13 +1,17 @@
 package io.github.hectorvent.floci.services.servicecatalog;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Wire-level tests for {@code DescribeProvisionedProduct},
@@ -31,6 +35,9 @@ class ServiceCatalogProvisionedProductLifecycleConsumerTest {
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/servicecatalog/aws4_request";
+
+    @Inject
+    ObjectMapper objectMapper;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -155,29 +162,42 @@ class ServiceCatalogProvisionedProductLifecycleConsumerTest {
     // ---------- TerminateProvisionedProduct ----------
 
     @Test
-    void terminateProvisionedProduct_marksTerminatedAndReturnsDescribableRecord() {
+    void terminateProvisionedProduct_marksTerminatedAndReturnsDescribableRecord() throws Exception {
         String productId = createProduct("ab-terminate-pp-product");
         String artifactId = firstArtifactId(productId);
         String provisionedId = importProvisionedProduct(productId, artifactId, "ab-terminate-pp");
+        Response originalProduct = call("DescribeProvisionedProduct", "{\"Id\":\"" + provisionedId + "\"}")
+                .then().statusCode(200).extract().response();
+        double originalCreatedTime = objectMapper.readTree(originalProduct.asString())
+                .path("ProvisionedProductDetail").path("CreatedTime").asDouble();
 
-        String recordId = call("TerminateProvisionedProduct", "{\"ProvisionedProductId\":\""
+        Thread.sleep(25);
+        Response terminated = call("TerminateProvisionedProduct", "{\"ProvisionedProductId\":\""
                 + provisionedId + "\",\"TerminateToken\":\"tok-terminate-pp\"}")
         .then()
             .statusCode(200)
             .body("RecordDetail.ProvisionedProductId", equalTo(provisionedId))
             .body("RecordDetail.Status", equalTo("SUCCEEDED"))
             .body("RecordDetail.RecordType", equalTo("TERMINATE_PROVISIONED_PRODUCT"))
-            .extract().path("RecordDetail.RecordId");
+            .extract().response();
+        JsonNode terminationRecord = objectMapper.readTree(terminated.asString()).path("RecordDetail");
+        String recordId = terminationRecord.path("RecordId").asText();
 
-        call("DescribeProvisionedProduct", "{\"Id\":\"" + provisionedId + "\"}")
+        Response terminatedProduct = call("DescribeProvisionedProduct", "{\"Id\":\"" + provisionedId + "\"}")
         .then()
             .statusCode(200)
-            .body("ProvisionedProductDetail.Status", equalTo("TERMINATED"));
+            .body("ProvisionedProductDetail.Status", equalTo("TERMINATED"))
+            .extract().response();
+        assertEquals(originalCreatedTime, objectMapper.readTree(terminatedProduct.asString())
+                .path("ProvisionedProductDetail").path("CreatedTime").asDouble());
 
-        call("DescribeRecord", "{\"Id\":\"" + recordId + "\"}")
+        Response described = call("DescribeRecord", "{\"Id\":\"" + recordId + "\"}")
         .then()
             .statusCode(200)
-            .body("RecordDetail.RecordType", equalTo("TERMINATE_PROVISIONED_PRODUCT"));
+            .body("RecordDetail.RecordType", equalTo("TERMINATE_PROVISIONED_PRODUCT"))
+            .extract().response();
+        JsonNode describedRecord = objectMapper.readTree(described.asString()).path("RecordDetail");
+        assertEquals(describedRecord.path("CreatedTime").asDouble(), terminationRecord.path("CreatedTime").asDouble());
     }
 
     @Test

@@ -153,15 +153,15 @@ class SsoOidcServiceTest {
         refresh.put("grantType", "refresh_token");
         refresh.put("refreshToken", source.refreshToken());
         assertOidcError("invalid_scope",
-                () -> service.createIamToken(refresh, sourceApplication, java.util.List.of("api:write")));
+                () -> service.createIamToken(refresh, sourceApplication, List.of("api:write")));
         assertEquals(sourceApplication,
-                service.createIamToken(refresh, sourceApplication, java.util.List.of("api:read")).clientId());
+                service.createIamToken(refresh, sourceApplication, List.of("api:read")).clientId());
 
         ObjectNode jwt = mapper.createObjectNode();
         jwt.put("grantType", "urn:ietf:params:oauth:grant-type:jwt-bearer");
         jwt.put("assertion", "header.payload.signature");
         assertEquals(targetApplication,
-                service.createIamToken(jwt, targetApplication, java.util.List.of("openid")).clientId());
+                service.createIamToken(jwt, targetApplication, List.of("openid")).clientId());
 
         ObjectNode exchange = mapper.createObjectNode();
         exchange.put("grantType", "urn:ietf:params:oauth:grant-type:token-exchange");
@@ -173,7 +173,7 @@ class SsoOidcServiceTest {
         assertNull(exchanged.refreshToken());
 
         assertOidcError("invalid_grant",
-                () -> service.createIamToken(exchange, sourceApplication, java.util.List.of("openid")));
+                () -> service.createIamToken(exchange, sourceApplication, List.of("openid")));
     }
 
     @Test

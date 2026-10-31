@@ -2,8 +2,12 @@ package io.github.hectorvent.floci.services.ssoadmin;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.hamcrest.Matchers;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -47,7 +51,7 @@ class SsoAdminIntegrationTest {
     void listInstances_isStableAcrossCalls() {
         String firstArn = listInstancesArn();
         String secondArn = listInstancesArn();
-        org.junit.jupiter.api.Assertions.assertEquals(firstArn, secondArn);
+        Assertions.assertEquals(firstArn, secondArn);
     }
 
     @Test
@@ -71,7 +75,7 @@ class SsoAdminIntegrationTest {
                     + "\"InstanceAccessControlAttributeConfiguration\":{\"AccessControlAttributes\":[{"
                     + "\"Key\":\"Department\",\"Value\":{\"Source\":[\"${path:enterprise.department}\"]}}]}}")
         .when().post("/")
-        .then().statusCode(200).body(org.hamcrest.Matchers.emptyOrNullString());
+        .then().statusCode(200).body(Matchers.emptyOrNullString());
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -94,7 +98,7 @@ class SsoAdminIntegrationTest {
                     + "\"EncryptionConfiguration\":{\"KeyType\":\"CUSTOMER_MANAGED_KEY\","
                     + "\"KmsKeyArn\":\"arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-1234567890ab\"}}")
         .when().post("/")
-        .then().statusCode(200).body(org.hamcrest.Matchers.emptyOrNullString());
+        .then().statusCode(200).body(Matchers.emptyOrNullString());
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -134,7 +138,7 @@ class SsoAdminIntegrationTest {
             .body("RegionName", equalTo("eu-west-2"))
             .body("Status", equalTo("ACTIVE"))
             .body("IsPrimaryRegion", equalTo(false))
-            .body("AddedDate", org.hamcrest.Matchers.notNullValue());
+            .body("AddedDate", Matchers.notNullValue());
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -145,7 +149,7 @@ class SsoAdminIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Regions.RegionName", org.hamcrest.Matchers.hasItem("eu-west-2"))
+            .body("Regions.RegionName", Matchers.hasItem("eu-west-2"))
             .body("Regions.find { it.RegionName == 'eu-west-2' }.Status", equalTo("ACTIVE"));
 
         given()
@@ -157,7 +161,7 @@ class SsoAdminIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", org.hamcrest.Matchers.containsString("ConflictException"));
+            .body("__type", Matchers.containsString("ConflictException"));
     }
 
     @Test
@@ -186,7 +190,7 @@ class SsoAdminIntegrationTest {
             .body(request)
         .when().post("/")
         .then().statusCode(400)
-            .body("__type", org.hamcrest.Matchers.containsString("ResourceNotFoundException"));
+            .body("__type", Matchers.containsString("ResourceNotFoundException"));
     }
 
     @Test
@@ -221,7 +225,7 @@ class SsoAdminIntegrationTest {
                 .body("{\"InstanceArn\":\"" + instanceArn + "\",\"ResourceArn\":\"" + permissionSetArn + "\","
                         + "\"Tags\":[{\"Key\":\"Environment\",\"Value\":\"prod\"},{\"Key\":\"Owner\",\"Value\":\"platform\"}]}")
             .when().post("/")
-            .then().statusCode(200).body(org.hamcrest.Matchers.emptyOrNullString());
+            .then().statusCode(200).body(Matchers.emptyOrNullString());
 
         given()
                 .contentType("application/x-amz-json-1.1")
@@ -241,7 +245,7 @@ class SsoAdminIntegrationTest {
                 .header("X-Amz-Target", "SWBExternalService.UntagResource")
                 .body("{\"ResourceArn\":\"" + permissionSetArn + "\",\"TagKeys\":[\"Environment\"]}")
             .when().post("/")
-            .then().statusCode(200).body(org.hamcrest.Matchers.emptyOrNullString());
+            .then().statusCode(200).body(Matchers.emptyOrNullString());
 
         given()
                 .contentType("application/x-amz-json-1.1")
@@ -276,7 +280,7 @@ class SsoAdminIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(org.hamcrest.Matchers.is(org.hamcrest.Matchers.emptyOrNullString()));
+            .body(Matchers.is(Matchers.emptyOrNullString()));
     }
 
     @Test
@@ -338,7 +342,7 @@ class SsoAdminIntegrationTest {
             .body("ApplicationAccount", equalTo("000000000000"))
             .body("ApplicationArn", equalTo(applicationArn))
             .body("ApplicationProviderArn", equalTo("arn:aws:sso::aws:applicationProvider/custom"))
-            .body("CreatedDate", org.hamcrest.Matchers.notNullValue())
+            .body("CreatedDate", Matchers.notNullValue())
             .body("CreatedFrom", equalTo("us-east-1"))
             .body("Description", equalTo("Describe application"))
             .body("IdentityStoreArn", equalTo("arn:aws:identitystore::000000000000:identitystore/d-9067f2a3c1"))
@@ -358,7 +362,7 @@ class SsoAdminIntegrationTest {
                     + "\"ApplicationProvider\":\"arn:aws:sso::aws:applicationProvider/custom\"}}")
         .when().post("/")
         .then().statusCode(200)
-            .body("Applications.ApplicationArn", org.hamcrest.Matchers.hasItem(applicationArn));
+            .body("Applications.ApplicationArn", Matchers.hasItem(applicationArn));
     }
 
     @Test
@@ -382,7 +386,7 @@ class SsoAdminIntegrationTest {
             .body("{\"ApplicationArn\":\"" + applicationArn + "\",\"Name\":\"Updated Integration\","
                     + "\"Description\":\"Updated application\",\"Status\":\"DISABLED\"}")
         .when().post("/")
-        .then().statusCode(200).body(org.hamcrest.Matchers.emptyOrNullString());
+        .then().statusCode(200).body(Matchers.emptyOrNullString());
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -429,7 +433,7 @@ class SsoAdminIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(org.hamcrest.Matchers.is(org.hamcrest.Matchers.emptyOrNullString()));
+            .body(Matchers.is(Matchers.emptyOrNullString()));
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -549,7 +553,7 @@ class SsoAdminIntegrationTest {
             .header("X-Amz-Target", "SWBExternalService.PutApplicationAssignmentConfiguration")
             .body("{\"ApplicationArn\":\"" + applicationArn + "\",\"AssignmentRequired\":false}")
         .when().post("/")
-        .then().statusCode(200).body(org.hamcrest.Matchers.emptyOrNullString());
+        .then().statusCode(200).body(Matchers.emptyOrNullString());
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -581,7 +585,7 @@ class SsoAdminIntegrationTest {
                     + "\"AuthorizedTargets\":[\"arn:aws:sso:::instance/ssoins-7223b02a5d9f7c8e\"]}")
         .when().post("/")
         .then().statusCode(200)
-            .body(org.hamcrest.Matchers.is(org.hamcrest.Matchers.emptyOrNullString()));
+            .body(Matchers.is(Matchers.emptyOrNullString()));
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -607,7 +611,7 @@ class SsoAdminIntegrationTest {
         .then().statusCode(200)
             .extract().path("ApplicationArn");
 
-        for (String scope : java.util.List.of("api:read", "api:write")) {
+        for (String scope : List.of("api:read", "api:write")) {
             given()
                 .contentType("application/x-amz-json-1.1")
                 .header("Authorization", AUTH_HEADER)
@@ -631,7 +635,7 @@ class SsoAdminIntegrationTest {
             .body("Scopes[0].AuthorizedTargets[0]",
                     equalTo("arn:aws:sso:::instance/ssoins-7223b02a5d9f7c8e"))
             .extract().path("NextToken");
-        org.junit.jupiter.api.Assertions.assertNotNull(nextToken);
+        Assertions.assertNotNull(nextToken);
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -688,14 +692,14 @@ class SsoAdminIntegrationTest {
                 .body(assignmentRequest)
             .when().post("/")
             .then().statusCode(200)
-            .body(org.hamcrest.Matchers.is(org.hamcrest.Matchers.emptyOrNullString()));
+            .body(Matchers.is(Matchers.emptyOrNullString()));
 
         given().contentType("application/x-amz-json-1.1").header("Authorization", AUTH_HEADER)
                 .header("X-Amz-Target", "SWBExternalService.DeleteApplicationAssignment")
                 .body(assignmentRequest)
             .when().post("/")
             .then().statusCode(400)
-            .body("__type", org.hamcrest.Matchers.containsString("ResourceNotFoundException"));
+            .body("__type", Matchers.containsString("ResourceNotFoundException"));
     }
 
     @Test
@@ -721,7 +725,7 @@ class SsoAdminIntegrationTest {
             .header("X-Amz-Target", "SWBExternalService.PutApplicationAuthenticationMethod")
             .body(body)
         .when().post("/")
-        .then().statusCode(200).body(org.hamcrest.Matchers.emptyOrNullString());
+        .then().statusCode(200).body(Matchers.emptyOrNullString());
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -786,14 +790,14 @@ class SsoAdminIntegrationTest {
                 .body("{\"ApplicationArn\":\"" + applicationArn + "\",\"AuthenticationMethodType\":\"IAM\"}")
             .when().post("/")
             .then().statusCode(400)
-            .body("__type", org.hamcrest.Matchers.containsString("ResourceNotFoundException"));
+            .body("__type", Matchers.containsString("ResourceNotFoundException"));
 
         given().contentType("application/x-amz-json-1.1").header("Authorization", AUTH_HEADER)
                 .header("X-Amz-Target", "SWBExternalService.DeleteApplicationAuthenticationMethod")
                 .body("{\"ApplicationArn\":\"" + applicationArn + "\",\"AuthenticationMethodType\":\"SAML\"}")
             .when().post("/")
             .then().statusCode(400)
-            .body("__type", org.hamcrest.Matchers.containsString("ValidationException"));
+            .body("__type", Matchers.containsString("ValidationException"));
     }
 
     @Test
@@ -825,7 +829,7 @@ class SsoAdminIntegrationTest {
             .body("{\"ApplicationArn\":\"" + applicationArn + "\","
                     + "\"UserBackgroundSessionApplicationStatus\":\"ENABLED\"}")
         .when().post("/")
-        .then().statusCode(200).body(org.hamcrest.Matchers.emptyOrNullString());
+        .then().statusCode(200).body(Matchers.emptyOrNullString());
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -858,7 +862,7 @@ class SsoAdminIntegrationTest {
                     + "\"GrantType\":\"authorization_code\","
                     + "\"Grant\":{\"AuthorizationCode\":{\"RedirectUris\":[\"https://example.com/callback\"]}}}")
         .when().post("/")
-        .then().statusCode(200).body(org.hamcrest.Matchers.emptyOrNullString());
+        .then().statusCode(200).body(Matchers.emptyOrNullString());
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -923,14 +927,14 @@ class SsoAdminIntegrationTest {
                 .body("{\"ApplicationArn\":\"" + applicationArn + "\",\"GrantType\":\"authorization_code\"}")
             .when().post("/")
             .then().statusCode(400)
-            .body("__type", org.hamcrest.Matchers.containsString("ResourceNotFoundException"));
+            .body("__type", Matchers.containsString("ResourceNotFoundException"));
 
         given().contentType("application/x-amz-json-1.1").header("Authorization", AUTH_HEADER)
                 .header("X-Amz-Target", "SWBExternalService.DeleteApplicationGrant")
                 .body("{\"ApplicationArn\":\"" + applicationArn + "\",\"GrantType\":\"client_credentials\"}")
             .when().post("/")
             .then().statusCode(400)
-            .body("__type", org.hamcrest.Matchers.containsString("ValidationException"));
+            .body("__type", Matchers.containsString("ValidationException"));
     }
 
     @Test
@@ -987,7 +991,7 @@ class SsoAdminIntegrationTest {
             .body("{\"TrustedTokenIssuerArn\":\"" + arn + "\",\"Name\":\"IntegrationIssuerUpdated\","
                     + "\"TrustedTokenIssuerConfiguration\":{\"OidcJwtConfiguration\":{\"ClaimAttributePath\":\"email\"}}}")
         .when().post("/")
-        .then().statusCode(200).body(org.hamcrest.Matchers.emptyOrNullString());
+        .then().statusCode(200).body(Matchers.emptyOrNullString());
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -1016,7 +1020,7 @@ class SsoAdminIntegrationTest {
         .when().post("/")
         .then()
             .statusCode(200)
-            .body("TrustedTokenIssuers.TrustedTokenIssuerArn", org.hamcrest.Matchers.hasItem(arn))
+            .body("TrustedTokenIssuers.TrustedTokenIssuerArn", Matchers.hasItem(arn))
             .body("TrustedTokenIssuers.find { it.TrustedTokenIssuerArn == '" + arn + "' }.Name", equalTo("IntegrationIssuerUpdated"))
             .body("TrustedTokenIssuers.find { it.TrustedTokenIssuerArn == '" + arn + "' }.TrustedTokenIssuerType", equalTo("OIDC_JWT"));
     }
@@ -1046,7 +1050,7 @@ class SsoAdminIntegrationTest {
             .body(deleteRequest)
         .when().post("/")
         .then().statusCode(200)
-            .body(org.hamcrest.Matchers.is(org.hamcrest.Matchers.emptyOrNullString()));
+            .body(Matchers.is(Matchers.emptyOrNullString()));
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -1055,7 +1059,7 @@ class SsoAdminIntegrationTest {
             .body(deleteRequest)
         .when().post("/")
         .then().statusCode(400)
-            .body("__type", org.hamcrest.Matchers.containsString("ResourceNotFoundException"));
+            .body("__type", Matchers.containsString("ResourceNotFoundException"));
     }
 
     @Test
@@ -1073,7 +1077,7 @@ class SsoAdminIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(org.hamcrest.Matchers.is(org.hamcrest.Matchers.emptyOrNullString()));
+            .body(Matchers.is(Matchers.emptyOrNullString()));
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -1105,7 +1109,7 @@ class SsoAdminIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(org.hamcrest.Matchers.anyOf(org.hamcrest.Matchers.is(200), org.hamcrest.Matchers.is(400)));
+            .statusCode(Matchers.anyOf(Matchers.is(200), Matchers.is(400)));
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -1126,7 +1130,7 @@ class SsoAdminIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(org.hamcrest.Matchers.is(org.hamcrest.Matchers.emptyOrNullString()));
+            .body(Matchers.is(Matchers.emptyOrNullString()));
 
         given()
             .contentType("application/x-amz-json-1.1")
@@ -1137,7 +1141,7 @@ class SsoAdminIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", org.hamcrest.Matchers.containsString("ResourceNotFoundException"));
+            .body("__type", Matchers.containsString("ResourceNotFoundException"));
     }
 
     @Test
@@ -1184,7 +1188,7 @@ class SsoAdminIntegrationTest {
             .body("Status", equalTo("ACTIVE"))
             .body("PermissionSetsEnabled", equalTo(false))
             .body("IdentityStoreId", matchesPattern("d-[0-9a-f]{10}"))
-            .body("CreatedDate", org.hamcrest.Matchers.notNullValue());
+            .body("CreatedDate", Matchers.notNullValue());
         given()
             .contentType("application/x-amz-json-1.1")
             .header("Authorization", auth)
@@ -1199,7 +1203,7 @@ class SsoAdminIntegrationTest {
             .body("Instances[0].Name", equalTo("StandaloneInstance"))
             .body("Instances[0].OwnerAccountId", equalTo("222233334444"))
             .body("Instances[0].PrimaryRegion", equalTo("us-west-2"))
-            .body("Instances[0].CreatedDate", org.hamcrest.Matchers.greaterThan(0.0f))
+            .body("Instances[0].CreatedDate", Matchers.greaterThan(0.0f))
             .body("Instances[0].Regions.size()", equalTo(1))
             .body("Instances[0].Regions[0].RegionName", equalTo("us-west-2"))
             .body("Instances[0].Regions[0].IsPrimaryRegion", equalTo(true))
@@ -1224,7 +1228,7 @@ class SsoAdminIntegrationTest {
                 .body("{\"InstanceArn\":\"" + instanceArn + "\"}")
             .when().post("/")
             .then().statusCode(200)
-            .body(org.hamcrest.Matchers.is(org.hamcrest.Matchers.emptyOrNullString()));
+            .body(Matchers.is(Matchers.emptyOrNullString()));
 
         given()
                 .contentType("application/x-amz-json-1.1")
@@ -1255,21 +1259,21 @@ class SsoAdminIntegrationTest {
                 .body("{\"ApplicationArn\":\"" + applicationArn + "\"}")
             .when().post("/")
             .then().statusCode(200)
-            .body(org.hamcrest.Matchers.is(org.hamcrest.Matchers.emptyOrNullString()));
+            .body(Matchers.is(Matchers.emptyOrNullString()));
 
         given().contentType("application/x-amz-json-1.1").header("Authorization", AUTH_HEADER)
                 .header("X-Amz-Target", "SWBExternalService.DeleteApplication")
                 .body("{\"ApplicationArn\":\"" + applicationArn + "\"}")
             .when().post("/")
             .then().statusCode(400)
-            .body("__type", org.hamcrest.Matchers.containsString("ResourceNotFoundException"));
+            .body("__type", Matchers.containsString("ResourceNotFoundException"));
     }
 
     @Test
     void listAccountAssignmentsForPrincipalReturnsPrincipalAccessWithPagination() {
         String instanceArn = listInstancesArn();
         String principalId = "cccccccc-dddd-eeee-ffff-000000000001";
-        for (String name : java.util.List.of("PrincipalIntegrationOne", "PrincipalIntegrationTwo")) {
+        for (String name : List.of("PrincipalIntegrationOne", "PrincipalIntegrationTwo")) {
             String permissionSetArn = given()
                     .contentType("application/x-amz-json-1.1")
                     .header("Authorization", AUTH_HEADER)
@@ -1295,7 +1299,7 @@ class SsoAdminIntegrationTest {
             .then().statusCode(200)
                 .body("AccountAssignments.size()", equalTo(1))
                 .extract().path("NextToken");
-        org.junit.jupiter.api.Assertions.assertNotNull(nextToken);
+        Assertions.assertNotNull(nextToken);
     }
 
     @Test
@@ -1335,7 +1339,7 @@ class SsoAdminIntegrationTest {
                 .body("{\"InstanceArn\":\"" + instanceArn + "\",\"Filter\":{\"Status\":\"SUCCEEDED\"}}")
             .when().post("/")
             .then().statusCode(200)
-                .body("PermissionSetsProvisioningStatus.RequestId", org.hamcrest.Matchers.hasItem(requestId));
+                .body("PermissionSetsProvisioningStatus.RequestId", Matchers.hasItem(requestId));
     }
 
     @Test
@@ -1361,7 +1365,7 @@ class SsoAdminIntegrationTest {
                         + "\"ProvisioningStatus\":\"LATEST_PERMISSION_SET_PROVISIONED\"}")
             .when().post("/")
             .then().statusCode(200)
-                .body("PermissionSets", org.hamcrest.Matchers.hasItem(permissionSetArn));
+                .body("PermissionSets", Matchers.hasItem(permissionSetArn));
     }
 
     @Test
@@ -1387,7 +1391,7 @@ class SsoAdminIntegrationTest {
                         + "\"ProvisioningStatus\":\"LATEST_PERMISSION_SET_PROVISIONED\"}")
             .when().post("/")
             .then().statusCode(200)
-                .body("AccountIds", org.hamcrest.Matchers.hasItem("321098765432"));
+                .body("AccountIds", Matchers.hasItem("321098765432"));
     }
 
     @Test
@@ -1417,7 +1421,7 @@ class SsoAdminIntegrationTest {
                 .statusCode(200)
                 .body("AccountAssignmentDeletionStatus.Status", equalTo("SUCCEEDED"))
                 .body("AccountAssignmentDeletionStatus.RequestId", matchesPattern("[0-9a-f-]{36}"))
-                .body("AccountAssignmentDeletionStatus.CreatedDate", org.hamcrest.Matchers.greaterThan(0.0f))
+                .body("AccountAssignmentDeletionStatus.CreatedDate", Matchers.greaterThan(0.0f))
                 .extract().path("AccountAssignmentDeletionStatus.RequestId");
 
         given().contentType("application/x-amz-json-1.1").header("Authorization", AUTH_HEADER)
@@ -1433,7 +1437,7 @@ class SsoAdminIntegrationTest {
                 .body("{\"InstanceArn\":\"" + instanceArn + "\",\"Filter\":{\"Status\":\"SUCCEEDED\"}}")
             .when().post("/")
             .then().statusCode(200)
-                .body("AccountAssignmentsDeletionStatus.RequestId", org.hamcrest.Matchers.hasItem(deletionRequestId));
+                .body("AccountAssignmentsDeletionStatus.RequestId", Matchers.hasItem(deletionRequestId));
     }
 
     @Test
@@ -1447,7 +1451,7 @@ class SsoAdminIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", org.hamcrest.Matchers.containsString("UnknownOperationException"));
+            .body("__type", Matchers.containsString("UnknownOperationException"));
     }
 
     @Test
@@ -1462,7 +1466,7 @@ class SsoAdminIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Instances.size()", org.hamcrest.Matchers.equalTo(0));
+            .body("Instances.size()", Matchers.equalTo(0));
     }
 
     private static String listInstancesArn() {

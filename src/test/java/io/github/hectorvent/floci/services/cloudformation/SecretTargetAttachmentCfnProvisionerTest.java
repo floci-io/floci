@@ -22,7 +22,10 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
@@ -93,7 +96,7 @@ class SecretTargetAttachmentCfnProvisionerTest {
         provisioner.delete(resource, REGION);
 
         ArgumentCaptor<String> values = ArgumentCaptor.forClass(String.class);
-        verify(secretsManagerService, org.mockito.Mockito.times(2)).putSecretValue(
+        verify(secretsManagerService, Mockito.times(2)).putSecretValue(
                 eq(SECRET_ARN), values.capture(), isNull(), isNull(), eq(REGION), isNull());
 
         JsonNode attached = mapper.readTree(values.getAllValues().get(0));
@@ -638,11 +641,11 @@ class SecretTargetAttachmentCfnProvisionerTest {
 
     private void stubSecretValues(String... values) {
         when(secretsManagerService.describeSecret(SECRET_ID, REGION)).thenReturn(secret(SECRET_ARN));
-        SecretVersion[] versions = java.util.Arrays.stream(values)
+        SecretVersion[] versions = Arrays.stream(values)
                 .map(this::secretVersion)
                 .toArray(SecretVersion[]::new);
         when(secretsManagerService.getSecretValue(SECRET_ARN, null, null, REGION))
-                .thenReturn(versions[0], java.util.Arrays.copyOfRange(versions, 1, versions.length));
+                .thenReturn(versions[0], Arrays.copyOfRange(versions, 1, versions.length));
     }
 
     private Secret secret(String arn) {
@@ -662,7 +665,7 @@ class SecretTargetAttachmentCfnProvisionerTest {
         resource.setLogicalId("Attachment");
         resource.setResourceType("AWS::SecretsManager::SecretTargetAttachment");
         resource.setPhysicalId(SECRET_ARN);
-        resource.setAttributes(new java.util.HashMap<>(Map.of(
+        resource.setAttributes(new HashMap<>(Map.of(
                 "__FlociSecretTargetManagedKeys",
                 "engine,host,port,dbname,dbInstanceIdentifier",
                 "__FlociSecretTargetOwner",

@@ -21,6 +21,7 @@ import java.security.KeyPairGenerator;
 import java.security.Signature;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
+import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.restassured.RestAssured.given;
@@ -235,7 +236,7 @@ class HttpProxyJwtClaimsMappingIntegrationTest {
     private static String base64UrlUnsigned(BigInteger value) {
         byte[] bytes = value.toByteArray();
         if (bytes.length > 1 && bytes[0] == 0) {
-            bytes = java.util.Arrays.copyOfRange(bytes, 1, bytes.length);
+            bytes = Arrays.copyOfRange(bytes, 1, bytes.length);
         }
         return Base64Url.encode(bytes);
     }

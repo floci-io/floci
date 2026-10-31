@@ -26,11 +26,14 @@ public class S3ResourcePolicyProvider implements ResourcePolicyProvider {
         if (!"s3".equalsIgnoreCase(credentialScope) || resourceArn == null) {
             return List.of();
         }
-        String bucketName = extractBucketName(resourceArn);
+        AwsArnUtils.Arn arn = s3Arn(resourceArn);
+        String bucketName = arn == null ? null : extractBucketName(arn);
         if (bucketName == null || bucketName.isEmpty() || "*".equals(bucketName)) {
             return List.of();
         }
-        Optional<S3Service.BucketPolicyInfo> policyInfo = s3Service.findBucketPolicyInfo(bucketName);
+        Optional<S3Service.BucketPolicyInfo> policyInfo = S3ControlArnUtils.regionalBucketForm(arn)
+                ? s3Service.findBucketPolicyInfoForAccount(arn.accountId(), bucketName)
+                : s3Service.findBucketPolicyInfo(bucketName);
         return policyInfo.map(info -> List.of(new ResourcePolicy(info.policy(), info.ownerAccountId())))
                 .orElseGet(List::of);
     }
@@ -50,12 +53,26 @@ public class S3ResourcePolicyProvider implements ResourcePolicyProvider {
         if (!"s3".equalsIgnoreCase(credentialScope) || resourceArn == null) {
             return resourceArn;
         }
-        String bucketName = extractBucketName(resourceArn);
-        if (bucketName == null || bucketName.isEmpty() || "*".equals(bucketName)) {
+        AwsArnUtils.Arn arn = s3Arn(resourceArn);
+        if (arn == null || S3ControlArnUtils.regionalBucketForm(arn)) {
             return resourceArn;
         }
-        String resource = AwsArnUtils.resourceIfArnFor(resourceArn, "s3").orElseThrow();
-        return AwsArnUtils.Arn.global(s3Service.bucketPartition(bucketName), "s3", "", resource).toString();
+        String bucketName = extractBucketName(arn);
+        if (bucketName.isEmpty() || "*".equals(bucketName)) {
+            return resourceArn;
+        }
+        return AwsArnUtils.Arn.global(s3Service.bucketPartition(bucketName), "s3", "", arn.resource()).toString();
+    }
+
+    /**
+     * The request's resource, parsed without decoding: every ARN reaching here is already in its
+     * decoded form, the data plane's from the request path and a control tagging one re-minted
+     * by the rule that read it off the wire, so decoding again would rewrite an object key like
+     * {@code a+b.txt} before IAM checks it. Null when it is not an s3 ARN, which leaves the
+     * request its identity policy alone: no bucket policy applies, as when the bucket has none.
+     */
+    private static AwsArnUtils.Arn s3Arn(String resourceArn) {
+        return AwsArnUtils.isArnFor(resourceArn, "s3") ? AwsArnUtils.parse(resourceArn) : null;
     }
 
     /**
@@ -63,11 +80,21 @@ public class S3ResourcePolicyProvider implements ResourcePolicyProvider {
      * no policy for a China or GovCloud bucket, which silently changed the access decision.
      */
     static String extractBucketName(String resourceArn) {
-        String tail = AwsArnUtils.resourceIfArnFor(resourceArn, "s3").orElse(null);
-        if (tail == null) {
-            return null;
+        AwsArnUtils.Arn arn = s3Arn(resourceArn);
+        return arn == null ? null : extractBucketName(arn);
+    }
+
+    /**
+     * The bucket of a parsed S3 ARN: the one after {@code bucket/} in the regional form a
+     * control tagging route names, so a policy is looked up from the bucket the handler acts on
+     * and not from a bucket named {@code bucket} with the real name as its key, and the bucket
+     * before the first slash in every data-plane form.
+     */
+    static String extractBucketName(AwsArnUtils.Arn arn) {
+        if (S3ControlArnUtils.regionalBucketForm(arn)) {
+            return S3ControlArnUtils.bucketName(arn);
         }
-        int slash = tail.indexOf('/');
-        return slash < 0 ? tail : tail.substring(0, slash);
+        int slash = arn.resource().indexOf('/');
+        return slash < 0 ? arn.resource() : arn.resource().substring(0, slash);
     }
 }

@@ -9,6 +9,7 @@ import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttSecurityException;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
+import org.eclipse.paho.mqttv5.client.MqttConnectionOptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
@@ -305,8 +306,8 @@ class IotMqttMutualTlsIntegrationTest {
         return new org.eclipse.paho.mqttv5.client.MqttClient("ssl://127.0.0.1:" + TLS_PORT, clientId, null);
     }
 
-    private static org.eclipse.paho.mqttv5.client.MqttConnectionOptions mqtt5Options(SSLSocketFactory socketFactory) {
-        org.eclipse.paho.mqttv5.client.MqttConnectionOptions options = new org.eclipse.paho.mqttv5.client.MqttConnectionOptions();
+    private static MqttConnectionOptions mqtt5Options(SSLSocketFactory socketFactory) {
+        MqttConnectionOptions options = new MqttConnectionOptions();
         options.setCleanStart(true);
         options.setConnectionTimeout(10);
         options.setAutomaticReconnect(false);

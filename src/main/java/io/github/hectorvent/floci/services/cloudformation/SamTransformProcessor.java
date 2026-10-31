@@ -15,8 +15,11 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -94,11 +97,14 @@ class SamTransformProcessor {
         // (including the early return below when Resources is absent or not an object).
         JsonNode globals = expanded.path("Globals");
         expanded.remove("Globals");
-        // SAM refuses any Globals property it does not list for a section. AutoPublishCodeSha256 is
-        // one of them: one value there would name every function's version.
-        if (globals.path("Function").has("AutoPublishCodeSha256")) {
-            throw new AwsException("ValidationError", "'Globals' section is invalid. 'AutoPublishCodeSha256' "
-                    + "is not a supported property of 'Function'.", 400);
+        // SAM refuses any Globals property it does not list for a section. AutoPublishCodeSha256 and
+        // VersionDescription are two of them: one value there would name, or describe, every
+        // function's version.
+        for (String property : List.of("AutoPublishCodeSha256", "VersionDescription")) {
+            if (globals.path("Function").has(property)) {
+                throw new AwsException("ValidationError", "'Globals' section is invalid. '" + property
+                        + "' is not a supported property of 'Function'.", 400);
+            }
         }
 
         JsonNode resources = expanded.path("Resources");
@@ -122,6 +128,7 @@ class SamTransformProcessor {
         // AWS::Serverless::HttpApi via ApiId: {Ref: <logicalId>}) before either side is expanded,
         // so expansion order between the Function and the HttpApi resource doesn't matter.
         List<HttpApiRoute> httpApiRoutes = collectHttpApiRoutes(samLogicalIds, resources);
+        Map<String, String> generatedReferences = new LinkedHashMap<>();
 
         for (String logicalId : samLogicalIds) {
             JsonNode resDef = resources.get(logicalId);
@@ -135,8 +142,11 @@ class SamTransformProcessor {
             // copyResourceLevelAttributes runs once per arm, right after that arm builds its node.
             switch (type) {
                 case "AWS::Serverless::Function" -> {
-                    expandServerlessFunction(logicalId, mergeGlobals(globals, "Function", properties),
+                    String aliasId = expandServerlessFunction(logicalId, mergeGlobals(globals, "Function", properties),
                             resDef, expanded, expandedResources, parameterValues);
+                    if (aliasId != null) {
+                        generatedReferences.put(logicalId + ".Alias", aliasId);
+                    }
                     copyResourceLevelAttributes(resDef, (ObjectNode) expandedResources.path(logicalId));
                 }
                 case "AWS::Serverless::SimpleTable" -> {
@@ -174,7 +184,26 @@ class SamTransformProcessor {
             generateImplicitApi(apiRoutes, globals(template), expandedResources);
         }
 
+        rewriteGeneratedReferences(expanded, generatedReferences);
         return expanded;
+    }
+
+    private void rewriteGeneratedReferences(JsonNode node, Map<String, String> generatedReferences) {
+        if (node.isObject()) {
+            ObjectNode object = (ObjectNode) node;
+            if (object.size() == 1 && object.path("Ref").isTextual()) {
+                String generatedId = generatedReferences.get(object.path("Ref").asText());
+                if (generatedId != null) {
+                    object.put("Ref", generatedId);
+                }
+                return;
+            }
+            object.elements().forEachRemaining(child -> rewriteGeneratedReferences(child, generatedReferences));
+        } else if (node.isArray()) {
+            for (JsonNode child : node) {
+                rewriteGeneratedReferences(child, generatedReferences);
+            }
+        }
     }
 
     private JsonNode globals(JsonNode template) {
@@ -293,7 +322,7 @@ class SamTransformProcessor {
         // Auth.Authorizers -> one AWS::ApiGatewayV2::Authorizer per entry, keyed by SAM authorizer
         // name so routes referencing Auth.DefaultAuthorizer (the only form handled here — per-route
         // Auth overrides are not expanded) can resolve the logical id to Ref.
-        Map<String, String> authorizerLogicalIdsByName = new java.util.LinkedHashMap<>();
+        Map<String, String> authorizerLogicalIdsByName = new LinkedHashMap<>();
         JsonNode auth = properties.path("Auth");
         JsonNode authorizers = auth.path("Authorizers");
         if (authorizers.isObject()) {
@@ -582,7 +611,7 @@ class SamTransformProcessor {
 
     private Map<String, String> expandImplicitRestApiAuthorizers(String apiId, JsonNode auth,
                                                                    ObjectNode resources) {
-        Map<String, String> logicalIds = new java.util.LinkedHashMap<>();
+        Map<String, String> logicalIds = new LinkedHashMap<>();
         JsonNode authorizers = auth.path("Authorizers");
         if (authorizers.isTextual()) {
             if (!"AWS_IAM".equals(authorizers.asText())) {
@@ -755,10 +784,10 @@ class SamTransformProcessor {
                     "SAM Api authorizer '" + defaultAuthorizer + "' is not defined in Auth.Authorizers.", 400);
         }
 
-        Map<String, String> pathToResource = new java.util.LinkedHashMap<>();
+        Map<String, String> pathToResource = new LinkedHashMap<>();
         List<String> methodIds = new ArrayList<>();
-        java.util.Set<String> permissionFns = new java.util.LinkedHashSet<>();
-        java.util.Set<String> seenRoutes = new java.util.LinkedHashSet<>();
+        Set<String> permissionFns = new LinkedHashSet<>();
+        Set<String> seenRoutes = new LinkedHashSet<>();
 
         for (ApiRoute r : routes) {
             String method = r.httpMethod().toUpperCase();
@@ -946,7 +975,7 @@ class SamTransformProcessor {
         return base;
     }
 
-    private void expandServerlessFunction(String logicalId, JsonNode properties, JsonNode source,
+    private String expandServerlessFunction(String logicalId, JsonNode properties, JsonNode source,
                                           ObjectNode template, ObjectNode resources,
                                           Map<String, String> parameterValues) {
         resources.remove(logicalId);
@@ -978,6 +1007,7 @@ class SamTransformProcessor {
                 expandFunctionEvent(logicalId, entry.getKey(), entry.getValue(), resources);
             }
         }
+        return aliasLogicalId;
     }
 
     /**
@@ -1017,6 +1047,7 @@ class SamTransformProcessor {
         versionDef.put("Type", "AWS::Lambda::Version");
         ObjectNode versionProps = objectMapper.createObjectNode();
         versionProps.set("FunctionName", ref(functionLogicalId));
+        copyRenamed(properties, "VersionDescription", versionProps, "Description");
         versionDef.set("Properties", versionProps);
         versionDef.setAll(passthrough.deepCopy());
         // The version a new hash replaces leaves the template on that update; like SAM, keep it

@@ -18,6 +18,62 @@
 | `AssumeRoot` | Opens a privileged session on a member account of the organization |
 | `GetWebIdentityToken` | Returns a signed JWT representing the calling identity |
 
+## Request Constraints
+
+Every operation that models a constraint is held to the one its model declares rather than to a
+check written by hand, which is all ten that carry a member: `tools/aws/regen_sts_shapes.py`
+vendors them and the walk is the one IAM reads its own file with. `GetCallerIdentity` models no
+member at all, so there is nothing to read for it. One word of the
+message differs between the two: STS quotes the offending value, `Value 'x' at 'serialNumber'`,
+where IAM names the member and leaves it out, which is what each service's own captures carry (see
+the [IAM service doc](iam.md)). Every violation
+a request carries is reported in one `ValidationError`, in the order the model lists the members,
+and a member that breaks two constraints is reported for both. A member sent empty is a member the
+request carries, so it breaks its own length rather than reading as absent, and only a member the
+request names nowhere is answered as null. A list arrives numbered under its own name,
+`Audience.member.1` or the bare `Audience.1`, a member of a list of structures carries its fields
+under that prefix as `Tags.member.1.Key` does, and each is named the way this service already
+names one, `audience.1.member` and `tags.1.member.key`, under the index the request spelled.
+
+What that adds is on `GetSessionToken`, whose `SerialNumber`, `TokenCode` and
+`MinimumSessionTokenSize` were accepted and ignored: each is now held to its shape, so a serial
+number under 9 characters, a token code that is not six digits or a token size past 4096 answers
+400 where it used to answer credentials. The size is still only validated: the session token stays
+the length this emulator mints whatever the request asks for, which is a gap rather than a reading.
+`GetAccessKeyInfo` and `GetWebIdentityToken` answer the messages they already answered, from the
+same bounds and the same patterns, and what moves there is that an access key ID breaking both its
+length and its pattern is answered for both where the check it replaces stopped at the first.
+
+The model says nothing about what counts as a number, so a `DurationSeconds` or a
+`MinimumSessionTokenSize` that is no number at all stays `InvalidParameterValue`, answered before
+the constraints, while a digit string is held to the range whatever width it overflows: a duration
+of `99999999999` breaks the maximum rather than being called no integer. The whitespace around a
+number is not part of it, both where the range is read and where the duration is then used, so a
+`DurationSeconds` of ` 3600 ` is an hour rather than the default a raw parse would have fallen back
+to, which is how IAM reads its own `maxItems`.
+
+The seven operations read last answered an absent member from a check of their own, which named the
+parameter as the request writes it, `RoleArn` rather than `roleArn`, and read a blank value as an
+absent one. Both of those move onto the form above, so a request missing `RoleSessionName` is
+answered `Value null at 'roleSessionName' failed to satisfy constraint: Member must not be null`,
+and one sending it empty breaks its minimum length instead, which is the reading the model gives
+and the one the rest of this package already answers. What those seven gain is every bound the
+model declares beside the required members: `RoleArn` at 20 to 2048 characters,
+`RoleSessionName` at 2 to 64 of `[\w+=,.@-]`, `ExternalId`, `SourceIdentity`, `Policy`,
+`PolicyArns`, `Tags`, `TransitiveTagKeys` and `ProvidedContexts` on `AssumeRole`, `SAMLAssertion`
+at 4 to 100000 on `AssumeRoleWithSAML`, `WebIdentityToken` at 4 to 20000 and `ProviderId` at 4 to
+2048 on `AssumeRoleWithWebIdentity`, `Name` at 2 to 32 on `GetFederationToken`, `EncodedMessage` at
+1 to 10240 on `DecodeAuthorizationMessage`, and `TargetPrincipal` at 12 to 2048 on `AssumeRoot`,
+whose own length check said the same thing by hand. Each operation keeps the refusals it answers
+ahead of the constraints: `GetFederationToken` and `GetSessionToken` still turn away session
+credentials first, and `AssumeRoot` still refuses the global endpoint first.
+
+One reading is Floci's own. `TradeInToken` on `GetDelegatedAccessToken` is required and carries no
+length at all, so a request sending it empty is a request that carries it: it reaches the lookup
+and is answered `ExpiredTradeInTokenException`, the refusal any token that cannot be redeemed gets,
+where the check it replaces called it absent. Nothing published says what AWS answers an empty
+trade-in token, and the model is what is in hand, so the blank is read as the value it is.
+
 ## Privileged Root Sessions
 
 `AssumeRoot` returns "short term credentials you can use to perform privileged tasks on a member
@@ -67,8 +123,8 @@ than the credentials report AWS returns.
 itself: AWS states that the operation "does not indicate the state of the access key. The key might
 be active, inactive, or deleted", so an inactive key answers its account the same as an active one.
 A long-term `AKIA` key resolves through the account that holds it and a temporary `ASIA` key through
-the session that minted it. The ID is read against its own shape first, 16 to 128 characters of
-`[\w]`, which answers `ValidationError` before any lookup.
+the session that minted it. The ID is read against its own shape first, the 16 to 128 characters of
+`[\w]` the model declares, which answers `ValidationError` before any lookup.
 
 One answer is Floci's own. The operation models no errors at all, and the reference says only that
 "providing a deleted access key might return an error that the key doesn't exist", so a well-formed
@@ -112,7 +168,8 @@ this package: `Audience` is required and holds 1 to 10 audiences of 1 to 1000 ch
 `SigningAlgorithm` is required at a fixed length of 5, `DurationSeconds` is 60 to 3600 and defaults
 to 300, and `Tags` is at most 50 tags whose keys and values carry their own lengths and pattern. An
 audience sent empty is an audience that is present, so it breaks the minimum length rather than
-reading as absent.
+reading as absent, and an audience numbered but never sent is how an absent list arrives, so a
+request naming none of them is the required member reading as null.
 
 A session cannot outlive itself. `SessionDurationEscalationException` is what a caller holding
 temporary credentials gets when the requested duration would run past the moment its own session
@@ -140,7 +197,9 @@ under `request_tags` rather than the claim that chooses the token's lifetime.
 Two answers here are Floci's readings. `jwtAlgorithmType` publishes a fixed length of 5 and no enum, so a
 five-character value that is neither `RS256` nor `ES384` is answered with the enum violation this
 package renders for a value outside a documented set, the two values coming from the reference
-rather than from the model. The global endpoint is refused because the reference says "The
+rather than from the model. It is reported where the model lists that member, ahead of anything the
+tags break, and a value the declared length already refuses is not read against the set as well.
+The global endpoint is refused because the reference says "The
 GetWebIdentityToken API is not available on the STS Global endpoint" without giving the refusal, so
 it borrows the wording AWS publishes for `AssumeRoot`; a request to a local host names no such
 endpoint and is not refused. `JWTPayloadSizeExceededException` is modelled and nothing published

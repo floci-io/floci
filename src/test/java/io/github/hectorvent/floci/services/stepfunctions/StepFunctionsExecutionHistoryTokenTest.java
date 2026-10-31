@@ -70,6 +70,14 @@ class StepFunctionsExecutionHistoryTokenTest {
     }
 
     @Test
+    void aTokenIssuedAfterTheCurrentTimeIsRefused() {
+        String token = firstPageToken();
+
+        when(clock.millis()).thenReturn(ISSUED - 1);
+        assertInvalid(handler, token);
+    }
+
+    @Test
     void aTokenWhoseIssueTimeWasMovedForwardIsRefused() {
         String token = firstPageToken();
         String decoded = new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
