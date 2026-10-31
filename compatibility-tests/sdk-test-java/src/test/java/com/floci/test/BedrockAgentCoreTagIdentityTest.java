@@ -126,6 +126,45 @@ class BedrockAgentCoreTagIdentityTest {
     }
 
     @Test
+    void nonDefaultAccountMemoryTagsRespectIdentity() {
+        try (BedrockAgentCoreControlClient accountClient =
+                     TestFixtures.bedrockAgentCoreControlClient("111111111111")) {
+            String name = "memtag" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+            CreateMemoryResponse created = accountClient.createMemory(CreateMemoryRequest.builder()
+                    .name(name).eventExpiryDuration(30).build());
+            String arn = created.memory().arn();
+            try {
+                assertThat(arn).contains(":111111111111:");
+                accountClient.tagResource(TagResourceRequest.builder()
+                        .resourceArn(arn).tags(Map.of("env", "dev")).build());
+                assertThat(accountClient.listTagsForResource(ListTagsForResourceRequest.builder()
+                        .resourceArn(arn).build()).tags()).containsEntry("env", "dev");
+                accountClient.untagResource(UntagResourceRequest.builder()
+                        .resourceArn(arn).tagKeys(List.of("env")).build());
+                assertThat(accountClient.listTagsForResource(ListTagsForResourceRequest.builder()
+                        .resourceArn(arn).build()).tags()).doesNotContainKey("env");
+
+                String[] parts = arn.split(":");
+                String foreignAccount = arn.replace(":111111111111:", ":222222222222:");
+                String otherRegion = parts[3].equals("eu-west-3") ? "us-east-1" : "eu-west-3";
+                String foreignRegion = arn.replace(":" + parts[3] + ":", ":" + otherRegion + ":");
+                for (String foreign : List.of(foreignAccount, foreignRegion)) {
+                    assertThatThrownBy(() -> accountClient.listTagsForResource(ListTagsForResourceRequest.builder()
+                            .resourceArn(foreign).build())).isInstanceOf(ResourceNotFoundException.class);
+                    assertThatThrownBy(() -> accountClient.tagResource(TagResourceRequest.builder()
+                            .resourceArn(foreign).tags(Map.of("env", "stolen")).build()))
+                            .isInstanceOf(ResourceNotFoundException.class);
+                    assertThatThrownBy(() -> accountClient.untagResource(UntagResourceRequest.builder()
+                            .resourceArn(foreign).tagKeys(List.of("env")).build()))
+                            .isInstanceOf(ResourceNotFoundException.class);
+                }
+            } finally {
+                accountClient.deleteMemory(DeleteMemoryRequest.builder().memoryId(created.memory().id()).build());
+            }
+        }
+    }
+
+    @Test
     @Order(2)
     void workloadIdentityCrud() {
         CreateWorkloadIdentityResponse created = client.createWorkloadIdentity(

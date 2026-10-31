@@ -6,16 +6,20 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Test;
 
 import java.net.URI;
 import java.net.URLDecoder;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -87,24 +91,24 @@ class SigninIntegrationTest {
                 .get("/_floci/signin/floci-header.svg")
                 .then()
                 .statusCode(200)
-                .header("Content-Type", org.hamcrest.Matchers.startsWith("image/svg+xml"))
-                .body(org.hamcrest.Matchers.containsString("viewBox=\"0 0 531.25 156.71\""))
-                .body(org.hamcrest.Matchers.containsString("#FF9900"));
+                .header("Content-Type", Matchers.startsWith("image/svg+xml"))
+                .body(Matchers.containsString("viewBox=\"0 0 531.25 156.71\""))
+                .body(Matchers.containsString("#FF9900"));
 
         request()
                 .get("/_floci/signin/floci.svg")
                 .then()
                 .statusCode(200)
-                .header("Content-Type", org.hamcrest.Matchers.startsWith("image/svg+xml"));
+                .header("Content-Type", Matchers.startsWith("image/svg+xml"));
 
         request()
                 .get("/_floci/signin/signin.css")
                 .then()
                 .statusCode(200)
-                .header("Content-Type", org.hamcrest.Matchers.startsWith("text/css"))
-                .body(org.hamcrest.Matchers.containsString("--floci-brand: #5559a7"))
-                .body(org.hamcrest.Matchers.containsString("--floci-orange: #ff9900"))
-                .body(org.hamcrest.Matchers.containsString("border-color: #667085"));
+                .header("Content-Type", Matchers.startsWith("text/css"))
+                .body(Matchers.containsString("--floci-brand: #5559a7"))
+                .body(Matchers.containsString("--floci-orange: #ff9900"))
+                .body(Matchers.containsString("border-color: #667085"));
 
         String redirectLocation = approve(location);
         URI redirect = URI.create(redirectLocation);
@@ -266,7 +270,7 @@ class SigninIntegrationTest {
                 .header("X-Content-Type-Options", equalTo("nosniff"))
                 .header("Content-Security-Policy", equalTo("default-src 'none'; img-src 'self'; "
                         + "style-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"))
-                .body(org.hamcrest.Matchers.containsString("request_id is required"));
+                .body(Matchers.containsString("request_id is required"));
 
         String verifier = verifier();
         String state = UUID.randomUUID().toString();
@@ -281,7 +285,7 @@ class SigninIntegrationTest {
                 .post("/_floci/signin/consent")
                 .then()
                 .statusCode(400)
-                .body(org.hamcrest.Matchers.containsString("action must be continue or cancel"));
+                .body(Matchers.containsString("action must be continue or cancel"));
 
         String redirectLocation = approve(consentLocation);
         Map<String, String> params = queryParams(URI.create(redirectLocation).getRawQuery());
@@ -353,7 +357,7 @@ class SigninIntegrationTest {
                 .body("client_id=" + CLIENT_ID
                         + "&grant_type=authorization_code"
                         + "&code=bogus"
-                        + "&redirect_uri=" + java.net.URLEncoder.encode(REDIRECT_URI, StandardCharsets.UTF_8)
+                        + "&redirect_uri=" + URLEncoder.encode(REDIRECT_URI, StandardCharsets.UTF_8)
                         + "&code_verifier=" + verifier())
                 .when()
                 .post("/v1/token")
@@ -621,9 +625,9 @@ class SigninIntegrationTest {
     }
 
     private static Map<String, String> queryParams(String query) {
-        return java.util.Arrays.stream(query.split("&"))
+        return Arrays.stream(query.split("&"))
                 .map(pair -> pair.split("=", 2))
-                .collect(java.util.stream.Collectors.toMap(
+                .collect(Collectors.toMap(
                         parts -> URLDecoder.decode(parts[0], StandardCharsets.UTF_8),
                         parts -> URLDecoder.decode(parts[1], StandardCharsets.UTF_8)));
     }

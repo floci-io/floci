@@ -398,15 +398,15 @@ public class KmsService implements ResourceProvider {
             "GenerateMac", "VerifyMac", "DeriveSharedSecret"));
 
     /** GrantNameType pattern/length from the KMS model (kms/2014-11-01/service-2.json). */
-    private static final java.util.regex.Pattern GRANT_NAME_PATTERN =
-            java.util.regex.Pattern.compile("^[a-zA-Z0-9:/_-]+$");
+    private static final Pattern GRANT_NAME_PATTERN =
+            Pattern.compile("^[a-zA-Z0-9:/_-]+$");
 
     /**
      * GrantConstraintSourceArnType pattern from the KMS model (kms/2014-11-01/service-2.json),
      * quoted verbatim in AWS's validation message; it already accepts every partition.
      */
-    private static final java.util.regex.Pattern GRANT_CONSTRAINT_SOURCE_ARN_PATTERN =
-            java.util.regex.Pattern.compile("^arn:aws[a-z0-9-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:.+$"); // partition-literal: model pattern quoted in AWS's message
+    private static final Pattern GRANT_CONSTRAINT_SOURCE_ARN_PATTERN =
+            Pattern.compile("^arn:aws[a-z0-9-]*:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}:.+$"); // partition-literal: model pattern quoted in AWS's message
 
     private static final Set<String> GRANT_CONSTRAINT_MEMBERS =
             Set.of("EncryptionContextSubset", "EncryptionContextEquals", "SourceArn");
@@ -2258,9 +2258,16 @@ public class KmsService implements ResourceProvider {
             ensureAwsManagedKeys(region);
         }
         if (AwsArnUtils.isArnFor(keyIdOrArn, "kms")) {
-            String arnRegion = AwsArnUtils.parse(keyIdOrArn).region();
-            if (!region.equals(arnRegion)) {
-                throw new AwsException("NotFoundException", "Invalid arn " + arnRegion, 400);
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(keyIdOrArn);
+            if (!region.equals(arn.region())) {
+                throw new AwsException("NotFoundException", "Invalid arn " + arn.region(), 400);
+            }
+            // Floci does not evaluate key policies, so another account's key is never usable here;
+            // without this the store would answer with the caller's own key or alias of that name.
+            if (!arn.accountId().equals(regionResolver.getAccountId())) {
+                throw new AwsException("NotFoundException", arn.resource().startsWith("alias/")
+                        ? "Alias " + keyIdOrArn + " is not found."
+                        : "Key '" + keyIdOrArn + "' does not exist", 400);
             }
         }
         String id = keyIdOrArn;

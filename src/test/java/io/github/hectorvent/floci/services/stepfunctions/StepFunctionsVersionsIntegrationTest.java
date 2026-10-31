@@ -6,6 +6,8 @@ import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.Collections;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.emptyOrNullString;
@@ -41,7 +43,7 @@ class StepFunctionsVersionsIntegrationTest {
 
         // No versions published yet -> empty list (the call that previously failed).
         call("ListStateMachineVersions", "{\"stateMachineArn\":\"" + arn + "\"}")
-                .then().statusCode(200).body("stateMachineVersions", is(java.util.Collections.emptyList()));
+                .then().statusCode(200).body("stateMachineVersions", is(Collections.emptyList()));
 
         // Publish a version.
         String versionArn = call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}")
@@ -55,7 +57,7 @@ class StepFunctionsVersionsIntegrationTest {
         call("DeleteStateMachineVersion", "{\"stateMachineVersionArn\":\"" + versionArn + "\"}")
                 .then().statusCode(200);
         call("ListStateMachineVersions", "{\"stateMachineArn\":\"" + arn + "\"}")
-                .then().statusCode(200).body("stateMachineVersions", is(java.util.Collections.emptyList()));
+                .then().statusCode(200).body("stateMachineVersions", is(Collections.emptyList()));
     }
 
     @Test

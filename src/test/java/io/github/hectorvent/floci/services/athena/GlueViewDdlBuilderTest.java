@@ -7,10 +7,12 @@ import io.github.hectorvent.floci.services.glue.model.Column;
 import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -254,7 +256,7 @@ class GlueViewDdlBuilderTest {
         Database nullNameDb = createDatabase(null);
         Database blankNameDb = createDatabase("   ");
         Database validDb = createDatabase("valid_db");
-        when(glueService.getDatabases()).thenReturn(java.util.Arrays.asList(null, nullNameDb, blankNameDb, validDb));
+        when(glueService.getDatabases()).thenReturn(Arrays.asList(null, nullNameDb, blankNameDb, validDb));
         when(glueService.getTables("valid_db")).thenReturn(List.of());
 
         String ddl = builder.build(null);
@@ -266,7 +268,7 @@ class GlueViewDdlBuilderTest {
     @Test
     void testGetDatabasesExceptionPropagates() {
         when(glueService.getDatabases()).thenThrow(new RuntimeException("Glue failure"));
-        org.junit.jupiter.api.Assertions.assertThrows(RuntimeException.class, () -> builder.build(null));
+        Assertions.assertThrows(RuntimeException.class, () -> builder.build(null));
     }
 
     @Test

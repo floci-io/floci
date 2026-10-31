@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshift;
 
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
+import io.github.hectorvent.floci.services.redshift.model.Snapshot;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.quarkus.test.junit.QuarkusTest;
@@ -25,10 +26,12 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
@@ -53,6 +56,9 @@ class RedshiftInterceptorIntegrationTest {
     RedshiftService service;
 
     @Inject
+    RedshiftSnapshotScheduler snapshotScheduler;
+
+    @Inject
     S3Service s3;
 
     @Inject
@@ -72,6 +78,8 @@ class RedshiftInterceptorIntegrationTest {
     void deleteSharedCluster() {
         if (sharedClusterId != null) {
             service.deleteCluster(sharedClusterId);
+            // Drops the automated snapshot dumps taken from the deleted cluster.
+            snapshotScheduler.tick(Instant.now());
         }
     }
 
@@ -694,5 +702,42 @@ class RedshiftInterceptorIntegrationTest {
             assertTrue(ex.getMessage().toLowerCase().contains("does not exist") || ex.getMessage().toLowerCase().contains("missing.csv"), ex.getMessage());
         }
     }
-}
 
+    @Test
+    void automatedDumpRestoresTheRowsPresentAtSnapshotTime() throws Exception {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String table = "snapshot_rows_" + suffix;
+        String restoredId = "it-auto-restored-" + suffix;
+        String scheduleId = "auto-hourly-" + suffix;
+        service.createSnapshotSchedule(scheduleId, null, List.of("rate(1 hour)"), Map.of());
+        boolean restored = false;
+        try {
+            try (Connection connection = waitForConnection(sharedCluster, "admin", "Secret123");
+                    Statement statement = connection.createStatement()) {
+                statement.execute("CREATE TABLE " + table + " (id integer)");
+                statement.execute("INSERT INTO " + table + " VALUES (42)");
+                Cluster associated = service.modifyClusterSnapshotSchedule(sharedClusterId, scheduleId, false);
+                snapshotScheduler.tick(associated.getAutomatedSnapshotAnchor().plusSeconds(3600));
+                statement.execute("INSERT INTO " + table + " VALUES (99)");
+            }
+            Snapshot snapshot = service.describeSnapshots(null, sharedClusterId).stream()
+                    .filter(value -> "automated".equals(value.getSnapshotType())).findFirst().orElseThrow();
+            Cluster target = service.restoreFromClusterSnapshot(restoredId, snapshot.getSnapshotIdentifier());
+            restored = true;
+            try (Connection connection = waitForConnection(target, "admin", "Secret123");
+                    Statement statement = connection.createStatement();
+                    ResultSet rows = statement.executeQuery("SELECT count(*), min(id), max(id) FROM " + table)) {
+                assertTrue(rows.next());
+                assertEquals(1, rows.getInt(1));
+                assertEquals(42, rows.getInt(2));
+                assertEquals(42, rows.getInt(3));
+            }
+        } finally {
+            if (restored) {
+                service.deleteCluster(restoredId);
+            }
+            service.modifyClusterSnapshotSchedule(sharedClusterId, null, true);
+            service.deleteSnapshotSchedule(scheduleId);
+        }
+    }
+}

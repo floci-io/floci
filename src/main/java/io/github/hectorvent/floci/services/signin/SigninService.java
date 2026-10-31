@@ -530,9 +530,9 @@ public class SigninService {
             if (i > 0) {
                 result.append('&');
             }
-            result.append(java.net.URLEncoder.encode(values[i], StandardCharsets.UTF_8))
+            result.append(URLEncoder.encode(values[i], StandardCharsets.UTF_8))
                     .append('=')
-                    .append(java.net.URLEncoder.encode(values[i + 1], StandardCharsets.UTF_8));
+                    .append(URLEncoder.encode(values[i + 1], StandardCharsets.UTF_8));
         }
         return result.toString();
     }

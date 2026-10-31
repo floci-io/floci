@@ -235,6 +235,24 @@ class EventBridgeTest {
         }
     }
 
+    @Test
+    @Order(26)
+    void putEventsToAnEventBusThatDoesNotExistIsAnsweredAsPublished() {
+        PutEventsResponse response = eb.putEvents(PutEventsRequest.builder()
+                .entries(PutEventsRequestEntry.builder()
+                        .eventBusName(TestFixtures.uniqueName("eb-missing-bus"))
+                        .source("com.myapp")
+                        .detailType("OrderPlaced")
+                        .detail("{}")
+                        .build())
+                .build());
+
+        assertThat(response.failedEntryCount()).isZero();
+        assertThat(response.entries()).hasSize(1);
+        assertThat(response.entries().get(0).eventId()).isNotBlank();
+        assertThat(response.entries().get(0).errorCode()).isNull();
+    }
+
     // ──────────────────────────── InputTransformer ────────────────────────────
 
     @Test

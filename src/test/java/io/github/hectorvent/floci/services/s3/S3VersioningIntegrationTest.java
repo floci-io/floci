@@ -790,4 +790,46 @@ class S3VersioningIntegrationTest {
         }
     }
 
+    @Test
+    @Order(29)
+    void aSuspendedDeleteLeavesANullDeleteMarker() {
+        String bucket = "suspended-null-marker";
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+        String older = given().body("older").when().put("/" + bucket + "/key")
+                .then().statusCode(200).extract().header("x-amz-version-id");
+        given().body("<VersioningConfiguration><Status>Suspended</Status></VersioningConfiguration>")
+                .when().put("/" + bucket + "?versioning").then().statusCode(200);
+
+        given().when().delete("/" + bucket + "/key").then().statusCode(204)
+                .header("x-amz-delete-marker", "true")
+                .header("x-amz-version-id", "null");
+        given().when().delete("/" + bucket + "/key").then().statusCode(204)
+                .header("x-amz-delete-marker", "true")
+                .header("x-amz-version-id", "null");
+        given().when().get("/" + bucket + "/key").then().statusCode(404);
+        given().queryParam("versions", "").queryParam("prefix", "key").when().get("/" + bucket)
+                .then().statusCode(200)
+                .body("ListVersionsResult.DeleteMarker.VersionId", equalTo("null"))
+                .body("ListVersionsResult.DeleteMarker.IsLatest", equalTo("true"))
+                .body("ListVersionsResult.Version.VersionId", equalTo(older))
+                .body("ListVersionsResult.Version.IsLatest", equalTo("false"));
+
+        given().contentType("application/xml")
+                .body("<Delete><Object><Key>missing</Key></Object></Delete>")
+                .when().post("/" + bucket + "?delete")
+                .then().statusCode(200)
+                .body("DeleteResult.Deleted.Key", equalTo("missing"))
+                .body("DeleteResult.Deleted.DeleteMarker", equalTo("true"))
+                .body("DeleteResult.Deleted.DeleteMarkerVersionId", equalTo("null"));
+
+        given().queryParam("versionId", "null").when().delete("/" + bucket + "/key").then().statusCode(204)
+                .header("x-amz-delete-marker", "true")
+                .header("x-amz-version-id", "null");
+        given().when().get("/" + bucket + "/key").then().statusCode(200)
+                .header("x-amz-version-id", older)
+                .body(equalTo("older"));
+    }
+
 }

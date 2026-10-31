@@ -40,6 +40,21 @@ class CloudFormationTemplateEngineTest {
     }
 
     @Test
+    void joinAndSelectConsumeTypedGetAttArraysWithoutSplittingMemberCommas() {
+        CloudFormationTemplateEngine engine = new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
+                "stack/id", Map.of(), Map.of(), Map.of("Watcher", Map.of("SourceIdsList", "stored")),
+                Map.of(), Map.of(), mapper, null, UnaryOperator.identity(), null, Map.of(),
+                (logicalId, attribute, value) -> mapper.createArrayNode().add("first,with-comma").add("second"));
+
+        assertEquals("first,with-comma|second", engine.resolve(json("""
+                {"Fn::Join":["|",{"Fn::GetAtt":["Watcher","SourceIdsList"]}]}
+                """)));
+        assertEquals("first,with-comma", engine.resolve(json("""
+                {"Fn::Select":[0,{"Fn::GetAtt":["Watcher","SourceIdsList"]}]}
+                """)));
+    }
+
+    @Test
     void getAttOnAMissingAttributeOfAStubbedDisabledServiceIsRefused() {
         CloudFormationTemplateEngine e = engineWithAttributes(Map.of("Repo", Map.of(
                 "Arn", "arn:aws:stub:::Repo", CloudFormationTemplateEngine.SERVICE_DISABLED_ATTR, "true")));

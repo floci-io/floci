@@ -167,6 +167,7 @@ public class FlinkContainerManager {
                 .withHostDockerInternalOnLinux()
                 .withEmbeddedDns()
                 .withLogRotation()
+                .withJavaTrustStore()
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "kinesisanalytics", app.getApplicationName(),
                         app.getAccountId() != null ? app.getAccountId() : regionResolver.getAccountId(), region));
@@ -221,6 +222,7 @@ public class FlinkContainerManager {
                     .withEnv("FLINK_PROPERTIES", tmProps)
                     .withNetworkMode("container:" + jm.containerId())
                     .withLogRotation()
+                    .withJavaTrustStore()
                     .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                             "kinesisanalytics", app.getApplicationName(),
                             app.getAccountId() != null ? app.getAccountId() : regionResolver.getAccountId(), region))

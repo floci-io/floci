@@ -39,7 +39,7 @@ class ApiGatewayGreedyPathParameterIntegrationTest {
     }
 
     @Test @Order(2)
-    void setupAssetsGreedyResource() {
+    void setupGreedyResources() {
         String rootId = given()
                 .when().get("/restapis/" + apiId + "/resources")
                 .then()
@@ -94,6 +94,38 @@ class ApiGatewayGreedyPathParameterIntegrationTest {
                         + "/methods/ANY/integration/responses/200")
                 .then()
                 .statusCode(201);
+
+        // /v1/admin/catalog/{kind} lists, /v1/admin/catalog/{kind}/{name+} serves one item
+        String catalogId = createResource(createResource(createResource(rootId, "v1"), "admin"), "catalog");
+        String kindId = createResource(catalogId, "{kind}");
+        mockEcho(kindId, "{\"matched\":\"catalog-list\",\"kind\":\"$input.params('kind')\"}");
+        mockEcho(createResource(kindId, "{name+}"), "{\"matched\":\"catalog-item\","
+                + "\"kind\":\"$input.params('kind')\",\"name\":\"$input.params('name')\"}");
+    }
+
+    private static String createResource(String parentId, String pathPart) {
+        return given()
+                .contentType(ContentType.JSON)
+                .body("{\"pathPart\":\"" + pathPart + "\"}")
+                .when().post("/restapis/" + apiId + "/resources/" + parentId)
+                .then()
+                .statusCode(201)
+                .extract().path("id");
+    }
+
+    private static void mockEcho(String resourceId, String responseTemplate) {
+        String method = "/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET";
+        given().contentType(ContentType.JSON).body("{\"authorizationType\":\"NONE\"}")
+                .when().put(method).then().statusCode(201);
+        given().contentType(ContentType.JSON).body("{\"responseParameters\":{}}")
+                .when().put(method + "/responses/200").then().statusCode(201);
+        given().contentType(ContentType.JSON)
+                .body("{\"type\":\"MOCK\",\"requestTemplates\":{\"application/json\":\"{\\\"statusCode\\\": 200}\"}}")
+                .when().put(method + "/integration").then().statusCode(201);
+        given().contentType(ContentType.JSON)
+                .body("{\"selectionPattern\":\"\",\"responseTemplates\":{\"application/json\":\""
+                        + responseTemplate.replace("\"", "\\\"") + "\"}}")
+                .when().put(method + "/integration/responses/200").then().statusCode(201);
     }
 
     @Test @Order(3)
@@ -159,6 +191,29 @@ class ApiGatewayGreedyPathParameterIntegrationTest {
                 .then()
                 .statusCode(403)
                 .body("message", equalTo("Missing Authentication Token"));
+    }
+
+    @Test @Order(8)
+    void greedyResourceBelowAPathParameterReceivesBothParameters() {
+        // Used to fall through to the no-match 403: the greedy matcher compared the request with
+        // the literal text "/v1/admin/catalog/{kind}/", which no real path starts with.
+        given()
+                .when().get("/execute-api/" + apiId + "/test/v1/admin/catalog/scopes/teos/sur-df")
+                .then()
+                .statusCode(200)
+                .body("matched", equalTo("catalog-item"))
+                .body("kind", equalTo("scopes"))
+                .body("name", equalTo("teos/sur-df"));
+    }
+
+    @Test @Order(9)
+    void parentResourceStillServesItsOwnPath() {
+        given()
+                .when().get("/execute-api/" + apiId + "/test/v1/admin/catalog/scopes")
+                .then()
+                .statusCode(200)
+                .body("matched", equalTo("catalog-list"))
+                .body("kind", equalTo("scopes"));
     }
 
     @Test @Order(99)

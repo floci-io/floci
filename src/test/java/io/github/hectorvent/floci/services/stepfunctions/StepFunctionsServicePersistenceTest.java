@@ -30,6 +30,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -113,7 +114,7 @@ class StepFunctionsServicePersistenceTest {
             history.add(succeeded);
             execution.setStatus("SUCCEEDED");
             execution.setOutput("{\"result\":true}");
-            invocation.<java.util.function.BiConsumer<Execution, List<HistoryEvent>>>getArgument(4)
+            invocation.<BiConsumer<Execution, List<HistoryEvent>>>getArgument(4)
                     .accept(execution, history);
             return null;
         }).when(aslExecutor).executeAsync(any(StateMachine.class), any(Execution.class), anyList(),
@@ -398,7 +399,7 @@ class StepFunctionsServicePersistenceTest {
         @Override
         public void executeAsync(StateMachine stateMachine, Execution execution,
                                  List<HistoryEvent> history, MockedTestCase mockedTestCase,
-                                 java.util.function.BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+                                 BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
             super.executeAsync(stateMachine, execution, history, mockedTestCase,
                     (updatedExecution, updatedHistory) -> {
                         try {

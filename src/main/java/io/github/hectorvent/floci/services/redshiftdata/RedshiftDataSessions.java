@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshiftdata;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChange;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditSql.UserChanges;
@@ -15,6 +16,7 @@ import java.sql.SQLException;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
@@ -33,6 +35,7 @@ class RedshiftDataSessions implements AutoCloseable {
     private static final List<String> TARGET_FIELDS = List.of("ClusterIdentifier", "WorkgroupName", "Database", "DbUser", "SecretArn");
 
     private final ConcurrentHashMap<String, Session> sessions = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, SessionInfo> history = new ConcurrentHashMap<>();
     private final Clock clock;
     private ScheduledExecutorService sweeper;
     private boolean closed;
@@ -127,6 +130,7 @@ class RedshiftDataSessions implements AutoCloseable {
     }
 
     void sweep() {
+        history.values().removeIf(info -> !clock.instant().isBefore(info.createdAt().plus(MAX_AGE)));
         RuntimeException failure = null;
         for (Session session : sessions.values()) {
             boolean expire;
@@ -178,6 +182,10 @@ class RedshiftDataSessions implements AutoCloseable {
             return null;
         }
         session.closed = true;
+        session.updatedAt = expired(session) ? session.deadline() : clock.instant();
+        if (session.admitted && clock.instant().isBefore(session.createdAt.plus(MAX_AGE))) {
+            history.put(session.id, session.info());
+        }
         sessions.remove(session.id, session);
         Retirement retirement = new Retirement(session.id, session.connection, cancel ? session.execution : null,
                 session.connectionClosed);
@@ -246,6 +254,7 @@ class RedshiftDataSessions implements AutoCloseable {
                 failure = accumulate(failure, cleanupFailure);
             }
         }
+        history.clear();
         if (failure != null) {
             throw failure;
         }
@@ -271,7 +280,29 @@ class RedshiftDataSessions implements AutoCloseable {
         clear();
     }
 
-    record Scope(String accountId, String region, String caller) { }
+    List<SessionInfo> snapshots() {
+        sweepSafely();
+        ConcurrentHashMap<String, SessionInfo> result = new ConcurrentHashMap<>();
+        for (Session session : sessions.values()) {
+            synchronized (session) {
+                if (session.admitted && clock.instant().isBefore(session.createdAt.plus(MAX_AGE))) {
+                    result.put(session.id, session.info());
+                }
+            }
+        }
+        result.putAll(history);
+        return new ArrayList<>(result.values());
+    }
+
+    record Scope(String accountId, String region, String caller, String principal) {
+        Scope(String accountId, String region, String caller) {
+            this(accountId, region, caller, caller);
+        }
+    }
+
+    record SessionInfo(String id, Scope owner, String targetArn, String cluster, String workgroup,
+                       String database, String user, Instant createdAt, Instant updatedAt,
+                       Instant ttl, int keepAlive, String status, String statementId) { }
 
     static final class Session {
         private final String id = UUID.randomUUID().toString();
@@ -279,6 +310,8 @@ class RedshiftDataSessions implements AutoCloseable {
         private final RedshiftDataResourceResolver.DatabaseTarget target;
         private final ObjectNode parameters;
         private final Instant createdAt;
+        private Instant updatedAt;
+        private boolean admitted;
         private Instant idleUntil;
         private int keepAlive;
         private boolean closed;
@@ -300,7 +333,26 @@ class RedshiftDataSessions implements AutoCloseable {
                 }
             }
             this.createdAt = createdAt;
+            this.updatedAt = createdAt;
             this.idleUntil = createdAt.plus(MAX_AGE);
+        }
+
+        private Instant deadline() {
+            Instant maximum = createdAt.plus(MAX_AGE);
+            return active != null || maximum.isBefore(idleUntil) ? maximum : idleUntil;
+        }
+
+        private SessionInfo info() {
+            boolean busy = !closed && active != null;
+            AwsArnUtils.Arn arn = AwsArnUtils.parse(target.arn());
+            boolean serverless = "redshift-serverless".equals(arn.service());
+            String cluster = serverless ? null : arn.resource().substring("cluster:".length());
+            String workgroup = serverless ? target.workgroupName() != null ? target.workgroupName()
+                    : parameters.path("WorkgroupName").asText(target.arn()) : null;
+            String user = parameters.path("DbUser").asText(target.auditUser());
+            return new SessionInfo(id, owner, target.arn(), cluster, workgroup, target.database(), user,
+                    createdAt, updatedAt, closed ? updatedAt : deadline(), busy ? active.seconds : keepAlive,
+                    closed ? "CLOSED" : busy ? "BUSY" : "AVAILABLE", busy ? active.statementId : null);
         }
 
         RedshiftDataResourceResolver.DatabaseTarget target(JsonNode request) {
@@ -325,6 +377,7 @@ class RedshiftDataSessions implements AutoCloseable {
         private final int seconds;
         private final AtomicBoolean released = new AtomicBoolean();
         private boolean admitted;
+        private String statementId;
 
         private Reservation(Session session, boolean created, int seconds) {
             this.session = session;
@@ -337,7 +390,16 @@ class RedshiftDataSessions implements AutoCloseable {
         }
 
         void admitted() {
-            admitted = true;
+            admitted(null);
+        }
+
+        void admitted(String id) {
+            synchronized (session) {
+                admitted = true;
+                statementId = id;
+                session.admitted = true;
+                session.updatedAt = clock.instant();
+            }
         }
 
         void bind(RedshiftDataExecution execution) throws SQLException {
@@ -442,6 +504,10 @@ class RedshiftDataSessions implements AutoCloseable {
                     return;
                 }
                 boolean remove = !completed && created || completed && (seconds == 0 || session.connection == null);
+                if (completed) {
+                    session.keepAlive = seconds;
+                    session.updatedAt = clock.instant();
+                }
                 if (remove) {
                     retirement = retireLocked(session, false);
                 } else {

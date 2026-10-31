@@ -1049,6 +1049,43 @@ class SqsJsonProtocolTest {
     }
 
     @Test
+    void delaySecondsOutsideTheAwsRangeIsRejected() {
+        String delayQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"json-delay-range-queue\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessage")
+            .body("{\"QueueUrl\":\"" + delayQueueUrl + "\",\"MessageBody\":\"x\",\"DelaySeconds\":901}")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"))
+            .body("message", equalTo("Value 901 for parameter DelaySeconds is invalid. Reason: Must be >= 0 and <= 900."));
+
+        // Larger than an int: must not wrap around to a valid delay.
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessage")
+            .body("{\"QueueUrl\":\"" + delayQueueUrl + "\",\"MessageBody\":\"x\",\"DelaySeconds\":4294967296}")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+            .body("{\"QueueUrl\":\"" + delayQueueUrl + "\",\"Entries\":["
+                    + "{\"Id\":\"late\",\"MessageBody\":\"x\",\"DelaySeconds\":4294967296}]}")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"));
+    }
+
+    @Test
     void redrivePolicyReadsBackAsCompactJson() {
         String dlqUrl = given()
             .contentType(CONTENT_TYPE)

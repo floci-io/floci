@@ -85,6 +85,7 @@ map as empty.
 | ACM | `acm:certificate` |
 | Amazon MQ | `mq:broker` |
 | API Gateway | `apigateway:restapis`, `apigateway:restapis/stages`, `apigateway:apikeys`, `apigateway:usageplans`, `apigateway:domainnames` |
+| Bedrock | `bedrock:guardrail` |
 | CloudFormation | `cloudformation:stack` |
 | CloudWatch Logs | `logs:log-group` |
 | Cognito | `cognito-idp:userpool` |

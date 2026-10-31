@@ -69,8 +69,10 @@ import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509ExtendedKeyManager;
 import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
@@ -83,6 +85,7 @@ import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -493,7 +496,7 @@ class IotMqttBrokerServiceTest {
             subscribeHandler.set(invocation.getArgument(0));
             return closing;
         });
-        when(closing.publish(anyString(), any(), any(), anyBoolean(), anyBoolean()))
+        when(closing.publish(anyString(), any(), any(), anyBoolean(), anyBoolean(), anyInt()))
                 .thenThrow(new IllegalStateException("the connection closed"));
         MqttTopicSubscription requested = mock(MqttTopicSubscription.class);
         when(requested.topicName()).thenReturn("devices/+/metrics");
@@ -511,7 +514,7 @@ class IotMqttBrokerServiceTest {
 
             broker.publish("devices/d1/metrics", "{\"t\":1}".getBytes(StandardCharsets.UTF_8));
 
-            verify(closing).publish(eq("devices/d1/metrics"), any(), any(), anyBoolean(), anyBoolean());
+            verify(closing).publish(eq("devices/d1/metrics"), any(), any(), anyBoolean(), anyBoolean(), anyInt());
             assertEquals("{\"t\":1}", fannedOut.poll(10, TimeUnit.SECONDS), "the other subscriber got its copy");
         } finally {
             disconnect(subscriber);
@@ -892,6 +895,74 @@ class IotMqttBrokerServiceTest {
         assertFalse(disconnected.get(0).get("clientInitiatedDisconnect").asBoolean());
     }
 
+    /**
+     * A retained message whose stored QoS is negative, which Publish kept as sent before it refused
+     * a qos outside 0 and 1, is still sent on subscribe, at QoS 0.
+     */
+    @Test
+    void aRetainedMessageStoredWithANegativeQosIsStillSentOnSubscribe() throws Exception {
+        startBrokerRecordingPublishes();
+        iotService.get().publish("legacy/status", "{}".getBytes(StandardCharsets.UTF_8), true, -1, null, null, Runnable::run);
+        BlockingQueue<String> topics = new LinkedBlockingQueue<>();
+
+        MqttClient subscriber = subscribedPlain("legacy", "legacy/status", topics);
+        try {
+            assertEquals("legacy/status", topics.poll(10, TimeUnit.SECONDS));
+        } finally {
+            disconnect(subscriber);
+        }
+    }
+
+    /**
+     * QoS 1 copies fanned out to one client from several threads, none acknowledged yet, each carry
+     * their own packet identifier, as MQTT requires.
+     */
+    @Test
+    void concurrentQos1CopiesToOneClientCarryDistinctPacketIdentifiers() throws Exception {
+        startBrokerRecordingPublishes();
+        int threads = 8;
+        int perThread = 2000;
+        ExecutorService publishers = Executors.newFixedThreadPool(threads);
+        try (Socket socket = rawConnect("packet-ids")) {
+            DataInputStream in = rawSubscribeQos1(socket, "ids/#");
+
+            for (int thread = 0; thread < threads; thread++) {
+                publishers.execute(() -> {
+                    for (int i = 0; i < perThread; i++) {
+                        broker.publish("ids/x", new byte[] {1}, 1);
+                    }
+                });
+            }
+
+            Set<Integer> packetIds = new HashSet<>();
+            for (int i = 0; i < threads * perThread; i++) {
+                packetIds.add(readQos1PublishPacketId(in));
+            }
+            assertEquals(threads * perThread, packetIds.size(), "no two unacknowledged copies share a packet identifier");
+        } finally {
+            publishers.shutdownNow();
+        }
+    }
+
+    /** QoS 1 copies sent to other clients do not use up the packet identifiers of a client whose QoS 1 copy is unacknowledged. */
+    @Test
+    void anotherClientsTrafficDoesNotRecycleAPacketIdentifierStillInFlight() throws Exception {
+        startBrokerRecordingPublishes();
+        try (Socket busy = rawConnect("busy"); Socket socket = rawConnect("slow")) {
+            rawSubscribeQos1(busy, "busy/#");
+            DataInputStream in = rawSubscribeQos1(socket, "slow/#");
+            broker.publish("slow/first", new byte[] {1}, 1);
+            int first = readQos1PublishPacketId(in);
+
+            for (int i = 0; i < 65_534; i++) {
+                broker.publish("busy/x", new byte[] {1}, 1);
+            }
+            broker.publish("slow/second", new byte[] {2}, 1);
+
+            assertNotEquals(first, readQos1PublishPacketId(in), "the first copy was never acknowledged");
+        }
+    }
+
     @Test
     void aQos2PublishEndsTheSessionWithAClientError() throws Exception {
         startBrokerRecordingPublishes();
@@ -1052,7 +1123,7 @@ class IotMqttBrokerServiceTest {
         });
         broker.handleEndpoint(departing, false);
         verify(subscriber, timeout(10_000))
-                .publish(eq("$aws/events/presence/connected/departing"), any(), any(), anyBoolean(), anyBoolean());
+                .publish(eq("$aws/events/presence/connected/departing"), any(), any(), anyBoolean(), anyBoolean(), anyInt());
 
         ExecutorService departingEventLoop = Executors.newSingleThreadExecutor();
         subscriberMonitor.lock();
@@ -1066,7 +1137,7 @@ class IotMqttBrokerServiceTest {
             departingEventLoop.shutdown();
         }
         verify(subscriber, timeout(10_000))
-                .publish(eq("$aws/events/presence/disconnected/departing"), any(), any(), anyBoolean(), anyBoolean());
+                .publish(eq("$aws/events/presence/disconnected/departing"), any(), any(), anyBoolean(), anyBoolean(), anyInt());
     }
 
     /** A PUBLISH, SUBSCRIBE, UNSUBSCRIBE or PUBACK counts as traffic for the keep-alive, as a PINGREQ does. */
@@ -1190,8 +1261,8 @@ class IotMqttBrokerServiceTest {
         broker.publish("stale/topic", "{}".getBytes(StandardCharsets.UTF_8));
         broker.publish("kept/topic", "{}".getBytes(StandardCharsets.UTF_8));
 
-        verify(current, timeout(10_000)).publish(eq("kept/topic"), any(), any(), anyBoolean(), anyBoolean());
-        verify(current, never()).publish(eq("stale/topic"), any(), any(), anyBoolean(), anyBoolean());
+        verify(current, timeout(10_000)).publish(eq("kept/topic"), any(), any(), anyBoolean(), anyBoolean(), anyInt());
+        verify(current, never()).publish(eq("stale/topic"), any(), any(), anyBoolean(), anyBoolean(), anyInt());
     }
 
     /**
@@ -1893,6 +1964,37 @@ class IotMqttBrokerServiceTest {
         socket.getOutputStream().write(packet(0x30 | (qos << 1), body.toByteArray()));
     }
 
+    /** Subscribes a raw client to one filter at QoS 1 and returns its stream once the broker granted it. */
+    private static DataInputStream rawSubscribeQos1(Socket socket, String topicFilter) throws IOException {
+        ByteArrayOutputStream subscribe = new ByteArrayOutputStream();
+        subscribe.write(0x00);
+        subscribe.write(0x01);
+        writeUtf8(subscribe, topicFilter);
+        subscribe.write(0x01);
+        socket.getOutputStream().write(packet(0x82, subscribe.toByteArray()));
+        DataInputStream in = new DataInputStream(socket.getInputStream());
+        assertArrayEquals(new byte[] {(byte) 0x90, 0x03, 0x00, 0x01, 0x01}, in.readNBytes(5), "SUBACK granting QoS 1");
+        return in;
+    }
+
+    /** Reads one QoS 1 PUBLISH and returns its packet identifier. */
+    private static int readQos1PublishPacketId(DataInputStream in) throws IOException {
+        assertEquals(0x32, in.readUnsignedByte(), "a QoS 1 PUBLISH without DUP or RETAIN");
+        int remaining = 0;
+        int multiplier = 1;
+        int encoded;
+        do {
+            encoded = in.readUnsignedByte();
+            remaining += (encoded & 127) * multiplier;
+            multiplier *= 128;
+        } while ((encoded & 128) != 0);
+        int topicLength = in.readUnsignedShort();
+        in.skipNBytes(topicLength);
+        int packetId = in.readUnsignedShort();
+        in.skipNBytes(remaining - topicLength - 4);
+        return packetId;
+    }
+
     private static byte[] packet(int type, byte[] body) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         out.write(type);
@@ -2006,7 +2108,7 @@ class IotMqttBrokerServiceTest {
                 .addKeyValue(Buffer.buffer(leaf.privateKeyPem()));
     }
 
-    private static java.math.BigInteger serial(CertificateGenerator.GeneratedCertificate leaf) {
+    private static BigInteger serial(CertificateGenerator.GeneratedCertificate leaf) {
         return Pem.parseCertificate(leaf.certificatePem()).getSerialNumber();
     }
 

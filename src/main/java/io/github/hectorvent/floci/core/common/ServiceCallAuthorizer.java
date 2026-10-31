@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ResourcePolicyProviders;
+import io.quarkus.runtime.Startup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -30,6 +31,7 @@ import java.util.Map;
  * The decision is returned rather than thrown, because what a refusal means is the caller's to
  * decide: a notification that is not delivered, a delivery that is retried, or an error.
  */
+@Startup
 @ApplicationScoped
 public class ServiceCallAuthorizer {
 

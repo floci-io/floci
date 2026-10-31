@@ -288,7 +288,8 @@ class EksAddonIntegrationTest {
         String name = "addon-k8s-" + UUID.randomUUID().toString().substring(0, 8);
         String basePath = "/clusters/" + name + "/addons";
 
-        createCluster(account, name, "1.35");
+        // Newer than every version the catalog and the k3s map cover; this test runs EKS in mock mode.
+        createCluster(account, name, "1.40");
         try {
             // Create with no version resolves default version on cluster outside catalog range
             given().header("Authorization", auth(account, "eks"))
@@ -396,7 +397,7 @@ class EksAddonIntegrationTest {
         createCluster(account, name, "1.30");
 
         try {
-            // 1. Create aws-ebs-csi-driver addon without specifying version (resolves default v1.31.0-eksbuild.1)
+            // 1. Create aws-ebs-csi-driver addon without specifying version (resolves the catalog's 1.30 default)
             Map<String, Object> createReq = Map.of(
                     "addonName", "aws-ebs-csi-driver",
                     "serviceAccountRoleArn", roleArn
@@ -411,7 +412,7 @@ class EksAddonIntegrationTest {
                     .contentType(containsString("application/json"))
                     .body("addon.clusterName", equalTo(name))
                     .body("addon.addonName", equalTo("aws-ebs-csi-driver"))
-                    .body("addon.addonVersion", equalTo("v1.31.0-eksbuild.1"))
+                    .body("addon.addonVersion", equalTo(EksAddonServiceTest.catalogDefault("aws-ebs-csi-driver", "1.30")))
                     .body("addon.status", equalTo("ACTIVE"))
                     .body("addon.owner", equalTo("aws"))
                     .body("addon.publisher", equalTo("eks"))
@@ -424,7 +425,7 @@ class EksAddonIntegrationTest {
                     .statusCode(200)
                     .contentType(containsString("application/json"))
                     .body("addon.addonName", equalTo("aws-ebs-csi-driver"))
-                    .body("addon.addonVersion", equalTo("v1.31.0-eksbuild.1"))
+                    .body("addon.addonVersion", equalTo(EksAddonServiceTest.catalogDefault("aws-ebs-csi-driver", "1.30")))
                     .body("addon.status", equalTo("ACTIVE"));
 
             // 3. Filter describe-addon-versions by addonName

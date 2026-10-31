@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Predicate;
 
 /**
  * HTTP client for the shared Reposilite sidecar. A CodeArtifact repository maps to a named
@@ -149,14 +150,54 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
     }
 
     /**
-     * Only a confirmed 404 means absent; confirmed live (a {@code GET} on a missing directory, or a
-     * never-provisioned repository, both answer a clean 404). Anything else, an auth failure or a
-     * server error, throws instead of collapsing to "not found": a Reposilite outage must not read
-     * as every Maven package having been deleted.
+     * {@code true} only when at least one real version subdirectory sits beneath the group/
+     * artifact directory, not merely whenever that directory answers at all: {@link
+     * #mergeExternalConnectionReleaseVersions} writes a {@code maven-metadata.xml} straight into
+     * that same directory purely to advertise resolvable versions, with no version ever actually
+     * retained there, so treating that file's presence alone as "exists" would make {@code
+     * CodeArtifactService#isUpstreamRetentionBlocked} see a brand-new package as already
+     * directly-published and permanently refuse every later retention attempt for it, since no
+     * claim could ever get recorded to prove otherwise. A confirmed 404 means absent (a missing
+     * directory, or a never-provisioned repository, both answer a clean 404). Anything else, an
+     * auth failure or a server error, throws instead of collapsing to "not found": a Reposilite
+     * outage must not read as every Maven package having been deleted.
      */
     @Override
     public boolean packageExists(String repositoryContainerId, String domain, String repository, String namespace,
             String packageName) {
+        String baseUrl = manager.ensureReady();
+        String path = "/api/maven/details" + packageDirectoryPath(repositoryContainerId, namespace, packageName);
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), path))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", manager.basicAuthHeader())
+                .GET()
+                .build();
+        HttpResponse<String> response = send(request, BodyHandlers.ofString());
+        if (response.statusCode() == 404) {
+            return false;
+        }
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Could not look up " + packageName + " on the Reposilite sidecar: "
+                    + "upstream returned " + response.statusCode());
+        }
+        for (JsonNode entry : readTree(response.body()).path("files")) {
+            if ("DIRECTORY".equals(entry.path("type").asText())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Unlike {@link #packageExists}, a bare GET on the group/artifact directory, with no
+     * requirement that anything beneath it be a real version: a metadata-only merge (just a
+     * {@code maven-metadata.xml} file, no version subdirectory) still answers {@code 200} here,
+     * so {@code DeletePackage} actually removes it instead of skipping the delete and reporting
+     * success while leaving it fetchable.
+     */
+    @Override
+    public boolean hasAnyContentToDelete(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName) {
         String baseUrl = manager.ensureReady();
         HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl),
                         packageDirectoryPath(repositoryContainerId, namespace, packageName)))
@@ -328,6 +369,152 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
                         packageName, version))));
     }
 
+    /**
+     * One {@code /api/maven/details} response, split into what {@link #walkMavenDirectory} needs:
+     * which file names this directory holds directly, and which entries are subdirectories to
+     * possibly recurse into.
+     */
+    private record MavenDirectoryListing(List<String> fileNames, List<String> subdirectories) {}
+
+    /**
+     * Reposilite has no single list-everything endpoint (confirmed live: only the same one-level
+     * {@code /api/maven/details} directory listing {@link #listPackageVersionAssetNames}/{@link
+     * #listPackageVersions} already read one known directory at a time), so this walks the
+     * repository's directory tree from its root, recursing into {@code DIRECTORY} entries.
+     *
+     * <p>A plain groupId segment can never be told apart from the group/artifact directory itself
+     * by its own shape alone: both hold nothing but further {@code DIRECTORY} entries (confirmed
+     * live: {@code spike}'s own listing, one {@code DIRECTORY} entry named {@code 1.0.0}, looks
+     * identical in shape to {@code com}'s own listing, one {@code DIRECTORY} entry named {@code
+     * example}). What tells them apart is one level deeper: a version directory's own children are
+     * never further directories, only real files (or, after a {@code DisposePackageVersions}, none
+     * at all); a plain groupId segment's children always are.
+     *
+     * <p>Raised by Greptile's review: a real Maven coordinate layout can have both at the very same
+     * directory, since nothing stops one groupId from being a literal prefix of another's own
+     * segments (AWS's own worked example shape: {@code com:foo:1.0.0} and {@code com.foo:bar:1.0.0}
+     * share the real directory {@code com/foo}, one holding both a version directory {@code 1.0.0}
+     * and a further groupId segment {@code bar}). Peeking only one representative child, as an
+     * earlier version of this method did, answered only "is the current directory package-shaped
+     * or group-shaped", a false either/or that depended on which child happened to be peeked (or on
+     * {@code maven-metadata.xml}'s presence short-circuiting before any sibling was ever looked at
+     * either), silently dropping whichever of the two coordinates it didn't settle on. {@link
+     * #walkMavenDirectory} now checks every child of the current directory, not just one: a
+     * version-shaped child (no further directories) proves the current directory is itself a
+     * package, recorded at most once regardless of how many such children it has; a group-shaped
+     * child is recursed into as a further namespace segment, every time, independent of whether the
+     * current directory was already recorded. {@code maven-metadata.xml} still short-circuits
+     * straight to a record (covering a package {@link #recordVersionAvailable} was called for that
+     * happens to have zero version directories of its own, e.g. a {@code CopyPackageVersions}
+     * source whose every version failed), but no longer skips the sibling-child walk below it.
+     *
+     * <p>Raised by hectorvent's review: every CodeArtifact repository gets a maven sidecar id at
+     * creation regardless of whether it is ever actually used through maven, so without checking
+     * {@link ReposiliteSidecarManager#isStarted} first, exactly like {@link #releaseRepository}
+     * already does for the same reason, a {@code ListPackages} call with no format filter would
+     * start the one shared Reposilite container just to walk it for a repository that has never
+     * published anything through maven.
+     */
+    @Override
+    public List<PackageIdentifier> listPackages(String repositoryContainerId, String domain, String repository) {
+        if (!manager.isStarted()) {
+            return List.of();
+        }
+        String baseUrl = manager.ensureReady();
+        List<PackageIdentifier> result = new ArrayList<>();
+        walkMavenDirectory(baseUrl, "/api/maven/details/" + SidecarUriUtils.encodeSegment(repositoryContainerId)
+                + "/", List.of(), result);
+        return result;
+    }
+
+    private void walkMavenDirectory(String baseUrl, String detailsPath, List<String> pathSegments,
+            List<PackageIdentifier> result) {
+        MavenDirectoryListing listing = fetchMavenDirectoryListing(baseUrl, detailsPath);
+        if (listing == null) {
+            return;
+        }
+        boolean recordedAsPackage = false;
+        if (listing.fileNames().contains("maven-metadata.xml")) {
+            recordMavenPackage(pathSegments, result);
+            recordedAsPackage = true;
+        }
+        for (String subdirectory : listing.subdirectories()) {
+            String childPath = detailsPath + SidecarUriUtils.encodeSegment(subdirectory) + "/";
+            MavenDirectoryListing childListing = fetchMavenDirectoryListing(baseUrl, childPath);
+            if (childListing == null) {
+                continue;
+            }
+            // Raised by Greptile's review: a real Maven snapshot version directory also holds its
+            // own maven-metadata.xml (listing that version's timestamped builds), alongside its
+            // real artifact files (jar, pom, checksums), so "has maven-metadata.xml" alone cannot
+            // tell that apart from the artifact-level-metadata-only directory the check below
+            // exists for (one with no version directories of its own and, this time, no other real
+            // files alongside its metadata.xml either). Only the latter shape, a directory whose
+            // files are entirely maven-metadata.xml and its checksum sidecars and nothing else, is
+            // excluded from being treated as version-shaped; a snapshot version directory's own
+            // real artifact files keep it version-shaped exactly like any other.
+            boolean isArtifactMetadataOnly = childListing.fileNames().contains("maven-metadata.xml")
+                    && childListing.fileNames().stream().allMatch(name -> name.equals("maven-metadata.xml")
+                            || name.startsWith("maven-metadata.xml."));
+            if (childListing.subdirectories().isEmpty() && !isArtifactMetadataOnly) {
+                // This child holds no further directories of its own (real asset files, or none at
+                // all post-dispose) and is not artifact-metadata-only either: it is version-shaped,
+                // proving the current directory is (also) the group/artifact level itself,
+                // regardless of what its other children look like. An artifact-metadata-only child
+                // (an artifact-level directory with zero version directories of its own, see
+                // recordVersionAvailable's own javadoc, the exact shape a native PUT straight to
+                // that file produces) is never version-shaped, no matter how empty it otherwise
+                // looks; falling into the recurse below instead is what lets that child record
+                // itself through this same method's own metadata.xml short-circuit above, rather
+                // than this directory being wrongly recorded as the package in its place.
+                if (!recordedAsPackage) {
+                    recordMavenPackage(pathSegments, result);
+                    recordedAsPackage = true;
+                }
+                continue;
+            }
+            List<String> nextSegments = new ArrayList<>(pathSegments);
+            nextSegments.add(subdirectory);
+            walkMavenDirectory(baseUrl, childPath, nextSegments, result);
+        }
+    }
+
+    private void recordMavenPackage(List<String> pathSegments, List<PackageIdentifier> result) {
+        if (pathSegments.size() >= 2) {
+            String packageName = pathSegments.get(pathSegments.size() - 1);
+            String namespace = String.join(".", pathSegments.subList(0, pathSegments.size() - 1));
+            result.add(new PackageIdentifier(namespace, packageName));
+        }
+    }
+
+    private MavenDirectoryListing fetchMavenDirectoryListing(String baseUrl, String detailsPath) {
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), detailsPath))
+                .timeout(Duration.ofSeconds(30))
+                .header("Authorization", manager.basicAuthHeader())
+                .GET()
+                .build();
+        HttpResponse<String> response = send(request, BodyHandlers.ofString());
+        if (response.statusCode() == 404) {
+            return null;
+        }
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Could not list Maven packages on the Reposilite sidecar: upstream "
+                    + "returned " + response.statusCode());
+        }
+        List<String> fileNames = new ArrayList<>();
+        List<String> subdirectories = new ArrayList<>();
+        for (JsonNode entry : readTree(response.body()).path("files")) {
+            String type = entry.path("type").asText();
+            String name = entry.path("name").asText();
+            if ("FILE".equals(type)) {
+                fileNames.add(name);
+            } else if ("DIRECTORY".equals(type)) {
+                subdirectories.add(name);
+            }
+        }
+        return new MavenDirectoryListing(fileNames, subdirectories);
+    }
+
     private Instant latestFileTimestamp(String baseUrl, String versionDetailsPath) {
         HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), versionDetailsPath))
                 .timeout(Duration.ofSeconds(30))
@@ -476,6 +663,138 @@ public class ReposiliteSidecarClient implements RepositorySidecarManager {
                 .end("versioning")
                 .end("metadata");
         deployArtifact(repositoryContainerId, gav, metadata.build().getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * Merges {@code externalMetadataXml}, a real public Maven repository's own group/artifact-
+     * level {@code maven-metadata.xml} fetched through an external connection, into {@code
+     * repositoryContainerId}'s own copy, so a client resolving a Maven version range or a Gradle
+     * dynamic version can discover a release this repository has never actually retained a byte
+     * of yet. The real asset bytes for whichever version the resolver settles on are still
+     * fetched on demand the normal way, through a separate, per-version import attempt; this
+     * only ever advertises versions, the same separation a real {@code maven-metadata.xml}
+     * request and the version-specific GAV requests that follow it already have.
+     *
+     * <p>Only {@code -SNAPSHOT}-free versions this repository's own {@code versionAllowed} does
+     * not reject are merged in: the snapshot restriction matches an external connection's own
+     * per-asset import ("AWS CodeArtifact only supports importing Maven release versions"), and
+     * {@code versionAllowed} exists so a caller can also keep out any version this repository has
+     * recorded as {@code Archived}/{@code Disposed}. Without that second check, disposing this
+     * package's only locally-listed version deletes its metadata file outright (see {@link
+     * #recordVersionDisposed}), and the next merge would otherwise re-import that exact disposed
+     * version straight back from the public repository's own still-unaware listing: a resolver
+     * could then pick a version whose real bytes this repository will never serve again. A
+     * version already listed locally is never added twice. Returns {@code false} without writing
+     * anything when the public repository's own metadata names no allowed release version this
+     * repository doesn't already have listed.
+     *
+     * <p>Reads the existing local copy through {@link #fetchArtifactConfirmingMissing}, not
+     * {@link #fetchArtifact}: that method's {@code empty()} also means "any non-200," 500/503
+     * included, which this merge must never read as "no local metadata yet," since that would let
+     * a transient sidecar read failure silently replace a real, locally-published package's
+     * {@code latest}/{@code release} with the external source's own guess at them.
+     *
+     * <p>Never lets the external source override an already-existing local {@code latest}/
+     * {@code release}: this bridge has no reliable way to tell whether a locally-published
+     * version a direct {@code mvn deploy} already recorded is newer or older than whatever the
+     * public repository last published, since Maven version strings do not sort by any universal
+     * rule this emulator could apply safely. A package with no local metadata at all has nothing
+     * to protect, so its merged {@code latest}/{@code release} are taken from the external
+     * source's own declared values, falling back to the last release version in document order
+     * when the source's own {@code <latest>}/{@code <release>} elements are themselves missing.
+     *
+     * <p>Writes the matching {@code .sha1}/{@code .md5} checksum siblings alongside every write,
+     * the same upkeep {@link #recordVersionDisposed} already owes this exact file: left out, a
+     * Maven client that verifies checksums could never trust even the first metadata response
+     * this merge ever produces. Raised by Greptile's review: the no-op return below, taken once
+     * every external version is already listed locally, repairs those same two checksums against
+     * the existing metadata first, the same way {@link #recordVersionDisposed}'s own early
+     * returns already do. Without that, a prior attempt whose metadata write succeeded but whose
+     * checksum write then failed would leave a stale checksum in place forever: every later
+     * request for this exact package would keep finding nothing new to add and keep taking this
+     * same no-op path, never repairing it, so a client verifying checksums could keep failing
+     * indefinitely even once the sidecar itself has long since recovered.
+     */
+    public boolean mergeExternalConnectionReleaseVersions(String repositoryContainerId, String namespace,
+            String packageName, byte[] externalMetadataXml, Predicate<String> versionAllowed) {
+        ensureRepository(repositoryContainerId);
+        String externalXml = new String(externalMetadataXml, StandardCharsets.UTF_8);
+        List<String> externalReleaseVersions = XmlParser.extractAll(externalXml, "version").stream()
+                .filter(v -> !v.endsWith("-SNAPSHOT"))
+                .filter(versionAllowed)
+                .toList();
+        if (externalReleaseVersions.isEmpty()) {
+            return false;
+        }
+        String gav = artifactMetadataGav(namespace, packageName);
+        Optional<FetchedArtifact> existing = fetchArtifactConfirmingMissing(repositoryContainerId, gav);
+        List<String> versions = new ArrayList<>();
+        String groupId = namespace;
+        String artifactId = packageName;
+        String latest = null;
+        String release = null;
+        boolean hadLocalMetadata = existing.isPresent();
+        if (hadLocalMetadata) {
+            String xml = new String(existing.get().content(), StandardCharsets.UTF_8);
+            versions.addAll(XmlParser.extractAll(xml, "version"));
+            groupId = XmlParser.extractFirst(xml, "groupId", namespace);
+            artifactId = XmlParser.extractFirst(xml, "artifactId", packageName);
+            latest = XmlParser.extractFirst(xml, "latest", null);
+            release = XmlParser.extractFirst(xml, "release", null);
+        }
+        boolean addedAny = false;
+        for (String version : externalReleaseVersions) {
+            if (!versions.contains(version)) {
+                versions.add(version);
+                addedAny = true;
+            }
+        }
+        if (!addedAny) {
+            if (hadLocalMetadata) {
+                writeMetadataChecksum(repositoryContainerId, gav + ".sha1",
+                        Digests.sha1Hex(existing.get().content()));
+                writeMetadataChecksum(repositoryContainerId, gav + ".md5",
+                        Digests.md5Hex(existing.get().content()));
+            }
+            return false;
+        }
+        if (!hadLocalMetadata) {
+            groupId = XmlParser.extractFirst(externalXml, "groupId", namespace);
+            artifactId = XmlParser.extractFirst(externalXml, "artifactId", packageName);
+            // The external source's own declared <latest>/<release> are trusted only when they
+            // actually name one of this merge's own release versions: a public repository could
+            // declare a SNAPSHOT (or any other value already filtered out above) as its latest,
+            // which must never end up named here without also being listed in <versions>.
+            String lastReleaseVersion = externalReleaseVersions.get(externalReleaseVersions.size() - 1);
+            String declaredLatest = XmlParser.extractFirst(externalXml, "latest", null);
+            latest = externalReleaseVersions.contains(declaredLatest) ? declaredLatest : lastReleaseVersion;
+            String declaredRelease = XmlParser.extractFirst(externalXml, "release", null);
+            release = externalReleaseVersions.contains(declaredRelease) ? declaredRelease : lastReleaseVersion;
+        }
+        XmlBuilder metadata = new XmlBuilder().start("metadata")
+                .elem("groupId", groupId)
+                .elem("artifactId", artifactId)
+                .start("versioning")
+                .elem("latest", latest)
+                .elem("release", release)
+                .start("versions");
+        for (String v : versions) {
+            metadata.elem("version", v);
+        }
+        metadata.end("versions")
+                .elem("lastUpdated", METADATA_TIMESTAMP.format(Instant.now()))
+                .end("versioning")
+                .end("metadata");
+        byte[] metadataBytes = metadata.build().getBytes(StandardCharsets.UTF_8);
+        DeployOutcome outcome = deployArtifact(repositoryContainerId, gav, metadataBytes);
+        if (!outcome.wroteNewContent()) {
+            throw new IllegalStateException("Could not merge external connection release versions into "
+                    + packageName + "'s maven-metadata.xml on the Reposilite sidecar: upstream returned "
+                    + outcome.status());
+        }
+        writeMetadataChecksum(repositoryContainerId, gav + ".sha1", Digests.sha1Hex(metadataBytes));
+        writeMetadataChecksum(repositoryContainerId, gav + ".md5", Digests.md5Hex(metadataBytes));
+        return true;
     }
 
     /**

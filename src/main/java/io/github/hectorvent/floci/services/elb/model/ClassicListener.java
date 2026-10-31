@@ -28,7 +28,16 @@ public class ClassicListener {
     public Integer getLoadBalancerPort() { return loadBalancerPort; }
     public void setLoadBalancerPort(Integer loadBalancerPort) { this.loadBalancerPort = loadBalancerPort; }
 
-    public String getInstanceProtocol() { return instanceProtocol; }
+    public String getInstanceProtocol() {
+        if (instanceProtocol != null && !instanceProtocol.isEmpty()) {
+            return instanceProtocol;
+        }
+        return switch (protocol) {
+            case "HTTPS" -> "HTTP";
+            case "SSL" -> "TCP";
+            case null, default -> protocol;
+        };
+    }
     public void setInstanceProtocol(String instanceProtocol) { this.instanceProtocol = instanceProtocol; }
 
     public Integer getInstancePort() { return instancePort; }

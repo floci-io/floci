@@ -84,7 +84,9 @@ public class SecretRotationScheduler {
 
     void tick(Instant now) {
         for (SecretsManagerService.RegionalSecret entry : service.listAllSecrets()) {
-            if (!isDue(entry.secret(), now)) {
+            if (!isDue(entry.secret(), now)
+                    || (entry.secret().getOwningService() != null
+                    && !service.supportsManagedRotation(entry.secret().getArn(), entry.region()))) {
                 continue;
             }
             try {
@@ -109,7 +111,7 @@ public class SecretRotationScheduler {
         }
         // A replica is read-only, a deleted secret is not rotatable, and a secret another AWS
         // service owns is rotated by that service rather than through a rotation Lambda.
-        if (secret.isReplica() || secret.getDeletedDate() != null || secret.getOwningService() != null) {
+        if (secret.isReplica() || secret.getDeletedDate() != null) {
             return false;
         }
         return !secret.getNextRotationDate().isAfter(now);

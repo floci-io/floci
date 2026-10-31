@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.ecr.registry;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ecr.EcrService;
+import io.github.hectorvent.floci.testutil.FreePorts;
+import io.vertx.core.Context;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -21,6 +23,9 @@ import io.vertx.ext.web.Router;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
 import java.util.ArrayList;
@@ -28,6 +33,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -45,6 +51,8 @@ import static org.mockito.Mockito.when;
 class EcrRegistryDataPlaneTest {
 
     private Vertx vertx;
+    private Semaphore repositoryWriteLock;
+    private CountDownLatch repositoryWriteLockRefused;
 
     @BeforeEach
     void setUp() {
@@ -368,6 +376,200 @@ class EcrRegistryDataPlaneTest {
     }
 
     /**
+     * A manifest push takes its repository's write lock before anything of it reaches the
+     * registry, the same lock a BatchDeleteImage holds while it drops a shared manifest and
+     * writes it back under its surviving tags: a push that arrives during such a delete waits
+     * for it instead of landing between the drop and the write-back, where the restore would
+     * overwrite it. Reads take no lock and answer while the push waits.
+     */
+    @Test
+    void aManifestPushWaitsForTheRepositoryWriteLockAndCompletesAfterIt() throws Exception {
+        AtomicInteger manifestWrites = new AtomicInteger();
+        HttpServer registry = vertx.createHttpServer()
+                .requestHandler(request -> {
+                    if (request.method() == HttpMethod.PUT) {
+                        request.bodyHandler(body -> {
+                            manifestWrites.incrementAndGet();
+                            request.response().setStatusCode(201).end();
+                        });
+                    } else if (request.method() == HttpMethod.HEAD) {
+                        request.response().setStatusCode(404).end();
+                    } else {
+                        request.response().setStatusCode(200).end();
+                    }
+                })
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        HttpServer dataPlane = null;
+        HttpClient client = null;
+        try {
+            dataPlane = dataPlane(registry, false);
+            client = vertx.createHttpClient();
+            assertTrue(repositoryWriteLock.tryAcquire(), "the test takes the lock a delete would hold");
+
+            Future<HttpClientResponse> push = client.request(new RequestOptions()
+                            .setHost("127.0.0.1")
+                            .setPort(dataPlane.actualPort())
+                            .setMethod(HttpMethod.PUT)
+                            .setURI("/v2/platform/api/manifests/v1"))
+                    .compose(request -> {
+                        request.putHeader("Host", "000000000000.dkr.ecr.us-east-1.localhost:4566");
+                        request.setChunked(true);
+                        return request.send(Buffer.buffer("{}"));
+                    });
+
+            Integer readStatus = client.request(new RequestOptions()
+                            .setHost("127.0.0.1")
+                            .setPort(dataPlane.actualPort())
+                            .setMethod(HttpMethod.GET)
+                            .setURI("/v2/platform/api/manifests/v1"))
+                    .compose(request -> {
+                        request.putHeader("Host", "000000000000.dkr.ecr.us-east-1.localhost:4566");
+                        return request.send().map(HttpClientResponse::statusCode);
+                    })
+                    .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            assertEquals(200, readStatus, "a read answers while a write waits for the lock");
+
+            assertTrue(repositoryWriteLockRefused.await(5, TimeUnit.SECONDS),
+                    "the push is parked waiting for the repository's write lock");
+            assertEquals(0, manifestWrites.get(),
+                    "the push must not reach the registry while the repository's delete holds the lock");
+
+            repositoryWriteLock.release();
+            HttpClientResponse response = push.toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertEquals(201, response.statusCode());
+            assertEquals(1, manifestWrites.get());
+            assertTrue(acquiredWithin(repositoryWriteLock, 5_000),
+                    "the exchange returns the write lock with its answer");
+        } finally {
+            if (client != null) {
+                client.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            }
+            if (dataPlane != null) {
+                dataPlane.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            }
+            registry.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    /**
+     * Two manifest PUTs to one repository on one HTTP/2 connection. The first holds the
+     * repository's write lock and is parked at the registry, which has read its body and holds
+     * the answer. The second waits for the lock. The second push's body must not sit unread in
+     * the connection's flow-control window, where it would keep a first push still sending its
+     * body from ever finishing: it would never release the lock, and both would wait forever.
+     * The data plane drains a waiting manifest body, so the second push's whole body reaches
+     * the data plane while the first is still parked, and both pushes then complete, in order,
+     * once the registry answers. The registry reads the parked body rather than pausing it,
+     * because a paused body's unread bytes would hold the window themselves, and how many of
+     * them the loopback socket buffers absorb depends on the OS.
+     */
+    @Test
+    void concurrentManifestPushesOnOneConnectionDoNotDeadlock() throws Exception {
+        int parkedBodyBytes = 4 * 1024 * 1024;
+        int waitingBodyBytes = 2 * 1024 * 1024;
+        CountDownLatch parkedArrived = new CountDownLatch(1);
+        AtomicReference<HttpServerRequest> parkedRequest = new AtomicReference<>();
+        AtomicReference<Context> parkedContext = new AtomicReference<>();
+        AtomicInteger order = new AtomicInteger();
+        AtomicInteger parkedAnsweredAt = new AtomicInteger(-1);
+        AtomicInteger waitingArrivedAt = new AtomicInteger(-1);
+        AtomicInteger registryParkedBodyBytes = new AtomicInteger();
+        AtomicInteger registryWaitingBodyBytes = new AtomicInteger();
+        HttpServer registry = vertx.createHttpServer()
+                .requestHandler(request -> {
+                    if (request.path().endsWith("/manifests/first")) {
+                        request.bodyHandler(body -> {
+                            registryParkedBodyBytes.set(body.length());
+                            parkedRequest.set(request);
+                            parkedContext.set(Vertx.currentContext());
+                            parkedArrived.countDown();
+                        });
+                        return;
+                    }
+                    if (!request.path().endsWith("/manifests/second")) {
+                        request.response().setStatusCode(405).end();
+                        return;
+                    }
+                    waitingArrivedAt.set(order.incrementAndGet());
+                    request.bodyHandler(body -> {
+                        registryWaitingBodyBytes.set(body.length());
+                        request.response().setStatusCode(201).end();
+                    });
+                })
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        HttpServer dataPlane = null;
+        HttpClient client = null;
+        try {
+            dataPlane = dataPlane(registry, false);
+            // HTTP/2 with prior knowledge: both pushes are streams on one connection, as
+            // crane's are.
+            client = vertx.createHttpClient(new HttpClientOptions()
+                    .setProtocolVersion(HttpVersion.HTTP_2)
+                    .setHttp2ClearTextUpgrade(false));
+            SocketAddress server = SocketAddress.inetSocketAddress(dataPlane.actualPort(), "127.0.0.1");
+
+            Future<HttpClientResponse> first = client.request(new RequestOptions()
+                            .setServer(server)
+                            .setHost("000000000000.dkr.ecr.us-east-1.localhost")
+                            .setPort(4566)
+                            .setMethod(HttpMethod.PUT)
+                            .setURI("/v2/platform/api/manifests/first"))
+                    .compose(request -> request.send(Buffer.buffer(new byte[parkedBodyBytes])));
+            assertTrue(parkedArrived.await(5, TimeUnit.SECONDS),
+                    "the push that holds the lock reached the registry");
+
+            HttpClientRequest waiting = client.request(new RequestOptions()
+                            .setServer(server)
+                            .setHost("000000000000.dkr.ecr.us-east-1.localhost")
+                            .setPort(4566)
+                            .setMethod(HttpMethod.PUT)
+                            .setURI("/v2/platform/api/manifests/second"))
+                    .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            waiting.setChunked(true);
+            Future<HttpClientResponse> second = waiting.response();
+            List<Future<Void>> writes = new ArrayList<>();
+            for (int written = 0; written < waitingBodyBytes; written += 64 * 1024) {
+                writes.add(waiting.write(Buffer.buffer(new byte[64 * 1024])));
+            }
+
+            // The waiting push's whole body reaches the data plane while the push holding the
+            // lock is still parked.
+            Future.join(writes).toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
+            waiting.end();
+
+            HttpServerRequest parked = parkedRequest.get();
+            parkedContext.get().runOnContext(ignored -> {
+                parkedAnsweredAt.set(order.incrementAndGet());
+                parked.response().setStatusCode(201).end();
+            });
+
+            assertEquals(201, first.toCompletionStage().toCompletableFuture()
+                    .get(10, TimeUnit.SECONDS).statusCode());
+            assertEquals(201, second.toCompletionStage().toCompletableFuture()
+                    .get(10, TimeUnit.SECONDS).statusCode());
+            assertEquals(parkedBodyBytes, registryParkedBodyBytes.get());
+            assertEquals(waitingBodyBytes, registryWaitingBodyBytes.get());
+            assertTrue(waitingArrivedAt.get() > parkedAnsweredAt.get(),
+                    "the waiting push reaches the registry only after the push holding the"
+                            + " lock is answered");
+            assertTrue(acquiredWithin(repositoryWriteLock, 5_000),
+                    "both exchanges return the write lock with their answers");
+        } finally {
+            if (client != null) {
+                client.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            }
+            if (dataPlane != null) {
+                dataPlane.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+            }
+            registry.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+        }
+    }
+
+    /**
      * An HTTP/2 client such as crane sends every upload of a push as a stream on one
      * connection, and the data plane needs a registry connection for each. An upload left
      * waiting for one stays paused, and its unread bytes hold the client connection's
@@ -551,6 +753,67 @@ class EcrRegistryDataPlaneTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({"true,GET,/v2/", "false,GET,/v2/",
+            "true,PUT,/v2/platform/api/manifests/latest", "false,PUT,/v2/platform/api/manifests/latest"})
+    void unavailableRegistryExplainsTheNetworkRequirement(boolean startupFailure, String method, String path)
+            throws Exception {
+        EcrRegistryManager manager = Mockito.mock(EcrRegistryManager.class);
+        HttpServer dataPlane = dataPlane(manager, false, null);
+        when(manager.httpClient()).thenReturn(new RegistryHttpClient(
+                "http://127.0.0.1:" + FreePorts.loopbackIpv4Port()));
+        if (startupFailure) {
+            Mockito.doThrow(new IllegalStateException("internal-startup-detail")).when(manager).ensureStarted();
+        }
+        RegistryResponse response = request(dataPlane.actualPort(), HttpMethod.valueOf(method), path);
+        assertEquals(503, response.status());
+        assertEquals("application/json", response.contentType());
+        assertEquals("registry/2.0", response.apiVersion());
+        assertFalse(response.body().isBlank());
+        JsonArray errors = new JsonObject(response.body()).getJsonArray("errors");
+        assertNotNull(errors);
+        assertEquals(1, errors.size());
+        JsonObject error = errors.getJsonObject(0);
+        assertEquals("UNAVAILABLE", error.getString("code"));
+        String message = error.getString("message");
+        assertTrue(message.contains("registry"));
+        assertTrue(message.contains("user-defined network"));
+        assertTrue(message.contains("FLOCI_SERVICES_ECR_DOCKER_NETWORK"));
+        assertFalse(response.body().contains("internal-startup-detail"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void headFailuresKeepRegistryHeadersWithoutSendingABody(boolean startupFailure) throws Exception {
+        EcrRegistryManager manager = Mockito.mock(EcrRegistryManager.class);
+        HttpServer dataPlane = dataPlane(manager, false, null);
+        when(manager.httpClient()).thenReturn(new RegistryHttpClient(
+                "http://127.0.0.1:" + FreePorts.loopbackIpv4Port()));
+        if (startupFailure) {
+            Mockito.doThrow(new IllegalStateException("internal-startup-detail")).when(manager).ensureStarted();
+        }
+        RegistryResponse response = request(dataPlane.actualPort(), HttpMethod.HEAD, "/v2/platform/api/manifests/latest");
+        assertEquals(503, response.status());
+        assertEquals("application/json", response.contentType());
+        assertEquals("registry/2.0", response.apiVersion());
+        assertTrue(response.body().isEmpty());
+    }
+
+    @Test
+    void upstreamErrorResponsesPassThroughUnchanged() throws Exception {
+        HttpServer registry = vertx.createHttpServer().requestHandler(request -> request.response()
+                        .setStatusCode(503).putHeader("Content-Type", "text/plain").end("registry temporarily busy"))
+                .listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        EcrRegistryManager manager = Mockito.mock(EcrRegistryManager.class);
+        when(manager.httpClient()).thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
+        HttpServer dataPlane = dataPlane(manager, false, null);
+        RegistryResponse response = request(dataPlane.actualPort(), HttpMethod.GET, "/v2/");
+        assertEquals(503, response.status());
+        assertEquals("text/plain", response.contentType());
+        assertEquals("registry temporarily busy", response.body());
+        assertNull(response.apiVersion());
+    }
+
     /**
      * A data plane in front of {@code registry}, on plain HTTP that a client can speak HTTP/1.1 or,
      * with prior knowledge, HTTP/2 to. Repository {@code platform/api} of account 000000000000 in
@@ -562,12 +825,17 @@ class EcrRegistryDataPlaneTest {
 
     private HttpServer dataPlane(HttpServer registry, boolean immutableTags, CountDownLatch tagReleased) throws Exception {
         EcrRegistryManager registryManager = Mockito.mock(EcrRegistryManager.class);
+        when(registryManager.httpClient())
+                .thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
+        return dataPlane(registryManager, immutableTags, tagReleased);
+    }
+
+    private HttpServer dataPlane(EcrRegistryManager registryManager, boolean immutableTags,
+                                 CountDownLatch tagReleased) throws Exception {
         EcrService ecrService = Mockito.mock(EcrService.class);
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
         when(config.services().ecr().enabled()).thenReturn(true);
         when(config.services().ecr().uriStyle()).thenReturn("hostname");
-        when(registryManager.httpClient())
-                .thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
         when(ecrService.isImageTagImmutable("platform/api", "000000000000", "us-east-1"))
                 .thenReturn(immutableTags);
         // The tag lock lives in EcrService, so the mock holds a real one.
@@ -581,6 +849,22 @@ class EcrRegistryDataPlaneTest {
             return null;
         })
                 .when(ecrService).releaseImmutableTag(anyString());
+        // The repository write lock lives in EcrService too, so the mock holds a real one,
+        // and counts a latch each time it refuses a writer.
+        repositoryWriteLock = new Semaphore(1);
+        repositoryWriteLockRefused = new CountDownLatch(1);
+        when(ecrService.tryLockRepositoryWrites(anyString()))
+                .thenAnswer(call -> {
+                    if (repositoryWriteLock.tryAcquire()) {
+                        return true;
+                    }
+                    repositoryWriteLockRefused.countDown();
+                    return false;
+                });
+        Mockito.doAnswer(call -> {
+            repositoryWriteLock.release();
+            return null;
+        }).when(ecrService).unlockRepositoryWrites(anyString());
         when(ecrService.registryRepositoryName("platform/api", "000000000000", "us-east-1"))
                 .thenReturn("legacy/platform-api");
 
@@ -592,6 +876,21 @@ class EcrRegistryDataPlaneTest {
     }
 
     private record ManifestResponse(int statusCode, String body) {
+    }
+
+    /**
+     * Takes the semaphore within {@code millis}, for assertions that follow an exchange whose
+     * end, and with it its lock release, runs on the event loop after its answer is seen.
+     */
+    private static boolean acquiredWithin(Semaphore semaphore, long millis) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + millis;
+        while (!semaphore.tryAcquire()) {
+            if (System.currentTimeMillis() >= deadline) {
+                return false;
+            }
+            Thread.sleep(10);
+        }
+        return true;
     }
 
     private ManifestResponse putManifest(int port) throws Exception {
@@ -617,4 +916,16 @@ class EcrRegistryDataPlaneTest {
                         .map(body -> new ManifestResponse(response.statusCode(), body.toString())))
                 .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
     }
+
+    private RegistryResponse request(int port, HttpMethod method, String path) throws Exception {
+        return vertx.createHttpClient().request(new RequestOptions().setHost("127.0.0.1").setPort(port)
+                        .setMethod(method).setURI(path))
+                .compose(request -> request.putHeader("Host", "000000000000.dkr.ecr.us-east-1.localhost:4566").send())
+                .compose(response -> response.body().map(body -> new RegistryResponse(response.statusCode(),
+                        response.getHeader("Content-Type"), response.getHeader("Docker-Distribution-API-Version"),
+                        body.toString())))
+                .toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+    }
+
+    private record RegistryResponse(int status, String contentType, String apiVersion, String body) {}
 }

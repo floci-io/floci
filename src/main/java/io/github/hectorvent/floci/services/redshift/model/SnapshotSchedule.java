@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshift.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -17,6 +18,10 @@ public class SnapshotSchedule {
     private String scheduleDescription;
     private List<String> scheduleDefinitions = new ArrayList<>();
     private Map<String, String> tags = new LinkedHashMap<>();
+    private Instant updatedAt;
+
+    public Instant getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(Instant value) { updatedAt = value; }
 
     public SnapshotSchedule() {}
 

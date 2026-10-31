@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -57,7 +58,7 @@ class AslExecutorIntrinsicContextTest {
         AslExecutor executor = newExecutor();
         JsonNode input = mapper.createObjectNode();
         JsonNode context = mapper.createObjectNode();
-        ((com.fasterxml.jackson.databind.node.ObjectNode) context).putObject("Map")
+        ((ObjectNode) context).putObject("Map")
                 .putObject("Item").putObject("Value").put("solutionId", "SOLUTION_B");
 
         JsonNode result = executor.resolvePath(
@@ -71,7 +72,7 @@ class AslExecutorIntrinsicContextTest {
         AslExecutor executor = newExecutor();
         JsonNode input = mapper.createObjectNode();
         JsonNode context = mapper.createObjectNode();
-        ((com.fasterxml.jackson.databind.node.ObjectNode) context).put("token", "abc");
+        ((ObjectNode) context).put("token", "abc");
 
         // States.JsonToString($$) serializes the whole Context Object.
         JsonNode result = executor.resolvePath("States.JsonToString($$)", input, context);
@@ -83,7 +84,7 @@ class AslExecutorIntrinsicContextTest {
     void inputArgsStillResolveWithContextPresent() {
         AslExecutor executor = newExecutor();
         JsonNode input = mapper.createObjectNode();
-        ((com.fasterxml.jackson.databind.node.ObjectNode) input).put("a", "X").put("b", "Y");
+        ((ObjectNode) input).put("a", "X").put("b", "Y");
         JsonNode context = mapper.createObjectNode();
 
         JsonNode result = executor.resolvePath("States.Format('{}-{}', $.a, $.b)", input, context);
@@ -95,7 +96,7 @@ class AslExecutorIntrinsicContextTest {
     void noContext_intrinsicResolutionUnchanged() {
         AslExecutor executor = newExecutor();
         JsonNode input = mapper.createObjectNode();
-        ((com.fasterxml.jackson.databind.node.ObjectNode) input).put("name", "widget");
+        ((ObjectNode) input).put("name", "widget");
 
         // The 2-arg form (context == null) must behave exactly as before: $. args resolve,
         // and a stray $$. arg — which has no context to resolve against — yields "null".

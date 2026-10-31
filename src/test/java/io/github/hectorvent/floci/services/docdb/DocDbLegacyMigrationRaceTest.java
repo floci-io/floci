@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
@@ -15,6 +16,7 @@ import io.github.hectorvent.floci.services.rds.RdsService;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -150,7 +152,7 @@ class DocDbLegacyMigrationRaceTest {
         // Staged rather than raced: the listing is held at its first scan while the move runs to
         // completion, which is the interleaving that loses or doubles the record.
         PausingStorageBackend<DocDbCluster> pausing =
-                new PausingStorageBackend<>(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>());
+                new PausingStorageBackend<>(new InMemoryStorage<>());
         serviceOver(pausing);
         String id = "listed-across-the-move";
         DocDbCluster legacy = new DocDbCluster();
@@ -158,7 +160,7 @@ class DocDbLegacyMigrationRaceTest {
         legacy.setStatus("available");
         clusterStore.put(id, legacy);
 
-        AtomicReference<java.util.List<String>> listed = new AtomicReference<>();
+        AtomicReference<List<String>> listed = new AtomicReference<>();
         AtomicReference<Throwable> unexpected = new AtomicReference<>();
         // The second scan: the first runs before the move, so holding the second is what puts the
         // move between them — the interleaving in which a record can be lost or counted twice.
@@ -181,7 +183,7 @@ class DocDbLegacyMigrationRaceTest {
         lister.join(TimeUnit.SECONDS.toMillis(10));
 
         assertNull(unexpected.get(), () -> "unexpected failure: " + unexpected.get());
-        assertEquals(java.util.List.of(id), listed.get(),
+        assertEquals(List.of(id), listed.get(),
                 "the cluster should be listed exactly once across the move");
     }
 
@@ -191,7 +193,7 @@ class DocDbLegacyMigrationRaceTest {
         // and the cluster delete runs to completion first. Sharing one monitor is what stops the
         // held write from landing afterwards.
         PausingStorageBackend<DocDbCluster> pausing =
-                new PausingStorageBackend<>(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>());
+                new PausingStorageBackend<>(new InMemoryStorage<>());
         serviceOver(pausing);
         String clusterId = "co-delete-staged";
         String instanceId = "co-delete-staged-instance";
@@ -247,7 +249,7 @@ class DocDbLegacyMigrationRaceTest {
 
             CountDownLatch start = new CountDownLatch(1);
             AtomicReference<Throwable> unexpected = new AtomicReference<>();
-            AtomicReference<java.util.List<String>> listed = new AtomicReference<>();
+            AtomicReference<List<String>> listed = new AtomicReference<>();
 
             Thread mover = new Thread(() -> {
                 await(start);
@@ -273,7 +275,7 @@ class DocDbLegacyMigrationRaceTest {
             mover.join(TimeUnit.SECONDS.toMillis(10));
             lister.join(TimeUnit.SECONDS.toMillis(10));
             assertNull(unexpected.get(), () -> "unexpected failure: " + unexpected.get());
-            assertEquals(java.util.List.of(id), listed.get(),
+            assertEquals(List.of(id), listed.get(),
                     "the cluster should be listed exactly once, attempt " + attempt);
         }
     }
@@ -342,7 +344,7 @@ class DocDbLegacyMigrationRaceTest {
         // those two would be undone by that write. Holding the move at its write and letting a
         // delete run is that interleaving exactly.
         PausingStorageBackend<DocDbCluster> pausing =
-                new PausingStorageBackend<>(new io.github.hectorvent.floci.core.storage.InMemoryStorage<>());
+                new PausingStorageBackend<>(new InMemoryStorage<>());
         serviceOver(pausing);
         String id = "moved-while-deleted";
         DocDbCluster legacy = new DocDbCluster();

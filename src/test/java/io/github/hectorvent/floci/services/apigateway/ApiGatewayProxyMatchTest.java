@@ -36,7 +36,7 @@ class ApiGatewayProxyMatchTest {
         ctrl = new ApiGatewayExecuteController(apiGatewayService, null, apiGatewayV2Service, lambdaService,
                 new RegionResolver("us-east-1", "000000000000"),
                 new ObjectMapper(), vtlEngine, serviceRouter, webSocketConnectionManager, elbV2Service, null,
-                new ApiGatewayExecuteRouteContext(), null, null, null, null, null);
+                new ApiGatewayExecuteRouteContext(), null, null, null, null, null, null);
     }
 
     private ApiGatewayResource resource(String id, String parentId, String pathPart, String path) {
@@ -218,6 +218,77 @@ class ApiGatewayProxyMatchTest {
 
         assertSame(template, ctrl.matchResource(resources, "/items/1"));
         assertNull(ctrl.matchResource(resources, "/items/1/sub"));
+    }
+
+    // ──────────────────────────── greedy below a path parameter ────────────────────────────
+    // Measured on AWS: every matching resource, exact, parameterised or greedy, is ranked by its
+    // literal segments, then by its segments before the greedy parameter, then by the leftmost
+    // literal. A greedy resource is no longer special-cased behind every parameterised one.
+
+    @Test
+    void greedyResourceBelowAPathParameterMatches() {
+        ApiGatewayResource list = resource("r1", "root", "{kind}", "/v1/admin/catalog/{kind}");
+        ApiGatewayResource item = resource("r2", "r1", "{name+}", "/v1/admin/catalog/{kind}/{name+}");
+        List<ApiGatewayResource> resources = List.of(item, list);
+
+        assertSame(item, ctrl.matchResource(resources, "/v1/admin/catalog/scopes/teos/sur-df"));
+        assertSame(item, ctrl.matchResource(resources, "/v1/admin/catalog/scopes/teos"));
+        assertSame(list, ctrl.matchResource(resources, "/v1/admin/catalog/scopes"));
+        assertNull(ctrl.matchResource(List.of(item), "/v1/admin/catalog/scopes/"));
+        assertNull(ctrl.matchResource(List.of(item), "/v1/admin/other/scopes/teos"));
+    }
+
+    @Test
+    void moreLiteralSegmentsWinAcrossParameterisedAndGreedyResources() {
+        ApiGatewayResource greedy = resource("r1", "root", "{proxy+}", "/s/b/{proxy+}");
+        ApiGatewayResource template = resource("r2", "root", "{y}", "/s/{x}/{y}");
+        ApiGatewayResource deepTemplate = resource("r3", "root", "{v}", "/s/{x}/{y}/{z}/{v}");
+        List<ApiGatewayResource> resources = List.of(template, deepTemplate, greedy);
+
+        assertSame(greedy, ctrl.matchResource(resources, "/s/b/c"));
+        assertSame(greedy, ctrl.matchResource(resources, "/s/b/c/d/e"));
+        assertSame(template, ctrl.matchResource(resources, "/s/a/c"));
+    }
+
+    @Test
+    void moreLiteralSegmentsBeatADeeperGreedyParent() {
+        ApiGatewayResource shallow = resource("r1", "root", "{proxy+}", "/q/b/{proxy+}");
+        ApiGatewayResource deep = resource("r2", "root", "{p+}", "/q/{x}/{y}/{p+}");
+        ApiGatewayResource early = resource("r3", "root", "{p+}", "/m/b/{y}/{z}/{p+}");
+        ApiGatewayResource late = resource("r4", "root", "{q+}", "/m/{x}/c/d/{q+}");
+        List<ApiGatewayResource> resources = List.of(deep, shallow, early, late);
+
+        assertSame(shallow, ctrl.matchResource(resources, "/q/b/c/d"));
+        assertSame(deep, ctrl.matchResource(resources, "/q/a/c/d"));
+        assertSame(late, ctrl.matchResource(resources, "/m/b/c/d/e"));
+    }
+
+    @Test
+    void deeperGreedyParentWinsAtEqualLiteralSegments() {
+        ApiGatewayResource nested = resource("r1", "root", "{y+}", "/a/{x}/{y+}");
+        ApiGatewayResource literal = resource("r2", "root", "{proxy+}", "/a/b/{proxy+}");
+        ApiGatewayResource deeper = resource("r3", "root", "{z+}", "/a/{x}/c/{z+}");
+        List<ApiGatewayResource> resources = List.of(nested, literal, deeper);
+
+        assertSame(nested, ctrl.matchResource(resources, "/a/one/two/three"));
+        assertSame(literal, ctrl.matchResource(resources, "/a/b/c"));
+        assertEquals(List.of(deeper, literal, nested), ctrl.matchResources(resources, "/a/b/c/d"));
+    }
+
+    @Test
+    void leftmostLiteralBreaksATie() {
+        ApiGatewayResource leftLiteral = resource("r1", "root", "{p+}", "/n/b/{y}/{p+}");
+        ApiGatewayResource rightLiteral = resource("r2", "root", "{q+}", "/n/{x}/c/{q+}");
+
+        assertSame(leftLiteral, ctrl.matchResource(List.of(rightLiteral, leftLiteral), "/n/b/c/d"));
+        assertSame(leftLiteral, ctrl.matchResource(List.of(leftLiteral, rightLiteral), "/n/b/c/d"));
+    }
+
+    @Test
+    void pathParameterMatchesAnEmptySegment() {
+        ApiGatewayResource template = resource("r1", "root", "two", "/a/{x}/two");
+
+        assertSame(template, ctrl.matchResource(List.of(template), "/a//two"));
     }
 
     // ──────────────────────────── trailing-slash preservation (#1557) ────────────────────────────

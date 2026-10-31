@@ -1256,8 +1256,8 @@ class KmsServiceTest {
             PublicKey publicKey = KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(
                     Base64.getDecoder().decode(kmsService.getPublicKey(key.getKeyId(), REGION).getPublicKeyEncoded())));
             Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");
-            cipher.init(javax.crypto.Cipher.ENCRYPT_MODE, publicKey, new javax.crypto.spec.OAEPParameterSpec(
-                    "SHA-256", "MGF1", MGF1ParameterSpec.SHA256, javax.crypto.spec.PSource.PSpecified.DEFAULT));
+            cipher.init(Cipher.ENCRYPT_MODE, publicKey, new OAEPParameterSpec(
+                    "SHA-256", "MGF1", MGF1ParameterSpec.SHA256, PSource.PSpecified.DEFAULT));
             byte[] localCiphertext = cipher.doFinal(PLAINTEXT);
 
             KmsService.DecryptResult decrypted = kmsService.decryptAndResolveKey(

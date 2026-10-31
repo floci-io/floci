@@ -15,6 +15,7 @@ import com.github.dockerjava.api.exception.NotModifiedException;
 import com.github.dockerjava.api.model.Bind;
 import com.github.dockerjava.api.model.Capability;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.ContainerConfig;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.HostConfig;
@@ -34,6 +35,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.Closeable;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -136,9 +138,29 @@ public class ContainerLifecycleManager {
         return createAndStart(spec, true);
     }
 
+    /**
+     * Starts a disposable container for a specific Docker platform, reclaiming its anonymous
+     * volumes if startup fails.
+     *
+     * @param platform Docker platform, such as {@code linux/amd64}, or null for the daemon's own
+     */
+    public ContainerInfo createAndStartEphemeral(ContainerSpec spec, String platform) {
+        return createAndStart(spec, platform, true);
+    }
+
     private ContainerInfo createAndStart(ContainerSpec spec, boolean removeAnonymousVolumes) {
         String resolvedImage = imageCacheService.ensureImageExists(spec.image());
-        String containerId = create(spec, resolvedImage, null, removeAnonymousVolumes);
+        return createAndStart(spec, resolvedImage, null, removeAnonymousVolumes);
+    }
+
+    private ContainerInfo createAndStart(ContainerSpec spec, String platform, boolean removeAnonymousVolumes) {
+        String resolvedImage = imageCacheService.ensureImageExists(spec.image(), platform);
+        return createAndStart(spec, resolvedImage, platform, removeAnonymousVolumes);
+    }
+
+    private ContainerInfo createAndStart(ContainerSpec spec, String resolvedImage, String platform,
+                                         boolean removeAnonymousVolumes) {
+        String containerId = create(spec, resolvedImage, platform, removeAnonymousVolumes);
         try {
             return withPublishedHostPorts(startCreated(containerId, spec), spec);
         } catch (RuntimeException failure) {
@@ -163,9 +185,12 @@ public class ContainerLifecycleManager {
      * Resolves the image a container launch is about to run, pulling it as the ECS agent does
      * under {@code behavior}. A spec built from the returned image id runs exactly that image,
      * whatever a later pull of the same reference moves its tag to.
+     *
+     * @param platform the Docker platform the container runs, such as {@code linux/amd64}, or null
+     *        for the daemon's own
      */
-    public LaunchImage resolveImageForLaunch(String image, ImagePullBehavior behavior) {
-        return imageCacheService.resolveForLaunch(image, behavior);
+    public LaunchImage resolveImageForLaunch(String image, ImagePullBehavior behavior, String platform) {
+        return imageCacheService.resolveForLaunch(image, behavior, platform);
     }
 
     /**
@@ -221,13 +246,23 @@ public class ContainerLifecycleManager {
         if (caBundle.isEmpty()) {
             return createContainer(spec, resolvedImage, platform, hostConfig, spec.env());
         }
-        String containerId = createContainer(spec, resolvedImage, platform, hostConfig,
-                ContainerCaBundle.appendEnv(spec.env()));
-        if (copyCaBundle(containerId, caBundle.get())) {
+        List<String> env = ContainerCaBundle.appendEnv(spec.env());
+        Path javaTrustStore = null;
+        if (spec.javaTrustStore()) {
+            Optional<Path> trustStore = ContainerCaBundle.javaTrustStoreHostPath(config);
+            Optional<List<String>> imageEnv = trustStore.isPresent() ? imageEnv(resolvedImage) : Optional.empty();
+            if (imageEnv.isPresent()) {
+                javaTrustStore = trustStore.get();
+                env = ContainerCaBundle.appendJavaTrustEnv(env, imageEnv.get());
+            }
+        }
+        String containerId = createContainer(spec, resolvedImage, platform, hostConfig, env);
+        if (copyCaBundle(containerId, caBundle.get(), javaTrustStore)) {
             return containerId;
         }
-        // SSL_CERT_FILE and friends replace the image's trust store, so they must never name a
-        // file that is not there. Start over without them: the container keeps its own trust.
+        // SSL_CERT_FILE and friends replace the image's trust store, and so does JAVA_TOOL_OPTIONS
+        // the JVM's, so they must never name a file that is not there. Start over without them: the
+        // container keeps its own trust.
         if (removeAnonymousVolumes) {
             removeIfExistsStrict(containerId, true);
         } else {
@@ -360,25 +395,58 @@ public class ContainerLifecycleManager {
 
     /**
      * Copies the CA bundle into the created, not yet started, container so runtimes that read
-     * {@code SSL_CERT_FILE} and friends at init find it. A copy rather than a bind mount because
-     * when Floci itself runs in Docker its persistent path is not a host path the daemon can mount.
-     * Returns false, after logging why, when the copy failed; an image without {@code /etc} is the
-     * expected reason, and the caller then recreates the container without the trust variables.
+     * {@code SSL_CERT_FILE} and friends at init find it, and beside it the Java trust store, when
+     * {@code javaTrustStore} is not null, for the JVMs {@code JAVA_TOOL_OPTIONS} points at it. A copy
+     * rather than a bind mount because when Floci itself runs in Docker its persistent path is not a
+     * host path the daemon can mount. Returns false, after logging why, when a copy failed; an image
+     * without {@code /etc} is the expected reason, and the caller then recreates the container
+     * without the trust variables.
      */
-    private boolean copyCaBundle(String containerId, Path bundle) {
+    private boolean copyCaBundle(String containerId, Path bundle, Path javaTrustStore) {
         try {
-            byte[] content = Files.readAllBytes(bundle);
-            RetryingTarCopier.copyBytes(dockerClient, containerId, ContainerCaBundle.CONTAINER_DIR,
-                    ContainerCaBundle.FILE_NAME, content, 0644,
-                    RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
+            copyIntoContainerDir(containerId, bundle, ContainerCaBundle.FILE_NAME);
             LOG.debugv("Copied the CA bundle into container {0} at {1}", containerId, ContainerCaBundle.CONTAINER_PATH);
+            if (javaTrustStore != null) {
+                copyIntoContainerDir(containerId, javaTrustStore, ContainerCaBundle.JAVA_TRUST_STORE_FILE_NAME);
+            }
             return true;
         } catch (Exception e) {
-            LOG.warnv(e, "Could not copy the CA bundle into container {0}; creating it again without the trust "
-                    + "variables, so it keeps its own trust store and will not trust Floci HTTPS: {1}",
+            LOG.warnv(e, "Could not copy the CA bundle or its Java trust store into container {0}; creating it"
+                    + " again without the trust variables, so it keeps its own trust store and will not trust"
+                    + " Floci HTTPS: {1}",
                     containerId, e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Copies the CA bundle's Java trust store into {@code containerId} at
+     * {@link ContainerCaBundle#JAVA_TRUST_STORE_PATH}, for a container whose JVMs are then pointed at
+     * it, as {@link ContainerCaBundle#JAVA_TRUST_SHELL_LINE} does, and whose spec does not ask for it,
+     * as {@link ContainerBuilder.Builder#withJavaTrustStore} does. Returns whether it is there: false
+     * when TLS is off, the boot wrote no trust store, or the copy failed, which is logged; the JVMs then
+     * keep the image's trust store.
+     */
+    public boolean copyJavaTrustStore(String containerId) {
+        Optional<Path> trustStore = ContainerCaBundle.javaTrustStoreHostPath(config);
+        if (trustStore.isEmpty()) {
+            return false;
+        }
+        try {
+            copyIntoContainerDir(containerId, trustStore.get(), ContainerCaBundle.JAVA_TRUST_STORE_FILE_NAME);
+            return true;
+        } catch (Exception e) {
+            LOG.warnv("Could not copy the Java trust store into container {0}, whose JVMs keep the image's trust"
+                    + " store and will not trust Floci HTTPS: {1}", containerId, e.getMessage());
+            return false;
+        }
+    }
+
+    // Copies a file of the CA bundle's to the container's ContainerCaBundle.CONTAINER_DIR as name, readable by
+    // any user, so a non-root USER can read it.
+    private void copyIntoContainerDir(String containerId, Path file, String name) throws IOException {
+        RetryingTarCopier.copyBytes(dockerClient, containerId, ContainerCaBundle.CONTAINER_DIR, name,
+                Files.readAllBytes(file), 0644, RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, archiveRetryBackoffMillis);
     }
 
     /**
@@ -516,22 +584,7 @@ public class ContainerLifecycleManager {
     }
 
     private void stopAndRemoveAdmitted(String containerId, Closeable logStream, int stopTimeoutSeconds) {
-        LOG.infov("Stopping container {0}", containerId);
-
-        boolean stoppedOrMissing = false;
-        try {
-            dockerClient.stopContainerCmd(containerId).withTimeout(stopTimeoutSeconds).exec();
-            stoppedOrMissing = true;
-        } catch (NotFoundException e) {
-            LOG.debugv("Container {0} not found (already removed)", containerId);
-            stoppedOrMissing = true;
-        } catch (NotModifiedException e) {
-            // HTTP 304: the container had already exited, which is the outcome the stop wanted.
-            LOG.debugv("Container {0} had already stopped", containerId);
-            stoppedOrMissing = true;
-        } catch (Exception e) {
-            LOG.warnv("Error stopping container {0}: {1}", containerId, e.getMessage());
-        }
+        boolean stoppedOrMissing = stopAdmitted(containerId, stopTimeoutSeconds);
 
         // Force removal is the recovery path when Docker could not stop the container cleanly. It also
         // terminates the follow-log transport, allowing its terminal callback to drain the final tail.
@@ -549,6 +602,35 @@ public class ContainerLifecycleManager {
 
         if (logStream != null && (stoppedOrMissing || removedOrMissing)) {
             closeLogStreamAfterContainerStop(logStream);
+        }
+    }
+
+    /**
+     * Stops a container and leaves it in place, for its output to be read before it is removed: one that
+     * had already exited, or is gone, counts as stopped.
+     *
+     * @param stopTimeoutSeconds seconds to wait for the container to stop cleanly after
+     *        SIGTERM before Docker sends SIGKILL. Must be a non-negative integer.
+     */
+    public void stop(String containerId, int stopTimeoutSeconds) {
+        withTeardownSlot(() -> stopAdmitted(containerId, stopTimeoutSeconds));
+    }
+
+    private boolean stopAdmitted(String containerId, int stopTimeoutSeconds) {
+        LOG.infov("Stopping container {0}", containerId);
+        try {
+            dockerClient.stopContainerCmd(containerId).withTimeout(stopTimeoutSeconds).exec();
+            return true;
+        } catch (NotFoundException e) {
+            LOG.debugv("Container {0} not found (already removed)", containerId);
+            return true;
+        } catch (NotModifiedException e) {
+            // HTTP 304: the container had already exited, which is the outcome the stop wanted.
+            LOG.debugv("Container {0} had already stopped", containerId);
+            return true;
+        } catch (Exception e) {
+            LOG.warnv("Error stopping container {0}: {1}", containerId, e.getMessage());
+            return false;
         }
     }
 
@@ -577,10 +659,18 @@ public class ContainerLifecycleManager {
     }
 
     public void stopAndRemoveStrict(String containerId, Closeable logStream, int stopTimeoutSeconds) {
-        withTeardownSlot(() -> stopAndRemoveStrictAdmitted(containerId, logStream, stopTimeoutSeconds));
+        stopAndRemoveStrict(containerId, logStream, stopTimeoutSeconds, false);
     }
 
-    private void stopAndRemoveStrictAdmitted(String containerId, Closeable logStream, int stopTimeoutSeconds) {
+    /** Strict teardown that can also reclaim the container's anonymous volumes. */
+    public void stopAndRemoveStrict(String containerId, Closeable logStream, int stopTimeoutSeconds,
+                                     boolean removeAnonymousVolumes) {
+        withTeardownSlot(() -> stopAndRemoveStrictAdmitted(
+                containerId, logStream, stopTimeoutSeconds, removeAnonymousVolumes));
+    }
+
+    private void stopAndRemoveStrictAdmitted(String containerId, Closeable logStream, int stopTimeoutSeconds,
+                                             boolean removeAnonymousVolumes) {
         LOG.infov("Stopping container {0}", containerId);
 
         Exception stopFailure = null;
@@ -599,7 +689,11 @@ public class ContainerLifecycleManager {
         }
 
         try {
-            dockerClient.removeContainerCmd(containerId).withForce(true).exec();
+            RemoveContainerCmd remove = dockerClient.removeContainerCmd(containerId).withForce(true);
+            if (removeAnonymousVolumes) {
+                remove.withRemoveVolumes(true);
+            }
+            remove.exec();
             LOG.debugv("Removed container {0}", containerId);
         } catch (NotFoundException e) {
             // Already gone, so cleanup succeeded.
@@ -938,6 +1032,22 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * The environment {@code resolvedImage} gives its containers, empty, after logging why, when it could
+     * not be read.
+     */
+    private Optional<List<String>> imageEnv(String resolvedImage) {
+        try {
+            ContainerConfig imageConfig = dockerClient.inspectImageCmd(resolvedImage).exec().getConfig();
+            String[] env = imageConfig == null ? null : imageConfig.getEnv();
+            return Optional.of(env == null ? List.of() : List.of(env));
+        } catch (Exception e) {
+            LOG.warnv("Could not read the environment of image {0}, so the JVMs in its container keep the image's"
+                    + " trust store and will not trust Floci HTTPS: {1}", resolvedImage, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /**
      * Labels declared on an image, empty when they could not be read.
      *
      * <p>Ensures the image is present first, so the labels of an image that has never been pulled
@@ -953,6 +1063,38 @@ public class ContainerLifecycleManager {
         } catch (Exception e) {
             LOG.debugv("Could not read labels of image {0}: {1}", image, e.getMessage());
             return Optional.empty();
+        }
+    }
+
+    /**
+     * Commits {@code containerId}, stopped or running, as the image {@code repository}:{@code tag}, run as
+     * {@code user} and labelled {@code labels}, and returns its id. The image takes the container's own
+     * configuration wherever the commit sets none, its environment, entrypoint and command among them.
+     */
+    public String commit(String containerId, String repository, String tag, String user, Map<String, String> labels) {
+        return dockerClient.commitCmd(containerId)
+                .withRepository(repository)
+                .withTag(tag)
+                .withUser(user)
+                .withLabels(labels)
+                .exec();
+    }
+
+    /**
+     * Removes {@code image}, forcibly. True when it is gone, removed now or already absent; false when the
+     * daemon refused, which is logged, so a caller that must find it again keeps its reference.
+     */
+    public boolean removeImage(String image) {
+        try {
+            dockerClient.removeImageCmd(image).withForce(true).exec();
+            LOG.infov("Removed Docker image {0}", image);
+            return true;
+        } catch (NotFoundException e) {
+            LOG.debugv("Docker image {0} was already absent", image);
+            return true;
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not remove Docker image {0}: {1}", image, e.getMessage());
+            return false;
         }
     }
 

@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.s3;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.HybridStorage;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -13,33 +15,45 @@ import io.github.hectorvent.floci.services.s3.model.ChecksumType;
 import io.github.hectorvent.floci.services.s3.model.FilterRule;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
 import io.github.hectorvent.floci.services.s3.model.LambdaNotification;
+import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
 import io.github.hectorvent.floci.services.s3.model.NotificationConfiguration;
 import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.s3.model.WebsiteConfiguration;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.ArrayList;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -100,16 +114,16 @@ class S3ServiceTest {
     }
 
     @Test
-    @org.junit.jupiter.api.condition.DisabledOnOs(org.junit.jupiter.api.condition.OS.WINDOWS)
+    @DisabledOnOs(OS.WINDOWS)
     void constructorThrowsWhenDataRootUncreatable() throws Exception {
-        org.junit.jupiter.api.Assumptions.assumeFalse("root".equals(System.getProperty("user.name")),
+        Assumptions.assumeFalse("root".equals(System.getProperty("user.name")),
                 "root ignores directory write permissions");
         Path readOnlyParent = tempDir.resolve("ro");
         Files.createDirectories(readOnlyParent);
         assertTrue(readOnlyParent.toFile().setWritable(false));
         try {
             Path dataRoot = readOnlyParent.resolve("s3");
-            assertThrows(java.io.UncheckedIOException.class,
+            assertThrows(UncheckedIOException.class,
                     () -> new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), dataRoot, false));
         } finally {
             assertTrue(readOnlyParent.toFile().setWritable(true));
@@ -677,7 +691,7 @@ class S3ServiceTest {
         s3Service.createBucket("test-bucket", "us-east-1");
         byte[] part1 = new byte[5 * 1024 * 1024];
         byte[] part2 = "Part2Data-World".getBytes(StandardCharsets.UTF_8);
-        var upload = s3Service.initiateMultipartUpload("test-bucket", "multipart.bin", "application/octet-stream");
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "multipart.bin", "application/octet-stream");
         s3Service.uploadPart("test-bucket", "multipart.bin", upload.getUploadId(), 1, part1);
         s3Service.uploadPart("test-bucket", "multipart.bin", upload.getUploadId(), 2, part2);
         S3Object source = s3Service.completeMultipartUpload("test-bucket", "multipart.bin", upload.getUploadId(),
@@ -875,6 +889,19 @@ class S3ServiceTest {
     }
 
     @Test
+    void aSuspendedDeleteFiresDeleteMarkerCreatedWithoutAVersionId() throws IOException {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        S3Service service = versionedBucketNotifyingOnRemoval(lambdaInvoker, "notif-s3-suspended-delete");
+        service.putBucketVersioning("test-bucket", "Suspended");
+
+        service.deleteObject("test-bucket", "k.txt");
+
+        JsonNode record = onlyRecordedS3Event(lambdaInvoker);
+        assertEquals("ObjectRemoved:DeleteMarkerCreated", record.path("eventName").asText());
+        assertTrue(record.path("s3").path("object").path("versionId").isMissingNode());
+    }
+
+    @Test
     void deleteObjectVersionThatDoesNotExistFiresNoNotification() {
         RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
         S3Service service = versionedBucketNotifyingOnRemoval(lambdaInvoker, "notif-s3-delete-missing-version");
@@ -959,6 +986,68 @@ class S3ServiceTest {
         assertTrue(deleted.compareTo(put) > 0, put + " then " + deleted);
     }
 
+    @Test
+    void notificationCarriesDocumentedEventFieldsAndConfiguredId() throws IOException {
+        RecordingLambdaInvoker invoker = new RecordingLambdaInvoker();
+        S3Service service = bucketNotifyingOnCreation(invoker, "notification-consumer-fields");
+        service.putObject("test-bucket", "original/a b+c.txt",
+                "payload".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        JsonNode event = onlyRecordedS3Event(invoker);
+        assertFalse(event.path("responseElements").path("x-amz-id-2").asText().isBlank());
+        assertFalse(event.path("responseElements").path("x-amz-request-id").asText().isBlank());
+        assertEquals("000000000000", event.path("s3").path("bucket")
+                .path("ownerIdentity").path("principalId").asText());
+        assertEquals("lambda-notif", event.path("s3").path("configurationId").asText());
+        assertEquals("original/a+b%2Bc.txt", event.path("s3").path("object").path("key").asText());
+        assertEquals(7, event.path("s3").path("object").path("size").asInt());
+    }
+
+    @Test
+    void eachMatchingNotificationCarriesItsOwnConfigurationId() throws IOException {
+        RecordingLambdaInvoker invoker = new RecordingLambdaInvoker();
+        S3Service service = bucketNotifyingOnCreation(invoker, "notification-rule-identity");
+        NotificationConfiguration config = service.getBucketNotificationConfiguration("test-bucket");
+        config.getLambdaFunctionConfigurations().add(new LambdaNotification(
+                "second-rule", "arn:aws:lambda:us-east-1:000000000000:function:second",
+                List.of("s3:ObjectCreated:*"), List.of()));
+        service.putBucketNotificationConfiguration("test-bucket", config, true);
+        service.putBucketVersioning("test-bucket", "Enabled");
+        invoker.afterDelivery = () -> service.putBucketVersioning("test-bucket", "Suspended");
+        S3Object stored = service.putObject("test-bucket", "original.txt", new byte[]{1}, "text/plain", null);
+
+        assertEquals(2, invoker.payloads.size());
+        ObjectMapper mapper = new ObjectMapper();
+        assertEquals("lambda-notif", mapper.readTree(invoker.payloads.get(0))
+                .path("Records").get(0).path("s3").path("configurationId").asText());
+        assertEquals("second-rule", mapper.readTree(invoker.payloads.get(1))
+                .path("Records").get(0).path("s3").path("configurationId").asText());
+        JsonNode first = mapper.readTree(invoker.payloads.get(0)).path("Records").get(0);
+        JsonNode second = mapper.readTree(invoker.payloads.get(1)).path("Records").get(0);
+        assertFalse(first.path("s3").path("object").path("versionId").asText().isBlank());
+        assertEquals(stored.getVersionId(), first.path("s3").path("object").path("versionId").asText());
+        assertEquals(first.path("eventTime"), second.path("eventTime"));
+        assertEquals(first.path("responseElements"), second.path("responseElements"));
+        assertEquals(first.path("s3").path("object"), second.path("s3").path("object"));
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" \t "})
+    void missingLambdaNotificationRuleIdUsesEmulator(String id) throws IOException {
+        RecordingLambdaInvoker invoker = new RecordingLambdaInvoker();
+        S3Service service = bucketNotifyingOnCreation(invoker, "notification-missing-rule-id");
+        NotificationConfiguration config = new NotificationConfiguration();
+        config.getLambdaFunctionConfigurations().add(new LambdaNotification(
+                id, "arn:aws:lambda:us-east-1:000000000000:function:s3-notif-test",
+                List.of("s3:ObjectCreated:*"), List.of()));
+        service.putBucketNotificationConfiguration("test-bucket", config, true);
+
+        service.putObject("test-bucket", "original.txt", new byte[]{1}, "text/plain", null);
+
+        assertEquals("emulator", onlyRecordedS3Event(invoker).path("s3").path("configurationId").asText());
+    }
+
     private S3Service bucketNotifyingOnCreation(RecordingLambdaInvoker lambdaInvoker, String dataDir) {
         return bucketNotifyingOn(lambdaInvoker, dataDir, "s3:ObjectCreated:*");
     }
@@ -1016,6 +1105,8 @@ class S3ServiceTest {
         private String region;
         private String functionName;
         private byte[] payload;
+        private final List<byte[]> payloads = new ArrayList<>();
+        private Runnable afterDelivery;
         private InvocationType type;
 
         @Override
@@ -1023,7 +1114,11 @@ class S3ServiceTest {
             this.region = region;
             this.functionName = functionName;
             this.payload = payload;
+            this.payloads.add(payload);
             this.type = type;
+            if (afterDelivery != null) {
+                afterDelivery.run();
+            }
         }
     }
 
@@ -1111,9 +1206,9 @@ class S3ServiceTest {
         websiteBucket("index.html", null);
         s3Service.putObject("site", "docs/index.html", "hi".getBytes(), "text/html", null);
 
-        var resolution = s3Service.resolveWebsiteRequest("site", "docs", true, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("site", "docs", true, UNSIGNED);
 
-        var serve = assertInstanceOf(S3Service.WebsiteResolution.ServeObject.class, resolution);
+        S3Service.WebsiteResolution.ServeObject serve = assertInstanceOf(S3Service.WebsiteResolution.ServeObject.class, resolution);
         assertEquals("docs/index.html", serve.key());
     }
 
@@ -1123,7 +1218,7 @@ class S3ServiceTest {
         s3Service.putObject("site", "index.html", "root".getBytes(), "text/html", null);
 
         // The site root is a directory request even though the caller saw no trailing slash.
-        var resolution = s3Service.resolveWebsiteRequest("site", "", false, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("site", "", false, UNSIGNED);
 
         assertEquals("index.html",
                 assertInstanceOf(S3Service.WebsiteResolution.ServeObject.class, resolution).key());
@@ -1135,7 +1230,7 @@ class S3ServiceTest {
         s3Service.putObject("site", "docs/index.html", "hi".getBytes(), "text/html", null);
 
         // No trailing slash, no object at "docs", but an index lives beneath it.
-        var resolution = s3Service.resolveWebsiteRequest("site", "docs", false, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("site", "docs", false, UNSIGNED);
 
         assertInstanceOf(S3Service.WebsiteResolution.RedirectToDirectory.class, resolution);
     }
@@ -1147,7 +1242,7 @@ class S3ServiceTest {
         s3Service.putObject("site", "docs/index.html", "hi".getBytes(), "text/html", null);
 
         // An exact object hit is served by the normal object path, not redirected.
-        var resolution = s3Service.resolveWebsiteRequest("site", "docs", false, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("site", "docs", false, UNSIGNED);
 
         assertInstanceOf(S3Service.WebsiteResolution.NotAWebsite.class, resolution);
     }
@@ -1157,9 +1252,9 @@ class S3ServiceTest {
         websiteBucket("index.html", "error.html");
         s3Service.putObject("site", "error.html", "oops".getBytes(), "text/html", null);
 
-        var resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
 
-        var err = assertInstanceOf(S3Service.WebsiteResolution.ErrorDocument.class, resolution);
+        S3Service.WebsiteResolution.ErrorDocument err = assertInstanceOf(S3Service.WebsiteResolution.ErrorDocument.class, resolution);
         assertEquals(404, err.status());
         assertArrayEquals("oops".getBytes(), err.object().getData());
     }
@@ -1168,7 +1263,7 @@ class S3ServiceTest {
     void resolveWebsiteRequestFallsBackToDefaultErrorWhenNoErrorDocumentConfigured() {
         websiteBucket("index.html", null);
 
-        var resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
 
         assertEquals(404,
                 assertInstanceOf(S3Service.WebsiteResolution.DefaultError.class, resolution).status());
@@ -1179,7 +1274,7 @@ class S3ServiceTest {
         // Configured but never uploaded: S3 serves its built-in page rather than 500-ing.
         websiteBucket("index.html", "error.html");
 
-        var resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("site", "missing", true, UNSIGNED);
 
         assertEquals(404,
                 assertInstanceOf(S3Service.WebsiteResolution.DefaultError.class, resolution).status());
@@ -1189,7 +1284,7 @@ class S3ServiceTest {
     void resolveWebsiteRequestIsNotAWebsiteWithoutConfiguration() {
         s3Service.createBucket("plain", "us-east-1");
 
-        var resolution = s3Service.resolveWebsiteRequest("plain", "any", true, UNSIGNED);
+        S3Service.WebsiteResolution resolution = s3Service.resolveWebsiteRequest("plain", "any", true, UNSIGNED);
 
         assertInstanceOf(S3Service.WebsiteResolution.NotAWebsite.class, resolution);
     }
@@ -1260,16 +1355,16 @@ class S3ServiceTest {
         // Through the real storage layer rather than Jackson alone: written, flushed to disk, and
         // read back by a second service over the same file, the way a restart does it.
         Path bucketsFile = tempDir.resolve("s3-buckets.json");
-        var beforeRestart = new io.github.hectorvent.floci.core.storage.HybridStorage<String, Bucket>(
-                bucketsFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Bucket>>() {}, 60000);
+        HybridStorage<String, Bucket> beforeRestart = new HybridStorage<String, Bucket>(
+                bucketsFile, new TypeReference<Map<String, Bucket>>() {}, 60000);
         S3Service before = new S3Service(beforeRestart, new InMemoryStorage<>(), tempDir.resolve("s3a"), false);
         before.createBucket("persisted-metrics", "us-east-1");
         before.putBucketMetricsConfiguration("persisted-metrics", "EntireBucket", "<Id>EntireBucket</Id>");
         beforeRestart.flush();
         beforeRestart.shutdown();
 
-        var afterRestart = new io.github.hectorvent.floci.core.storage.HybridStorage<String, Bucket>(
-                bucketsFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Bucket>>() {}, 60000);
+        HybridStorage<String, Bucket> afterRestart = new HybridStorage<String, Bucket>(
+                bucketsFile, new TypeReference<Map<String, Bucket>>() {}, 60000);
         afterRestart.load();
         try {
             S3Service after = new S3Service(afterRestart, new InMemoryStorage<>(), tempDir.resolve("s3a"), false);
@@ -1323,10 +1418,10 @@ class S3ServiceTest {
 
     @Test
     void analyticsAndInventoryConfigurationsSurviveAJacksonRoundTrip() throws Exception {
-        var mapper = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         Bucket bucket = new Bucket("persisted-configs");
-        bucket.setAnalyticsConfigurations(new java.util.LinkedHashMap<>(Map.of("a", "<Id>a</Id>")));
-        bucket.setInventoryConfigurations(new java.util.LinkedHashMap<>(Map.of("i", "<Id>i</Id>")));
+        bucket.setAnalyticsConfigurations(new LinkedHashMap<>(Map.of("a", "<Id>a</Id>")));
+        bucket.setInventoryConfigurations(new LinkedHashMap<>(Map.of("i", "<Id>i</Id>")));
 
         Bucket reloaded = mapper.readValue(mapper.writeValueAsString(bucket), Bucket.class);
         assertEquals("<Id>a</Id>", reloaded.getAnalyticsConfigurations().get("a"));
@@ -1337,9 +1432,9 @@ class S3ServiceTest {
     void metricsConfigurationsSurviveAJacksonRoundTrip() throws Exception {
         // Bucket records are persisted as JSON, so the configurations have to come back after a
         // restart, and a record written before the field existed has to still load.
-        var mapper = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         Bucket bucket = new Bucket("persisted");
-        bucket.setMetricsConfigurations(new java.util.LinkedHashMap<>(
+        bucket.setMetricsConfigurations(new LinkedHashMap<>(
                 Map.of("EntireBucket", "<Id>EntireBucket</Id>")));
 
         Bucket reloaded = mapper.readValue(mapper.writeValueAsString(bucket), Bucket.class);
@@ -1355,7 +1450,7 @@ class S3ServiceTest {
      * hope for it, which keeps the test both instant and immune to a slow machine.
      */
     private static void awaitBlockedOnMonitor(Thread thread) throws InterruptedException {
-        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         while (thread.getState() != Thread.State.BLOCKED) {
             if (System.nanoTime() > deadline) {
                 fail("thread never reached the bucket monitor");
@@ -1370,7 +1465,7 @@ class S3ServiceTest {
         // mutation's re-read and its write would still be undone. That interleaving is too narrow
         // to force from a test, so what is asserted here is the property that closes it — the
         // delete waits for whoever holds the record's monitor.
-        var buckets = new InMemoryStorage<String, Bucket>();
+        InMemoryStorage<String, Bucket> buckets = new InMemoryStorage<String, Bucket>();
         S3Service service = new S3Service(buckets, new InMemoryStorage<>(), tempDir.resolve("s3-monitor"), false);
         service.createBucket("monitor-bucket", "us-east-1");
         Bucket record = buckets.get("monitor-bucket").orElseThrow();
@@ -1378,7 +1473,7 @@ class S3ServiceTest {
         Thread delete = new Thread(() -> service.deleteBucket("monitor-bucket"));
         synchronized (record) {
             delete.start();
-            long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10);
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
             while (delete.getState() != Thread.State.BLOCKED) {
                 assertTrue(buckets.get("monitor-bucket").isPresent(),
                         "DeleteBucket removed the record without waiting for the bucket monitor");
@@ -1399,13 +1494,13 @@ class S3ServiceTest {
         // would be undone by the write. The interleaving is forced rather than raced for: the test
         // holds the bucket monitor, lets the put resolve the record and block on it, deletes the
         // bucket from the same thread, and only then releases.
-        var buckets = new InMemoryStorage<String, Bucket>();
+        InMemoryStorage<String, Bucket> buckets = new InMemoryStorage<String, Bucket>();
         S3Service service = new S3Service(buckets, new InMemoryStorage<>(), tempDir.resolve("s3-race"), false);
         service.createBucket("race-bucket", "us-east-1");
         Bucket record = buckets.get("race-bucket").orElseThrow();
 
-        var putStarted = new java.util.concurrent.CountDownLatch(1);
-        var thrownByPut = new java.util.concurrent.atomic.AtomicReference<Exception>();
+        CountDownLatch putStarted = new CountDownLatch(1);
+        AtomicReference<Exception> thrownByPut = new AtomicReference<Exception>();
         Thread put = new Thread(() -> {
             putStarted.countDown();
             try {
@@ -1434,13 +1529,13 @@ class S3ServiceTest {
         // Presence is not enough: deleted and recreated under the same name, the store holds a
         // different record, and writing the resolved one back would replace the new bucket with
         // the old one's state.
-        var buckets = new InMemoryStorage<String, Bucket>();
+        InMemoryStorage<String, Bucket> buckets = new InMemoryStorage<String, Bucket>();
         S3Service service = new S3Service(buckets, new InMemoryStorage<>(), tempDir.resolve("s3-recreate"), false);
         service.createBucket("recreated-bucket", "us-east-1");
         Bucket original = buckets.get("recreated-bucket").orElseThrow();
 
-        var putStarted = new java.util.concurrent.CountDownLatch(1);
-        var thrownByPut = new java.util.concurrent.atomic.AtomicReference<Exception>();
+        CountDownLatch putStarted = new CountDownLatch(1);
+        AtomicReference<Exception> thrownByPut = new AtomicReference<Exception>();
         Thread put = new Thread(() -> {
             putStarted.countDown();
             try {
@@ -1473,10 +1568,10 @@ class S3ServiceTest {
         // monitor concurrent puts of different ids overwrite each other's work.
         s3Service.createBucket("metrics-race", "us-east-1");
         int count = 24;
-        var pool = java.util.concurrent.Executors.newFixedThreadPool(8);
-        var start = new java.util.concurrent.CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch start = new CountDownLatch(1);
         try {
-            var submitted = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            ArrayList<Future<?>> submitted = new ArrayList<Future<?>>();
             for (int i = 0; i < count; i++) {
                 String id = "config-" + i;
                 submitted.add(pool.submit(() -> {
@@ -1486,8 +1581,8 @@ class S3ServiceTest {
                 }));
             }
             start.countDown();
-            for (var future : submitted) {
-                future.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            for (Future<?> future : submitted) {
+                future.get(30, TimeUnit.SECONDS);
             }
         } finally {
             pool.shutdownNow();
@@ -1574,8 +1669,8 @@ class S3ServiceTest {
         // Through the real storage layer rather than Jackson alone: written, flushed to disk, and
         // read back by a second service over the same file, the way a restart does it.
         Path bucketsFile = tempDir.resolve("s3-buckets-tiering.json");
-        var beforeRestart = new io.github.hectorvent.floci.core.storage.HybridStorage<String, Bucket>(
-                bucketsFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Bucket>>() {}, 60000);
+        HybridStorage<String, Bucket> beforeRestart = new HybridStorage<String, Bucket>(
+                bucketsFile, new TypeReference<Map<String, Bucket>>() {}, 60000);
         S3Service before = new S3Service(beforeRestart, new InMemoryStorage<>(), tempDir.resolve("s3b"), false);
         before.createBucket("persisted-tiering", "us-east-1");
         before.putBucketIntelligentTieringConfiguration("persisted-tiering", "EntireBucket",
@@ -1583,8 +1678,8 @@ class S3ServiceTest {
         beforeRestart.flush();
         beforeRestart.shutdown();
 
-        var afterRestart = new io.github.hectorvent.floci.core.storage.HybridStorage<String, Bucket>(
-                bucketsFile, new com.fasterxml.jackson.core.type.TypeReference<Map<String, Bucket>>() {}, 60000);
+        HybridStorage<String, Bucket> afterRestart = new HybridStorage<String, Bucket>(
+                bucketsFile, new TypeReference<Map<String, Bucket>>() {}, 60000);
         afterRestart.load();
         try {
             S3Service after = new S3Service(afterRestart, new InMemoryStorage<>(), tempDir.resolve("s3b"), false);
@@ -1599,9 +1694,9 @@ class S3ServiceTest {
     void intelligentTieringConfigurationsSurviveAJacksonRoundTrip() throws Exception {
         // Bucket records are persisted as JSON, so the configurations have to come back after a
         // restart, and a record written before the field existed has to still load.
-        var mapper = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules();
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
         Bucket bucket = new Bucket("persisted");
-        bucket.setIntelligentTieringConfigurations(new java.util.LinkedHashMap<>(
+        bucket.setIntelligentTieringConfigurations(new LinkedHashMap<>(
                 Map.of("EntireBucket", "<Id>EntireBucket</Id>")));
 
         Bucket reloaded = mapper.readValue(mapper.writeValueAsString(bucket), Bucket.class);
@@ -1618,10 +1713,10 @@ class S3ServiceTest {
         // monitor concurrent puts of different ids overwrite each other's work.
         s3Service.createBucket("tiering-race", "us-east-1");
         int count = 24;
-        var pool = java.util.concurrent.Executors.newFixedThreadPool(8);
-        var start = new java.util.concurrent.CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        CountDownLatch start = new CountDownLatch(1);
         try {
-            var submitted = new java.util.ArrayList<java.util.concurrent.Future<?>>();
+            ArrayList<Future<?>> submitted = new ArrayList<Future<?>>();
             for (int i = 0; i < count; i++) {
                 String id = "config-" + i;
                 submitted.add(pool.submit(() -> {
@@ -1632,8 +1727,8 @@ class S3ServiceTest {
                 }));
             }
             start.countDown();
-            for (var future : submitted) {
-                future.get(30, java.util.concurrent.TimeUnit.SECONDS);
+            for (Future<?> future : submitted) {
+                future.get(30, TimeUnit.SECONDS);
             }
         } finally {
             pool.shutdownNow();

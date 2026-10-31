@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.configservice.AwsConfigService;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRule;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.mockito.Mockito;
 
 import java.util.HashMap;
 import java.util.List;
@@ -100,7 +101,7 @@ class ConfigCfnProvisionerTest {
         when(config.describeConfigRules("us-east-1", List.of()))
                 .thenReturn(List.of(new ConfigRule("old-rule", "arn:old", "config-rule-123",
                         null, null, null, null, null, "ACTIVE", null, List.of())));
-        org.mockito.Mockito.doThrow(new RuntimeException("rule in use"))
+        Mockito.doThrow(new RuntimeException("rule in use"))
                 .when(config).deleteConfigRule("us-east-1", "old-rule");
         StackResource resource = resource();
         resource.setPhysicalId("old-rule");

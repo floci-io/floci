@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.appsync.graphql.auth;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -158,7 +159,7 @@ public class LambdaAuthorizerValidator {
             if (size > MAX_RESOLVER_CONTEXT_BYTES) {
                 throw AppSyncAuth.unauthorized();
             }
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+        } catch (JsonProcessingException e) {
             throw AppSyncAuth.unauthorized();
         }
         return flat;

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
@@ -11,6 +12,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
@@ -75,6 +77,11 @@ class CodeArtifactPypiControllerTest {
                 .thenReturn(Optional.of(new AuthorizationTokenScope(OWNER, REGION)));
         when(service.ensureFormatContainerId(eq("pypi"), eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY)))
                 .thenReturn("pypi-repo-id");
+        // Matches a real repository with no UpdatePackageVersionsStatus/DisposePackageVersions
+        // call ever made against it: archivedOrDisposedVersionFromFilename's own scan has nothing
+        // to check, so downloadFile proxies straight through unless a test below overrides this.
+        when(service.containerBackedOverriddenVersionStatusesByRepository(eq(REGION), eq(DOMAIN), eq(OWNER),
+                eq(REPOSITORY), eq("pypi"))).thenReturn(Map.of());
         when(pypiserver.ensureReady(eq("pypi-repo-id"), any())).thenReturn(backendUrl);
 
         HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
@@ -179,6 +186,62 @@ class CodeArtifactPypiControllerTest {
 
         assertEquals(404, response.getStatus());
         assertEquals("/packages/..%2Fsecret.tar.gz", observedRawPath.get());
+    }
+
+    /**
+     * Closes 10-NATIVE-STATUS for pypi: {@code downloadFile}'s own route is a bare filename with
+     * no package name or version anywhere in the URL, unlike Maven's GAV path or nuget's content
+     * route, so the coordinate {@code requireContainerBackedVersionDownloadable} needs is resolved
+     * by matching the filename against this repository's own Archived/Disposed status overrides
+     * (see {@code archivedOrDisposedVersionFromFilename}), not a separate map recorded only at
+     * upload time: raised by Greptile's review, that earlier mechanism was never populated by a
+     * version {@code CopyPackageVersions} wrote straight to the destination sidecar, so archiving
+     * a copied version never blocked its download. Resolving against the override records
+     * instead works regardless of how the real file got there.
+     */
+    @Test
+    void downloadFileBlocksAFileWhoseVersionIsArchived() {
+        // No controller.upload call at all, deliberately: proves this resolves against the
+        // override records themselves, not anything an upload would have recorded, the exact
+        // case a version CopyPackageVersions wrote straight to the destination sidecar is in.
+        when(service.containerBackedOverriddenVersionStatusesByRepository(eq(REGION), eq(DOMAIN), eq(OWNER),
+                eq(REPOSITORY), eq("pypi"))).thenReturn(Map.of("my-pkg", Map.of("1.0.0", "Archived")));
+
+        AtomicBoolean downloadReceived = new AtomicBoolean();
+        backend.createContext("/packages/my_pkg-1.0.0.tar.gz", exchange -> {
+            downloadReceived.set(true);
+            respond(exchange, 200, "application/octet-stream", "new content");
+        });
+        doThrow(new AwsException("ResourceNotFoundException", "Package version '1.0.0' was not found.", 404))
+                .when(service).requireContainerBackedVersionDownloadable(eq(OWNER), eq(REGION), eq(DOMAIN),
+                        eq(REPOSITORY), eq("pypi"), isNull(), eq("my-pkg"), eq("1.0.0"), eq("pypi-repo-id"));
+
+        Response response = controller.downloadFile(headers("Bearer good"), DOMAIN, REPOSITORY,
+                "my_pkg-1.0.0.tar.gz");
+
+        assertEquals(404, response.getStatus());
+        assertEquals(false, downloadReceived.get());
+    }
+
+    /**
+     * The overwhelmingly common case: a repository nothing has ever called {@code
+     * UpdatePackageVersionsStatus}/{@code DisposePackageVersions} against has no overrides at all
+     * (the default this class's own {@code setUp} already stubs), so {@code
+     * archivedOrDisposedVersionFromFilename} finds nothing to match and the download proxies
+     * straight through without ever consulting {@code requireContainerBackedVersionDownloadable}.
+     */
+    @Test
+    void downloadFileOfAnUntrackedFilenameSkipsTheCheckAndStillProxies() {
+        byte[] content = "package bytes".getBytes(StandardCharsets.UTF_8);
+        backend.createContext("/packages/never-uploaded-1.0.tar.gz",
+                exchange -> respond(exchange, 200, "application/octet-stream", content));
+
+        Response response = controller.downloadFile(headers("Bearer good"), DOMAIN, REPOSITORY,
+                "never-uploaded-1.0.tar.gz");
+
+        assertEquals(200, response.getStatus());
+        verify(service, never()).requireContainerBackedVersionDownloadable(any(), any(), any(), any(), any(), any(),
+                any(), any(), any());
     }
 
     /**
@@ -626,13 +689,13 @@ class CodeArtifactPypiControllerTest {
         return body.getBytes(StandardCharsets.UTF_8);
     }
 
-    private static void respond(com.sun.net.httpserver.HttpExchange exchange, int status, String contentType,
-                                 String body) throws java.io.IOException {
+    private static void respond(HttpExchange exchange, int status, String contentType,
+                                 String body) throws IOException {
         respond(exchange, status, contentType, body.getBytes(StandardCharsets.UTF_8));
     }
 
-    private static void respond(com.sun.net.httpserver.HttpExchange exchange, int status, String contentType,
-                                 byte[] body) throws java.io.IOException {
+    private static void respond(HttpExchange exchange, int status, String contentType,
+                                 byte[] body) throws IOException {
         exchange.getResponseHeaders().add("Content-Type", contentType);
         exchange.sendResponseHeaders(status, body.length);
         exchange.getResponseBody().write(body);

@@ -102,6 +102,86 @@ class KinesisAnalyticsV2JsonHandlerTest {
     }
 
     @Test
+    void listApplicationsHonorsLimitAndReturnsNextToken() {
+        String longName = "a".repeat(128);
+        createApplication(longName);
+        createApplication("demo-b");
+
+        ObjectNode request = MAPPER.createObjectNode().put("Limit", 1);
+        ObjectNode firstPage = entity(handler.handle("ListApplications", request, REGION));
+
+        assertEquals(1, firstPage.get("ApplicationSummaries").size());
+        assertEquals(longName, firstPage.get("ApplicationSummaries").get(0).get("ApplicationName").asText());
+        assertThat(firstPage.hasNonNull("NextToken"), is(true));
+        String token = firstPage.get("NextToken").asText();
+        assertEquals(longName, token);
+
+        createApplication("a0");
+        ObjectNode secondRequest = MAPPER.createObjectNode().put("Limit", 1).put("NextToken", token);
+        ObjectNode secondPage = entity(handler.handle("ListApplications", secondRequest, REGION));
+        assertEquals("demo-b", secondPage.get("ApplicationSummaries").get(0).get("ApplicationName").asText());
+        assertThat(secondPage.has("NextToken"), is(false));
+    }
+
+    @Test
+    void listApplicationsContinuesAfterTheLastReturnedApplicationIsDeleted() {
+        createApplication("demo-a");
+        createApplication("demo-b");
+
+        ObjectNode firstPage = entity(handler.handle("ListApplications",
+                MAPPER.createObjectNode().put("Limit", 1), REGION));
+        String firstName = firstPage.get("ApplicationSummaries").get(0).get("ApplicationName").asText();
+        String token = firstPage.get("NextToken").asText();
+        assertEquals(firstName, token);
+
+        ObjectNode describe = MAPPER.createObjectNode().put("ApplicationName", firstName);
+        double createTimestamp = entity(handler.handle("DescribeApplication", describe, REGION))
+                .get("ApplicationDetail").get("CreateTimestamp").asDouble();
+        ObjectNode delete = MAPPER.createObjectNode()
+                .put("ApplicationName", firstName)
+                .put("CreateTimestamp", createTimestamp);
+        assertThat(handler.handle("DeleteApplication", delete, REGION).getStatus(), is(200));
+
+        ObjectNode secondPage = entity(handler.handle("ListApplications",
+                MAPPER.createObjectNode().put("Limit", 1).put("NextToken", token), REGION));
+        assertEquals("demo-b", secondPage.get("ApplicationSummaries").get(0).get("ApplicationName").asText());
+    }
+
+    @Test
+    void listApplicationsUsesDefaultPageSizeAndEndsWithoutToken() {
+        for (int index = 0; index < 51; index++) {
+            createApplication(String.format("default-page-%02d", index));
+        }
+
+        ObjectNode firstPage = entity(handler.handle("ListApplications", MAPPER.createObjectNode(), REGION));
+
+        assertEquals(50, firstPage.get("ApplicationSummaries").size());
+        assertThat(firstPage.hasNonNull("NextToken"), is(true));
+
+        ObjectNode secondRequest = MAPPER.createObjectNode().put("NextToken",
+                firstPage.get("NextToken").asText());
+        ObjectNode secondPage = entity(handler.handle("ListApplications", secondRequest, REGION));
+
+        assertEquals(1, secondPage.get("ApplicationSummaries").size());
+        assertThat(secondPage.has("NextToken"), is(false));
+    }
+
+    @Test
+    void listApplicationsRejectsInvalidLimitAndToken() {
+        createApplication("demo-a");
+        for (int limit : new int[]{0, 51}) {
+            AwsException error = assertThrows(AwsException.class, () -> handler.handle("ListApplications",
+                    MAPPER.createObjectNode().put("Limit", limit), REGION));
+            assertEquals("InvalidRequestException", error.getErrorCode());
+        }
+        for (String token : new String[]{"", "!", "x".repeat(129)}) {
+            AwsException error = assertThrows(AwsException.class, () -> handler.handle("ListApplications",
+                    MAPPER.createObjectNode().put("NextToken", token), REGION));
+            assertEquals("InvalidRequestException", error.getErrorCode());
+        }
+    }
+
+    @Test
     void deleteApplicationRemovesIt() {
         createApplication("demo");
 

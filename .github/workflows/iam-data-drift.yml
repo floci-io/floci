@@ -1,11 +1,13 @@
 name: IAM Data Drift
 
-# Checks the six vendored files that come from AWS's live service reference rather than from a
+# Checks the eleven vendored files that come from AWS's live service reference rather than from a
 # pinned dependency: the IAM service namespace list, the map of which resource each IAM action is
 # authorized against, the map of operations AWS authorizes as an action of another name, the
 # table of the operations that pass a role and the services they pass it to, the table of the
-# tagging actions operations that tag what they create need, and the table of the resources each
-# operation's request names. That
+# operations that pass a Lambda network connector, the table of the
+# tagging actions operations that tag what they create need, the table of the resources each
+# operation's request names, the DynamoDB condition key table, the IAM condition key table, the
+# S3 Control tag condition key table, and the Lambda Web condition key table. That
 # needs the live service reference index, so unlike every other check here it can
 # fail without anything in the repository having changed: an AWS outage, or a namespace AWS has
 # retired. It therefore runs on its own, never as part of a job that ordinary changes trigger.
@@ -14,7 +16,10 @@ name: IAM Data Drift
 #
 #   - On a pull request that touches a vendored file or its generator, which is where a
 #     hand-typed or mistyped entry would enter the repository. A pull request that does not touch
-#     them cannot introduce one, so it does not run and cannot be failed by an outage.
+#     them cannot introduce one, so it does not run and cannot be failed by an outage. For the same
+#     reason, one that does checks only the files it touches, each with its generator and the
+#     modules that generator imports (the paths in the Makefile, above iam-data-verify): drift in a
+#     file it leaves alone is not its doing, and the weekly run reports it.
 #   - Weekly, because the files also go stale without anyone touching them: AWS ships services
 #     and actions, and occasionally retires them. Tying the only upstream check to pull request
 #     activity would mean a quiet month is a month with no drift detection at all.
@@ -22,7 +27,8 @@ name: IAM Data Drift
 # An entry AWS has *added* since the last sync is reported without failing: a new namespace makes
 # the service-last-accessed report incomplete rather than wrong, and a new action or resource type
 # leaves that action evaluated against `*`, which is where it was before any of this existed. The
-# fix for a real failure is to run the matching sync target and commit the result.
+# two condition key tables fail on an added pair as well: a key missing from the context stops a
+# conditioned Allow matching and a conditioned Deny applying. The fix for a real failure is to run the matching sync target and commit the result.
 #
 # The offline shape check is hermetic and runs per pull request inside the "Vendored AWS data in
 # sync" job in partition-literals.yml instead.
@@ -42,12 +48,29 @@ on:
       - 'src/main/resources/aws/iam-passed-roles.json'
       - 'tools/aws/regen_iam_passed_roles.py'
       - 'tools/aws/test_regen_iam_passed_roles.py'
+      - 'src/main/resources/aws/iam-passed-network-connectors.json'
+      - 'tools/aws/regen_iam_passed_network_connectors.py'
+      - 'tools/aws/test_regen_iam_passed_network_connectors.py'
       - 'src/main/resources/aws/iam-tag-on-create.json'
       - 'tools/aws/regen_iam_tag_on_create.py'
       - 'tools/aws/test_regen_iam_tag_on_create.py'
       - 'src/main/resources/aws/iam-request-resources.json'
       - 'tools/aws/regen_iam_request_resources.py'
       - 'tools/aws/test_regen_iam_request_resources.py'
+      - 'src/main/resources/aws/dynamodb-condition-keys.json'
+      - 'tools/aws/regen_dynamodb_condition_keys.py'
+      - 'tools/aws/test_regen_dynamodb_condition_keys.py'
+      - 'src/main/resources/aws/iam-condition-keys.json'
+      - 'tools/aws/regen_iam_condition_keys.py'
+      - 'tools/aws/test_regen_iam_condition_keys.py'
+      - 'src/main/resources/aws/s3control-tag-condition-keys.json'
+      - 'tools/aws/regen_s3control_tag_condition_keys.py'
+      - 'tools/aws/test_regen_s3control_tag_condition_keys.py'
+      - 'src/main/resources/aws/lambda-web-condition-keys.json'
+      - 'tools/aws/regen_lambda_web_condition_keys.py'
+      - 'tools/aws/test_regen_lambda_web_condition_keys.py'
+      - 'tools/aws/regen_partitions.py'
+      - 'tools/aws/regen_query_services.py'
       - '.github/workflows/iam-data-drift.yml'
   schedule:
     # Mondays at 06:00 UTC, before the working week rather than during it.
@@ -72,6 +95,10 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # A pull request's merge commit and its first parent, the base branch, so the step below
+          # can tell which files the pull request changes.
+          fetch-depth: 2
 
       - name: Set up Python
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -80,5 +107,15 @@ jobs:
 
       # No dependency install: the generators are deliberately stdlib-only, and this job runs no
       # tests. The pinned botocore the sibling workflow needs is for the partition generator.
-      - name: Check every vendored IAM file still matches upstream
-        run: make iam-data-verify
+      #
+      # A pull request checks the files it changes; the weekly and manual runs check every file. A
+      # diff that cannot be read leaves CHANGED empty, which checks every file too.
+      - name: Check the vendored IAM files still match upstream
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = pull_request ]; then
+            make iam-data-verify CHANGED="$(git diff --name-only HEAD^1 HEAD | tr '\n' ' ')"
+          else
+            make iam-data-verify
+          fi

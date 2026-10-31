@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.apigatewayv2;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.MethodOrderer;
@@ -14,6 +15,7 @@ import java.net.http.HttpClient;
 import java.net.http.WebSocket;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
@@ -27,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class WebSocketLambdaAuthorizerTest {
 
-    @io.quarkus.test.common.http.TestHTTPResource("/")
+    @TestHTTPResource("/")
     URI baseUri;
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -609,7 +611,7 @@ class WebSocketLambdaAuthorizerTest {
         try {
             wsFuture.get(60, TimeUnit.SECONDS);
             fail("Expected WebSocket connection to fail with status " + expectedStatus);
-        } catch (java.util.concurrent.ExecutionException e) {
+        } catch (ExecutionException e) {
             Throwable cause = e.getCause();
             assertNotNull(cause, "Expected a cause for the ExecutionException");
             String message = cause.getMessage() != null ? cause.getMessage() : "";

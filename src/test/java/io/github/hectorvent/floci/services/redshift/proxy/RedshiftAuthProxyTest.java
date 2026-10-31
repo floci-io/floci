@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -236,6 +237,33 @@ class RedshiftAuthProxyTest {
     }
 
     @Test
+    void activeConnectionsCountsOpenClientsAndFallsOnClose() throws Exception {
+        fakeBackend = new ServerSocket(0);
+        int proxyPort = FreePorts.anyInterfacePort();
+        proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", fakeBackend.getLocalPort(),
+                "admin", "Secret123", "dev",
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT,
+                mock(S3Service.class), mock(IamService.class), 5000, 5000, 5);
+        proxy.start(proxyPort);
+        assertEquals(0, proxy.activeConnections());
+
+        try (Socket first = new Socket("localhost", proxyPort); Socket second = new Socket("localhost", proxyPort)) {
+            awaitActiveConnections(2);
+            first.close();
+            awaitActiveConnections(1);
+        }
+        awaitActiveConnections(0);
+    }
+
+    private void awaitActiveConnections(int expected) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (proxy.activeConnections() != expected && System.nanoTime() < deadline) {
+            Thread.sleep(25);
+        }
+        assertEquals(expected, proxy.activeConnections());
+    }
+
+    @Test
     void startRetriesTheBindWhileThePortIsMomentarilyStillInUse() throws Exception {
         fakeBackend = new ServerSocket(0);
         int proxyPort = FreePorts.anyInterfacePort();
@@ -277,6 +305,24 @@ class RedshiftAuthProxyTest {
         Field f = RedshiftAuthProxy.class.getDeclaredField("masterPassword");
         f.setAccessible(true);
         assertEquals("rotated", f.get(proxy));
+    }
+
+    @Test
+    void bindsWithABurstTolerantAcceptBacklog() throws Exception {
+        AtomicInteger acceptBacklog = new AtomicInteger();
+        proxy = new RedshiftAuthProxy("111111111111:c1", "localhost", 1,
+                "admin", "Secret123", "dev",
+                mock(RdsSigV4Validator.class), realTls(), (user, pw) -> PasswordValidator.AuthResult.REJECT,
+                mock(S3Service.class), mock(IamService.class), 5000, 5000, 100) {
+            @Override
+            ServerSocket listenSocket(int proxyPort, int backlog) throws IOException {
+                acceptBacklog.set(backlog);
+                return super.listenSocket(proxyPort, backlog);
+            }
+        };
+        proxy.start(0);
+        assertEquals(4096, acceptBacklog.get(),
+                "a connection burst must not overflow the proxy's accept queue");
     }
 
     private RdsProxyTlsCertificates realTls() {

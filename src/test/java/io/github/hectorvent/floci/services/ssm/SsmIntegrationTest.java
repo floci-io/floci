@@ -2173,7 +2173,7 @@ class SsmIntegrationTest {
             .body("message", equalTo("NUMBER_VALUE can not be converted to a String"));
     }
 
-    private io.restassured.response.ValidatableResponse labelParameterVersion(String body) {
+    private ValidatableResponse labelParameterVersion(String body) {
         return given()
             .header("X-Amz-Target", "AmazonSSM.LabelParameterVersion")
             .contentType(SSM_CONTENT_TYPE)
@@ -2379,7 +2379,7 @@ class SsmIntegrationTest {
         }
     }
 
-    private io.restassured.response.ValidatableResponse unlabel(String body) {
+    private ValidatableResponse unlabel(String body) {
         return given()
             .header("X-Amz-Target", "AmazonSSM.UnlabelParameterVersion")
             .contentType(SSM_CONTENT_TYPE)
@@ -2521,7 +2521,7 @@ class SsmIntegrationTest {
         return received;
     }
 
-    private io.restassured.response.ValidatableResponse describeParameters(String body) {
+    private ValidatableResponse describeParameters(String body) {
         return given()
             .header("X-Amz-Target", "AmazonSSM.DescribeParameters")
             .contentType(SSM_CONTENT_TYPE)

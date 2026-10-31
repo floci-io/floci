@@ -41,7 +41,8 @@ class LegacyBasePathMappingIntegrationTest {
     }
 
     private void seedLegacyState() {
-        service.createDomainName(REGION, Map.of("domainName", DOMAIN));
+        // REGIONAL: the v2 mapping API this test reads through refuses an EDGE domain, as AWS does.
+        service.createDomainName(REGION, Map.of("domainName", DOMAIN, "endpointType", "REGIONAL"));
         // The canonical root, as writes produce it today.
         service.createBasePathMapping(REGION, DOMAIN, Map.of("restApiId", "api-canonical", "stage", "prod"));
         // And one the old write path left under the empty key; its field still reads "(none)".

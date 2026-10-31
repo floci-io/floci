@@ -747,12 +747,15 @@ public class DelegationRequestService {
      * A member that does not meet the format or the constraints it declares. The reference's
      * common errors publish {@code ValidationError} for exactly that, "the input doesn't meet the
      * required format or constraints", for every IAM operation and without listing it on any of
-     * them, which is why it appears in no operation's error table and in none of these.
+     * them, which is why it appears in no operation's error table and in none of these. The member
+     * is named without the value, as {@link IamValidationErrors} reads it, and a member the request
+     * never sent keeps the one word that still stands where a value would.
      */
     private static AwsException constraintViolation(String value, String member, String constraint) {
-        return SmithyValidationErrors.validationError("Value "
-                + (value == null ? "null" : "'" + value + "'") + " at '" + member
-                + "' failed to satisfy constraint: " + constraint);
+        if (value == null) {
+            return SmithyValidationErrors.validationError(SmithyValidationErrors.notNull(member));
+        }
+        return IamValidationErrors.validationError(member, value, constraint);
     }
 
     private static AwsException noSuchRequest(String id) {

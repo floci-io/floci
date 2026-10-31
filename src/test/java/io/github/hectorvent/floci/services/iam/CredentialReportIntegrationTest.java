@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 
 import java.util.Base64;
@@ -24,7 +25,7 @@ class CredentialReportIntegrationTest {
     private static final String IAM_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request";
 
-    private static io.restassured.specification.RequestSpecification iam(String action) {
+    private static RequestSpecification iam(String action) {
         return given().header("Authorization", IAM_AUTH).formParam("Action", action);
     }
 

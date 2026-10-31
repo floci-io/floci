@@ -239,7 +239,7 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
     }
 
     static String tableName(Scope scope, String value) {
-        if (!value.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(value)) {
             return value;
         }
         DynamoDbTableNames.resolveWithRegion(value, scope.region());
@@ -528,7 +528,7 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
     }
 
     private String existingTableKey(Scope scope, String resourceArn) {
-        if (resourceArn == null || !resourceArn.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(resourceArn)) {
             throw new AwsException("ValidationException", "Invalid TableArn", 400);
         }
         String name = ownTableName(scope, resourceArn);

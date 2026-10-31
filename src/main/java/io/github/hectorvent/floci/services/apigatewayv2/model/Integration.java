@@ -21,10 +21,16 @@ public class Integration {
     private Map<String, String> requestParameters;
     private String connectionId;
 
+    private String credentialsArn;
+
     public Integration() {}
+
+    public String getCredentialsArn() { return credentialsArn; }
+    public void setCredentialsArn(String credentialsArn) { this.credentialsArn = credentialsArn; }
 
     /** Shallow copy. Add new fields here so callers like {@code withResolvedUri} keep them. */
     public Integration(Integration src) {
+        this.credentialsArn = src.credentialsArn;
         this.integrationId = src.integrationId;
         this.integrationType = src.integrationType;
         this.connectionType = src.connectionType;

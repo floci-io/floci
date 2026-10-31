@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.sql.Types;
 import java.util.List;
@@ -23,7 +24,7 @@ class RedshiftDataFieldMapperTest {
         assertEquals(1.5, RedshiftDataFieldMapper.toField(om, 1.5d, Types.DOUBLE, false).get("doubleValue").asDouble());
         assertTrue(RedshiftDataFieldMapper.toField(om, true, Types.BOOLEAN, false).get("booleanValue").asBoolean());
         assertEquals("12.34",
-                RedshiftDataFieldMapper.toField(om, new java.math.BigDecimal("12.34"), Types.NUMERIC, false)
+                RedshiftDataFieldMapper.toField(om, new BigDecimal("12.34"), Types.NUMERIC, false)
                         .get("stringValue").asText());
         assertEquals("hello",
                 RedshiftDataFieldMapper.toField(om, "hello", Types.VARCHAR, false).get("stringValue").asText());

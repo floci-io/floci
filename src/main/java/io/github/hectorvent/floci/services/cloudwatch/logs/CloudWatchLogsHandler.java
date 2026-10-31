@@ -400,6 +400,11 @@ public class CloudWatchLogsHandler {
             requireListSize(request.path("logStreamNames"), "logStreamNames", 1, 100);
         }
         request.path("logStreamNames").forEach(n -> streamNames.add(resolveLogStreamName(n.asText(null))));
+        // After the logStreamNames check, so a request that check refuses gets its message rather than this one.
+        if (groupName == null || groupName.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    "logGroupName or logGroupIdentifier is required.", 400);
+        }
 
         CloudWatchLogsService.FilteredLogEventsResult result =
                 logsService.filterLogEvents(groupName, streamNames, startTime, endTime, filterPattern, limit,

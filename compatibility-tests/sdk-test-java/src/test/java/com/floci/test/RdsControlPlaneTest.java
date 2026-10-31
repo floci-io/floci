@@ -10,6 +10,8 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.DescribeSubnetsResponse;
 import software.amazon.awssdk.services.rds.RdsClient;
+import software.amazon.awssdk.services.rds.model.Certificate;
+import software.amazon.awssdk.services.rds.model.CertificateNotFoundException;
 import software.amazon.awssdk.services.rds.model.ConnectionPoolConfigurationInfo;
 import software.amazon.awssdk.services.rds.model.CreateDbClusterEndpointResponse;
 import software.amazon.awssdk.services.rds.model.CreateDbClusterResponse;
@@ -25,6 +27,8 @@ import software.amazon.awssdk.services.rds.model.DBClusterRole;
 import software.amazon.awssdk.services.rds.model.DBClusterSnapshot;
 import software.amazon.awssdk.services.rds.model.DBEngineVersion;
 import software.amazon.awssdk.services.rds.model.DBInstance;
+import software.amazon.awssdk.services.rds.model.DBInstanceAutomatedBackup;
+import software.amazon.awssdk.services.rds.model.DBInstanceAutomatedBackupsReplication;
 import software.amazon.awssdk.services.rds.model.DBInstanceRole;
 import software.amazon.awssdk.services.rds.model.DBProxyEndpointTargetRole;
 import software.amazon.awssdk.services.rds.model.DBProxyTarget;
@@ -34,12 +38,14 @@ import software.amazon.awssdk.services.rds.model.DbClusterEndpointNotFoundExcept
 import software.amazon.awssdk.services.rds.model.DbClusterRoleAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbClusterRoleNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbClusterSnapshotNotFoundException;
+import software.amazon.awssdk.services.rds.model.DbInstanceAutomatedBackupNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbInstanceRoleAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbInstanceRoleNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbLogFileNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbProxyEndpointNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbSnapshotNotFoundException;
+import software.amazon.awssdk.services.rds.model.DescribeCertificatesResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDBLogFilesDetails;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxiesResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbProxyEndpointsResponse;
@@ -50,6 +56,7 @@ import software.amazon.awssdk.services.rds.model.DescribeOptionGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOrderableDbInstanceOptionsResponse;
 import software.amazon.awssdk.services.rds.model.DownloadDbLogFilePortionResponse;
 import software.amazon.awssdk.services.rds.model.EngineDefaults;
+import software.amazon.awssdk.services.rds.model.InvalidDbInstanceAutomatedBackupStateException;
 import software.amazon.awssdk.services.rds.model.InvalidDbInstanceStateException;
 import software.amazon.awssdk.services.rds.model.InvalidDbProxyEndpointStateException;
 import software.amazon.awssdk.services.rds.model.InvalidOptionGroupStateException;
@@ -143,6 +150,7 @@ class RdsControlPlaneTest {
                         .minCapacity(0.0)
                         .maxCapacity(16.0)));
 
+        assertThat(created.dbCluster().hostedZoneId()).isEqualTo("Z2R2ITUGPM61AM");
         assertThat(created.dbCluster().engine()).isEqualTo("aurora-postgresql");
         assertThat(created.dbCluster().serverlessV2ScalingConfiguration().minCapacity())
                 .isEqualTo(0.0);
@@ -164,6 +172,7 @@ class RdsControlPlaneTest {
 
         DBCluster described = rds.describeDBClusters(b -> b
                 .dbClusterIdentifier(serverlessClusterName)).dbClusters().get(0);
+        assertThat(described.hostedZoneId()).isEqualTo("Z2R2ITUGPM61AM");
         assertThat(described.serverlessV2ScalingConfiguration().minCapacity()).isEqualTo(0.0);
         assertThat(described.serverlessV2ScalingConfiguration().maxCapacity()).isEqualTo(16.0);
         assertThat(described.serverlessV2ScalingConfiguration().secondsUntilAutoPause())
@@ -878,6 +887,95 @@ class RdsControlPlaneTest {
     }
 
     @Test
+    @DisplayName("Certificates: list the CAs, override the default and set an instance's CA")
+    void sdkRoundTripsCertificates() {
+        String instanceName = TestFixtures.uniqueName("rds-ca");
+        try {
+            DescribeCertificatesResponse listed = rds.describeCertificates(b -> {});
+            assertThat(listed.defaultCertificateForNewLaunches()).isEqualTo("rds-ca-rsa2048-g1");
+            assertThat(listed.certificates()).extracting(Certificate::certificateIdentifier)
+                    .containsExactly("rds-ca-ecc384-g1", "rds-ca-rsa2048-g1", "rds-ca-rsa4096-g1");
+            assertThat(listed.certificates()).allSatisfy(c -> {
+                assertThat(c.certificateType()).isEqualTo("CA");
+                assertThat(c.thumbprint()).matches("[0-9a-f]{40}");
+                assertThat(c.validTill()).isAfter(c.validFrom());
+                assertThat(c.certificateArn()).endsWith("::cert:" + c.certificateIdentifier());
+            });
+            assertThatThrownBy(() -> rds.describeCertificates(b -> b.certificateIdentifier("rds-ca-2019")))
+                    .isInstanceOf(CertificateNotFoundException.class);
+
+            Certificate override = rds.modifyCertificates(b -> b.certificateIdentifier("rds-ca-ecc384-g1"))
+                    .certificate();
+            assertThat(override.customerOverride()).isTrue();
+            assertThat(override.customerOverrideValidTill()).isEqualTo(override.validTill());
+            DBInstance created = createDbInstance(rds, instanceName, "ca-secret").dbInstance();
+            assertThat(created.caCertificateIdentifier()).isEqualTo("rds-ca-ecc384-g1");
+            assertThat(created.certificateDetails().caIdentifier()).isEqualTo("rds-ca-ecc384-g1");
+            assertThat(created.certificateDetails().validTill()).isEqualTo(override.validTill());
+
+            rds.modifyDBInstance(b -> b.dbInstanceIdentifier(instanceName)
+                    .caCertificateIdentifier("rds-ca-rsa4096-g1").applyImmediately(true));
+            assertThat(rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName)).dbInstances().get(0)
+                    .caCertificateIdentifier()).isEqualTo("rds-ca-rsa4096-g1");
+        } finally {
+            rds.modifyCertificates(b -> b.removeCustomerOverride(true));
+            deleteDbInstance(rds, instanceName);
+        }
+        assertThat(rds.describeCertificates(b -> {}).defaultCertificateForNewLaunches())
+                .isEqualTo("rds-ca-rsa2048-g1");
+    }
+
+    @Test
+    @DisplayName("Automated backups: active, retained after a delete, restored from, replicated and deleted")
+    void sdkRoundTripsAutomatedBackups() {
+        String instanceName = TestFixtures.uniqueName("rds-ab");
+        String restoredName = TestFixtures.uniqueName("rds-ab-restored");
+        Region destination = Region.US_WEST_2;
+        try (RdsClient west = rdsClient(destination)) {
+            DBInstance created = createDbInstance(rds, instanceName, "ab-secret").dbInstance();
+            String dbi = created.dbiResourceId();
+            DBInstanceAutomatedBackup active = rds.describeDBInstanceAutomatedBackups(b -> b.dbiResourceId(dbi))
+                    .dbInstanceAutomatedBackups().get(0);
+            assertThat(active.status()).isEqualTo("active");
+            assertThat(active.dbInstanceAutomatedBackupsArn()).endsWith(":auto-backup:ab-" + dbi.substring(3));
+            assertThat(active.restoreWindow().earliestTime()).isBeforeOrEqualTo(active.restoreWindow().latestTime());
+            assertThatThrownBy(() -> rds.deleteDBInstanceAutomatedBackup(b -> b.dbiResourceId(dbi)))
+                    .isInstanceOf(InvalidDbInstanceAutomatedBackupStateException.class);
+
+            DBInstanceAutomatedBackup replica = west.startDBInstanceAutomatedBackupsReplication(b -> b
+                    .sourceDBInstanceArn(created.dbInstanceArn()).backupRetentionPeriod(5))
+                    .dbInstanceAutomatedBackup();
+            assertThat(replica.status()).isEqualTo("replicating");
+            assertThat(replica.backupRetentionPeriod()).isEqualTo(5);
+            assertThat(rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName)).dbInstances().get(0)
+                    .dbInstanceAutomatedBackupsReplications())
+                    .extracting(DBInstanceAutomatedBackupsReplication::dbInstanceAutomatedBackupsArn)
+                    .containsExactly(replica.dbInstanceAutomatedBackupsArn());
+            assertThat(west.stopDBInstanceAutomatedBackupsReplication(b -> b
+                    .sourceDBInstanceArn(created.dbInstanceArn())).dbInstanceAutomatedBackup().status())
+                    .isEqualTo("retained");
+            west.deleteDBInstanceAutomatedBackup(b -> b
+                    .dbInstanceAutomatedBackupsArn(replica.dbInstanceAutomatedBackupsArn()));
+
+            rds.deleteDBInstance(b -> b.dbInstanceIdentifier(instanceName).skipFinalSnapshot(true)
+                    .deleteAutomatedBackups(false));
+            assertThat(rds.describeDBInstanceAutomatedBackups(b -> b.dbiResourceId(dbi))
+                    .dbInstanceAutomatedBackups().get(0).status()).isEqualTo("retained");
+            assertThat(rds.restoreDBInstanceToPointInTime(b -> b.sourceDbiResourceId(dbi)
+                    .targetDBInstanceIdentifier(restoredName).useLatestRestorableTime(true))
+                    .dbInstance().dbInstanceIdentifier()).isEqualTo(restoredName);
+
+            assertThat(rds.deleteDBInstanceAutomatedBackup(b -> b.dbiResourceId(dbi))
+                    .dbInstanceAutomatedBackup().status()).isEqualTo("deleting");
+            assertThatThrownBy(() -> rds.describeDBInstanceAutomatedBackups(b -> b.dbiResourceId(dbi)))
+                    .isInstanceOf(DbInstanceAutomatedBackupNotFoundException.class);
+        } finally {
+            deleteDbInstance(rds, restoredName);
+            deleteDbInstance(rds, instanceName);
+        }
+    }
+
+    @Test
     @DisplayName("IAM role associations: add, describe and remove for a cluster and an instance")
     void sdkRoundTripsIamRoleAssociations() {
         String clusterName = TestFixtures.uniqueName("rds-roles-cluster");
@@ -1011,7 +1109,7 @@ class RdsControlPlaneTest {
                 .build();
     }
 
-    private static software.amazon.awssdk.services.rds.model.CreateDbInstanceResponse createDbInstance(
+    private static CreateDbInstanceResponse createDbInstance(
             RdsClient client, String name, String password) {
         return client.createDBInstance(b -> b
                 .dbInstanceIdentifier(name)

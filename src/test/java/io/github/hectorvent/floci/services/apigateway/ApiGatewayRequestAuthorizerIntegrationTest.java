@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -530,7 +531,7 @@ class ApiGatewayRequestAuthorizerIntegrationTest {
                 .when().get("/execute-api/" + noneApiId + "/prod/open")
                 .then()
                 .statusCode(200)
-                .body("invoked", org.hamcrest.Matchers.equalTo(true));
+                .body("invoked", Matchers.equalTo(true));
     }
 
     // ──────────────────────────── Allow / Deny policy ────────────────────────────

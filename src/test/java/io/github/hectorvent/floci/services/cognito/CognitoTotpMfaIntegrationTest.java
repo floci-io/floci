@@ -12,6 +12,7 @@ import java.time.Clock;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -91,5 +92,22 @@ class CognitoTotpMfaIntegrationTest {
                  "ChallengeResponses":{"USERNAME":"totp-user","SOFTWARE_TOKEN_MFA_CODE":"%s"}}
                 """.formatted(clientId, later.path("Session").asText(), code);
         cognitoAction("RespondToAuthChallenge", replay).then().statusCode(400);
+
+        String reuseSession = cognitoJson("InitiateAuth", loginRequest).path("Session").asText();
+        String challengeResponse = """
+                {"ClientId":"%s","ChallengeName":"SOFTWARE_TOKEN_MFA","Session":"%s",
+                 "ChallengeResponses":{"USERNAME":"totp-user","SOFTWARE_TOKEN_MFA_CODE":"%s"}}
+                """;
+        cognitoAction("RespondToAuthChallenge", challengeResponse.formatted(clientId, reuseSession, code))
+                .then().statusCode(400)
+                .body("__type", equalTo("ExpiredCodeException"))
+                .body("message", equalTo("Your software token has already been used once."))
+                .body("AuthenticationResult", nullValue());
+
+        String nextStepCode = CognitoTotp.code(associated.path("SecretCode").asText(),
+                clock.instant().plusSeconds(30));
+        JsonNode nextStep = cognitoJson("RespondToAuthChallenge",
+                challengeResponse.formatted(clientId, reuseSession, nextStepCode));
+        assertFalse(nextStep.path("AuthenticationResult").path("AccessToken").asText().isEmpty());
     }
 }

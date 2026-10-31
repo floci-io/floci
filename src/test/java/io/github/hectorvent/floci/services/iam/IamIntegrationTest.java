@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.AwsQueryController;
+import io.github.hectorvent.floci.testing.SamlMetadata;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -723,7 +724,7 @@ class IamIntegrationTest {
     void getAccessKeyLastUsedReturnsNeverUsedShape() {
         given()
             .formParam("Action", "GetAccessKeyLastUsed")
-            .formParam("AccessKeyId", "AKIAEXAMPLE")
+            .formParam("AccessKeyId", "AKIAIOSFODNN7EXAMPLE")
             .header("Authorization",
                     "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
         .when()
@@ -792,8 +793,7 @@ class IamIntegrationTest {
     @Order(54)
     void getSamlProviderDoesNotCrossAccountBoundaries() {
         String providerName = "cross-account-saml-" + System.nanoTime();
-        String metadata = "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\"https://idp.example.test/"
-                + providerName + "\"><md:IDPSSODescriptor><md:KeyDescriptor use=\"signing\"><ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data><ds:X509Certificate>Y2VydA==</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor></md:IDPSSODescriptor></md:EntityDescriptor>";
+        String metadata = SamlMetadata.forEntity("https://idp.example.test/" + providerName);
         String ownerAuth = "AWS4-HMAC-SHA256 Credential=111111111111/20260227/us-east-1/iam/aws4_request";
         String otherAccountAuth = "AWS4-HMAC-SHA256 Credential=222222222222/20260227/us-east-1/iam/aws4_request";
         given().formParam("Action", "CreateSAMLProvider").formParam("Name", providerName)
@@ -1691,8 +1691,8 @@ class IamIntegrationTest {
             .when().post("/").then()
                 .statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-                .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value '" + name
-                        + "' at 'roleName' failed to satisfy constraint: " + entry.getValue()));
+                .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at"
+                        + " 'roleName' failed to satisfy constraint: " + entry.getValue()));
 
             given()
                 .formParam("Action", "GetRole")
@@ -1728,8 +1728,10 @@ class IamIntegrationTest {
         .when().post("/").then()
             .statusCode(400)
             .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value ''"
-                    + " at 'roleName' failed to satisfy constraint: Member must have length greater than or equal to 1"));
+            .body("ErrorResponse.Error.Message", equalTo("2 validation errors detected: Value at"
+                    + " 'roleName' failed to satisfy constraint: Member must have length greater"
+                    + " than or equal to 1; Value at 'roleName' failed to satisfy constraint:"
+                    + " Member must satisfy regular expression pattern: [\\w+=,.@-]+"));
 
         given()
             .formParam("Action", "CreateRole")
@@ -1744,7 +1746,7 @@ class IamIntegrationTest {
     @Order(87)
     void roleActionsRejectANameOutsideTheRoleNamePattern() {
         String name = "aws:ec2-instance";
-        String message = "1 validation error detected: Value '" + name + "' at 'roleName' failed to satisfy"
+        String message = "1 validation error detected: Value at 'roleName' failed to satisfy"
                 + " constraint: Member must satisfy regular expression pattern: [\\w+=,.@-]+";
         Map<String, Map<String, String>> actions = new LinkedHashMap<>();
         actions.put("GetRole", Map.of());

@@ -80,6 +80,8 @@ import java.security.spec.X509EncodedKeySpec;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Base64;
@@ -189,6 +191,7 @@ public class CognitoService implements ResourceProvider {
     private final TlsCertificateManager certificateManager;
     private final boolean enforceTokenValidityLimits;
     private final Object[] userLocks = newUserLockStripes();
+    private final Object[] poolLocks = newUserLockStripes();
     // Reserve names per account through registration callbacks, without blocking their admin requests.
     private final Set<String> userCreatesInFlight = ConcurrentHashMap.newKeySet();
 
@@ -207,6 +210,15 @@ public class CognitoService implements ResourceProvider {
     private Object userLock(String poolId, String username) {
         String key = userKey(poolId, username);
         return userLocks[Math.floorMod(key.hashCode(), USER_LOCK_STRIPES)];
+    }
+
+    /**
+     * Held by every write that reads a pool and stores it back whole, so one write never stores a
+     * pool read before another write landed. The lock is per pool id, not per instance, since some
+     * of these writes store a new copy in place of the instance another write is holding.
+     */
+    private Object poolLock(String poolId) {
+        return poolLocks[Math.floorMod(poolId.hashCode(), USER_LOCK_STRIPES)];
     }
 
     @Inject
@@ -444,21 +456,23 @@ public class CognitoService implements ResourceProvider {
 
     public UserPool updateUserPool(Map<String, Object> request, String region) {
         String id = (String) request.get("UserPoolId");
-        UserPool pool = describeUserPool(id);
-        UserPool updatedPool = MAPPER.convertValue(pool, UserPool.class);
+        synchronized (poolLock(id)) {
+            UserPool pool = describeUserPool(id);
+            UserPool updatedPool = MAPPER.convertValue(pool, UserPool.class);
 
-        populateUserPool(updatedPool, request);
-        if (request.containsKey("LambdaConfig")) {
-            requireCustomSenderKey(updatedPool, false, region);
-        }
-        if (request.get("PoolName") instanceof String poolName && !poolName.isBlank()) {
-            updatedPool.setName(poolName);
-        }
+            populateUserPool(updatedPool, request);
+            if (request.containsKey("LambdaConfig")) {
+                requireCustomSenderKey(updatedPool, false, region);
+            }
+            if (request.get("PoolName") instanceof String poolName && !poolName.isBlank()) {
+                updatedPool.setName(poolName);
+            }
 
-        updatedPool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-        poolStore.put(id, updatedPool);
-        LOG.infov("Updated User Pool: {0}", id);
-        return updatedPool;
+            updatedPool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            poolStore.put(id, updatedPool);
+            LOG.infov("Updated User Pool: {0}", id);
+            return updatedPool;
+        }
     }
 
     /**
@@ -479,16 +493,21 @@ public class CognitoService implements ResourceProvider {
      * Everything else on the pool, its users and signing keys among them, stays as it is now.
      */
     public UserPool restoreUserPoolSettings(UserPool settings) {
-        UserPool pool = describeUserPool(settings.getId());
-        UserPool restored = MAPPER.convertValue(pool, UserPool.class);
-        copyUserPoolSettings(MAPPER.convertValue(settings, UserPool.class), restored);
-        restored.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-        poolStore.put(restored.getId(), restored);
-        LOG.infov("Restored User Pool settings: {0}", restored.getId());
-        return restored;
+        synchronized (poolLock(settings.getId())) {
+            UserPool pool = describeUserPool(settings.getId());
+            UserPool restored = MAPPER.convertValue(pool, UserPool.class);
+            copyUserPoolSettings(MAPPER.convertValue(settings, UserPool.class), restored);
+            restored.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            poolStore.put(restored.getId(), restored);
+            LOG.infov("Restored User Pool settings: {0}", restored.getId());
+            return restored;
+        }
     }
 
-    /** The name and every field {@code populateUserPool} sets, which is what an update can change. */
+    /**
+     * The name, every field {@code populateUserPool} sets and the MFA factors, which is what an
+     * update can change: CloudFormation sets the factors of a pool's EnabledMfas.
+     */
     private static void copyUserPoolSettings(UserPool from, UserPool to) {
         to.setName(from.getName());
         to.setPolicies(from.getPolicies());
@@ -504,6 +523,9 @@ public class CognitoService implements ResourceProvider {
         to.setVerificationMessageTemplate(from.getVerificationMessageTemplate());
         to.setSmsAuthenticationMessage(from.getSmsAuthenticationMessage());
         to.setMfaConfiguration(from.getMfaConfiguration());
+        to.setSoftwareTokenMfaEnabled(from.getSoftwareTokenMfaEnabled());
+        to.setSmsMfaConfiguration(from.getSmsMfaConfiguration());
+        to.setEmailMfaConfiguration(from.getEmailMfaConfiguration());
         to.setDeviceConfiguration(from.getDeviceConfiguration());
         to.setEmailConfiguration(from.getEmailConfiguration());
         to.setSmsConfiguration(from.getSmsConfiguration());
@@ -517,6 +539,12 @@ public class CognitoService implements ResourceProvider {
     }
 
     public void addCustomAttributes(String userPoolId, List<Map<String, Object>> customAttributes) {
+        synchronized (poolLock(userPoolId)) {
+            addCustomAttributesUnderPoolLock(userPoolId, customAttributes);
+        }
+    }
+
+    private void addCustomAttributesUnderPoolLock(String userPoolId, List<Map<String, Object>> customAttributes) {
         UserPool pool = describeUserPool(userPoolId);
         List<Map<String, Object>> schema = pool.getSchemaAttributes();
         if (schema == null) {
@@ -808,8 +836,55 @@ public class CognitoService implements ResourceProvider {
                                          Map<String, Object> smsMfaConfiguration,
                                          Map<String, Object> emailMfaConfiguration,
                                          WebAuthnConfiguration webAuthnConfiguration) {
+        synchronized (poolLock(id)) {
+            UserPool pool = describeUserPool(id);
+            applyMfaConfig(pool, mfaConfiguration, softwareTokenMfaEnabled, smsMfaConfiguration,
+                    emailMfaConfiguration, webAuthnConfiguration, false);
+            poolStore.put(id, pool);
+            return pool;
+        }
+    }
+
+    /**
+     * SetUserPoolMfaConfig where a factor that is not given is turned off instead of kept, which is
+     * how CloudFormation applies a user pool's EnabledMfas. The settings are built on a copy and
+     * stored in one write, so a concurrent sign-in never reads the pool between its old and new
+     * MFA settings, and under the pool lock, so a concurrent tag or update is kept.
+     * SMS is the exception: once enabled, only MfaConfiguration OFF turns it off, as the
+     * AWS::Cognito::UserPool reference documents, so an SMS setting that is not given is kept,
+     * with the pool's current message and SMS configuration rather than the ones it was enabled
+     * with, since an update may have just changed them.
+     */
+    public UserPool replaceUserPoolMfaConfig(String id, String mfaConfiguration,
+                                             Boolean softwareTokenMfaEnabled,
+                                             Map<String, Object> smsMfaConfiguration,
+                                             Map<String, Object> emailMfaConfiguration) {
+        synchronized (poolLock(id)) {
+            UserPool pool = MAPPER.convertValue(describeUserPool(id), UserPool.class);
+            if (smsMfaConfiguration == null && mfaConfiguration != null && !"OFF".equals(mfaConfiguration)
+                    && pool.getSmsMfaConfiguration() != null) {
+                smsMfaConfiguration = new LinkedHashMap<>(pool.getSmsMfaConfiguration());
+                if (pool.getSmsAuthenticationMessage() != null) {
+                    smsMfaConfiguration.put("SmsAuthenticationMessage", pool.getSmsAuthenticationMessage());
+                }
+                if (pool.getSmsConfiguration() != null) {
+                    smsMfaConfiguration.put("SmsConfiguration", pool.getSmsConfiguration());
+                }
+            }
+            applyMfaConfig(pool, mfaConfiguration, softwareTokenMfaEnabled, smsMfaConfiguration,
+                    emailMfaConfiguration, null, true);
+            poolStore.put(id, pool);
+            return pool;
+        }
+    }
+
+    private void applyMfaConfig(UserPool pool, String mfaConfiguration,
+                                Boolean softwareTokenMfaEnabled,
+                                Map<String, Object> smsMfaConfiguration,
+                                Map<String, Object> emailMfaConfiguration,
+                                WebAuthnConfiguration webAuthnConfiguration,
+                                boolean replaceFactors) {
         boolean otherFactorConfigured = smsMfaConfiguration != null || emailMfaConfiguration != null;
-        UserPool pool = describeUserPool(id);
         if (webAuthnConfiguration != null) {
             validateWebAuthnConfiguration(webAuthnConfiguration);
         }
@@ -846,8 +921,11 @@ public class CognitoService implements ResourceProvider {
             pool.setSmsMfaConfiguration(null);
             pool.setEmailMfaConfiguration(null);
         } else {
-            if (softwareTokenMfaEnabled != null) {
+            if (softwareTokenMfaEnabled != null || replaceFactors) {
                 pool.setSoftwareTokenMfaEnabled(softwareTokenMfaEnabled);
+            }
+            if (smsMfaConfiguration == null && replaceFactors) {
+                pool.setSmsMfaConfiguration(null);
             }
             if (smsMfaConfiguration != null) {
                 pool.setSmsMfaConfiguration(new LinkedHashMap<>(smsMfaConfiguration));
@@ -860,15 +938,14 @@ public class CognitoService implements ResourceProvider {
                     pool.setSmsConfiguration(copy);
                 }
             }
-            if (emailMfaConfiguration != null) {
-                pool.setEmailMfaConfiguration(new LinkedHashMap<>(emailMfaConfiguration));
+            if (emailMfaConfiguration != null || replaceFactors) {
+                pool.setEmailMfaConfiguration(emailMfaConfiguration != null
+                        ? new LinkedHashMap<>(emailMfaConfiguration) : null);
             }
         }
         if (webAuthnConfiguration != null) {
             pool.setWebAuthnConfiguration(webAuthnConfiguration);
         }
-        poolStore.put(id, pool);
-        return pool;
     }
 
     private static void validateWebAuthnConfiguration(WebAuthnConfiguration configuration) {
@@ -987,8 +1064,8 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("InvalidParameterException", "Tags are required", 400);
         }
         ReservedTags.rejectReservedTagsOnUpdate(tags);
-        UserPool pool = describeUserPoolByArn(resourceArn);
-        synchronized (pool) {
+        synchronized (poolLock(extractUserPoolIdFromArn(resourceArn))) {
+            UserPool pool = describeUserPoolByArn(resourceArn);
             pool.setUserPoolTags(mergeUserPoolTags(pool.getUserPoolTags(), tags));
             pool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
             poolStore.put(pool.getId(), pool);
@@ -999,8 +1076,8 @@ public class CognitoService implements ResourceProvider {
         if (tagKeys == null || tagKeys.isEmpty()) {
             throw new AwsException("InvalidParameterException", "TagKeys are required", 400);
         }
-        UserPool pool = describeUserPoolByArn(resourceArn);
-        synchronized (pool) {
+        synchronized (poolLock(extractUserPoolIdFromArn(resourceArn))) {
+            UserPool pool = describeUserPoolByArn(resourceArn);
             pool.setUserPoolTags(removeUserPoolTags(pool.getUserPoolTags(), tagKeys));
             pool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
             poolStore.put(pool.getId(), pool);
@@ -1949,7 +2026,9 @@ public class CognitoService implements ResourceProvider {
 
     /**
      * AWS accepts only an issued ACM certificate from us-east-1 behind a custom domain, and answers
-     * anything else with this one message.
+     * anything else with this one message. ACM finds a certificate by its id alone, so the ARN's
+     * partition and account are checked here: a certificate in another partition or account is
+     * never the caller's.
      */
     private void requireUsableCertificate(String certificateArn) {
         AwsArnUtils.Arn arn;
@@ -1959,6 +2038,8 @@ public class CognitoService implements ResourceProvider {
             throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
         }
         if (!"acm".equals(arn.service()) || !CERTIFICATE_REGION.equals(arn.region())
+                || !arn.partition().equals(regionResolver.getPartition())
+                || !arn.accountId().equals(regionResolver.getAccountId())
                 || !arn.resource().startsWith("certificate/")) {
             throw new AwsException("InvalidParameterException", CERTIFICATE_NOT_USABLE, 400);
         }
@@ -1994,9 +2075,9 @@ public class CognitoService implements ResourceProvider {
     }
 
     private String generateDomainVersion() {
-        return java.time.format.DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
-                .withZone(java.time.ZoneOffset.UTC)
-                .format(java.time.Instant.now());
+        return DateTimeFormatter.ofPattern("yyyyMMddHHmmss")
+                .withZone(ZoneOffset.UTC)
+                .format(Instant.now());
     }
 
     // ──────────────────────────── Log Delivery ────────────────────────────
@@ -2013,10 +2094,12 @@ public class CognitoService implements ResourceProvider {
         validateLogConfigurations(logConfigurations);
         rejectUnusableEventSources(logConfigurations);
 
-        UserPool pool = describeUserPool(userPoolId);
-        pool.setLogConfigurations(new ArrayList<>(logConfigurations));
-        poolStore.put(userPoolId, pool);
-        return pool;
+        synchronized (poolLock(userPoolId)) {
+            UserPool pool = describeUserPool(userPoolId);
+            pool.setLogConfigurations(new ArrayList<>(logConfigurations));
+            poolStore.put(userPoolId, pool);
+            return pool;
+        }
     }
 
     public UserPool getLogDeliveryConfiguration(String userPoolId) {
@@ -3769,11 +3852,29 @@ public class CognitoService implements ResourceProvider {
                 return false;
             }
             user.setSoftwareTokenMfaSecret(pending);
+            user.setLastSoftwareTokenMfaStep(null);
             user.setSoftwareTokenMfaDeviceName(friendlyDeviceName == null || friendlyDeviceName.isEmpty()
                     ? null : friendlyDeviceName);
             user.setPendingSoftwareTokenMfaSecret(null);
             user.setPendingSoftwareTokenMfaAttemptsRemaining(null);
             user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            userStore.put(userKey(poolId, user.getUsername()), user);
+            return true;
+        }
+    }
+
+    /**
+     * Records {@code step} as the user's last accepted software-token step, refusing it when a code
+     * from that step or an earlier one already answered a challenge (RFC 6238 section 5.2).
+     */
+    boolean consumeSoftwareTokenStep(String poolId, String username, long step) {
+        synchronized (userLock(poolId, username)) {
+            CognitoUser user = adminGetUser(poolId, username);
+            Long last = user.getLastSoftwareTokenMfaStep();
+            if (last != null && step <= last) {
+                return false;
+            }
+            user.setLastSoftwareTokenMfaStep(step);
             userStore.put(userKey(poolId, user.getUsername()), user);
             return true;
         }

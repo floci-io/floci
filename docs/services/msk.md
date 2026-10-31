@@ -78,7 +78,7 @@ Two details worth knowing:
   `configurationRevision`, which is where the Terraform AWS provider reads it from.
 - Members AWS defaults server-side are defaulted here too, so a `terraform plan` converges:
   `enhancedMonitoring` becomes `DEFAULT`, and `encryptionInfo.encryptionInTransit` becomes
-  `clientBroker: TLS_PLAINTEXT` / `inCluster: true` when the request omits them.
+  `clientBroker: TLS` / `inCluster: true` when the request omits them.
 
 ### Serverless clusters
 
@@ -116,7 +116,7 @@ Cluster and configuration tags are managed through `/v1/tags/{resourceArn}`
 Configuration tags are reachable only through the tag endpoints, because AWS's
 `DescribeConfiguration` response has no tags member.
 
-### SCRAM Secrets Association 
+### SCRAM Secrets Association
 
 Manages credentials only: the broker does not enable SASL authentication or
 validate these users when clients connect. Clients can still connect without

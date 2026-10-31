@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -387,6 +389,12 @@ public class CodeDeployService {
 
     public List<String> listApplications(String region) {
         return new ArrayList<>(applicationsFor(region).keySet());
+    }
+
+    public PaginatedResult<String> listApplications(String region, String nextToken) {
+        return Pagination.paginate(listApplications(region), name -> name, 100, nextToken,
+                "codedeploy:ListApplications:" + regionResolver.getAccountId() + ":" + region,
+                token -> new AwsException("InvalidNextTokenException", "Invalid nextToken.", 400));
     }
 
     public List<Application> batchGetApplications(String region, List<String> names) {

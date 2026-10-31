@@ -14,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -716,7 +717,7 @@ class CognitoCfnProvisionerTest {
         CountDownLatch ready = new CountDownLatch(2);
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
-            List<Future<Throwable>> outcomes = new java.util.ArrayList<>();
+            List<Future<Throwable>> outcomes = new ArrayList<>();
             for (int i = 0; i < 2; i++) {
                 outcomes.add(pool.submit(() -> {
                     ready.countDown();

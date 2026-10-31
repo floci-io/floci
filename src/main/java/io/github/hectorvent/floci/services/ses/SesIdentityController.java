@@ -36,7 +36,6 @@ import static io.github.hectorvent.floci.services.ses.SesV2Json.parseTagsArray;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.putTimestamp;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.readOptionBody;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.remapV1Exception;
-import static io.github.hectorvent.floci.services.ses.SesV2Json.requireObjectOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMapMemberOrAbsent;
 import static io.github.hectorvent.floci.services.ses.SesV2Json.stringMemberOrAbsent;
 
@@ -279,8 +278,7 @@ public class SesIdentityController {
         if (policyNode.isMissingNode() || policyNode.isNull()) {
             // Verified against AWS: a missing/null required member is a Smithy validation error.
             throw SmithyValidationErrors.badRequest(
-                    "Value at 'policy' failed to satisfy constraint: "
-                            + "Member must not be null");
+                    SmithyValidationErrors.notNullWithoutValue("policy"));
         }
         if (!policyNode.isTextual()) {
             // Policy is a String; AWS rejects a non-string with an empty-bodied 400. Don't coerce
@@ -316,12 +314,13 @@ public class SesIdentityController {
         String region = regionResolver.resolveRegion(headers);
         try {
             JsonNode request = readOptionBody(objectMapper, body);
+            SesV2RequestShapes.check("PutEmailIdentityDkimSigningAttributes", request);
             String origin = request.path("SigningAttributesOrigin").asText(null);
             if (!"AWS_SES".equals(origin) && !"EXTERNAL".equals(origin)) {
                 throw new AwsException("BadRequestException",
                         "SigningAttributesOrigin must be AWS_SES or EXTERNAL.", 400);
             }
-            JsonNode attrs = requireObjectOrAbsent(request, "SigningAttributes");
+            JsonNode attrs = request.path("SigningAttributes");
             String selector = attrs.path("DomainSigningSelector").asText(null);
             String nextKeyLength = attrs.path("NextSigningKeyLength").asText(null);
             if (nextKeyLength != null

@@ -7,18 +7,8 @@ import io.restassured.filter.FilterContext;
 import io.restassured.response.Response;
 import io.restassured.specification.FilterableRequestSpecification;
 import io.restassured.specification.FilterableResponseSpecification;
-import org.bouncycastle.asn1.ASN1EncodableVector;
-import org.bouncycastle.asn1.ASN1Integer;
-import org.bouncycastle.asn1.DERSequence;
-import org.bouncycastle.asn1.x9.X9ECParameters;
-import org.bouncycastle.crypto.ec.CustomNamedCurves;
-import org.bouncycastle.crypto.params.ECDomainParameters;
-import org.bouncycastle.crypto.params.ECPrivateKeyParameters;
-import org.bouncycastle.crypto.signers.ECDSASigner;
-import org.bouncycastle.util.encoders.Hex;
 
 import java.io.IOException;
-import java.math.BigInteger;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -42,9 +32,6 @@ public final class S3SigV4aRequestSigner implements Filter {
     private static final String SERVICE = "s3";
     private static final DateTimeFormatter AMZ_DATE =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
-    private static final X9ECParameters CURVE = CustomNamedCurves.getByName("secp256r1");
-    private static final ECDomainParameters DOMAIN = new ECDomainParameters(
-            CURVE.getCurve(), CURVE.getG(), CURVE.getN(), CURVE.getH());
 
     private final String accessKeyId;
     private final String secretKey;
@@ -155,18 +142,7 @@ public final class S3SigV4aRequestSigner implements Filter {
         String stringToSign = SigV4aSignature.ALGORITHM + "\n" + amzDate + "\n"
                 + scopeDate + "/" + SERVICE + "/aws4_request\n"
                 + Digests.sha256Hex(canonicalRequest.getBytes(StandardCharsets.UTF_8));
-        BigInteger privateScalar = SigV4aSignature.derivePrivateScalar(secretKey, accessKeyId);
-        ECDSASigner signer = new ECDSASigner();
-        signer.init(true, new ECPrivateKeyParameters(privateScalar, DOMAIN));
-        BigInteger[] rs = signer.generateSignature(Digests.sha256(stringToSign.getBytes(StandardCharsets.UTF_8)));
-        ASN1EncodableVector sequence = new ASN1EncodableVector();
-        sequence.add(new ASN1Integer(rs[0]));
-        sequence.add(new ASN1Integer(rs[1]));
-        try {
-            return Hex.toHexString(new DERSequence(sequence).getEncoded());
-        } catch (IOException e) {
-            throw new IllegalStateException("could not encode the signature", e);
-        }
+        return SigV4aSigning.sign(accessKeyId, secretKey, stringToSign);
     }
 
     private static String rawPath(URI uri) {

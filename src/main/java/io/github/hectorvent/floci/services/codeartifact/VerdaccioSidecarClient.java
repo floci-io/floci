@@ -23,6 +23,7 @@ import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 
@@ -149,6 +150,58 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
                 }
             }
             result.add(new PackageVersionTimestamp(version, published));
+        });
+        return result;
+    }
+
+    /**
+     * Verdaccio's own {@code /-/all} endpoint (confirmed live), scoped to this repository's own
+     * backend the same way every other call here is (one {@code baseUrl} per repository): its
+     * response object's keys are every package's own real path exactly as {@link #packagePath}
+     * already builds it ({@code @scope/name} or a bare {@code name}), plus one non-package key,
+     * {@code _updated}, filtered out here rather than treated as a package named "_updated".
+     *
+     * <p>Raised by hectorvent's review: every CodeArtifact repository gets an npm sidecar id at
+     * creation regardless of whether it is ever actually used through npm, so without checking
+     * {@link VerdaccioSidecarManager#isRunning} first, a {@code ListPackages} call with no format
+     * filter would start this repository's own Verdaccio container just to find it empty, every
+     * time, for a repository that has never published anything through npm.
+     */
+    @Override
+    public List<PackageIdentifier> listPackages(String repositoryContainerId, String domain, String repository) {
+        if (!manager.isRunning(repositoryContainerId)) {
+            return List.of();
+        }
+        String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
+        HttpRequest request = HttpRequest.newBuilder(SidecarUriUtils.combine(URI.create(baseUrl), "/-/all"))
+                .timeout(Duration.ofSeconds(30)).GET().build();
+        HttpResponse<String> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.ofString());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the Verdaccio sidecar to list packages", e);
+        }
+        if (response.statusCode() != 200) {
+            throw new IllegalStateException("Could not list packages on the Verdaccio sidecar: upstream returned "
+                    + response.statusCode());
+        }
+        JsonNode all;
+        try {
+            all = mapper.readTree(response.body());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not parse Verdaccio's package listing", e);
+        }
+        List<PackageIdentifier> result = new ArrayList<>();
+        all.fieldNames().forEachRemaining(key -> {
+            if ("_updated".equals(key)) {
+                return;
+            }
+            if (key.startsWith("@")) {
+                int slash = key.indexOf('/');
+                result.add(new PackageIdentifier(key.substring(1, slash), key.substring(slash + 1)));
+            } else {
+                result.add(new PackageIdentifier(null, key));
+            }
         });
         return result;
     }
@@ -309,6 +362,33 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
         String tarballUrl = versionNode.path("dist").path("tarball").asText("");
         String tarballFilename = tarballUrl.substring(tarballUrl.lastIndexOf('/') + 1);
         return tarballFilename.isEmpty() ? null : tarballFilename;
+    }
+
+    /**
+     * The exact version whose tarball Verdaccio's own packument records {@code filename} under,
+     * found by checking every version's own {@link #tarballFilenameFor} rather than assuming
+     * {@code filename} embeds its version in the {@code <packageName>-<version>.tgz} shape this
+     * emulator's own publish path always writes: nothing in the real npm publish protocol
+     * requires a client-chosen {@code dist.tarball} name to follow that convention, so {@code
+     * CodeArtifactNpmDataPlane}'s own download-side Archived guard resolves the real coordinate
+     * here instead of guessing from the filename's own text. Empty when the package doesn't
+     * exist, or no version's own tarball matches.
+     */
+    public Optional<String> versionForTarballFilename(String repositoryContainerId, String domain,
+            String repository, String namespace, String packageName, String filename) {
+        String baseUrl = ensureReady(repositoryContainerId, publicUrl(domain, repository));
+        JsonNode document = fetchPackageDocument(baseUrl, namespace, packageName).orElse(null);
+        if (document == null) {
+            return Optional.empty();
+        }
+        Iterator<String> versions = document.path("versions").fieldNames();
+        while (versions.hasNext()) {
+            String version = versions.next();
+            if (filename.equals(tarballFilenameFor(document, version))) {
+                return Optional.of(version);
+            }
+        }
+        return Optional.empty();
     }
 
     /**

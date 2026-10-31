@@ -23,6 +23,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.RepeatedTest;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -520,7 +521,7 @@ class DynamoDbConcurrencyIntegrationTest {
 
         // CDC delivery is asynchronous (bounded best-effort retry queue): wait for the background drain to
         // flush every buffered record before reading the shard, otherwise this reads a partial stream.
-        assertTrue(forwarder.awaitIdle(java.time.Duration.ofSeconds(10)),
+        assertTrue(forwarder.awaitIdle(Duration.ofSeconds(10)),
                 "the CDC drain must flush all buffered records");
 
         // Paginated drain of the single shard.

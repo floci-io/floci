@@ -27,6 +27,9 @@ public final class TestImages {
 
     public static final String PYTHON_ALPINE = "python:3.12-alpine";
 
+    /** Corretto 8, the JVM of Lambda's oldest Java runtime, as a JDK so a test compiles its probe in the container. */
+    public static final String CORRETTO_8 = "amazoncorretto:8-alpine-jdk";
+
     public static final String PGBOUNCER = "edoburu/pgbouncer:v1.24.0-p1";
 
     /** The same image AWS publishes at {@code public.ecr.aws/aws-observability/aws-for-fluent-bit:3}. */

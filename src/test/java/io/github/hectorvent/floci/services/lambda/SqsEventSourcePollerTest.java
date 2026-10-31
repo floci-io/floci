@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.pipes.PipesFilterMatcher;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
+import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import io.vertx.core.Vertx;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,6 +20,8 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -26,6 +29,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -118,8 +122,8 @@ class SqsEventSourcePollerTest {
         msg.setBody("hello");
         msg.setSentTimestamp(Instant.now());
 
-        io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue attr =
-                new io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue("red", "String");
+        MessageAttributeValue attr =
+                new MessageAttributeValue("red", "String");
         msg.getMessageAttributes().put("color", attr);
         msg.updateMd5OfMessageAttributes();
 
@@ -153,8 +157,8 @@ class SqsEventSourcePollerTest {
         msg.setBody("order");
         msg.setSentTimestamp(Instant.now());
 
-        io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue attr =
-                new io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue("42", "Number");
+        MessageAttributeValue attr =
+                new MessageAttributeValue("42", "Number");
         msg.getMessageAttributes().put("count", attr);
 
         EventSourceMapping esm = new EventSourceMapping();
@@ -176,8 +180,8 @@ class SqsEventSourcePollerTest {
         msg.setSentTimestamp(Instant.now());
 
         byte[] raw = {1, 2, 3};
-        io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue attr =
-                new io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue(raw, "Binary");
+        MessageAttributeValue attr =
+                new MessageAttributeValue(raw, "Binary");
         msg.getMessageAttributes().put("data", attr);
 
         EventSourceMapping esm = new EventSourceMapping();
@@ -191,16 +195,16 @@ class SqsEventSourcePollerTest {
         assertEquals("Binary", data.get("dataType").asText());
         assertNull(data.get("stringValue"));
         assertEquals(
-                java.util.Base64.getEncoder().encodeToString(raw),
+                Base64.getEncoder().encodeToString(raw),
                 data.get("binaryValue").asText());
     }
 
     @Test
     void buildSqsEventHandlesMultipleAttributesAcrossMultipleMessages() throws Exception {
-        io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue a1 =
-                new io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue("v1", "String");
-        io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue a2 =
-                new io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue("v2", "String");
+        MessageAttributeValue a1 =
+                new MessageAttributeValue("v1", "String");
+        MessageAttributeValue a2 =
+                new MessageAttributeValue("v2", "String");
 
         Message msg1 = new Message();
         msg1.setBody("m1");
@@ -462,7 +466,7 @@ class SqsEventSourcePollerTest {
         esm.setBatchSize(batchSize);
         if (patterns.length > 0) {
             EventSourceMapping.FilterCriteria fc = new EventSourceMapping.FilterCriteria();
-            List<EventSourceMapping.Filter> filters = new java.util.ArrayList<>();
+            List<EventSourceMapping.Filter> filters = new ArrayList<>();
             for (String p : patterns) {
                 EventSourceMapping.Filter f = new EventSourceMapping.Filter();
                 f.setPattern(p);
@@ -490,6 +494,35 @@ class SqsEventSourcePollerTest {
         fn.setTimeout(10);
         when(functionStore.getForAccount("000000000000", "us-east-1", "throwfn")).thenReturn(Optional.of(fn));
         return fn;
+    }
+
+    @Test
+    void largeBatchesUseLegalReceiveCountsAndStillDeliverTheWholeBatch() throws Exception {
+        LambdaFunction fn = stubThrowFn();
+        EventSourceMapping esm = esm();
+        esm.setBatchSize(25);
+        esm.setMaximumBatchingWindowInSeconds(300);
+        poller.setClockForTest(() -> 0L);
+        List<Message> messages = new ArrayList<>();
+        for (int i = 0; i < 25; i++) {
+            messages.add(message("large-" + i));
+        }
+        AtomicInteger position = new AtomicInteger();
+        when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenAnswer(call -> {
+                    int count = call.getArgument(1);
+                    assertTrue(count >= 1 && count <= 10);
+                    int start = position.getAndAdd(count);
+                    return messages.subList(start, Math.min(start + count, messages.size()));
+                });
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult());
+        for (int i = 0; i < 3; i++) {
+            awaitPoll(poller.pollAndInvoke(esm));
+        }
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(executorService).invoke(eq(fn), payload.capture(), eq(InvocationType.RequestResponse));
+        assertEquals(25, OBJECT_MAPPER.readTree(payload.getValue()).path("Records").size());
     }
 
     private void stubReceive(EventSourceMapping esm, List<Message> messages) {

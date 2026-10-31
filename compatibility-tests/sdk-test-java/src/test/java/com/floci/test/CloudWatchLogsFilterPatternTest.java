@@ -85,6 +85,17 @@ class CloudWatchLogsFilterPatternTest {
         }
     }
 
+    @Test
+    @DisplayName("a request naming no log group is refused with InvalidParameterException")
+    void aRequestNamingNoLogGroupIsRefused() {
+        // Not measured on AWS: the API reference requires logGroupName or logGroupIdentifier and models
+        // InvalidParameterException for a parameter specified incorrectly.
+        try (CloudWatchLogsClient logs = TestFixtures.cloudWatchLogsClient()) {
+            assertThatThrownBy(() -> logs.filterLogEvents(request -> request.filterPattern("ERROR")))
+                    .isInstanceOf(InvalidParameterException.class);
+        }
+    }
+
     /** The 1-based positions in {@link #EVENTS} of the events the pattern matches, oldest first. */
     private static List<Integer> matches(CloudWatchLogsClient logs, String groupName, String pattern) {
         List<Integer> positions = new ArrayList<>();

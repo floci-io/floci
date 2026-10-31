@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lakeformation;
 
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lakeformation.model.ResourceInfo;
@@ -63,7 +64,7 @@ class LakeFormationResourceRaceTest {
                 await(start);
                 try {
                     storage.updateResource(REGION, RESOURCE_ARN, UPDATE_ROLE, null, null, null);
-                } catch (io.github.hectorvent.floci.core.common.AwsException expected) {
+                } catch (AwsException expected) {
                     if (!"EntityNotFoundException".equals(expected.getErrorCode())) {
                         unexpected.set(expected);
                     }

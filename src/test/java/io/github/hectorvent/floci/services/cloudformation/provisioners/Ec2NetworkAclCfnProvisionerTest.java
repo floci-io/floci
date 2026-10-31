@@ -39,6 +39,7 @@ class Ec2NetworkAclCfnProvisionerTest {
     private ProvisionContext ctx() {
         // The engine is a collaborator; scalars resolve to their text and {"Ref": "X"} nodes
         // resolve to "resolved-X", enough to prove every property goes through the engine.
+        // {"Ref": "AWS::NoValue"} resolves to "", as it does in the real engine.
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
@@ -46,7 +47,8 @@ class Ec2NetworkAclCfnProvisionerTest {
                 return null;
             }
             if (node.isObject() && node.has("Ref")) {
-                return "resolved-" + node.get("Ref").asText();
+                String ref = node.get("Ref").asText();
+                return "AWS::NoValue".equals(ref) ? "" : "resolved-" + ref;
             }
             return node.asText();
         });
@@ -122,7 +124,7 @@ class Ec2NetworkAclCfnProvisionerTest {
         provisioner.provision(r, props, new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack"));
 
         verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 150, "6", "deny", true,
-                "0.0.0.0/0", 22, 22, true);
+                "0.0.0.0/0", null, null, null, 22, 22, true);
         assertEquals("acl-abc|150|egress", r.getPhysicalId());
     }
 
@@ -134,8 +136,81 @@ class Ec2NetworkAclCfnProvisionerTest {
         provisioner.provision(r, props, ctx());
 
         verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 100, "-1", null, false,
-                null, null, null, true);
+                null, null, null, null, null, null, true);
         assertEquals("acl-abc|100|ingress", r.getPhysicalId());
+    }
+
+    @Test
+    void aclEntryPassesIpv6CidrBlockThrough() {
+        StackResource r = resource("AWS::EC2::NetworkAclEntry", "Entry");
+        ObjectNode props = mapper.createObjectNode()
+                .put("NetworkAclId", "acl-abc")
+                .put("RuleNumber", 101)
+                .put("Protocol", "-1")
+                .put("RuleAction", "allow")
+                .put("Ipv6CidrBlock", "::/0");
+
+        provisioner.provision(r, props, ctx());
+
+        verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 101, "-1", "allow", false,
+                null, "::/0", null, null, null, null, true);
+    }
+
+    @Test
+    void aclEntryPassesIcmpTypeAndCodeThrough() {
+        StackResource r = resource("AWS::EC2::NetworkAclEntry", "Entry");
+        ObjectNode props = mapper.createObjectNode()
+                .put("NetworkAclId", "acl-abc")
+                .put("RuleNumber", 110)
+                .put("Protocol", "1")
+                .put("RuleAction", "allow")
+                .put("CidrBlock", "0.0.0.0/0");
+        props.set("Icmp", mapper.createObjectNode().put("Type", 8).put("Code", -1));
+
+        provisioner.provision(r, props, ctx());
+
+        verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 110, "1", "allow", false,
+                "0.0.0.0/0", null, 8, -1, null, null, true);
+    }
+
+    @Test
+    void aclEntryOmitsIcmpTypeAndCodeThatResolveToNoValue() {
+        StackResource r = resource("AWS::EC2::NetworkAclEntry", "Entry");
+        ObjectNode props = mapper.createObjectNode()
+                .put("NetworkAclId", "acl-abc")
+                .put("RuleNumber", 120)
+                .put("Protocol", "1")
+                .put("RuleAction", "allow")
+                .put("CidrBlock", "0.0.0.0/0");
+        ObjectNode icmp = mapper.createObjectNode();
+        icmp.set("Type", mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        icmp.set("Code", mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        props.set("Icmp", icmp);
+
+        provisioner.provision(r, props, ctx());
+
+        verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 120, "1", "allow", false,
+                "0.0.0.0/0", null, null, null, null, null, true);
+    }
+
+    @Test
+    void aclEntryOmitsPortRangeAndRuleNumberThatResolveToNoValue() {
+        StackResource r = resource("AWS::EC2::NetworkAclEntry", "Entry");
+        ObjectNode props = mapper.createObjectNode()
+                .put("NetworkAclId", "acl-abc")
+                .put("Protocol", "6")
+                .put("RuleAction", "allow")
+                .put("CidrBlock", "0.0.0.0/0");
+        props.set("RuleNumber", mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        ObjectNode portRange = mapper.createObjectNode();
+        portRange.set("From", mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        portRange.set("To", mapper.createObjectNode().put("Ref", "AWS::NoValue"));
+        props.set("PortRange", portRange);
+
+        provisioner.provision(r, props, ctx());
+
+        verify(ec2).createNetworkAclEntry("us-east-1", "acl-abc", 100, "6", "allow", false,
+                "0.0.0.0/0", null, null, null, null, null, true);
     }
 
     /**

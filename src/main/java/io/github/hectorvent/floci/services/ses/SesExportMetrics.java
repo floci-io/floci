@@ -100,7 +100,7 @@ final class SesExportMetrics {
 
     private static void validateDimensions(JsonNode dimensions, List<String> violations) {
         if (!dimensions.isObject()) {
-            violations.add(constraint("dimensions", "Member must not be null"));
+            violations.add(SmithyValidationErrors.notNullWithoutValue(PATH + "dimensions"));
             return;
         }
         if (dimensions.isEmpty()) {
@@ -133,7 +133,7 @@ final class SesExportMetrics {
 
     private static void validateMetrics(JsonNode metrics, List<String> violations) {
         if (!metrics.isArray()) {
-            violations.add(constraint("metrics", "Member must not be null"));
+            violations.add(SmithyValidationErrors.notNullWithoutValue(PATH + "metrics"));
             return;
         }
         if (metrics.isEmpty()) {

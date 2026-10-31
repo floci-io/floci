@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.neptune.proxy;
 
+import io.github.hectorvent.floci.core.common.ListenBacklog;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -37,11 +38,19 @@ public class NeptuneGremlinProxy {
     }
 
     public void start(int proxyPort) throws IOException {
-        serverSocket = new ServerSocket(proxyPort);
+        serverSocket = listenSocket(proxyPort, ListenBacklog.ACCEPT);
         running = true;
         Thread.ofVirtual().name("neptune-proxy-accept-" + clusterId).start(this::acceptLoop);
         LOG.infov("Neptune Gremlin proxy started for cluster {0} on port {1} → {2}:{3}",
                 clusterId, String.valueOf(proxyPort), backendHost, String.valueOf(backendPort));
+    }
+
+    /**
+     * Opens the listening socket. A seam so a test can pin the accept backlog: a bound
+     * {@code ServerSocket} does not report the backlog it was created with.
+     */
+    ServerSocket listenSocket(int proxyPort, int backlog) throws IOException {
+        return new ServerSocket(proxyPort, backlog);
     }
 
     public void stop() {

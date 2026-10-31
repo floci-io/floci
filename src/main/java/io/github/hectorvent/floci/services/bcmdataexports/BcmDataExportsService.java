@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.S3DestinationValidation;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.bcmdataexports.model.DataQuery;
@@ -22,11 +23,11 @@ import org.jboss.logging.Logger;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.Function;
 import java.util.regex.Pattern;
 
 /**
@@ -118,7 +119,8 @@ public class BcmDataExportsService {
 
     /** Returns one account-scoped page for {@code ListExports}. */
     public PaginatedResult<Export> listExports(Integer maxResults, String nextToken) {
-        return paginate(exportStore.scan(key -> true), Export::getExportArn, maxResults, nextToken,
+        return Pagination.paginate(exportStore.scan(key -> true), Export::getExportArn, maxResults, nextToken,
+                MAX_PAGE_SIZE, MAX_PAGE_SIZE, 8192, "ValidationException",
                 "ListExports:" + regionResolver.getAccountId());
     }
 
@@ -129,15 +131,15 @@ public class BcmDataExportsService {
      */
     public Map<String, List<Export>> listAllExportsByAccount() {
         Collection<Export> all;
-        if (exportStore instanceof io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<?> aware) {
+        if (exportStore instanceof AccountAwareStorageBackend<?> aware) {
             @SuppressWarnings("unchecked")
-            io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<Export> typed =
-                    (io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<Export>) aware;
+            AccountAwareStorageBackend<Export> typed =
+                    (AccountAwareStorageBackend<Export>) aware;
             all = typed.scanAllAccounts();
         } else {
             all = exportStore.scan(key -> true);
         }
-        Map<String, List<Export>> result = new java.util.LinkedHashMap<>();
+        Map<String, List<Export>> result = new LinkedHashMap<>();
         for (Export export : all) {
             String account = export.getOwnerAccountId();
             if (account == null || account.isEmpty()) {
@@ -199,21 +201,9 @@ public class BcmDataExportsService {
                     "Export " + exportArn + " not found.", 400);
         }
         String prefix = exportArn + "::";
-        return paginate(executionStore.scan(key -> key.startsWith(prefix)), ExportExecution::getExecutionId,
-                maxResults, nextToken, "ListExecutions:" + regionResolver.getAccountId() + ":" + exportArn);
-    }
-
-    private static <T> PaginatedResult<T> paginate(List<T> items, Function<T, String> cursorOf,
-                                                 Integer maxResults, String nextToken, String namespace) {
-        int limit = maxResults != null ? maxResults : MAX_PAGE_SIZE;
-        if (limit < 1 || limit > MAX_PAGE_SIZE) {
-            throw new AwsException("ValidationException", "MaxResults must be between 1 and 300.", 400);
-        }
-        if (nextToken != null && nextToken.length() > 8192) {
-            throw new AwsException("ValidationException", "NextToken must not exceed 8192 characters.", 400);
-        }
-        return Pagination.paginate(items, cursorOf, limit, nextToken, namespace,
-                token -> new AwsException("ValidationException", "Invalid NextToken.", 400));
+        return Pagination.paginate(executionStore.scan(key -> key.startsWith(prefix)), ExportExecution::getExecutionId,
+                maxResults, nextToken, MAX_PAGE_SIZE, MAX_PAGE_SIZE, 8192, "ValidationException",
+                "ListExecutions:" + regionResolver.getAccountId() + ":" + exportArn);
     }
 
     /** {@code GetExecution} — returns one execution record. */
@@ -241,10 +231,10 @@ public class BcmDataExportsService {
         exec.setCreatedBy(createdBy);
         exec.setCreatedAt(System.currentTimeMillis());
         String key = executionKey(exportArn, exec.getExecutionId());
-        if (executionStore instanceof io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<?> aware) {
+        if (executionStore instanceof AccountAwareStorageBackend<?> aware) {
             @SuppressWarnings("unchecked")
-            io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<ExportExecution> typed =
-                    (io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<ExportExecution>) aware;
+            AccountAwareStorageBackend<ExportExecution> typed =
+                    (AccountAwareStorageBackend<ExportExecution>) aware;
             typed.putForAccount(accountId, key, exec);
         } else {
             executionStore.put(key, exec);
@@ -268,10 +258,10 @@ public class BcmDataExportsService {
             exec.setStatusReason(reason);
         }
         String key = executionKey(exec.getExportArn(), exec.getExecutionId());
-        if (executionStore instanceof io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<?> aware) {
+        if (executionStore instanceof AccountAwareStorageBackend<?> aware) {
             @SuppressWarnings("unchecked")
-            io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<ExportExecution> typed =
-                    (io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend<ExportExecution>) aware;
+            AccountAwareStorageBackend<ExportExecution> typed =
+                    (AccountAwareStorageBackend<ExportExecution>) aware;
             typed.putForAccount(accountId, key, exec);
         } else {
             executionStore.put(key, exec);

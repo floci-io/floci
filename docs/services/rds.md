@@ -44,6 +44,8 @@ existing failure path. The PostgreSQL restore SQL readiness retry policy is unch
 
 RDS Data API (`rds-data`) is documented separately because it uses REST JSON routes instead of the RDS Query protocol. See [RDS Data API](rds-data.md).
 
+RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all regions until regional values are captured. Floci Route 53 resolves aliases by DNS name and does not check this ID. The us-east-1 value is shown in the [AWS CLI RDS example](https://docs.aws.amazon.com/cli/v1/reference/rds/describe-db-instances.html).
+
 ## Supported Management Actions
 
 <!-- floci:actions:start -->
@@ -69,6 +71,8 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeValidDBInstanceModifications` | Return the storage an instance can move to: its type and the sizes a modify stores as asked |
 | `DescribeOrderableDBInstanceOptions` | List the orderable engine, version and instance class combinations from the engine catalogue; see [Engine catalogue](#engine-catalogue) |
 | `DescribeEvents` | - |
+| `DescribeCertificates` | List the Region's RDS certificate authorities and the one new instances get; see [Certificate authorities](#certificate-authorities) |
+| `ModifyCertificates` | Set or remove the account's default certificate authority for new instances |
 | `CreateEventSubscription` | Create an event notification subscription (stored, nothing is published) |
 | `DescribeEventSubscriptions` | List subscriptions, or the one the request names |
 | `ModifyEventSubscription` | Update the members the request names |
@@ -120,6 +124,10 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `ModifyDBSnapshot` | Change the engine version or option group of an available manual DB snapshot |
 | `RestoreDBInstanceFromDBSnapshot` | Create a new DB instance from a snapshot |
 | `RestoreDBInstanceToPointInTime` | Create a new DB instance from a source instance at a time in its restorable window; see [Point in time restore](#point-in-time-restore) |
+| `DescribeDBInstanceAutomatedBackups` | List the Region's instance automated backups: `active` for live instances, `retained` and `replicating` ones; see [Automated backups](#automated-backups) |
+| `DeleteDBInstanceAutomatedBackup` | Delete a retained instance automated backup by `DbiResourceId` or `DBInstanceAutomatedBackupsArn` |
+| `StartDBInstanceAutomatedBackupsReplication` | Replicate a source instance's automated backups from its Region to this one (metadata only) |
+| `StopDBInstanceAutomatedBackupsReplication` | Stop replicating to this Region; the replica is kept as `retained` |
 | `DescribeDBSnapshots` | List DB instance snapshots |
 | `DescribeDBSnapshotAttributes` | Return a snapshot's `restore` attribute (accounts authorized to copy/restore it) |
 | `ModifyDBSnapshotAttribute` | Add or remove accounts authorized to copy/restore a snapshot |
@@ -142,6 +150,8 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `CopyDBClusterSnapshot` | Copy an available cluster snapshot (by identifier or same-region ARN) to a new manual one with its data; `CopyTags` and `Tags`; the copy reports `SourceDBClusterSnapshotArn` |
 | `RestoreDBClusterFromSnapshot` | Create a cluster from a cluster snapshot's settings and data; `Engine` must match the snapshot's |
 | `RestoreDBClusterToPointInTime` | Create a cluster from a source cluster at a time in its restorable window; see [Point in time restore](#point-in-time-restore) |
+| `DescribeDBClusterAutomatedBackups` | List the Region's retained cluster automated backups; see [Automated backups](#automated-backups) |
+| `DeleteDBClusterAutomatedBackup` | Delete a retained cluster automated backup by `DbClusterResourceId` |
 | `DescribeDBClusterSnapshotAttributes` | Return the `restore` attribute of a cluster snapshot |
 | `ModifyDBClusterSnapshotAttribute` | Add or remove `restore` values (account ids or `all`) on a cluster snapshot |
 | `StartExportTask` | Start an export task for a DB snapshot or DB cluster snapshot; see [Exporting snapshots to Amazon S3](#exporting-snapshots-to-amazon-s3) |
@@ -769,6 +779,31 @@ Associations are recorded, not exercised: Floci does not check the role in IAM a
 role's credentials to the database, so an `aws_s3` import still needs credentials of its own. Deleting a cluster or instance drops its
 associations, and snapshots, restores and read replicas start without any.
 
+## Aurora managed password rotation
+
+`ModifyDBCluster` supports `RotateMasterUserPassword=true` for an existing
+RDS-managed master-user secret. Set `ApplyImmediately=true`; requests without it,
+without an existing managed secret, with `MasterUserPassword`, or disabling
+`ManageMasterUserPassword` in the same call are rejected before credentials change.
+
+The local operation completes synchronously: it changes the running database's
+password, publishes a new `AWSCURRENT` secret version, and updates the cluster and
+member proxy credentials. The preceding version becomes `AWSPREVIOUS`. If secret
+publication fails, Floci attempts to restore the previous database credential and
+secret version labels. A backend failure leaves the previous secret current.
+Metadata-only RDS mock mode updates the secret and stored credentials without
+starting a database. Scheduled RDS-owned rotation through Secrets Manager remains
+outside this `ModifyDBCluster` operation.
+
+```bash
+aws --endpoint-url http://localhost:4566 rds modify-db-cluster \
+  --db-cluster-identifier example --rotate-master-user-password --apply-immediately
+```
+
+Use the managed secret's new current value for subsequent SQL connections. Existing
+database sessions may remain connected after rotation, as with a normal password
+change; verify with fresh connections.
+
 ## Aurora managed password opt-out
 
 When `ModifyDBCluster` disables `ManageMasterUserPassword` while the managed secret has
@@ -803,11 +838,10 @@ retention period up to `LatestRestorableTime` on `DescribeDBInstances`; an insta
 window runs from its creation (`EarliestRestorableTime`) to `LatestRestorableTime` on
 `DescribeDBClusters`.
 
-An instance source is named by `SourceDBInstanceIdentifier` or `SourceDbiResourceId`, a cluster
-source by `SourceDBClusterIdentifier` (identifier or ARN) or `SourceDbClusterResourceId`. Restoring
-from retained automated backups (`SourceDBInstanceAutomatedBackupsArn`, used for a deleted instance)
-is not supported, since Floci keeps no automated backups, and answers
-`DBInstanceAutomatedBackupNotFound`. A restored instance takes the source's engine, version,
+An instance source is named by `SourceDBInstanceIdentifier`, `SourceDbiResourceId` or
+`SourceDBInstanceAutomatedBackupsArn`, a cluster source by `SourceDBClusterIdentifier` (identifier
+or ARN) or `SourceDbClusterResourceId`. A resource ID or backups ARN can also name a deleted source
+through the automated backup it kept; see [Automated backups](#automated-backups). A restored instance takes the source's engine, version,
 credentials, database name, storage and encryption, and its instance class unless the request names
 one; everything else is the request's or the default a new instance gets. A restored cluster takes
 the source's engine, version, credentials, database name and encryption, and has no instances until
@@ -818,6 +852,33 @@ target is seeded from a `pg_dumpall` of the source taken when the request arrive
 replicas use, so the restored data is the source's latest state whatever time in the window is
 asked for; this is also why `LatestRestorableTime` is always the current time. As with
 `CreateDBSnapshot`, only PostgreSQL sources are accepted.
+
+## Automated backups
+
+A standalone instance with `BackupRetentionPeriod` above 0 has an `active` automated backup, which
+`DescribeDBInstanceAutomatedBackups` builds from the instance: its `RestoreWindow` is the instance's
+restorable window, and its ARN is `auto-backup:ab-` followed by the `DbiResourceId` after `db-`.
+Aurora instances are not listed, since their backups belong to the cluster.
+
+`DeleteDBInstance` and `DeleteDBCluster` take `DeleteAutomatedBackups`. It defaults to `true`, which
+removes the backups with the resource, as on AWS. With `false`, a standalone instance with backups on
+leaves a `retained` backup, and a cluster leaves one that `DescribeDBClusterAutomatedBackups` lists.
+Its restore window ends at the deletion. Outside mock mode a PostgreSQL source's data is saved with
+the backup (a `pg_dumpall`, as for snapshots), so a point in time restore from it brings the data
+back; if that copy fails, the delete fails and nothing is deleted. A restore from a backup that holds
+no data, such as one kept in mock mode, fails outside mock mode. Floci does not expire retained
+backups: they stay until `DeleteDBInstanceAutomatedBackup` or `DeleteDBClusterAutomatedBackup`
+removes them, and a backup of a live resource cannot be deleted
+(`InvalidDBInstanceAutomatedBackupState`, `InvalidDBClusterAutomatedBackupStateFault`).
+
+`StartDBInstanceAutomatedBackupsReplication` is called in the destination Region with the source's
+ARN. The source must be a live standalone instance with backups on, in another Region. The replica
+is listed in the destination Region as `replicating`, with the `BackupRetentionPeriod` asked for (7
+days by default), and the source lists it under `DBInstanceAutomatedBackupsReplications` in
+`DescribeDBInstances`. Replication is metadata only: no data is copied between Regions, so a restore
+from a replica copies the live source. `StopDBInstanceAutomatedBackupsReplication`, or deleting the
+source, keeps the replica as `retained`; a stop with nothing replicating to the Region answers
+`InvalidDBInstanceState`.
 
 ## Exporting snapshots to Amazon S3
 
@@ -1004,6 +1065,41 @@ Two limits follow from that. `SHOW CREATE USER` reports the substituted plugin r
 connecting with a token is not yet emulated for MySQL: unlike PostgreSQL, which receives the
 password in cleartext, MySQL sends a scramble, so the proxy would have to drive the
 `mysql_clear_password` auth switch that real RDS triggers before it could see a token to validate.
+
+## Certificate authorities
+
+`DescribeCertificates` lists the Region's RDS certificate authorities, `rds-ca-rsa2048-g1`,
+`rds-ca-rsa4096-g1` and `rds-ca-ecc384-g1`, with the thumbprint and validity AWS reports. They are
+vendored from the certificate bundles AWS publishes for each Region of the `aws` partition by
+`tools/aws/regen_rds_ca_certificates.py`. As the user guide says, ap-south-1, ap-southeast-4,
+ca-west-1, eu-central-2, eu-south-2 and il-central-1 offer only `rds-ca-rsa2048-g1`, though their
+bundles carry all three. A Region with no vendored entry, such as a GovCloud, China or custom one,
+reports us-east-1's certificates under its own ARN.
+
+- `CertificateIdentifier` filters, without regard to case, and an unknown one is
+  `CertificateNotFound`. `MaxRecords` (20 to 100) and `Marker` page the list. `Filters` is not taken,
+  since the API reference says it isn't supported.
+- `DefaultCertificateForNewLaunches` is `rds-ca-rsa2048-g1` until `ModifyCertificates` sets an
+  override for the account and Region. The overriding certificate then reports `CustomerOverride`
+  true and its `CustomerOverrideValidTill`. `RemoveCustomerOverride` puts RDS's default back.
+  Sending both members, or neither, is `InvalidParameterCombination`. AWS doesn't document what it does here, so
+  this behavior is a guess.
+- `CreateDBInstance`, `RestoreDBInstanceFromDBSnapshot`, `RestoreDBInstanceToPointInTime`,
+  `CreateDBInstanceReadReplica` and `ModifyDBInstance` take `CACertificateIdentifier`. An instance
+  given none gets the account's default when it is created. An unknown identifier is
+  `CertificateNotFound`. A modify changes it at once, as Floci applies every modification
+  immediately, and a blank value leaves it as it was. `CertificateRotationRestart` is accepted and
+  has no effect.
+- Instances report `CACertificateIdentifier` and `CertificateDetails` (`CAIdentifier`, with the
+  CA's `ValidTill`, as Floci keeps no per-instance server certificate). An instance stored before
+  this was recorded reports `rds-ca-rsa2048-g1`, since an override applies only to instances
+  created after it. `AWS::RDS::DBInstance` takes
+  `CACertificateIdentifier` and resolves `CertificateDetails.CAIdentifier` and
+  `CertificateDetails.ValidTill` in `Fn::GetAtt`.
+
+The identifier is metadata: the auth proxy presents a certificate from Floci's own CA whatever
+the instance names, so clients trust Floci's CA (see [TLS / SSL](#tls-ssl)), not AWS's bundle.
+Multi-AZ DB clusters do not take `CACertificateIdentifier` yet.
 
 ## TLS / SSL
 

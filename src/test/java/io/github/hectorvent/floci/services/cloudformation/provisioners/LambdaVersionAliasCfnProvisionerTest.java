@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.LambdaAlias;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -165,7 +166,7 @@ class LambdaVersionAliasCfnProvisionerTest {
     void deleteAliasAlreadyGoneIsIdempotent() {
         // The function may have been deleted first, taking its aliases with it; a stack delete has
         // to stay idempotent rather than transition to DELETE_FAILED.
-        org.mockito.Mockito.doThrow(new AwsException("ResourceNotFoundException", "Alias not found: production", 404))
+        Mockito.doThrow(new AwsException("ResourceNotFoundException", "Alias not found: production", 404))
                 .when(lambda).deleteAlias(any(), any(), any());
 
         provisioner.delete("AWS::Lambda::Alias", ALIAS_ARN, "us-east-1");

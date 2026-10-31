@@ -30,6 +30,21 @@ class OpenSearchVersionsTest {
     }
 
     @Test
+    void supportedVersionsIncludeMissingAwsManagedReleases() {
+        assertThat(OpenSearchVersions.supportedVersions(),
+                hasItems("OpenSearch_3.7", "OpenSearch_1.1", "OpenSearch_1.0"));
+        assertDoesNotThrow(() -> OpenSearchVersions.validate("OpenSearch_3.7"));
+        assertDoesNotThrow(() -> OpenSearchVersions.validate("OpenSearch_1.1"));
+        assertDoesNotThrow(() -> OpenSearchVersions.validate("OpenSearch_1.0"));
+        assertEquals("opensearchproject/opensearch:3.7.0",
+                OpenSearchVersions.imageFor("OpenSearch_3.7"));
+        assertEquals("opensearchproject/opensearch:1.1.0",
+                OpenSearchVersions.imageFor("OpenSearch_1.1"));
+        assertEquals("opensearchproject/opensearch:1.0.0",
+                OpenSearchVersions.imageFor("OpenSearch_1.0"));
+    }
+
+    @Test
     void supportedVersionsListsNewestOpenSearch3xFirst() {
         // Newest-first is what AWS's ListVersions returns; SDK clients render
         // dropdowns in this order, so a regression here would be user-visible.

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -55,7 +56,7 @@ class Ec2ManagedPrefixListIntegrationTest {
             .body("CreateManagedPrefixListResponse.prefixList.tagSet.item.key", equalTo("env"))
             .extract().path("CreateManagedPrefixListResponse.prefixList.prefixListId");
 
-        org.junit.jupiter.api.Assertions.assertTrue(prefixListId.startsWith("pl-"));
+        Assertions.assertTrue(prefixListId.startsWith("pl-"));
     }
 
     @Test

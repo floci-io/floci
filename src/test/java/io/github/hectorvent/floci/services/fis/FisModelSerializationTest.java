@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.fis.model.Experiment;
 import io.github.hectorvent.floci.services.fis.model.ExperimentTemplate;
+import io.github.hectorvent.floci.services.fis.model.ExperimentTemplateTarget;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -54,7 +55,7 @@ class FisModelSerializationTest {
 
         assertEquals(mapper.writeValueAsString(expected), mapper.writeValueAsString(actual));
         assertInstanceOf(
-                io.github.hectorvent.floci.services.fis.model.ExperimentTemplateTarget.class,
+                ExperimentTemplateTarget.class,
                 model.getTargets().get("instances"));
         assertFalse(actual.has("logConfiguration"));
         assertFalse(actual.has("experimentReportConfiguration"));

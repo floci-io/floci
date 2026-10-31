@@ -126,15 +126,16 @@ hand-rolled `arn:aws[a-z-]*:` regexes, `Arn.of(...)` calls with a blank region a
 with the literal `"aws"` against `tools/partition/baseline.tsv`, per file. It also inventories
 ARNs handled by hand: `"arn:" + ...` concatenation (`arn-concat`, except a pattern built from
 `PARTITION_REGEX`), `startsWith("arn:")` checks (`arn-probe`) and `split(":")` on a value named
-`*arn*`/`*Arn*` (`arn-split`). Those three still have baselined sites, which only shrink; every
-other category's baseline is empty, so any new one fails.
+`*arn*`/`*Arn*` (`arn-split`). Every category's baseline is empty, so any new site fails.
 A literal in a new file fails, growth in an existing file fails, and a drop fails until you
 run `make partition-baseline` and commit the smaller baseline.
 
 - Mint ARNs through `AwsArnUtils.Arn.of(...)` / `RegionResolver.buildArn(...)`, recognise
   them with `AwsArnUtils.isArn` / `PARTITION_REGEX`, read their fields with
   `AwsArnUtils.parse(...)`, and derive hosts from the region's
-  DNS suffix (`AwsRegions.dnsSuffixFor`).
+  DNS suffix (`AwsRegions.dnsSuffixFor`). A parameter that takes a name or an ARN, where AWS
+  answers a malformed ARN with its own error, tells the two apart with
+  `AwsArnUtils.looksLikeArn` (any value starting `arn:`); `isArn` would treat that value as a name.
 - A regionless ARN (IAM, STS, CloudFront, Organizations, an S3 bucket) never goes through
   `Arn.of(service, "", ...)`, which silently means `aws`: use `RegionResolver.buildGlobalArn`
   for the request's partition, or `Arn.global(partition, ...)` with the resource's own

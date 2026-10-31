@@ -80,6 +80,11 @@ public class Stack {
      */
     private StackUpdateSnapshot updateRollbackSnapshot;
     private List<String> updateRollbackResourceIds;
+    /**
+     * The {@code RetainResources} of the last DeleteStack that started a delete. A DeleteStack
+     * repeated while that delete runs must name the same list, in the same order.
+     */
+    private List<String> retainResources = List.of();
 
     public String getStackId() { return stackId; }
     public void setStackId(String stackId) { this.stackId = stackId; }
@@ -226,4 +231,6 @@ public class Stack {
     public void setUpdateRollbackSnapshot(StackUpdateSnapshot updateRollbackSnapshot) { this.updateRollbackSnapshot = updateRollbackSnapshot; }
     public List<String> getUpdateRollbackResourceIds() { return updateRollbackResourceIds; }
     public void setUpdateRollbackResourceIds(List<String> updateRollbackResourceIds) { this.updateRollbackResourceIds = updateRollbackResourceIds; }
+    public List<String> getRetainResources() { return retainResources; }
+    public void setRetainResources(List<String> retainResources) { this.retainResources = retainResources; }
 }

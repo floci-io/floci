@@ -4,13 +4,12 @@ import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.auth.SigV4RequestValidator;
 import io.github.hectorvent.floci.testing.MutableClock;
+import io.github.hectorvent.floci.testing.SignedIamUsers;
 import io.github.hectorvent.floci.testing.ValidateSignaturesProfile;
-import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
-import io.restassured.path.xml.XmlPath;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.MethodOrderer;
@@ -62,9 +61,6 @@ class S3ValidateSignaturesIntegrationTest {
     private static final String SIGNIN_CLIENT_ID = "arn:aws:signin:::devtools/same-device";
     private static final String SIGNIN_REDIRECT_URI = "http://127.0.0.1:4567/oauth/callback";
     private static final String SIGNIN_VERIFIER = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
-
-    private static String userAccessKeyId;
-    private static String userSecretKey;
 
     @Inject
     MutableClock clock;
@@ -158,30 +154,35 @@ class S3ValidateSignaturesIntegrationTest {
 
     @Test
     @Order(10)
-    void verifiedCallerIsNotAuthorizedAgainstTheBucketPolicy() {
-        createIamUser("validate-signatures-user");
-        given()
-            .filter(LOCAL_SIGNER)
-            .body(DENY_ALL_POLICY)
-        .when()
-            .put("/" + BUCKET + "?policy")
-        .then()
-            .statusCode(200);
-        given()
-            .filter(LOCAL_SIGNER)
-        .when()
-            .get("/" + BUCKET + "?policy")
-        .then()
-            .statusCode(200)
-            .body(containsString("\"Deny\""));
+    void verifiedCallerIsNotAuthorizedAgainstTheBucketPolicy() throws Exception {
+        URI endpoint = URI.create("http://localhost:" + RestAssured.port + "/");
+        String userName;
+        try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "validate-signatures-user-")) {
+            userName = user.name();
+            given()
+                .filter(LOCAL_SIGNER)
+                .body(DENY_ALL_POLICY)
+            .when()
+                .put("/" + BUCKET + "?policy")
+            .then()
+                .statusCode(200);
+            given()
+                .filter(LOCAL_SIGNER)
+            .when()
+                .get("/" + BUCKET + "?policy")
+            .then()
+                .statusCode(200)
+                .body(containsString("\"Deny\""));
 
-        given()
-            .filter(S3RequestSigner.signedAs(userAccessKeyId, userSecretKey))
-        .when()
-            .get("/" + BUCKET + "/" + KEY)
-        .then()
-            .statusCode(200)
-            .body(equalTo("signed body"));
+            given()
+                .filter(S3RequestSigner.signedAs(user.accessKeyId(), user.secretAccessKey()))
+            .when()
+                .get("/" + BUCKET + "/" + KEY)
+            .then()
+                .statusCode(200)
+                .body(equalTo("signed body"));
+        }
+        SignedIamUsers.iam(endpoint, "GetUser", Map.of("UserName", userName)).then().statusCode(404);
     }
 
     @Test
@@ -471,32 +472,6 @@ class S3ValidateSignaturesIntegrationTest {
                 .collect(Collectors.toMap(
                         parts -> URLDecoder.decode(parts[0], StandardCharsets.UTF_8),
                         parts -> URLDecoder.decode(parts[1], StandardCharsets.UTF_8)));
-    }
-
-    private static void createIamUser(String userName) {
-        // validate-signatures verifies IAM's signatures too, so these calls carry real ones.
-        AwsRequestSigner iam = AwsRequestSigner.signedAs("test", "test", "iam");
-        given()
-            .filter(iam)
-            .contentType("application/x-www-form-urlencoded")
-            .body("Action=CreateUser&UserName=" + userName + "&Version=2010-05-08")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
-
-        XmlPath key = given()
-            .filter(iam)
-            .contentType("application/x-www-form-urlencoded")
-            .body("Action=CreateAccessKey&UserName=" + userName + "&Version=2010-05-08")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .extract()
-            .xmlPath();
-        userAccessKeyId = key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");
-        userSecretKey = key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.SecretAccessKey");
     }
 
     private static String postPolicy(String key) {

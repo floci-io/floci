@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.dynamodb.backend.RecordingDynamoDbBac
 import io.github.hectorvent.floci.services.dynamodb.backend.RecordingDynamoDbBackend.Invocation;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.Integration;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftZeroEtlWriter;
 import io.github.hectorvent.floci.testing.ThreadStates;
@@ -68,6 +69,94 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
     DynamoDbFacade dynamoDb;
 
     private static final String SHARD_ID = "shardId-0000000001-00000000001";
+
+    @Test
+    void healthyIdlePollsDoNotRewriteCheckpointState() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftService service = mock(RedshiftService.class);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        Integration integration = streamingIntegration();
+        integration.setStatus("active");
+        integration.setShardSequenceNumbers(Map.of(SHARD_ID, "s1"));
+        streams.shard(SHARD_ID, null).add(streamRecord("s1"));
+        RedshiftDynamoDbZeroEtlConsumer consumer = new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, service, writer);
+
+        consumer.pollOnce(integration);
+        consumer.pollOnce(integration);
+
+        verify(service, never()).updateIntegrationRuntime(any(), any(), any(), anyBoolean(), any());
+        verify(writer, never()).writeBatch(any(), any(), any(), any());
+        assertEquals(Map.of(SHARD_ID, "s1"), integration.getShardSequenceNumbers());
+    }
+
+    @Test
+    void pausedClusterSkipsPollingWithoutAdvancingProgressOrFailingIntegration() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftService service = mock(RedshiftService.class);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        Integration integration = streamingIntegration();
+        integration.setStatus("active");
+        integration.setShardSequenceNumbers(Map.of(SHARD_ID, "s1"));
+        streams.shard(SHARD_ID, null).addAll(List.of(streamRecord("s1"), streamRecord("s2")));
+        Cluster cluster = new Cluster();
+        cluster.setClusterStatus("paused");
+        when(service.describeClustersForAccount(integration.getAccountId(), "warehouse")).thenReturn(List.of(cluster));
+        RedshiftDynamoDbZeroEtlConsumer consumer = new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, service, writer);
+
+        consumer.pollTask(integration).run();
+
+        verifyNoInteractions(writer);
+        assertTrue(streams.iteratorRequests.isEmpty());
+        assertEquals(Map.of(SHARD_ID, "s1"), integration.getShardSequenceNumbers());
+        verify(service, never()).updateIntegrationRuntime(any(), any(), any(), anyBoolean(), any());
+        cluster.setClusterStatus("available");
+        consumer.pollOnce(integration);
+        verify(writer).writeBatch(integration.getAccountId(), "warehouse", "floci_zetl_orders",
+                List.of(streamRecord("s2").awsRecord()));
+        assertEquals(Map.of(SHARD_ID, "s2"), integration.getShardSequenceNumbers());
+    }
+
+    @Test
+    void healthyEmptyPollRecoversFailedIntegrationAfterResume() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftService service = mock(RedshiftService.class);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        Integration integration = streamingIntegration();
+        integration.setStatus("failed");
+        integration.setLastError("cluster was paused");
+        integration.setRetryCount(1);
+        integration.setShardSequenceNumbers(Map.of(SHARD_ID, "s1"));
+        streams.shard(SHARD_ID, null).add(streamRecord("s1"));
+        Cluster cluster = new Cluster();
+        cluster.setClusterStatus("available");
+        when(service.describeClustersForAccount(integration.getAccountId(), "warehouse")).thenReturn(List.of(cluster));
+
+        new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, service, writer).pollOnce(integration);
+
+        verify(service).recoverIntegrationRuntime(integration.getAccountId(), integration.getIntegrationArn());
+        verify(writer, never()).writeBatch(any(), any(), any(), any());
+        assertEquals(Map.of(SHARD_ID, "s1"), integration.getShardSequenceNumbers());
+    }
+
+    @Test
+    void pollFailureDuringPauseDoesNotMarkIntegrationFailed() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftService service = mock(RedshiftService.class);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        Integration integration = streamingIntegration();
+        Cluster cluster = new Cluster();
+        cluster.setClusterStatus("available");
+        when(service.describeClustersForAccount(integration.getAccountId(), "warehouse")).thenReturn(List.of(cluster));
+        doAnswer(invocation -> {
+            cluster.setClusterStatus("paused");
+            throw new AwsException("InternalFailure", "database stopped during poll", 500);
+        }).when(writer).createLandingTable(any(), any(), any());
+
+        new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, service, writer).pollTask(integration).run();
+
+        verify(service, never()).updateIntegrationRuntime(any(), any(), any(), anyBoolean(), any());
+        assertTrue(integration.getShardSequenceNumbers().isEmpty());
+    }
 
     /**
      * Serves shards from memory the way the native engine does. A cursor is the sequence to read

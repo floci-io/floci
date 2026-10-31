@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -20,6 +21,8 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
 
 import static io.github.hectorvent.floci.core.common.ReservedTags.rejectUnknownReservedTags;
 
@@ -286,7 +289,7 @@ public class KmsJsonHandler {
     private Response handleCreateGrant(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText(null);
         String granteePrincipal = request.path("GranteePrincipal").asText(null);
-        List<String> operations = new java.util.ArrayList<>();
+        List<String> operations = new ArrayList<>();
         request.path("Operations").forEach(operation -> operations.add(operation.asText()));
         String retiringPrincipal = request.path("RetiringPrincipal").isMissingNode()
                 ? null : request.path("RetiringPrincipal").asText(null);
@@ -617,7 +620,7 @@ public class KmsJsonHandler {
 
     private Response handleUntagResource(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
-        java.util.List<String> keys = new java.util.ArrayList<>();
+        List<String> keys = new ArrayList<>();
         request.path("TagKeys").forEach(k -> keys.add(k.asText()));
         service.untagResource(keyId, keys, region);
         return Response.ok().build();
@@ -931,15 +934,10 @@ public class KmsJsonHandler {
             if (!"PRIMARY".equals(candidate.getMultiRegionKeyType())) {
                 ObjectNode replica = replicas.addObject();
                 replica.put("Arn", candidate.getArn());
-                replica.put("Region", regionFromArn(candidate.getArn()));
+                replica.put("Region", AwsArnUtils.regionOrDefault(candidate.getArn(), ""));
             }
         }
         return configuration;
-    }
-
-    private static String regionFromArn(String arn) {
-        String[] parts = arn.split(":", 6);
-        return parts.length > 3 ? parts[3] : "";
     }
 
     private static void addTags(ArrayNode array, KmsKey key) {

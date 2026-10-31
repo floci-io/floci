@@ -44,11 +44,14 @@ public class CodeArtifactMavenController {
 
     private final CodeArtifactService service;
     private final ReposiliteSidecarClient reposilite;
+    private final CodeArtifactMavenExternalConnectionImporter externalConnectionImporter;
 
     @Inject
-    public CodeArtifactMavenController(CodeArtifactService service, ReposiliteSidecarClient reposilite) {
+    public CodeArtifactMavenController(CodeArtifactService service, ReposiliteSidecarClient reposilite,
+                                        CodeArtifactMavenExternalConnectionImporter externalConnectionImporter) {
         this.service = service;
         this.reposilite = reposilite;
+        this.externalConnectionImporter = externalConnectionImporter;
     }
 
     @PUT
@@ -83,6 +86,17 @@ public class CodeArtifactMavenController {
                         scope.owner(), repository, "maven", c[0], c[1], c[2]);
             } catch (AwsException e) {
                 return Response.status(409).entity(e.getMessage()).build();
+            }
+            // AWS's own documented behavior: "CodeArtifact will not permit publishing a package
+            // version that is already present in the external repository." Checked only for a
+            // well-formed, versioned GAV, same scope as the Archived/Disposed guard above; a bare
+            // maven-metadata.xml PUT is never a specific version to check either way.
+            if (externalConnectionImporter.existsInExternalConnection(scope.region(), domain, scope.owner(),
+                    repository, gav)) {
+                return Response.status(409)
+                        .entity("A version of this package is already present in the repository's external "
+                                + "connection and cannot be republished directly.")
+                        .build();
             }
         }
         // Snapshotted before the real write, not after: see
@@ -138,7 +152,7 @@ public class CodeArtifactMavenController {
      * name. The version element has no such approximation to make: it is {@code null} exactly
      * when there genuinely is no version in the path.
      */
-    private static Optional<String[]> parseNamespaceAndPackageName(String gav) {
+    static Optional<String[]> parseNamespaceAndPackageName(String gav) {
         String[] segments = gav.split("/");
         boolean metadataFile = isMavenMetadataFile(segments[segments.length - 1]);
         int packageNameIndex = metadataFile ? segments.length - 2 : segments.length - 3;
@@ -159,19 +173,71 @@ public class CodeArtifactMavenController {
     @Produces(MediaType.WILDCARD)
     public Response fetch(@Context HttpHeaders headers, @PathParam("domain") String domain,
                            @PathParam("repository") String repository, @PathParam("gav") String gav) {
-        String repoId = requireScope(headers, domain, repository).repoId();
-        return reposilite.fetchArtifact(repoId, gav)
-                .map(this::toResponse)
-                .orElseGet(() -> Response.status(Response.Status.NOT_FOUND).build());
+        MavenRequestScope scope = requireScope(headers, domain, repository);
+        if (!isDownloadable(scope, domain, repository, gav)) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        Optional<FetchedArtifact> artifact = reposilite.fetchArtifact(scope.repoId(), gav);
+        if ((artifact.isEmpty() || isBareMavenMetadataFile(gav))
+                && externalConnectionImporter.tryImport(scope.region(), domain, scope.owner(), repository,
+                        scope.repoId(), gav)) {
+            artifact = reposilite.fetchArtifact(scope.repoId(), gav);
+        }
+        return artifact.map(this::toResponse).orElseGet(() -> Response.status(Response.Status.NOT_FOUND).build());
     }
 
     @HEAD
     public Response head(@Context HttpHeaders headers, @PathParam("domain") String domain,
                           @PathParam("repository") String repository, @PathParam("gav") String gav) {
-        String repoId = requireScope(headers, domain, repository).repoId();
-        return reposilite.artifactExists(repoId, gav)
-                ? Response.ok().build()
-                : Response.status(Response.Status.NOT_FOUND).build();
+        MavenRequestScope scope = requireScope(headers, domain, repository);
+        if (!isDownloadable(scope, domain, repository, gav)) {
+            return Response.status(Response.Status.NOT_FOUND).build();
+        }
+        // A dependency resolver can probe with HEAD before ever issuing the GET that would
+        // otherwise trigger retention below, so a miss here must attempt the same import a GET
+        // miss would, or a HEAD-first client would see a false "not found" before the real GET
+        // ever gets the chance to retain it.
+        boolean exists = reposilite.artifactExists(scope.repoId(), gav);
+        if ((!exists || isBareMavenMetadataFile(gav))
+                && externalConnectionImporter.tryImport(scope.region(), domain, scope.owner(), repository,
+                        scope.repoId(), gav)) {
+            exists = reposilite.artifactExists(scope.repoId(), gav);
+        }
+        return exists ? Response.ok().build() : Response.status(Response.Status.NOT_FOUND).build();
+    }
+
+    /**
+     * {@code true} only for the exact, bare {@code maven-metadata.xml} path, never a checksum
+     * sibling: unlike a fixed version's own assets, which never change once retained, a package's
+     * available-version list can keep growing on the real public repository after this
+     * repository's own first merge of it, so a request for this exact file always gets a fresh
+     * import attempt even when a local copy already exists, not just on the first ever miss.
+     * Raised by Greptile's review: without this, {@link #fetch}/{@link #head} only ever imported
+     * metadata once, the first time this exact GAV was requested, and every later request for the
+     * same package's version list silently kept serving that same first snapshot forever, no
+     * matter how many releases the public repository published afterward.
+     */
+    private static boolean isBareMavenMetadataFile(String gav) {
+        return gav.endsWith("/maven-metadata.xml");
+    }
+
+    /**
+     * {@code true} unless {@code gav} names an exact version this service knows is {@code
+     * Archived}: {@link #parseNamespaceAndPackageName}'s own version element is {@code null} for a
+     * bare {@code maven-metadata.xml} path (no specific version to block), which this treats the
+     * same as "not a well-formed, versioned GAV at all": both fall through to Reposilite
+     * unchecked, exactly as {@code deploy} above already does for the identical case.
+     */
+    private boolean isDownloadable(MavenRequestScope scope, String domain, String repository, String gav) {
+        return parseNamespaceAndPackageName(gav).filter(c -> c[2] != null).map(c -> {
+            try {
+                service.requireContainerBackedVersionDownloadable(scope.owner(), scope.region(), domain, repository,
+                        "maven", c[0], c[1], c[2], scope.repoId());
+                return true;
+            } catch (AwsException e) {
+                return false;
+            }
+        }).orElse(true);
     }
 
     private Response toResponse(FetchedArtifact artifact) {

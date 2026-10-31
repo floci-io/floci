@@ -211,6 +211,11 @@ floci:
       default-image: "valkey/valkey:8"
     redshift:
       enabled: true
+      automated-snapshots-enabled: false
+      cloudwatch-metrics-enabled: true
+      snapshot-sweep-interval-seconds: 60
+      snapshot-copy-enabled: false
+      snapshot-copy-sweep-interval-seconds: 60
       default-port: 5439
       image-version: postgres:15-alpine
       poll-interval-ms: 1000
@@ -248,6 +253,12 @@ floci:
       shutdown-timeout-seconds: 10
     redshift-serverless:
       enabled: true
+      snapshot-expiration-enabled: false
+      snapshot-expiration-sweep-interval-seconds: 60
+      snapshot-copy-enabled: false
+      snapshot-copy-sweep-interval-seconds: 60
+      scheduled-actions-enabled: false
+      scheduled-action-sweep-interval-seconds: 60
     neptune:
       enabled: true
       proxy-base-port: 8182
@@ -352,6 +363,7 @@ floci:
       dynamic-awsvpc-host-ports: false
       host-volume-roots: []
       allow-unsafe-host-volumes: false
+      allow-privileged-containers: false
       image-pull-behavior: prefer-cached
     appconfig:
       enabled: true

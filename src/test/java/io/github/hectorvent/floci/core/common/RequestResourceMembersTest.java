@@ -100,16 +100,64 @@ class RequestResourceMembersTest {
                     + "{\"resources\":[],\"creates\":[{\"type\":\"part\",\"parent\":\"thing\",\"arn\":\"ThingArn\"}]}}}"),
                     part);
         }
-        // A member past one structure, or a structure's member filling a variable.
+        // A member past one structure, or filling a variable from a list in a list.
         assertThrows(IllegalStateException.class, () -> parse(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].B.ThingArn\"}")));
-        assertThrows(IllegalStateException.class, () -> parse(document(formats,
-                "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A[].Name\"}}")));
+        for (String bad : List.of("A.Names[]", "A[].Names[]", "A[].B.Name")) {
+            assertThrows(IllegalStateException.class, () -> parse(document(formats,
+                    "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"" + bad + "\"}}")), bad);
+        }
+        // A field of each of a list's structures fills a variable, read as given when absent or as an ARN, which
+        // only a member filling a variable is.
+        Member each = new Member("A", true, new Member("Name", false));
+        assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", each), Map.of(), Map.of(),
+                Map.of("A[].Name", "default"), Map.of("A[].Name", "thing"), null, null, Map.of(), false)),
+                parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A[].Name\"},"
+                        + "\"absent\":{\"A[].Name\":\"default\"},\"arnOf\":{\"A[].Name\":\"thing\"}}"))
+                        .operations().get("a:Op"));
+        assertEquals("A[].Name", each.path());
+        for (String bad : List.of("\"absent\":{\"A[].Name\":\"default\"}", "\"arnOf\":{\"A[].Name\":\"thing\"}")) {
+            assertThrows(IllegalStateException.class, () -> parse(document(formats,
+                    "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"}," + bad + "}")), bad);
+        }
+        // A field of a structure fills a variable, as one value.
+        Member field = new Member("A", false, new Member("Name", false));
+        assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", field), Map.of(), Map.of(),
+                Map.of("A.Name", "default"), Map.of(), null, null, Map.of(), false)),
+                parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A.Name\"},"
+                        + "\"absent\":{\"A.Name\":\"default\"}}")).operations().get("a:Op"));
+        assertEquals("A.Name", field.path());
+        // A variable fixed to the one value its handler uses, and one fixed that is no variable, that a member fills,
+        // or to no value.
+        String owned = "\"arnFormats\":{\"a\":{\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${Owner}/${ThingName}\"}}";
+        assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Name", false)), Map.of(),
+                Map.of(), Map.of(), Map.of(), null, null, Map.of("Owner", "Custom"), false)),
+                parseUnchecked(document(owned, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},"
+                        + "\"fixed\":{\"Owner\":\"Custom\"}}")).operations().get("a:Op"));
+        for (String bad : List.of("{\"Other\":\"Custom\"}", "{\"ThingName\":\"Custom\"}", "{\"Owner\":\"\"}",
+                "{\"Owner\":1}")) {
+            assertThrows(IllegalStateException.class, () -> parse(document(owned,
+                    "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},\"fixed\":" + bad + "}")), bad);
+        }
+        // The resource a create makes, beside others it names, marked made, and a mark that is not true.
+        assertTrue(parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},"
+                + "\"made\":true}")).operations().get("a:Op").getFirst().made());
+        assertTrue(parseUnchecked(document(formats, "{\"types\":[\"thing\"],\"arn\":\"ThingArn\",\"made\":true}"))
+                .operations().get("a:Op").getFirst().made());
+        for (String bad : List.of("false", "\"true\"", "1")) {
+            assertThrows(IllegalStateException.class, () -> parse(document(formats,
+                    "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},\"made\":" + bad + "}")), bad);
+        }
         assertEquals(List.of(new Resource(List.of("thing"), new Member("A", true, new Member("ThingArns", true)), Map.of(),
-                Map.of(), Map.of(), Map.of(), Map.of(), null, null)), parseUnchecked(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].ThingArns[]\"}"))
+                Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of(), false)), parseUnchecked(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].ThingArns[]\"}"))
                 .operations().get("a:Op"));
-        // An ARN read before more than one character.
+        // A member read before more than one character, holding an ARN or filling a variable.
         assertThrows(IllegalStateException.class, () -> parse(document(formats,
                 "{\"types\":[\"thing\"],\"arn\":\"ThingArn\",\"before\":\"##\"}")));
+        assertThrows(IllegalStateException.class, () -> parse(document(formats,
+                "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Id\"},\"before\":\"##\"}")));
+        // A member filling a variable read up to a character, as a CodeBuild build id names its project.
+        assertEquals(":", parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Id\"},"
+                + "\"before\":\":\"}")).operations().get("a:Op").getFirst().before());
         // An account from a list, or for a type whose format has no account.
         assertThrows(IllegalStateException.class, () -> parse(document(formats,
                 "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},\"account\":\"Ids[]\"}")));
@@ -139,19 +187,21 @@ class RequestResourceMembersTest {
                     "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"}," + bad + "}")), bad);
         }
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Name", false)),
-                Map.of(), Map.of("Bus", List.of("default")), Map.of("Bus", "default"), Map.of("Bus", "thing"), null, null)),
+                Map.of(), Map.of("Bus", List.of("default")), Map.of("Bus", "default"), Map.of("Bus", "thing"), null, null,
+                Map.of(), false)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},"
                         + "\"unless\":{\"Bus\":[\"default\"]},\"absent\":{\"Bus\":\"default\"},"
                         + "\"arnOf\":{\"Bus\":\"thing\"}}")).operations().get("a:Op"));
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Names", true)), Map.of(),
-                        Map.of(), Map.of(), Map.of(), new Member("registryId", false), null)),
+                        Map.of(), Map.of(), Map.of(), new Member("registryId", false), null, Map.of(), false)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Names[]\"},"
                         + "\"account\":\"registryId\"}")).operations().get("a:Op"));
     }
 
     /**
      * Each resource alone, from a request naming it and nothing else, gives exactly its ARN, in the account its
-     * account member names when it has one.
+     * account member names when it has one, with those of the operation's resources every request names, a create's
+     * new resource no member names (Cloud Map's {@code CreateService}).
      */
     @TestFactory
     Stream<DynamicTest> everyResourceOfTheTableIsReadFromAJsonBodyAndAForm() {
@@ -182,9 +232,15 @@ class RequestResourceMembersTest {
                         put(body, member, value);
                         form.append('&').append(parameter(member)).append('=').append(encoded(value));
                     });
-                    assertEquals(List.of(expected), RequestResources.of(operation.getKey(), json(body.toString()),
+                    List<String> named = operation.getValue().stream()
+                            .filter(other -> other == resource || named(other))
+                            .map(other -> other == resource ? expected : expected(
+                                    table.formats().get(namespace).get(other.types().getFirst()).format(), other,
+                                    "000000000000"))
+                            .distinct().toList();
+                    assertEquals(named, RequestResources.of(operation.getKey(), json(body.toString()),
                             "aws", "us-east-1", "000000000000"), body.toString());
-                    assertEquals(List.of(expected), RequestResources.of(operation.getKey(), form(form.toString()),
+                    assertEquals(named, RequestResources.of(operation.getKey(), form(form.toString()),
                             "aws", "us-east-1", "000000000000"), form.toString());
                 })));
     }
@@ -213,6 +269,12 @@ class RequestResourceMembersTest {
                     assertTrue(RequestResources.created(operation.getKey(), form(form), "aws", "us-east-1",
                             "000000000000").contains(expected), form);
                 })));
+    }
+
+    /** Whether every request of its operation names the resource: no member names it and no member's value selects it. */
+    private static boolean named(Resource resource) {
+        return resource.arn() == null && resource.fill().isEmpty() && resource.when().isEmpty()
+                && resource.unless().isEmpty();
     }
 
     /** The value at the member's path in a body: in its list's first element, and in its field's structure. */
@@ -246,6 +308,9 @@ class RequestResourceMembersTest {
                 .replace("${Account}", account);
         for (String variable : resource.fill().keySet()) {
             arn = arn.replace("${" + variable + "}", "x");
+        }
+        for (Map.Entry<String, String> variable : resource.fixed().entrySet()) {
+            arn = arn.replace("${" + variable.getKey() + "}", variable.getValue());
         }
         return arn.replaceAll("\\$\\{\\w+}", "*");
     }

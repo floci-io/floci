@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -23,11 +24,16 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
- * RunInstances accepts the launch-time public-IP override in two wire shapes:
- * the primary network-interface spec (what Terraform sends) and the legacy
- * top-level parameter (what the CLI and older SDKs send). Both must reach
- * Ec2Service; absent must stay null so the subnet's MapPublicIpOnLaunch
- * default still applies.
+ * What RunInstances takes from the interface spec.
+ *
+ * <p>The launch-time public-IP override arrives in two wire shapes: the primary network-interface spec
+ * (what Terraform sends) and the legacy top-level parameter (what the CLI and older SDKs send). Both
+ * must reach Ec2Service; absent must stay null so the subnet's MapPublicIpOnLaunch default still applies.
+ *
+ * <p>Terraform's aws_instance also sends its security groups on the primary interface spec
+ * ({@code NetworkInterface.1.SecurityGroupId.N}) whenever private_ip or associate_public_ip_address is
+ * set. RunInstances read only the top-level {@code SecurityGroupId.N}, so the instance landed in the
+ * VPC's default group.
  */
 class Ec2RunInstancesPublicIpParamTest {
 
@@ -35,29 +41,64 @@ class Ec2RunInstancesPublicIpParamTest {
 
     @Test
     void topLevelAssociatePublicIpAddressReachesTheService() {
-        assertForwarded(params("AssociatePublicIpAddress", "true"), Boolean.TRUE);
-        assertForwarded(params("AssociatePublicIpAddress", "false"), Boolean.FALSE);
+        assertEquals(Boolean.TRUE, forward(params("AssociatePublicIpAddress", "true")).associatePublicIp());
+        assertEquals(Boolean.FALSE, forward(params("AssociatePublicIpAddress", "false")).associatePublicIp());
     }
 
     @Test
     void networkInterfaceSpecStillReachesTheService() {
-        assertForwarded(params("NetworkInterface.1.AssociatePublicIpAddress", "true"), Boolean.TRUE);
-        assertForwarded(params("NetworkInterface.1.AssociatePublicIpAddress", "false"), Boolean.FALSE);
+        assertEquals(Boolean.TRUE,
+                forward(params("NetworkInterface.1.AssociatePublicIpAddress", "true")).associatePublicIp());
+        assertEquals(Boolean.FALSE,
+                forward(params("NetworkInterface.1.AssociatePublicIpAddress", "false")).associatePublicIp());
     }
 
     @Test
     void networkInterfaceSpecWinsWhenBothArePresent() {
         MultivaluedMap<String, String> p = params("NetworkInterface.1.AssociatePublicIpAddress", "false");
         p.putSingle("AssociatePublicIpAddress", "true");
-        assertForwarded(p, Boolean.FALSE);
+        assertEquals(Boolean.FALSE, forward(p).associatePublicIp());
     }
 
     @Test
     void absentStaysNullSoTheSubnetDefaultApplies() {
-        assertForwarded(baseParams(), null);
+        assertNull(forward(baseParams()).associatePublicIp(),
+                "an absent override must stay null so the subnet default decides");
     }
 
-    private void assertForwarded(MultivaluedMap<String, String> p, Boolean expected) {
+    @Test
+    void groupsOnThePrimaryInterfaceSpecReachTheService() {
+        MultivaluedMap<String, String> p = baseParams();
+        p.putSingle("NetworkInterface.1.SecurityGroupId.1", "sg-0123456789abcdef0");
+        p.putSingle("NetworkInterface.1.DeviceIndex", "0");
+        assertEquals(List.of("sg-0123456789abcdef0"), forward(p).securityGroupIds());
+    }
+
+    @Test
+    void aSecondaryInterfaceSpecsGroupsAreNotTheInstances() {
+        MultivaluedMap<String, String> p = baseParams();
+        p.putSingle("NetworkInterface.1.SecurityGroupId.1", "sg-0123456789abcdef0");
+        p.putSingle("NetworkInterface.1.DeviceIndex", "1");
+        assertEquals(List.of(), forward(p).securityGroupIds());
+    }
+
+    @Test
+    void topLevelAndInterfaceGroupsTogetherAreRefused() {
+        MultivaluedMap<String, String> p = baseParams();
+        p.putSingle("NetworkInterface.1.SecurityGroupId.1", "sg-0123456789abcdef0");
+        p.putSingle("SecurityGroupId.1", "sg-0fedcba9876543210");
+        Response response = handler(mock(Ec2Service.class)).handle("RunInstances", p, REGION);
+        assertEquals(400, response.getStatus());
+        assertEquals(true, String.valueOf(response.getEntity()).contains("InvalidParameterCombination"));
+    }
+
+    /** The interface-spec arguments of the runInstances call the handler forwarded. */
+    private record Forwarded(List<String> securityGroupIds, Boolean associatePublicIp) {
+    }
+
+    /** Runs RunInstances through the handler and captures the call it forwards to Ec2Service. */
+    @SuppressWarnings("unchecked")
+    private static Forwarded forward(MultivaluedMap<String, String> p) {
         Ec2Service service = mock(Ec2Service.class);
         when(service.runInstances(anyString(), nullable(String.class), nullable(String.class),
                 anyInt(), anyInt(), nullable(String.class), anyList(), nullable(String.class),
@@ -67,27 +108,24 @@ class Ec2RunInstancesPublicIpParamTest {
                 nullable(String.class), nullable(String.class), nullable(List.class), eq(false), nullable(String.class),
                 nullable(LaunchTemplateData.CapacityReservationSpecification.class)))
                 .thenReturn(new Reservation());
+        handler(service).handle("RunInstances", p, REGION);
 
-        Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
-                mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
-                mock(Ec2SnapshotBlockPublicAccessService.class), mock(Ec2IpamService.class),
-                mock(RegionResolver.class));
-        handler.handle("RunInstances", p, REGION);
-
+        ArgumentCaptor<List<String>> groups = ArgumentCaptor.forClass(List.class);
         ArgumentCaptor<Boolean> associatePublicIp = ArgumentCaptor.forClass(Boolean.class);
         verify(service).runInstances(anyString(), nullable(String.class), nullable(String.class),
-                anyInt(), anyInt(), nullable(String.class), anyList(), nullable(String.class),
+                anyInt(), anyInt(), nullable(String.class), groups.capture(), nullable(String.class),
                 nullable(String.class), anyList(), nullable(String.class), nullable(String.class),
                 associatePublicIp.capture(), nullable(String.class), anyInt(), nullable(String.class),
                 nullable(LaunchTemplateData.MetadataOptions.class), nullable(String.class), nullable(String.class), eq(false),
                 nullable(String.class), nullable(String.class), nullable(List.class), eq(false), nullable(String.class),
                 nullable(LaunchTemplateData.CapacityReservationSpecification.class));
-        if (expected == null) {
-            assertNull(associatePublicIp.getValue(),
-                    "an absent override must stay null so the subnet default decides");
-        } else {
-            assertEquals(expected, associatePublicIp.getValue());
-        }
+        return new Forwarded(groups.getValue(), associatePublicIp.getValue());
+    }
+
+    private static Ec2QueryHandler handler(Ec2Service service) {
+        return new Ec2QueryHandler(service, mock(EmulatorConfig.class), mock(FlowLogService.class),
+                mock(Ec2EbsEncryptionService.class), mock(Ec2SnapshotBlockPublicAccessService.class),
+                mock(Ec2IpamService.class), mock(RegionResolver.class));
     }
 
     private static MultivaluedMap<String, String> baseParams() {

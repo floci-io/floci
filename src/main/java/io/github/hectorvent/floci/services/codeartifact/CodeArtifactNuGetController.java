@@ -130,7 +130,14 @@ public class CodeArtifactNuGetController {
     public Response packageContent(@Context HttpHeaders headers, @PathParam("domain") String domain,
                                     @PathParam("repository") String repository, @PathParam("id") String id,
                                     @PathParam("version") String version, @PathParam("filename") String filename) {
-        String baseUrl = requireRepository(headers, domain, repository).baseUrl();
+        RepositoryHandle handle = requireRepository(headers, domain, repository);
+        try {
+            service.requireContainerBackedVersionDownloadable(handle.owner(), handle.region(), domain, repository,
+                    "nuget", null, id, version, handle.repoId());
+        } catch (AwsException e) {
+            return Response.status(404).build();
+        }
+        String baseUrl = handle.baseUrl();
         String lowerId = SidecarUriUtils.encodeSegment(id.toLowerCase(Locale.ROOT));
         String encodedVersion = SidecarUriUtils.encodeSegment(version);
         String lowerFilename = filename.toLowerCase(Locale.ROOT);

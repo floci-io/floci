@@ -30,6 +30,7 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
     private final PasswordValidator passwordValidator;
     private final SigV4Validator sigV4Validator;
     private final Supplier<SSLContext> tlsContext;
+    private final ElastiCacheBackendAcl backendAcl = new ElastiCacheBackendAcl();
 
     public ElastiCacheAuthProxy(String groupId, AuthMode authMode,
                                 String backendHost, int backendPort,
@@ -81,6 +82,36 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
         encrypted.setSoTimeout(client.getSoTimeout());
         encrypted.startHandshake();
         return encrypted;
+    }
+
+    @Override
+    protected void initializeBackend(Socket backend, String username) throws IOException {
+        boolean members = passwordValidator.hasMembers();
+        if (!members && !backendAcl.initialized()) {
+            return;
+        }
+        // Disabling default without configuring replication credentials breaks cluster nodes.
+        // Until that path is implemented, fail closed rather than ignore the user's ACL.
+        if (passwordValidator.clusterMode()) {
+            throw new IOException("Cluster-mode user ACL transport is not supported yet");
+        }
+        String name = username == null || username.isEmpty() ? "default" : username;
+        backendAcl.authenticate(backend, name,
+                () -> members ? passwordValidator.accessString(name) : "on ~* &* +@all");
+    }
+
+    /**
+     * Applies the user's current access string to the backend user that its open sessions run as. A
+     * failure is logged and the sessions keep their old permissions until the user authenticates again.
+     */
+    public void refreshUser(String username) {
+        String name = username == null || username.isEmpty() ? "default" : username;
+        try {
+            backendAcl.reapply(backendHost(), backendPort(), name, () -> passwordValidator.accessString(name));
+        } catch (IOException e) {
+            LOG.warnv(e, "Could not apply the new permissions of user {0} to the open sessions of group {1}",
+                    name, groupId);
+        }
     }
 
     @Override
@@ -166,6 +197,14 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
         /** Read per connection: a modify can move the cache from preferred to required while the proxy runs. */
         default TransitEncryption transitEncryption() {
             return TransitEncryption.NONE;
+        }
+
+        default String accessString(String username) {
+            return null;
+        }
+
+        default boolean clusterMode() {
+            return false;
         }
 
         default boolean hasMembers() {

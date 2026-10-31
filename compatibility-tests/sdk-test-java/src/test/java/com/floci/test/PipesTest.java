@@ -6,6 +6,9 @@ import software.amazon.awssdk.services.pipes.model.*;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.*;
 
+import java.util.HashSet;
+import java.util.Set;
+
 import static org.assertj.core.api.Assertions.*;
 
 @DisplayName("EventBridge Pipes")
@@ -284,7 +287,7 @@ class PipesTest {
                         .build());
             }
 
-            java.util.Set<String> foundMessages = new java.util.HashSet<>();
+            Set<String> foundMessages = new HashSet<>();
             for (int i = 0; i < 20 && foundMessages.size() < 3; i++) {
                 Thread.sleep(1000);
                 ReceiveMessageResponse recv = sqs.receiveMessage(ReceiveMessageRequest.builder()

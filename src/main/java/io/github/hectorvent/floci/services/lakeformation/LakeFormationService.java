@@ -41,7 +41,7 @@ public class LakeFormationService {
         if (request.getResourceArn() == null) {
             throw new AwsException("InvalidInputException", "ResourceArn is required", 400);
         }
-        if (!request.getResourceArn().startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(request.getResourceArn())) {
             throw new AwsException("InvalidInputException", "ResourceArn must be a valid ARN", 400);
         }
         if (storage.describeResource(region, request.getResourceArn()).isPresent()) {
@@ -148,7 +148,7 @@ public class LakeFormationService {
         String catalogId = request.getCatalogId() != null ? request.getCatalogId() : regionResolver.getAccountId();
         
         if (request.getPermissionsWithGrantOption() != null) {
-            java.util.List<String> perms = request.getPermissions() != null ? request.getPermissions() : java.util.List.of();
+            List<String> perms = request.getPermissions() != null ? request.getPermissions() : List.of();
             for (String grantOption : request.getPermissionsWithGrantOption()) {
                 if (!perms.contains(grantOption)) {
                     throw new AwsException("InvalidInputException", "PermissionsWithGrantOption must be a subset of Permissions", 400);

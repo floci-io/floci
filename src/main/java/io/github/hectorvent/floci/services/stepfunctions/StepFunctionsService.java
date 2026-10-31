@@ -8,11 +8,13 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnShapes;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.SignedMarkers;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -34,6 +36,9 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -50,9 +55,11 @@ import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class StepFunctionsService implements Resettable, ResourceProvider {
+    private static final int LIST_EXECUTIONS_MAX_TOKEN_LENGTH = 3096;
 
     private static final Logger LOG = Logger.getLogger(StepFunctionsService.class);
     private static final int HISTORY_PERSIST_CHECKPOINT = 100;
+    private static final Duration LIST_EXECUTIONS_TOKEN_LIFETIME = Duration.ofHours(24);
 
     private final StorageBackend<String, StateMachine> stateMachineStore;
     private final StorageBackend<String, StateMachineAlias> stateMachineAliasStore;
@@ -102,6 +109,8 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     private final ObjectMapper objectMapper;
     private final SfnMockLoader mockLoader;
     private final StepFunctionsEventPublisher eventPublisher;
+    private final Clock clock;
+    private final SignedMarkers listExecutionTokens = new SignedMarkers();
 
     // Fields that are valid only in JSONPath mode. Validated against real AWS:
     // creating a JSONata state machine with any of these fields returns SCHEMA_VALIDATION_FAILED.
@@ -151,10 +160,18 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             new FieldStateTypeRule("Catch", Set.of("Task", "Parallel", "Map")),
             new FieldStateTypeRule("Retry", Set.of("Task", "Parallel", "Map")));
 
-    @Inject
     public StepFunctionsService(StorageFactory storageFactory, RegionResolver regionResolver,
                                 AslExecutor aslExecutor, ObjectMapper objectMapper,
                                 SfnMockLoader mockLoader, StepFunctionsEventPublisher eventPublisher) {
+        this(storageFactory, regionResolver, aslExecutor, objectMapper, mockLoader, eventPublisher,
+                Clock.systemUTC());
+    }
+
+    @Inject
+    public StepFunctionsService(StorageFactory storageFactory, RegionResolver regionResolver,
+                                AslExecutor aslExecutor, ObjectMapper objectMapper,
+                                SfnMockLoader mockLoader, StepFunctionsEventPublisher eventPublisher,
+                                Clock clock) {
         this.stateMachineStore = storageFactory.create("stepfunctions", "sfn-state-machines.json",
                 new TypeReference<Map<String, StateMachine>>() {});
         this.executionStore = storageFactory.create("stepfunctions", "sfn-executions.json",
@@ -173,6 +190,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         this.objectMapper = objectMapper;
         this.mockLoader = mockLoader;
         this.eventPublisher = eventPublisher;
+        this.clock = clock;
     }
 
     public void clear() {
@@ -512,20 +530,26 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * Key prefix matching every Step Functions ARN in {@code region}. This store is keyed by the
-     * full ARN, unlike the other services, which key by {@code region::name}, so the prefix has to
-     * carry the region's partition or a list cannot find what a create wrote.
+     * True for a store key that is a Step Functions ARN in {@code region}. This store is keyed by
+     * the full ARN, unlike the other services, which key by {@code region::name}, so the match has
+     * to carry the region's partition or a list cannot find what a create wrote.
      *
-     * <p>Deliberately stops before the account segment: the store holds resources for more than
-     * one account under account isolation, so {@code RegionResolver.buildArn} is the wrong helper
-     * here, since it appends its own account id.
+     * <p>Deliberately ignores the account segment: the store holds resources for more than one
+     * account under account isolation.
      */
-    private static String regionArnPrefix(String region) {
-        return "arn:" + AwsRegions.partitionFor(region) + ":states:" + region + ":";
+    private static boolean isInRegion(String key, String region) {
+        return AwsArnUtils.parseIfArnIn(key, "states", region).isPresent();
     }
 
     public List<StateMachine> listStateMachines(String region) {
-        return stateMachineStore.scan(k -> k.startsWith(regionArnPrefix(region)));
+        return stateMachineStore.scan(k -> isInRegion(k, region));
+    }
+
+    public PaginatedResult<StateMachine> listStateMachines(String region, Integer maxResults, String nextToken) {
+        int pageSize = StepFunctionsPaging.pageSize(maxResults, nextToken);
+        return Pagination.paginate(listStateMachines(region), StateMachine::getStateMachineArn, pageSize, nextToken,
+                "states:state-machines:" + region + ":" + regionResolver.getAccountId(),
+                token -> new AwsException("InvalidToken", "Invalid nextToken.", 400));
     }
 
     // ── State machine versions ──────────────────────────────────────────────
@@ -1012,6 +1036,36 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         }).orElse(false));
     }
 
+    /** Returns a filtered, newest-first page of executions for the ListExecutions API. */
+    public PaginatedResult<ExecutionSnapshot> listExecutions(String stateMachineArn, String statusFilter,
+                                                              Integer maxResults, String nextToken) {
+        int pageSize = StepFunctionsPaging.pageSize(maxResults, nextToken, LIST_EXECUTIONS_MAX_TOKEN_LENGTH);
+        List<ExecutionSnapshot> matching = listExecutions(stateMachineArn).stream()
+                .map(execution -> new ExecutionSnapshot(execution, execution.getStatus()))
+                .filter(snapshot -> statusFilter == null || statusFilter.equals(snapshot.status()))
+                .toList();
+        String scope = "states:executions:" + regionResolver.getAccountId() + ":" + stateMachineArn + ":"
+                + (statusFilter == null ? "*" : statusFilter);
+        String namespace = "states:executions:" + Base64Url.encode(
+                Digests.sha256(scope.getBytes(StandardCharsets.UTF_8)));
+        return Pagination.paginateExpiring(matching, StepFunctionsService::executionPaginationCursor,
+                pageSize, nextToken, namespace, clock, LIST_EXECUTIONS_TOKEN_LIFETIME, listExecutionTokens,
+                token -> new AwsException("InvalidToken", "Invalid nextToken.", 400));
+    }
+
+    public record ExecutionSnapshot(Execution execution, String status) {
+    }
+
+    /** Sorts newest executions first while keeping equal timestamps deterministic. */
+    private static String executionPaginationCursor(ExecutionSnapshot snapshot) {
+        Execution execution = snapshot.execution();
+        Double stopDate = execution.getStopDate();
+        double sortDate = "RUNNING".equals(snapshot.status()) || stopDate == null
+                ? execution.getStartDate() : stopDate;
+        long sortMillis = Math.round(sortDate * 1000.0);
+        return String.format("%019d:%s", Long.MAX_VALUE - sortMillis, execution.getExecutionArn());
+    }
+
     /**
      * Aborts a running execution. The caller's {@code error} and {@code cause} land on the
      * Execution itself, not only on the history event, so DescribeExecution reports them.
@@ -1193,8 +1247,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     }
 
     public List<Activity> listActivities(String region) {
-        String prefix = regionArnPrefix(region);
-        return activityStore.scan(k -> k.startsWith(prefix) && k.contains(":activity:"));
+        return activityStore.scan(k -> isInRegion(k, region) && k.contains(":activity:"));
     }
 
     public PaginatedResult<Activity> listActivities(String region, Integer maxResults, String nextToken) {

@@ -1,40 +1,59 @@
 package io.github.hectorvent.floci.services.emrserverless;
 
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.exception.InternalServerErrorException;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.StreamType;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import java.io.Closeable;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.StringReader;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.zip.GZIPInputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -46,6 +65,9 @@ class EmrServerlessSparkRunnerTest {
     private final ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
     private final DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
     private final SparkJobRunner.Progress progress = mock(SparkJobRunner.Progress.class);
+    private final S3Service s3 = mock(S3Service.class);
+    private final ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+    private final EcrRegistryManager ecr = mock(EcrRegistryManager.class);
 
     @Test
     void sparkSubmitRunsLocallyOnFlocisS3ThenTheRunsOwnSettings() {
@@ -104,6 +126,9 @@ class EmrServerlessSparkRunnerTest {
                 EmrServerlessSparkRunner.image(null, "emr-spark-8.1.0"));
         assertEquals("registry.internal/emr-serverless/spark/emr-7.5.0:20250425",
                 EmrServerlessSparkRunner.image("registry.internal/emr-serverless/spark/%s:20250425", "emr-7.5.0"));
+        // The image a cluster's bootstrap left, which its steps get by id.
+        String bootstrapped = "sha256:" + "2".repeat(64);
+        assertEquals(bootstrapped, EmrServerlessSparkRunner.image(bootstrapped, "emr-7.5.0"));
     }
 
     @Test
@@ -115,10 +140,116 @@ class EmrServerlessSparkRunnerTest {
         runner(builder).run(job(Duration.ZERO), progress);
 
         verify(builder).newContainer("public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest");
+        verify(spec).withEntrypoint(List.of("/usr/lib/spark/bin/spark-submit"));
+        verify(spec).withCmd(argThat((List<String> cmd) -> List.of("--master", "local[*]").equals(cmd.subList(0, 2))
+                && "s3://bucket/jobs/app.jar".equals(cmd.getLast())));
         verify(spec).withName(ContainerStorageHelper.dockerName(config, "emr-serverless-00f0000000000001"));
         verify(spec).withDockerNetwork(Optional.of("floci-network"));
         verify(spec).withLabels(argThat(labels ->
                 "emr-serverless".equals(labels.get(ContainerStorageHelper.SERVICE_LABEL))));
+        // Its JVMs trust Floci's CA, the trust store going in with the CA bundle as the container is created.
+        verify(spec).withJavaTrustStore();
+        verify(lifecycle, never()).copyJavaTrustStore(anyString());
+        // The release's image is not in an ECR repository, so it is pulled once, as the container is created.
+        verify(lifecycle, never()).resolveImageForLaunch(anyString(), any(), any());
+    }
+
+    @Test
+    void anImageInAnEcrRepositoryRunsFromFlocisRegistryPulledForEveryRun() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        String custom = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/spark/custom:7.5.0";
+        String inFlocisRegistry = "localhost:5100/123456789012/eu-west-1/spark/custom:7.5.0";
+        String pulled = "sha256:" + "3".repeat(64);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        when(builder.resolveImage(inFlocisRegistry)).thenReturn(inFlocisRegistry);
+        when(ecr.rewriteImageUri(custom)).thenReturn(inFlocisRegistry);
+        when(lifecycle.resolveImageForLaunch(inFlocisRegistry, ImagePullBehavior.DEFAULT, null))
+                .thenReturn(new LaunchImage(pulled, "sha256:" + "4".repeat(64)));
+        EmrServerlessSparkRunner runner = runner(builder);
+
+        runner.run(customImageJob(custom), progress);
+        runner.run(customImageJob(custom), progress);
+
+        // By the id each pull resolved, which a push under the same tag cannot move.
+        verify(lifecycle, times(2)).resolveImageForLaunch(inFlocisRegistry, ImagePullBehavior.DEFAULT, null);
+        verify(builder, times(2)).newContainer(pulled);
+        verify(builder, never()).newContainer(custom);
+    }
+
+    @Test
+    void aCommandRunsThroughFlocisWrapperWithTheJobsSparkSettingsInItsEnvironment() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        List<String> command = List.of("bash", "-c", "aws s3 ls s3://bucket/");
+
+        runner(builder).run(commandJob(command, Map.of("spark.executor.cores", "4")), progress);
+
+        // bash -c runs Floci's wrapper with "floci" as its $0 and the command as "$@".
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.size() == 4
+                && entrypoint.subList(0, 2).equals(List.of("/bin/bash", "-c"))
+                && entrypoint.get(2).contains("export SPARK_CONF_DIR=") && entrypoint.get(2).endsWith("exec \"$@\"")
+                && "floci".equals(entrypoint.get(3))));
+        verify(spec).withCmd(command);
+        verify(spec).withEnv(eq("FLOCI_SPARK_DEFAULTS"),
+                argThat(file -> file.startsWith("spark.master local[*]\n")
+                        && file.endsWith("\nspark.executor.cores 4")));
+        verify(spec, never()).withEntrypoint(List.of("/usr/lib/spark/bin/spark-submit"));
+        verify(spec).withJavaTrustStore();
+        // The job's own variables, a cluster's spark-env exports, beside Floci's (none from this test's mock).
+        verify(spec).withEnv(List.of("PYSPARK_PYTHON=/usr/bin/python3.11"));
+    }
+
+    @Test
+    void aJobsVariablesFollowFlocisAndReplaceOneOfTheSameName() {
+        Map<String, String> jobs = new LinkedHashMap<>();
+        jobs.put("AWS_REGION", "us-east-1");
+        jobs.put("SPARK_DAEMON_JAVA_OPTS", "-Dkey=value -Xmx1g");
+
+        assertEquals(List.of("AWS_REGION=us-east-1", "AWS_ENDPOINT_URL=http://floci:4566",
+                        "SPARK_DAEMON_JAVA_OPTS=-Dkey=value -Xmx1g"),
+                EmrServerlessSparkRunner.environment(
+                        List.of("AWS_REGION=eu-west-1", "AWS_ENDPOINT_URL=http://floci:4566"), jobs));
+        assertEquals(List.of("AWS_REGION=eu-west-1"),
+                EmrServerlessSparkRunner.environment(List.of("AWS_REGION=eu-west-1"), Map.of()));
+    }
+
+    @Test
+    void aCommandsOwnSparkSubmitRunsLocallyOnFlocisS3WithTheJobsSparkDefaults() {
+        assertEquals(String.join("\n",
+                "spark.master local[*]",
+                "spark.hadoop.fs.s3a.endpoint http://floci:4566",
+                "spark.hadoop.fs.s3a.endpoint.region eu-west-1",
+                "spark.hadoop.fs.s3a.path.style.access true",
+                "spark.hadoop.fs.s3a.committer.magic.track.commits.in.memory.enabled true",
+                "spark.hadoop.fs.s3.impl org.apache.hadoop.fs.s3a.S3AFileSystem",
+                "spark.hadoop.fs.AbstractFileSystem.s3.impl org.apache.hadoop.fs.s3a.S3A",
+                "spark.hadoop.aws.glue.endpoint http://floci:4566",
+                "spark.hadoop.aws.region eu-west-1",
+                "spark.sql.shuffle.partitions 8"),
+                EmrServerlessSparkRunner.sparkDefaultsFile(
+                        commandJob(List.of("bash", "-c", "spark-submit s3://bucket/jobs/app.py"),
+                                Map.of("spark.sql.shuffle.partitions", "8")), ENDPOINT));
+    }
+
+    @Test
+    void aCommandsSparkDefaultsReachSparkAsTheJobGaveThem() throws IOException {
+        Map<String, String> sparkDefaults = new LinkedHashMap<>();
+        sparkDefaults.put("spark.driver.extraJavaOptions", "-Dpattern=\\d+ -Dpath=C:\\tmp");
+        sparkDefaults.put("spark.odd key=with:separators", "#not a comment\nnor a second line\t!");
+        sparkDefaults.put("!spark.leading", "kept");
+
+        // Spark's Utils.getPropertiesFromFile loads spark-defaults.conf with Properties.load.
+        Properties loaded = new Properties();
+        loaded.load(new StringReader(EmrServerlessSparkRunner.sparkDefaultsFile(
+                commandJob(List.of("bash", "-c", "spark-submit s3://bucket/jobs/app.py"), sparkDefaults), ENDPOINT)));
+
+        assertEquals("local[*]", loaded.getProperty("spark.master"));
+        assertEquals("-Dpattern=\\d+ -Dpath=C:\\tmp", loaded.getProperty("spark.driver.extraJavaOptions"));
+        assertEquals("#not a comment\nnor a second line\t!", loaded.getProperty("spark.odd key=with:separators"));
+        assertEquals("kept", loaded.getProperty("!spark.leading"));
+        assertEquals(ENDPOINT, loaded.getProperty("spark.hadoop.fs.s3a.endpoint"));
     }
 
     @Test
@@ -131,7 +262,7 @@ class EmrServerlessSparkRunnerTest {
 
         assertNull(outcome.exitCode());
         assertNotNull(outcome.failure());
-        verify(lifecycle, never()).createAndStart(any());
+        verify(lifecycle, never()).create(any());
     }
 
     @Test
@@ -164,15 +295,16 @@ class EmrServerlessSparkRunnerTest {
     @Test
     void aResetWhileTheImageIsPulledStopsTheRunOnceItsContainerIsUp() {
         EmrServerlessSparkRunner runner = runner();
-        when(lifecycle.createAndStart(any())).thenAnswer(pulling -> {
+        when(lifecycle.create(any())).thenAnswer(pulling -> {
             runner.stopManagedContainers();
-            return new ContainerLifecycleManager.ContainerInfo("driver", Map.of());
+            return "driver";
         });
 
         SparkJobRunner.Outcome outcome = runner.run(job(Duration.ZERO), progress);
 
         assertTrue(outcome.stopped());
         verify(progress, never()).started();
+        verify(lifecycle, never()).startCreated(anyString(), any());
         verify(lifecycle).stopAndRemove("driver", null, 0);
     }
 
@@ -186,6 +318,26 @@ class EmrServerlessSparkRunnerTest {
 
         assertTrue(outcome.stopped());
         verify(progress, never()).started();
+        verify(lifecycle, never()).startCreated(anyString(), any());
+        verify(lifecycle).stopAndRemove("driver", null, 0);
+    }
+
+    @Test
+    void aRunStoppedWhileItsContainerIsCreatedNeverStartsItsDriver() {
+        EmrServerlessSparkRunner runner = runner();
+        SparkJobRunner.Job job = job(Duration.ZERO);
+        // The create pulls the image and copies the trust store in, either of which can wait on Docker, and a
+        // stop only marks the run.
+        when(lifecycle.create(any())).thenAnswer(creating -> {
+            runner.stop(job.runId());
+            return "driver";
+        });
+
+        SparkJobRunner.Outcome outcome = runner.run(job, progress);
+
+        assertTrue(outcome.stopped());
+        verify(progress, never()).started();
+        verify(lifecycle, never()).startCreated(anyString(), any());
         verify(lifecycle).stopAndRemove("driver", null, 0);
     }
 
@@ -242,6 +394,146 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void theDriversOutputGoesGzippedToTheRunsLogFolderOnceItEnds() throws IOException {
+        EmrServerlessSparkRunner runner = runner();
+        driverWrote(new Frame(StreamType.STDERR, bytes("INFO SparkContext: Running Spark version 3.5.2\n")),
+                new Frame(StreamType.STDOUT, bytes("Pi is roughly 3.14\n")),
+                new Frame(StreamType.STDOUT, bytes("done\n")));
+
+        SparkJobRunner.Outcome outcome = runner.run(job("s3://logs/emr/j-1/steps/s-1/"), progress);
+
+        assertEquals(0, outcome.exitCode());
+        assertEquals("Pi is roughly 3.14\ndone\n", written("logs", "emr/j-1/steps/s-1/stdout.gz"));
+        assertEquals("INFO SparkContext: Running Spark version 3.5.2\n",
+                written("logs", "emr/j-1/steps/s-1/stderr.gz"));
+    }
+
+    @Test
+    void aLogFolderInAHadoopSchemeIsInTheSameBucket() throws IOException {
+        EmrServerlessSparkRunner runner = runner();
+        driverWrote(new Frame(StreamType.STDOUT, bytes("done\n")));
+
+        runner.run(job("s3n://logs/emr/j-1/steps/s-1/"), progress);
+
+        assertEquals("done\n", written("logs", "emr/j-1/steps/s-1/stdout.gz"));
+    }
+
+    @Test
+    void aCancelledRunsDriverIsStoppedBeforeItsLogsAreReadAndRemovedAfterThey() {
+        EmrServerlessSparkRunner runner = runner();
+        SparkJobRunner.Job job = job("s3://logs/emr/j-1/steps/s-1/");
+        driverWrote(new Frame(StreamType.STDOUT, bytes("sleeping\n")));
+        when(docker.inspectContainerCmd("driver").exec().getState().getRunning()).thenAnswer(look -> {
+            runner.stop(job.runId());
+            return true;
+        });
+
+        SparkJobRunner.Outcome outcome = runner.run(job, progress);
+
+        // Stopped first, the driver changes nothing while its output is read, and all of that output is there.
+        assertTrue(outcome.stopped());
+        InOrder order = inOrder(lifecycle, docker, s3);
+        order.verify(lifecycle).stop("driver", 0);
+        order.verify(docker).logContainerCmd("driver");
+        order.verify(s3).putObjectFromStream(eq("logs"), eq("emr/j-1/steps/s-1/stdout.gz"), any(), anyString(),
+                anyMap());
+        order.verify(lifecycle).stopAndRemove("driver", null, 0);
+    }
+
+    @Test
+    void anInterruptedLogReadEndsDockersStreamAndWritesNothing() throws IOException {
+        EmrServerlessSparkRunner runner = runner();
+        Closeable stream = mock(Closeable.class);
+        // Floci shuts down while the output is read: Docker has started sending it, and never finishes.
+        when(docker.logContainerCmd("driver").withStdOut(true).withStdErr(true).withFollowStream(false)
+                .withTimestamps(false).exec(any())).thenAnswer(read -> {
+                    ResultCallback.Adapter<Frame> output = read.getArgument(0);
+                    output.onStart(stream);
+                    output.onNext(new Frame(StreamType.STDOUT, bytes("Pi is ")));
+                    Thread.currentThread().interrupt();
+                    return output;
+                });
+
+        try {
+            SparkJobRunner.Outcome outcome = runner.run(job("s3://logs/emr/j-1/steps/s-1/"), progress);
+
+            assertEquals(0, outcome.exitCode());
+            verify(stream).close();
+            verify(s3, never()).putObjectFromStream(anyString(), anyString(), any(), anyString(), anyMap());
+        } finally {
+            assertTrue(Thread.interrupted());
+        }
+    }
+
+    @Test
+    void logsThatCannotBeWrittenLeaveTheRunAsItEnded() {
+        EmrServerlessSparkRunner runner = runner();
+        driverWrote(new Frame(StreamType.STDOUT, bytes("done\n")));
+        when(s3.putObjectFromStream(anyString(), anyString(), any(), anyString(), anyMap()))
+                .thenThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist", 404));
+
+        SparkJobRunner.Outcome outcome = runner.run(job("s3://missing/emr/j-1/steps/s-1/"), progress);
+
+        assertEquals(0, outcome.exitCode());
+        verify(lifecycle).stopAndRemove("driver", null, 0);
+    }
+
+    @Test
+    void aDriverFlocisTeardownTookWritesNoLogs() {
+        EmrServerlessSparkRunner runner = runner();
+        when(docker.inspectContainerCmd("driver").exec().getState().getRunning()).thenAnswer(look -> {
+            runner.stopManagedContainers();
+            return true;
+        });
+
+        SparkJobRunner.Outcome outcome = runner.run(job("s3://logs/emr/j-1/steps/s-1/"), progress);
+
+        assertTrue(outcome.stopped());
+        verify(docker, never()).logContainerCmd(anyString());
+        verify(s3, never()).putObjectFromStream(anyString(), anyString(), any(), anyString(), anyMap());
+    }
+
+    @Test
+    void theDriversOutputGoesToTheJobsCloudWatchLogStreamsWhileItRuns() {
+        EmrServerlessSparkRunner runner = runner();
+        String driver = "/applications/00f0000000000000/jobs/00f0000000000001/SPARK_DRIVER/";
+
+        runner.run(job(new SparkJobRunner.CloudWatchLogs("/aws/emr-serverless", driver + "stdout", driver + "stderr")),
+                progress);
+
+        verify(logStreamer).attachByStreamForAccount("123456789012", "driver", "/aws/emr-serverless",
+                driver + "stdout", driver + "stderr", "eu-west-1", "emr-serverless:00f0000000000001");
+        verify(logStreamer, never()).attachConsoleOnly(anyString(), anyString());
+    }
+
+    @Test
+    void withoutCloudWatchLogStreamsTheDriversOutputGoesOnlyToFlocisLog() {
+        runner().run(job(Duration.ZERO), progress);
+
+        verify(logStreamer).attachConsoleOnly("driver", "emr-serverless:00f0000000000001");
+        verify(logStreamer, never()).attachByStreamForAccount(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aRunWithoutALogFolderReadsNoOutput() {
+        runner().run(job(Duration.ZERO), progress);
+
+        verify(docker, never()).logContainerCmd(anyString());
+        verify(lifecycle, never()).stop(anyString(), anyInt());
+    }
+
+    @Test
+    void aLogFolderFollowsTheLogUriAfterOneSlash() {
+        assertEquals("s3://logs/emr/j-1/steps/s-1/",
+                EmrServerlessSparkRunner.logFolder("s3://logs/emr/", "j-1/steps/s-1/"));
+        assertEquals("s3://logs/emr/j-1/steps/s-1/",
+                EmrServerlessSparkRunner.logFolder("s3://logs/emr", "j-1/steps/s-1/"));
+        assertEquals("s3://logs/j-1/steps/s-1/", EmrServerlessSparkRunner.logFolder("s3://logs//", "j-1/steps/s-1/"));
+        assertNull(EmrServerlessSparkRunner.logFolder(null, "j-1/steps/s-1/"));
+        assertNull(EmrServerlessSparkRunner.logFolder(" ", "j-1/steps/s-1/"));
+    }
+
+    @Test
     void driversAnEarlierProcessOfThisDeploymentLeftAreRemoved() {
         EmrServerlessSparkRunner runner = runner();
         when(config.port()).thenReturn(4566);
@@ -261,12 +553,38 @@ class EmrServerlessSparkRunnerTest {
 
     private EmrServerlessSparkRunner runner(ContainerBuilder builder) {
         when(lifecycle.getDockerClient()).thenReturn(docker);
-        when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("driver", Map.of()));
+        when(lifecycle.create(any())).thenReturn("driver");
         when(docker.inspectContainerCmd("driver").exec().getState().getRunning()).thenReturn(false);
         when(docker.inspectContainerCmd("driver").exec().getState().getExitCodeLong()).thenReturn(0L);
-        return new EmrServerlessSparkRunner(builder, lifecycle, mock(ContainerLogStreamer.class),
-                mock(LaunchedContainerAwsEnv.class), mock(LambdaExecutionRoleCredentials.class), config,
+        return new EmrServerlessSparkRunner(builder, lifecycle, logStreamer,
+                mock(LaunchedContainerAwsEnv.class), mock(LambdaExecutionRoleCredentials.class), s3, ecr, config,
                 new MutableClock(), Duration.ZERO);
+    }
+
+    // What the driver wrote, as Docker gives it once asked for an ended container's output.
+    private void driverWrote(Frame... frames) {
+        when(docker.logContainerCmd("driver").withStdOut(true).withStdErr(true).withFollowStream(false)
+                .withTimestamps(false).exec(any())).thenAnswer(read -> {
+                    ResultCallback.Adapter<Frame> output = read.getArgument(0);
+                    for (Frame frame : frames) {
+                        output.onNext(frame);
+                    }
+                    output.onComplete();
+                    return output;
+                });
+    }
+
+    // The object the runner put at key, gunzipped.
+    private String written(String bucket, String key) throws IOException {
+        ArgumentCaptor<InputStream> data = ArgumentCaptor.forClass(InputStream.class);
+        verify(s3).putObjectFromStream(eq(bucket), eq(key), data.capture(), eq("application/x-gzip"), eq(Map.of()));
+        try (GZIPInputStream gunzip = new GZIPInputStream(data.getValue())) {
+            return new String(gunzip.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    private static byte[] bytes(String text) {
+        return text.getBytes(StandardCharsets.UTF_8);
     }
 
     private static Container driver(String id, String owner) {
@@ -281,19 +599,45 @@ class EmrServerlessSparkRunnerTest {
         return job(List.of("s3://bucket/jobs/app.jar"), Map.of(), timeout);
     }
 
+    private static SparkJobRunner.Job job(String logFolder) {
+        return job(null, List.of("s3://bucket/jobs/app.jar"), Map.of(), Duration.ZERO, logFolder, null);
+    }
+
+    private static SparkJobRunner.Job job(SparkJobRunner.CloudWatchLogs cloudWatchLogs) {
+        return job(null, List.of("s3://bucket/jobs/app.jar"), Map.of(), Duration.ZERO, null, cloudWatchLogs);
+    }
+
     private static SparkJobRunner.Job job(List<String> application, Map<String, String> sparkDefaults) {
         return job(application, sparkDefaults, Duration.ZERO);
     }
 
     private static SparkJobRunner.Job job(List<String> application, Map<String, String> sparkDefaults,
                                           Duration timeout) {
-        return job(null, application, sparkDefaults, timeout);
+        return job(null, application, sparkDefaults, timeout, null, null);
     }
 
     private static SparkJobRunner.Job job(String imageTemplate, List<String> application,
                                           Map<String, String> sparkDefaults, Duration timeout) {
+        return job(imageTemplate, application, sparkDefaults, timeout, null, null);
+    }
+
+    private static SparkJobRunner.Job job(String imageTemplate, List<String> application,
+                                          Map<String, String> sparkDefaults, Duration timeout, String logFolder,
+                                          SparkJobRunner.CloudWatchLogs cloudWatchLogs) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
-                imageTemplate, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults, application,
-                timeout);
+                imageTemplate, null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults,
+                application, null, timeout, logFolder, cloudWatchLogs, Map.of());
+    }
+
+    private static SparkJobRunner.Job customImageJob(String customImage) {
+        return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
+                null, customImage, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
+                List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of());
+    }
+
+    private static SparkJobRunner.Job commandJob(List<String> command, Map<String, String> sparkDefaults) {
+        return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
+                null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults, List.of(), command,
+                Duration.ZERO, null, null, Map.of("PYSPARK_PYTHON", "/usr/bin/python3.11"));
     }
 }

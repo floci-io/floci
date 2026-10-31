@@ -341,7 +341,8 @@ public class SesMetricsController {
     private static Instant requireTimestamp(JsonNode query, String field, String member, int position) {
         JsonNode node = query.path(field);
         if (node.isMissingNode() || node.isNull()) {
-            throw aggregated(List.of(memberConstraint(position, member, "Member must not be null")));
+            throw aggregated(List.of(
+                    SmithyValidationErrors.notNullWithoutValue("queries." + position + ".member." + member)));
         }
         if (node.isNumber()) {
             try {

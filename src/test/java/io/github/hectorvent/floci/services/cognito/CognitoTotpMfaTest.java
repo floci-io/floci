@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cognito;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Totp;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
@@ -355,6 +356,87 @@ class CognitoTotpMfaTest {
         mac.update("Caldera Derived Key".getBytes(StandardCharsets.UTF_8));
         mac.update((byte) 1);
         return Arrays.copyOf(mac.doFinal(), 16);
+    }
+
+    @Test
+    void codeThatAnsweredAChallengeCannotAnswerAnother() {
+        String secret = registerSoftwareToken();
+        String code = CognitoTotp.code(secret, clock.instant());
+        assertNotNull(answerSoftwareTokenChallenge((String) passwordLogin().get("Session"), code)
+                .get("AuthenticationResult"));
+
+        String session = (String) passwordLogin().get("Session");
+        AwsException reused = assertThrows(AwsException.class, () -> answerSoftwareTokenChallenge(session, code));
+        assertEquals("ExpiredCodeException", reused.getErrorCode());
+        assertEquals("Your software token has already been used once.", reused.getMessage());
+        assertEquals(400, reused.getHttpStatus());
+
+        String wrongCode = code.equals("000000") ? "000001" : "000000";
+        assertEquals("CodeMismatchException", assertThrows(AwsException.class,
+                () -> answerSoftwareTokenChallenge(session, wrongCode)).getErrorCode());
+
+        clock.advance(Duration.ofSeconds(30));
+        assertEquals("ExpiredCodeException", assertThrows(AwsException.class,
+                () -> answerSoftwareTokenChallenge(session, code)).getErrorCode(),
+                "a used code stays refused while it is still inside the drift window");
+        assertNotNull(answerSoftwareTokenChallenge(session, CognitoTotp.code(secret, clock.instant()))
+                .get("AuthenticationResult"));
+    }
+
+    @Test
+    void codeFromAnEarlierStepIsRefusedOnceALaterOneWasAccepted() {
+        String secret = registerSoftwareToken();
+        String earlier = CognitoTotp.code(secret, clock.instant());
+        String later = CognitoTotp.code(secret, clock.instant().plusSeconds(30));
+        assertNotNull(answerSoftwareTokenChallenge((String) passwordLogin().get("Session"), later)
+                .get("AuthenticationResult"));
+        assertEquals("ExpiredCodeException", assertThrows(AwsException.class,
+                () -> answerSoftwareTokenChallenge((String) passwordLogin().get("Session"), earlier))
+                .getErrorCode());
+    }
+
+    @Test
+    void newlyVerifiedSoftwareTokenStartsWithoutAUsedStep() {
+        String secret = registerSoftwareToken();
+        Map<String, Object> signedIn = answerSoftwareTokenChallenge((String) passwordLogin().get("Session"),
+                CognitoTotp.code(secret, clock.instant()));
+        String accessToken = (String) ((Map<?, ?>) signedIn.get("AuthenticationResult")).get("AccessToken");
+
+        String replacement = (String) service.associateSoftwareToken(accessToken, null).get("SecretCode");
+        service.verifySoftwareToken(accessToken, null, CognitoTotp.code(replacement, clock.instant()));
+        assertNull(service.adminGetUser(pool.getId(), USERNAME).getLastSoftwareTokenMfaStep());
+        assertNotNull(answerSoftwareTokenChallenge((String) passwordLogin().get("Session"),
+                CognitoTotp.code(replacement, clock.instant())).get("AuthenticationResult"));
+    }
+
+    @Test
+    void usedStepSurvivesUserSerializationAndOlderUsersHaveNone() throws Exception {
+        String secret = registerSoftwareToken();
+        answerSoftwareTokenChallenge((String) passwordLogin().get("Session"), CognitoTotp.code(secret, clock.instant()));
+
+        ObjectMapper mapper = new ObjectMapper();
+        CognitoUser persisted = service.adminGetUser(pool.getId(), USERNAME);
+        CognitoUser restored = mapper.readValue(mapper.writeValueAsBytes(persisted), CognitoUser.class);
+        assertEquals(Totp.stepAt(clock.instant()), restored.getLastSoftwareTokenMfaStep());
+
+        CognitoUser older = mapper.readValue("{\"username\":\"bob\",\"softwareTokenMfaSecret\":\"" + secret + "\"}",
+                CognitoUser.class);
+        assertNull(older.getLastSoftwareTokenMfaStep());
+    }
+
+    private String registerSoftwareToken() {
+        Map<String, Object> associated = service.associateSoftwareToken(null, (String) passwordLogin().get("Session"));
+        String secret = (String) associated.get("SecretCode");
+        String verifiedSession = (String) service.verifySoftwareToken(null, (String) associated.get("Session"),
+                CognitoTotp.code(secret, clock.instant())).get("Session");
+        service.respondToAuthChallenge(client.getClientId(), "MFA_SETUP", verifiedSession,
+                Map.of("USERNAME", USERNAME));
+        return secret;
+    }
+
+    private Map<String, Object> answerSoftwareTokenChallenge(String session, String code) {
+        return service.respondToAuthChallenge(client.getClientId(), "SOFTWARE_TOKEN_MFA", session,
+                Map.of("USERNAME", USERNAME, "SOFTWARE_TOKEN_MFA_CODE", code));
     }
 
     private Map<String, Object> passwordLogin() {

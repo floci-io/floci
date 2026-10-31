@@ -1,0 +1,24 @@
+{
+  "_source": {"generator": "tools/aws/regen_iam_passed_network_connectors.py", "reference": "https://servicereference.us-east-1.amazonaws.com/", "botocore": "botocore 1.43.113 (installed package)", "retrieved": "2026-10-27", "note": "make iam-passed-network-connectors-check re-derives every member from botocore; make iam-passed-network-connectors-verify checks every operation against AWS."},
+  "namespaces": {"appsync": ["appsync"], "lambda": ["lambda-microvms", "lambda-web"]},
+  "operations": {
+    "appsync:CreateDataSource": {"notRead": "botocore's model has no request member that names a connector"},
+    "appsync:UpdateDataSource": {"notRead": "botocore's model has no request member that names a connector"},
+    "lambda:CreateMicrovmImage": {"connectors": [
+      {"member": "egressNetworkConnectors[]", "whenAbsent": "aws-network-connector:INTERNET_EGRESS"}
+    ]},
+    "lambda:CreateWebFunction": {"connectors": [
+      {"member": "revisionConfig.serviceConfig.egressNetworkConnectorArn"}
+    ]},
+    "lambda:CreateWebFunctionRevision": {"connectors": [
+      {"member": "serviceConfig.egressNetworkConnectorArn"}
+    ]},
+    "lambda:RunMicrovm": {"connectors": [
+      {"member": "egressNetworkConnectors[]", "whenAbsent": "aws-network-connector:INTERNET_EGRESS"},
+      {"member": "ingressNetworkConnectors[]", "whenAbsent": "aws-network-connector:HTTP_INGRESS"}
+    ]},
+    "lambda:UpdateMicrovmImage": {"connectors": [
+      {"member": "egressNetworkConnectors[]", "whenAbsent": "aws-network-connector:INTERNET_EGRESS"}
+    ]}
+  }
+}

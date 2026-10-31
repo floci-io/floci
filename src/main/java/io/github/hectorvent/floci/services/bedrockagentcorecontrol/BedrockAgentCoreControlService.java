@@ -280,11 +280,11 @@ public class BedrockAgentCoreControlService {
      * validated here — the data plane treats them permissively.
      */
     public boolean runtimeArnExists(String region, String arn) {
-        String[] parts = arn == null ? new String[0] : arn.split(":");
-        if (parts.length < 6 || !parts[5].startsWith("agent/")) {
+        String resource = BedrockAgentCoreArns.resource(arn);
+        if (resource == null || !resource.startsWith("agent/")) {
             return true;
         }
-        String uuid = parts[5].substring("agent/".length());
+        String uuid = resource.substring("agent/".length());
         String prefix = keyPrefix(region);
         return storage.scan(k -> k.startsWith(prefix)).stream()
                 .anyMatch(r -> uuid.equals(r.getUuid()));
@@ -325,11 +325,11 @@ public class BedrockAgentCoreControlService {
 
     private static String uuidFromArn(String arn) {
         // arn:aws:bedrock-agentcore:<region>:<account>:agent/<uuid>:<version>
-        String[] parts = arn == null ? new String[0] : arn.split(":");
-        if (parts.length < 6 || !parts[5].startsWith("agent/")) {
+        String resource = BedrockAgentCoreArns.resource(arn);
+        if (resource == null || !resource.startsWith("agent/")) {
             throw new AwsException("ValidationException", "Unsupported resource ARN: " + arn, 400);
         }
-        return parts[5].substring("agent/".length());
+        return resource.substring("agent/".length());
     }
 
     // ──────────────────────────── Endpoints (Phase 2) ────────────────────────────
@@ -453,11 +453,11 @@ public class BedrockAgentCoreControlService {
      * API, so this is the only way back from the ARN CloudFormation keeps as the physical id.
      */
     public Optional<EndpointLocation> findEndpointByArn(String region, String arn) {
-        String[] parts = arn == null ? new String[0] : arn.split(":");
-        if (parts.length < 6 || !parts[5].startsWith("agentEndpoint/")) {
+        String resource = BedrockAgentCoreArns.resource(arn);
+        if (resource == null || !resource.startsWith("agentEndpoint/")) {
             return Optional.empty();
         }
-        String uuid = parts[5].substring("agentEndpoint/".length());
+        String uuid = resource.substring("agentEndpoint/".length());
         String prefix = keyPrefix(region);
         for (AgentRuntime runtime : storage.scan(k -> k.startsWith(prefix))) {
             for (AgentRuntimeEndpoint endpoint : runtime.getEndpoints()) {

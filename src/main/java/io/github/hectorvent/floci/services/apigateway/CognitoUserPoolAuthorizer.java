@@ -21,8 +21,7 @@ import java.util.stream.Collectors;
 public class CognitoUserPoolAuthorizer {
 
     public enum Failure {
-        UNAUTHORIZED,
-        ACCESS_DENIED
+        UNAUTHORIZED
     }
 
     public record Result(Failure failure, String principalId, Map<String, Object> context) {}
@@ -62,10 +61,11 @@ public class CognitoUserPoolAuthorizer {
             if (!providerArns.contains(verifiedPoolArn)) {
                 return new Result(Failure.UNAUTHORIZED, null, null);
             }
+            // AWS answers 401, not 403, when the token claims none of the method's scopes, ID tokens included.
             List<String> requiredScopes = method.getAuthorizationScopes();
             if (requiredScopes != null && !requiredScopes.isEmpty()) {
                 if (!"access".equals(verified.tokenUse())) {
-                    return new Result(Failure.ACCESS_DENIED, null, null);
+                    return new Result(Failure.UNAUTHORIZED, null, null);
                 }
                 Set<String> granted = new HashSet<>();
                 Object scopeClaim = verified.claims().get("scope");
@@ -73,7 +73,7 @@ public class CognitoUserPoolAuthorizer {
                     granted.addAll(Arrays.asList(value.trim().split("\\s+")));
                 }
                 if (requiredScopes.stream().noneMatch(granted::contains)) {
-                    return new Result(Failure.ACCESS_DENIED, null, null);
+                    return new Result(Failure.UNAUTHORIZED, null, null);
                 }
             }
             String principalId = String.valueOf(verified.claims().getOrDefault("sub", "unknown"));

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.servicecatalog;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -95,7 +96,7 @@ class ServiceCatalogProvisionedProductPlanConsumerTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("InvalidParametersException"))
-            .body("message", org.hamcrest.Matchers.startsWith("PlanType must be one of"));
+            .body("message", Matchers.startsWith("PlanType must be one of"));
     }
 
     @Test
@@ -112,7 +113,7 @@ class ServiceCatalogProvisionedProductPlanConsumerTest {
             .body("PlanName", equalTo("ab-create-plan"))
             .body("ProvisionProductId", equalTo(productId))
             .body("ProvisioningArtifactId", equalTo(artifactId))
-            .body("PlanId", org.hamcrest.Matchers.notNullValue());
+            .body("PlanId", Matchers.notNullValue());
     }
 
     // ---------- DescribeProvisionedProductPlan ----------

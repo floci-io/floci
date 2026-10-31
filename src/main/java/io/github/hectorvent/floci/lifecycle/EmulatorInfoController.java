@@ -29,12 +29,15 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeMap;
 
 @Path("{prefix:(_floci|_localstack)}")
 @Produces(MediaType.APPLICATION_JSON)
 public class EmulatorInfoController {
 
     private static final Logger LOG = Logger.getLogger(EmulatorInfoController.class);
+    static final int MANIFEST_VERSION = 1;
+    static final int CONSOLE_CONTRACT = 2;
 
     private final ServiceRegistry serviceRegistry;
     private final InitLifecycleState initLifecycleState;
@@ -99,11 +102,48 @@ public class EmulatorInfoController {
         return Response.ok(body).build();
     }
 
+    /**
+     * The emulator manifest of the Floci Console Contract v2: what a web console, or a script, needs to
+     * know about this emulator. Additive over the original {@code version}, {@code edition},
+     * {@code original_edition} and {@code dynamodb_backend} keys, which stay as they were.
+     */
     @GET
     @Path("/info")
     public Response info() {
-        return Response.ok(Map.of("version", version, "edition", "community", "original_edition", "floci-always-free",
-                "dynamodb_backend", dynamoDbBackendSelector.selected())).build();
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("manifest_version", MANIFEST_VERSION);
+        body.put("console_contract", CONSOLE_CONTRACT);
+        body.put("cloud", "aws");
+        body.put("emulator", "floci");
+        body.put("version", version);
+        body.put("edition", "community");
+        body.put("original_edition", "floci-always-free");
+        body.put("dynamodb_backend", dynamoDbBackendSelector.selected());
+        body.put("endpoint", config.effectiveBaseUrl());
+        body.put("health_url", "/_floci/health");
+        body.put("tls", Map.of("enabled", config.tls().enabled()));
+        body.put("services", manifestServices(serviceRegistry.getServices()));
+
+        Map<String, Object> defaults = new LinkedHashMap<>();
+        defaults.put("region", config.defaultRegion());
+        defaults.put("account_id", config.defaultAccountId());
+        body.put("defaults", defaults);
+
+        Map<String, Object> ui = new LinkedHashMap<>();
+        ui.put("enabled", config.services().ui().enabled());
+        ui.put("port", config.services().ui().port());
+        body.put("ui", ui);
+        return Response.ok(body).build();
+    }
+
+    /**
+     * The health map's {@code running} and {@code available}, as the manifest's {@code enabled} and
+     * {@code disabled}.
+     */
+    static Map<String, String> manifestServices(Map<String, String> healthServices) {
+        Map<String, String> services = new TreeMap<>();
+        healthServices.forEach((name, status) -> services.put(name, "running".equals(status) ? "enabled" : "disabled"));
+        return services;
     }
 
     @GET

@@ -2,13 +2,18 @@ package io.github.hectorvent.floci.services.emr;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.emr.model.EmrStep;
+import io.github.hectorvent.floci.services.lambda.launcher.BootstrapProcess;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EmrSparkStepsTest {
 
@@ -49,6 +54,56 @@ class EmrSparkStepsTest {
     }
 
     @Test
+    void aCommandRunnerStepThatIsNotSparkRunsItsCommand() {
+        // The Release Guide's own example: download a script, make it executable, run it.
+        List<String> bash = List.of("bash", "-c",
+                "aws s3 cp s3://bucket/my-script.sh /home/hadoop; chmod u+x /home/hadoop/my-script.sh;"
+                        + " cd /home/hadoop; ./my-script.sh");
+
+        assertEquals(bash, EmrSparkSteps.command(step("command-runner.jar", null, bash.toArray(String[]::new))));
+        assertEquals(List.of("python3", "-c", "print(1)"),
+                EmrSparkSteps.command(step("command-runner.jar", null, "python3", "-c", "print(1)")));
+        assertNull(EmrSparkSteps.command(
+                step("command-runner.jar", null, "spark-submit", "s3://bucket/jobs/report.py")));
+    }
+
+    @Test
+    void aScriptRunnerStepFetchesItsScriptAndRunsItWithItsArguments() {
+        for (String jar : List.of("script-runner.jar",
+                "s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar")) {
+            List<String> command = EmrSparkSteps.command(step(jar, null, "s3://bucket/my-script.sh", "--day", "1"));
+
+            assertEquals(List.of("bash", "-c"), command.subList(0, 2));
+            assertTrue(command.get(2).contains("aws s3 cp --only-show-errors"));
+            assertEquals(List.of("script-runner", "s3://bucket/my-script.sh", "--day", "1"),
+                    command.subList(3, command.size()));
+        }
+    }
+
+    @Test
+    void aScriptRunnerScriptNamedWithoutAPathRunsFromTheWorkingDirectory(@TempDir Path workingDirectory)
+            throws Exception {
+        // Not executable yet: script-runner makes it so, as it does a script it fetched from S3.
+        Files.writeString(workingDirectory.resolve("my-script.sh"), "#!/bin/sh\nprintf 'ran:%s|' \"$@\"\n");
+        List<String> command = EmrSparkSteps.command(step("script-runner.jar", null, "my-script.sh", "--day", "1 2"));
+
+        BootstrapProcess.Result ended =
+                BootstrapProcess.run(new ProcessBuilder(command).directory(workingDirectory.toFile()));
+
+        assertEquals(new BootstrapProcess.Result(0, "ran:--day|ran:1 2|"), ended);
+    }
+
+    @Test
+    void toolsTheImageDoesNotHaveAreNotRun() {
+        for (String tool : List.of("hive-script", "pig-script", "hadoop-streaming", "hadoop-lzo", "s3-dist-cp")) {
+            assertNull(EmrSparkSteps.command(step("command-runner.jar", null, tool, "--src", "s3://bucket/in/")));
+        }
+        assertNull(EmrSparkSteps.command(step("command-runner.jar", null)));
+        assertNull(EmrSparkSteps.command(step("script-runner.jar", null)));
+        assertNull(EmrSparkSteps.command(step("s3://bucket/jars/app.jar", null, "1")));
+    }
+
+    @Test
     void theClustersSparkDefaultsComeFromItsConfigurations() {
         String configurations = """
                 [{"Classification": "spark-env", "Properties": {"JAVA_HOME": "/usr/lib/jvm"}},
@@ -60,6 +115,41 @@ class EmrSparkStepsTest {
                 EmrSparkSteps.sparkDefaults(configurations, objectMapper));
         assertEquals(Map.of(), EmrSparkSteps.sparkDefaults(null, objectMapper));
         assertEquals(Map.of(), EmrSparkSteps.sparkDefaults("[{", objectMapper));
+    }
+
+    @Test
+    void sparkHiveSitePropertiesReachSparkAsHadoopSettingsThatSparkDefaultsOverride() {
+        // The Management Guide's Glue Data Catalog setting for Spark, and one spark-defaults overrides.
+        String configurations = """
+                [{"Classification": "spark-hive-site", "Properties": {
+                  "hive.metastore.client.factory.class":
+                    "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory",
+                  "hive.metastore.glue.catalogid": "111122223333"}},
+                 {"Classification": "spark-defaults", "Properties": {
+                  "spark.hadoop.hive.metastore.glue.catalogid": "444455556666"}}]
+                """;
+
+        assertEquals(Map.of("spark.hadoop.hive.metastore.client.factory.class",
+                        "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory",
+                        "spark.hadoop.hive.metastore.glue.catalogid", "444455556666"),
+                EmrSparkSteps.sparkDefaults(configurations, objectMapper));
+    }
+
+    @Test
+    void theClustersSparkEnvExportsAreItsStepsEnvironment() {
+        // The Release Guide's spark-env example, with a property outside export, which sets nothing.
+        String configurations = """
+                [{"Classification": "spark-env", "Properties": {"IGNORED": "1"}, "Configurations": [
+                   {"Classification": "export", "Properties": {"JAVA_HOME": "/usr/lib/jvm/java-1.8.0",
+                    "PYSPARK_PYTHON": "/usr/bin/python3.11"}, "Configurations": []}]},
+                 {"Classification": "hadoop-env", "Properties": {}, "Configurations": [
+                   {"Classification": "export", "Properties": {"HADOOP_HEAPSIZE": "2048"}}]}]
+                """;
+
+        assertEquals(Map.of("JAVA_HOME", "/usr/lib/jvm/java-1.8.0", "PYSPARK_PYTHON", "/usr/bin/python3.11"),
+                EmrSparkSteps.sparkEnvironment(configurations, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.sparkEnvironment(null, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.sparkEnvironment("[{", objectMapper));
     }
 
     private static EmrStep step(String jar, String mainClass, String... args) {

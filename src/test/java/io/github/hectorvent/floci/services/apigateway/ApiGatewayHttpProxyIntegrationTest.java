@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.http.ContentType;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
@@ -222,7 +223,7 @@ class ApiGatewayHttpProxyIntegrationTest {
                 .when().get("/execute-api/" + apiId + "/test/orders/42?limit=5")
                 .then().statusCode(200)
                 .header("X-Backend-Marker", "hit")
-                .body("from", org.hamcrest.Matchers.equalTo("backend"));
+                .body("from", Matchers.equalTo("backend"));
 
         assertEquals("GET", lastMethod.get());
         assertEquals("/orders/42", lastPath.get());
@@ -344,7 +345,7 @@ class ApiGatewayHttpProxyIntegrationTest {
                 .when().get("/execute-api/" + apiId + "/test/orders/42")
                 .then()
                 .statusCode(200)
-                .body("from", org.hamcrest.Matchers.equalTo("backend"));
+                .body("from", Matchers.equalTo("backend"));
 
         assertEquals("/42", lastPath.get());
     }
@@ -365,6 +366,42 @@ class ApiGatewayHttpProxyIntegrationTest {
         assertEquals("{\"symbol\":\"ACME\"}", lastBody.get());
     }
 
+    // AWS forwards a DELETE body like any other (e.g. a batch delete taking a list of ids), and
+    // every execute-api URL form reaches the same dispatch, so each must hand the body over.
+    @ParameterizedTest
+    @CsvSource({
+            "/execute-api/{apiId}/test/orders",
+            "/_aws/execute-api/{apiId}/test/orders",
+            "/restapis/{apiId}/test/_user_request_/orders",
+    })
+    void forwardsRequestBodyOnDelete(String urlTemplate) {
+        resetRecordings();
+        String apiId = createProxyApi("http-proxy-delete-api", backendUri(), null);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"ids\":[\"a\",\"b\"]}")
+                .when().delete(urlTemplate.replace("{apiId}", apiId))
+                .then().statusCode(200);
+
+        assertEquals("DELETE", lastMethod.get());
+        assertEquals("/orders", lastPath.get());
+        assertEquals("{\"ids\":[\"a\",\"b\"]}", lastBody.get());
+    }
+
+    @Test
+    void deleteWithoutBodyStillReachesTheBackend() {
+        resetRecordings();
+        String apiId = createProxyApi("http-proxy-delete-empty-api", backendUri(), null);
+
+        given()
+                .when().delete("/execute-api/" + apiId + "/test/orders/42")
+                .then().statusCode(200);
+
+        assertEquals("DELETE", lastMethod.get());
+        assertEquals("", lastBody.get());
+    }
+
     @Test
     void relaysBackendErrorStatusVerbatim() {
         resetRecordings();
@@ -375,7 +412,7 @@ class ApiGatewayHttpProxyIntegrationTest {
         given()
                 .when().get("/execute-api/" + apiId + "/test/orders/missing")
                 .then().statusCode(404)
-                .body("from", org.hamcrest.Matchers.equalTo("backend"));
+                .body("from", Matchers.equalTo("backend"));
     }
 
     @Test

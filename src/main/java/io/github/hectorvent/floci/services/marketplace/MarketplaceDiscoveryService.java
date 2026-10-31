@@ -13,6 +13,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -198,7 +199,7 @@ public class MarketplaceDiscoveryService implements Resettable {
         String sortOrder = request.path("sortOrder").asText(
                 "AVERAGE_CUSTOMER_RATING".equals(sortBy) ? "DESCENDING" : "ASCENDING");
         if ("DESCENDING".equals(sortOrder)) {
-            java.util.Collections.reverse(list);
+            Collections.reverse(list);
         }
         return list;
     }

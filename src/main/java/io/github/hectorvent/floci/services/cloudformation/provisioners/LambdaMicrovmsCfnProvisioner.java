@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -54,6 +55,11 @@ public class LambdaMicrovmsCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public Set<String> resourceTypes() {
         return Set.of("AWS::Lambda::MicrovmImage", "AWS::Lambda::NetworkConnector");
+    }
+
+    @Override
+    public Map<String, Set<String>> integerAttributes() {
+        return Map.of(NETWORK_CONNECTOR, Set.of("LatestVersion"));
     }
 
     @Override
@@ -123,10 +129,13 @@ public class LambdaMicrovmsCfnProvisioner implements CfnResourceProvisioner {
             throw new IllegalStateException("Could not read the network connector update snapshot for "
                     + resource.getLogicalId(), e);
         }
-        microvmsService.updateConnector(snapshot.path("region").asText(), snapshot.path("arn").asText(),
+        LambdaMicrovmsService.NetworkConnector restored = microvmsService.updateConnector(
+                snapshot.path("region").asText(), snapshot.path("arn").asText(),
                 textList(snapshot.path("subnetIds")), textList(snapshot.path("securityGroupIds")),
                 snapshot.path("operatorRole").asText(null), snapshot.path("networkProtocol").asText(null),
                 textList(snapshot.path("associatedComputeResourceTypes")));
+        // The restore is an update too, so it makes the next version.
+        putLatestVersion(resource, restored);
         resource.getAttributes().remove(CfnRollback.NETWORK_CONNECTOR_UPDATE_SNAPSHOT_ATTR);
         return true;
     }
@@ -194,6 +203,13 @@ public class LambdaMicrovmsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", connector.arn);
         r.getAttributes().put("Id", connector.id);
         r.getAttributes().put("Name", connector.name);
+        putLatestVersion(r, connector);
+    }
+
+    private static void putLatestVersion(StackResource r, LambdaMicrovmsService.NetworkConnector connector) {
+        r.getAttributes().put("LatestVersion", Long.toString(connector.latestVersion));
+        r.getAttributes().put("LatestVersionArn",
+                LambdaArnUtils.networkConnectorVersionArn(connector.arn, connector.latestVersion));
     }
 
     /** Records the connector's settings before an in-place update, for {@link #rollbackUpdate}. */

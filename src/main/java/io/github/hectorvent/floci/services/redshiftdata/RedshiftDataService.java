@@ -209,7 +209,14 @@ public class RedshiftDataService implements Resettable {
             caller = iamService == null ? "access-key:" + accessKey
                     : iamService.resolveCallerArn(accessKey).orElse("access-key:" + accessKey);
         }
-        return new RedshiftDataSessions.Scope(store.accountId(), region, caller == null ? "anonymous" : caller);
+        String identity = caller == null ? "anonymous" : caller;
+        String role = principal == null && requestContext != null && iamService != null
+                ? iamService.resolvePrincipalArn(requestContext.getAccessKeyId()).orElse(identity) : identity;
+        return new RedshiftDataSessions.Scope(store.accountId(), region, identity, role);
+    }
+
+    public ObjectNode listSessions(JsonNode request, String region) {
+        return new RedshiftDataSessionListing(objectMapper, sessions).list(request, sessionScope(region, null));
     }
 
     private Admission replay(RedshiftDataIdempotencyStore.Receipt receipt, RedshiftDataIdempotencyStore.Scope scope,
@@ -277,7 +284,7 @@ public class RedshiftDataService implements Resettable {
                             }
                         }
                         if (session != null) {
-                            session.admitted();
+                            session.admitted(stored.id);
                         }
                     },
                     execution -> {
@@ -1336,7 +1343,7 @@ public class RedshiftDataService implements Resettable {
         return offset;
     }
 
-    private static double epochSeconds(Instant instant) {
+    static double epochSeconds(Instant instant) {
         return instant.toEpochMilli() / 1000.0;
     }
 

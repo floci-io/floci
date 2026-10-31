@@ -4117,8 +4117,8 @@ given()
 
     @Test
     void partiqlBindsParametersOfEveryAttributeValueType() throws Exception {
-        var mapper = new ObjectMapper();
-        var tableName = "PartiqlOperandTypeTable";
+        ObjectMapper mapper = new ObjectMapper();
+        String tableName = "PartiqlOperandTypeTable";
 
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
@@ -4179,7 +4179,7 @@ given()
 
     private int partiqlMatchCount(ObjectMapper mapper, String tableName, String attribute, String parameter)
             throws Exception {
-        var body = given()
+        String body = given()
             .header("X-Amz-Target", "DynamoDB_20120810.ExecuteStatement")
             .contentType(DYNAMODB_CONTENT_TYPE)
             .body("""
@@ -4200,7 +4200,7 @@ given()
     // ValidationException naming the operator as it was written.
     @Test
     void partiqlOrderingOperatorRejectsAnOperandTypeWithNoOrdering() {
-        var tableName = "PartiqlOrderingTable";
+        String tableName = "PartiqlOrderingTable";
 
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
@@ -4252,7 +4252,7 @@ given()
     // AttributeValue with zero or several type keys is a ValidationException.
     @Test
     void partiqlRejectsAParameterThatIsNotAWellFormedAttributeValue() {
-        var tableName = "PartiqlParameterShapeTable";
+        String tableName = "PartiqlParameterShapeTable";
 
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
@@ -4280,7 +4280,7 @@ given()
         .when().post("/")
         .then().statusCode(200);
 
-        for (var op : List.of("=", "<")) {
+        for (String op : List.of("=", "<")) {
             given()
                 .header("X-Amz-Target", "DynamoDB_20120810.ExecuteStatement")
                 .contentType(DYNAMODB_CONTENT_TYPE)

@@ -691,7 +691,7 @@ class IotTest {
         assertThat(described.certificateDescription().status()).isEqualTo(CertificateStatus.ACTIVE);
         assertThat(described.certificateDescription().certificateMode()).isEqualTo(CertificateMode.DEFAULT);
         assertThat(described.certificateDescription().validity().notAfter())
-                .isEqualTo(java.time.Instant.parse("2049-12-31T23:59:59Z"));
+                .isEqualTo(Instant.parse("2049-12-31T23:59:59Z"));
         assertThat(cert.certificateId()).matches("[0-9a-f]{64}");
         assertThat(cert.keyPair().privateKey()).startsWith("-----BEGIN RSA PRIVATE KEY-----");
 
@@ -1018,6 +1018,80 @@ class IotTest {
         iot.deleteThing(DeleteThingRequest.builder().thingName(thingName).build());
         iot.deprecateThingType(DeprecateThingTypeRequest.builder().thingTypeName(thingType).build());
         iot.deleteThingType(DeleteThingTypeRequest.builder().thingTypeName(thingType).build());
+    }
+
+    @Test
+    void thingUpdateHonoursMergeThingTypeAndExpectedVersion() {
+        // AWS keeps a deprecated thing type for five minutes before it can be deleted, so on AWS the
+        // test borrows a test thing type the account already has, as fleetIndexSearch does.
+        String thingType = TestFixtures.isRealAws() ? existingTestThingType() : "java-iot-update-type";
+        assertThat(thingType)
+                .as("on AWS the account needs an active thing type whose name contains \"test\"")
+                .isNotNull();
+        String thingName = "java-iot-update-thing";
+        try {
+            iot.deleteThing(DeleteThingRequest.builder().thingName(thingName).build());
+        } catch (Exception ignored) {
+            // Nothing is left over from an earlier run.
+        }
+        if (!TestFixtures.isRealAws()) {
+            deleteThingTypeQuietly(thingType);
+            iot.createThingType(CreateThingTypeRequest.builder().thingTypeName(thingType).build());
+        }
+        iot.createThing(CreateThingRequest.builder()
+                .thingName(thingName)
+                .attributePayload(AttributePayload.builder().attributes(Map.of("env", "java", "owner", "iot")).build())
+                .build());
+
+        iot.updateThing(UpdateThingRequest.builder()
+                .thingName(thingName)
+                .attributePayload(AttributePayload.builder()
+                        .attributes(Map.of("fw", "1.2", "owner", ""))
+                        .merge(true)
+                        .build())
+                .build());
+        DescribeThingResponse merged = iot.describeThing(DescribeThingRequest.builder().thingName(thingName).build());
+        assertThat(merged.attributes()).isEqualTo(Map.of("env", "java", "fw", "1.2"));
+
+        iot.updateThing(UpdateThingRequest.builder().thingName(thingName).thingTypeName(thingType).build());
+        DescribeThingResponse typed = iot.describeThing(DescribeThingRequest.builder().thingName(thingName).build());
+        assertThat(typed.thingTypeName()).isEqualTo(thingType);
+        assertThat(typed.attributes()).isEqualTo(Map.of("env", "java", "fw", "1.2"));
+
+        iot.updateThing(UpdateThingRequest.builder().thingName(thingName).removeThingType(true).build());
+        DescribeThingResponse untyped = iot.describeThing(DescribeThingRequest.builder().thingName(thingName).build());
+        assertThat(untyped.thingTypeName()).isNull();
+
+        assertThatThrownBy(() -> iot.updateThing(UpdateThingRequest.builder()
+                .thingName(thingName)
+                .thingTypeName(thingType)
+                .removeThingType(true)
+                .build()))
+                .isInstanceOf(InvalidRequestException.class);
+
+        long version = untyped.version();
+        assertThatThrownBy(() -> iot.deleteThing(DeleteThingRequest.builder()
+                .thingName(thingName)
+                .expectedVersion(version - 1)
+                .build()))
+                .isInstanceOf(VersionConflictException.class);
+        assertThat(iot.describeThing(DescribeThingRequest.builder().thingName(thingName).build()).version()).isEqualTo(version);
+
+        iot.deleteThing(DeleteThingRequest.builder().thingName(thingName).expectedVersion(version).build());
+        assertThatThrownBy(() -> iot.describeThing(DescribeThingRequest.builder().thingName(thingName).build()))
+                .isInstanceOf(ResourceNotFoundException.class);
+        if (!TestFixtures.isRealAws()) {
+            deleteThingTypeQuietly(thingType);
+        }
+    }
+
+    private void deleteThingTypeQuietly(String thingType) {
+        try {
+            iot.deprecateThingType(DeprecateThingTypeRequest.builder().thingTypeName(thingType).build());
+            iot.deleteThingType(DeleteThingTypeRequest.builder().thingTypeName(thingType).build());
+        } catch (Exception ignored) {
+            // Absent: nothing is left over from an earlier run.
+        }
     }
 
     @Test

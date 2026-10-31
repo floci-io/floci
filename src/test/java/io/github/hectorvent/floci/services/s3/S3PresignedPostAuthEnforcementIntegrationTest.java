@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.testutil.S3RequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -77,7 +78,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .post("/" + BUCKET)
         .then()
             .statusCode(403)
-            .body("Error.Code", org.hamcrest.Matchers.equalTo("AccessDenied"));
+            .body("Error.Code", Matchers.equalTo("AccessDenied"));
     }
 
     @Test
@@ -100,7 +101,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .post("/" + BUCKET)
         .then()
             .statusCode(403)
-            .body("Error.Code", org.hamcrest.Matchers.equalTo("SignatureDoesNotMatch"));
+            .body("Error.Code", Matchers.equalTo("SignatureDoesNotMatch"));
 
         given()
             .filter(S3RequestSigner.signedAs(LEGACY_ACCESS_KEY_ID, LEGACY_SECRET_KEY))
@@ -131,7 +132,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .post("/" + BUCKET)
         .then()
             .statusCode(403)
-            .body("Error.Code", org.hamcrest.Matchers.equalTo("SignatureDoesNotMatch"));
+            .body("Error.Code", Matchers.equalTo("SignatureDoesNotMatch"));
     }
 
     @Test
@@ -155,7 +156,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .post("/" + BUCKET)
         .then()
             .statusCode(403)
-            .body("Error.Code", org.hamcrest.Matchers.equalTo("AccessDenied"));
+            .body("Error.Code", Matchers.equalTo("AccessDenied"));
     }
 
     @Test
@@ -180,7 +181,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .post("/" + BUCKET)
         .then()
             .statusCode(403)
-            .body("Error.Code", org.hamcrest.Matchers.equalTo("AccessDenied"));
+            .body("Error.Code", Matchers.equalTo("AccessDenied"));
     }
 
     @Test
@@ -205,7 +206,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .post("/" + BUCKET)
         .then()
             .statusCode(403)
-            .body("Error.Code", org.hamcrest.Matchers.equalTo("AccessDenied"));
+            .body("Error.Code", Matchers.equalTo("AccessDenied"));
     }
 
     @Test
@@ -232,7 +233,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .post("/" + BUCKET)
         .then()
             .statusCode(403)
-            .body("Error.Code", org.hamcrest.Matchers.equalTo("AccessDenied"));
+            .body("Error.Code", Matchers.equalTo("AccessDenied"));
     }
 
     @Test
@@ -264,7 +265,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .get("/" + BUCKET + "/" + key)
         .then()
             .statusCode(200)
-            .body(org.hamcrest.Matchers.equalTo(fileContent));
+            .body(Matchers.equalTo(fileContent));
     }
 
     @Test
@@ -300,7 +301,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .post("/" + BUCKET)
         .then()
             .statusCode(403)
-            .body("Error.Code", org.hamcrest.Matchers.equalTo("AccessDenied"));
+            .body("Error.Code", Matchers.equalTo("AccessDenied"));
     }
 
     @Test
@@ -332,7 +333,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .post("/" + BUCKET)
         .then()
             .statusCode(403)
-            .body("Error.Code", org.hamcrest.Matchers.equalTo("AccessDenied"));
+            .body("Error.Code", Matchers.equalTo("AccessDenied"));
     }
 
     // --- IAM identity-policy enforcement (#3195): a genuinely-signed presigned POST from a
@@ -370,7 +371,7 @@ class S3PresignedPostAuthEnforcementIntegrationTest {
             .post("/" + BUCKET)
         .then()
             .statusCode(403)
-            .body("Error.Code", org.hamcrest.Matchers.equalTo("AccessDenied"));
+            .body("Error.Code", Matchers.equalTo("AccessDenied"));
     }
 
     @Test

@@ -26,13 +26,15 @@ public final class SigV4Canonicalization {
     /**
      * Whether {@code signature} is the one {@code secretKey} produces for this request under any of
      * {@link #canonicalUriCandidates(String) the canonical URIs} a signer could have produced for
-     * {@code rawPath}, compared in constant time.
+     * {@code rawPath}, compared in constant time. A scope with no region is a SigV4a one, checked
+     * with {@link SigV4aSignature}.
      */
     public static boolean signatureMatches(String method, String rawPath, String canonicalQueryString,
                                            String canonicalHeaders, String signedHeaders, String payloadHash,
                                            String amzDate, CredentialScope scope, String secretKey,
                                            String signature) throws Exception {
-        byte[] signingKey = SigV4RequestValidator.deriveSigningKey(
+        boolean asymmetric = scope.region() == null;
+        byte[] signingKey = asymmetric ? null : SigV4RequestValidator.deriveSigningKey(
                 secretKey, scope.date(), scope.region(), scope.service());
         for (String canonicalUri : canonicalUriCandidates(rawPath)) {
             String canonicalRequest = method + "\n"
@@ -41,10 +43,16 @@ public final class SigV4Canonicalization {
                     + canonicalHeaders + "\n"
                     + signedHeaders + "\n"
                     + payloadHash;
-            String stringToSign = ALGORITHM + "\n"
+            String stringToSign = (asymmetric ? SigV4aSignature.ALGORITHM : ALGORITHM) + "\n"
                     + amzDate + "\n"
                     + scope.credentialScope() + "\n"
                     + Digests.sha256Hex(canonicalRequest.getBytes(StandardCharsets.UTF_8));
+            if (asymmetric) {
+                if (SigV4aSignature.verify(secretKey, scope.accessKeyId(), stringToSign, signature)) {
+                    return true;
+                }
+                continue;
+            }
             String expected = SigV4RequestValidator.hexEncode(
                     SigV4RequestValidator.hmacSha256(signingKey, stringToSign));
             if (MessageDigest.isEqual(expected.getBytes(StandardCharsets.UTF_8),

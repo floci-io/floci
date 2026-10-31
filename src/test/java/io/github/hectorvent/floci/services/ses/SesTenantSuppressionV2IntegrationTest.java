@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -31,7 +32,7 @@ class SesTenantSuppressionV2IntegrationTest {
     private static final String TENANT_ADDR = "floci-sup-tenant@example.com";
     private static final String ACCOUNT_ADDR = "floci-sup-acct@example.com";
 
-    private static io.restassured.specification.RequestSpecification v2() {
+    private static RequestSpecification v2() {
         return given().contentType("application/json").header("Authorization", AUTH);
     }
 

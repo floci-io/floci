@@ -363,8 +363,8 @@ public class DataSyncService {
                 String svmArn = configuration.path("StorageVirtualMachineArn").asText("");
                 String fileSystemId = fsxFileSystemId(svmArn);
                 if (!fileSystemId.isEmpty()) {
-                    configuration.put("FsxFilesystemArn", AwsArnUtils.Arn.of("fsx", arnRegion(svmArn, region),
-                            arnAccountId(svmArn), "file-system/" + fileSystemId).toString());
+                    configuration.put("FsxFilesystemArn", AwsArnUtils.Arn.of("fsx", AwsArnUtils.regionOrDefault(svmArn, region),
+                            AwsArnUtils.accountOrDefault(svmArn, regionResolver.getAccountId()), "file-system/" + fileSystemId).toString());
                 }
             }
             case HDFS -> {
@@ -431,7 +431,7 @@ public class DataSyncService {
                     fileSystemUri(type, configuration.path("FsxFilesystemArn").asText(""), region, configuration);
             case FSX_ONTAP -> {
                 String svmArn = configuration.path("StorageVirtualMachineArn").asText("");
-                yield "fsxn://" + arnRegion(svmArn, region) + "." + fsxFileSystemId(svmArn) + "."
+                yield "fsxn://" + AwsArnUtils.regionOrDefault(svmArn, region) + "." + fsxFileSystemId(svmArn) + "."
                         + fsxStorageVirtualMachineId(svmArn) + subdirectory(configuration);
             }
             case HDFS -> {
@@ -459,7 +459,7 @@ public class DataSyncService {
         if (slash >= 0) {
             fileSystemId = fileSystemId.substring(slash + 1);
         }
-        return type.uriScheme() + "://" + arnRegion(fileSystemArn, region) + "." + fileSystemId
+        return type.uriScheme() + "://" + AwsArnUtils.regionOrDefault(fileSystemArn, region) + "." + fileSystemId
                 + subdirectory(configuration);
     }
 
@@ -497,19 +497,8 @@ public class DataSyncService {
         return segments.length > 2 ? segments[2] : "";
     }
 
-    private static String arnRegion(String arn, String fallback) {
-        String[] segments = arn.split(":", 6);
-        return segments.length > 3 && !segments[3].isEmpty() ? segments[3] : fallback;
-    }
-
-    private String arnAccountId(String arn) {
-        String[] segments = arn.split(":", 6);
-        return segments.length > 4 && !segments[4].isEmpty() ? segments[4] : regionResolver.getAccountId();
-    }
-
     private static String arnResource(String arn) {
-        String[] segments = arn.split(":", 6);
-        return segments.length > 5 ? segments[5] : "";
+        return AwsArnUtils.isArn(arn) ? AwsArnUtils.parse(arn).resource() : "";
     }
 
     // ---- Filters ----

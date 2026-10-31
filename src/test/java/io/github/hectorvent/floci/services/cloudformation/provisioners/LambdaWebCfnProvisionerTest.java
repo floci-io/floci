@@ -44,7 +44,8 @@ class LambdaWebCfnProvisionerTest {
     private static final Set<String> REVISION_ATTRIBUTES =
             Set.of("FunctionArn", "RevisionArn", "RevisionId", "State", "StateReason", "CreatedAt");
     private static final Set<String> ENDPOINT_ATTRIBUTES =
-            Set.of("FunctionArn", "EndpointArn", "DomainName", "State", "StateReason", "CreatedAt", "UpdatedAt");
+            Set.of("FunctionArn", "EndpointArn", "DomainName", "RegionalEndpoints", "State", "StateReason", "CreatedAt",
+                    "UpdatedAt");
 
     private final LambdaWebService service = mock(LambdaWebService.class);
     private final LambdaWebCfnProvisioner provisioner = new LambdaWebCfnProvisioner(service);
@@ -372,6 +373,34 @@ class LambdaWebCfnProvisionerTest {
     }
 
     @Test
+    void regionalEndpointsIsTheApiBlockInPascalCase() {
+        WebFunctionEndpoint created = endpoint("prod", "PerRegion", List.of("us-east-1", "us-west-2"));
+        created.authType = "ApplicationManaged";
+        WebFunctionEndpoint.RevisionWeight weight = new WebFunctionEndpoint.RevisionWeight();
+        weight.revisionId = "rev-aaaaa";
+        weight.weight = 100;
+        created.revisionWeights.add(weight);
+        created.scalingConfig = new WebFunctionEndpoint.ScalingConfig();
+        created.scalingConfig.maxEnvironments = 3;
+        created.regionalDomainNames.put("us-east-1", "abc.001.lambda-web.us-east-1.localhost:4566");
+        created.regionalDomainNames.put("us-west-2", "abc.001.lambda-web.us-west-2.localhost:4566");
+        when(service.createEndpoint(eq(REGION), eq("app"), any())).thenReturn(created);
+        StackResource r = resource(LambdaWebCfnProvisioner.ENDPOINT);
+
+        provisioner.provision(r, endpointProps("PerRegion"), ctx(null));
+
+        String entry = "{\"AuthType\":\"ApplicationManaged\",\"DomainName\":\"abc.001.lambda-web.%s.localhost:4566\","
+                + "\"RevisionWeights\":[{\"RevisionId\":\"rev-aaaaa\",\"Weight\":100}],"
+                + "\"ScalingConfig\":{\"MaxEnvironments\":3},\"State\":\"Active\","
+                + "\"StateReason\":\"The endpoint is active in the region.\"}";
+        assertEquals("{\"us-east-1\":" + entry.formatted("us-east-1") + ",\"us-west-2\":" + entry.formatted("us-west-2")
+                + "}", provisioner.attributeValue(LambdaWebCfnProvisioner.ENDPOINT, "RegionalEndpoints",
+                r.getAttributes().get("RegionalEndpoints")).toString());
+        assertEquals("Active", provisioner.attributeValue(LambdaWebCfnProvisioner.ENDPOINT, "State",
+                r.getAttributes().get("State")).textValue());
+    }
+
+    @Test
     void endpointWithTheSameIdentityIsUpdatedInPlace() {
         WebFunctionEndpoint existing = endpoint("prod", "HomeRegion", List.of("us-east-1"));
         existing.authType = "ApplicationManaged";
@@ -405,7 +434,14 @@ class LambdaWebCfnProvisionerTest {
         assertEquals("The endpoint is updated.", r.getAttributes().get("UpdateStatusReason"));
         assertFalse(provisioner.hasReplacementUpdate(r));
         // A failed stack update puts the prior configuration back.
+        WebFunctionEndpoint restoredEndpoint = endpoint("prod", "HomeRegion", List.of("us-east-1"));
+        restoredEndpoint.authType = "ApplicationManaged";
+        when(service.updateEndpoint(eq(REGION), eq(FN_ARN), eq("prod"), any()))
+                .thenReturn(new LambdaWebService.EndpointUpdate(updated, restoredEndpoint));
         assertTrue(provisioner.rollbackUpdate(r));
+        assertEquals("ApplicationManaged", provisioner.attributeValue(LambdaWebCfnProvisioner.ENDPOINT,
+                "RegionalEndpoints", r.getAttributes().get("RegionalEndpoints")).path("us-east-1").path("AuthType")
+                .textValue(), "the restored endpoint's regional block");
         ArgumentCaptor<JsonNode> restored = ArgumentCaptor.forClass(JsonNode.class);
         verify(service).updateEndpoint(eq(REGION), eq(FN_ARN), eq("prod"), restored.capture());
         assertEquals("ApplicationManaged", restored.getValue().path("authType").asText());

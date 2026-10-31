@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.github.hectorvent.floci.testing.SignedIamUsers;
 import io.github.hectorvent.floci.testing.ValidateSignaturesProfile;
 import io.github.hectorvent.floci.testutil.AppSyncRequestSigner;
 import io.github.hectorvent.floci.testutil.AwsRequestSigner;
@@ -53,9 +54,6 @@ class SigV4HeaderSignatureIntegrationTest {
     private static final String JSON_1_1 = "application/x-amz-json-1.1";
     private static final String FORM = "application/x-www-form-urlencoded";
     private static final String CBOR_1_1 = "application/x-amz-cbor-1.1";
-
-    private static String userAccessKeyId;
-    private static String userSecretKey;
 
     @Test
     @Order(100)
@@ -255,38 +253,34 @@ class SigV4HeaderSignatureIntegrationTest {
 
     @Test
     @Order(9)
-    void iamCreatedKeyVerifiesWithItsOwnSecretOnly() {
-        AwsRequestSigner iam = AwsRequestSigner.signedAs("test", "test", "iam");
-        given().filter(iam).contentType(FORM)
-            .body("Action=CreateUser&UserName=validate-signatures-sqs-user&Version=2010-05-08")
-        .when().post("/").then().statusCode(200);
-        XmlPath key = given().filter(iam).contentType(FORM)
-            .body("Action=CreateAccessKey&UserName=validate-signatures-sqs-user&Version=2010-05-08")
-        .when().post("/").then().statusCode(200).extract().xmlPath();
-        userAccessKeyId = key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");
-        userSecretKey = key.getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.SecretAccessKey");
+    void iamCreatedKeyVerifiesWithItsOwnSecretOnly() throws Exception {
+        URI endpoint = URI.create("http://localhost:" + RestAssured.port + "/");
+        String userName;
+        try (SignedIamUsers.User credentials = SignedIamUsers.createUser(endpoint, "validate-signatures-sqs-")) {
+            userName = credentials.name();
+            AwsRequestSigner user = credentials.signer("sqs");
+            given()
+                .filter(user)
+                .contentType(JSON_1_0)
+                .header("X-Amz-Target", "AmazonSQS.ListQueues")
+                .body("{}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
 
-        AwsRequestSigner user = AwsRequestSigner.signedAs(userAccessKeyId, userSecretKey, "sqs");
-        given()
-            .filter(user)
-            .contentType(JSON_1_0)
-            .header("X-Amz-Target", "AmazonSQS.ListQueues")
-            .body("{}")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
-
-        given()
-            .filter(user.withSecret("not-the-secret"))
-            .contentType(JSON_1_0)
-            .header("X-Amz-Target", "AmazonSQS.ListQueues")
-            .body("{}")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(403)
-            .body("__type", equalTo("InvalidSignatureException"));
+            given()
+                .filter(user.withSecret("not-the-secret"))
+                .contentType(JSON_1_0)
+                .header("X-Amz-Target", "AmazonSQS.ListQueues")
+                .body("{}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(403)
+                .body("__type", equalTo("InvalidSignatureException"));
+        }
+        SignedIamUsers.iam(endpoint, "GetUser", Map.of("UserName", userName)).then().statusCode(404);
     }
 
     @ParameterizedTest
@@ -510,20 +504,22 @@ class SigV4HeaderSignatureIntegrationTest {
 
     @Test
     @Order(19)
-    void queryGetAuthenticatesTheIssuedKeyBeforeDispatch() {
-        AwsRequestSigner signer = AwsRequestSigner.signedAs(
-                userAccessKeyId, userSecretKey, "elasticloadbalancing");
-        given().filter(signer)
-                .queryParam("Action", "DescribeLoadBalancers")
-                .queryParam("Version", "2012-06-01")
-                .get("/").then().statusCode(200)
-                .body(containsString("DescribeLoadBalancersResponse"));
-        given().filter(signer.withSecret("not-the-issued-secret"))
-                .queryParam("Action", "DescribeLoadBalancers")
-                .queryParam("Version", "2012-06-01")
-                .get("/").then().statusCode(403)
-                .contentType(containsString("xml"))
-                .body("ErrorResponse.Error.Code", equalTo("SignatureDoesNotMatch"));
+    void queryGetAuthenticatesTheIssuedKeyBeforeDispatch() throws Exception {
+        URI endpoint = URI.create("http://localhost:" + RestAssured.port + "/");
+        try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "validate-signatures-query-")) {
+            AwsRequestSigner signer = user.signer("elasticloadbalancing");
+            given().filter(signer)
+                    .queryParam("Action", "DescribeLoadBalancers")
+                    .queryParam("Version", "2012-06-01")
+                    .get("/").then().statusCode(200)
+                    .body(containsString("DescribeLoadBalancersResponse"));
+            given().filter(signer.withSecret("not-the-issued-secret"))
+                    .queryParam("Action", "DescribeLoadBalancers")
+                    .queryParam("Version", "2012-06-01")
+                    .get("/").then().statusCode(403)
+                    .contentType(containsString("xml"))
+                    .body("ErrorResponse.Error.Code", equalTo("SignatureDoesNotMatch"));
+        }
     }
 
     @Test
@@ -532,9 +528,8 @@ class SigV4HeaderSignatureIntegrationTest {
         URI endpoint = URI.create("http://localhost:" + RestAssured.port + "/");
         Map<String, String> query = Map.of(
                 "Action", "DescribeLoadBalancers", "Version", "2012-06-01");
-        AwsRequestSigner signer = AwsRequestSigner.signedAs(
-                userAccessKeyId, userSecretKey, "elasticloadbalancing");
-        try (HttpClient client = HttpClient.newHttpClient()) {
+        try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "validate-signatures-presigned-"); HttpClient client = HttpClient.newHttpClient()) {
+            AwsRequestSigner signer = user.signer("elasticloadbalancing");
             URI signed = signer.presignedUri("GET", endpoint, query, new byte[0]);
             HttpResponse<String> accepted = client.send(HttpRequest.newBuilder(signed).GET().build(),
                     HttpResponse.BodyHandlers.ofString());

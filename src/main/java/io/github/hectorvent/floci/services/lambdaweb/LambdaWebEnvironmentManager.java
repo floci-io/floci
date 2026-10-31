@@ -83,7 +83,8 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
     static final String TASK_DIR = "/var/task";
     static final String RUNTIME_DIR = "/var/runtime";
     private static final String RUNTIME_RESOURCE = "lambdaweb/index.mjs";
-    static final int MEMORY_MB = 2048;
+    // The total the process sees on AWS. Node sizes a heap flag that NODE_OPTIONS leaves out from it.
+    static final long CONTAINER_MEMORY_BYTES = 2519064576L;
     static final Duration LISTEN_TIMEOUT = Duration.ofSeconds(9);
     static final Duration SUMMARY_PERIOD = Duration.ofSeconds(60);
     static final List<String> NODE_FLAGS = List.of("--expose-gc", "--max-http-header-size", "135168",
@@ -578,7 +579,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
                 .withEntrypoint(List.of("/var/lang/bin/node"))
                 .withCmd(cmd)
                 .withWorkingDir(TASK_DIR)
-                .withMemoryMb(MEMORY_MB)
+                .withMemoryBytes(CONTAINER_MEMORY_BYTES)
                 .withLoopbackPortBinding(APP_PORT, 0)
                 .withInit()
                 .withDockerNetwork(config.services().lambda().dockerNetwork())
@@ -704,7 +705,7 @@ public class LambdaWebEnvironmentManager implements ContainerTeardown {
         env.add("AWS_LAMBDA_HTTP_ENDPOINT=0.0.0.0:" + APP_PORT);
         env.add("AWS_LAMBDA_INITIALIZATION_TYPE=native-http");
         env.add("AWS_EXECUTION_ENV=AWS_Lambda_" + revision.buildConfig.runtime + "-lite");
-        env.add("AWS_LAMBDA_FUNCTION_MEMORY_SIZE=" + MEMORY_MB);
+        env.add("AWS_LAMBDA_FUNCTION_MEMORY_SIZE=2048");
         env.add("AWS_LAMBDA_LOG_LEVEL=" + revision.serviceConfig.applicationLogLevel);
         // AWS names the metadata server as the runtime API too, and it answers the runtime paths with 404.
         env.add("AWS_LAMBDA_METADATA_API=" + metadataApi);

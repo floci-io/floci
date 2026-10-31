@@ -11,6 +11,8 @@ import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.apigatewaymanagementapi.ApiGatewayManagementApiClient;
 import software.amazon.awssdk.services.apigatewaymanagementapi.model.DeleteConnectionRequest;
@@ -251,8 +253,8 @@ class ApiGatewayV2WebSocketDataPlaneTest {
         return ApiGatewayManagementApiClient.builder()
                 .endpointOverride(mgmtEndpoint)
                 .region(TestFixtures.region())
-                .credentialsProvider(software.amazon.awssdk.auth.credentials.StaticCredentialsProvider.create(
-                        software.amazon.awssdk.auth.credentials.AwsBasicCredentials.create("test", "test")))
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create("test", "test")))
                 .build();
     }
 

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ssm;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusMock;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.MethodOrderer;
@@ -149,7 +150,7 @@ class SsmSendCommandIntegrationTest {
             .body("Command.TargetCount", equalTo(1))
             .extract().body().asString();
 
-        commandId = io.restassured.path.json.JsonPath.from(response).getString("Command.CommandId");
+        commandId = JsonPath.from(response).getString("Command.CommandId");
     }
 
     @Test
@@ -266,7 +267,7 @@ class SsmSendCommandIntegrationTest {
             .when().post("/")
             .then().statusCode(200).extract().body().asString();
 
-            String newCmdId = io.restassured.path.json.JsonPath.from(resp).getString("Command.CommandId");
+            String newCmdId = JsonPath.from(resp).getString("Command.CommandId");
 
             msgId = given()
                 .header("X-Amz-Target", "AmazonSSMMessageDeliveryService.GetMessages")
@@ -312,7 +313,7 @@ class SsmSendCommandIntegrationTest {
         .when().post("/")
         .then().statusCode(200).extract().body().asString();
 
-        String cid = io.restassured.path.json.JsonPath.from(resp).getString("Command.CommandId");
+        String cid = JsonPath.from(resp).getString("Command.CommandId");
 
         // Poll
         String msgId = given()
@@ -381,7 +382,7 @@ class SsmSendCommandIntegrationTest {
         .when().post("/")
         .then().statusCode(200).extract().body().asString();
 
-        String cid = io.restassured.path.json.JsonPath.from(resp).getString("Command.CommandId");
+        String cid = JsonPath.from(resp).getString("Command.CommandId");
 
         given()
             .header("X-Amz-Target", "AmazonSSM.CancelCommand")
@@ -444,7 +445,7 @@ class SsmSendCommandIntegrationTest {
             .body("Command.ErrorCount", equalTo(0))
             .extract().body().asString();
 
-        String cid = io.restassured.path.json.JsonPath.from(response).getString("Command.CommandId");
+        String cid = JsonPath.from(response).getString("Command.CommandId");
 
         given()
             .header("X-Amz-Target", "AmazonSSM.GetCommandInvocation")

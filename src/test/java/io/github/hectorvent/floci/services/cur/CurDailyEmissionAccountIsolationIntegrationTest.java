@@ -1,7 +1,11 @@
 package io.github.hectorvent.floci.services.cur;
 
+import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.services.cur.model.ReportDefinition;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SidecarContainersProfile;
+import io.quarkus.arc.Arc;
+import io.quarkus.arc.ManagedContext;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
@@ -9,6 +13,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 
+import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -16,6 +21,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
 
 /**
  * Verifies that the daily emission loop honors per-report owner accounts:
@@ -88,21 +94,19 @@ class CurDailyEmissionAccountIsolationIntegrationTest {
         // helper below mirrors what CurEmissionScheduler.runUnderAccount does,
         // since the @Test thread is also outside any incoming HTTP scope here
         // (the prior REST-Assured calls have terminated their request scopes).
-        Map<String, java.util.List<io.github.hectorvent.floci.services.cur.model.ReportDefinition>> grouped =
+        Map<String, List<ReportDefinition>> grouped =
                 curService.listAllReportsByAccount();
-        assertThat(grouped, org.hamcrest.Matchers.hasKey(ACCOUNT_ID));
+        assertThat(grouped, hasKey(ACCOUNT_ID));
 
-        io.quarkus.arc.ManagedContext rc = io.quarkus.arc.Arc.container().requestContext();
+        ManagedContext rc = Arc.container().requestContext();
         boolean wasActive = rc.isActive();
         if (!wasActive) {
             rc.activate();
         }
         try {
-            io.github.hectorvent.floci.core.common.RequestContext ctx =
-                    io.quarkus.arc.Arc.container()
-                            .instance(io.github.hectorvent.floci.core.common.RequestContext.class).get();
+            RequestContext ctx = Arc.container().instance(RequestContext.class).get();
             ctx.setAccountId(ACCOUNT_ID);
-            for (io.github.hectorvent.floci.services.cur.model.ReportDefinition def
+            for (ReportDefinition def
                     : grouped.get(ACCOUNT_ID)) {
                 engine.emitForCurrentMonth(def.getReportName(), def.getS3Bucket(),
                         def.getS3Prefix(), def.getS3Region(), ACCOUNT_ID);

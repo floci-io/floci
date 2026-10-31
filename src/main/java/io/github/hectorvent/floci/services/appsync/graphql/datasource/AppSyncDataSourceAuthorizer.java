@@ -166,7 +166,7 @@ public class AppSyncDataSourceAuthorizer {
             return List.of();
         }
         String endpointRegion = text(endpoint, "awsRegion");
-        String clusterArn = cluster.startsWith("arn:") ? cluster
+        String clusterArn = AwsArnUtils.looksLikeArn(cluster) ? cluster
                 : AwsArnUtils.Arn.of("rds", endpointRegion == null ? region : endpointRegion,
                         regionResolver.getAccountId(), "cluster:" + cluster).toString();
         List<Permission> permissions = new ArrayList<>();

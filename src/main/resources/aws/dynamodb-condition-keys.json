@@ -1,0 +1,1130 @@
+{
+  "source": "https://servicereference.us-east-1.amazonaws.com/v1/dynamodb/dynamodb.json",
+  "botocore": "botocore 1.43.113 (installed package)",
+  "actions": {
+    "dynamodb:AssociateTableReplica": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:BatchGetItem": [
+      "aws:ResourceTag/${TagKey}",
+      "dynamodb:Attributes",
+      "dynamodb:LeadingKeys",
+      "dynamodb:ReturnConsumedCapacity",
+      "dynamodb:Select"
+    ],
+    "dynamodb:BatchWriteItem": [
+      "aws:ResourceTag/${TagKey}",
+      "dynamodb:Attributes",
+      "dynamodb:LeadingKeys",
+      "dynamodb:ReturnConsumedCapacity"
+    ],
+    "dynamodb:ConditionCheckItem": [
+      "aws:ResourceTag/${TagKey}",
+      "dynamodb:Attributes",
+      "dynamodb:LeadingKeys",
+      "dynamodb:ReturnConsumedCapacity",
+      "dynamodb:ReturnValues"
+    ],
+    "dynamodb:CreateBackup": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:CreateGlobalTable": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:CreateGlobalTableWitness": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:CreateTable": [
+      "aws:RequestTag/${TagKey}",
+      "aws:ResourceTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "dynamodb:CreateTableReplica": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:DeleteBackup": [],
+    "dynamodb:DeleteGlobalTableWitness": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:DeleteItem": [
+      "aws:ResourceTag/${TagKey}",
+      "dynamodb:Attributes",
+      "dynamodb:EnclosingOperation",
+      "dynamodb:LeadingKeys",
+      "dynamodb:ReturnConsumedCapacity",
+      "dynamodb:ReturnValues"
+    ],
+    "dynamodb:DeleteResourcePolicy": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:DeleteTable": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:DeleteTableReplica": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:DescribeBackup": [],
+    "dynamodb:DescribeContinuousBackups": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:DescribeContributorInsights": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:DescribeEndpoints": [],
+    "dynamodb:DescribeExport": [],
+    "dynamodb:DescribeGlobalTable": [],
+    "dynamodb:DescribeGlobalTableSettings": [],
+    "dynamodb:DescribeImport": [],
+    "dynamodb:DescribeKinesisStreamingDestination": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:DescribeLimits": [],
+    "dynamodb:DescribeReservedCapacity": [],
+    "dynamodb:DescribeReservedCapacityOfferings": [],
+    "dynamodb:DescribeStream": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:DescribeTable": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:DescribeTableReplicaAutoScaling": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:DescribeTimeToLive": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:DisableKinesisStreamingDestination": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:DisassociateTableReplica": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:EnableKinesisStreamingDestination": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:ExportTableToPointInTime": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:GetAbacStatus": [],
+    "dynamodb:GetItem": [
+      "aws:ResourceTag/${TagKey}",
+      "dynamodb:Attributes",
+      "dynamodb:EnclosingOperation",
+      "dynamodb:LeadingKeys",
+      "dynamodb:ReturnConsumedCapacity",
+      "dynamodb:Select"
+    ],
+    "dynamodb:GetRecords": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:GetResourcePolicy": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:GetShardIterator": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:ImportTable": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:InjectError": [
+      "dynamodb:FisActionId",
+      "dynamodb:FisTargetArns"
+    ],
+    "dynamodb:ListBackups": [],
+    "dynamodb:ListContributorInsights": [],
+    "dynamodb:ListExports": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:ListGlobalTables": [],
+    "dynamodb:ListImports": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:ListStreams": [],
+    "dynamodb:ListTables": [],
+    "dynamodb:ListTagsOfResource": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:PartiQLDelete": [
+      "aws:ResourceTag/${TagKey}",
+      "dynamodb:Attributes",
+      "dynamodb:EnclosingOperation",
+      "dynamodb:LeadingKeys",
+      "dynamodb:ReturnValues"
+    ],
+    "dynamodb:PartiQLInsert": [
+      "aws:ResourceTag/${TagKey}",
+      "dynamodb:Attributes",
+      "dynamodb:EnclosingOperation",
+      "dynamodb:LeadingKeys"
+    ],
+    "dynamodb:PartiQLSelect": [
+      "aws:ResourceTag/${TagKey}",
+      "dynamodb:Attributes",
+      "dynamodb:EnclosingOperation",
+      "dynamodb:FullTableScan",
+      "dynamodb:LeadingKeys",
+      "dynamodb:Select"
+    ],
+    "dynamodb:PartiQLUpdate": [
+      "aws:ResourceTag/${TagKey}",
+      "dynamodb:Attributes",
+      "dynamodb:EnclosingOperation",
+      "dynamodb:LeadingKeys",
+      "dynamodb:ReturnValues"
+    ],
+    "dynamodb:PurchaseReservedCapacityOfferings": [],
+    "dynamodb:PutItem": [
+      "aws:ResourceTag/${TagKey}",
+      "dynamodb:Attributes",
+      "dynamodb:EnclosingOperation",
+      "dynamodb:LeadingKeys",
+      "dynamodb:ReturnConsumedCapacity",
+      "dynamodb:ReturnValues"
+    ],
+    "dynamodb:PutResourcePolicy": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:Query": [
+      "aws:ResourceTag/${TagKey}",
+      "dynamodb:Attributes",
+      "dynamodb:LeadingKeys",
+      "dynamodb:ReturnConsumedCapacity",
+      "dynamodb:ReturnValues",
+      "dynamodb:Select"
+    ],
+    "dynamodb:ReadDataForReplication": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:ReplicateSettings": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:RestoreTableFromAwsBackup": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:RestoreTableFromBackup": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:RestoreTableToPointInTime": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:Scan": [
+      "aws:ResourceTag/${TagKey}",
+      "dynamodb:Attributes",
+      "dynamodb:ReturnConsumedCapacity",
+      "dynamodb:ReturnValues",
+      "dynamodb:Select"
+    ],
+    "dynamodb:SearchVectors": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:StartAwsBackupJob": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:TagResource": [
+      "aws:RequestTag/${TagKey}",
+      "aws:ResourceTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "dynamodb:UntagResource": [
+      "aws:ResourceTag/${TagKey}",
+      "aws:TagKeys"
+    ],
+    "dynamodb:UpdateAbacStatus": [],
+    "dynamodb:UpdateContinuousBackups": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:UpdateContributorInsights": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:UpdateGlobalTable": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:UpdateGlobalTableSettings": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:UpdateGlobalTableVersion": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:UpdateItem": [
+      "aws:ResourceTag/${TagKey}",
+      "dynamodb:Attributes",
+      "dynamodb:EnclosingOperation",
+      "dynamodb:LeadingKeys",
+      "dynamodb:ReturnConsumedCapacity",
+      "dynamodb:ReturnValues"
+    ],
+    "dynamodb:UpdateKinesisStreamingDestination": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:UpdateTable": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:UpdateTableReplicaAutoScaling": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:UpdateTimeToLive": [
+      "aws:ResourceTag/${TagKey}"
+    ],
+    "dynamodb:WriteDataForReplication": [
+      "aws:ResourceTag/${TagKey}"
+    ]
+  },
+  "members": {
+    "BatchExecuteStatement": {
+      "dynamodb:Attributes": [
+        "Statements.*.Statement"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [
+        "Statements.*.Statement"
+      ],
+      "dynamodb:LeadingKeys": [
+        "Statements.*.Statement"
+      ],
+      "dynamodb:ReturnConsumedCapacity": [
+        "ReturnConsumedCapacity"
+      ],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "Statements.*.Statement"
+      ]
+    },
+    "BatchGetItem": {
+      "dynamodb:Attributes": [
+        "RequestItems.*.AttributesToGet",
+        "RequestItems.*.ExpressionAttributeNames",
+        "RequestItems.*.Keys",
+        "RequestItems.*.ProjectionExpression"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [
+        "RequestItems.*.Keys"
+      ],
+      "dynamodb:ReturnConsumedCapacity": [
+        "ReturnConsumedCapacity"
+      ],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "RequestItems.*.AttributesToGet",
+        "RequestItems.*.ProjectionExpression"
+      ]
+    },
+    "BatchWriteItem": {
+      "dynamodb:Attributes": [
+        "RequestItems.*.*.DeleteRequest.Key",
+        "RequestItems.*.*.PutRequest.Item"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [
+        "RequestItems.*.*.DeleteRequest.Key",
+        "RequestItems.*.*.PutRequest.Item"
+      ],
+      "dynamodb:ReturnConsumedCapacity": [
+        "ReturnConsumedCapacity"
+      ],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "CreateBackup": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "CreateGlobalTable": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "CreateTable": {
+      "dynamodb:Attributes": [
+        "Tags.*.Key"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [
+        "Tags.*.Key"
+      ],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "GlobalSecondaryIndexes.*.IndexName",
+        "LocalSecondaryIndexes.*.IndexName",
+        "VectorIndexes.*.IndexName"
+      ]
+    },
+    "DeleteBackup": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DeleteItem": {
+      "dynamodb:Attributes": [
+        "ConditionExpression",
+        "Expected",
+        "ExpressionAttributeNames",
+        "Key"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [
+        "Key"
+      ],
+      "dynamodb:ReturnConsumedCapacity": [
+        "ReturnConsumedCapacity"
+      ],
+      "dynamodb:ReturnValues": [
+        "ReturnValues"
+      ],
+      "dynamodb:Select": []
+    },
+    "DeleteResourcePolicy": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DeleteTable": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DescribeBackup": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DescribeContinuousBackups": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DescribeContributorInsights": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "IndexName"
+      ]
+    },
+    "DescribeEndpoints": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DescribeExport": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DescribeGlobalTable": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DescribeGlobalTableSettings": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DescribeImport": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DescribeKinesisStreamingDestination": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DescribeLimits": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DescribeTable": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DescribeTableReplicaAutoScaling": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DescribeTimeToLive": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "DisableKinesisStreamingDestination": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "EnableKinesisStreamingDestination": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "ExecuteStatement": {
+      "dynamodb:Attributes": [
+        "Statement"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [
+        "Statement"
+      ],
+      "dynamodb:LeadingKeys": [
+        "Statement"
+      ],
+      "dynamodb:ReturnConsumedCapacity": [
+        "ReturnConsumedCapacity"
+      ],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "Statement"
+      ]
+    },
+    "ExecuteTransaction": {
+      "dynamodb:Attributes": [
+        "TransactStatements.*.Statement"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [
+        "TransactStatements.*.Statement"
+      ],
+      "dynamodb:LeadingKeys": [
+        "TransactStatements.*.Statement"
+      ],
+      "dynamodb:ReturnConsumedCapacity": [
+        "ReturnConsumedCapacity"
+      ],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "TransactStatements.*.Statement"
+      ]
+    },
+    "ExportTableToPointInTime": {
+      "dynamodb:Attributes": [
+        "FilterSpecification.ExpressionAttributeNames",
+        "FilterSpecification.FilterExpression",
+        "FilterSpecification.KeyConditionExpression",
+        "FilterSpecification.ProjectionExpression"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [
+        "FilterSpecification.KeyConditionExpression"
+      ],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "FilterSpecification.ProjectionExpression"
+      ]
+    },
+    "GetItem": {
+      "dynamodb:Attributes": [
+        "AttributesToGet",
+        "ExpressionAttributeNames",
+        "Key",
+        "ProjectionExpression"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [
+        "Key"
+      ],
+      "dynamodb:ReturnConsumedCapacity": [
+        "ReturnConsumedCapacity"
+      ],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "AttributesToGet",
+        "ProjectionExpression"
+      ]
+    },
+    "GetResourcePolicy": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "ImportTable": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "TableCreationParameters.GlobalSecondaryIndexes.*.IndexName",
+        "TableCreationParameters.VectorIndexes.*.IndexName"
+      ]
+    },
+    "ListBackups": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "ListContributorInsights": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "ListExports": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "ListGlobalTables": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "ListImports": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "ListTables": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "ListTagsOfResource": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "PutItem": {
+      "dynamodb:Attributes": [
+        "ConditionExpression",
+        "Expected",
+        "ExpressionAttributeNames",
+        "Item"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [
+        "Item"
+      ],
+      "dynamodb:ReturnConsumedCapacity": [
+        "ReturnConsumedCapacity"
+      ],
+      "dynamodb:ReturnValues": [
+        "ReturnValues"
+      ],
+      "dynamodb:Select": []
+    },
+    "PutResourcePolicy": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "Query": {
+      "dynamodb:Attributes": [
+        "AttributesToGet",
+        "ExpressionAttributeNames",
+        "FilterExpression",
+        "KeyConditionExpression",
+        "KeyConditions",
+        "ProjectionExpression",
+        "QueryFilter"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [
+        "KeyConditionExpression",
+        "KeyConditions"
+      ],
+      "dynamodb:ReturnConsumedCapacity": [
+        "ReturnConsumedCapacity"
+      ],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "AttributesToGet",
+        "IndexName",
+        "ProjectionExpression",
+        "Select"
+      ]
+    },
+    "RestoreTableFromBackup": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "GlobalSecondaryIndexOverride.*.IndexName",
+        "LocalSecondaryIndexOverride.*.IndexName",
+        "VectorIndexOverride.*.IndexName"
+      ]
+    },
+    "RestoreTableToPointInTime": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "GlobalSecondaryIndexOverride.*.IndexName",
+        "LocalSecondaryIndexOverride.*.IndexName",
+        "VectorIndexOverride.*.IndexName"
+      ]
+    },
+    "Scan": {
+      "dynamodb:Attributes": [
+        "AttributesToGet",
+        "ExpressionAttributeNames",
+        "FilterExpression",
+        "ProjectionExpression",
+        "ScanFilter"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [
+        "ReturnConsumedCapacity"
+      ],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "AttributesToGet",
+        "IndexName",
+        "ProjectionExpression",
+        "Select"
+      ]
+    },
+    "SearchVectors": {
+      "dynamodb:Attributes": [
+        "ExpressionAttributeNames",
+        "ProjectionExpression"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [
+        "ReturnConsumedCapacity"
+      ],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "IndexName",
+        "ProjectionExpression"
+      ]
+    },
+    "TagResource": {
+      "dynamodb:Attributes": [
+        "Tags.*.Key"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [
+        "Tags.*.Key"
+      ],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "TransactGetItems": {
+      "dynamodb:Attributes": [
+        "TransactItems.*.Get.ExpressionAttributeNames",
+        "TransactItems.*.Get.Key",
+        "TransactItems.*.Get.ProjectionExpression"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [
+        "TransactItems.*.Get.Key"
+      ],
+      "dynamodb:ReturnConsumedCapacity": [
+        "ReturnConsumedCapacity"
+      ],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "TransactItems.*.Get.ProjectionExpression"
+      ]
+    },
+    "TransactWriteItems": {
+      "dynamodb:Attributes": [
+        "TransactItems.*.ConditionCheck.ConditionExpression",
+        "TransactItems.*.ConditionCheck.ExpressionAttributeNames",
+        "TransactItems.*.ConditionCheck.Key",
+        "TransactItems.*.Delete.ConditionExpression",
+        "TransactItems.*.Delete.ExpressionAttributeNames",
+        "TransactItems.*.Delete.Key",
+        "TransactItems.*.Put.ConditionExpression",
+        "TransactItems.*.Put.ExpressionAttributeNames",
+        "TransactItems.*.Put.Item",
+        "TransactItems.*.Update.ConditionExpression",
+        "TransactItems.*.Update.ExpressionAttributeNames",
+        "TransactItems.*.Update.Key",
+        "TransactItems.*.Update.UpdateExpression"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [
+        "TransactItems.*.ConditionCheck.Key",
+        "TransactItems.*.Delete.Key",
+        "TransactItems.*.Put.Item",
+        "TransactItems.*.Update.Key"
+      ],
+      "dynamodb:ReturnConsumedCapacity": [
+        "ReturnConsumedCapacity"
+      ],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "UntagResource": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "UpdateContinuousBackups": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "UpdateContributorInsights": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "IndexName"
+      ]
+    },
+    "UpdateGlobalTable": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "UpdateGlobalTableSettings": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "GlobalTableGlobalSecondaryIndexSettingsUpdate.*.IndexName",
+        "ReplicaSettingsUpdate.*.ReplicaGlobalSecondaryIndexSettingsUpdate.*.IndexName"
+      ]
+    },
+    "UpdateItem": {
+      "dynamodb:Attributes": [
+        "AttributeUpdates",
+        "ConditionExpression",
+        "Expected",
+        "ExpressionAttributeNames",
+        "Key",
+        "UpdateExpression"
+      ],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [
+        "Key"
+      ],
+      "dynamodb:ReturnConsumedCapacity": [
+        "ReturnConsumedCapacity"
+      ],
+      "dynamodb:ReturnValues": [
+        "ReturnValues"
+      ],
+      "dynamodb:Select": []
+    },
+    "UpdateKinesisStreamingDestination": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    },
+    "UpdateTable": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "GlobalSecondaryIndexUpdates.*.Create.IndexName",
+        "GlobalSecondaryIndexUpdates.*.Delete.IndexName",
+        "GlobalSecondaryIndexUpdates.*.Update.IndexName",
+        "ReplicaUpdates.*.Create.GlobalSecondaryIndexes.*.IndexName",
+        "ReplicaUpdates.*.Update.GlobalSecondaryIndexes.*.IndexName",
+        "VectorIndexUpdates.*.Create.IndexName",
+        "VectorIndexUpdates.*.Delete.IndexName"
+      ]
+    },
+    "UpdateTableReplicaAutoScaling": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": [
+        "GlobalSecondaryIndexUpdates.*.IndexName",
+        "ReplicaUpdates.*.ReplicaGlobalSecondaryIndexUpdates.*.IndexName"
+      ]
+    },
+    "UpdateTimeToLive": {
+      "dynamodb:Attributes": [],
+      "dynamodb:EnclosingOperation": [],
+      "dynamodb:FisActionId": [],
+      "dynamodb:FisTargetArns": [],
+      "dynamodb:FullTableScan": [],
+      "dynamodb:LeadingKeys": [],
+      "dynamodb:ReturnConsumedCapacity": [],
+      "dynamodb:ReturnValues": [],
+      "dynamodb:Select": []
+    }
+  },
+  "attributesToGetMinimum": 1
+}

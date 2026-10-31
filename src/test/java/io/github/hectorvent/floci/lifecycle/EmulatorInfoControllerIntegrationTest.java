@@ -11,6 +11,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.List;
@@ -69,6 +71,26 @@ class EmulatorInfoControllerIntegrationTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"/_floci/info", "/_localstack/info"})
+    void info_isTheConsoleContractManifestOnBothPaths(String path) {
+        given()
+            .when().get(path)
+            .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .body("manifest_version", equalTo(1))
+                .body("console_contract", equalTo(2))
+                .body("cloud", equalTo("aws"))
+                .body("health_url", equalTo("/_floci/health"))
+                .body("services.s3", equalTo("enabled"))
+                .body("defaults.region", equalTo("us-east-1"))
+                .body("defaults.account_id", equalTo("000000000000"))
+                .body("ui.port", equalTo(4500))
+                .body("version", equalTo(FlociVersion.current()))
+                .body("dynamodb_backend", notNullValue());
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"/_floci/init", "/_localstack/init"})
     void init_returnsLifecycleStateOnBothPaths(String path) {
         given()
@@ -122,7 +144,7 @@ class EmulatorInfoControllerIntegrationTest {
                 .extract().body().asString();
 
         X509Certificate cert = (X509Certificate) CertificateFactory.getInstance("X.509")
-                .generateCertificate(new java.io.ByteArrayInputStream(pem.getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+                .generateCertificate(new ByteArrayInputStream(pem.getBytes(StandardCharsets.US_ASCII)));
         assertTrue(cert.getBasicConstraints() >= 0, "must be a CA certificate");
         assertEquals(cert.getSubjectX500Principal(), cert.getIssuerX500Principal());
         assertEquals(pem, given().when().get("/_floci/ca.pem").then().extract().body().asString(),

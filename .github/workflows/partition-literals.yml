@@ -16,7 +16,9 @@ on:
     paths:
       - 'src/main/java/**'
       - 'src/main/resources/aws/**'
+      - 'src/main/resources/eks/addon-versions.json'
       - 'tools/partition/**'
+      - 'tools/java_sources.py'
       - 'tools/rename/**'
       - 'tools/aws/**'
       - 'tools/slr/**'
@@ -32,7 +34,9 @@ on:
     paths:
       - 'src/main/java/**'
       - 'src/main/resources/aws/**'
+      - 'src/main/resources/eks/addon-versions.json'
       - 'tools/partition/**'
+      - 'tools/java_sources.py'
       - 'tools/rename/**'
       - 'tools/aws/**'
       - 'tools/slr/**'
@@ -97,6 +101,17 @@ jobs:
 
       - name: Run generator tests
         run: make aws-data-test
+
+      - name: Check DynamoDB condition request members
+        run: make dynamodb-condition-keys-check
+
+      - name: Check IAM condition key request members
+        run: make iam-condition-keys-check
+      - name: Check S3 Control tag condition request members
+        run: make s3control-tag-condition-keys-check
+
+      - name: Check Lambda Web condition request members
+        run: make lambda-web-condition-keys-check
 
       - name: Check partitions.json against a fresh generation
         run: make aws-data-check

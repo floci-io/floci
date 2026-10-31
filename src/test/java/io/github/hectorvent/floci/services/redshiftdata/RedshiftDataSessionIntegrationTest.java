@@ -20,7 +20,9 @@ import software.amazon.awssdk.services.redshiftdata.RedshiftDataClient;
 import software.amazon.awssdk.services.redshiftdata.model.DescribeStatementResponse;
 import software.amazon.awssdk.services.redshiftdata.model.ExecuteStatementRequest;
 import software.amazon.awssdk.services.redshiftdata.model.ExecuteStatementResponse;
+import software.amazon.awssdk.services.redshiftdata.model.ListSessionsResponse;
 import software.amazon.awssdk.services.redshiftdata.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.redshiftdata.model.SessionData;
 import software.amazon.awssdk.services.redshiftdata.model.SqlParameter;
 import software.amazon.awssdk.services.redshiftdata.model.StatusString;
 import software.amazon.awssdk.services.redshiftdata.model.ValidationException;
@@ -150,6 +152,53 @@ class RedshiftDataSessionIntegrationTest {
                 .parameters(SqlParameter.builder().name("unused").value("42").build())));
         assertEquals(400, error.statusCode());
         verifyNoInteractions(factory);
+    }
+
+    @Test
+    void sdkListsSessionsWithFiltersPaginationAndClosedHistory() {
+        ExecuteStatementResponse first = data.executeStatement(r -> r.waitTimeSeconds(30).clusterIdentifier("warehouse")
+                .dbUser("admin").database("dev").sessionKeepAliveSeconds(60).sql("SELECT 1"));
+        finished(first.id());
+        ExecuteStatementResponse second = data.executeStatement(r -> r.waitTimeSeconds(30).workgroupName("analytics")
+                .database("dev").sessionKeepAliveSeconds(60).sql("SELECT 2"));
+        finished(second.id());
+
+        ListSessionsResponse page = data.listSessions(r -> r.maxResults(1));
+        assertEquals(1, page.sessions().size());
+        assertNotNull(page.nextToken());
+        ListSessionsResponse last = data.listSessions(r -> r.maxResults(1).nextToken(page.nextToken()));
+        assertEquals(1, last.sessions().size());
+        assertNotEquals(page.sessions().getFirst().sessionId(), last.sessions().getFirst().sessionId());
+        assertNull(last.nextToken());
+
+        SessionData cluster = data.listSessions(r -> r.clusterIdentifier("warehouse").database("dev")).sessions().getFirst();
+        assertEquals(first.sessionId(), cluster.sessionId());
+        assertEquals("AVAILABLE", cluster.statusAsString());
+        assertEquals("admin", cluster.dbUser());
+        assertEquals(60, cluster.sessionAliveSeconds());
+        assertNotNull(cluster.createdAt());
+        assertNotNull(cluster.updatedAt());
+        assertTrue(cluster.sessionTtl().isAfter(cluster.createdAt()));
+        assertNull(cluster.currentStatementId());
+        assertNull(cluster.workgroupName());
+        SessionData workgroup = data.listSessions(r -> r.workgroupName("analytics")).sessions().getFirst();
+        assertEquals(second.sessionId(), workgroup.sessionId());
+        assertNull(workgroup.clusterIdentifier());
+
+        try (RedshiftDataClient other = client("another-caller", Region.US_EAST_1);
+             RedshiftDataClient otherRegion = client("test", Region.EU_WEST_1)) {
+            assertTrue(other.listSessions(r -> r.maxResults(100)).sessions().isEmpty());
+            assertTrue(otherRegion.listSessions(r -> r.maxResults(100)).sessions().isEmpty());
+            assertThrows(ResourceNotFoundException.class, () -> other.listSessions(r -> r.sessionId(first.sessionId())));
+        }
+        String closed = data.executeStatement(r -> r.waitTimeSeconds(30).sessionId(first.sessionId())
+                .sessionKeepAliveSeconds(0).sql("SELECT 3")).id();
+        finished(closed);
+        assertTrue(data.listSessions(r -> r.clusterIdentifier("warehouse")).sessions().isEmpty());
+        assertEquals(first.sessionId(), data.listSessions(r -> r.status("CLOSED")).sessions().getFirst().sessionId());
+        assertEquals("CLOSED", data.listSessions(r -> r.sessionId(first.sessionId())).sessions().getFirst().statusAsString());
+        assertThrows(ValidationException.class, () -> data.listSessions(r -> r.sessionId(first.sessionId()).status("CLOSED")));
+        assertThrows(ValidationException.class, () -> data.listSessions(r -> r.maxResults(101)));
     }
 
     @Test

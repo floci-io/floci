@@ -279,7 +279,7 @@ public class RelationalDataSourceInvoker implements AppSyncDataSourceInvoker {
                     "Data source " + dataSource.getName()
                             + " has no rdsHttpEndpointConfig.dbClusterIdentifier", 500);
         }
-        if (identifier.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(identifier)) {
             return identifier;
         }
         String endpointRegion = text(endpoint.get("awsRegion"));

@@ -696,7 +696,7 @@ class CognitoLambdaTriggersTest {
                         "autoConfirmUser", true,
                         "autoVerifyEmail", true)));
 
-        var user = service.signUp(client.getClientId(), "alice", "Perm1234!",
+        CognitoUser user = service.signUp(client.getClientId(), "alice", "Perm1234!",
                 Map.of("email", "alice@example.com"), Map.of(), Map.of());
 
         assertEquals("CONFIRMED", user.getUserStatus(),
@@ -714,7 +714,7 @@ class CognitoLambdaTriggersTest {
                 any(byte[].class), any()))
                 .thenReturn(ok(Map.of("autoVerifyPhone", true)));
 
-        var user = service.signUp(client.getClientId(), "alice", "Perm1234!",
+        CognitoUser user = service.signUp(client.getClientId(), "alice", "Perm1234!",
                 Map.of("phone_number", "+15551234567"), Map.of(), Map.of());
 
         assertEquals("true", user.getAttributes().get("phone_number_verified"),
@@ -1331,7 +1331,7 @@ class CognitoLambdaTriggersTest {
         seedUser(pool, "alice", "Perm1234!");
         UserPoolClient client = createClient(pool);
 
-        org.mockito.ArgumentCaptor<byte[]> payloadCap = org.mockito.ArgumentCaptor.forClass(byte[].class);
+        ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
         when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
                 .thenReturn(ok(Map.of()));
 

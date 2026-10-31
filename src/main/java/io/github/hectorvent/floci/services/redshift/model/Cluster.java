@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshift.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -89,7 +90,25 @@ public class Cluster {
     private Integer snapshotCopyRetentionPeriod;
     private Integer snapshotCopyManualRetentionPeriod;
     private String snapshotCopyGrantName;
+    // Only snapshots taken after this instant are copied, as AWS copies from the moment copy is enabled.
+    private Instant snapshotCopyEnabledAt;
     private String snapshotScheduleIdentifier;
+    private Instant automatedSnapshotAnchor;
+    private String snapshotRegion;
+    private Integer automatedSnapshotRetentionPeriod;
+    private String snapshotGeneration;
+
+    public String getSnapshotGeneration() { return snapshotGeneration; }
+    public void setSnapshotGeneration(String value) { snapshotGeneration = value; }
+
+    public Instant getAutomatedSnapshotAnchor() { return automatedSnapshotAnchor; }
+    public void setAutomatedSnapshotAnchor(Instant value) { automatedSnapshotAnchor = value; }
+    public String getSnapshotRegion() { return snapshotRegion; }
+    public void setSnapshotRegion(String value) { snapshotRegion = value; }
+    public int getAutomatedSnapshotRetentionPeriod() {
+        return automatedSnapshotRetentionPeriod == null ? 1 : automatedSnapshotRetentionPeriod;
+    }
+    public void setAutomatedSnapshotRetentionPeriod(Integer value) { automatedSnapshotRetentionPeriod = value; }
 
     public String getSnapshotCopyDestinationRegion() { return snapshotCopyDestinationRegion; }
     public void setSnapshotCopyDestinationRegion(String snapshotCopyDestinationRegion) { this.snapshotCopyDestinationRegion = snapshotCopyDestinationRegion; }
@@ -97,6 +116,8 @@ public class Cluster {
     public void setSnapshotCopyRetentionPeriod(Integer snapshotCopyRetentionPeriod) { this.snapshotCopyRetentionPeriod = snapshotCopyRetentionPeriod; }
     public Integer getSnapshotCopyManualRetentionPeriod() { return snapshotCopyManualRetentionPeriod; }
     public void setSnapshotCopyManualRetentionPeriod(Integer snapshotCopyManualRetentionPeriod) { this.snapshotCopyManualRetentionPeriod = snapshotCopyManualRetentionPeriod; }
+    public Instant getSnapshotCopyEnabledAt() { return snapshotCopyEnabledAt; }
+    public void setSnapshotCopyEnabledAt(Instant snapshotCopyEnabledAt) { this.snapshotCopyEnabledAt = snapshotCopyEnabledAt; }
     public String getSnapshotCopyGrantName() { return snapshotCopyGrantName; }
     public void setSnapshotCopyGrantName(String snapshotCopyGrantName) { this.snapshotCopyGrantName = snapshotCopyGrantName; }
     public String getSnapshotScheduleIdentifier() { return snapshotScheduleIdentifier; }

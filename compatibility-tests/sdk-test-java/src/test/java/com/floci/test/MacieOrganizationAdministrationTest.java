@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.macie2.Macie2Client;
 import software.amazon.awssdk.services.macie2.model.CreateMemberResponse;
 
+import java.util.Map;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
@@ -38,7 +40,7 @@ class MacieOrganizationAdministrationTest {
 
             CreateMemberResponse member = administrator.createMember(request -> request
                     .account(account -> account.accountId(MEMBER_ACCOUNT).email("member@example.com"))
-                    .tags(java.util.Map.of("team", "security")));
+                    .tags(Map.of("team", "security")));
             assertThat(member.arn())
                     .isEqualTo(TestFixtures.arn("macie2", ADMIN_ACCOUNT, "member/" + MEMBER_ACCOUNT));
             assertThat(administrator.listMembers(request -> request.onlyAssociated("true")).members())

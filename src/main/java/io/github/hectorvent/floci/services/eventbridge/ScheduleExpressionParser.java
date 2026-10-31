@@ -6,6 +6,7 @@ import com.cronutils.parser.CronParser;
 import io.github.hectorvent.floci.core.common.AwsCronDefinitions;
 
 import java.time.ZonedDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -80,7 +81,7 @@ public final class ScheduleExpressionParser {
         if (next == null) {
             throw new IllegalStateException("No next fire time found for cron expression: " + expression);
         }
-        long millis = java.time.temporal.ChronoUnit.MILLIS.between(from, next);
+        long millis = ChronoUnit.MILLIS.between(from, next);
         return Math.max(millis, 1000);
     }
 

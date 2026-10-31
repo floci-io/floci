@@ -5,7 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
@@ -14,6 +13,7 @@ import io.github.hectorvent.floci.services.cloudformation.provisioners.LogsMetri
 import io.github.hectorvent.floci.services.cloudformation.provisioners.ProvisionContext;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.MetricFilter;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
+import io.github.hectorvent.floci.testing.StorageFactories;
 import jakarta.enterprise.event.Event;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -178,16 +178,10 @@ class CloudWatchLogsMetricFilterStorageReloadTest {
     }
 
     private Services open(String mode, String account) {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.defaultAccountId()).thenReturn(account);
-        when(config.storage().persistentPath()).thenReturn(directory.toString());
-        when(config.storage().wal().compactionIntervalMs()).thenReturn(3_600_000L);
+        EmulatorConfig config = StorageFactories.config(directory, account);
         when(config.services().cloudwatchlogs().maxEventsPerQuery()).thenReturn(10_000);
         when(config.services().cloudwatchlogs().maxStoredEvents()).thenReturn(10_000);
-        ServiceConfigAccess access = mock(ServiceConfigAccess.class);
-        when(access.storageMode(anyString())).thenReturn(mode);
-        when(access.storageFlushInterval(anyString())).thenReturn(3_600_000L);
-        return new Services(new StorageFactory(config, access), config, account);
+        return new Services(StorageFactories.open(config, mode), config, account);
     }
 
     private static class Services implements AutoCloseable {

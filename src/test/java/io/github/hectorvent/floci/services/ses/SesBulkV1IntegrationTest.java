@@ -18,6 +18,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
+import static io.github.hectorvent.floci.core.common.SmithyValidationErrors.notNullWithoutValue;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -41,6 +42,10 @@ class SesBulkV1IntegrationTest {
 
     private static final String MISSING_DESTINATION_2 = "1 validation error detected: Value at "
             + "'destinations.2.member.destination' failed to satisfy constraint: Member must not be null";
+
+    private static final String MEMBERS = "SendBulkTemplatedEmailResponse.SendBulkTemplatedEmailResult.Status.member";
+
+    private static final String FULL_TEMPLATE_DATA = "{\"name\":\"X\",\"team\":\"floci\"}";
 
     private static final Pattern MESSAGE_ID_PATTERN =
             Pattern.compile("<MessageId>([^<]+)</MessageId>");
@@ -133,6 +138,7 @@ class SesBulkV1IntegrationTest {
             .formParam("Action", "SendBulkTemplatedEmail")
             .formParam("Source", SENDER)
             .formParam("Template", "ghost")
+            .formParam("DefaultTemplateData", "{}")
             .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com")
         .when()
             .post("/")
@@ -280,57 +286,196 @@ class SesBulkV1IntegrationTest {
                 "expected per-entry Status=InvalidParameterValue for missing rendering variable");
     }
 
+    // Each of these fails its own entry with a 200 for the call (probed 2026-10-25).
     @ParameterizedTest(name = "{0}")
-    @MethodSource("nonObjectBulkTemplateDataPayloads")
+    @MethodSource("invalidReplacementTemplateData")
     @Order(10)
-    void sendBulkTemplatedEmail_nonObjectTemplateData_returnsInvalidParameterValue(
-            String label, String defaultTemplateData, String replacementTemplateData) {
-        RequestSpecification spec = given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
-            .formParam("Action", "SendBulkTemplatedEmail")
-            .formParam("Source", SENDER)
-            .formParam("Template", "v1-bulk-welcome")
-            .formParam("DefaultTemplateData", defaultTemplateData)
-            .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com");
-        if (replacementTemplateData != null) {
-            spec = spec.formParam("Destinations.member.1.ReplacementTemplateData", replacementTemplateData);
-        }
-        spec
+    void sendBulkTemplatedEmail_invalidReplacementTemplateData_failsOnlyThatEntry(String label, String data) {
+        bulkSpec(FULL_TEMPLATE_DATA)
+            .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com")
+            .formParam("Destinations.member.1.ReplacementTemplateData", data)
+            .formParam("Destinations.member.2.Destination.ToAddresses.member.1", "bob@example.com")
         .when()
             .post("/")
         .then()
-            .statusCode(400)
-            .body(containsString("<Code>InvalidParameterValue</Code>"));
+            .statusCode(200)
+            .body(MEMBERS + ".size()", equalTo(2))
+            .body(MEMBERS + "[0].Status", equalTo("InvalidParameterValue"))
+            .body(MEMBERS + "[0].Error", equalTo("The template data is invalid"))
+            .body(MEMBERS + "[1].Status", equalTo("Success"));
     }
 
-    static Stream<Arguments> nonObjectBulkTemplateDataPayloads() {
+    static Stream<Arguments> invalidReplacementTemplateData() {
         return Stream.of(
-                Arguments.of("array DefaultTemplateData", "[1,2,3]", null),
-                Arguments.of("scalar ReplacementTemplateData", "{\"team\":\"floci\"}", "42")
-        );
+                Arguments.of("malformed JSON", "{not json"),
+                Arguments.of("scalar", "42"));
+    }
+
+    @Test
+    @Order(11)
+    void sendBulkTemplatedEmail_invalidDefaultTemplateData_failsEveryEntry() {
+        bulkSpec("[1,2,3]")
+            .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com")
+            .formParam("Destinations.member.1.ReplacementTemplateData", FULL_TEMPLATE_DATA)
+            .formParam("Destinations.member.2.Destination.ToAddresses.member.1", "bob@example.com")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(MEMBERS + ".size()", equalTo(2))
+            .body(MEMBERS + "[0].Status", equalTo("InvalidParameterValue"))
+            .body(MEMBERS + "[0].Error", equalTo("The template data is invalid"))
+            .body(MEMBERS + "[1].Status", equalTo("InvalidParameterValue"))
+            .body(MEMBERS + "[1].Error", equalTo("The template data is invalid"));
     }
 
     @Test
     @Order(9)
-    void sendBulkTemplatedEmail_recipientsExceeds50_returnsMessageRejected() {
-        RequestSpecification spec = given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", AUTH)
-            .formParam("Action", "SendBulkTemplatedEmail")
-            .formParam("Source", SENDER)
-            .formParam("Template", "v1-bulk-welcome");
+    void sendBulkTemplatedEmail_recipientsExceed50_failsOnlyThatEntry() {
+        RequestSpecification spec = bulkSpec(FULL_TEMPLATE_DATA);
         for (int i = 1; i <= 51; i++) {
             spec = spec.formParam(
                     "Destinations.member.1.Destination.ToAddresses.member." + i,
                     "user" + i + "@example.com");
         }
         spec
+            .formParam("Destinations.member.2.Destination.ToAddresses.member.1", "bob@example.com")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(MEMBERS + ".size()", equalTo(2))
+            .body(MEMBERS + "[0].Status", equalTo("InvalidParameterValue"))
+            .body(MEMBERS + "[0].Error", equalTo("Recipient count exceeds 50."))
+            .body(MEMBERS + "[1].Status", equalTo("Success"));
+    }
+
+    @Test
+    @Order(18)
+    void sendBulkTemplatedEmail_emptyReplacementTagName_failsOnlyThatEntry() {
+        bulkSpec(FULL_TEMPLATE_DATA)
+            .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com")
+            .formParam("Destinations.member.1.ReplacementTags.member.1.Name", "")
+            .formParam("Destinations.member.1.ReplacementTags.member.1.Value", "v")
+            .formParam("Destinations.member.2.Destination.ToAddresses.member.1", "bob@example.com")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(MEMBERS + ".size()", equalTo(2))
+            .body(MEMBERS + "[0].Status", equalTo("InvalidParameterValue"))
+            .body(MEMBERS + "[0].Error", equalTo("The tag name must be specified."))
+            .body(MEMBERS + "[1].Status", equalTo("Success"));
+    }
+
+    @Test
+    @Order(19)
+    void sendBulkTemplatedEmail_emptyDefaultTagName_failsEveryEntry() {
+        bulkSpec(FULL_TEMPLATE_DATA)
+            .formParam("DefaultTags.member.1.Name", "")
+            .formParam("DefaultTags.member.1.Value", "v")
+            .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com")
+            .formParam("Destinations.member.2.Destination.ToAddresses.member.1", "bob@example.com")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(MEMBERS + ".size()", equalTo(2))
+            .body(MEMBERS + "[0].Status", equalTo("InvalidParameterValue"))
+            .body(MEMBERS + "[0].Error", equalTo("The tag name must be specified."))
+            .body(MEMBERS + "[1].Status", equalTo("InvalidParameterValue"))
+            .body(MEMBERS + "[1].Error", equalTo("The tag name must be specified."));
+    }
+
+    // Answered before the template lookup and the sender verification (probed 2026-10-27).
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("missingDefaultTemplateData")
+    @Order(20)
+    void sendBulkTemplatedEmail_missingDefaultTemplateData_rejectsTheCall(String label, String data, String source,
+                                                                          String template) {
+        RequestSpecification spec = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "SendBulkTemplatedEmail")
+            .formParam("Source", source)
+            .formParam("Template", template)
+            .formParam("Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com");
+        if (data != null) {
+            spec = spec.formParam("DefaultTemplateData", data);
+        }
+        spec
         .when()
             .post("/")
         .then()
             .statusCode(400)
-            .body(containsString("<Code>MessageRejected</Code>"));
+            .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+            .body("ErrorResponse.Error.Message", equalTo("The default template data does not exist"));
+    }
+
+    static Stream<Arguments> missingDefaultTemplateData() {
+        return Stream.of(
+                Arguments.of("absent", null, SENDER, "v1-bulk-welcome"),
+                Arguments.of("empty", "", SENDER, "v1-bulk-welcome"),
+                Arguments.of("absent, unknown template", null, SENDER, "v1-bulk-missing"),
+                Arguments.of("absent, unverified Source", null, "bulk-v1-unverified@floci.test", "v1-bulk-welcome"));
+    }
+
+    // An address syntax error wins over a blank tag name, which wins over invalid template data, which
+    // wins over the recipient count (probed 2026-10-26 and 2026-10-27).
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("entriesWithSeveralFailures")
+    @Order(21)
+    void sendBulkTemplatedEmail_entryWithSeveralFailures_answersTheFirst(String label, Map<String, String> entry,
+                                                                          String error) {
+        bulkSpec(FULL_TEMPLATE_DATA)
+            .formParams(entry)
+            .formParam("Destinations.member.2.Destination.ToAddresses.member.1", "bob@example.com")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(MEMBERS + ".size()", equalTo(2))
+            .body(MEMBERS + "[0].Status", equalTo("InvalidParameterValue"))
+            .body(MEMBERS + "[0].Error", equalTo(error))
+            .body(MEMBERS + "[1].Status", equalTo("Success"));
+    }
+
+    static Stream<Arguments> entriesWithSeveralFailures() {
+        return Stream.of(
+                Arguments.of("51 recipients, data 42 and an empty tag name",
+                        with(recipients(51, null),
+                                "Destinations.member.1.ReplacementTemplateData", "42",
+                                "Destinations.member.1.ReplacementTags.member.1.Name", "",
+                                "Destinations.member.1.ReplacementTags.member.1.Value", "v"),
+                        "The tag name must be specified."),
+                Arguments.of("51 recipients and data 42",
+                        with(recipients(51, null), "Destinations.member.1.ReplacementTemplateData", "42"),
+                        "The template data is invalid"),
+                Arguments.of("51 recipients, one malformed", recipients(51, "not-an-address"),
+                        "Missing final '@domain'"),
+                Arguments.of("data 42 and a malformed recipient",
+                        with(recipients(1, "not-an-address"), "Destinations.member.1.ReplacementTemplateData", "42"),
+                        "Missing final '@domain'"));
+    }
+
+    // The first entry's To list of count addresses, the last one replaced by last when given.
+    private static Map<String, String> recipients(int count, String last) {
+        Map<String, String> params = new HashMap<>();
+        for (int i = 1; i <= count; i++) {
+            params.put("Destinations.member.1.Destination.ToAddresses.member." + i,
+                    i == count && last != null ? last : "user" + i + "@example.com");
+        }
+        return params;
+    }
+
+    private static RequestSpecification bulkSpec(String defaultTemplateData) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "SendBulkTemplatedEmail")
+            .formParam("Source", SENDER)
+            .formParam("Template", "v1-bulk-welcome")
+            .formParam("DefaultTemplateData", defaultTemplateData);
     }
 
     @Test
@@ -452,6 +597,11 @@ class SesBulkV1IntegrationTest {
         Map<String, String> withoutDestination2 = Map.of(
                 "Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com",
                 "Destinations.member.2.ReplacementTemplateData", "{}");
+        Map<String, String> oneRecipient = Map.of(
+                "Source", SENDER,
+                "Template", "v1-bulk-welcome",
+                "DefaultTemplateData", FULL_TEMPLATE_DATA,
+                "Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com");
         Map<String, String> gapAt2 = new HashMap<>();
         for (int i = 1; i <= 51; i++) {
             if (i != 2) {
@@ -468,7 +618,35 @@ class SesBulkV1IntegrationTest {
                                 + "Member must not be null; Value at 'destinations.2.member.destination' "
                                 + "failed to satisfy constraint: Member must not be null"),
                 Arguments.of("51 indexes with a gap", with(gapAt2, "Source", SENDER, "Template", "v1-bulk-welcome"),
-                        MISSING_DESTINATION_2));
+                        MISSING_DESTINATION_2),
+                Arguments.of("replacement tag without Name",
+                        with(oneRecipient, "Destinations.member.1.ReplacementTags.member.1.Value", "v"),
+                        "1 validation error detected: "
+                                + notNullWithoutValue("destinations.1.member.replacementTags.1.member.name")),
+                // Probed 2026-10-26 from here on.
+                Arguments.of("replacement tag without Value",
+                        with(oneRecipient, "Destinations.member.1.ReplacementTags.member.1.Name", "a"),
+                        "1 validation error detected: "
+                                + notNullWithoutValue("destinations.1.member.replacementTags.1.member.value")),
+                Arguments.of("default tag without Name", with(oneRecipient, "DefaultTags.member.1.Value", "v"),
+                        "1 validation error detected: " + notNullWithoutValue("defaultTags.1.member.name")),
+                // 'template' comes first although DefaultTags precedes Template in the model.
+                Arguments.of("no Template and a default tag without Name", Map.of(
+                                "Source", SENDER,
+                                "Destinations.member.1.Destination.ToAddresses.member.1", "alice@example.com",
+                                "DefaultTags.member.1.Value", "v"),
+                        "2 validation errors detected: " + notNullWithoutValue("template") + "; "
+                                + notNullWithoutValue("defaultTags.1.member.name")),
+                Arguments.of("replacement tag at index 2 only", with(oneRecipient,
+                                "Destinations.member.1.ReplacementTags.member.2.Name", "a",
+                                "Destinations.member.1.ReplacementTags.member.2.Value", "v"),
+                        "2 validation errors detected: "
+                                + notNullWithoutValue("destinations.1.member.replacementTags.1.member.name") + "; "
+                                + notNullWithoutValue("destinations.1.member.replacementTags.1.member.value")),
+                Arguments.of("default tag at index 2 only", with(oneRecipient,
+                                "DefaultTags.member.2.Name", "a", "DefaultTags.member.2.Value", "v"),
+                        "2 validation errors detected: " + notNullWithoutValue("defaultTags.1.member.name") + "; "
+                                + notNullWithoutValue("defaultTags.1.member.value")));
     }
 
     private static Map<String, String> with(Map<String, String> params, String... namesAndValues) {

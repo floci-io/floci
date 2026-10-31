@@ -43,6 +43,15 @@ class RedshiftIamDbUserResolverTest {
     }
 
     @Test
+    void userPathContainingAColonStillYieldsTheUserName() {
+        when(accountResolver.extractAccessKeyId("auth")).thenReturn("AKIA123");
+        when(iamService.resolveCallerArn("AKIA123"))
+                .thenReturn(Optional.of("arn:aws:iam::000000000000:user/team:x/alice"));
+
+        assertEquals("IAM:alice", resolver.resolveDbUser("auth"));
+    }
+
+    @Test
     void mapsAssumedRoleArnToIamrPrefix() {
         when(accountResolver.extractAccessKeyId("auth")).thenReturn("ASIA123");
         when(iamService.resolveCallerArn("ASIA123"))

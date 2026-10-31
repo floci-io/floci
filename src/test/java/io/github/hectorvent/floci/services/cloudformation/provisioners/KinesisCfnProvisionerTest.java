@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.util.HashMap;
 import java.util.List;
@@ -195,7 +196,7 @@ class KinesisCfnProvisionerTest {
     @Test
     void aFailedCleanupOfTheRenamedStreamIsSwallowed() {
         when(kinesis.createStream(eq("new"), anyInt(), any(), anyString())).thenReturn(stream("arn", 24));
-        org.mockito.Mockito.doThrow(new RuntimeException("boom"))
+        Mockito.doThrow(new RuntimeException("boom"))
                 .when(kinesis).deleteStream("old", REGION);
 
         StackResource r = provision("""

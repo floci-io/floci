@@ -97,7 +97,8 @@ class RestLambdaAuthorizerIntegrationTest {
             default -> output.put("policyDocument", Map.of("Statement", List.of(Map.of("Effect", "Allow"))));
         }
         respond(output);
-        given().header("Authorization", "token").get(execute("allowed")).then().statusCode(500);
+        given().header("Authorization", "token").get(execute("allowed")).then().statusCode(500)
+                .header("x-amzn-ErrorType", equalTo("AuthorizerConfigurationException"));
     }
 
     @ParameterizedTest
@@ -182,7 +183,8 @@ class RestLambdaAuthorizerIntegrationTest {
     void missingTokenIsUnauthorizedWithoutInvokingLambda() throws Exception {
         configure("TOKEN", 0, "method.request.header.Authorization");
         allowAll();
-        given().get(execute("allowed")).then().statusCode(401);
+        given().get(execute("allowed")).then().statusCode(401)
+                .header("x-amzn-ErrorType", equalTo("UnauthorizedException"));
         verifyInvocation(0);
     }
 
@@ -312,9 +314,31 @@ class RestLambdaAuthorizerIntegrationTest {
                 .thenReturn(new InvokeResult(200, "Unhandled", payload, null, "lambda-error"));
         for (int i = 0; i < 2; i++) {
             given().header("Authorization", "token").get(execute("allowed"))
-                    .then().statusCode("Unauthorized".equals(message) ? 401 : 500);
+                    .then().statusCode("Unauthorized".equals(message) ? 401 : 500)
+                    .header("x-amzn-ErrorType", equalTo("Unauthorized".equals(message)
+                            ? "UnauthorizedException" : "AuthorizerConfigurationException"));
         }
         verifyInvocation(2);
+    }
+
+    @Test
+    void lambdaProxyFunctionErrorIsAnInternalServerError() throws Exception {
+        configure("TOKEN", 0, "method.request.header.Authorization");
+        allowAll();
+        String resourceId = given().get("/restapis/" + apiId + "/resources").then().extract()
+                .path("item.find { it.path == '/allowed' }.id");
+        given().contentType(ContentType.JSON).body(Map.of("type", "AWS_PROXY", "httpMethod", "POST",
+                        "uri", AUTHORIZER_URI.replace(FUNCTION, "failing-proxy")))
+                .put(methodPath(resourceId) + "/integration").then().statusCode(201);
+        when(lambdaService.invokeTarget(eq("us-east-1"), eq("arn:aws:lambda:us-east-1:000000000000:function:failing-proxy"),
+                any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new InvokeResult(200, "Unhandled",
+                        new ObjectMapper().writeValueAsBytes(Map.of("errorMessage", "boom")), null, "proxy-error"));
+        deploy("test");
+
+        given().header("Authorization", "token").get(execute("allowed"))
+                .then().statusCode(502)
+                .header("x-amzn-ErrorType", equalTo("InternalServerErrorException"));
     }
 
     private void configure(String type, int ttl, String identitySource) {

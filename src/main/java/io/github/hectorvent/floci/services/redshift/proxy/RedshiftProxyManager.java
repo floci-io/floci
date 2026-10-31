@@ -16,6 +16,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -149,6 +150,12 @@ public class RedshiftProxyManager {
         if (proxy != null) {
             proxy.updateIamRoles(iamRoleArns, defaultIamRoleArn);
         }
+    }
+
+    /** Open client connections of the proxy registered under {@code relayKey}; empty when none runs. */
+    public OptionalInt activeConnections(String relayKey) {
+        RedshiftAuthProxy proxy = proxies.get(relayKey);
+        return proxy == null ? OptionalInt.empty() : OptionalInt.of(proxy.activeConnections());
     }
 
     public synchronized void stopProxy(String relayKey) {

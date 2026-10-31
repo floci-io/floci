@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerHandle;
 import io.github.hectorvent.floci.services.lambda.launcher.ContainerLauncher;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageResolver;
+import io.github.hectorvent.floci.services.lambda.launcher.LambdaRuntimeEnv;
 import io.github.hectorvent.floci.services.lambda.launcher.LambdaRuntimeLauncher;
 import io.github.hectorvent.floci.services.lambda.model.ContainerState;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
@@ -184,16 +185,8 @@ public class KubernetesPodLauncher implements LambdaRuntimeLauncher {
 
             Optional<String> caConfigMap = ContainerCaBundle.hostPath(config).map(bundle -> ensureCaConfigMap(namespace, bundle));
 
-            ArrayList<String> env = new ArrayList<>();
-            env.add("AWS_LAMBDA_RUNTIME_API=" + addressResolver.resolve() + ":" + runtimeApiServer.getPort());
-            env.add("AWS_LAMBDA_FUNCTION_NAME=" + fn.getFunctionName());
-            env.add("AWS_LAMBDA_FUNCTION_MEMORY_SIZE=" + fn.getMemorySize());
-            env.add("AWS_LAMBDA_FUNCTION_TIMEOUT=" + fn.getTimeout());
-            env.add("AWS_LAMBDA_LOG_GROUP_NAME=" + cwLogGroup);
-            env.add("AWS_LAMBDA_LOG_STREAM_NAME=" + cwLogStream);
-            if (fn.getHandler() != null && !fn.getHandler().isBlank()) {
-                env.add("_HANDLER=" + fn.getHandler());
-            }
+            List<String> env = LambdaRuntimeEnv.of(fn,
+                    addressResolver.resolve() + ":" + runtimeApiServer.getPort(), cwLogGroup, cwLogStream);
             env.addAll(awsEnv.sdkBaselineEnv(region, Optional.empty(), addressResolver.flociBaseUrl(),
                     Optional.empty(), AwsArnUtils.accountOrDefault(fn.getFunctionArn(), config.defaultAccountId())));
             if (fn.getEnvironment() != null) {

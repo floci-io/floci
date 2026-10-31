@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.pipes;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.msk.MskService;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import org.junit.jupiter.api.BeforeEach;
@@ -145,10 +146,10 @@ class PipesKafkaConsumerManagerTest {
                 """));
 
         assertEquals("SourceParameters.ManagedStreamingKafkaParameters.TopicName is required",
-                assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+                assertThrows(AwsException.class,
                         () -> manager.resolveTopicName(managed)).getMessage());
         assertEquals("SourceParameters.SelfManagedKafkaParameters.TopicName is required",
-                assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+                assertThrows(AwsException.class,
                         () -> manager.resolveTopicName(selfManaged)).getMessage());
     }
 
@@ -163,10 +164,10 @@ class PipesKafkaConsumerManagerTest {
         selfManaged.setSourceParameters(MAPPER.createObjectNode());
 
         assertEquals("SourceParameters.ManagedStreamingKafkaParameters is required",
-                assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+                assertThrows(AwsException.class,
                         () -> manager.resolveTopicName(managed)).getMessage());
         assertEquals("SourceParameters.SelfManagedKafkaParameters is required",
-                assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+                assertThrows(AwsException.class,
                         () -> manager.resolveTopicName(selfManaged)).getMessage());
     }
 

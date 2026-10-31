@@ -98,7 +98,7 @@ class StsAssumeRoleResourceEnforcementIntegrationTest {
         given().port(baseUri.getPort()).urlEncodingEnabled(false)
                 .contentType("application/x-www-form-urlencoded")
                 .header("Authorization", auth(caller.accessKeyId(), "sts"))
-                .body("Action=AssumeRole&RoleSessionName=s&RoleArn="
+                .body("Action=AssumeRole&RoleSessionName=" + EnforcementFixtures.SESSION_NAME + "&RoleArn="
                         + URLEncoder.encode(deniedArn, StandardCharsets.UTF_8) + "%ZZ")
                 .when().post("/")
                 .then().statusCode(not(200)).body(not(containsString("AccessKeyId")));
@@ -116,7 +116,7 @@ class StsAssumeRoleResourceEnforcementIntegrationTest {
                 .header("Authorization", auth(caller.accessKeyId(), "sts"))
                 .formParam("Action", "AssumeRole")
                 .formParam("RoleArn", roleArn)
-                .formParam("RoleSessionName", "s")
+                .formParam("RoleSessionName", EnforcementFixtures.SESSION_NAME)
                 .when().post("/");
     }
 }

@@ -9,6 +9,11 @@ operator sets one image name and Floci does the rest.
 
 If you are running a console rather than writing one, see [Web Console](index.md).
 
+**Console Contract v2** extends this page for every Floci emulator (AWS, Azure, GCP, OCI) without changing
+anything below: it adds `FLOCI_INFO_URL` and the emulator manifest at `GET /_floci/info`, described in
+[The manifest](#the-manifest). The full v2 text is published with
+[floci-az](https://floci.io/floci-az/ui/console-contract/).
+
 ## The short version
 
 Three things make a console a Floci console:
@@ -39,7 +44,8 @@ credential discovery.
 | `AWS_SECRET_ACCESS_KEY` | `test` | Placeholder. |
 | `AWS_SESSION_TOKEN` | `test` | Placeholder. |
 | `PORT` | `4500` | The port the console MUST listen on. |
-| `FLOCI_CLOUD` | `aws` | Which emulator this is: `aws`, `gcp`, `az` or `oci`. |
+| `FLOCI_CLOUD` | `aws` | Which emulator this is: `aws`, `gcp`, `az` or `oci`. A console SHOULD open on this cloud and offer only it. |
+| `FLOCI_INFO_URL` | `http://floci:4566/_floci/info` | The [manifest](#the-manifest), at the address the console reaches Floci on (v2). |
 | `FLOCI_TLS_SKIP_VERIFY` | `1` | Present only when the operator opted out of TLS verification. |
 | `NODE_TLS_REJECT_UNAUTHORIZED` | `0` | The same instruction in the form a Node or Bun client honours. |
 
@@ -121,6 +127,34 @@ The health endpoint MUST NOT require authentication, and SHOULD respond within a
   watching an interstitial page the whole time.
 - The console MAY be stateless and MUST tolerate being stopped and recreated at any time: Floci
   recreates it whenever the endpoint it was built with no longer addresses the running Floci.
+
+## The manifest
+
+`GET /_floci/info` describes the running emulator (v2). A console MAY read it at `FLOCI_INFO_URL`, and MUST
+ignore keys it does not know:
+
+```json
+{
+  "manifest_version": 1,
+  "console_contract": 2,
+  "cloud": "aws",
+  "emulator": "floci",
+  "version": "2.3.0",
+  "edition": "community",
+  "original_edition": "floci-always-free",
+  "dynamodb_backend": "local",
+  "endpoint": "http://localhost:4566",
+  "health_url": "/_floci/health",
+  "tls": {"enabled": false},
+  "services": {"ec2": "enabled", "s3": "enabled"},
+  "defaults": {"region": "us-east-1", "account_id": "000000000000"},
+  "ui": {"enabled": true, "port": 4500}
+}
+```
+
+`services` lists every service as `enabled` or `disabled` (`running` and `available` in `/_floci/health`).
+`version`, `edition`, `original_edition` and `dynamodb_backend` are the keys `/_floci/info` returned before
+the manifest; they stay.
 
 ## Self-description labels
 

@@ -7,10 +7,13 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.UsageLine;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -30,7 +33,7 @@ final class GroupAggregator {
      * Builds a single {@code ResultByTime} entry covering {@code [bucketStart, bucketEnd)}
      * from the provided lines (already filtered + costed).
      */
-    ObjectNode buildResultByTime(java.time.Instant bucketStart, java.time.Instant bucketEnd,
+    ObjectNode buildResultByTime(Instant bucketStart, Instant bucketEnd,
                                   List<UsageLine> lines, List<GroupBy> groupBys, Set<String> metrics,
                                   CostSynthesizer synthesizer) {
         ObjectNode result = objectMapper.createObjectNode();
@@ -123,7 +126,7 @@ final class GroupAggregator {
     }
 
     static Set<String> parseMetrics(JsonNode node) {
-        Set<String> out = new java.util.LinkedHashSet<>();
+        Set<String> out = new LinkedHashSet<>();
         if (node.isArray()) {
             for (JsonNode v : node) {
                 if (!v.isNull() && !v.asText().isEmpty()) {
@@ -136,7 +139,7 @@ final class GroupAggregator {
 
     static String formatAmount(double amount) {
         // AWS returns amounts as decimal strings.
-        return String.format(java.util.Locale.ROOT, "%.10f", amount);
+        return String.format(Locale.ROOT, "%.10f", amount);
     }
 
     record GroupBy(String type, String key) {}

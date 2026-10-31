@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.apigateway.model.RequestValidator;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -180,7 +181,7 @@ class ApiGatewayExportIntegrationTest {
         service.createDeployment(REGION, apiId, Map.of("stageName", "xml"));
         given().get(exportPath("xml", "oas30")).then().statusCode(400).body("message", containsString("non-JSON"));
         given().get("/restapis/" + apiId + "/deployments/" + deploymentId).then().statusCode(200)
-                .body("exportSnapshot", org.hamcrest.Matchers.nullValue());
+                .body("exportSnapshot", Matchers.nullValue());
     }
 
     private String exportPath(String stage, String type) {

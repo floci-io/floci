@@ -29,7 +29,7 @@ class RedshiftDataEventPublisher {
 
     void publish(RedshiftDataStatementStore.StoredStatement statement) {
         try {
-            if (!registry.isServiceEnabled("eventbridge")) {
+            if (!registry.isServiceEnabled("events")) {
                 LOG.warnv("EventBridge disabled for statement {0}, account {1}, region {2}",
                         statement.id, statement.accountId, statement.region);
                 return;

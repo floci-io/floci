@@ -772,6 +772,83 @@ class CodeArtifactPypiDockerIntegrationTest {
     }
 
     /**
+     * Bridges to pypiserver's own root {@code /simple/} index, confirmed live: uploads a package
+     * with a mixed-case, dotted name to confirm {@code PypiserverSidecarClient#listPackages}'s own
+     * href parsing really gets back the PEP 503-normalized project name a live pypiserver root
+     * index reports, not the originally-uploaded spelling, matching what {@code
+     * CodeArtifactService}'s own {@code accountingPackageName} already normalizes pypi names to.
+     */
+    @Test
+    @Order(22)
+    void listPackagesBridgesToTheRealPypiserverRootSimpleIndex() {
+        String packageName = "List.Packages_Probe";
+        String filename = "list_packages_probe-1.0.0.tar.gz";
+        byte[] content = "list-packages-probe-bytes".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, filename, content))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+
+        JsonPath body = given().header("Authorization", AUTH)
+                .post("/v1/packages?domain=" + DOMAIN + "&repository=" + REPO + "&format=pypi")
+                .then().statusCode(200)
+                .extract().jsonPath();
+        List<String> names = body.getList("packages.package", String.class);
+        assertTrue(names.contains("list-packages-probe"), "expected list-packages-probe among " + names);
+    }
+
+    /**
+     * Closes 10-NATIVE-STATUS for pypi: a plain {@code pip install} download of an Archived
+     * version's real file must 404 against the live pypiserver sidecar, even though the file
+     * itself is still sitting there untouched. This is the one format whose download route is a
+     * bare filename with no package name or version in the URL at all (see {@code
+     * CodeArtifactPypiController#fileIdentitiesByRepo}'s own javadoc), so this also proves the
+     * identity this test's own upload recorded is what the download route resolved the coordinate
+     * from. Its own package, not {@link #PACKAGE_NAME}, so archiving it can't disturb any other
+     * ordered test in this class.
+     */
+    @Test
+    @Order(22)
+    void archivingAVersionBlocksItsRealPypiserverFileDownloadWhileLeavingTheBytesInPlace() {
+        String packageName = "archive-download-pypi-pkg";
+        String filename = "archive_download_pypi_pkg-1.0.0.tar.gz";
+        byte[] content = "archive download throwaway sdist".getBytes(StandardCharsets.UTF_8);
+        given().header("Authorization", "Bearer " + bearerToken)
+                .contentType("multipart/form-data; boundary=boundary123")
+                .body(twineUploadBody("boundary123", packageName, filename, content))
+                .post("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/")
+                .then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"],\"targetStatus\":\"Archived\"}")
+                .post("/v1/package/versions/update_status?domain=" + DOMAIN + "&repository=" + REPO
+                        + "&format=pypi&package=" + packageName)
+                .then().statusCode(200)
+                .body("successfulVersions['1.0.0'].status", equalTo("Archived"));
+
+        given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/packages/" + filename)
+                .then().statusCode(404);
+
+        // Proves the block above is this check's own override, not pypiserver having genuinely
+        // lost the file: un-archiving must make the exact same bytes fetchable again, with
+        // nothing re-uploaded in between.
+        given().contentType("application/json").header("Authorization", AUTH)
+                .body("{\"versions\":[\"1.0.0\"],\"targetStatus\":\"Published\"}")
+                .post("/v1/package/versions/update_status?domain=" + DOMAIN + "&repository=" + REPO
+                        + "&format=pypi&package=" + packageName)
+                .then().statusCode(200)
+                .body("successfulVersions['1.0.0'].status", equalTo("Published"));
+        byte[] fetchedAfterUnarchive = given().header("Authorization", "Bearer " + bearerToken)
+                .get("/codeartifact/pypi/" + DOMAIN + "/" + REPO + "/packages/" + filename)
+                .then().statusCode(200)
+                .extract().asByteArray();
+        assertEquals(new String(content, StandardCharsets.UTF_8),
+                new String(fetchedAfterUnarchive, StandardCharsets.UTF_8));
+    }
+
+    /**
      * Proves the actual mechanism, not just that {@code PypiserverSidecarManager} has a method
      * named right: {@code ContainerTeardowns.stopAll} runs every {@code ContainerTeardown} on
      * {@code /state/reset}, and this is what stops a live container.

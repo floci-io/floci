@@ -244,7 +244,8 @@ class CloudWatchMetricsQueryHandlerTest {
 
     @Test
     void describeAlarmsReturnsEmptyCompositeAndLogAlarmCollections() {
-        when(metricsService.describeAlarms(any(), any(), eq(REGION))).thenReturn(List.of());
+        when(metricsService.describeAlarms(any(CloudWatchMetricsService.AlarmFilter.class), eq(REGION)))
+                .thenReturn(new CloudWatchMetricsService.DescribedAlarms(List.of(), List.of()));
 
         String xml = (String) handler.handle("DescribeAlarms", new MultivaluedHashMap<>(), REGION).getEntity();
 

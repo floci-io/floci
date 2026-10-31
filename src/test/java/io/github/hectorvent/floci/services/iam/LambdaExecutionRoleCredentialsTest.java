@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -58,7 +59,7 @@ class LambdaExecutionRoleCredentialsTest {
         assertEquals(200, session.sessionToken().length());
         CallerContext caller = iamService.resolveCallerContext(session.accessKeyId());
         assertNotNull(caller);
-        assertEquals(java.util.List.of(POLICY), caller.identityPolicies());
+        assertEquals(List.of(POLICY), caller.identityPolicies());
         assertEquals(
                 "arn:aws:sts::000000000000:assumed-role/LambdaExecutionRole/function",
                 iamService.resolveCallerArn(session.accessKeyId()).orElseThrow());
@@ -80,7 +81,7 @@ class LambdaExecutionRoleCredentialsTest {
 
         SessionCreds session = credentials.forFunction(version).orElseThrow();
 
-        assertEquals(java.util.List.of(POLICY),
+        assertEquals(List.of(POLICY),
                 iamService.resolveCallerContext(session.accessKeyId()).identityPolicies());
     }
 

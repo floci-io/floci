@@ -14,9 +14,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -198,9 +200,9 @@ class CloudFormationUnsupportedResourceTypeTest {
 
     /** Runs {@code action} with a handler on the provisioner's logger, collecting every record. */
     private <T> T whileCapturingProvisionerLogs(List<LogRecord> collected,
-                                                java.util.function.Supplier<T> action) {
-        java.util.logging.Logger logger =
-                java.util.logging.Logger.getLogger(CfnResourceDispatcher.class.getName());
+                                                Supplier<T> action) {
+        Logger logger =
+                Logger.getLogger(CfnResourceDispatcher.class.getName());
         Level original = logger.getLevel();
         Handler handler = new Handler() {
             @Override

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -33,7 +34,7 @@ class S3LeadingSlashKeyIntegrationTest {
 
     private static final String BUCKET = "test-slash-bucket";
 
-    @io.quarkus.test.common.http.TestHTTPResource("/")
+    @TestHTTPResource("/")
     URI baseUri;
 
     // --- Setup ---

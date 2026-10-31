@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.route53.model.AliasTarget;
 import io.github.hectorvent.floci.services.route53.model.HealthCheck;
 import io.github.hectorvent.floci.services.route53.model.HealthCheckConfig;
+import io.github.hectorvent.floci.services.route53.model.HostedZone;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
@@ -72,6 +73,45 @@ class Route53ServiceTest {
         RegionResolver regionResolver = new RegionResolver("us-east-1", ACCOUNT);
 
         return new Route53Service(storageFactory, config, regionResolver, ec2Service);
+    }
+
+    @Test
+    void hostedZonesByNameUseReversedLabelsAndFilteredPageBoundary() {
+        Route53Service service = newService();
+        String firstId = service.createHostedZone("z.example.com.", "byname-first", null, null).zone().getId();
+        String lastId = service.createHostedZone("a.other.com.", "byname-last", null, null).zone().getId();
+
+        assertEquals(List.of(firstId, lastId), service.listHostedZonesByName(null, 0).stream()
+                .map(HostedZone::getId).toList());
+
+        Route53Pagination.Page<HostedZone> lastPage = service.pageHostedZonesByName("a.other.com.", null, 1);
+        assertEquals(List.of(lastId), lastPage.items().stream().map(HostedZone::getId).toList());
+        assertFalse(lastPage.isTruncated());
+    }
+
+    @Test
+    void reversedDnsNameKeepsAnEscapedDotInsideItsLabel() {
+        assertEquals("com.example.a\\.b.", Route53Service.reversedDnsName("a\\.b.example.com."));
+    }
+
+    @Test
+    void hostedZonesByNameContinueAcrossNamesAndLimitPagesToOneHundred() {
+        Route53Service service = newService();
+        for (int i = 0; i < 101; i++) {
+            service.createHostedZone("zone-" + String.format("%03d", i) + ".example.test.",
+                    "byname-cap-" + i, null, null);
+        }
+
+        assertEquals(101, service.listHostedZonesByName(null, 0).size());
+        Route53Pagination.Page<HostedZone> firstPage = service.pageHostedZonesByName(null, null, 200);
+        assertEquals(100, firstPage.items().size());
+        assertTrue(firstPage.isTruncated());
+
+        HostedZone nextZone = firstPage.nextItem();
+        Route53Pagination.Page<HostedZone> secondPage = service.pageHostedZonesByName(
+                nextZone.getName(), nextZone.getId(), 200);
+        assertEquals(List.of(nextZone.getId()), secondPage.items().stream().map(HostedZone::getId).toList());
+        assertFalse(secondPage.isTruncated());
     }
 
     @ParameterizedTest(name = "configured names ending in {0}")
@@ -266,6 +306,56 @@ class Route53ServiceTest {
         rrs.setSetIdentifier(setIdentifier);
         rrs.setWeight(weight);
         return rrs;
+    }
+
+    @Test
+    void recordOutsideTheHostedZoneIsRejected() {
+        Route53Service service = newService();
+        String zoneId = service.createHostedZone("datacite.org.", "ref-outside", null, null).zone().getId();
+
+        AwsException e = assertThrows(AwsException.class, () -> service.changeResourceRecordSets(zoneId,
+                List.of(change("CREATE", aRecord("_lovable.strategy", 300, "1.2.3.4"))), null));
+        assertEquals("InvalidChangeBatch", e.getErrorCode());
+        assertEquals("RRSet with DNS name _lovable.strategy. is not permitted in zone datacite.org.", e.getMessage());
+        AwsException suffixOnly = assertThrows(AwsException.class, () -> service.changeResourceRecordSets(zoneId,
+                List.of(change("CREATE", aRecord("notdatacite.org", 300, "1.2.3.4"))), null));
+        assertEquals("InvalidChangeBatch", suffixOnly.getErrorCode());
+    }
+
+    @Test
+    void recordInsideTheHostedZoneIsAcceptedRegardlessOfCaseDotOrWildcard() {
+        Route53Service service = newService();
+        String zoneId = service.createHostedZone("datacite.org.", "ref-inside", null, null).zone().getId();
+
+        service.changeResourceRecordSets(zoneId, List.of(
+                change("CREATE", aRecord("WWW.DataCite.org", 300, "1.2.3.4")),
+                change("CREATE", aRecord("*.blog.datacite.org.", 300, "1.2.3.5")),
+                change("CREATE", aRecord("datacite.org", 300, "1.2.3.6"))), null);
+
+        assertEquals(5, service.listResourceRecordSets(zoneId, null, null, 0).size());
+    }
+
+    @Test
+    void rootHostedZoneAcceptsAnyRecordName() {
+        Route53Service service = newService();
+        String zoneId = service.createHostedZone(".", "ref-root", null, null).zone().getId();
+
+        service.changeResourceRecordSets(zoneId,
+                List.of(change("CREATE", aRecord("www.example.", 300, "1.2.3.4"))), null);
+
+        assertEquals(3, service.listResourceRecordSets(zoneId, null, null, 0).size());
+    }
+
+    @Test
+    void zoneCheckFoldsOnlyAsciiLettersLikeRecordIdentity() {
+        Route53Service service = newService();
+        String zoneId = service.createHostedZone("k.example.", "ref-kelvin", null, null).zone().getId();
+
+        service.changeResourceRecordSets(zoneId,
+                List.of(change("CREATE", aRecord("www.K.example.", 300, "1.2.3.4"))), null);
+        AwsException e = assertThrows(AwsException.class, () -> service.changeResourceRecordSets(zoneId,
+                List.of(change("CREATE", aRecord("www.\u212A.example.", 300, "1.2.3.5"))), null));
+        assertEquals("InvalidChangeBatch", e.getErrorCode());
     }
 
     @Test

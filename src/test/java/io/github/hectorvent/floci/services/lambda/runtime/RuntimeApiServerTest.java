@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.PendingInvocation;
 import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonObject;
+import io.vertx.ext.web.RoutingContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,7 +20,9 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
@@ -28,6 +31,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -52,7 +57,7 @@ class RuntimeApiServerTest {
         server = new RuntimeApiServer(vertx, port);
         server.start().get(5, TimeUnit.SECONDS);
         httpClient = HttpClient.newBuilder()
-                .connectTimeout(java.time.Duration.ofSeconds(5))
+                .connectTimeout(Duration.ofSeconds(5))
                 .build();
         scheduler = Executors.newSingleThreadScheduledExecutor();
     }
@@ -573,12 +578,12 @@ class RuntimeApiServerTest {
      * sendInvocation subsequently ran.
      */
     private void installGatedServerWithDispatchObservation(
-            java.util.function.Consumer<io.vertx.ext.web.RoutingContext> afterEnqueueLockReleased,
-            java.util.function.Consumer<String> onSendInvocation) throws Exception {
+            Consumer<RoutingContext> afterEnqueueLockReleased,
+            Consumer<String> onSendInvocation) throws Exception {
         server.stop().get(5, TimeUnit.SECONDS);
         port = findFreePort();
         server = new RuntimeApiServer(vertx, port) {
-            @Override protected void afterEnqueueDispatchLockReleased(io.vertx.ext.web.RoutingContext waitingCtx) {
+            @Override protected void afterEnqueueDispatchLockReleased(RoutingContext waitingCtx) {
                 afterEnqueueLockReleased.accept(waitingCtx);
             }
             @Override protected void beforeSendInvocationWrite(String requestId) {
@@ -747,8 +752,8 @@ class RuntimeApiServerTest {
         // A disconnect between the two reads made neither branch fire and stranded
         // the invocation in inFlight until the function deadline. Force that
         // interleaving by ending the ctx from afterEnqueueDispatchLockReleased.
-        java.util.concurrent.atomic.AtomicInteger sendInvocationCalls =
-                new java.util.concurrent.atomic.AtomicInteger();
+        AtomicInteger sendInvocationCalls =
+                new AtomicInteger();
         installGatedServerWithDispatchObservation(
                 waitingCtx -> {
                     if (!waitingCtx.response().ended()) {
@@ -784,16 +789,16 @@ class RuntimeApiServerTest {
         // .end() flush strands the invocation in inFlight. Force it by ending the
         // parked ctx from beforeSendInvocationWrite; assert onFailure requeues +
         // clears inFlight.
-        java.util.concurrent.atomic.AtomicReference<io.vertx.ext.web.RoutingContext> parkedCtx =
-                new java.util.concurrent.atomic.AtomicReference<>();
+        AtomicReference<RoutingContext> parkedCtx =
+                new AtomicReference<>();
         server.stop().get(5, TimeUnit.SECONDS);
         port = findFreePort();
         server = new RuntimeApiServer(vertx, port) {
-            @Override protected void afterEnqueueDispatchLockReleased(io.vertx.ext.web.RoutingContext waitingCtx) {
+            @Override protected void afterEnqueueDispatchLockReleased(RoutingContext waitingCtx) {
                 parkedCtx.set(waitingCtx);
             }
             @Override protected void beforeSendInvocationWrite(String requestId) {
-                io.vertx.ext.web.RoutingContext ctx = parkedCtx.get();
+                RoutingContext ctx = parkedCtx.get();
                 if (ctx != null && !ctx.response().ended()) {
                     ctx.response().setStatusCode(500).end();
                 }
@@ -910,7 +915,7 @@ class RuntimeApiServerTest {
         // request-line get through, proving the listener is up.
         HttpRequest probe = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
-                .timeout(java.time.Duration.ofMillis(500))
+                .timeout(Duration.ofMillis(500))
                 .GET()
                 .build();
         CompletableFuture<HttpResponse<String>> probeFuture =
@@ -1328,21 +1333,21 @@ class RuntimeApiServerTest {
     @Test
     @Timeout(15)
     void notifyExtensionsOfInvoke_requeuedOnWriteFailure_deliversInvokeExactlyOnce() throws Exception {
-        java.util.concurrent.atomic.AtomicInteger sendInvocationCalls =
-                new java.util.concurrent.atomic.AtomicInteger();
-        java.util.concurrent.atomic.AtomicReference<io.vertx.ext.web.RoutingContext> parkedCtx =
-                new java.util.concurrent.atomic.AtomicReference<>();
+        AtomicInteger sendInvocationCalls =
+                new AtomicInteger();
+        AtomicReference<RoutingContext> parkedCtx =
+                new AtomicReference<>();
         server.stop().get(5, TimeUnit.SECONDS);
         port = findFreePort();
         server = new RuntimeApiServer(vertx, port) {
-            @Override protected void afterEnqueueDispatchLockReleased(io.vertx.ext.web.RoutingContext waitingCtx) {
+            @Override protected void afterEnqueueDispatchLockReleased(RoutingContext waitingCtx) {
                 parkedCtx.set(waitingCtx);
             }
             @Override protected void beforeSendInvocationWrite(String requestId) {
                 if (sendInvocationCalls.incrementAndGet() == 1) {
                     // Simulate the client disconnecting between dispatch commitment and the
                     // write landing, forcing sendInvocation()'s write to fail.
-                    io.vertx.ext.web.RoutingContext ctx = parkedCtx.get();
+                    RoutingContext ctx = parkedCtx.get();
                     if (ctx != null && !ctx.response().ended()) {
                         ctx.response().setStatusCode(500).end();
                     }
@@ -1729,7 +1734,7 @@ class RuntimeApiServerTest {
 
         HttpResponse<String> next = httpClient.send(HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
-                        .timeout(java.time.Duration.ofSeconds(5))
+                        .timeout(Duration.ofSeconds(5))
                         .GET().build(),
                 HttpResponse.BodyHandlers.ofString());
         assertEquals(204, next.statusCode(),
@@ -1910,7 +1915,7 @@ class RuntimeApiServerTest {
         HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/event/next"))
                         .header("Lambda-Extension-Identifier", survivorId)
-                        .timeout(java.time.Duration.ofSeconds(5))
+                        .timeout(Duration.ofSeconds(5))
                         .GET().build(),
                 HttpResponse.BodyHandlers.ofString());
 
@@ -1976,13 +1981,13 @@ class RuntimeApiServerTest {
     @Timeout(60)
     void extensionShutdown_racedAgainstStop_isNeverOrphaned() throws Exception {
         int iterations = 500;
-        java.util.concurrent.atomic.AtomicInteger totalDelivered = new java.util.concurrent.atomic.AtomicInteger();
+        AtomicInteger totalDelivered = new AtomicInteger();
 
         for (int i = 0; i < iterations; i++) {
             // A fresh client per iteration — the port may be reused from an earlier iteration, and
             // a shared client's connection pool could otherwise hand back a stale pooled
             // connection to that iteration's now-closed server.
-            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
+            HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
             int freshPort = findFreePort();
             RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
             freshServer.start().get(5, TimeUnit.SECONDS);
@@ -2048,7 +2053,7 @@ class RuntimeApiServerTest {
     @Timeout(60)
     void enqueueRacedAgainstStop_alwaysCompletesResultFuture() throws Exception {
         int iterations = 500;
-        java.util.concurrent.ThreadLocalRandom random = java.util.concurrent.ThreadLocalRandom.current();
+        ThreadLocalRandom random = ThreadLocalRandom.current();
 
         for (int i = 0; i < iterations; i++) {
             int freshPort = findFreePort();
@@ -2094,7 +2099,7 @@ class RuntimeApiServerTest {
         int iterations = 300;
 
         for (int i = 0; i < iterations; i++) {
-            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
+            HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
             int freshPort = findFreePort();
             RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
             freshServer.start().get(5, TimeUnit.SECONDS);
@@ -2143,7 +2148,7 @@ class RuntimeApiServerTest {
         int iterations = 300;
 
         for (int i = 0; i < iterations; i++) {
-            HttpClient client = HttpClient.newBuilder().connectTimeout(java.time.Duration.ofSeconds(5)).build();
+            HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
             int freshPort = findFreePort();
             RuntimeApiServer freshServer = new RuntimeApiServer(vertx, freshPort);
             freshServer.start().get(5, TimeUnit.SECONDS);
@@ -2224,7 +2229,7 @@ class RuntimeApiServerTest {
 
     private String registerExtensionOn(HttpClient client, int targetPort, String name, String... events)
             throws Exception {
-        String eventsJson = String.join(",", java.util.Arrays.stream(events).map(e -> "\"" + e + "\"").toList());
+        String eventsJson = String.join(",", Arrays.stream(events).map(e -> "\"" + e + "\"").toList());
         HttpResponse<String> response = client.send(HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + targetPort + "/2020-01-01/extension/register"))
                         .header("Lambda-Extension-Name", name)
@@ -2273,7 +2278,7 @@ class RuntimeApiServerTest {
     }
 
     private String registerExtension(String name, String... events) throws Exception {
-        String eventsJson = String.join(",", java.util.Arrays.stream(events).map(e -> "\"" + e + "\"").toList());
+        String eventsJson = String.join(",", Arrays.stream(events).map(e -> "\"" + e + "\"").toList());
         HttpResponse<String> response = httpClient.send(HttpRequest.newBuilder()
                         .uri(URI.create("http://localhost:" + port + "/2020-01-01/extension/register"))
                         .header("Lambda-Extension-Name", name)

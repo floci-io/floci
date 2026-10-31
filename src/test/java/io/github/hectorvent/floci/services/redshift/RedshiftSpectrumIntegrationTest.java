@@ -377,7 +377,7 @@ class RedshiftSpectrumIntegrationTest {
             // Phase 1 does not support bind-parameterized Spectrum predicates (SpectrumQueryClassifier
             // rejects them), so this exercises Extended Query with a literal predicate: pgjdbc still
             // uses Parse/Bind/Describe/Execute/Sync for PreparedStatement even without a '?'.
-            try (java.sql.PreparedStatement prepared = connection.prepareStatement(
+            try (PreparedStatement prepared = connection.prepareStatement(
                     "SELECT id, name FROM analytics_ext.events WHERE id = 1")) {
                 // Forces pgjdbc to send Describe('S', ...) (Describe Statement, not just Describe
                 // Portal): the response must be ParameterDescription followed by RowDescription/NoData.
@@ -417,7 +417,7 @@ class RedshiftSpectrumIntegrationTest {
             // Fetch size only becomes a real server-side cursor (Execute with maxRows > 0, answered
             // with PortalSuspended) in pgjdbc when autoCommit is off.
             connection.setAutoCommit(false);
-            try (java.sql.PreparedStatement prepared = connection.prepareStatement(
+            try (PreparedStatement prepared = connection.prepareStatement(
                     "SELECT id, name FROM analytics_fetch.events")) {
                 prepared.setFetchSize(2);
                 List<Integer> ids = new ArrayList<>();

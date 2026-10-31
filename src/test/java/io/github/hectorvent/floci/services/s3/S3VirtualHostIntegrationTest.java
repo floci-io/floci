@@ -371,7 +371,7 @@ class S3VirtualHostIntegrationTest {
     @Order(22)
     void createMultipartUploadViaVirtualHostWithXForwardedHost() {
         String key = "multipart-xfh.zip";
-        io.restassured.response.Response response = given()
+        Response response = given()
             .header("Host", "floci:4566")
             .header("X-Forwarded-Host", HOST)
             .header("Authorization",

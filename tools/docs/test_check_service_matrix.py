@@ -139,7 +139,7 @@ Another link to [SQS](sqs.md).
 ])
 def test_non_tabular_action_counts_follow_dispatcher(slug, handler):
     root = c._repo_root()
-    source = root / "src/main/java/io/github/hectorvent/floci/services" / handler
+    source = root / c.PACKAGE_DIR / "services" / handler
     expected = len(set(c.regen_action_docs.extract_switch_actions(
         source.read_text(encoding="utf-8")
     )))
@@ -156,8 +156,8 @@ def test_non_tabular_action_count_tracks_new_dispatch_cases(tmp_path):
     )
     registry = tmp_path / "tools/docs/service_matrix.yaml"
     registry.parent.mkdir(parents=True)
-    registry.write_text("action_count_sources:\n  glue: src/GlueJsonHandler.java\n", encoding="utf-8")
-    handler = tmp_path / "src/GlueJsonHandler.java"
+    registry.write_text("action_count_sources:\n  glue: services/GlueJsonHandler.java\n", encoding="utf-8")
+    handler = tmp_path / c.PACKAGE_DIR / "services/GlueJsonHandler.java"
     handler.parent.mkdir(parents=True)
     handler.write_text(
         'case "CreateTable" -> create();\ncase "GetTable" -> get();\n',
@@ -189,8 +189,8 @@ def test_generated_action_table_requires_numeric_matrix_count(tmp_path):
     )
     registry = tmp_path / "tools/docs/service_matrix.yaml"
     registry.parent.mkdir(parents=True)
-    registry.write_text("action_count_sources:\n  glue: src/GlueJsonHandler.java\n", encoding="utf-8")
-    handler = tmp_path / "src/GlueJsonHandler.java"
+    registry.write_text("action_count_sources:\n  glue: services/GlueJsonHandler.java\n", encoding="utf-8")
+    handler = tmp_path / c.PACKAGE_DIR / "services/GlueJsonHandler.java"
     handler.parent.mkdir(parents=True)
     handler.write_text('case "CreateTable" -> create();\ncase "GetTable" -> get();\n', encoding="utf-8")
 
@@ -225,11 +225,11 @@ def test_non_tabular_action_source_cannot_be_removed_silently(tmp_path):
     registry = tmp_path / "tools/docs/service_matrix.yaml"
     registry.parent.mkdir(parents=True)
     registry.write_text(
-        "action_count_sources:\n  glue: src/GlueJsonHandler.java\n"
-        "  ec2: src/Ec2QueryHandler.java\n", encoding="utf-8",
+        "action_count_sources:\n  glue: services/GlueJsonHandler.java\n"
+        "  ec2: services/Ec2QueryHandler.java\n", encoding="utf-8",
     )
-    source_dir = tmp_path / "src"
-    source_dir.mkdir()
+    source_dir = tmp_path / c.PACKAGE_DIR / "services"
+    source_dir.mkdir(parents=True)
     (source_dir / "GlueJsonHandler.java").write_text(
         'case "CreateTable" -> create();\ncase "GetTable" -> get();\n', encoding="utf-8",
     )
@@ -239,7 +239,7 @@ def test_non_tabular_action_source_cannot_be_removed_silently(tmp_path):
 
     required = frozenset({"glue", "ec2"})
     assert c.extract_action_counts(tmp_path, required) == {"glue": 2, "ec2": 1}
-    registry.write_text("action_count_sources:\n  glue: src/GlueJsonHandler.java\n", encoding="utf-8")
+    registry.write_text("action_count_sources:\n  glue: services/GlueJsonHandler.java\n", encoding="utf-8")
     with pytest.raises(ValueError, match="required action count source\\(s\\) missing: ec2"):
         c.extract_action_counts(tmp_path, required)
 
@@ -354,3 +354,20 @@ def test_find_unlinked_pages_ignores_non_markdown(tmp_path):
     (tmp_path / "ssm.md").write_text("# page\n")
     (tmp_path / "diagram.svg").write_text("<svg/>")
     assert c.find_unlinked_pages(tmp_path, slugs={"ssm"}, facet_pages=set()) == []
+
+
+def test_action_count_source_paths_are_relative_to_the_package_root(tmp_path):
+    matrix = tmp_path / "docs/services/index.md"
+    matrix.parent.mkdir(parents=True)
+    matrix.write_text(
+        "## Service Matrix\n\n| [Glue](glue.md) | Query | JSON | 2 |\n\n## Common Setup\n",
+        encoding="utf-8",
+    )
+    registry = tmp_path / "tools/docs/service_matrix.yaml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        f"action_count_sources:\n  glue: {c.PACKAGE_DIR}/services/GlueJsonHandler.java\n", encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="relative to"):
+        c.extract_action_counts(tmp_path)

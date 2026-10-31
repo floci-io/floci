@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigatewayv2;
 
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
 import io.restassured.path.json.JsonPath;
@@ -28,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class WebSocketStageVariablesTest {
 
-    @io.quarkus.test.common.http.TestHTTPResource("/")
+    @TestHTTPResource("/")
     URI baseUri;
 
     private static String wsApiId;

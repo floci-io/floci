@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
+import org.hamcrest.Matchers;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -150,8 +151,8 @@ class SesConfigurationSetSuppressionOptionsV2IntegrationTest {
                 .put("/v2/email/configuration-sets/" + CS + "/suppression-options")
         .then()
                 .statusCode(400)
-                .body("__type", org.hamcrest.Matchers.equalTo("BadRequestException"))
-                .body("message", org.hamcrest.Matchers.equalTo(
+                .body("__type", Matchers.equalTo("BadRequestException"))
+                .body("message", Matchers.equalTo(
                         "Reason INVALID is invalid, must be one of [BOUNCE, COMPLAINT]."));
     }
 

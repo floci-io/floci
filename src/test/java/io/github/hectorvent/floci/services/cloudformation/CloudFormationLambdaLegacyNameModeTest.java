@@ -14,6 +14,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Function;
+import java.util.logging.Handler;
+import java.util.logging.LogRecord;
+import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -144,12 +147,12 @@ class CloudFormationLambdaLegacyNameModeTest {
 
     /** Collects the messages LambdaCfnProvisioner logs while {@code action} runs. */
     private List<String> provisionerLogMessages(Runnable action) {
-        java.util.logging.Logger logger =
-                java.util.logging.Logger.getLogger(LambdaCfnProvisioner.class.getName());
+        Logger logger =
+                Logger.getLogger(LambdaCfnProvisioner.class.getName());
         List<String> messages = new CopyOnWriteArrayList<>();
-        java.util.logging.Handler handler = new java.util.logging.Handler() {
+        Handler handler = new Handler() {
             @Override
-            public void publish(java.util.logging.LogRecord logRecord) {
+            public void publish(LogRecord logRecord) {
                 messages.add(logRecord.getMessage());
             }
 

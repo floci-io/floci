@@ -26,6 +26,10 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+
 /**
  * AWS Lambda MicroVMs control plane ("Lambda Microvms", apiVersion 2025-09-09,
  * rest-json, signs as {@code lambda}). Images with a converging version/build
@@ -460,8 +464,7 @@ public class LambdaMicrovmsController {
      * cannot name a different region than the resource it describes.
      */
     private static String regionOf(String arn) {
-        String[] parts = arn.split(":", 5);
-        return parts.length > 3 ? parts[3] : "";
+        return AwsArnUtils.regionOrDefault(arn, "");
     }
 
     /**
@@ -513,10 +516,10 @@ public class LambdaMicrovmsController {
         return node;
     }
 
-    private ObjectNode catalogNode(java.util.List<java.util.Map<String, Object>> entries) {
+    private ObjectNode catalogNode(List<Map<String, Object>> entries) {
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("items");
-        for (java.util.Map<String, Object> entry : entries) {
+        for (Map<String, Object> entry : entries) {
             ObjectNode node = items.addObject();
             entry.forEach((k, v) -> {
                 if (v instanceof Double d) {
@@ -530,7 +533,7 @@ public class LambdaMicrovmsController {
         return root;
     }
 
-    private double epoch(java.time.Instant instant) {
+    private double epoch(Instant instant) {
         return instant.toEpochMilli() / 1000.0;
     }
 

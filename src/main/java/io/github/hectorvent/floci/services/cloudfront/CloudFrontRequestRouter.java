@@ -10,6 +10,7 @@ import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Pattern;
 
@@ -331,7 +332,7 @@ public final class CloudFrontRequestRouter {
             }
             host = host.substring(0, colon);
         }
-        String lowerHost = host.toLowerCase(java.util.Locale.ROOT);
+        String lowerHost = host.toLowerCase(Locale.ROOT);
         int endpointMarker = -1;
         for (String marker : new String[] {".s3-website-", ".s3-website.", ".s3.", ".s3-"}) {
             endpointMarker = Math.max(endpointMarker, lowerHost.lastIndexOf(marker));

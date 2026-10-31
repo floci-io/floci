@@ -8,6 +8,7 @@ import jakarta.inject.Inject;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.StreamSupport;
 
 /** Evaluates the federated principal and SAML action in a role trust policy. */
 @ApplicationScoped
@@ -69,7 +70,7 @@ public class SAMLTrustPolicyEvaluator {
                 String claimName = colon < 0 ? key : key.substring(colon + 1);
                 List<String> actual = claims.getOrDefault(claimName, List.of());
                 List<String> expected = entry.getValue().isArray()
-                        ? java.util.stream.StreamSupport.stream(entry.getValue().spliterator(), false)
+                        ? StreamSupport.stream(entry.getValue().spliterator(), false)
                                 .filter(JsonNode::isTextual).map(JsonNode::asText).toList()
                         : entry.getValue().isTextual() ? List.of(entry.getValue().asText()) : List.of();
                 if (expected.isEmpty() || actual.isEmpty()) {

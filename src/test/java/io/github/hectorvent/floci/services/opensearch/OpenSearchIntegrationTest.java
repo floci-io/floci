@@ -64,6 +64,38 @@ class OpenSearchIntegrationTest {
     }
 
     @Test
+    @Order(2)
+    void createAndDescribeNewEngineVersions() {
+        for (String version : new String[] {"OpenSearch_3.7", "OpenSearch_1.1", "OpenSearch_1.0"}) {
+            String domainName = "version-" + version.substring("OpenSearch_".length()).replace('.', '-');
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("{\"DomainName\":\"" + domainName + "\",\"EngineVersion\":\"" + version + "\"}")
+            .when()
+                .post("/2021-01-01/opensearch/domain")
+            .then()
+                .statusCode(200)
+                .body("DomainStatus.EngineVersion", equalTo(version));
+
+            given()
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .get("/2021-01-01/opensearch/domain/" + domainName)
+            .then()
+                .statusCode(200)
+                .body("DomainStatus.EngineVersion", equalTo(version));
+
+            given()
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .delete("/2021-01-01/opensearch/domain/" + domainName)
+            .then()
+                .statusCode(200);
+        }
+    }
+
+    @Test
     @Order(3)
     void describeDomain() {
         given()
@@ -228,6 +260,7 @@ class OpenSearchIntegrationTest {
         .then()
             .statusCode(200)
             .body("Versions", not(empty()))
+            .body("Versions", hasItems("OpenSearch_3.7", "OpenSearch_1.1", "OpenSearch_1.0"))
             .body("Versions", hasItem("OpenSearch_3.6"))
             .body("Versions", hasItem("OpenSearch_2.19"))
             .body("Versions", hasItem("OpenSearch_2.11"))

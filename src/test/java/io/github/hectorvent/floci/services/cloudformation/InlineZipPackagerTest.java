@@ -4,6 +4,7 @@ import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -36,7 +37,7 @@ class InlineZipPackagerTest {
                 if (entry.getName().equals(entryName)) {
                     ByteArrayOutputStream out = new ByteArrayOutputStream();
                     zis.transferTo(out);
-                    return out.toString(java.nio.charset.StandardCharsets.UTF_8);
+                    return out.toString(StandardCharsets.UTF_8);
                 }
             }
         }

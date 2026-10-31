@@ -37,11 +37,13 @@ import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.export.SnapshotExportSource;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterAutomatedBackup;
 import io.github.hectorvent.floci.services.rds.model.DbClusterEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbClusterSnapshot;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
+import io.github.hectorvent.floci.services.rds.model.DbInstanceAutomatedBackup;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceScalingChanges;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceSettings;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
@@ -94,6 +96,7 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * Core RDS business logic — DB instances, clusters, and parameter groups.
@@ -183,7 +186,13 @@ public class RdsService implements Resettable, ResourceProvider {
     private StorageBackend<String, RdsEvent> events = new InMemoryStorage<>();
     private final StorageBackend<String, EventSubscription> eventSubscriptions;
     private final StorageBackend<String, DbClusterEndpoint> clusterEndpoints;
+    /** The account's ModifyCertificates override per Region, by CA identifier. */
+    private final StorageBackend<String, String> certificateOverrides;
     private final StorageBackend<String, DbProxyEndpoint> proxyEndpoints;
+    /** Retained and replicated instance backups, by Region and the source's DbiResourceId. */
+    private final StorageBackend<String, DbInstanceAutomatedBackup> instanceAutomatedBackups;
+    /** Retained cluster backups, by Region and the cluster's DbClusterResourceId. */
+    private final StorageBackend<String, DbClusterAutomatedBackup> clusterAutomatedBackups;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
     // CreateDBCluster/CreateDBInstance register the new resource only after the
@@ -285,6 +294,12 @@ public class RdsService implements Resettable, ResourceProvider {
                 new TypeReference<Map<String, String>>() {});
         this.events = storageFactory.create("rds", "rds-events.json",
                 new TypeReference<Map<String, RdsEvent>>() {});
+        this.certificateOverrides = storageFactory.create("rds", "rds-certificate-overrides.json",
+                new TypeReference<Map<String, String>>() {});
+        this.instanceAutomatedBackups = storageFactory.create("rds", "rds-instance-automated-backups.json",
+                new TypeReference<Map<String, DbInstanceAutomatedBackup>>() {});
+        this.clusterAutomatedBackups = storageFactory.create("rds", "rds-cluster-automated-backups.json",
+                new TypeReference<Map<String, DbClusterAutomatedBackup>>() {});
     }
 
     RdsService(RdsContainerManager containerManager,
@@ -417,13 +432,16 @@ public class RdsService implements Resettable, ResourceProvider {
         this.proxyTargetGroups = proxyTargetGroups;
         this.taggingService = taggingService;
         this.metricsService = null;
-        this.globalClusters = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
-        this.snapshots = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
+        this.globalClusters = new InMemoryStorage<>();
+        this.snapshots = new InMemoryStorage<>();
         this.clusterSnapshots = new InMemoryStorage<>();
-        this.snapshotData = new io.github.hectorvent.floci.core.storage.InMemoryStorage<>();
+        this.snapshotData = new InMemoryStorage<>();
         this.eventSubscriptions = new InMemoryStorage<>();
+        this.certificateOverrides = new InMemoryStorage<>();
         this.clusterEndpoints = new InMemoryStorage<>();
         this.proxyEndpoints = new InMemoryStorage<>();
+        this.instanceAutomatedBackups = new InMemoryStorage<>();
+        this.clusterAutomatedBackups = new InMemoryStorage<>();
     }
 
     public void restorePersistedRuntime() {
@@ -700,7 +718,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                           Boolean publiclyAccessible, Integer requestedPort,
                                           Boolean deletionProtection) {
         String effectiveRegion = effectiveRegion(region);
-        String dbiResourceId = "db-" + java.util.UUID.randomUUID().toString()
+        String dbiResourceId = "db-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
         String dbInstanceArn = regionResolver.buildArn("rds", effectiveRegion, "db:" + id);
         if (findInstanceForScope(currentAccountId(), effectiveRegion, id) != null
@@ -743,6 +761,8 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         DbInstanceSettings.validateMonitoringPairOnCreate(
                 settings.monitoringInterval(), settings.monitoringRoleArn());
+        resolvedSettings = resolvedSettings.withCaCertificateIdentifier(
+                resolveCaCertificate(settings.caCertificateIdentifier(), effectiveRegion));
         boolean mock = config.services().rds().mock();
         if (masterUsername == null || masterUsername.isBlank()) {
             masterUsername = "root";
@@ -983,7 +1003,7 @@ public class RdsService implements Resettable, ResourceProvider {
         snapshot.setOptionGroupName(instance.getOptionGroupName());
         snapshot.setStorageEncrypted(instance.isStorageEncrypted());
         snapshot.setKmsKeyId(instance.getKmsKeyId());
-        snapshot.setTags(tags != null ? new java.util.LinkedHashMap<>(tags) : new java.util.LinkedHashMap<>());
+        snapshot.setTags(tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>());
         snapshot.setDbSnapshotArn(regionResolver.buildArn("rds", effectiveRegion, "snapshot:" + snapshotId));
 
         String sqlDump = "";
@@ -1152,7 +1172,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String sourceId = sourceIdentifier;
         String sourceRegion = targetRegion;
         String sourceAccount = currentAccountId();
-        if (sourceIdentifier != null && sourceIdentifier.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(sourceIdentifier)) {
             try {
                 AwsArnUtils.Arn parsed = AwsArnUtils.parse(sourceIdentifier);
                 // Both regions must belong to the ARN's partition; changing its prefix must
@@ -1247,6 +1267,17 @@ public class RdsService implements Resettable, ResourceProvider {
                                                        List<String> vpcSecurityGroupIds,
                                                        Map<String, String> tags, String region,
                                                        Integer requestedPort, Boolean iamEnabled, String storageType) {
+        return restoreDbInstanceFromDbSnapshot(instanceId, snapshotId, dbInstanceClass, availabilityZone,
+                multiAz, dbSubnetGroupName, vpcSecurityGroupIds, tags, region, requestedPort, iamEnabled,
+                storageType, null);
+    }
+
+    public DbInstance restoreDbInstanceFromDbSnapshot(String instanceId, String snapshotId, String dbInstanceClass,
+                                                       String availabilityZone, boolean multiAz, String dbSubnetGroupName,
+                                                       List<String> vpcSecurityGroupIds,
+                                                       Map<String, String> tags, String region,
+                                                       Integer requestedPort, Boolean iamEnabled, String storageType,
+                                                       String caCertificateIdentifier) {
         String effectiveRegion = effectiveRegion(region);
         DbSnapshot snapshot = Optional.ofNullable(findSnapshotForScope(currentAccountId(), effectiveRegion, snapshotId))
                 .orElseThrow(() -> new AwsException("DBSnapshotNotFound", "DBSnapshot " + snapshotId + " not found.", 404));
@@ -1261,7 +1292,8 @@ public class RdsService implements Resettable, ResourceProvider {
         // Use the parameters from the snapshot
         DbInstanceSettings restoreSettings = new DbInstanceSettings(
                 snapshot.isStorageEncrypted(), snapshot.getKmsKeyId(), null, null, null, null)
-                .withStorageType(storageType != null ? storageType : snapshot.getStorageType());
+                .withStorageType(storageType != null ? storageType : snapshot.getStorageType())
+                .withCaCertificateIdentifier(caCertificateIdentifier);
         DbInstance instance = createDbInstance(instanceId, snapshot.getEngine().name().toLowerCase(), snapshot.getEngineVersion(),
                 snapshot.getMasterUsername(), snapshot.getMasterPassword(),
                 snapshot.getDbName(), targetClass, snapshot.getAllocatedStorage(), Boolean.TRUE.equals(iamEnabled),
@@ -1316,25 +1348,26 @@ public class RdsService implements Resettable, ResourceProvider {
         if (targetId == null || targetId.isBlank()) {
             throw new AwsException("InvalidParameterValue", "TargetDBInstanceIdentifier is required.", 400);
         }
-        DbInstance source = resolvePointInTimeSource(request, effectiveRegion);
+        Instant now = Instant.now();
+        PointInTimeSource pointInTimeSource = resolvePointInTimeSource(request, effectiveRegion, now);
+        DbInstance source = pointInTimeSource.instance();
         String sourceId = source.getDbInstanceIdentifier();
         if (source.getDbClusterIdentifier() != null && !source.getDbClusterIdentifier().isBlank()) {
             throw new AwsException("InvalidParameterCombination",
                     "DB instance " + sourceId + " belongs to DB cluster " + source.getDbClusterIdentifier()
                     + ". Use RestoreDBClusterToPointInTime to restore the cluster.", 400);
         }
-        if (source.getStatus() != DbInstanceStatus.AVAILABLE) {
+        if (pointInTimeSource.live() && source.getStatus() != DbInstanceStatus.AVAILABLE) {
             throw new AwsException("InvalidDBInstanceState",
                     "DB instance " + sourceId + " is not in available state.", 400);
         }
-        if (source.getBackupRetentionPeriod() <= 0) {
+        if (pointInTimeSource.live() && source.getBackupRetentionPeriod() <= 0) {
             throw new AwsException("PointInTimeRestoreNotEnabled",
                     "Point-in-time restore is not enabled for DB instance " + sourceId
                     + " because its backup retention period is 0.", 400);
         }
-        Instant now = Instant.now();
         requireRestorableTime(request.restoreTime(), request.useLatestRestorableTime(),
-                earliestRestorableTime(source, now), now, "RestoreTime");
+                pointInTimeSource.earliest(), pointInTimeSource.latest(), "RestoreTime");
         if (source.getEngine() != DatabaseEngine.POSTGRES) {
             // CreateDBSnapshot draws the same line: the copy of the source is pg_dumpall based.
             throw new AwsException("InvalidDBInstanceState",
@@ -1363,7 +1396,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 source.isStorageEncrypted() ? source.getKmsKeyId() : null,
                 request.backupRetentionPeriod(), request.preferredBackupWindow(), null,
                 request.copyTagsToSnapshot()).withStorageType(
-                        request.storageType() != null ? request.storageType() : source.getStorageType());
+                        request.storageType() != null ? request.storageType() : source.getStorageType())
+                .withCaCertificateIdentifier(request.caCertificateIdentifier());
         DbInstance instance = createDbInstance(targetId, engineParam, source.getEngineVersion(),
                 source.getMasterUsername(), source.getMasterPassword(), dbName,
                 firstNonBlank(request.dbInstanceClass(), source.getDbInstanceClass()),
@@ -1383,11 +1417,16 @@ public class RdsService implements Resettable, ResourceProvider {
             try {
                 // Without both containers there is nothing to copy from or into, and reporting the
                 // restore as done would hand back an instance without the source's data.
-                if (source.getContainerId() == null || instance.getContainerId() == null) {
+                if ((pointInTimeSource.live() && source.getContainerId() == null)
+                        || instance.getContainerId() == null) {
                     throw new IllegalStateException("the source or target database container is not running");
                 }
-                String sqlDump = containerManager.createPostgresSnapshot(
-                        source.getContainerId(), source.getMasterUsername());
+                if (!pointInTimeSource.live() && pointInTimeSource.savedData() == null) {
+                    throw new IllegalStateException("the automated backup holds no saved data");
+                }
+                String sqlDump = pointInTimeSource.live()
+                        ? containerManager.createPostgresSnapshot(source.getContainerId(), source.getMasterUsername())
+                        : pointInTimeSource.savedData();
                 containerManager.restorePostgresSnapshot(
                         instance.getContainerId(), instance.getMasterUsername(), sqlDump);
                 if (renameDatabase) {
@@ -1417,10 +1456,19 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * The source of a point in time restore. A live instance can be named by identifier or by its
-     * DbiResourceId; an automated backups ARN names retained backups, which Floci does not keep.
+     * What a point in time restore copies: a live instance, or the instance a retained backup
+     * kept, with the window it can be restored to and, for a retained backup, its saved data.
      */
-    private DbInstance resolvePointInTimeSource(PointInTimeRestoreRequest request, String region) {
+    private record PointInTimeSource(DbInstance instance, boolean live, Instant earliest, Instant latest,
+                                     String savedData) {}
+
+    /**
+     * The source of a point in time restore. A live instance can be named by identifier or by its
+     * DbiResourceId; a deleted one by the DbiResourceId or ARN of the automated backup it kept. A
+     * replicated backup's ARN names its live source in the source Region.
+     */
+    private synchronized PointInTimeSource resolvePointInTimeSource(PointInTimeRestoreRequest request,
+                                                                    String region, Instant now) {
         String byId = request.sourceDbInstanceIdentifier();
         String byResourceId = request.sourceDbiResourceId();
         String byBackupsArn = request.sourceDbInstanceAutomatedBackupsArn();
@@ -1431,16 +1479,41 @@ public class RdsService implements Resettable, ResourceProvider {
                     + "SourceDBInstanceAutomatedBackupsArn.", 400);
         }
         if (!isBlank(byId)) {
-            return getDbInstance(byId, region);
+            return livePointInTimeSource(getDbInstance(byId, region), now);
         }
-        if (!isBlank(byResourceId)) {
-            return listDbInstancesByDbiResourceIds(List.of(byResourceId), region).stream()
+        DbInstanceAutomatedBackup backup = instanceBackupsIn(region).stream()
+                .filter(b -> isBlank(byResourceId)
+                        ? byBackupsArn.equals(b.getDbInstanceAutomatedBackupsArn())
+                        : byResourceId.equalsIgnoreCase(b.getInstance().getDbiResourceId()))
+                .findFirst()
+                .orElse(null);
+        if (backup == null && !isBlank(byResourceId)) {
+            // An instance without backups has no automated backup, but is still named by its ID.
+            DbInstance live = listDbInstancesByDbiResourceIds(List.of(byResourceId), region).stream()
                     .findFirst()
                     .orElseThrow(() -> new AwsException("DBInstanceNotFound",
                             "DB instance with resource ID " + byResourceId + " not found.", 404));
+            return livePointInTimeSource(live, now);
         }
-        throw new AwsException("DBInstanceAutomatedBackupNotFound",
-                "Automated backups " + byBackupsArn + " not found.", 404);
+        if (backup == null) {
+            throw instanceBackupNotFound(byBackupsArn);
+        }
+        return switch (backup.getStatus()) {
+            case DbInstanceAutomatedBackup.ACTIVE -> livePointInTimeSource(backup.getInstance(), now);
+            // The live source's data, checked against the replica's own window.
+            case DbInstanceAutomatedBackup.REPLICATING -> new PointInTimeSource(
+                    getDbInstance(backup.getInstance().getDbInstanceIdentifier(), backup.getRegion()), true,
+                    backup.getEarliestTime(), backup.getLatestTime(), null);
+            default -> new PointInTimeSource(backup.getInstance(), false, backup.getEarliestTime(),
+                    backup.getLatestTime(), backup.isDataSaved()
+                            ? snapshotData.get(instanceBackupDataKey(region, backup.getInstance().getDbiResourceId()))
+                                    .orElse(null)
+                            : null);
+        };
+    }
+
+    private static PointInTimeSource livePointInTimeSource(DbInstance instance, Instant now) {
+        return new PointInTimeSource(instance, true, earliestRestorableTime(instance, now), now, null);
     }
 
     /**
@@ -1467,6 +1540,360 @@ public class RdsService implements Resettable, ResourceProvider {
 
     private static boolean isBlank(String value) {
         return value == null || value.isBlank();
+    }
+
+    // ── Automated backups ─────────────────────────────────────────────────────
+
+    /** AWS's default retention for replicated automated backups, in days. */
+    static final int DEFAULT_REPLICATED_BACKUP_RETENTION_DAYS = 7;
+    /** Floci does not model a cluster's backup retention period; one day is the AWS default. */
+    static final int CLUSTER_BACKUP_RETENTION_DAYS = 1;
+
+    public record AutomatedBackupPage<T>(List<T> backups, String marker) {}
+
+    /**
+     * An instance's automated backups and their replicas in this Region: each live standalone
+     * instance with backups on has an {@code active} one, and retained and replicated ones are
+     * stored. Aurora instances are left out, since their backups belong to the cluster.
+     */
+    public synchronized AutomatedBackupPage<DbInstanceAutomatedBackup> describeDbInstanceAutomatedBackups(
+            String region, String dbiResourceId, String instanceId, String backupsArn,
+            List<String> statuses, List<String> instanceIds, List<String> resourceIds,
+            Integer maxRecords, String marker) {
+        String effectiveRegion = effectiveRegion(region);
+        requireValidMaxRecords(maxRecords);
+        List<DbInstanceAutomatedBackup> matching = instanceBackupsIn(effectiveRegion).stream()
+                .filter(b -> isBlank(dbiResourceId)
+                        || dbiResourceId.equalsIgnoreCase(b.getInstance().getDbiResourceId()))
+                .filter(b -> isBlank(instanceId)
+                        || instanceId.equalsIgnoreCase(b.getInstance().getDbInstanceIdentifier()))
+                .filter(b -> isBlank(backupsArn) || backupsArn.equals(b.getDbInstanceAutomatedBackupsArn()))
+                .filter(b -> statuses.isEmpty() || statuses.contains(b.getStatus()))
+                .filter(b -> instanceIds.isEmpty()
+                        || instanceIds.contains(b.getInstance().getDbInstanceIdentifier())
+                        || instanceIds.contains(b.getInstance().getDbInstanceArn()))
+                .filter(b -> resourceIds.isEmpty()
+                        || resourceIds.contains(b.getInstance().getDbiResourceId())
+                        || resourceIds.contains(b.getDbInstanceAutomatedBackupsArn()))
+                .sorted(Comparator.comparing((DbInstanceAutomatedBackup b) -> b.getInstance().getDbInstanceIdentifier())
+                        .thenComparing(DbInstanceAutomatedBackup::getDbInstanceAutomatedBackupsArn))
+                .toList();
+        if (matching.isEmpty() && !(isBlank(dbiResourceId) && isBlank(instanceId) && isBlank(backupsArn))) {
+            throw instanceBackupNotFound(firstNonBlank(dbiResourceId, firstNonBlank(instanceId, backupsArn)));
+        }
+        OffsetPage<DbInstanceAutomatedBackup> page = offsetPage(matching, maxRecords, marker);
+        return new AutomatedBackupPage<>(page.items(), page.marker());
+    }
+
+    /** Deletes a retained or stopped replicated backup, named by its source's DbiResourceId or its ARN. */
+    public synchronized DbInstanceAutomatedBackup deleteDbInstanceAutomatedBackup(
+            String region, String dbiResourceId, String backupsArn) {
+        String effectiveRegion = effectiveRegion(region);
+        if (isBlank(dbiResourceId) == isBlank(backupsArn)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Specify exactly one of DbiResourceId and DBInstanceAutomatedBackupsArn.", 400);
+        }
+        DbInstanceAutomatedBackup backup = instanceBackupsIn(effectiveRegion).stream()
+                .filter(b -> isBlank(dbiResourceId)
+                        ? backupsArn.equals(b.getDbInstanceAutomatedBackupsArn())
+                        : dbiResourceId.equalsIgnoreCase(b.getInstance().getDbiResourceId()))
+                .findFirst()
+                .orElseThrow(() -> instanceBackupNotFound(firstNonBlank(dbiResourceId, backupsArn)));
+        if (!DbInstanceAutomatedBackup.RETAINED.equals(backup.getStatus())) {
+            throw new AwsException("InvalidDBInstanceAutomatedBackupState",
+                    "Automated backup " + backup.getDbInstanceAutomatedBackupsArn() + " is " + backup.getStatus()
+                    + ", and only a retained automated backup can be deleted.", 400);
+        }
+        String dbi = backup.getInstance().getDbiResourceId();
+        instanceAutomatedBackups.delete(dbResourceKey(effectiveRegion, dbi));
+        snapshotData.delete(instanceBackupDataKey(effectiveRegion, dbi));
+        backup.setStatus("deleting");
+        return backup;
+    }
+
+    /**
+     * Starts replicating a source instance's automated backups from its Region to this one. The
+     * replica is metadata only: no data crosses Regions, so a restore from it copies the source's
+     * current data while the source lives.
+     */
+    public synchronized DbInstanceAutomatedBackup startDbInstanceAutomatedBackupsReplication(
+            String region, String sourceInstanceArn, Integer backupRetentionPeriod, String kmsKeyId) {
+        String effectiveRegion = effectiveRegion(region);
+        DbInstance source = requireReplicationSource(sourceInstanceArn, effectiveRegion);
+        String sourceId = source.getDbInstanceIdentifier();
+        if (!isBlank(source.getDbClusterIdentifier())) {
+            throw new AwsException("InvalidDBInstanceState",
+                    "DB instance " + sourceId + " belongs to DB cluster " + source.getDbClusterIdentifier()
+                    + ", and automated backup replication is not supported for it.", 400);
+        }
+        if (source.getStatus() != DbInstanceStatus.AVAILABLE) {
+            throw new AwsException("InvalidDBInstanceState",
+                    "DB instance " + sourceId + " is not in available state.", 400);
+        }
+        if (source.getBackupRetentionPeriod() <= 0) {
+            throw new AwsException("InvalidDBInstanceState",
+                    "Automated backups are not enabled for DB instance " + sourceId + ".", 400);
+        }
+        int retention = backupRetentionPeriod != null ? backupRetentionPeriod : DEFAULT_REPLICATED_BACKUP_RETENTION_DAYS;
+        if (retention < 1 || retention > 35) {
+            throw new AwsException("InvalidParameterValue",
+                    "BackupRetentionPeriod must be between 1 and 35.", 400);
+        }
+        String key = dbResourceKey(effectiveRegion, source.getDbiResourceId());
+        // A replica kept as retained after a stop is replaced, so replication can start again.
+        if (instanceAutomatedBackups.get(key)
+                .filter(b -> DbInstanceAutomatedBackup.REPLICATING.equals(b.getStatus())).isPresent()) {
+            throw new AwsException("InvalidDBInstanceAutomatedBackupState",
+                    "DB instance " + sourceId + " is already replicating to " + effectiveRegion + ".", 400);
+        }
+        Instant now = Instant.now();
+        DbInstanceAutomatedBackup replica = new DbInstanceAutomatedBackup();
+        replica.setDbInstanceAutomatedBackupsArn(instanceBackupArn(effectiveRegion, source.getDbiResourceId()));
+        replica.setStatus(DbInstanceAutomatedBackup.REPLICATING);
+        replica.setInstance(source);
+        replica.setRegion(regionFromArn(source.getDbInstanceArn()));
+        replica.setEarliestTime(now);
+        replica.setLatestTime(now);
+        replica.setBackupRetentionPeriod(retention);
+        replica.setKmsKeyId(isBlank(kmsKeyId) ? null : kmsKeyId);
+        instanceAutomatedBackups.put(key, replica);
+        source.getAutomatedBackupReplicationArns().add(replica.getDbInstanceAutomatedBackupsArn());
+        putInstanceForScope(currentAccountId(), replica.getRegion(), sourceId, source);
+        LOG.infov("Replicating automated backups of DB instance {0} to {1}", sourceId, effectiveRegion);
+        return replica;
+    }
+
+    /** Stops replicating a source's backups to this Region; the replica is kept as retained. */
+    public synchronized DbInstanceAutomatedBackup stopDbInstanceAutomatedBackupsReplication(
+            String region, String sourceInstanceArn) {
+        String effectiveRegion = effectiveRegion(region);
+        DbInstance source = requireReplicationSource(sourceInstanceArn, effectiveRegion);
+        String key = dbResourceKey(effectiveRegion, source.getDbiResourceId());
+        DbInstanceAutomatedBackup replica = instanceAutomatedBackups.get(key)
+                .filter(b -> DbInstanceAutomatedBackup.REPLICATING.equals(b.getStatus()))
+                .orElseThrow(() -> new AwsException("InvalidDBInstanceState",
+                        "DB instance " + source.getDbInstanceIdentifier()
+                        + " is not replicating to the current region.", 400));
+        source.getAutomatedBackupReplicationArns().remove(replica.getDbInstanceAutomatedBackupsArn());
+        putInstanceForScope(currentAccountId(), replica.getRegion(), source.getDbInstanceIdentifier(), source);
+        replica.setStatus(DbInstanceAutomatedBackup.RETAINED);
+        replica.setLatestTime(Instant.now());
+        instanceAutomatedBackups.put(key, replica);
+        LOG.infov("Stopped replicating automated backups of DB instance {0} to {1}",
+                source.getDbInstanceIdentifier(), effectiveRegion);
+        return replica;
+    }
+
+    /** Retained cluster backups in this Region. A live cluster's backups are not listed, as in AWS. */
+    public synchronized AutomatedBackupPage<DbClusterAutomatedBackup> describeDbClusterAutomatedBackups(
+            String region, String clusterResourceId, String clusterId, List<String> statuses,
+            List<String> clusterIds, List<String> resourceIds, Integer maxRecords, String marker) {
+        String effectiveRegion = effectiveRegion(region);
+        requireValidMaxRecords(maxRecords);
+        List<DbClusterAutomatedBackup> matching = clusterBackupsIn(effectiveRegion).stream()
+                .filter(b -> isBlank(clusterResourceId)
+                        || clusterResourceId.equalsIgnoreCase(b.getCluster().getDbClusterResourceId()))
+                .filter(b -> isBlank(clusterId) || clusterId.equalsIgnoreCase(b.getCluster().getDbClusterIdentifier()))
+                .filter(b -> statuses.isEmpty() || statuses.contains(b.getStatus()))
+                .filter(b -> clusterIds.isEmpty()
+                        || clusterIds.contains(b.getCluster().getDbClusterIdentifier())
+                        || clusterIds.contains(b.getCluster().getDbClusterArn()))
+                .filter(b -> resourceIds.isEmpty()
+                        || resourceIds.contains(b.getCluster().getDbClusterResourceId())
+                        || resourceIds.contains(b.getDbClusterAutomatedBackupsArn()))
+                .sorted(Comparator.comparing((DbClusterAutomatedBackup b) -> b.getCluster().getDbClusterIdentifier())
+                        .thenComparing(DbClusterAutomatedBackup::getDbClusterAutomatedBackupsArn))
+                .toList();
+        if (matching.isEmpty() && !(isBlank(clusterResourceId) && isBlank(clusterId))) {
+            throw clusterBackupNotFound(firstNonBlank(clusterResourceId, clusterId));
+        }
+        OffsetPage<DbClusterAutomatedBackup> page = offsetPage(matching, maxRecords, marker);
+        return new AutomatedBackupPage<>(page.items(), page.marker());
+    }
+
+    public synchronized DbClusterAutomatedBackup deleteDbClusterAutomatedBackup(String region, String clusterResourceId) {
+        String effectiveRegion = effectiveRegion(region);
+        if (isBlank(clusterResourceId)) {
+            throw new AwsException("InvalidParameterValue", "DbClusterResourceId is required.", 400);
+        }
+        DbClusterAutomatedBackup backup = clusterBackupsIn(effectiveRegion).stream()
+                .filter(b -> clusterResourceId.equalsIgnoreCase(b.getCluster().getDbClusterResourceId()))
+                .findFirst()
+                .orElse(null);
+        if (backup == null) {
+            boolean live = listDbClusters(null, effectiveRegion).stream()
+                    .anyMatch(c -> clusterResourceId.equalsIgnoreCase(c.getDbClusterResourceId()));
+            if (live) {
+                throw new AwsException("InvalidDBClusterAutomatedBackupStateFault",
+                        "The automated backups of " + clusterResourceId + " belong to a live DB cluster.", 400);
+            }
+            throw clusterBackupNotFound(clusterResourceId);
+        }
+        String resourceId = backup.getCluster().getDbClusterResourceId();
+        clusterAutomatedBackups.delete(dbResourceKey(effectiveRegion, resourceId));
+        snapshotData.delete(clusterBackupDataKey(effectiveRegion, resourceId));
+        backup.setStatus("deleting");
+        return backup;
+    }
+
+    private List<DbInstanceAutomatedBackup> instanceBackupsIn(String region) {
+        Instant now = Instant.now();
+        List<DbInstanceAutomatedBackup> all = new ArrayList<>();
+        for (DbInstance instance : listDbInstances(null, region)) {
+            if (isBlank(instance.getDbClusterIdentifier()) && instance.getBackupRetentionPeriod() > 0) {
+                all.add(activeInstanceBackupOf(instance, region, now));
+            }
+        }
+        String prefix = region + "::";
+        for (DbInstanceAutomatedBackup stored : instanceAutomatedBackups.scan(key -> key.startsWith(prefix))) {
+            if (DbInstanceAutomatedBackup.REPLICATING.equals(stored.getStatus())) {
+                // A replica follows its live source up to now.
+                stored.setLatestTime(now);
+            }
+            all.add(stored);
+        }
+        return all;
+    }
+
+    private List<DbClusterAutomatedBackup> clusterBackupsIn(String region) {
+        String prefix = region + "::";
+        return clusterAutomatedBackups.scan(key -> key.startsWith(prefix));
+    }
+
+    private DbInstanceAutomatedBackup activeInstanceBackupOf(DbInstance instance, String region, Instant now) {
+        DbInstanceAutomatedBackup backup = new DbInstanceAutomatedBackup();
+        backup.setDbInstanceAutomatedBackupsArn(instanceBackupArn(region, instance.getDbiResourceId()));
+        backup.setStatus(DbInstanceAutomatedBackup.ACTIVE);
+        backup.setInstance(instance);
+        backup.setRegion(region);
+        backup.setEarliestTime(earliestRestorableTime(instance, now));
+        backup.setLatestTime(now);
+        backup.setBackupRetentionPeriod(instance.getBackupRetentionPeriod());
+        backup.setKmsKeyId(instance.getKmsKeyId());
+        return backup;
+    }
+
+    /**
+     * The backup a deleted instance leaves: its restore window ends now, and outside mock mode a
+     * PostgreSQL instance's data is copied so a later restore can bring it back. A failed copy
+     * fails the delete, which has changed nothing yet.
+     */
+    private DbInstanceAutomatedBackup retainedInstanceBackupOf(DbInstance instance, String region) {
+        Instant now = Instant.now();
+        DbInstanceAutomatedBackup backup = activeInstanceBackupOf(instance, region, now);
+        backup.setStatus(DbInstanceAutomatedBackup.RETAINED);
+        backup.setInstance(instance);
+        String dump = saveBackupData(instance.getEngine(), instance.getContainerId(), instance.getMasterUsername(),
+                "DB instance " + instance.getDbInstanceIdentifier(), "InvalidDBInstanceState");
+        if (dump != null) {
+            snapshotData.put(instanceBackupDataKey(region, instance.getDbiResourceId()), dump);
+            backup.setDataSaved(true);
+        }
+        return backup;
+    }
+
+    private DbClusterAutomatedBackup retainedClusterBackupOf(DbCluster cluster, String region) {
+        Instant now = Instant.now();
+        DbClusterAutomatedBackup backup = new DbClusterAutomatedBackup();
+        backup.setDbClusterAutomatedBackupsArn(regionResolver.buildArn("rds", region,
+                "cluster-auto-backup:" + cluster.getDbClusterResourceId()));
+        backup.setStatus(DbClusterAutomatedBackup.RETAINED);
+        backup.setCluster(cluster);
+        backup.setRegion(region);
+        backup.setEarliestTime(cluster.getCreatedAt() != null ? cluster.getCreatedAt() : now);
+        backup.setLatestTime(now);
+        backup.setBackupRetentionPeriod(CLUSTER_BACKUP_RETENTION_DAYS);
+        String dump = saveBackupData(cluster.getEngine(), cluster.getContainerId(), cluster.getMasterUsername(),
+                "DB cluster " + cluster.getDbClusterIdentifier(), "InvalidDBClusterStateFault");
+        if (dump != null) {
+            snapshotData.put(clusterBackupDataKey(region, cluster.getDbClusterResourceId()), dump);
+            backup.setDataSaved(true);
+        }
+        return backup;
+    }
+
+    /** A dump of a PostgreSQL database's data, or null in mock mode or for an engine Floci cannot copy. */
+    private String saveBackupData(DatabaseEngine engine, String containerId, String masterUsername,
+                                  String owner, String errorCode) {
+        if (config.services().rds().mock() || engine != DatabaseEngine.POSTGRES || containerId == null) {
+            return null;
+        }
+        try {
+            return containerManager.createPostgresSnapshot(containerId, masterUsername);
+        } catch (Exception e) {
+            LOG.warnv(e, "Failed to save the automated backup of {0}", owner);
+            AwsException failure = new AwsException(errorCode,
+                    "Failed to save the automated backup of " + owner + ": " + e.getMessage(), 400);
+            failure.initCause(e);
+            throw failure;
+        }
+    }
+
+    /** A deleted instance's replicas in other Regions stop following it and are kept as retained. */
+    private void retainReplicatedBackups(DbInstance instance) {
+        Instant now = Instant.now();
+        for (String replicaArn : instance.getAutomatedBackupReplicationArns()) {
+            String key = dbResourceKey(regionFromArn(replicaArn), instance.getDbiResourceId());
+            instanceAutomatedBackups.get(key).ifPresent(replica -> {
+                replica.setStatus(DbInstanceAutomatedBackup.RETAINED);
+                replica.setLatestTime(now);
+                instanceAutomatedBackups.put(key, replica);
+            });
+        }
+        instance.getAutomatedBackupReplicationArns().clear();
+    }
+
+    /** The live instance a replication request names by ARN, in a Region other than this one. */
+    private DbInstance requireReplicationSource(String sourceInstanceArn, String region) {
+        if (isBlank(sourceInstanceArn)) {
+            throw new AwsException("InvalidParameterValue", "SourceDBInstanceArn is required.", 400);
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(sourceInstanceArn);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "SourceDBInstanceArn " + sourceInstanceArn + " is not a valid DB instance ARN.", 400);
+        }
+        if (!arn.resource().startsWith("db:")) {
+            throw new AwsException("InvalidParameterValue",
+                    "SourceDBInstanceArn " + sourceInstanceArn + " is not a valid DB instance ARN.", 400);
+        }
+        if (region.equals(arn.region())) {
+            throw new AwsException("InvalidParameterValue",
+                    "The source DB instance must be in a Region other than " + region + ".", 400);
+        }
+        String sourceId = arn.resource().substring("db:".length());
+        DbInstance source = findInstanceForScope(currentAccountId(), arn.region(), sourceId);
+        // The whole ARN must name the instance, so another account's or partition's ARN finds nothing.
+        if (source == null || !sourceInstanceArn.equals(source.getDbInstanceArn())) {
+            throw new AwsException("DBInstanceNotFound", "DB instance " + sourceInstanceArn + " not found.", 404);
+        }
+        return source;
+    }
+
+    /** {@code db-XXXX} names the instance; its backups are {@code auto-backup:ab-XXXX}, as in AWS. */
+    private String instanceBackupArn(String region, String dbiResourceId) {
+        String suffix = dbiResourceId.startsWith("db-") ? dbiResourceId.substring("db-".length()) : dbiResourceId;
+        return regionResolver.buildArn("rds", region, "auto-backup:ab-" + suffix);
+    }
+
+    private String instanceBackupDataKey(String region, String dbiResourceId) {
+        return dbResourceKey(region, "auto-backup:" + dbiResourceId);
+    }
+
+    private String clusterBackupDataKey(String region, String clusterResourceId) {
+        return dbResourceKey(region, "cluster-auto-backup:" + clusterResourceId);
+    }
+
+    private static AwsException instanceBackupNotFound(String name) {
+        return new AwsException("DBInstanceAutomatedBackupNotFound",
+                "Automated backups " + name + " not found.", 404);
+    }
+
+    private static AwsException clusterBackupNotFound(String name) {
+        return new AwsException("DBClusterAutomatedBackupNotFoundFault",
+                "Automated backups " + name + " not found.", 404);
     }
 
     // ── Read replicas ─────────────────────────────────────────────────────────
@@ -1499,7 +1926,7 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidParameterCombination",
                     "Either SourceDBInstanceIdentifier or SourceDBClusterIdentifier must be specified.", 400);
         }
-        boolean sourceByArn = sourceRef.startsWith("arn:");
+        boolean sourceByArn = AwsArnUtils.looksLikeArn(sourceRef);
         if (request.replicaMode() != null && !request.replicaMode().isBlank()) {
             // ReplicaMode selects mounted or open-read-only for Db2 and Oracle replicas; no
             // emulated engine is either, so AWS's parameter check applies to all of them.
@@ -1571,7 +1998,8 @@ public class RdsService implements Resettable, ResourceProvider {
                 source.isStorageEncrypted() && sameRegion ? source.getKmsKeyId() : null,
                 0, source.getPreferredBackupWindow(), source.getPreferredMaintenanceWindow(),
                 copyTagsToSnapshot).withStorageType(
-                        request.storageType() != null ? request.storageType() : source.getStorageType());
+                        request.storageType() != null ? request.storageType() : source.getStorageType())
+                .withCaCertificateIdentifier(request.caCertificateIdentifier());
         Map<String, String> tags = request.tags() != null ? request.tags() : Map.of();
 
         DbInstance replica = createDbInstance(id, engineParam, source.getEngineVersion(),
@@ -1689,13 +2117,13 @@ public class RdsService implements Resettable, ResourceProvider {
         String accountId = currentAccountId();
         String region = requestRegion;
         String sourceId = sourceRef;
-        if (sourceRef.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(sourceRef)) {
             // A source in another Region is named by ARN; the replica lands in the request Region.
-            String[] parts = sourceRef.split(":", 7);
-            if (parts.length == 7 && "rds".equals(parts[2]) && "db".equals(parts[5])
-                    && accountId.equals(parts[4])) {
-                region = parts[3].isBlank() ? requestRegion : parts[3];
-                sourceId = parts[6];
+            AwsArnUtils.Arn arn = AwsArnUtils.isArn(sourceRef) ? AwsArnUtils.parse(sourceRef) : null;
+            if (arn != null && "rds".equals(arn.service()) && arn.resource().startsWith("db:")
+                    && accountId.equals(arn.accountId())) {
+                region = arn.region().isBlank() ? requestRegion : arn.region();
+                sourceId = arn.resource().substring("db:".length());
             } else {
                 throw new AwsException("DBInstanceNotFound",
                         "DB instance " + sourceRef + " not found.", 404);
@@ -1757,7 +2185,7 @@ public class RdsService implements Resettable, ResourceProvider {
      * Region as the linking instance, an ARN names one anywhere in the account.
      */
     private DbInstance findLinkedInstance(String accountId, DbInstance from, String linkName) {
-        if (linkName.startsWith("arn:")) {
+        if (AwsArnUtils.isArn(linkName)) {
             for (DbInstance candidate : instances.scan(k -> true)) {
                 if (linkName.equalsIgnoreCase(candidate.getDbInstanceArn())
                         && accountId.equals(accountIdFromArn(candidate.getDbInstanceArn()))) {
@@ -1787,7 +2215,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     .equalsIgnoreCase(replica.getReadReplicaSourceDbInstanceIdentifier())) {
                 continue;
             }
-            if (replicaName.startsWith("arn:")) {
+            if (AwsArnUtils.isArn(replicaName)) {
                 replica.setReadReplicationStatus(READ_REPLICATION_TERMINATED);
             } else {
                 replica.setReadReplicaSourceDbInstanceIdentifier(null);
@@ -1859,7 +2287,7 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidParameterValue",
                     "AttributeName must be restore.", 400);
         }
-        List<String> updated = new java.util.ArrayList<>(snapshot.getRestoreAccountIds());
+        List<String> updated = new ArrayList<>(snapshot.getRestoreAccountIds());
         if (valuesToAdd != null) {
             valuesToAdd.stream().filter(v -> !updated.contains(v)).forEach(updated::add);
         }
@@ -2108,22 +2536,42 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidParameterValue",
                     "RestoreType must be full-copy or copy-on-write.", 400);
         }
-        // SourceDBClusterIdentifier takes the cluster's identifier or its ARN (API reference).
-        DbCluster source = !isBlank(sourceClusterRef)
-                ? getDbCluster(clusterIdentifierFromArnOrName(sourceClusterRef, effectiveRegion), effectiveRegion)
-                : listDbClusters(null, effectiveRegion).stream()
+        // SourceDBClusterIdentifier takes the cluster's identifier or its ARN (API reference). A
+        // resource ID names a live cluster, or a deleted one through the backup it kept.
+        DbClusterAutomatedBackup retained = null;
+        DbCluster source;
+        String savedData = null;
+        if (!isBlank(sourceClusterRef)) {
+            source = getDbCluster(clusterIdentifierFromArnOrName(sourceClusterRef, effectiveRegion), effectiveRegion);
+        } else {
+            synchronized (this) {
+                source = listDbClusters(null, effectiveRegion).stream()
                         .filter(c -> sourceClusterResourceId.equals(c.getDbClusterResourceId()))
                         .findFirst()
-                        .orElseThrow(() -> new AwsException("DBClusterNotFoundFault",
-                                "DB cluster with resource ID " + sourceClusterResourceId + " not found.", 404));
+                        .orElse(null);
+                if (source == null) {
+                    retained = clusterBackupsIn(effectiveRegion).stream()
+                            .filter(b -> sourceClusterResourceId.equals(b.getCluster().getDbClusterResourceId()))
+                            .findFirst()
+                            .orElseThrow(() -> new AwsException("DBClusterNotFoundFault",
+                                    "DB cluster with resource ID " + sourceClusterResourceId + " not found.", 404));
+                    source = retained.getCluster();
+                    savedData = retained.isDataSaved()
+                            ? snapshotData.get(clusterBackupDataKey(effectiveRegion, sourceClusterResourceId)).orElse(null)
+                            : null;
+                }
+            }
+        }
         String sourceId = source.getDbClusterIdentifier();
-        if (source.getStatus() != null && source.getStatus() != DbInstanceStatus.AVAILABLE) {
+        if (retained == null && source.getStatus() != null && source.getStatus() != DbInstanceStatus.AVAILABLE) {
             throw new AwsException("InvalidDBClusterStateFault",
                     "DB cluster " + sourceId + " is not in available state.", 400);
         }
         Instant now = Instant.now();
-        Instant earliest = source.getCreatedAt() != null ? source.getCreatedAt() : now;
-        requireRestorableTime(restoreToTime, useLatestRestorableTime, earliest, now, "RestoreToTime");
+        Instant earliest = retained != null ? retained.getEarliestTime()
+                : source.getCreatedAt() != null ? source.getCreatedAt() : now;
+        Instant latest = retained != null ? retained.getLatestTime() : now;
+        requireRestorableTime(restoreToTime, useLatestRestorableTime, earliest, latest, "RestoreToTime");
         if (source.getEngine() != DatabaseEngine.POSTGRES) {
             throw new AwsException("InvalidDBClusterStateFault",
                     "Operation RestoreDBClusterToPointInTime is not supported for engine "
@@ -2145,11 +2593,15 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         if (!config.services().rds().mock()) {
             try {
-                if (source.getContainerId() == null || cluster.getContainerId() == null) {
+                if ((retained == null && source.getContainerId() == null) || cluster.getContainerId() == null) {
                     throw new IllegalStateException("the source or target database container is not running");
                 }
-                String sqlDump = containerManager.createPostgresSnapshot(
-                        source.getContainerId(), source.getMasterUsername());
+                if (retained != null && savedData == null) {
+                    throw new IllegalStateException("the automated backup holds no saved data");
+                }
+                String sqlDump = retained == null
+                        ? containerManager.createPostgresSnapshot(source.getContainerId(), source.getMasterUsername())
+                        : savedData;
                 containerManager.restorePostgresSnapshot(
                         cluster.getContainerId(), cluster.getMasterUsername(), sqlDump);
             } catch (Exception e) {
@@ -2247,7 +2699,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     /** A cluster named by identifier or by ARN; an ARN for another account or Region names no cluster here. */
     private String clusterIdentifierFromArnOrName(String source, String region) {
-        if (!source.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(source)) {
             return source;
         }
         return clusterIdFromArn(source, region,
@@ -2282,7 +2734,7 @@ public class RdsService implements Resettable, ResourceProvider {
         if (source == null || source.isBlank()) {
             throw new AwsException("InvalidParameterValue", "A DB cluster snapshot identifier is required.", 400);
         }
-        if (!source.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(source)) {
             return source;
         }
         AwsArnUtils.Arn arn;
@@ -2413,7 +2865,7 @@ public class RdsService implements Resettable, ResourceProvider {
     public synchronized void addTagsToResource(
             String resourceName, Map<String, String> tags, String region) {
         TagHandle handle = resolveTagHandle(resourceName, region);
-        Map<String, String> updated = new java.util.LinkedHashMap<>(handle.tags());
+        Map<String, String> updated = new LinkedHashMap<>(handle.tags());
         updated.putAll(tags);
         handle.save().accept(updated);
     }
@@ -2425,13 +2877,13 @@ public class RdsService implements Resettable, ResourceProvider {
     public synchronized void removeTagsFromResource(
             String resourceName, Collection<String> tagKeys, String region) {
         TagHandle handle = resolveTagHandle(resourceName, region);
-        Map<String, String> updated = new java.util.LinkedHashMap<>(handle.tags());
+        Map<String, String> updated = new LinkedHashMap<>(handle.tags());
         tagKeys.forEach(updated::remove);
         handle.save().accept(updated);
     }
 
     /** A resolved tag target: its current tags plus a sink that persists an updated map. */
-    private record TagHandle(Map<String, String> tags, java.util.function.Consumer<Map<String, String>> save) {}
+    private record TagHandle(Map<String, String> tags, Consumer<Map<String, String>> save) {}
 
     /**
      * Resolves a tagging ResourceName to its backing resource.
@@ -2448,7 +2900,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         String type = "db";
         String id = resourceName;
-        if (resourceName.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(resourceName)) {
             AwsArnUtils.Arn arn;
             try {
                 arn = AwsArnUtils.parse(resourceName);
@@ -2625,7 +3077,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private String resourceRegionOrDefault(String resourceName) {
-        return resourceName != null && resourceName.startsWith("arn:")
+        return AwsArnUtils.isArn(resourceName)
                 ? regionFromArn(resourceName) : regionResolver.getDefaultRegion();
     }
 
@@ -2875,10 +3327,14 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private static String managedMasterSecretString(DbCluster cluster) {
+        return managedMasterSecretString(cluster, cluster.getMasterPassword());
+    }
+
+    private static String managedMasterSecretString(DbCluster cluster, String password) {
         try {
             return JSON.writeValueAsString(Map.of(
                     "username", cluster.getMasterUsername(),
-                    "password", cluster.getMasterPassword(),
+                    "password", password,
                     "engine", cluster.getEngineIdentifier() != null && !cluster.getEngineIdentifier().isBlank()
                             ? cluster.getEngineIdentifier().toLowerCase()
                             : cluster.getEngine().name().toLowerCase(),
@@ -2892,7 +3348,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private static String generatedMasterPassword() {
-        return "floci-" + java.util.UUID.randomUUID().toString().replace("-", "");
+        return "floci-" + UUID.randomUUID().toString().replace("-", "");
     }
 
     public DbInstance getDbInstance(String id) {
@@ -2918,7 +3374,7 @@ public class RdsService implements Resettable, ResourceProvider {
         Map<String, DbInstance> unique = new LinkedHashMap<>();
         for (DbInstance instance : instances.scan(k -> true)) {
             boolean matchesFilter = filterId == null || filterId.isBlank()
-                    || (filterId.startsWith("arn:")
+                    || (AwsArnUtils.isArn(filterId)
                     ? filterId.equalsIgnoreCase(instance.getDbInstanceArn())
                     : instance.getDbInstanceIdentifier().equalsIgnoreCase(filterId));
             if (matchesFilter
@@ -2999,7 +3455,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 .filter(event -> sourceIdentifier == null || sourceIdentifier.equals(event.sourceIdentifier()))
                 .filter(event -> sourceType == null || sourceType.equals(event.sourceType()))
                 .filter(event -> !event.date().isBefore(effectiveStart) && !event.date().isAfter(effectiveEnd))
-                .sorted(java.util.Comparator.comparing(RdsEvent::date))
+                .sorted(Comparator.comparing(RdsEvent::date))
                 .toList();
     }
 
@@ -3149,6 +3605,10 @@ public class RdsService implements Resettable, ResourceProvider {
             effective = effective.withStorageType(null);
         }
         validateAutoscalingMinimum(instance, effective.maxAllocatedStorage());
+        if (!isBlank(settings.caCertificateIdentifier())) {
+            effective = effective.withCaCertificateIdentifier(
+                    resolveCaCertificate(settings.caCertificateIdentifier(), effectiveRegion));
+        }
         boolean changesParameterGroup = dbParameterGroupName != null && !dbParameterGroupName.isBlank();
         if (changesParameterGroup) {
             validateInstanceParameterGroup(dbParameterGroupName, engineName(instance),
@@ -4343,13 +4803,22 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public void deleteDbInstance(String id, String region) {
+        deleteDbInstance(id, region, true);
+    }
+
+    /**
+     * Deletes a DB instance. With {@code deleteAutomatedBackups} false, a standalone instance
+     * that keeps backups leaves a {@code retained} automated backup behind, which a point in time
+     * restore can still use; the default removes the backups with the instance, as in AWS.
+     */
+    public void deleteDbInstance(String id, String region, boolean deleteAutomatedBackups) {
         withInstancePublication(id, region, () -> {
-            doDeleteDbInstance(id, region);
+            doDeleteDbInstance(id, region, deleteAutomatedBackups);
             return null;
         });
     }
 
-    private synchronized void doDeleteDbInstance(String id, String region) {
+    private synchronized void doDeleteDbInstance(String id, String region, boolean deleteAutomatedBackups) {
         String effectiveRegion = effectiveRegion(region);
         DbInstance instance = Optional.ofNullable(
                         findInstanceForScope(currentAccountId(), effectiveRegion, id))
@@ -4368,6 +4837,10 @@ public class RdsService implements Resettable, ResourceProvider {
         }
 
         String clusterId = instance.getDbClusterIdentifier();
+        // Taken before the instance changes, so a failed copy of its data leaves it as it was.
+        DbInstanceAutomatedBackup retained = !deleteAutomatedBackups && isBlank(clusterId)
+                && instance.getBackupRetentionPeriod() > 0
+                ? retainedInstanceBackupOf(instance, effectiveRegion) : null;
         instance.setStatus(DbInstanceStatus.DELETING);
         putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
         detachReadReplicaLinksBeforeDelete(instance);
@@ -4410,6 +4883,10 @@ public class RdsService implements Resettable, ResourceProvider {
         releaseProxyPort(instance.getProxyPort());
         deleteInstanceForScope(currentAccountId(), effectiveRegion, id);
         reportedMemberRelayFailures.remove(instance.getDbInstanceArn());
+        retainReplicatedBackups(instance);
+        if (retained != null) {
+            instanceAutomatedBackups.put(dbResourceKey(effectiveRegion, instance.getDbiResourceId()), retained);
+        }
         LOG.infov("DB instance {0} deleted", id);
     }
 
@@ -4550,7 +5027,7 @@ public class RdsService implements Resettable, ResourceProvider {
                                         boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
                                         String engineMode, boolean storageEncrypted, Integer requestedPort) {
         String effectiveRegion = effectiveRegion(region);
-        String clusterResourceId = "cluster-" + java.util.UUID.randomUUID().toString()
+        String clusterResourceId = "cluster-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
         String clusterArn = regionResolver.buildArn("rds", effectiveRegion, "cluster:" + id);
         if (findClusterForScope(currentAccountId(), effectiveRegion, id) != null
@@ -4938,7 +5415,7 @@ public class RdsService implements Resettable, ResourceProvider {
         Map<String, DbCluster> unique = new LinkedHashMap<>();
         for (DbCluster cluster : clusters.scan(k -> true)) {
             boolean matchesFilter = filterId == null || filterId.isBlank()
-                    || (filterId.startsWith("arn:")
+                    || (AwsArnUtils.isArn(filterId)
                     ? filterId.equalsIgnoreCase(cluster.getDbClusterArn())
                     : cluster.getDbClusterIdentifier().equalsIgnoreCase(filterId));
             if (matchesFilter
@@ -4999,6 +5476,17 @@ public class RdsService implements Resettable, ResourceProvider {
                                      Integer serverlessV2SecondsUntilAutoPause,
                                      Boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
                                      String dbClusterParameterGroupName, String region) {
+        return modifyDbCluster(id, newPassword, iamEnabled, serverlessV2MinCapacity, serverlessV2MaxCapacity,
+                serverlessV2SecondsUntilAutoPause, manageMasterUserPassword, masterUserSecretKmsKeyId,
+                dbClusterParameterGroupName, false, false, region);
+    }
+
+    public DbCluster modifyDbCluster(String id, String newPassword, Boolean iamEnabled,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                     Integer serverlessV2SecondsUntilAutoPause,
+                                     Boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
+                                     String dbClusterParameterGroupName, boolean rotateMasterUserPassword,
+                                     boolean applyImmediately, String region) {
         String effectiveRegion = effectiveRegion(region);
         while (true) {
             DbCluster cluster = getDbCluster(id, effectiveRegion);
@@ -5011,7 +5499,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     return doModifyDbCluster(id, newPassword, iamEnabled, serverlessV2MinCapacity,
                             serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
                             manageMasterUserPassword, masterUserSecretKmsKeyId,
-                            dbClusterParameterGroupName, region);
+                            dbClusterParameterGroupName, rotateMasterUserPassword, applyImmediately, region);
                 }
             }
         }
@@ -5021,9 +5509,25 @@ public class RdsService implements Resettable, ResourceProvider {
                                      Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                      Integer serverlessV2SecondsUntilAutoPause,
                                      Boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
-                                     String dbClusterParameterGroupName, String region) {
+                                     String dbClusterParameterGroupName, boolean rotateMasterUserPassword,
+                                     boolean applyImmediately, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbCluster cluster = getDbCluster(id, effectiveRegion);
+        if (rotateMasterUserPassword) {
+            if (!applyImmediately || newPassword != null || Boolean.FALSE.equals(manageMasterUserPassword)) {
+                throw new AwsException("InvalidParameterCombination",
+                        "RotateMasterUserPassword requires ApplyImmediately and cannot set or disable the password.", 400);
+            }
+            if (cluster.getMasterUserSecretArn() == null || secretsManagerService == null) {
+                throw new AwsException("InvalidParameterCombination",
+                        "RotateMasterUserPassword requires an existing RDS-managed master user secret.", 400);
+            }
+            if (cluster.getStatus() != DbInstanceStatus.AVAILABLE) {
+                throw new AwsException("InvalidDBClusterStateFault",
+                        "The DB cluster must be available to rotate its master user password.", 400);
+            }
+            newPassword = generatedMasterPassword();
+        }
         boolean changesParameterGroup = dbClusterParameterGroupName != null
                 && !dbClusterParameterGroupName.isBlank();
         if (changesParameterGroup) {
@@ -5061,18 +5565,31 @@ public class RdsService implements Resettable, ResourceProvider {
         String oldPassword = cluster.getMasterPassword();
         boolean rotateBackend = hasNewPassword && !config.services().rds().mock()
                 && cluster.getContainerId() != null && !newPassword.equals(oldPassword);
+        String acceptedPassword = newPassword;
         Runnable changeCredentials = () -> {
             // Keep the old credential and secret until the running backend accepts the change.
             if (rotateBackend) {
                 containerManager.rotateMasterPassword(
                         cluster.getDockerVolumeName(), cluster.getContainerId(),
-                        cluster.getEngine(), cluster.getMasterUsername(), oldPassword, newPassword);
+                        cluster.getEngine(), cluster.getMasterUsername(), oldPassword, acceptedPassword);
             }
         };
         boolean releasesManagedSecret = Boolean.FALSE.equals(manageMasterUserPassword)
                 && cluster.getMasterUserSecretArn() != null;
         boolean credentialsChanged = true;
-        if (releasesManagedSecret) {
+        if (rotateMasterUserPassword) {
+            String rotatedValue = managedMasterSecretString(cluster, acceptedPassword);
+            secretsManagerService.rotateManagedSecretAfter(cluster.getMasterUserSecretArn(),
+                    MANAGED_SECRET_OWNING_SERVICE, effectiveRegion, () -> {
+                        changeCredentials.run();
+                        return rotatedValue;
+                    }, () -> {
+                        if (rotateBackend) {
+                            containerManager.rotateMasterPassword(cluster.getDockerVolumeName(), cluster.getContainerId(),
+                                    cluster.getEngine(), cluster.getMasterUsername(), acceptedPassword, oldPassword);
+                        }
+                    });
+        } else if (releasesManagedSecret) {
             if (secretsManagerService == null) {
                 throw new AwsException("InvalidParameterCombination",
                         "ManageMasterUserPassword requires Secrets Manager support.", 400);
@@ -5123,10 +5640,10 @@ public class RdsService implements Resettable, ResourceProvider {
         // Running backends have already accepted the rotation before metadata is published.
         if (passwordChanged) {
             proxyManager.updateMasterPassword(
-                    rdsResourceRelayKey(cluster.getDbClusterArn(), id), newPassword);
+                    rdsResourceRelayKey(cluster.getDbClusterArn(), id), acceptedPassword);
             updateClusterMembers(cluster, effectiveRegion,
-                    member -> member.setMasterPassword(newPassword),
-                    relayKey -> proxyManager.updateMasterPassword(relayKey, newPassword));
+                    member -> member.setMasterPassword(acceptedPassword),
+                    relayKey -> proxyManager.updateMasterPassword(relayKey, acceptedPassword));
         }
 
         if (iamEnabled != null) {
@@ -5157,6 +5674,14 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public void deleteDbCluster(String id, String region) {
+        deleteDbCluster(id, region, true);
+    }
+
+    /**
+     * Deletes a DB cluster. With {@code deleteAutomatedBackups} false the cluster leaves a
+     * {@code retained} automated backup behind, which RestoreDBClusterToPointInTime can still use.
+     */
+    public void deleteDbCluster(String id, String region, boolean deleteAutomatedBackups) {
         String effectiveRegion = effectiveRegion(region);
         while (true) {
             DbCluster cluster = getDbCluster(id, effectiveRegion);
@@ -5165,14 +5690,14 @@ public class RdsService implements Resettable, ResourceProvider {
                     if (findClusterForScope(currentAccountId(), effectiveRegion, id) != cluster) {
                         continue;
                     }
-                    doDeleteDbCluster(id, region);
+                    doDeleteDbCluster(id, region, deleteAutomatedBackups);
                     return;
                 }
             }
         }
     }
 
-    private void doDeleteDbCluster(String id, String region) {
+    private void doDeleteDbCluster(String id, String region, boolean deleteAutomatedBackups) {
         String effectiveRegion = effectiveRegion(region);
         DbCluster cluster = Optional.ofNullable(
                         findClusterForScope(currentAccountId(), effectiveRegion, id))
@@ -5189,6 +5714,9 @@ public class RdsService implements Resettable, ResourceProvider {
             throw new AwsException("InvalidDBClusterStateFault",
                     "DB cluster " + id + " is registered with a DB proxy target group.", 400);
         }
+        // Taken before the cluster changes, so a failed copy of its data leaves it as it was.
+        DbClusterAutomatedBackup retained = deleteAutomatedBackups ? null
+                : retainedClusterBackupOf(cluster, effectiveRegion);
         detachFromGlobalClusterBeforeDelete(cluster);
 
         detachManagedMasterUserSecret(cluster, effectiveRegion);
@@ -5216,6 +5744,9 @@ public class RdsService implements Resettable, ResourceProvider {
         // Custom endpoints belong to their cluster and go with it.
         clusterEndpointsOf(effectiveRegion, id).forEach(endpoint -> clusterEndpoints.delete(
                 clusterEndpointKey(effectiveRegion, endpoint.getDbClusterEndpointIdentifier())));
+        if (retained != null) {
+            clusterAutomatedBackups.put(dbResourceKey(effectiveRegion, cluster.getDbClusterResourceId()), retained);
+        }
         LOG.infov("DB cluster {0} deleted", id);
     }
 
@@ -5244,7 +5775,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         GlobalCluster global = new GlobalCluster();
         global.setGlobalClusterIdentifier(id.toLowerCase(Locale.ROOT));
-        global.setGlobalClusterResourceId("cluster-" + java.util.UUID.randomUUID().toString()
+        global.setGlobalClusterResourceId("cluster-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase());
         global.setGlobalClusterArn(globalClusterArn(regionResolver.getPartition(), accountId, global.getGlobalClusterIdentifier()));
         global.setStatus("available");
@@ -5756,7 +6287,7 @@ public class RdsService implements Resettable, ResourceProvider {
         if (reference == null || reference.isBlank()) {
             throw new AwsException("InvalidParameterValue", "DBClusterIdentifier is required.", 400);
         }
-        if (reference.startsWith("arn:")) {
+        if (AwsArnUtils.isArn(reference)) {
             DbCluster cluster = findClusterByArn(accountId, reference);
             if (cluster == null) {
                 throw new AwsException("DBClusterNotFoundFault", "DB cluster " + reference + " not found.", 404);
@@ -6541,6 +7072,104 @@ public class RdsService implements Resettable, ResourceProvider {
         LOG.infov("DB proxy {0} deleted", name);
     }
 
+    // ── Certificates ──────────────────────────────────────────────────────────
+
+    /** A certificate authority as DescribeCertificates and ModifyCertificates report it. */
+    public record Certificate(String certificateIdentifier, String thumbprint, Instant validFrom,
+                              Instant validTill, String certificateArn, boolean customerOverride,
+                              Instant customerOverrideValidTill) {}
+
+    public record CertificatePage(List<Certificate> certificates, String defaultForNewLaunches, String marker) {}
+
+    /** The CA an instance reports and the end of its validity. */
+    public record InstanceCertificate(String caIdentifier, Instant validTill) {}
+
+    /**
+     * The Region's certificate authorities in identifier order, or the one named, with the CA a new
+     * instance gets. {@code Filters} is not taken: the API reference says it isn't supported.
+     */
+    public synchronized CertificatePage describeCertificates(String region, String certificateIdentifier,
+                                                             Integer maxRecords, String marker) {
+        String effectiveRegion = effectiveRegion(region);
+        requireValidMaxRecords(maxRecords);
+        String override = certificateOverrides.get(effectiveRegion).orElse(null);
+        List<Certificate> matching = new ArrayList<>();
+        for (RdsCaCertificates.CaCertificate ca : RdsCaCertificates.forRegion(effectiveRegion)) {
+            if (isBlank(certificateIdentifier) || ca.identifier().equalsIgnoreCase(certificateIdentifier)) {
+                matching.add(certificate(ca, effectiveRegion, ca.identifier().equals(override)));
+            }
+        }
+        if (!isBlank(certificateIdentifier) && matching.isEmpty()) {
+            throw certificateNotFound(certificateIdentifier);
+        }
+        OffsetPage<Certificate> page = offsetPage(matching, maxRecords, marker);
+        return new CertificatePage(page.items(), defaultCaCertificate(effectiveRegion), page.marker());
+    }
+
+    /**
+     * Sets the CA new instances in the Region get, or with {@code removeCustomerOverride} puts back
+     * RDS's default. The answer is the CA set, or after a removal the one that was overridden.
+     */
+    public synchronized Certificate modifyCertificates(String region, String certificateIdentifier,
+                                                       Boolean removeCustomerOverride) {
+        String effectiveRegion = effectiveRegion(region);
+        boolean remove = Boolean.TRUE.equals(removeCustomerOverride);
+        if (remove == !isBlank(certificateIdentifier)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Specify either CertificateIdentifier or RemoveCustomerOverride, but not both.", 400);
+        }
+        if (remove) {
+            String previous = certificateOverrides.get(effectiveRegion)
+                    .orElse(RdsCaCertificates.DEFAULT_FOR_NEW_LAUNCHES);
+            certificateOverrides.delete(effectiveRegion);
+            return certificate(RdsCaCertificates.find(effectiveRegion, previous)
+                    .orElseThrow(() -> certificateNotFound(previous)), effectiveRegion, false);
+        }
+        RdsCaCertificates.CaCertificate ca = RdsCaCertificates.find(effectiveRegion, certificateIdentifier)
+                .orElseThrow(() -> certificateNotFound(certificateIdentifier));
+        certificateOverrides.put(effectiveRegion, ca.identifier());
+        return certificate(ca, effectiveRegion, true);
+    }
+
+    /**
+     * The CA an instance reports. One stored before CAs were recorded reports RDS's default, since an
+     * override applies only to instances created after it.
+     */
+    public InstanceCertificate instanceCertificate(DbInstance instance) {
+        String region = regionFromArn(instance.getDbInstanceArn());
+        String identifier = instance.getCaCertificateIdentifier() != null
+                ? instance.getCaCertificateIdentifier() : RdsCaCertificates.DEFAULT_FOR_NEW_LAUNCHES;
+        return RdsCaCertificates.find(region, identifier)
+                .map(ca -> new InstanceCertificate(ca.identifier(), ca.validTill()))
+                .orElse(new InstanceCertificate(identifier, null));
+    }
+
+    /** The account's override for the Region, else RDS's default. */
+    private String defaultCaCertificate(String region) {
+        return certificateOverrides.get(region).orElse(RdsCaCertificates.DEFAULT_FOR_NEW_LAUNCHES);
+    }
+
+    /** The requested CA in its canonical case, or the Region's default when none is requested. */
+    private String resolveCaCertificate(String requested, String region) {
+        if (isBlank(requested)) {
+            return defaultCaCertificate(region);
+        }
+        return RdsCaCertificates.find(region, requested)
+                .map(RdsCaCertificates.CaCertificate::identifier)
+                .orElseThrow(() -> certificateNotFound(requested));
+    }
+
+    private Certificate certificate(RdsCaCertificates.CaCertificate ca, String region, boolean override) {
+        String arn = new AwsArnUtils.Arn(regionResolver.partitionForRegion(region), "rds", region, "",
+                "cert:" + ca.identifier()).toString();
+        return new Certificate(ca.identifier(), ca.thumbprint(), ca.validFrom(), ca.validTill(), arn, override,
+                override ? ca.validTill() : null);
+    }
+
+    private static AwsException certificateNotFound(String identifier) {
+        return new AwsException("CertificateNotFound", "Certificate " + identifier + " not found.", 404);
+    }
+
     // ── DB Proxy endpoints ────────────────────────────────────────────────────
 
     /** AWS's limit on the endpoints a caller adds to one proxy, besides its default endpoint. */
@@ -6895,11 +7524,10 @@ public class RdsService implements Resettable, ResourceProvider {
 
     public Collection<DbParameterGroup> listDbParameterGroups(
             String filterName, String region) {
-        String effectiveRegion = effectiveRegion(region);
         if (filterName != null && !filterName.isBlank()) {
-            DbParameterGroup group = findParameterGroupForRegion(filterName, effectiveRegion);
-            return group != null ? List.of(group) : List.of();
+            return List.of(getDbParameterGroup(filterName, region));
         }
+        String effectiveRegion = effectiveRegion(region);
         Map<String, DbParameterGroup> unique = new LinkedHashMap<>();
         List<DbParameterGroup> storedGroups;
         if (parameterGroups instanceof AccountAwareStorageBackend<DbParameterGroup> aware) {
@@ -6937,17 +7565,19 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public DbParameterGroup modifyDbParameterGroup(String name,
-                                                    java.util.Map<String, String> parameters) {
+                                                    Map<String, String> parameters) {
         return modifyDbParameterGroup(
-                name, parameters, regionResolver.getDefaultRegion());
+                name, parameters, null, regionResolver.getDefaultRegion());
     }
 
     public DbParameterGroup modifyDbParameterGroup(
-            String name, java.util.Map<String, String> parameters, String region) {
+            String name, Map<String, String> parameters, Map<String, String> applyMethods, String region) {
         String effectiveRegion = effectiveRegion(region);
         DbParameterGroup group = getDbParameterGroup(name, effectiveRegion);
         if (parameters != null) {
             group.getParameters().putAll(parameters);
+            parameters.keySet().forEach(k -> group.getApplyMethods().put(
+                    k, applyMethods == null ? "immediate" : applyMethods.getOrDefault(k, "immediate")));
         }
         putParameterGroupForRegion(name, effectiveRegion, group);
         return group;
@@ -6969,6 +7599,7 @@ public class RdsService implements Resettable, ResourceProvider {
         DbParameterGroup target = createDbParameterGroup(
                 targetName, source.getDbParameterGroupFamily(), targetDescription, effectiveRegion);
         target.getParameters().putAll(source.getParameters());
+        target.getApplyMethods().putAll(source.getApplyMethods());
         putParameterGroupForRegion(targetName, effectiveRegion, target);
         return target;
     }
@@ -6982,6 +7613,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         DbParameterGroup group = getDbParameterGroup(name, effectiveRegion);
         resetParameters(group.getParameters(), resetAllParameters, parameterNames);
+        resetParameters(group.getApplyMethods(), resetAllParameters, parameterNames);
         putParameterGroupForRegion(name, effectiveRegion, group);
         return group;
     }
@@ -7005,7 +7637,7 @@ public class RdsService implements Resettable, ResourceProvider {
      * ({@code arn:aws:rds:region:account:pg:name}); names cannot contain a colon.
      */
     private static String groupNameFromIdentifier(String identifier) {
-        if (identifier != null && identifier.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(identifier)) {
             return identifier.substring(identifier.lastIndexOf(':') + 1);
         }
         return identifier;
@@ -7211,13 +7843,13 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     public DbClusterParameterGroup modifyDbClusterParameterGroup(String name,
-                                                                  java.util.Map<String, String> parameters) {
+                                                                  Map<String, String> parameters) {
         return modifyDbClusterParameterGroup(
-                name, parameters, regionResolver.getDefaultRegion());
+                name, parameters, null, regionResolver.getDefaultRegion());
     }
 
     public DbClusterParameterGroup modifyDbClusterParameterGroup(
-            String name, java.util.Map<String, String> parameters, String region) {
+            String name, Map<String, String> parameters, Map<String, String> applyMethods, String region) {
         String effectiveRegion = effectiveRegion(region);
         if (managedClusterParameterGroup(name) != null) {
             throw new AwsException("InvalidDBParameterGroupState",
@@ -7226,6 +7858,8 @@ public class RdsService implements Resettable, ResourceProvider {
         DbClusterParameterGroup group = getDbClusterParameterGroup(name, effectiveRegion);
         if (parameters != null) {
             group.getParameters().putAll(parameters);
+            parameters.keySet().forEach(k -> group.getApplyMethods().put(
+                    k, applyMethods == null ? "immediate" : applyMethods.getOrDefault(k, "immediate")));
         }
         putClusterParameterGroupForRegion(name, effectiveRegion, group);
         return group;
@@ -7246,6 +7880,7 @@ public class RdsService implements Resettable, ResourceProvider {
         DbClusterParameterGroup target = createDbClusterParameterGroup(
                 targetName, source.getDbParameterGroupFamily(), targetDescription, effectiveRegion);
         target.getParameters().putAll(source.getParameters());
+        target.getApplyMethods().putAll(source.getApplyMethods());
         putClusterParameterGroupForRegion(targetName, effectiveRegion, target);
         return target;
     }
@@ -7260,6 +7895,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         DbClusterParameterGroup group = getDbClusterParameterGroup(name, effectiveRegion);
         resetParameters(group.getParameters(), resetAllParameters, parameterNames);
+        resetParameters(group.getApplyMethods(), resetAllParameters, parameterNames);
         putClusterParameterGroupForRegion(name, effectiveRegion, group);
         return group;
     }
@@ -7966,7 +8602,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String key = dbProxyKey(region, dbProxyName);
         String accountId = currentAccountId();
         Optional<DbProxy> ownerProxy = findDbProxy(dbProxyName, region);
-        java.util.function.Predicate<DbProxyTargetGroup> owner = candidate ->
+        Predicate<DbProxyTargetGroup> owner = candidate ->
                 ownerProxy.isPresent()
                         && targetGroupBelongsTo(candidate, accountId, region)
                         && targetGroupMatchesProxy(candidate, ownerProxy.get());
@@ -8456,7 +9092,7 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     private String randomResourceSuffix() {
-        return java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 17);
+        return UUID.randomUUID().toString().replace("-", "").substring(0, 17);
     }
 
     /** The preferred listener port, used when no other proxy has reserved it. */
@@ -8883,7 +9519,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String accountId = AwsArnUtils.accountOrDefault(proxy.getDbProxyArn(), defaultAccountId);
         String region = regionFromArn(proxy.getDbProxyArn());
         String proxyKey = dbProxyKey(region, proxy.getDbProxyName());
-        java.util.function.Predicate<DbProxyTargetGroup> legacyOwner = candidate ->
+        Predicate<DbProxyTargetGroup> legacyOwner = candidate ->
                 targetGroupCanMigrateToProxy(candidate, proxy);
         DbProxyTargetGroup targetGroup;
         if (proxyTargetGroups instanceof AccountAwareStorageBackend<DbProxyTargetGroup> aware) {
@@ -9068,7 +9704,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveAccountId = accountId != null ? accountId : currentAccountId();
         String effectiveRegion = effectiveRegion(region);
         String key = dbResourceKey(effectiveRegion, clusterId);
-        java.util.function.Predicate<DbCluster> owner = cluster -> hasRdsResourceIdentity(
+        Predicate<DbCluster> owner = cluster -> hasRdsResourceIdentity(
                 cluster.getDbClusterArn(), effectiveAccountId, effectiveRegion,
                 "cluster", clusterId);
         if (clusters instanceof AccountAwareStorageBackend<DbCluster> aware) {
@@ -9099,7 +9735,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveAccountId = accountId != null ? accountId : currentAccountId();
         String effectiveRegion = effectiveRegion(region);
         String key = dbResourceKey(effectiveRegion, instanceId);
-        java.util.function.Predicate<DbInstance> owner = instance -> hasRdsResourceIdentity(
+        Predicate<DbInstance> owner = instance -> hasRdsResourceIdentity(
                 instance.getDbInstanceArn(), effectiveAccountId, effectiveRegion,
                 "db", instanceId);
         if (instances instanceof AccountAwareStorageBackend<DbInstance> aware) {
@@ -9167,7 +9803,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveAccountId = accountId != null ? accountId : currentAccountId();
         String effectiveRegion = effectiveRegion(region);
         String key = dbResourceKey(effectiveRegion, snapshotId);
-        java.util.function.Predicate<DbSnapshot> owner = snapshot -> hasRdsResourceIdentity(
+        Predicate<DbSnapshot> owner = snapshot -> hasRdsResourceIdentity(
                 snapshot.getDbSnapshotArn(), effectiveAccountId, effectiveRegion, "snapshot", snapshotId);
         if (snapshots instanceof AccountAwareStorageBackend<DbSnapshot> aware) {
             return aware.getForAccountMigratingLegacyKeys(
@@ -9211,7 +9847,7 @@ public class RdsService implements Resettable, ResourceProvider {
             String accountId, String region, String groupName) {
         String effectiveRegion = effectiveRegion(region);
         String key = dbResourceKey(effectiveRegion, groupName);
-        java.util.function.Predicate<DbSubnetGroup> owner = group ->
+        Predicate<DbSubnetGroup> owner = group ->
                 Objects.equals(groupName, group.getDbSubnetGroupName())
                         && hasRdsResourceIdentity(
                         group.getDbSubnetGroupArn(), accountId, effectiveRegion,
@@ -9324,7 +9960,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         String key = dbResourceKey(effectiveRegion, groupName);
-        java.util.function.Predicate<DbParameterGroup> owner = group ->
+        Predicate<DbParameterGroup> owner = group ->
                 Objects.equals(groupName, group.getDbParameterGroupName())
                         && parameterGroupBelongsToRegion(group, effectiveRegion);
         Optional<DbParameterGroup> resolved;
@@ -9405,7 +10041,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         String key = dbResourceKey(effectiveRegion, groupName);
-        java.util.function.Predicate<DbClusterParameterGroup> owner = group ->
+        Predicate<DbClusterParameterGroup> owner = group ->
                 Objects.equals(groupName, group.getDbClusterParameterGroupName())
                         && clusterParameterGroupBelongsToRegion(group, effectiveRegion);
         Optional<DbClusterParameterGroup> resolved;
@@ -9488,7 +10124,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String effectiveRegion = effectiveRegion(region);
         String accountId = currentAccountId();
         String key = dbResourceKey(effectiveRegion, groupName);
-        java.util.function.Predicate<OptionGroup> owner = group ->
+        Predicate<OptionGroup> owner = group ->
                 Objects.equals(groupName, group.getOptionGroupName())
                         && optionGroupBelongsToRegion(group, effectiveRegion);
         Optional<OptionGroup> resolved;
@@ -9872,7 +10508,7 @@ public class RdsService implements Resettable, ResourceProvider {
         Set<String> resolvedIds = resolvedSubnets.stream()
                 .map(Subnet::getSubnetId)
                 .filter(Objects::nonNull)
-                .collect(java.util.stream.Collectors.toSet());
+                .collect(Collectors.toSet());
         if (!resolvedIds.equals(requestedIds)) {
             throw new AwsException("InvalidSubnet",
                     "One or more VpcSubnetIds do not exist in region " + region + ".", 400);
@@ -9881,7 +10517,7 @@ public class RdsService implements Resettable, ResourceProvider {
         Set<String> vpcIds = resolvedSubnets.stream()
                 .map(Subnet::getVpcId)
                 .filter(id -> id != null && !id.isBlank())
-                .collect(java.util.stream.Collectors.toSet());
+                .collect(Collectors.toSet());
         if (vpcIds.size() != 1) {
             throw new AwsException("InvalidSubnet",
                     "VpcSubnetIds must belong to one VPC.", 400);
@@ -9937,7 +10573,7 @@ public class RdsService implements Resettable, ResourceProvider {
         if (resolvedSubnets.size() != subnetIds.size()) {
             Set<String> found = resolvedSubnets.stream()
                     .map(Subnet::getSubnetId)
-                    .collect(java.util.stream.Collectors.toSet());
+                    .collect(Collectors.toSet());
             List<String> missing = subnetIds.stream()
                     .filter(id -> !found.contains(id))
                     .distinct()

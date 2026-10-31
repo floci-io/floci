@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
@@ -346,7 +347,7 @@ public class Ec2InstanceCfnProvisioner implements CfnResourceProvisioner {
         if (nameOrArn == null || nameOrArn.isBlank()) {
             return null;
         }
-        return nameOrArn.startsWith("arn:") ? nameOrArn : ec2Service.resolveIamInstanceProfileName(nameOrArn);
+        return AwsArnUtils.looksLikeArn(nameOrArn) ? nameOrArn : ec2Service.resolveIamInstanceProfileName(nameOrArn);
     }
 
     private static boolean sameSecurityGroups(Instance prior, List<String> desired) {

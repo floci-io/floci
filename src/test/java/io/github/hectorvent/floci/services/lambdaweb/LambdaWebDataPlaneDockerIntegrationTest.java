@@ -127,7 +127,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                   env: {endpoint: process.env.AWS_LAMBDA_HTTP_ENDPOINT, init: process.env.AWS_LAMBDA_INITIALIZATION_TYPE,
                         exec: process.env.AWS_EXECUTION_ENV, account: process.env.AWS_ACCOUNT_ID,
                         region: process.env.AWS_REGION, custom: process.env.CUSTOM},
-                  execArgv: process.execArgv}));
+                  execArgv: process.execArgv, heapSizeLimit: require('node:v8').getHeapStatistics().heap_size_limit}));
               });
             }).listen(Number(port), host);
             """;
@@ -371,6 +371,14 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 .when().get(presigned.pathAndQuery())
                 .then().statusCode(200)
                 .body("url", equalTo(presigned.pathAndQuery()));
+
+        // SigV4a for a region set that covers the region passes, and loses its signature the same way.
+        LambdaWebRequestSigner.Signed asymmetric = new LambdaWebRequestSigner().sigV4a("us-*").sign("GET", domain, "/a");
+        given().header("Host", domain).headers(asymmetric.headers())
+                .when().get("/a")
+                .then().statusCode(200)
+                .body("headers.authorization", nullValue())
+                .body("headers.x-amz-region-set", equalTo("us-*"));
     }
 
     @Test
@@ -767,7 +775,8 @@ class LambdaWebDataPlaneDockerIntegrationTest {
 
         given().header("Host", domain).when().get("/").then().statusCode(200)
                 .body("execArgv", contains("--expose-gc", "--max-http-header-size", "135168",
-                        "--no-experimental-require-module", "--max-old-space-size=1536"));
+                        "--no-experimental-require-module", "--max-old-space-size=1536"))
+                .body("heapSizeLimit", equalTo(1811939328));
     }
 
     @Test

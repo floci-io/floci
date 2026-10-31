@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
+import org.mockito.Mockito;
 
 import java.util.HashMap;
 import java.util.List;
@@ -384,7 +385,7 @@ class BatchCfnProvisionerTest {
 
     // ── replacement cleanup ──────────────────────────────────────────────────
 
-    private ObjectNode detail(String key, String arn, java.util.Map<String, Object> fields) {
+    private ObjectNode detail(String key, String arn, Map<String, Object> fields) {
         ObjectNode out = mapper.createObjectNode();
         ObjectNode item = out.putArray(key).addObject();
         item.put("arn", arn);
@@ -492,7 +493,7 @@ class BatchCfnProvisionerTest {
         // stack to UPDATE_ROLLBACK_FAILED and leaves the environment on the failed update's values.
         when(batch.describeComputeEnvironments(any())).thenReturn(
                 detail("computeEnvironments", CE_ARN,
-                        java.util.Map.of("state", "ENABLED", "serviceRole", "role-before")));
+                        Map.of("state", "ENABLED", "serviceRole", "role-before")));
         StackResource r = resource("AWS::Batch::ComputeEnvironment", "Compute");
         r.getAttributes().put("ComputeEnvironmentName", "envy");
         ObjectNode props = mapper.createObjectNode();
@@ -505,7 +506,7 @@ class BatchCfnProvisionerTest {
         assertTrue(provisioner.rollbackUpdate(r), "an in-place update is restorable from the snapshot");
 
         ArgumentCaptor<JsonNode> calls = ArgumentCaptor.forClass(JsonNode.class);
-        verify(batch, org.mockito.Mockito.times(2)).updateComputeEnvironment(calls.capture());
+        verify(batch, Mockito.times(2)).updateComputeEnvironment(calls.capture());
         JsonNode restore = calls.getAllValues().get(1);
         assertEquals(CE_ARN, restore.path("computeEnvironment").asText());
         assertEquals("ENABLED", restore.path("state").asText(), "the state it was found with");
@@ -528,7 +529,7 @@ class BatchCfnProvisionerTest {
     void aRollbackCannotRemoveAValueTheFailedUpdateAdded() {
         // No serviceRole before the update: the environment simply does not carry one.
         when(batch.describeComputeEnvironments(any())).thenReturn(
-                detail("computeEnvironments", CE_ARN, java.util.Map.of("state", "ENABLED")));
+                detail("computeEnvironments", CE_ARN, Map.of("state", "ENABLED")));
         StackResource r = resource("AWS::Batch::ComputeEnvironment", "Compute");
         r.getAttributes().put("ComputeEnvironmentName", "envy");
         ObjectNode props = mapper.createObjectNode();
@@ -541,7 +542,7 @@ class BatchCfnProvisionerTest {
         assertTrue(provisioner.rollbackUpdate(r));
 
         ArgumentCaptor<JsonNode> calls = ArgumentCaptor.forClass(JsonNode.class);
-        verify(batch, org.mockito.Mockito.times(2)).updateComputeEnvironment(calls.capture());
+        verify(batch, Mockito.times(2)).updateComputeEnvironment(calls.capture());
         JsonNode failedUpdate = calls.getAllValues().get(0);
         JsonNode restore = calls.getAllValues().get(1);
 
@@ -556,7 +557,7 @@ class BatchCfnProvisionerTest {
     @Test
     void rollingBackAnInPlaceJobQueueUpdateRestoresPriorityAndState() {
         when(batch.describeJobQueues(any())).thenReturn(
-                detail("jobQueues", JQ_ARN, java.util.Map.of("state", "ENABLED", "priority", 3)));
+                detail("jobQueues", JQ_ARN, Map.of("state", "ENABLED", "priority", 3)));
         StackResource r = resource("AWS::Batch::JobQueue", "Queue");
         r.getAttributes().put("JobQueueName", "queue");
         ObjectNode props = mapper.createObjectNode();
@@ -568,7 +569,7 @@ class BatchCfnProvisionerTest {
         assertTrue(provisioner.rollbackUpdate(r));
 
         ArgumentCaptor<JsonNode> calls = ArgumentCaptor.forClass(JsonNode.class);
-        verify(batch, org.mockito.Mockito.times(2)).updateJobQueue(calls.capture());
+        verify(batch, Mockito.times(2)).updateJobQueue(calls.capture());
         JsonNode restore = calls.getAllValues().get(1);
         assertEquals(3, restore.path("priority").asInt(), "the priority it was found with");
         assertEquals("ENABLED", restore.path("state").asText());
@@ -606,7 +607,7 @@ class BatchCfnProvisionerTest {
     @Test
     void clearingTheUpdateDropsTheSnapshot() {
         when(batch.describeJobQueues(any())).thenReturn(
-                detail("jobQueues", JQ_ARN, java.util.Map.of("state", "ENABLED", "priority", 3)));
+                detail("jobQueues", JQ_ARN, Map.of("state", "ENABLED", "priority", 3)));
         StackResource r = resource("AWS::Batch::JobQueue", "Queue");
         r.getAttributes().put("JobQueueName", "queue");
         ObjectNode props = mapper.createObjectNode();

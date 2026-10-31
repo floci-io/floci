@@ -24,6 +24,7 @@ import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
@@ -1193,11 +1194,11 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     }
 
     private static void addTarEntry(
-            org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar,
-            String name, String content) throws java.io.IOException {
-        byte[] bytes = content.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        org.apache.commons.compress.archivers.tar.TarArchiveEntry entry =
-                new org.apache.commons.compress.archivers.tar.TarArchiveEntry(name);
+            TarArchiveOutputStream tar,
+            String name, String content) throws IOException {
+        byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
+        TarArchiveEntry entry =
+                new TarArchiveEntry(name);
         entry.setSize(bytes.length);
         entry.setMode(0755);
         tar.putArchiveEntry(entry);

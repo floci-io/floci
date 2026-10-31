@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
@@ -17,7 +18,6 @@ import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2Sta
 import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2StackTestSupport.integration;
 import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2StackTestSupport.stack;
 import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2StackTestSupport.stackAction;
-import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2StackTestSupport.waitForStackStatus;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
@@ -51,13 +51,13 @@ class CloudFormationApiGatewayV2IntegrationSettingsIntegrationTest {
     void removingSettingsFromTheTemplateRemovesThemFromTheIntegration() {
         String stackName = "integration-settings-removal-stack";
         stackAction("CreateStack", stackName, template(PARAMETERS.formatted("value-1") + TIMEOUT, ""));
-        waitForStackStatus(cloudFormationService, stackName, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         Integration created = integration(apiGatewayV2Service, stack(cloudFormationService, stackName));
         assertEquals(Map.of("overwrite:header.x-example", "value-1"), created.getRequestParameters());
         assertEquals(15000, created.getTimeoutInMillis());
 
         stackAction("UpdateStack", stackName, template(TIMEOUT, ""));
-        waitForStackStatus(cloudFormationService, stackName, "UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         Stack updated = stack(cloudFormationService, stackName);
         Integration integration = integration(apiGatewayV2Service, updated);
@@ -70,7 +70,7 @@ class CloudFormationApiGatewayV2IntegrationSettingsIntegrationTest {
                 .body("timeoutInMillis", equalTo(15000));
 
         stackAction("UpdateStack", stackName, template("", ""));
-        waitForStackStatus(cloudFormationService, stackName, "UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         Stack withoutTimeout = stack(cloudFormationService, stackName);
         assertEquals(0, integration(apiGatewayV2Service, withoutTimeout).getTimeoutInMillis());
@@ -81,12 +81,12 @@ class CloudFormationApiGatewayV2IntegrationSettingsIntegrationTest {
     void aTimeoutThatBecomesNoValueIsRemoved() {
         String stackName = "integration-settings-novalue-stack";
         stackAction("CreateStack", stackName, template(TIMEOUT, ""));
-        waitForStackStatus(cloudFormationService, stackName, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         assertEquals(15000, integration(apiGatewayV2Service, stack(cloudFormationService, stackName)).getTimeoutInMillis());
 
         stackAction("UpdateStack", stackName, template(
                 ",\"TimeoutInMillis\":{\"Fn::If\":[\"Off\",{\"Ref\":\"AWS::NoValue\"},15000]}", ""));
-        waitForStackStatus(cloudFormationService, stackName, "UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         assertEquals(0, integration(apiGatewayV2Service, stack(cloudFormationService, stackName)).getTimeoutInMillis());
     }
@@ -95,10 +95,10 @@ class CloudFormationApiGatewayV2IntegrationSettingsIntegrationTest {
     void failedUpdateRestoresTheEarlierRequestParameters() {
         String stackName = "integration-settings-rollback-stack";
         stackAction("CreateStack", stackName, template(PARAMETERS.formatted("original") + TIMEOUT, ""));
-        waitForStackStatus(cloudFormationService, stackName, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         stackAction("UpdateStack", stackName, template(PARAMETERS.formatted("changed"), FAILING_RESOURCE));
-        waitForStackStatus(cloudFormationService, stackName, "UPDATE_ROLLBACK_COMPLETE");
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
 
         Stack rolledBack = stack(cloudFormationService, stackName);
         Integration integration = integration(apiGatewayV2Service, rolledBack);

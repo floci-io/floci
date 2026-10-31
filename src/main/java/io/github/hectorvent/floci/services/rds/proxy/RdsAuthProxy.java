@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
+import io.github.hectorvent.floci.core.common.ListenBacklog;
 import io.github.hectorvent.floci.services.rds.container.RdsBackendGate;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import org.jboss.logging.Logger;
@@ -148,14 +149,20 @@ public class RdsAuthProxy {
     }
 
     public void start(int proxyPort) throws IOException {
-        serverSocket = new ServerSocket();
-        serverSocket.setReuseAddress(true);
-        serverSocket.bind(new InetSocketAddress(proxyPort));
+        serverSocket = listenSocket(proxyPort, ListenBacklog.ACCEPT);
         running = true;
         acceptThread = Thread.ofVirtual().name("rds-proxy-accept-" + instanceId).unstarted(this::acceptLoop);
         acceptThread.start();
         LOG.infov("RDS proxy started for instance {0} on port {1} → {2}:{3}",
                 instanceId, String.valueOf(proxyPort), backendHost, String.valueOf(backendPort));
+    }
+
+    /**
+     * Binds the listening socket. A seam so a test can pin the accept backlog: a bound
+     * {@code ServerSocket} does not report the backlog it was created with.
+     */
+    ServerSocket listenSocket(int proxyPort, int backlog) throws IOException {
+        return ListenBacklog.acceptSocket(proxyPort, backlog);
     }
 
     /** Swap the master-password snapshot after a rotation; new connections authenticate against it. */

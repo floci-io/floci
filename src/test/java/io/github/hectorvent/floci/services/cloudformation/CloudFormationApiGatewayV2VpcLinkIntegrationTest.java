@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Integration;
 import io.github.hectorvent.floci.services.apigatewayv2.model.VpcLink;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
+import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -19,7 +20,6 @@ import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2Sta
 import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2StackTestSupport.integration;
 import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2StackTestSupport.stack;
 import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2StackTestSupport.stackAction;
-import static io.github.hectorvent.floci.services.cloudformation.ApiGatewayV2StackTestSupport.waitForStackStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -52,7 +52,7 @@ class CloudFormationApiGatewayV2VpcLinkIntegrationTest {
     @Test
     void vpcLinkLifecycleFollowsTheCloudFormationUpdateRules() {
         stackAction("CreateStack", STACK_NAME, template("first-name", "subnet-aaaa1111"));
-        waitForStackStatus(cloudFormationService, STACK_NAME, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(STACK_NAME, "CREATE_COMPLETE");
 
         Stack created = stack(cloudFormationService, STACK_NAME);
         String vpcLinkId = created.getOutputs().get("VpcLinkRef");
@@ -66,12 +66,12 @@ class CloudFormationApiGatewayV2VpcLinkIntegrationTest {
         assertEquals(vpcLinkId, integration.getConnectionId());
 
         stackAction("UpdateStack", STACK_NAME, template("second-name", "subnet-aaaa1111"));
-        waitForStackStatus(cloudFormationService, STACK_NAME, "UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(STACK_NAME, "UPDATE_COMPLETE");
         assertEquals(vpcLinkId, stack(cloudFormationService, STACK_NAME).getOutputs().get("VpcLinkRef"), "a Name change keeps the same link");
         assertEquals("second-name", apiGatewayV2Service.getVpcLink(REGION, vpcLinkId).getName());
 
         stackAction("UpdateStack", STACK_NAME, template("second-name", "subnet-bbbb2222"));
-        waitForStackStatus(cloudFormationService, STACK_NAME, "UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(STACK_NAME, "UPDATE_COMPLETE");
         Stack replaced = stack(cloudFormationService, STACK_NAME);
         String newVpcLinkId = replaced.getOutputs().get("VpcLinkRef");
         assertNotEquals(vpcLinkId, newVpcLinkId, "a SubnetIds change replaces the link");
@@ -80,7 +80,7 @@ class CloudFormationApiGatewayV2VpcLinkIntegrationTest {
         assertEquals(newVpcLinkId, integration(apiGatewayV2Service, replaced).getConnectionId());
 
         stackAction("DeleteStack", STACK_NAME, null);
-        waitForStackStatus(cloudFormationService, STACK_NAME, "DELETE_COMPLETE");
+        CfnStackWaits.awaitStackDeleted(STACK_NAME);
         assertNotFound(newVpcLinkId);
     }
 
@@ -89,12 +89,12 @@ class CloudFormationApiGatewayV2VpcLinkIntegrationTest {
         String stackName = "vpclink-rollback-stack";
         stackAction("CreateStack", stackName,
                 template("rollback-link", "subnet-aaaa1111", "{}", VPC_LINK_CONNECTION, ""));
-        waitForStackStatus(cloudFormationService, stackName, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         String vpcLinkId = stack(cloudFormationService, stackName).getOutputs().get("VpcLinkRef");
 
         stackAction("UpdateStack", stackName,
                 template("rollback-link", "subnet-bbbb2222", "{}", VPC_LINK_CONNECTION, FAILING_RESOURCE));
-        waitForStackStatus(cloudFormationService, stackName, "UPDATE_ROLLBACK_COMPLETE");
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
 
         Stack rolledBack = stack(cloudFormationService, stackName);
         assertEquals(vpcLinkId, rolledBack.getOutputs().get("VpcLinkRef"));
@@ -112,10 +112,10 @@ class CloudFormationApiGatewayV2VpcLinkIntegrationTest {
         String stackName = "vpclink-connection-stack";
         stackAction("CreateStack", stackName,
                 template("connection-link", "subnet-aaaa1111", "{}", VPC_LINK_CONNECTION, ""));
-        waitForStackStatus(cloudFormationService, stackName, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
 
         stackAction("UpdateStack", stackName, template("connection-link", "subnet-aaaa1111", "{}", "", ""));
-        waitForStackStatus(cloudFormationService, stackName, "UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         Integration integration = integration(apiGatewayV2Service, stack(cloudFormationService, stackName));
         assertEquals("INTERNET", integration.getConnectionType());
@@ -127,11 +127,11 @@ class CloudFormationApiGatewayV2VpcLinkIntegrationTest {
         String stackName = "vpclink-reserved-tag-stack";
         String tags = "{\"floci:note\":\"kept\",\"Env\":\"test\"}";
         stackAction("CreateStack", stackName, template("reserved-v1", "subnet-aaaa1111", tags, "", ""));
-        waitForStackStatus(cloudFormationService, stackName, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
         String vpcLinkId = stack(cloudFormationService, stackName).getOutputs().get("VpcLinkRef");
 
         stackAction("UpdateStack", stackName, template("reserved-v2", "subnet-aaaa1111", tags, "", ""));
-        waitForStackStatus(cloudFormationService, stackName, "UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
 
         VpcLink link = apiGatewayV2Service.getVpcLink(REGION, vpcLinkId);
         assertEquals("reserved-v2", link.getName());

@@ -14,6 +14,7 @@ import static org.hamcrest.Matchers.*;
 class LambdaCodeSigningConfigIntegrationTest {
 
     private static final String BASE_PATH = "/2015-03-31";
+    private static final String CODE_SIGNING_PATH = "/2020-06-30";
     private static final String FUNCTION_NAME = "code-signing-test-function";
 
     @Test
@@ -42,7 +43,7 @@ class LambdaCodeSigningConfigIntegrationTest {
     void getFunctionCodeSigningConfig() {
         given()
         .when()
-            .get(BASE_PATH + "/functions/" + FUNCTION_NAME + "/code-signing-config")
+            .get(CODE_SIGNING_PATH + "/functions/" + FUNCTION_NAME + "/code-signing-config")
         .then()
             .statusCode(200)
             .body("FunctionName", equalTo(FUNCTION_NAME))
@@ -54,7 +55,7 @@ class LambdaCodeSigningConfigIntegrationTest {
     void getFunctionCodeSigningConfigNotFound() {
         given()
         .when()
-            .get(BASE_PATH + "/functions/nonexistent-function/code-signing-config")
+            .get(CODE_SIGNING_PATH + "/functions/nonexistent-function/code-signing-config")
         .then()
             .statusCode(404);
     }
