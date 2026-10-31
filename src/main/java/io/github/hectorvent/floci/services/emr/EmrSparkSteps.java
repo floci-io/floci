@@ -7,6 +7,10 @@ import io.github.hectorvent.floci.services.emr.model.EmrCluster;
 import io.github.hectorvent.floci.services.emr.model.EmrStep;
 import io.github.hectorvent.floci.services.emrserverless.EmrServerlessSparkRunner;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -19,13 +23,13 @@ import java.util.Set;
  * {@code spark-submit}, as the Management Guide's Spark steps are written, and a custom JAR step, whose main
  * class {@code spark-submit} runs with the JAR on its class path. Any other {@code command-runner.jar} step
  * runs its command, and a {@code script-runner.jar} step its script, as the Release Guide's "Run commands
- * and scripts on an Amazon EMR cluster" describes them.
+ * and scripts on an Amazon EMR cluster" describes them; an {@code s3-dist-cp} one runs Floci's own S3DistCp.
  */
 final class EmrSparkSteps {
 
     // No source gives AWS's wording for these; they are Floci's.
-    static final String NOT_RUN = "Floci does not run this step: hive-script, pig-script, hadoop-streaming,"
-            + " hadoop-lzo and s3-dist-cp are not in the image steps run in.";
+    static final String NOT_RUN = "Floci does not run this step: hive-script, pig-script, hadoop-streaming and"
+            + " hadoop-lzo are not in the image steps run in.";
     static final String INTERRUPTED = "Floci stopped while the step was running.";
 
     private static final String COMMAND_RUNNER = "command-runner.jar";
@@ -46,9 +50,13 @@ final class EmrSparkSteps {
     // Spark puts a spark.hadoop. setting in the Hadoop configuration its Hive client reads, ahead of hive-site.xml.
     private static final String SPARK_HADOOP_PREFIX = "spark.hadoop.";
     // The Release Guide's command-runner.jar tools that the EMR Serverless image does not have; its hadoop
-    // has no HDFS to run streaming or the LZO indexer against.
+    // has no MapReduce to run streaming or the LZO indexer.
     private static final Set<String> UNAVAILABLE_TOOLS = Set.of("hive-script", "pig-script", "hadoop-streaming",
-            "hadoop-lzo", "s3-dist-cp");
+            "hadoop-lzo");
+    private static final String S3_DIST_CP = "s3-dist-cp";
+    static final String S3_DIST_CP_RESOURCE = "emr/s3-dist-cp.py";
+    // The line that ends the program where the command writes it out.
+    static final String S3_DIST_CP_END = "FLOCI_S3_DIST_CP";
     // script-runner.jar fetches its script from S3 with the step's credentials, the image's AWS CLI reaching
     // Floci's S3, and runs it with its arguments; a path that is not in S3 is run as it is, a bare name from
     // the working directory when a file there has it, as exec would otherwise look for it on the PATH only.
@@ -105,7 +113,8 @@ final class EmrSparkSteps {
     /**
      * The command a step that is not a Spark step runs, or null for one Floci does not run: a
      * {@code command-runner.jar} step's arguments, its command first, unless it names a tool the image does
-     * not have; a {@code script-runner.jar} step's script, the first of its arguments, with the rest.
+     * not have; Floci's S3DistCp with the arguments of an {@code s3-dist-cp} one; a {@code script-runner.jar}
+     * step's script, the first of its arguments, with the rest.
      */
     static List<String> command(EmrStep step) {
         String jar = step.getJar();
@@ -114,6 +123,11 @@ final class EmrSparkSteps {
             return null;
         }
         if (named(jar, COMMAND_RUNNER)) {
+            if (S3_DIST_CP.equals(args.getFirst())) {
+                List<String> command = new ArrayList<>(List.of("bash", "-c", S3DistCp.COMMAND, S3_DIST_CP));
+                command.addAll(args.subList(1, args.size()));
+                return command;
+            }
             return named(args.getFirst(), SPARK_SUBMIT) || UNAVAILABLE_TOOLS.contains(args.getFirst())
                     ? null : List.copyOf(args);
         }
@@ -209,6 +223,32 @@ final class EmrSparkSteps {
         }
         kept.addAll(arguments.subList(i, arguments.size()));
         return kept;
+    }
+
+    /**
+     * Floci's S3DistCp: the image has neither {@code s3-dist-cp} nor MapReduce, so the command writes Floci's
+     * program into the container and runs it through {@code spark-submit}, which the command wrapper gives
+     * Floci's S3 and the cluster's HDFS. Read once, when the first {@code s3-dist-cp} step comes.
+     */
+    private static final class S3DistCp {
+        static final String COMMAND = String.join("\n",
+                "program=\"${TMPDIR:-/tmp}/floci-s3-dist-cp.py\"",
+                "cat > \"$program\" <<'" + S3_DIST_CP_END + "'",
+                program(),
+                S3_DIST_CP_END,
+                "exec spark-submit --conf spark.ui.enabled=false \"$program\" \"$@\"");
+
+        private static String program() {
+            try (InputStream in = Thread.currentThread().getContextClassLoader()
+                    .getResourceAsStream(S3_DIST_CP_RESOURCE)) {
+                if (in == null) {
+                    throw new IllegalStateException(S3_DIST_CP_RESOURCE + " is missing from the classpath");
+                }
+                return new String(in.readAllBytes(), StandardCharsets.UTF_8).stripTrailing();
+            } catch (IOException e) {
+                throw new UncheckedIOException("Could not read " + S3_DIST_CP_RESOURCE, e);
+            }
+        }
     }
 
     // command-runner.jar is named alone; a path such as /usr/bin/spark-submit names spark-submit too.
