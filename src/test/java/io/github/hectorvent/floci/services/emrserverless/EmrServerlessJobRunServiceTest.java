@@ -265,6 +265,8 @@ class EmrServerlessJobRunServiceTest {
         assertNull(job.cloudWatchLogs());
         assertEquals(Map.of(), job.environment());
         assertEquals(List.of(), job.archives());
+        // An EMR Serverless application has no cluster, nor its storage.
+        assertNull(job.storage());
     }
 
     @Test

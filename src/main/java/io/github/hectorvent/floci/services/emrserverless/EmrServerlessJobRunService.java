@@ -494,7 +494,8 @@ public class EmrServerlessJobRunService implements Resettable {
         SparkJobRunner.Job job = new SparkJobRunner.Job(SERVICE, run.getJobRunId(), arn.accountId(), arn.region(),
                 run.getReleaseLabel(), imageTemplate, customImage(app), dockerNetwork, run.getExecutionRole(),
                 sparkDefaults, application(sparkSubmit), null, timeout, driverLogFolder(app, run),
-                driverCloudWatchLogs(app, run), driverEnvironment(sparkProperties), archives(sparkProperties));
+                driverCloudWatchLogs(app, run), driverEnvironment(sparkProperties), archives(sparkProperties),
+                null);
         executing.add(run.getJobRunId());
         long launchedIn = generation;
         runExecutor.execute(() -> execute(job, launchedIn));

@@ -77,6 +77,8 @@ import static org.mockito.Mockito.when;
 class EmrServerlessSparkRunnerTest {
 
     private static final String ENDPOINT = "http://floci:4566";
+    private static final SparkJobRunner.Storage STORAGE = new SparkJobRunner.Storage(
+            "floci-aws-emr-j-2AXXXXXXGAPLF-home", "floci-aws-emr-j-2AXXXXXXGAPLF-mnt");
 
     private final EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
     private final ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
@@ -169,6 +171,8 @@ class EmrServerlessSparkRunnerTest {
         verify(lifecycle, never()).copyJavaTrustStore(anyString());
         // The release's image is not in an ECR repository, so it is pulled once, as the container is created.
         verify(lifecycle, never()).resolveImageForLaunch(anyString(), any(), any());
+        // An EMR Serverless run has no cluster, nor its storage.
+        verify(spec, never()).withNamedVolume(anyString(), anyString());
     }
 
     @Test
@@ -216,6 +220,7 @@ class EmrServerlessSparkRunnerTest {
         verify(spec).withJavaTrustStore();
         // The job's own variables, a cluster's spark-env exports, beside Floci's (none from this test's mock).
         verify(spec).withEnv(List.of("PYSPARK_PYTHON=/usr/bin/python3.11"));
+        verify(spec, never()).withEnv(eq("FLOCI_HADOOP_SITE"), anyString());
     }
 
     @Test
@@ -394,6 +399,62 @@ class EmrServerlessSparkRunnerTest {
 
         assertTrue(ended.exit() != 0);
         assertFalse(ended.output().contains("started"));
+    }
+
+    @Test
+    void aStepMountsItsClustersStorageWhoseHdfsIsWherePathsWithoutASchemeLead() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        SparkJobRunner.Job job = stepJob(Map.of("spark.hadoop.fs.defaultFS", "file:///"));
+
+        runner(builder).run(job, progress);
+        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(job, ENDPOINT);
+
+        verify(spec).withNamedVolume(STORAGE.home(), "/home/hadoop");
+        verify(spec).withNamedVolume(STORAGE.mnt(), "/mnt");
+        // After Floci's S3 settings, before the cluster's spark-defaults, which win.
+        assertEquals("spark.hadoop.aws.region=eu-west-1", arguments.get(17));
+        assertEquals(List.of(
+                "--conf", "spark.hadoop.fs.defaultFS=hdfs:///",
+                "--conf", "spark.hadoop.fs.hdfs.impl=org.apache.hadoop.fs.viewfs.ViewFileSystemOverloadScheme",
+                "--conf", "spark.hadoop.fs.viewfs.mounttable.default.linkFallback=file:///mnt/hdfs",
+                "--conf", "spark.sql.streaming.checkpointFileManagerClass="
+                        + "org.apache.spark.sql.execution.streaming.FileSystemBasedCheckpointFileManager",
+                "--conf", "spark.hadoop.fs.defaultFS=file:///",
+                "s3://bucket/jobs/report.py"), arguments.subList(18, arguments.size()));
+    }
+
+    @Test
+    void aCommandOnAClusterGivesItsHadoopCommandTheClustersHdfsToo() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        List<String> command = List.of("bash", "-c", "hadoop fs -put data.csv /input/");
+
+        runner(builder).run(commandJob(command, Map.of(), STORAGE), progress);
+
+        verify(spec).withNamedVolume(STORAGE.home(), "/home/hadoop");
+        verify(spec).withNamedVolume(STORAGE.mnt(), "/mnt");
+        verify(spec).withEnv("FLOCI_HADOOP_SITE", String.join("\n",
+                "<property><name>fs.defaultFS</name><value>hdfs:///</value></property>",
+                "<property><name>fs.hdfs.impl</name><value>org.apache.hadoop.fs.viewfs.ViewFileSystemOverloadScheme"
+                        + "</value></property>",
+                "<property><name>fs.viewfs.mounttable.default.linkFallback</name><value>file:///mnt/hdfs</value>"
+                        + "</property>"));
+        verify(spec).withEnv(eq("FLOCI_SPARK_DEFAULTS"), argThat(file -> file.contains(
+                "\nspark.hadoop.fs.defaultFS hdfs:///\n")));
+        // A copy of the Hadoop configuration a spark-env export of HADOOP_CONF_DIR names, else of the image's, links
+        // followed, its core-site.xml taking in the original's whole, whatever its XML, then the cluster's HDFS.
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "source_conf=\"${HADOOP_CONF_DIR:-/etc/hadoop/conf}\"\n")
+                && entrypoint.get(2).contains("cp -rL \"$source_conf/.\" \"$hadoop_conf\"")
+                && entrypoint.get(2).contains(
+                        "include='<xi:include href=\"/tmp/floci-hadoop-conf/floci-original-core-site.xml\"/>'")
+                && entrypoint.get(2).contains("'<configuration xmlns:xi=\"http://www.w3.org/2001/XInclude\">'"
+                        + " \"$include\" \"$FLOCI_HADOOP_SITE\" '</configuration>' > \"$hadoop_conf/core-site.xml\"")
+                && entrypoint.get(2).contains(
+                        "export HADOOP_CONF_DIR=\"$hadoop_conf\" PATH=\"/tmp/floci-bin:$PATH\"")));
     }
 
     @Test
@@ -835,24 +896,37 @@ class EmrServerlessSparkRunnerTest {
                                           SparkJobRunner.CloudWatchLogs cloudWatchLogs) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 imageTemplate, null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults,
-                application, null, timeout, logFolder, cloudWatchLogs, Map.of(), List.of());
+                application, null, timeout, logFolder, cloudWatchLogs, Map.of(), List.of(), null);
     }
 
     private static SparkJobRunner.Job customImageJob(String customImage) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 null, customImage, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
-                List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), List.of());
+                List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), List.of(), null);
     }
 
     private static SparkJobRunner.Job archiveJob(List<String> archives) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 null, null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
-                List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), archives);
+                List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), archives, null);
     }
 
     private static SparkJobRunner.Job commandJob(List<String> command, Map<String, String> sparkDefaults) {
+        return commandJob(command, sparkDefaults, null);
+    }
+
+    private static SparkJobRunner.Job commandJob(List<String> command, Map<String, String> sparkDefaults,
+                                                 SparkJobRunner.Storage storage) {
         return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults, List.of(), command,
-                Duration.ZERO, null, null, Map.of("PYSPARK_PYTHON", "/usr/bin/python3.11"), List.of());
+                Duration.ZERO, null, null, Map.of("PYSPARK_PYTHON", "/usr/bin/python3.11"), List.of(),
+                storage);
+    }
+
+    // A Spark step on a cluster, which has storage.
+    private static SparkJobRunner.Job stepJob(Map<String, String> sparkDefaults) {
+        return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
+                null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults,
+                List.of("s3://bucket/jobs/report.py"), null, Duration.ZERO, null, null, Map.of(), List.of(), STORAGE);
     }
 }
