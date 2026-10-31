@@ -211,7 +211,7 @@ notes:
   AWS::Route53::RecordSetGroup: 'written in one change batch, so a record set that cannot be written leaves the zone unchanged; every record set must be in the group''s hosted zone'
   Custom::DynamoDBReplica: applied natively against DynamoDB, not via a provider Lambda
   AWS::DynamoDB::Table: '`TimeToLiveSpecification` applied on create and update; to rename an enabled TTL attribute, disable TTL in one update and enable the new attribute in a later one'
-  AWS::Cognito::UserPool: '`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`; `EnabledMfas` is applied with `SetUserPoolMfaConfig`, as on AWS'
+  AWS::Cognito::UserPool: '`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`; `EnabledMfas` is applied with `SetUserPoolMfaConfig`, as on AWS, and once `SMS_MFA` is on only `MfaConfiguration: OFF` turns it off'
   AWS::SES::EmailIdentity: 'BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS''s region- and identity-specific zone assignment'
   AWS::SES::ReceiptRule: 'stored in an existing SES receipt rule set; Ref and RuleName return the rule name; management plane only, with no inbound mail delivery'
   AWS::Events::Archive: '`KmsKeyIdentifier` is ignored'
