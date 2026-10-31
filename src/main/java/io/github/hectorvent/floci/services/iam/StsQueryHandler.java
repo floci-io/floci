@@ -179,6 +179,11 @@ public class StsQueryHandler {
             return trustDenied;
         }
 
+        Response roleDurationError = validateMaxSessionDuration(durationSeconds, role);
+        if (roleDurationError != null) {
+            return roleDurationError;
+        }
+
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
         String assumedRoleArn = assumedRoleArn(sessionRoleArn, accountId, roleName, sessionName);
         String roleId = (role != null && role.getRoleId() != null) ? role.getRoleId() : ("AROA" + randomId(16));
