@@ -47,7 +47,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -2717,17 +2716,27 @@ public class RedshiftService implements ManagedSecretRotator {
                     || source.getCopiedToRegions().contains(destination)) {
                 return null;
             }
-            boolean stillCopying = clusters.getForAccount(accountId, cluster.getClusterIdentifier())
-                    .map(current -> destination.equals(current.getSnapshotCopyDestinationRegion())).orElse(false);
-            if (!stillCopying) {
+            // The candidates were chosen before the locks: copying may since have been disabled, re-enabled
+            // (which moves the enable time past this snapshot) or the cluster recreated.
+            Cluster current = clusters.getForAccount(accountId, cluster.getClusterIdentifier()).orElse(null);
+            if (current == null || !destination.equals(current.getSnapshotCopyDestinationRegion())
+                    || current.getSnapshotCopyEnabledAt() == null || source.getSnapshotCreateTime() == null
+                    || source.getSnapshotCreateTime().isBefore(current.getSnapshotCopyEnabledAt())) {
                 return null;
             }
             String key = copyKey(destination, snapshotId);
             Snapshot existing = snapshotCopies.getForAccount(accountId, key).orElse(null);
-            if (existing != null && Objects.equals(source.getSnapshotCreateTime(),
-                    existing.getSourceSnapshotCreateTime())) {
-                // A previous sweep committed this very copy and died before marking the source.
-                mutate(() -> markCopied(accountId, snapshotId, destination));
+            if (existing != null) {
+                if (Objects.equals(source.getSnapshotCreateTime(), existing.getSourceSnapshotCreateTime())) {
+                    // A previous sweep committed this very copy and died before marking the source.
+                    mutate(() -> markCopied(accountId, snapshotId, destination));
+                } else {
+                    // The source was deleted and recreated under the same name: the retained copy is an
+                    // independent backup and must not be replaced.
+                    LOG.warnv("Not copying Redshift snapshot {0} of account {1} to {2}: the destination already "
+                            + "holds a retained copy of an earlier snapshot with this identifier",
+                            snapshotId, accountId, destination);
+                }
                 return null;
             }
             Path dump;
@@ -2736,38 +2745,35 @@ public class RedshiftService implements ManagedSecretRotator {
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }
-            Snapshot copy = buildSnapshotCopy(accountId, source, cluster, dump);
+            Snapshot copy = buildSnapshotCopy(accountId, source, current, dump);
             try {
                 mutate(() -> {
                     snapshotCopies.putAllAtomicallyForAccount(accountId, Map.of(key, copy));
-                    markCopied(accountId, snapshotId, destination);
+                    // Hybrid flushes log instead of throwing: write the copy before the source marker that
+                    // makes later sweeps skip it, so the marker never reaches disk ahead of the copy.
                     snapshotCopies.flush();
+                    markCopied(accountId, snapshotId, destination);
                     snapshots.flush();
                     return null;
                 });
             } catch (RuntimeException e) {
                 // The records change in memory before they are flushed, so undo them before the dump goes.
-                rollbackSnapshotCopy(accountId, key, existing, source);
+                rollbackSnapshotCopy(accountId, key, source);
                 deleteCopyDump(accountId, dump == null ? null : dump.toString());
                 throw e;
-            }
-            if (existing != null && !Objects.equals(existing.getSqlDump(), copy.getSqlDump())) {
-                // Only now that the new record is saved is the replaced copy's dump unreferenced.
-                deleteCopyDump(accountId, existing.getSqlDump());
             }
             return null;
         });
     }
 
-    private void rollbackSnapshotCopy(String accountId, String key, Snapshot previousCopy, Snapshot source) {
+    private void rollbackSnapshotCopy(String accountId, String key, Snapshot source) {
         try {
             mutate(() -> {
-                if (previousCopy == null) {
-                    snapshotCopies.deleteAllAtomicallyForAccounts(Map.of(accountId, Set.of(key)));
-                } else {
-                    snapshotCopies.putAllAtomicallyForAccount(accountId, Map.of(key, previousCopy));
-                }
+                snapshotCopies.deleteAllAtomicallyForAccounts(Map.of(accountId, Set.of(key)));
                 snapshots.putAllAtomicallyForAccount(accountId, Map.of(source.getSnapshotIdentifier(), source));
+                // The copy may already have been flushed before the failure.
+                snapshotCopies.flush();
+                snapshots.flush();
                 return null;
             });
         } catch (RuntimeException rollbackFailure) {
@@ -2804,27 +2810,11 @@ public class RedshiftService implements ManagedSecretRotator {
             return null;
         }
         Path accountDir = accountDumpDir(accountId);
-        Path from = Paths.get(stored).toAbsolutePath().normalize();
-        if (!from.startsWith(accountDir) || from.equals(accountDir) || !Files.isRegularFile(from)) {
-            throw new IOException("Snapshot dump is missing or outside its account directory: " + from);
-        }
         Path destinationDir = accountDir.resolve("copies").resolve(destination).normalize();
         if (!destinationDir.startsWith(accountDir)) {
             throw new IOException("Invalid destination Region: " + destination);
         }
-        // Each copy gets its own file, so replacing an earlier copy never touches the dump it still points to.
-        String fileName = UUID.randomUUID().toString();
-        Path to = destinationDir.resolve(fileName + ".sql");
-        Path staging = destinationDir.resolve(fileName + ".sql.copying");
-        Files.createDirectories(destinationDir);
-        try {
-            Files.copy(from, staging, StandardCopyOption.REPLACE_EXISTING);
-            Files.move(staging, to, StandardCopyOption.ATOMIC_MOVE);
-        } catch (IOException e) {
-            Files.deleteIfExists(staging);
-            throw e;
-        }
-        return to;
+        return SnapshotDumpCopier.copy(Paths.get(stored), accountDir, destinationDir);
     }
 
     /** Records that the snapshot has been carried to the Region, so a deleted or expired copy stays gone. */
@@ -2874,8 +2864,10 @@ public class RedshiftService implements ManagedSecretRotator {
         int retention;
         if ("automated".equals(copy.getSnapshotType())) {
             String region = key.substring(0, key.indexOf("::"));
+            // A cluster recreated under the same name has a new generation and no say over the old copies.
             Integer current = clusters.getForAccount(accountId, copy.getClusterIdentifier())
                     .filter(cluster -> region.equals(cluster.getSnapshotCopyDestinationRegion()))
+                    .filter(cluster -> Objects.equals(cluster.getSnapshotGeneration(), copy.getClusterGeneration()))
                     .map(Cluster::getSnapshotCopyRetentionPeriod).orElse(null);
             Integer stored = copy.getAutomatedSnapshotRetentionPeriod();
             retention = current != null ? current : stored != null ? stored : DEFAULT_SNAPSHOT_COPY_RETENTION_DAYS;
@@ -3094,6 +3086,9 @@ public class RedshiftService implements ManagedSecretRotator {
         }
         if (resourceType == null || "snapshot".equalsIgnoreCase(resourceType)) {
             for (Snapshot s : snapshots.scan(k -> true)) {
+                if (snapshotCopies.get(copyKey(regionResolver.getRegion(), s.getSnapshotIdentifier())).isPresent()) {
+                    continue;
+                }
                 addTaggedResources(result, snapshotArn(s.getClusterIdentifier(), s.getSnapshotIdentifier()),
                         "snapshot", s.getTags(), tagKeysFilter);
             }

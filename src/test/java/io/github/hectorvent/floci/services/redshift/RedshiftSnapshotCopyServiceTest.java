@@ -20,6 +20,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 
@@ -213,6 +215,75 @@ class RedshiftSnapshotCopyServiceTest {
         AwsException refused = assertThrows(AwsException.class,
                 () -> fixture.service(DESTINATION).createSnapshot("nightly", "warehouse"));
         assertEquals("ClusterSnapshotAlreadyExists", refused.getErrorCode());
+    }
+
+    @Test
+    void aRecreatedSourceDoesNotReplaceTheRetainedCopyOfAnEarlierSnapshot() throws Exception {
+        Fixture fixture = fixture();
+        seedCluster(fixture, "warehouse", Instant.now().minusSeconds(60));
+        fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
+        fixture.service(SOURCE).runSnapshotCopies(Instant.now());
+        String key = DESTINATION + "::nightly";
+        Snapshot retained = new Snapshot(fixture.copies().getForAccount(ACCOUNT, key).orElseThrow());
+        retained.setSourceSnapshotCreateTime(retained.getSourceSnapshotCreateTime().minusSeconds(30));
+        retained.setTags(new LinkedHashMap<>(Map.of("env", "prod")));
+        fixture.copies().putForAccount(ACCOUNT, key, retained);
+        fixture.service(SOURCE).deleteSnapshot("nightly");
+        fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
+
+        fixture.service(SOURCE).runSnapshotCopies(Instant.now());
+
+        Snapshot kept = fixture.copies().getForAccount(ACCOUNT, key).orElseThrow();
+        assertEquals(retained.getSqlDump(), kept.getSqlDump());
+        assertEquals(Map.of("env", "prod"), kept.getTags());
+        assertTrue(Files.exists(Path.of(kept.getSqlDump())));
+        assertEquals(1, dumpFilesUnderCopies());
+        assertTrue(fixture.snapshots().getForAccount(ACCOUNT, "nightly").orElseThrow()
+                .getCopiedToRegions().isEmpty());
+    }
+
+    @Test
+    void aCopyOfARemovedClusterKeepsItsOwnRetentionWhenTheNameIsReused() {
+        Fixture fixture = fixture();
+        Cluster cluster = seedCluster(fixture, "warehouse", Instant.now().minusSeconds(60));
+        cluster.setSnapshotGeneration("gen-1");
+        fixture.clusters().putForAccount(ACCOUNT, "warehouse", cluster);
+        fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
+        fixture.service(SOURCE).runSnapshotCopies(Instant.now());
+        String key = DESTINATION + "::nightly";
+        Snapshot copy = new Snapshot(fixture.copies().getForAccount(ACCOUNT, key).orElseThrow());
+        copy.setSnapshotType("automated");
+        copy.setSnapshotCreateTime(Instant.now().minus(Duration.ofDays(3)));
+        copy.setAutomatedSnapshotRetentionPeriod(7);
+        fixture.copies().putForAccount(ACCOUNT, key, copy);
+        cluster.setSnapshotGeneration("gen-2");
+        cluster.setSnapshotCopyRetentionPeriod(1);
+        fixture.clusters().putForAccount(ACCOUNT, "warehouse", cluster);
+
+        fixture.service(SOURCE).runSnapshotCopies(Instant.now());
+        assertTrue(fixture.copies().getForAccount(ACCOUNT, key).isPresent());
+
+        cluster.setSnapshotGeneration("gen-1");
+        fixture.clusters().putForAccount(ACCOUNT, "warehouse", cluster);
+        fixture.service(SOURCE).runSnapshotCopies(Instant.now());
+        assertTrue(fixture.copies().getForAccount(ACCOUNT, key).isEmpty());
+    }
+
+    @Test
+    void describeTagsListsOnlyTheCopyTagsForASnapshotItShadows() {
+        Fixture fixture = fixture();
+        seedCluster(fixture, "warehouse", Instant.now().minusSeconds(60));
+        fixture.service(SOURCE).createSnapshot("nightly", "warehouse");
+        String sourceArn = "arn:aws:redshift:" + SOURCE + ":" + ACCOUNT + ":snapshot:warehouse/nightly";
+        String copyArn = "arn:aws:redshift:" + DESTINATION + ":" + ACCOUNT + ":snapshot:warehouse/nightly";
+        fixture.service(SOURCE).createTags(sourceArn, Map.of("env", "prod"));
+        fixture.service(SOURCE).runSnapshotCopies(Instant.now());
+        fixture.service(DESTINATION).createTags(copyArn, Map.of("env", "test"));
+
+        List<RedshiftService.TaggedResource> tags = fixture.service(DESTINATION)
+                .describeTags(null, "snapshot", null);
+
+        assertEquals(List.of(new RedshiftService.TaggedResource(copyArn, "snapshot", "env", "test")), tags);
     }
 
     private long dumpFilesUnderCopies() {
