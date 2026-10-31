@@ -248,10 +248,8 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
         if (lb.getVpcId() != null && lb.getSecurityGroups().isEmpty()) {
             // AWS associates a security group with a VPC load balancer created without one; for a
             // non-default VPC that is the VPC's default group. (In a default VPC AWS creates a
-            // default_elb_<id> group instead; not modelled.)
-            ec2Service.getSecurityGroupsForVpc(region, lb.getVpcId(),
-                            Map.of("group-name", List.of("default"))).stream()
-                    .findFirst()
+            // default_elb_<id> group instead; not modelled, see docs/services/elb-classic.md.)
+            ec2Service.defaultSecurityGroupOf(region, lb.getVpcId())
                     .ifPresent(sg -> lb.getSecurityGroups().add(sg.getGroupId()));
         }
         populateSourceSecurityGroup(region, lb);

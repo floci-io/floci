@@ -7283,7 +7283,9 @@ public class RdsService implements Resettable, ResourceProvider {
         endpoint.setVpcId(vpcId);
         endpoint.setVpcSubnetIds(vpcSubnetIds);
         endpoint.setVpcSecurityGroupIds(vpcSecurityGroupIds == null || vpcSecurityGroupIds.isEmpty()
-                ? defaultSecurityGroupOf(vpcId, effectiveRegion) : vpcSecurityGroupIds);
+                ? ec2Service.defaultSecurityGroupOf(effectiveRegion, vpcId).map(sg -> List.of(sg.getGroupId()))
+                        .orElse(List.of())
+                : vpcSecurityGroupIds);
         endpoint.setCreatedDate(Instant.now());
         endpoint.setTargetRole(role);
         endpoint.setEndpointNetworkType(networkType);
@@ -7407,13 +7409,6 @@ public class RdsService implements Resettable, ResourceProvider {
         endpoint.setDefault(true);
         endpoint.setEndpointNetworkType(proxy.getEndpointNetworkType());
         return endpoint;
-    }
-
-    private List<String> defaultSecurityGroupOf(String vpcId, String region) {
-        return ec2Service.getSecurityGroupsForVpc(region, vpcId, Map.of()).stream()
-                .filter(group -> "default".equals(group.getGroupName()))
-                .map(group -> group.getGroupId())
-                .toList();
     }
 
     private List<DbProxyEndpoint> proxyEndpointsOf(String region, String dbProxyName) {
