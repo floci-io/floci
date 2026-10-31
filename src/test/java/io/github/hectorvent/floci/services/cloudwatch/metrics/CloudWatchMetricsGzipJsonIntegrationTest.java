@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.SignedIamEnforcementProfile;
+import io.github.hectorvent.floci.testing.SignedIamUsers;
 import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -15,14 +16,12 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.net.URI;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
-import java.util.stream.Collectors;
 import java.util.zip.GZIPOutputStream;
 
 import static io.restassured.RestAssured.given;
@@ -142,38 +141,32 @@ class CloudWatchMetricsGzipJsonIntegrationTest {
 
     @Test
     void iamDecidesACompressedPublicationBeforeItIsDecompressed() throws Exception {
-        String user = "cw-gzip-" + UUID.randomUUID();
-        String key = null;
-        iam("CreateUser", Map.of("UserName", user)).then().statusCode(200);
-        try {
-            Response credentials = iam("CreateAccessKey", Map.of("UserName", user));
-            credentials.then().statusCode(200);
-            key = credentials.xmlPath().getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.AccessKeyId");
-            String secret = credentials.xmlPath()
-                    .getString("CreateAccessKeyResponse.CreateAccessKeyResult.AccessKey.SecretAccessKey");
-            AwsRequestSigner signer = AwsRequestSigner.signedAs(key, secret, "monitoring");
+        try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "cw-gzip-denied-")) {
+            AwsRequestSigner signer = user.signer("monitoring");
             String denied = namespace();
             request(signer, "PutMetricData", gzip(publication(denied)), "gzip")
                     .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
             request(signer, "PutMetricData", new byte[]{1, 2, 3}, "gzip")
                     .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
             assertAbsent(denied);
+        }
 
-            iam("PutUserPolicy", Map.of("UserName", user, "PolicyName", "publish-metrics", "PolicyDocument", """
-                    {"Version":"2012-10-17","Statement":[{
-                      "Effect":"Allow","Action":"cloudwatch:PutMetricData","Resource":"*"
-                    }]}
-                    """)).then().statusCode(200);
+        try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "cw-gzip-allowed-", "publish-metrics", """
+                {
+                  "Version": "2012-10-17",
+                  "Statement": [
+                    {
+                      "Effect": "Allow",
+                      "Action": "cloudwatch:PutMetricData",
+                      "Resource": "*"
+                    }
+                  ]
+                }
+                """)) {
+            AwsRequestSigner signer = user.signer("monitoring");
             String allowed = namespace();
             request(signer, "PutMetricData", gzip(publication(allowed)), "gzip").then().statusCode(200);
             list(allowed).then().statusCode(200).body("Metrics[0].MetricName", equalTo("Compressed"));
-        } finally {
-            // Unasserted: a failed cleanup call must not hide the test's failure or skip the next call.
-            if (key != null) {
-                iam("DeleteAccessKey", Map.of("UserName", user, "AccessKeyId", key));
-            }
-            iam("DeleteUserPolicy", Map.of("UserName", user, "PolicyName", "publish-metrics"));
-            iam("DeleteUser", Map.of("UserName", user));
         }
     }
 
@@ -228,16 +221,6 @@ class CloudWatchMetricsGzipJsonIntegrationTest {
             signed.put("content-encoding", encoding);
         }
         return signed;
-    }
-
-    private Response iam(String action, Map<String, String> parameters) throws Exception {
-        String body = "Action=" + action + "&Version=2010-05-08&" + parameters.entrySet().stream()
-                .map(entry -> URLEncoder.encode(entry.getKey(), StandardCharsets.UTF_8) + "="
-                        + URLEncoder.encode(entry.getValue(), StandardCharsets.UTF_8))
-                .collect(Collectors.joining("&"));
-        return given().headers(AwsRequestSigner.signedAs("test", "test", "iam")
-                        .headersFor("POST", endpoint, Map.of(), body.getBytes(StandardCharsets.UTF_8)))
-                .contentType("application/x-www-form-urlencoded").body(body).post(endpoint);
     }
 
     private static String namespace() {
