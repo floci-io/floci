@@ -18,6 +18,10 @@ on:
       - 'pom.xml'
       - '.github/ci/**'
       - '.github/workflows/ci.yml'
+  # Runs each merge queue entry against main plus the PRs queued ahead of it. paths does not
+  # apply to merge_group, so a queued PR is always checked.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
