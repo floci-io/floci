@@ -149,17 +149,31 @@ class PaymentCryptographyTest {
         assertThat(tags).containsEntry("owner", "compat");
     }
 
+    /**
+     * A region the creating client did not sign for. It has to differ from the
+     * region of the suite, or the key would be in that region too and the key
+     * would be found.
+     */
+    private static Region anotherRegion() {
+        Region region = TestFixtures.region();
+        if (region.id().startsWith("cn-")) {
+            return region.id().equals("cn-northwest-1")
+                    ? Region.of("cn-north-1") : Region.of("cn-northwest-1");
+        }
+        return Region.US_WEST_2.equals(region) ? Region.US_EAST_1 : Region.US_WEST_2;
+    }
+
     @Test
     void aKeyOfOneRegionIsNotFoundInAnother() {
         Key key = createAesKey();
-        PaymentCryptographyClient west = TestFixtures.paymentCryptographyClient(Region.US_WEST_2);
+        PaymentCryptographyClient elsewhere = TestFixtures.paymentCryptographyClient(anotherRegion());
         try {
-            assertThatThrownBy(() -> west.getKey(k -> k.keyIdentifier(keyIdOf(key.keyArn()))))
+            assertThatThrownBy(() -> elsewhere.getKey(k -> k.keyIdentifier(keyIdOf(key.keyArn()))))
                     .isInstanceOf(AwsServiceException.class)
                     .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
                             .errorCode()).isEqualTo("ResourceNotFoundException"));
         } finally {
-            west.close();
+            elsewhere.close();
         }
     }
 }
