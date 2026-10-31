@@ -25,6 +25,11 @@ By default, Docker containers launched for EC2 instances are bounded to the CPU 
 - **Types outside the full catalog**: Docker CPU and memory limits are not applied when the full catalog lacks a type. When opted in, Standard On-Demand admission requires a known default vCPU count, as described below.
 - **Configuration knob**: To disable container resource limits (for example, running a large instance type on a developer machine with limited resources), set `floci.services.ec2.instance-resource-limits: false` (or environment variable `FLOCI_SERVICES_EC2_INSTANCE_RESOURCE_LIMITS=false`).
 
+The full catalog includes `r5.large` with 2 vCPUs, 16 GiB of memory, x86_64 processors,
+EBS-only storage, and one network card supporting 3 interfaces and 10 IPv4 addresses per
+interface, following the [AWS R5 specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/mo.html).
+`DescribeInstanceTypes` and `DescribeInstanceTypeOfferings` use this same entry.
+
 ## Standard On-Demand admission
 
 Quota admission is opt-in. Set `FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS=true` to
