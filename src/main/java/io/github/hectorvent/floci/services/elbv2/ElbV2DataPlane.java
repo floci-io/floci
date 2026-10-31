@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver.CertificateMaterial;
 import io.github.hectorvent.floci.core.common.Pem;
+import io.github.hectorvent.floci.core.common.WebSocketUpgrades;
 import io.github.hectorvent.floci.core.common.tls.ReloadingKeyManager;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
@@ -25,12 +26,10 @@ import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
 import io.vertx.core.http.HttpClientOptions;
-import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
 import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.core.http.HttpServerResponse;
-import io.vertx.core.http.HttpVersion;
 import io.vertx.core.http.RequestOptions;
 import io.vertx.core.net.JdkSSLEngineOptions;
 import io.vertx.core.net.KeyCertOptions;
@@ -1241,26 +1240,9 @@ public class ElbV2DataPlane {
         }
     }
 
-    /**
-     * An ALB forwards a WebSocket handshake to an instance or ip target with its upgrade headers
-     * intact, which an ordinary proxied request cannot do: {@code Connection} and {@code Upgrade}
-     * are hop-by-hop and are stripped. AWS only tunnels WebSocket upgrades, over HTTP/1.1.
-     */
+    /** An ALB forwards a WebSocket handshake to an instance or ip target with its upgrade headers intact. */
     static boolean isWebSocketUpgrade(HttpServerRequest req) {
-        if (req.version() != HttpVersion.HTTP_1_1 || req.method() != HttpMethod.GET) {
-            return false;
-        }
-        if (!"websocket".equalsIgnoreCase(req.getHeader("Upgrade"))) {
-            return false;
-        }
-        for (String connection : req.headers().getAll("Connection")) {
-            for (String token : connection.split(",")) {
-                if ("upgrade".equalsIgnoreCase(token.trim())) {
-                    return true;
-                }
-            }
-        }
-        return false;
+        return WebSocketUpgrades.isHandshake(req);
     }
 
     private void proxyUpgrade(HttpServerRequest req, String host, int port, boolean preserveHostHeader,
@@ -1362,8 +1344,9 @@ public class ElbV2DataPlane {
                 target.close();
             }
         };
-        relay(client, target, lastActivity, close);
-        relay(target, client, lastActivity, close);
+        Runnable onData = () -> lastActivity.set(System.nanoTime());
+        WebSocketUpgrades.relay(client, target, onData, close);
+        WebSocketUpgrades.relay(target, client, onData, close);
         scheduleIdleCheck(idleTimeoutMillis, idleTimeoutMillis, lastActivity, timerId, closed, close);
     }
 
@@ -1381,20 +1364,6 @@ public class ElbV2DataPlane {
                         closed, close);
             }
         }));
-    }
-
-    private static void relay(NetSocket source, NetSocket destination, AtomicLong lastActivity, Runnable close) {
-        source.handler(buffer -> {
-            lastActivity.set(System.nanoTime());
-            destination.write(buffer);
-            if (destination.writeQueueFull()) {
-                source.pause();
-                destination.drainHandler(ignored -> source.resume());
-            }
-        });
-        source.endHandler(ignored -> close.run());
-        source.closeHandler(ignored -> close.run());
-        source.exceptionHandler(err -> close.run());
     }
 
     private void executeRedirect(HttpServerRequest req, Action action) {

@@ -238,6 +238,15 @@ PUT, PATCH and DELETE).
   so a large object is never held in memory. A custom origin's `Content-Length` is passed on, and a
   response it sends chunked stays chunked. Floci does not cache, so it serves objects larger than
   50 GB the way CloudFront does with caching disabled; with caching enabled, CloudFront refuses them.
+- WebSocket connections to custom origins are tunneled on every distribution, with no setting, as on
+  AWS. An HTTP/1.1 GET with `Upgrade: websocket` and `Connection: Upgrade` goes to the origin the
+  matched behavior selects with its `Upgrade` and `Connection` fields, and once the origin answers
+  `101 Switching Protocols` the viewer and origin connections are joined. Any other origin answer is
+  relayed as an ordinary response, without custom error responses or a response headers policy. The
+  `Sec-WebSocket-*` fields follow the behavior's forwarding settings as any other header does, so the
+  behavior must forward all viewer headers (the `AllViewer` origin request policy, or legacy cache
+  settings) or at least `Sec-WebSocket-Key` and `Sec-WebSocket-Version`. A WebSocket handshake to an
+  S3 origin is served as an ordinary GET.
 - Range GETs: an S3 origin serves the one byte range a viewer's `Range` asks for as 206 with its
   `Content-Range`, and answers 416 when the range starts past the end of the object. Any other
   `Range` gets the whole object: one CloudFront does not accept (ranges out of order or overlapping,
