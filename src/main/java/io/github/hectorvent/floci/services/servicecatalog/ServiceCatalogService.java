@@ -246,21 +246,28 @@ public class ServiceCatalogService implements PassedRoleLookup {
                 .findFirst().orElse(null);
         if (record == null) {
             String recordId = id("rec");
-            record = objectMapper.createObjectNode();
-            record.put("Type", "RECORD");
-            record.put("RecordId", recordId);
-            record.put("ProvisionedProductId", provisionedId);
-            record.put("ProvisionedProductName", text(product, "Name"));
-            record.put("ProductId", text(product, "ProductId"));
-            record.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
-            record.put("RecordType", recordType);
-            record.put("Status", "SUCCEEDED");
-            record.put("CreatedTime", product.path("CreatedTime").asDouble());
+            record = newProvisionedProductRecord(product, recordId, recordType,
+                    product.path("CreatedTime").asDouble());
             associationStore.put(recordId, record);
         }
         ObjectNode result = product.deepCopy();
         result.put("RecordId", text(record, "RecordId"));
         return result;
+    }
+
+    private ObjectNode newProvisionedProductRecord(
+            ObjectNode product, String recordId, String recordType, double createdTime) {
+        ObjectNode record = objectMapper.createObjectNode();
+        record.put("Type", "RECORD");
+        record.put("RecordId", recordId);
+        record.put("ProvisionedProductId", text(product, "Id"));
+        record.put("ProvisionedProductName", text(product, "Name"));
+        record.put("ProductId", text(product, "ProductId"));
+        record.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
+        record.put("RecordType", recordType);
+        record.put("Status", "SUCCEEDED");
+        record.put("CreatedTime", createdTime);
+        return record;
     }
 
     /**
@@ -1150,17 +1157,9 @@ public class ServiceCatalogService implements PassedRoleLookup {
                 .orElseThrow(() -> notFound("provisioned product", provisionedProductId));
 
         String recordId = id("rec");
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("Type", "RECORD");
-        record.put("RecordId", recordId);
-        record.put("ProvisionedProductId", provisionedProductId);
-        record.put("ProvisionedProductName", text(product, "Name"));
+        ObjectNode record = newProvisionedProductRecord(product, recordId,
+                "UPDATE_PROVISIONED_PRODUCT", Instant.now().toEpochMilli() / 1000.0);
         record.put("ProvisionedProductType", text(product, "Type"));
-        record.put("ProductId", text(product, "ProductId"));
-        record.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
-        record.put("RecordType", "UPDATE_PROVISIONED_PRODUCT");
-        record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
         associationStore.put(recordId, record);
 
         ObjectNode result = product.deepCopy();
@@ -1207,16 +1206,8 @@ public class ServiceCatalogService implements PassedRoleLookup {
         provisionedProductStore.put(provisionedId, provisioned);
 
         String recordId = id("rec");
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("Type", "RECORD");
-        record.put("RecordId", recordId);
-        record.put("ProvisionedProductId", provisionedId);
-        record.put("ProvisionedProductName", provisionedProductName);
-        record.put("ProductId", productId);
-        record.put("ProvisioningArtifactId", provisioningArtifactId);
-        record.put("RecordType", "IMPORT");
-        record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", provisioned.get("CreatedTime").asDouble());
+        ObjectNode record = newProvisionedProductRecord(provisioned, recordId, "IMPORT",
+                provisioned.get("CreatedTime").asDouble());
         associationStore.put(recordId, record);
 
         ObjectNode result = provisioned.deepCopy();
@@ -1458,16 +1449,8 @@ public class ServiceCatalogService implements PassedRoleLookup {
         }
 
         String recordId = id("rec");
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("Type", "RECORD");
-        record.put("RecordId", recordId);
-        record.put("ProvisionedProductId", text(product, "Id"));
-        record.put("ProvisionedProductName", text(product, "Name"));
-        record.put("ProductId", text(product, "ProductId"));
-        record.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
-        record.put("RecordType", "UPDATE_PROVISIONED_PRODUCT");
-        record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        ObjectNode record = newProvisionedProductRecord(product, recordId,
+                "UPDATE_PROVISIONED_PRODUCT", Instant.now().toEpochMilli() / 1000.0);
         associationStore.put(recordId, record);
 
         ObjectNode result = product.deepCopy();
@@ -1489,16 +1472,8 @@ public class ServiceCatalogService implements PassedRoleLookup {
         provisionedProductStore.put(provisionedProductId, product);
 
         String recordId = id("rec");
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("Type", "RECORD");
-        record.put("RecordId", recordId);
-        record.put("ProvisionedProductId", provisionedProductId);
-        record.put("ProvisionedProductName", text(product, "Name"));
-        record.put("ProductId", text(product, "ProductId"));
-        record.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
-        record.put("RecordType", "UPDATE_PROVISIONED_PRODUCT");
-        record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        ObjectNode record = newProvisionedProductRecord(product, recordId,
+                "UPDATE_PROVISIONED_PRODUCT", Instant.now().toEpochMilli() / 1000.0);
         associationStore.put(recordId, record);
 
         ObjectNode result = product.deepCopy();
@@ -1594,17 +1569,10 @@ public class ServiceCatalogService implements PassedRoleLookup {
         provisionedProductStore.put(id, product);
 
         String recordId = id("rec");
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("Type", "RECORD");
-        record.put("RecordId", recordId);
-        record.put("ProvisionedProductId", id);
-        record.put("ProvisionedProductName", text(product, "Name"));
-        record.put("ProductId", text(product, "ProductId"));
-        record.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
-        record.put("RecordType", "TERMINATE_PROVISIONED_PRODUCT");
-        record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", product.get("UpdatedTime").asDouble());
-        record.put("UpdatedTime", product.get("UpdatedTime").asDouble());
+        double updatedTime = product.get("UpdatedTime").asDouble();
+        ObjectNode record = newProvisionedProductRecord(product, recordId,
+                "TERMINATE_PROVISIONED_PRODUCT", updatedTime);
+        record.put("UpdatedTime", updatedTime);
         associationStore.put(recordId, record);
 
         ObjectNode result = product.deepCopy();

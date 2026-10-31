@@ -894,7 +894,7 @@ public class EcsJsonHandler {
         request.setTags(parseTagMap(req.path("tags")));
         ContainerInstance instance = service.registerContainerInstance(request, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("containerInstance", writer.containerInstanceNode(instance));
+        resp.set("containerInstance", writer.containerInstanceNode(instance, request.getCluster(), region));
         return Response.ok(resp).build();
     }
 
@@ -904,7 +904,7 @@ public class EcsJsonHandler {
         boolean force = req.path("force").asBoolean(false);
         ContainerInstance instance = service.deregisterContainerInstance(cluster, containerInstance, force, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("containerInstance", writer.containerInstanceNode(instance));
+        resp.set("containerInstance", writer.containerInstanceNode(instance, cluster, region));
         return Response.ok(resp).build();
     }
 
@@ -918,10 +918,8 @@ public class EcsJsonHandler {
         EcsService.DescribeContainerInstancesResult found =
                 service.describeContainerInstancesDetailed(cluster, instanceRefs, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        ArrayNode arr = objectMapper.createArrayNode();
-        found.instances().forEach(ci ->
-                arr.add(writer.containerInstanceNode(ci, includeTags, includeHealth)));
-        resp.set("containerInstances", arr);
+        resp.set("containerInstances", writer.containerInstanceNodes(
+                found.instances(), cluster, region, includeTags, includeHealth));
         ArrayNode failures = objectMapper.createArrayNode();
         found.failures().forEach(f -> failures.add(writer.failureNode(f)));
         resp.set("failures", failures);
@@ -931,10 +929,11 @@ public class EcsJsonHandler {
     private Response handleListContainerInstances(JsonNode req, String region) {
         String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
         String status = parseChoice(req, "status", CONTAINER_INSTANCE_STATUSES);
+        String filter = req.hasNonNull("filter") ? req.path("filter").asText() : null;
         Integer maxResults = req.hasNonNull("maxResults") ? req.path("maxResults").asInt() : null;
         String nextToken = req.hasNonNull("nextToken") ? req.path("nextToken").asText() : null;
         EcsService.ListPage page =
-                service.listContainerInstances(cluster, status, maxResults, nextToken, region);
+                service.listContainerInstances(cluster, status, filter, maxResults, nextToken, region);
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
         page.arns().forEach(arr::add);
@@ -950,7 +949,7 @@ public class EcsJsonHandler {
         String containerInstance = req.path("containerInstance").asText();
         ContainerInstance instance = service.updateContainerAgent(cluster, containerInstance, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        resp.set("containerInstance", writer.containerInstanceNode(instance));
+        resp.set("containerInstance", writer.containerInstanceNode(instance, cluster, region));
         return Response.ok(resp).build();
     }
 
@@ -961,9 +960,8 @@ public class EcsJsonHandler {
         EcsService.UpdateContainerInstancesStateResult updated =
                 service.updateContainerInstancesState(cluster, instanceRefs, status, region);
         ObjectNode resp = objectMapper.createObjectNode();
-        ArrayNode arr = objectMapper.createArrayNode();
-        updated.instances().forEach(ci -> arr.add(writer.containerInstanceNode(ci)));
-        resp.set("containerInstances", arr);
+        resp.set("containerInstances", writer.containerInstanceNodes(
+                updated.instances(), cluster, region, true, true));
         ArrayNode failures = objectMapper.createArrayNode();
         updated.failures().forEach(f -> failures.add(writer.failureNode(f)));
         resp.set("failures", failures);
