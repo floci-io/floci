@@ -62,6 +62,7 @@ class AutoScalingLaunchConfigurationBlockDevicesIntegrationTest {
                 "BlockDeviceMapping.1.DeviceName", "/dev/xvda",
                 "BlockDeviceMapping.1.Ebs.VolumeSize", "8",
                 "BlockDeviceMapping.1.Ebs.VolumeType", "gp2",
+                "BlockDeviceMapping.1.Ebs.DeleteOnTermination", "false",
                 "BlockDeviceMapping.2.DeviceName", "/dev/sdf",
                 "BlockDeviceMapping.2.Ebs.VolumeSize", "10")
                 .getString("RegisterImageResponse.imageId");
@@ -81,6 +82,7 @@ class AutoScalingLaunchConfigurationBlockDevicesIntegrationTest {
         XmlPath described = call(account, "ec2", "DescribeInstances", "InstanceId.1", instance);
         assertEquals(List.of("/dev/xvda", "/dev/sdg"),
                 described.getList(INSTANCE + ".blockDeviceMapping.item.deviceName", String.class));
+        // The configuration defaults to deleting the root even when the AMI keeps it.
         assertEquals(List.of("true", "false"),
                 described.getList(INSTANCE + ".blockDeviceMapping.item.ebs.deleteOnTermination", String.class));
         XmlPath root = volume(account, described, 0);

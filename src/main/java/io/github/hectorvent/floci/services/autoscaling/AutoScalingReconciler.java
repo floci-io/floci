@@ -988,7 +988,7 @@ public class AutoScalingReconciler {
                 ebs.setSnapshotId(sourceEbs.getSnapshotId());
                 ebs.setVolumeSize(sourceEbs.getVolumeSize());
                 ebs.setVolumeType(sourceEbs.getVolumeType());
-                ebs.setDeleteOnTermination(sourceEbs.getDeleteOnTermination());
+                ebs.setDeleteOnTermination(!Boolean.FALSE.equals(sourceEbs.getDeleteOnTermination()));
                 ebs.setIops(sourceEbs.getIops());
                 ebs.setThroughput(sourceEbs.getThroughput());
                 ebs.setEncrypted(sourceEbs.getEncrypted());

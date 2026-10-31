@@ -69,6 +69,10 @@ launch accepts are EC2's, `io2` included. A mapping EC2 refuses, such as an inva
 name or a snapshot that does not exist, fails that launch and is recorded as a failed
 scaling activity.
 
+An EBS mapping supplied by a launch configuration defaults `DeleteOnTermination` to
+`true`, even when the AMI's mapping sets it to `false`. An explicit `false` in the
+launch configuration keeps the volume after termination.
+
 For groups configured only with Availability Zones, Floci preserves its unpinned
 EC2 launch behavior and counts each member under the requested zone. This permits
 real zones outside the local subnet catalog, such as `us-east-1d`; the underlying
