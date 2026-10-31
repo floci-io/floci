@@ -501,6 +501,8 @@ class ApplicationAutoScalingServiceTest {
                     new Dimension("LoadBalancer", "app/my-lb/abc123"),
                     new Dimension("TargetGroup", "targetgroup/my-tg/def456")),
                     alarm.getDimensions());
+            assertEquals("Sum", alarm.getStatistic(),
+                    "RequestCountPerTarget's only valid CloudWatch statistic is Sum");
         }
     }
 

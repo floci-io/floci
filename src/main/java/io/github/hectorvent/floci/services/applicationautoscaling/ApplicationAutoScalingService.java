@@ -469,7 +469,7 @@ public class ApplicationAutoScalingService {
                                               PredefinedMetricSpecification spec) {
         String type = spec == null ? null : spec.getPredefinedMetricType();
         PredefinedMetric metric = type == null ? null : PREDEFINED_METRICS.get(type);
-        alarm.setStatistic("Average");
+        alarm.setStatistic(metric == null ? "Average" : metric.statistic());
         if (metric != null) {
             alarm.setNamespace(metric.namespace());
             alarm.setMetricName(metric.metricName());
@@ -488,16 +488,19 @@ public class ApplicationAutoScalingService {
      * {@code ECSServiceAverageMemoryUtilization} read the AWS/ECS service-level metrics
      * keyed by {@code ClusterName}/{@code ServiceName}, and {@code ALBRequestCountPerTarget}
      * reads the AWS/ApplicationELB per-target request count keyed by the load balancer and
-     * target group inside {@code ResourceLabel}. Types without a mapping Floci is certain of
+     * target group inside {@code ResourceLabel}. RequestCountPerTarget's only valid
+     * CloudWatch statistic is Sum (the value is already the per-minute average across
+     * targets), so each mapping carries the statistic the alarm must read. Types without a
+     * mapping Floci is certain of
      * are left onto the service namespace's own namespace under the type's name rather than
      * silently pointing at a metric the backing service never publishes.
      */
     private static final Map<String, PredefinedMetric> PREDEFINED_METRICS = Map.of(
-            "ECSServiceAverageCPUUtilization", new PredefinedMetric("AWS/ECS", "CPUUtilization"),
-            "ECSServiceAverageMemoryUtilization", new PredefinedMetric("AWS/ECS", "MemoryUtilization"),
-            "ALBRequestCountPerTarget", new PredefinedMetric("AWS/ApplicationELB", "RequestCountPerTarget"));
+            "ECSServiceAverageCPUUtilization", new PredefinedMetric("AWS/ECS", "CPUUtilization", "Average"),
+            "ECSServiceAverageMemoryUtilization", new PredefinedMetric("AWS/ECS", "MemoryUtilization", "Average"),
+            "ALBRequestCountPerTarget", new PredefinedMetric("AWS/ApplicationELB", "RequestCountPerTarget", "Sum"));
 
-    private record PredefinedMetric(String namespace, String metricName) {
+    private record PredefinedMetric(String namespace, String metricName, String statistic) {
     }
 
     private static String metricOrDefault(String value, String fallback) {

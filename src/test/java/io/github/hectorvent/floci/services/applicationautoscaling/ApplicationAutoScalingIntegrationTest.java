@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.applicationautoscaling;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -50,11 +51,11 @@ class ApplicationAutoScalingIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
-    private static io.restassured.specification.RequestSpecification call(String action) {
+    private static RequestSpecification call(String action) {
         return given().header("X-Amz-Target", TARGET_PREFIX + action).contentType(CONTENT_TYPE);
     }
 
-    private static io.restassured.specification.RequestSpecification cloudwatchCall(String action) {
+    private static RequestSpecification cloudwatchCall(String action) {
         return given().header("X-Amz-Target", CLOUDWATCH_TARGET + action).contentType(CLOUDWATCH_JSON_CONTENT_TYPE);
     }
 
@@ -225,6 +226,14 @@ class ApplicationAutoScalingIntegrationTest {
             .body("Alarms", hasSize(2))
             .body("Alarms[0].AlarmName", startsWith("TargetTracking-" + RESOURCE_ID))
             .body("Alarms[0].AlarmARN", startsWith("arn:aws:cloudwatch:"));
+
+        cloudwatchCall("DescribeAlarms")
+            .body("{ \"AlarmNamePrefix\": \"TargetTracking-" + RESOURCE_ID + "\" }")
+        .when().post("/").then().statusCode(200)
+            .body("MetricAlarms.find { it.MetricName == 'RequestCountPerTarget' }.Namespace",
+                equalTo("AWS/ApplicationELB"))
+            .body("MetricAlarms.find { it.MetricName == 'RequestCountPerTarget' }.Statistic",
+                equalTo("Sum"));
     }
 
     @Test
