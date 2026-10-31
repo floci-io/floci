@@ -539,13 +539,20 @@ class CognitoCfnIntegrationTest {
         String poolId = outputValue(describeStacks(stack, "CREATE_COMPLETE"), "PoolId");
 
         cloudFormation(stack, "UpdateStack", enabledMfasTemplate(
-            "\"MfaConfiguration\": \"OPTIONAL\", \"EnabledMfas\": [\"SOFTWARE_TOKEN_MFA\"], " + smsConfiguration));
+            "\"MfaConfiguration\": \"OPTIONAL\", \"EnabledMfas\": [\"SOFTWARE_TOKEN_MFA\"], "
+                + "\"SmsAuthenticationMessage\": \"New code {####}\", "
+                + "\"SmsConfiguration\": {\"SnsCallerArn\": \"arn:aws:iam::000000000000:role/sms-v2\"}"));
         describeStacks(stack, "UPDATE_COMPLETE");
         cognitoAction("GetUserPoolMfaConfig", "{\"UserPoolId\": \"" + poolId + "\"}")
             .then().statusCode(200)
             .body("MfaConfiguration", equalTo("OPTIONAL"))
             .body("SoftwareTokenMfaConfiguration.Enabled", equalTo(true))
-            .body("SmsMfaConfiguration.SmsConfiguration.SnsCallerArn", equalTo("arn:aws:iam::000000000000:role/sms"));
+            .body("SmsMfaConfiguration.SmsAuthenticationMessage", equalTo("New code {####}"))
+            .body("SmsMfaConfiguration.SmsConfiguration.SnsCallerArn", equalTo("arn:aws:iam::000000000000:role/sms-v2"));
+        cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("UserPool.SmsAuthenticationMessage", equalTo("New code {####}"))
+            .body("UserPool.SmsConfiguration.SnsCallerArn", equalTo("arn:aws:iam::000000000000:role/sms-v2"));
 
         cloudFormation(stack, "UpdateStack", enabledMfasTemplate("\"MfaConfiguration\": \"OFF\""));
         describeStacks(stack, "UPDATE_COMPLETE");
