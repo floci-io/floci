@@ -1372,20 +1372,13 @@ public class RedshiftServerlessService implements Resettable {
         }
         namespaces.clear();
         workgroups.clear();
-        for (AccountAwareStorageBackend.AccountEntry<RedshiftServerlessSnapshot> entry
-                : snapshots.scanAllAccountEntries(key -> true)) {
-            String dump = entry.value().getSqlDump();
-            if (dump != null && !dump.isBlank()) {
-                deleteDumpQuietly(Paths.get(dump));
-            }
-        }
         snapshots.clear();
         deleteDumpTree();
     }
 
     /**
-     * Reset empties the stores before it calls {@link #clear()}, so the loop above finds no snapshot
-     * left to name a dump. Every dump lives under this one directory, copies included.
+     * Reset empties the stores before it calls {@link #clear()}, so no snapshot is left to name a
+     * dump. Every dump lives under this one directory, copies included.
      */
     private void deleteDumpTree() {
         Path root = Paths.get(config.storage().persistentPath()).resolve("redshift-serverless-dumps")
