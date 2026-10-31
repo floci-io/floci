@@ -5,7 +5,6 @@ import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
-import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
@@ -28,12 +27,19 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.github.hectorvent.floci.testing.AlbFixtures.createListener;
+import static io.github.hectorvent.floci.testing.AlbFixtures.createLoadBalancer;
+import static io.github.hectorvent.floci.testing.AlbFixtures.createTargetGroup;
+import static io.github.hectorvent.floci.testing.AlbFixtures.deleteListener;
+import static io.github.hectorvent.floci.testing.AlbFixtures.deleteLoadBalancer;
+import static io.github.hectorvent.floci.testing.AlbFixtures.deleteTargetGroup;
+import static io.github.hectorvent.floci.testing.AlbFixtures.exchange;
+import static io.github.hectorvent.floci.testing.AlbFixtures.registerTarget;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
@@ -60,8 +66,6 @@ class CloudFrontWebSocketIntegrationTest {
         }
     }
 
-    private static final String AUTH =
-            "AWS4-HMAC-SHA256 Credential=test/20261101/us-east-1/elasticloadbalancing/aws4_request";
     private static final int LISTENER_PORT = 7797;
     private static final String CACHING_DISABLED = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad";
     private static final String ALL_VIEWER = "216adef6-5c7f-47e4-b989-5492eafa07d3";
@@ -114,10 +118,10 @@ class CloudFrontWebSocketIntegrationTest {
                 .toCompletableFuture()
                 .get(2, TimeUnit.SECONDS);
         client = vertx.createHttpClient();
-        loadBalancerArn = createLoadBalancer();
-        targetGroupArn = createTargetGroup(backend.actualPort());
-        registerTarget(targetGroupArn, backend.actualPort());
-        listenerArn = createListener(loadBalancerArn, targetGroupArn);
+        loadBalancerArn = createLoadBalancer("cloudfront-websocket-lb");
+        targetGroupArn = createTargetGroup("cloudfront-websocket-tg", "ip", backend.actualPort());
+        registerTarget(targetGroupArn, "127.0.0.1", backend.actualPort());
+        listenerArn = createListener(loadBalancerArn, targetGroupArn, LISTENER_PORT);
         await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> given()
                 .baseUri("http://127.0.0.1")
                 .port(LISTENER_PORT)
@@ -129,9 +133,9 @@ class CloudFrontWebSocketIntegrationTest {
 
     @AfterEach
     void stopAlbOrigin() throws Exception {
-        elbv2("DeleteListener", "ListenerArn", listenerArn);
-        elbv2("DeleteTargetGroup", "TargetGroupArn", targetGroupArn);
-        elbv2("DeleteLoadBalancer", "LoadBalancerArn", loadBalancerArn);
+        deleteListener(listenerArn);
+        deleteTargetGroup(targetGroupArn);
+        deleteLoadBalancer(loadBalancerArn);
         client.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
         backend.close().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
     }
@@ -277,87 +281,4 @@ class CloudFrontWebSocketIntegrationTest {
                 .get(5, TimeUnit.SECONDS);
     }
 
-    private static String exchange(WebSocket socket, String text) throws Exception {
-        CompletableFuture<String> reply = new CompletableFuture<>();
-        socket.textMessageHandler(reply::complete);
-        socket.writeTextMessage(text);
-        return reply.get(5, TimeUnit.SECONDS);
-    }
-
-    private static String createLoadBalancer() {
-        return given()
-                .formParam("Action", "CreateLoadBalancer")
-                .formParam("Name", "cloudfront-websocket-lb")
-                .formParam("Type", "application")
-                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
-                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"))
-                .header("Authorization", AUTH)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200)
-                .extract()
-                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
-    }
-
-    private static String createTargetGroup(int backendPort) {
-        return given()
-                .formParam("Action", "CreateTargetGroup")
-                .formParam("Name", "cloudfront-websocket-tg")
-                .formParam("Protocol", "HTTP")
-                .formParam("Port", backendPort)
-                .formParam("TargetType", "ip")
-                .formParam("HealthCheckEnabled", "false")
-                .header("Authorization", AUTH)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200)
-                .extract()
-                .path("CreateTargetGroupResponse.CreateTargetGroupResult.TargetGroups.member.TargetGroupArn");
-    }
-
-    private static void registerTarget(String targetGroupArn, int backendPort) {
-        given()
-                .formParam("Action", "RegisterTargets")
-                .formParam("TargetGroupArn", targetGroupArn)
-                .formParam("Targets.member.1.Id", "127.0.0.1")
-                .formParam("Targets.member.1.Port", backendPort)
-                .header("Authorization", AUTH)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200);
-    }
-
-    private static String createListener(String loadBalancerArn, String targetGroupArn) {
-        return given()
-                .formParam("Action", "CreateListener")
-                .formParam("LoadBalancerArn", loadBalancerArn)
-                .formParam("Protocol", "HTTP")
-                .formParam("Port", LISTENER_PORT)
-                .formParam("DefaultActions.member.1.Type", "forward")
-                .formParam("DefaultActions.member.1.TargetGroupArn", targetGroupArn)
-                .header("Authorization", AUTH)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200)
-                .extract()
-                .path("CreateListenerResponse.CreateListenerResult.Listeners.member.ListenerArn");
-    }
-
-    private static void elbv2(String action, String arnParameter, String arn) {
-        if (arn == null) {
-            return;
-        }
-        given()
-                .formParam("Action", action)
-                .formParam(arnParameter, arn)
-                .header("Authorization", AUTH)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200);
-    }
 }
