@@ -853,6 +853,81 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void createDbClusterStoresBackupRetentionPeriodAndCreateTags() {
+        DbCluster cluster = makeCluster("mycluster");
+        cluster.setDbClusterArn("arn:aws:rds:us-east-1:000000000000:cluster:mycluster");
+        when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), eq(false), isNull(),
+                any(), anyBoolean()))
+                .thenReturn(cluster);
+        DbCluster stored = makeCluster("mycluster");
+        stored.setDbClusterArn("arn:aws:rds:us-east-1:000000000000:cluster:mycluster");
+        stored.setBackupRetentionPeriod(5);
+        stored.setTags(Map.of("Name", "g"));
+        when(service.setBackupRetentionPeriod(any(), eq("mycluster"), eq(5))).thenReturn(stored);
+        when(service.getDbCluster(eq("mycluster"), any())).thenReturn(stored);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "mycluster");
+        p.add("Engine", "aurora-postgresql");
+        p.add("MasterUsername", "admin");
+        p.add("BackupRetentionPeriod", "5");
+        p.add("Tags.Tag.1.Key", "Name");
+        p.add("Tags.Tag.1.Value", "g");
+        Response response = handler.handle("CreateDBCluster", p);
+
+        String body = (String) response.getEntity();
+        assertEquals(200, response.getStatus());
+        assertTrue(body.contains("<BackupRetentionPeriod>5</BackupRetentionPeriod>"), body);
+        assertTrue(body.contains("<TagList>"), body);
+        assertTrue(body.contains("<Key>Name</Key>"), body);
+        assertTrue(body.contains("<Value>g</Value>"), body);
+        verify(service).setBackupRetentionPeriod(any(), eq("mycluster"), eq(5));
+        verify(service).addTagsToResource(eq("arn:aws:rds:us-east-1:000000000000:cluster:mycluster"),
+                eq(Map.of("Name", "g")), any());
+    }
+
+    @Test
+    void createDbClusterDefaultsBackupRetentionPeriodToOne() {
+        DbCluster cluster = makeCluster("mycluster");
+        when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
+                any(), any(), anyBoolean(), any(), any(), any(), any(), eq(false), isNull(),
+                any(), anyBoolean()))
+                .thenReturn(cluster);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "mycluster");
+        p.add("Engine", "aurora-postgresql");
+        p.add("MasterUsername", "admin");
+        Response response = handler.handle("CreateDBCluster", p);
+
+        String body = (String) response.getEntity();
+        assertEquals(200, response.getStatus());
+        assertTrue(body.contains("<BackupRetentionPeriod>1</BackupRetentionPeriod>"), body);
+    }
+
+    @Test
+    void modifyDbClusterUpdatesBackupRetentionPeriod() {
+        DbCluster cluster = makeCluster("mycluster");
+        when(service.modifyDbCluster(eq("mycluster"), isNull(), isNull(),
+                isNull(), isNull(), isNull(), isNull(), isNull(), isNull(), any()))
+                .thenReturn(cluster);
+        DbCluster updated = makeCluster("mycluster");
+        updated.setBackupRetentionPeriod(9);
+        when(service.setBackupRetentionPeriod(any(), eq("mycluster"), eq(9))).thenReturn(updated);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "mycluster");
+        p.add("BackupRetentionPeriod", "9");
+        Response response = handler.handle("ModifyDBCluster", p);
+
+        String body = (String) response.getEntity();
+        assertEquals(200, response.getStatus());
+        assertTrue(body.contains("<BackupRetentionPeriod>9</BackupRetentionPeriod>"), body);
+        verify(service).setBackupRetentionPeriod(any(), eq("mycluster"), eq(9));
+    }
+
+    @Test
     void createDbClusterDeletesTheClusterWhenItsRolesAreRefused() {
         DbCluster cluster = makeCluster("mycluster");
         when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),

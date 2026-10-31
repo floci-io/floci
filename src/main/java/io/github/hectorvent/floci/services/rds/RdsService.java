@@ -11028,6 +11028,15 @@ public class RdsService implements Resettable, ResourceProvider {
         return setHttpEndpoint(effectiveRegion, cluster, enabled);
     }
 
+    /** Sets the backup retention period on a cluster named by identifier, for CreateDBCluster and ModifyDBCluster. */
+    public synchronized DbCluster setBackupRetentionPeriod(String region, String clusterId, int backupRetentionPeriod) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        cluster.setBackupRetentionPeriod(backupRetentionPeriod);
+        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
     /** Sets the flag on a cluster named by identifier, for CreateDBCluster, ModifyDBCluster and CloudFormation. */
     public synchronized DbCluster setHttpEndpoint(String region, String clusterId, boolean enabled) {
         String effectiveRegion = effectiveRegion(region);
