@@ -278,6 +278,7 @@ public class IamConditionContextResolver {
         putIfPresent(conditions, "aws:ResourceAccount", resourceAccount);
         putIfPresent(conditions, "aws:PrincipalAccount", accountId);
         putIfPresent(conditions, "aws:RequestedRegion", region);
+        conditions.putIfAbsent("aws:ViaAWSService", List.of("false"));
         // Enforcement evaluates signed IAM credentials, not direct AWS service principals.
         conditions.put("aws:PrincipalIsAWSService", List.of("false"));
         return conditions;
@@ -300,6 +301,7 @@ public class IamConditionContextResolver {
                                                                String sourceArn, String sourceAccount) {
         Map<String, List<String>> conditions = new LinkedHashMap<>();
         conditions.put("aws:PrincipalIsAWSService", List.of("true"));
+        conditions.put("aws:ViaAWSService", List.of("false"));
         conditions.put("aws:PrincipalServiceName", List.of(servicePrincipal));
         conditions.put("aws:PrincipalServiceNamesList", List.of(servicePrincipal));
         putIfPresent(conditions, "aws:SourceArn", sourceArn);
