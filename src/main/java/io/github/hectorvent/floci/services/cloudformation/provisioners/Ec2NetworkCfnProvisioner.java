@@ -305,10 +305,12 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * Reconciles the template's {@code Tags} onto an entity: keys the template dropped are removed,
-     * the rest written. A template without a Tags property leaves whatever the entity carries.
+     * the rest written. A template without a Tags property clears them when the previous template
+     * declared Tags, and leaves whatever the entity carries when no template ever did.
      */
     private void applyTags(StackResource r, boolean reused, String resourceId, List<Tag> current, JsonNode props, ProvisionContext ctx) {
-        if (props == null || !props.has("Tags")) {
+        boolean declared = props != null && props.has("Tags");
+        if (!declared && !ctx.droppedProperties(props).contains("Tags")) {
             return;
         }
         Map<String, String> desired = ctx.resolveTags(props, "Tags");
@@ -465,13 +467,16 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         CfnRollback.guarded(r, ctx, !reuse, () -> ec2Service.deleteSubnet(ctx.region(), subnet.getSubnetId()),
                 () -> undoInPlace(r), () -> {
             applyTags(r, reuse, subnet.getSubnetId(), reuse ? existing.getTags() : List.of(), props, ctx);
-            if (mapPublicIpOnLaunch != null) {
-                if (reuse && ctx.isUpdate() && existing.isMapPublicIpOnLaunch() != Boolean.parseBoolean(mapPublicIpOnLaunch)) {
+            // A flag the previous template declared and this one drops goes back to false, the launch default.
+            String desiredMapPublicIp = mapPublicIpOnLaunch == null && reuse && ctx.droppedProperties(props).contains("MapPublicIpOnLaunch")
+                    ? "false" : mapPublicIpOnLaunch;
+            if (desiredMapPublicIp != null) {
+                if (reuse && ctx.isUpdate() && existing.isMapPublicIpOnLaunch() != Boolean.parseBoolean(desiredMapPublicIp)) {
                     ObjectNode prior = inPlacePrior(r, subnet.getSubnetId(), ctx);
                     prior.put("mapPublicIpOnLaunch", String.valueOf(existing.isMapPublicIpOnLaunch()));
                     writeInPlacePrior(r, prior);
                 }
-                ec2Service.modifySubnetAttribute(ctx.region(), subnet.getSubnetId(), "mapPublicIpOnLaunch", mapPublicIpOnLaunch);
+                ec2Service.modifySubnetAttribute(ctx.region(), subnet.getSubnetId(), "mapPublicIpOnLaunch", desiredMapPublicIp);
             }
         });
     }
@@ -719,7 +724,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
      *
      * <p>Entries and Tags are each brought to the template only when it declares them, or the
      * previous template did: a template that drops them clears them, and entries or tags no template
-     * ever declared are left alone. The other types here keep their tags when Tags is dropped.
+     * ever declared are left alone.
      */
     private void updatePrefixList(StackResource r, ManagedPrefixList existing, String name, String family,
                                   int maxEntries, List<PrefixListEntry> entries, JsonNode props, ProvisionContext ctx) {
@@ -755,18 +760,10 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
             }
             writeInPlacePrior(r, prior);
         }
-        JsonNode desiredTags = !props.has("Tags") && ctx.previouslyDeclared("Tags") ? untagged(props) : props;
         CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r), () -> {
-            applyTags(r, true, prefixListId, existing.getTags(), desiredTags, ctx);
+            applyTags(r, true, prefixListId, existing.getTags(), props, ctx);
             modifyPrefixList(ctx.region(), existing, name, maxEntries, changes);
         });
-    }
-
-    /** {@code props} with an empty Tags list, which removes the tags a previous template declared. */
-    private static JsonNode untagged(JsonNode props) {
-        ObjectNode copy = props.deepCopy();
-        copy.putArray("Tags");
-        return copy;
     }
 
     /**

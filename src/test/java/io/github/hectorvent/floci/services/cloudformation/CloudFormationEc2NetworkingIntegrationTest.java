@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -85,6 +86,53 @@ class CloudFormationEc2NetworkingIntegrationTest {
 
         cloudFormation(ROLLBACK_STACK, "DeleteStack", null);
         CfnStackWaits.awaitStackDeleted(ROLLBACK_STACK);
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    private static final String REMOVAL_STACK = "ec2-networking-removal-it";
+
+    /** A subnet, a route table and an internet gateway that declare their Tags, plus a route table that never does. */
+    private static String removalTemplate(String vpcId, boolean declared) {
+        String subnetProps = declared ? ", \"MapPublicIpOnLaunch\": true, \"Tags\": [{\"Key\": \"team\", \"Value\": \"subnet-net\"}]" : "";
+        String rtTags = declared ? ", \"Tags\": [{\"Key\": \"env\", \"Value\": \"rt-marker\"}]" : "";
+        String igwProps = declared ? "\"Properties\": {\"Tags\": [{\"Key\": \"env\", \"Value\": \"igw-marker\"}]}" : "\"Properties\": {}";
+        return """
+        {
+          "Resources": {
+            "Subnet": {"Type": "AWS::EC2::Subnet",
+                       "Properties": {"VpcId": "%1$s", "CidrBlock": "10.44.0.0/24"%2$s}},
+            "Rt": {"Type": "AWS::EC2::RouteTable", "Properties": {"VpcId": "%1$s"%3$s}},
+            "Igw": {"Type": "AWS::EC2::InternetGateway", %4$s},
+            "Plain": {"Type": "AWS::EC2::RouteTable", "Properties": {"VpcId": "%1$s"}}
+          },
+          "Outputs": {"SubnetId": {"Value": {"Ref": "Subnet"}}, "PlainId": {"Value": {"Ref": "Plain"}}}
+        }
+        """.formatted(vpcId, subnetProps, rtTags, igwProps);
+    }
+
+    @Test
+    void anUpdateClearsWhatTheNewTemplateDropsAndKeepsWhatTheStackNeverDeclared() {
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.44.0.0/16")), "<vpcId>", "</vpcId>");
+        cloudFormation(REMOVAL_STACK, "CreateStack", removalTemplate(vpcId, true));
+        Map<String, String> out = XmlParser.extractPairs(describeStacks(REMOVAL_STACK, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue");
+        ec2("CreateTags", Map.of("ResourceId.1", out.get("PlainId"), "Tag.1.Key", "owner", "Tag.1.Value", "outside-owner"));
+        assertTrue(subnetXml(out.get("SubnetId")).contains("<value>subnet-net</value>"));
+        assertTrue(subnetXml(out.get("SubnetId")).contains("<mapPublicIpOnLaunch>true</mapPublicIpOnLaunch>"));
+
+        cloudFormation(REMOVAL_STACK, "UpdateStack", removalTemplate(vpcId, false));
+
+        describeStacks(REMOVAL_STACK, "UPDATE_COMPLETE");
+        String subnet = subnetXml(out.get("SubnetId"));
+        assertFalse(subnet.contains("subnet-net"), "the subnet's dropped tag must be gone: " + subnet);
+        assertTrue(subnet.contains("<mapPublicIpOnLaunch>false</mapPublicIpOnLaunch>"), "the dropped flag goes back to false");
+        String routeTables = ec2("DescribeRouteTables");
+        assertFalse(routeTables.contains("rt-marker"), "the route table's dropped tag must be gone");
+        assertTrue(routeTables.contains("outside-owner"), "a tag on a resource the stack never tagged stays");
+        assertFalse(ec2("DescribeInternetGateways").contains("igw-marker"), "the gateway's dropped tag must be gone");
+
+        cloudFormation(REMOVAL_STACK, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(REMOVAL_STACK);
         ec2("DeleteVpc", Map.of("VpcId", vpcId));
     }
 
@@ -498,11 +546,7 @@ class CloudFormationEc2NetworkingIntegrationTest {
     }
 
     private static void cloudFormation(String stack, String action, String templateBody) {
-        RequestSpecification request = given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", action)
-            .formParam("StackName", stack);
+        RequestSpecification request = cfn(action, stack).header("Authorization", CFN_AUTH);
         if (templateBody != null) {
             request.formParam("TemplateBody", templateBody);
         }
@@ -514,11 +558,8 @@ class CloudFormationEc2NetworkingIntegrationTest {
     }
 
     private static String describeStacks(String stack, String expectedStatus) {
-        return given()
-            .contentType("application/x-www-form-urlencoded")
+        return cfn("DescribeStacks", stack)
             .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stack)
         .when().post("/").then().statusCode(200)
             .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
             .extract().asString();

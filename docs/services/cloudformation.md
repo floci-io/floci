@@ -715,7 +715,11 @@ their create default (`XrayEnabled`, `AdditionalAuthenticationProviders`, a func
 a resolver's `Kind`). Not cleared: the identifiers, `Tags` and `EnvironmentVariables`, which the
 provisioner already drives to the template, required members (`AuthenticationType`, `Type`, a function's
 `DataSourceName`), create-only members, an API key's `Expires`, a GraphQL API's `ApiType` and
-`Visibility`, and a UNIT resolver's `DataSourceName`. Other services follow
+`Visibility`, and a UNIT resolver's `DataSourceName`.
+
+On the EC2 networking types (`Subnet`, `InternetGateway`, `RouteTable`, `NatGateway`, `EIP`, `PrefixList`),
+a `Tags` property the previous template declared and the new one drops is cleared on `UpdateStack`, and
+`Subnet`'s `MapPublicIpOnLaunch` goes back to `false`. A resource whose templates never declared `Tags` keeps the ones set outside the stack. Other services follow
 [#6606](https://github.com/floci-io/floci/issues/6606).
 
 ## Template URLs
