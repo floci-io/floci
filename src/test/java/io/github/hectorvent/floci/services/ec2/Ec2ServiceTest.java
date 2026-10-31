@@ -4560,6 +4560,26 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void aNatGatewaysRequestedPrivateIpTakesNoLeaseAndIsStillNotHandedOut() {
+        // DeleteNatGateway returns no lease, so one taken for the gateway's PrivateIpAddress would
+        // keep the address from the network's allocator after the gateway is gone. The walk steps
+        // around it while the stored gateway holds it.
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = mockedVpcNetworkService(vpcNetworks);
+        String subnetId = privateIpSubnet(service);
+        when(vpcNetworks.effectiveSubnetCidr("us-east-1", subnetId)).thenReturn(Optional.of("10.50.1.0/24"));
+
+        assertEquals("10.50.1.10", service.createNatGateway("us-east-1", subnetId, null, "private",
+                "10.50.1.10", List.of()).getNatGatewayAddresses().getFirst().getPrivateIp());
+        verify(vpcNetworks, never()).claimPrivateIp(anyString(), anyString(), anyString());
+        verify(vpcNetworks, never()).reservePrivateIp(anyString(), anyString(), anyString());
+
+        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
+                .thenReturn(Optional.of("10.50.1.10"), Optional.of("10.50.1.11"), Optional.empty());
+        assertEquals(List.of("10.50.1.11"), launchAddresses(service, subnetId, 1));
+    }
+
+    @Test
     void anAddressAnotherAccountsInterfaceWasCreatedWithIsNotHandedOutOnASharedVpcNetwork() {
         // Default subnet ids are the same in every account, so their Docker network is shared, and
         // only the other account's stored interface says its address is held.

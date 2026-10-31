@@ -7,7 +7,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.testing.Ec2Requests.ec2;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.matchesRegex;
@@ -23,15 +23,16 @@ import static org.hamcrest.Matchers.startsWith;
 @QuarkusTest
 class Ec2NatGatewayAddressIntegrationTest {
 
-    private static final String AUTH_HEADER =
-            "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
+    private static final String ACCOUNT_ID = "000000000000";
+    private static final String REGION = "us-east-1";
 
     private String subnetId() {
-        String vpcId = ec2("CreateVpc", Map.of("CidrBlock", "10.94.0.0/16"))
+        String vpcId = ec2("CreateVpc", ACCOUNT_ID, REGION).formParam("CidrBlock", "10.94.0.0/16").post("/")
         .then().statusCode(200)
             .extract().path("CreateVpcResponse.vpc.vpcId");
 
-        return ec2("CreateSubnet", Map.of("VpcId", vpcId, "CidrBlock", "10.94.1.0/24"))
+        return ec2("CreateSubnet", ACCOUNT_ID, REGION)
+            .formParam("VpcId", vpcId).formParam("CidrBlock", "10.94.1.0/24").post("/")
         .then().statusCode(200)
             .extract().path("CreateSubnetResponse.subnet.subnetId");
     }
@@ -60,7 +61,7 @@ class Ec2NatGatewayAddressIntegrationTest {
             .extract().path("CreateNatGatewayResponse.natGateway.natGatewayId");
 
         // Describe is the read Terraform refreshes from, so it has to agree, not just Create.
-        ec2("DescribeNatGateways", Map.of("NatGatewayId.1", natGatewayId))
+        ec2("DescribeNatGateways", ACCOUNT_ID, REGION).formParam("NatGatewayId.1", natGatewayId).post("/")
         .then()
             .statusCode(200)
             .body("DescribeNatGatewaysResponse.natGatewaySet.item.natGatewayAddressSet.item.publicIp",
@@ -84,7 +85,8 @@ class Ec2NatGatewayAddressIntegrationTest {
             .statusCode(200)
             .extract().path("CreateNatGatewayResponse.natGateway.natGatewayId");
 
-        Response described = ec2("DescribeNatGateways", Map.of("NatGatewayId.1", natGatewayId))
+        Response described = ec2("DescribeNatGateways", ACCOUNT_ID, REGION)
+            .formParam("NatGatewayId.1", natGatewayId).post("/")
         .then().statusCode(200).extract().response();
         String prefix = "DescribeNatGatewaysResponse.natGatewaySet.item.";
         String eniId = described.path(prefix + "natGatewayAddressSet.item.networkInterfaceId");
@@ -94,7 +96,7 @@ class Ec2NatGatewayAddressIntegrationTest {
 
         // Twice: the id must be stable, not re-minted per read.
         for (int i = 0; i < 2; i++) {
-            ec2("DescribeNetworkInterfaces", Map.of("NetworkInterfaceId.1", eniId))
+            ec2("DescribeNetworkInterfaces", ACCOUNT_ID, REGION).formParam("NetworkInterfaceId.1", eniId).post("/")
             .then()
                 .statusCode(200)
                 .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.networkInterfaceId",
@@ -111,22 +113,22 @@ class Ec2NatGatewayAddressIntegrationTest {
                         + ".privateIpAddressesSet.item.association.allocationId", equalTo(allocationId));
         }
 
-        ec2("DescribeAddresses", Map.of("AllocationId.1", allocationId))
+        ec2("DescribeAddresses", ACCOUNT_ID, REGION).formParam("AllocationId.1", allocationId).post("/")
         .then()
             .statusCode(200)
             .body("DescribeAddressesResponse.addressesSet.item.associationId", equalTo(associationId))
             .body("DescribeAddressesResponse.addressesSet.item.networkInterfaceId", equalTo(eniId))
             .body("DescribeAddressesResponse.addressesSet.item.privateIpAddress", equalTo(privateIp));
 
-        ec2("DeleteNatGateway", Map.of("NatGatewayId", natGatewayId))
+        ec2("DeleteNatGateway", ACCOUNT_ID, REGION).formParam("NatGatewayId", natGatewayId).post("/")
         .then().statusCode(200);
 
-        ec2("DescribeNetworkInterfaces", Map.of("NetworkInterfaceId.1", eniId))
+        ec2("DescribeNetworkInterfaces", ACCOUNT_ID, REGION).formParam("NetworkInterfaceId.1", eniId).post("/")
         .then()
             .statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("InvalidNetworkInterfaceID.NotFound"));
 
-        ec2("DescribeAddresses", Map.of("AllocationId.1", allocationId))
+        ec2("DescribeAddresses", ACCOUNT_ID, REGION).formParam("AllocationId.1", allocationId).post("/")
         .then()
             .statusCode(200)
             .body("DescribeAddressesResponse.addressesSet.item.allocationId", equalTo(allocationId))
@@ -202,15 +204,15 @@ class Ec2NatGatewayAddressIntegrationTest {
         String natGatewayId = created.path("CreateNatGatewayResponse.natGateway.natGatewayId");
         String eniId = created.path("CreateNatGatewayResponse.natGateway.natGatewayAddressSet.item.networkInterfaceId");
 
-        ec2("DescribeNatGateways", Map.of("NatGatewayId.1", natGatewayId))
+        ec2("DescribeNatGateways", ACCOUNT_ID, REGION).formParam("NatGatewayId.1", natGatewayId).post("/")
         .then().statusCode(200)
             .body("DescribeNatGatewaysResponse.natGatewaySet.item.natGatewayAddressSet.item.privateIp",
                     equalTo("10.94.1.50"));
-        ec2("DescribeNetworkInterfaces", Map.of("NetworkInterfaceId.1", eniId))
+        ec2("DescribeNetworkInterfaces", ACCOUNT_ID, REGION).formParam("NetworkInterfaceId.1", eniId).post("/")
         .then().statusCode(200)
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.privateIpAddress",
                     equalTo("10.94.1.50"));
-        ec2("DescribeAddresses", Map.of("AllocationId.1", allocationId))
+        ec2("DescribeAddresses", ACCOUNT_ID, REGION).formParam("AllocationId.1", allocationId).post("/")
         .then().statusCode(200)
             .body("DescribeAddressesResponse.addressesSet.item.privateIpAddress", equalTo("10.94.1.50"));
     }
@@ -255,16 +257,8 @@ class Ec2NatGatewayAddressIntegrationTest {
         assertNatGatewaysIn(subnetId, 0);
     }
 
-    private static Response ec2(String action, Map<String, String> params) {
-        return given()
-            .formParam("Action", action)
-            .formParams(params)
-            .header("Authorization", AUTH_HEADER)
-        .when().post("/");
-    }
-
     private static Response allocation() {
-        return ec2("AllocateAddress", Map.of("Domain", "vpc"))
+        return ec2("AllocateAddress", ACCOUNT_ID, REGION).formParam("Domain", "vpc").post("/")
         .then().statusCode(200).extract().response();
     }
 
@@ -277,12 +271,13 @@ class Ec2NatGatewayAddressIntegrationTest {
     }
 
     private static Response createNat(Map<String, String> params) {
-        return ec2("CreateNatGateway", params);
+        return ec2("CreateNatGateway", ACCOUNT_ID, REGION).formParams(params).post("/");
     }
 
     /** A refused request must not leave a gateway behind in the subnet it named. */
     private static void assertNatGatewaysIn(String subnetId, int expected) {
-        ec2("DescribeNatGateways", Map.of("Filter.1.Name", "subnet-id", "Filter.1.Value.1", subnetId))
+        ec2("DescribeNatGateways", ACCOUNT_ID, REGION)
+            .formParam("Filter.1.Name", "subnet-id").formParam("Filter.1.Value.1", subnetId).post("/")
         .then().statusCode(200)
             .body("DescribeNatGatewaysResponse.natGatewaySet.item.size()", equalTo(expected));
     }
@@ -298,7 +293,7 @@ class Ec2NatGatewayAddressIntegrationTest {
         String failedId = createNat(heldByGateway).then().statusCode(200)
             .body("CreateNatGatewayResponse.natGateway.state", equalTo("failed"))
             .extract().path("CreateNatGatewayResponse.natGateway.natGatewayId");
-        ec2("DescribeNatGateways", Map.of("NatGatewayId.1", failedId))
+        ec2("DescribeNatGateways", ACCOUNT_ID, REGION).formParam("NatGatewayId.1", failedId).post("/")
         .then().statusCode(200)
             .body("DescribeNatGatewaysResponse.natGatewaySet.item.state", equalTo("failed"))
             .body("DescribeNatGatewaysResponse.natGatewaySet.item.failureCode",
@@ -308,29 +303,31 @@ class Ec2NatGatewayAddressIntegrationTest {
             .body(not(containsString("<networkInterfaceId>")));
 
         String heldByInstance = allocate();
-        ec2("AssociateAddress", Map.of("AllocationId", heldByInstance, "InstanceId", "i-0123456789abcdef0"))
+        ec2("AssociateAddress", ACCOUNT_ID, REGION)
+            .formParam("AllocationId", heldByInstance).formParam("InstanceId", "i-0123456789abcdef0").post("/")
         .then().statusCode(200);
         createNat(heldByInstance).then().statusCode(200)
             .body("CreateNatGatewayResponse.natGateway.state", equalTo("failed"))
             .body("CreateNatGatewayResponse.natGateway.failureCode", equalTo("Resource.AlreadyAssociated"));
-        String instanceAssociation = ec2("DescribeAddresses", Map.of("AllocationId.1", heldByInstance))
+        String instanceAssociation = ec2("DescribeAddresses", ACCOUNT_ID, REGION)
+            .formParam("AllocationId.1", heldByInstance).post("/")
         .then().statusCode(200)
             .body("DescribeAddressesResponse.addressesSet.item.instanceId", equalTo("i-0123456789abcdef0"))
             .extract().path("DescribeAddressesResponse.addressesSet.item.associationId");
         // The failed gateway does not hold the address: once the instance lets go it can be released.
-        ec2("DisassociateAddress", Map.of("AssociationId", instanceAssociation))
+        ec2("DisassociateAddress", ACCOUNT_ID, REGION).formParam("AssociationId", instanceAssociation).post("/")
         .then().statusCode(200);
-        ec2("ReleaseAddress", Map.of("AllocationId", heldByInstance))
+        ec2("ReleaseAddress", ACCOUNT_ID, REGION).formParam("AllocationId", heldByInstance).post("/")
         .then().statusCode(200);
 
         // The failed gateway claimed nothing, and deleting it leaves the first gateway's association alone.
-        String held = ec2("DescribeAddresses", Map.of("AllocationId.1", heldByGateway))
+        String held = ec2("DescribeAddresses", ACCOUNT_ID, REGION).formParam("AllocationId.1", heldByGateway).post("/")
         .then().statusCode(200)
             .body("DescribeAddressesResponse.addressesSet.item.associationId", startsWith("eipassoc-"))
             .extract().path("DescribeAddressesResponse.addressesSet.item.associationId");
-        ec2("DeleteNatGateway", Map.of("NatGatewayId", failedId))
+        ec2("DeleteNatGateway", ACCOUNT_ID, REGION).formParam("NatGatewayId", failedId).post("/")
         .then().statusCode(200);
-        ec2("DescribeAddresses", Map.of("AllocationId.1", heldByGateway))
+        ec2("DescribeAddresses", ACCOUNT_ID, REGION).formParam("AllocationId.1", heldByGateway).post("/")
         .then().statusCode(200)
             .body("DescribeAddressesResponse.addressesSet.item.associationId", equalTo(held));
     }
@@ -341,29 +338,30 @@ class Ec2NatGatewayAddressIntegrationTest {
         String allocationId = allocate();
         String natGatewayId = createNat(allocationId).then().statusCode(200)
             .extract().path("CreateNatGatewayResponse.natGateway.natGatewayId");
-        String associationId = ec2("DescribeAddresses", Map.of("AllocationId.1", allocationId))
+        String associationId = ec2("DescribeAddresses", ACCOUNT_ID, REGION)
+            .formParam("AllocationId.1", allocationId).post("/")
         .then().statusCode(200)
             .extract().path("DescribeAddressesResponse.addressesSet.item.associationId");
 
-        ec2("DisassociateAddress", Map.of("AssociationId", associationId))
+        ec2("DisassociateAddress", ACCOUNT_ID, REGION).formParam("AssociationId", associationId).post("/")
         .then().statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
 
-        ec2("DescribeAddresses", Map.of("AllocationId.1", allocationId))
+        ec2("DescribeAddresses", ACCOUNT_ID, REGION).formParam("AllocationId.1", allocationId).post("/")
         .then().statusCode(200)
             .body("DescribeAddressesResponse.addressesSet.item.associationId", equalTo(associationId));
 
         // Nor released out from under the gateway: AWS answers InvalidIPAddress.InUse.
-        ec2("ReleaseAddress", Map.of("AllocationId", allocationId))
+        ec2("ReleaseAddress", ACCOUNT_ID, REGION).formParam("AllocationId", allocationId).post("/")
         .then().statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("InvalidIPAddress.InUse"));
-        ec2("DescribeAddresses", Map.of("AllocationId.1", allocationId))
+        ec2("DescribeAddresses", ACCOUNT_ID, REGION).formParam("AllocationId.1", allocationId).post("/")
         .then().statusCode(200)
             .body("DescribeAddressesResponse.addressesSet.item.associationId", equalTo(associationId));
 
-        ec2("DeleteNatGateway", Map.of("NatGatewayId", natGatewayId))
+        ec2("DeleteNatGateway", ACCOUNT_ID, REGION).formParam("NatGatewayId", natGatewayId).post("/")
         .then().statusCode(200);
-        ec2("ReleaseAddress", Map.of("AllocationId", allocationId))
+        ec2("ReleaseAddress", ACCOUNT_ID, REGION).formParam("AllocationId", allocationId).post("/")
         .then().statusCode(200);
     }
 }

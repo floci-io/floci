@@ -4669,10 +4669,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * The in-use half of {@link #claimRequestedPrivateIp}, without the lease. CreateNetworkInterface
-     * uses it alone: an interface has no container to hold the address on the VPC network, and
-     * DeleteNetworkInterface returns no lease, so one taken here would keep the address from
-     * automatic allocation after the interface is gone. {@link #assignPrivateIp} already steps
-     * around addresses stored interfaces hold. Callers must hold {@link #privateIpAllocationLock}.
+     * and CreateNatGateway use it alone: neither an interface nor a NAT gateway has a container to
+     * hold the address on the VPC network, and DeleteNetworkInterface and DeleteNatGateway return
+     * no lease, so one taken here would keep the address from automatic allocation after its
+     * holder is gone. {@link #assignPrivateIp} already steps around addresses stored interfaces and
+     * NAT gateways hold. Callers must hold {@link #privateIpAllocationLock}.
      *
      * @return whether the address lies in a Docker-backed range, where a lease could be taken
      */
@@ -12424,14 +12425,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * Callers must hold {@link #privateIpAllocationLock}.
      *
      * @param requestedPrivateIp the request's PrivateIpAddress, already checked by
-     *                           {@link #validateRequestedPrivateIp}, or null
+     *                           {@link #validateRequestedPrivateIp}, or null. It takes no lease on
+     *                           the VPC network (see {@link #requireRequestedPrivateIpFree}).
      */
     private NatGatewayAddress natGatewayAddress(String region, String natGatewayId, String subnetId,
                                                 String allocationId, String requestedPrivateIp) {
         NatGatewayAddress address = new NatGatewayAddress();
         address.setNetworkInterfaceId(eniIdFromSeed("nat|" + natGatewayId));
         if (requestedPrivateIp != null) {
-            claimRequestedPrivateIp(region, subnetId, requestedPrivateIp);
+            requireRequestedPrivateIpFree(region, subnetId, requestedPrivateIp);
             address.setPrivateIp(requestedPrivateIp);
         } else {
             address.setPrivateIp(assignPrivateIp(region, subnetId));
