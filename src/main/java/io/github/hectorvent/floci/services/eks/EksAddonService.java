@@ -465,8 +465,8 @@ public class EksAddonService {
      * returns them, or empty when the cluster has no add-on with that ARN. This is how TagResource,
      * UntagResource and ListTagsForResource reach an add-on.
      */
-    public Optional<Map<String, String>> retag(Cluster cluster, String addonName, String addonArn,
-                                               UnaryOperator<Map<String, String>> change) {
+    public synchronized Optional<Map<String, String>> retag(Cluster cluster, String addonName, String addonArn,
+                                                            UnaryOperator<Map<String, String>> change) {
         String storageKey = prefix(cluster) + addonName.toLowerCase(Locale.ROOT);
         Optional<StoredAddon> found = storage.get(storageKey)
                 .filter(stored -> addonArn.equals(stored.addon().addonArn()));

@@ -1320,18 +1320,26 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     /**
-     * Applies {@code change} to the tags of the resource {@code resourceArn} names and returns them.
+     * Applies {@code edit} to the tags of the resource {@code resourceArn} names and returns them.
      * TagResource takes a cluster, node group, Fargate profile, add-on, pod identity association or
      * access entry ARN; each child ARN names its cluster as the segment after the resource type.
      */
-    private Map<String, String> retag(String resourceArn, UnaryOperator<Map<String, String>> change) {
+    private Map<String, String> retag(String resourceArn, UnaryOperator<Map<String, String>> edit) {
         String resource = AwsArnUtils.isArnFor(resourceArn, "eks") ? AwsArnUtils.parse(resourceArn).resource() : "";
-        if (!resource.contains("/")) {
-            throw new AwsException("InvalidParameterException", "Invalid resource ARN: " + resourceArn, 400);
+        String[] parts = resource.split("/", -1);
+        boolean child = !"cluster".equals(parts[0]);
+        if (parts.length < (child ? 3 : 2) || parts[1].isEmpty() || (child && parts[2].isEmpty())) {
+            throw new AwsException("BadRequestException", "Invalid resource ARN: " + resourceArn, 400);
         }
-        String[] parts = resource.split("/");
         String clusterName = parts[1];
-        String childName = parts.length > 2 ? parts[2] : "";
+        String childName = child ? parts[2] : "";
+        UnaryOperator<Map<String, String>> change = current -> {
+            Map<String, String> next = edit.apply(current);
+            if (!next.equals(current)) {
+                checkTagLimits(next);
+            }
+            return next;
+        };
         Optional<Map<String, String>> tags = switch (parts[0]) {
             case "cluster" -> storage.get(clusterName).map(cluster -> applyTags(cluster.getTags(), change, next -> {
                 cluster.setTags(new HashMap<>(next));
@@ -1358,8 +1366,23 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                     .flatMap(cluster -> accessEntries.retag(cluster, resourceArn, change));
             default -> Optional.empty();
         };
-        return tags.orElseThrow(() -> new AwsException("ResourceNotFoundException",
+        return tags.orElseThrow(() -> new AwsException("NotFoundException",
                 "Resource not found: " + resourceArn, 404));
+    }
+
+    /** The TagMap limits: at most 50 tags, keys of 1 to 128 characters and values of at most 256. */
+    private static void checkTagLimits(Map<String, String> tags) {
+        if (tags.size() > 50) {
+            throw new AwsException("BadRequestException", "Too many tags: maximum is 50", 400);
+        }
+        for (Map.Entry<String, String> tag : tags.entrySet()) {
+            if (tag.getKey() == null || tag.getKey().isEmpty() || tag.getKey().length() > 128) {
+                throw new AwsException("BadRequestException", "Invalid tag key: " + tag.getKey(), 400);
+            }
+            if (tag.getValue() == null || tag.getValue().length() > 256) {
+                throw new AwsException("BadRequestException", "Invalid tag value for key: " + tag.getKey(), 400);
+            }
+        }
     }
 
     /** The tags {@code change} makes of {@code current}, handed to {@code store} only when they differ. */

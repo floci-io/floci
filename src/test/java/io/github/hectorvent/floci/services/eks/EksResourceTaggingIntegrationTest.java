@@ -17,7 +17,7 @@ import static org.hamcrest.Matchers.not;
 /**
  * TagResource, UntagResource and ListTagsForResource take the ARN of any taggable EKS resource, not
  * only a cluster's. A child ARN such as {@code nodegroup/<cluster>/<name>/<id>} used to be read as a
- * cluster named after its last segment, so every child answered ResourceNotFoundException.
+ * cluster named after its last segment, so every child answered as not found.
  */
 @QuarkusTest
 class EksResourceTaggingIntegrationTest {
@@ -75,12 +75,37 @@ class EksResourceTaggingIntegrationTest {
             String staleNodegroup = arns.get("nodegroup").substring(0, arns.get("nodegroup").lastIndexOf('/') + 1)
                     + UUID.randomUUID();
             eks().get("/tags/" + staleNodegroup).then().statusCode(404)
-                    .body("__type", equalTo("ResourceNotFoundException"));
+                    .body("__type", equalTo("NotFoundException"));
             eks().get("/tags/" + arns.get("addon").replace("/" + name + "/", "/no-such-cluster/")).then()
-                    .statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+                    .statusCode(404).body("__type", equalTo("NotFoundException"));
             eks().get("/tags/arn:aws:eks:us-east-1:" + ACCOUNT + ":identityproviderconfig/" + name + "/oidc/x/y")
-                    .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
+                    .then().statusCode(404).body("__type", equalTo("NotFoundException"));
             eks().get("/tags/" + arns.get("cluster")).then().statusCode(200).body("tags", not(anEmptyMap()));
+
+            // An ARN that names a resource type but no cluster is a bad request, not a server error.
+            String noCluster = "arn:aws:eks:us-east-1:" + ACCOUNT + ":cluster/";
+            eks().get("/tags/" + noCluster).then().statusCode(400).body("__type", equalTo("BadRequestException"));
+            eks().queryParam("tagKeys", "team").delete("/tags/" + noCluster).then().statusCode(400)
+                    .body("__type", equalTo("BadRequestException"));
+            eks().get("/tags/" + arns.get("addon").substring(0, arns.get("addon").indexOf(name)) + name + "/")
+                    .then().statusCode(400).body("__type", equalTo("BadRequestException"));
+
+            // TagResource keeps every resource within the TagMap limits, counting the tags it already has.
+            Map<String, String> fortyNine = new LinkedHashMap<>();
+            for (int i = 0; i < 49; i++) {
+                fortyNine.put("k" + i, "v");
+            }
+            eks().contentType("application/json").body(Map.of("tags", fortyNine))
+                    .post("/tags/" + arns.get("addon")).then().statusCode(200);
+            eks().contentType("application/json").body(Map.of("tags", Map.of("one-too-many", "v")))
+                    .post("/tags/" + arns.get("addon")).then().statusCode(400)
+                    .body("__type", equalTo("BadRequestException"));
+            eks().get("/tags/" + arns.get("addon")).then().statusCode(200)
+                    .body("tags", not(hasKey("one-too-many")))
+                    .body("tags.team", equalTo("addon"));
+            eks().contentType("application/json").body(Map.of("tags", Map.of("k", "v".repeat(257))))
+                    .post("/tags/" + arns.get("access-entry")).then().statusCode(400)
+                    .body("__type", equalTo("BadRequestException"));
         } finally {
             eks().delete("/clusters/" + name + "/addons/vpc-cni");
             eks().delete("/clusters/" + name + "/node-groups/ng1");

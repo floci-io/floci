@@ -303,8 +303,8 @@ public class EksPodIdentityAssociationService {
      * {@code cluster} and returns them, or empty when the cluster has no association with that ARN.
      * This is how TagResource, UntagResource and ListTagsForResource reach an association.
      */
-    public Optional<Map<String, String>> retag(Cluster cluster, String associationId, String associationArn,
-                                               UnaryOperator<Map<String, String>> change) {
+    public synchronized Optional<Map<String, String>> retag(Cluster cluster, String associationId, String associationArn,
+                                                            UnaryOperator<Map<String, String>> change) {
         String key = prefix(cluster) + associationId;
         Optional<StoredAssociation> found = associations.get(key)
                 .filter(stored -> associationArn.equals(stored.association().associationArn()));

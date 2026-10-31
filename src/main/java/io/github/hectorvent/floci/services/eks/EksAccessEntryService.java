@@ -278,8 +278,8 @@ public class EksAccessEntryService {
      * are stored by principal, which the ARN does not carry whole, so the cluster's entries are
      * searched. This is how TagResource, UntagResource and ListTagsForResource reach an entry.
      */
-    public Optional<Map<String, String>> retag(Cluster cluster, String accessEntryArn,
-                                               UnaryOperator<Map<String, String>> change) {
+    public synchronized Optional<Map<String, String>> retag(Cluster cluster, String accessEntryArn,
+                                                            UnaryOperator<Map<String, String>> change) {
         String prefix = prefix(cluster);
         for (String key : entries.keys()) {
             if (!key.startsWith(prefix)) {
