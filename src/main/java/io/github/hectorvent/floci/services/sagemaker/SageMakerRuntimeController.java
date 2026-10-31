@@ -66,12 +66,13 @@ public class SageMakerRuntimeController {
                 builder.header("Accept", accept);
             }
             HttpResponse<byte[]> response = httpClient.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
-            // SageMaker Runtime maps model-container 5xx responses to ModelError (HTTP 424).
-            if (response.statusCode() >= 500) {
+            // SageMaker Runtime maps model-container 4xx and 5xx responses to ModelError (HTTP 424).
+            if (response.statusCode() >= 400) {
                 String originalMessage = new String(response.body(), StandardCharsets.UTF_8);
+                String errorKind = response.statusCode() >= 500 ? "server" : "client";
                 return Response.status(424).type(MediaType.APPLICATION_JSON).entity(Map.of(
                         "__type", "ModelError",
-                        "Message", "Received server error (" + response.statusCode() + ") from primary with message \"" + originalMessage + "\"",
+                        "Message", "Received " + errorKind + " error (" + response.statusCode() + ") from primary with message \"" + originalMessage + "\"",
                         "OriginalStatusCode", response.statusCode(),
                         "OriginalMessage", originalMessage
                 )).build();

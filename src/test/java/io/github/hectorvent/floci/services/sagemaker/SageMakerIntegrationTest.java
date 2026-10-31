@@ -14,9 +14,13 @@ import software.amazon.awssdk.services.sagemaker.SageMakerClient;
 import software.amazon.awssdk.services.sagemaker.model.ListModelsResponse;
 
 import java.net.URI;
+import java.time.Duration;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
@@ -29,6 +33,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 class SageMakerIntegrationTest {
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/sagemaker/aws4_request";
+    private static final String OTHER_ACCOUNT_AUTH =
+            "AWS4-HMAC-SHA256 Credential=111111111111/20260205/us-east-1/sagemaker/aws4_request";
+    // A model without an image fails its endpoint start before any container is created, so the
+    // failure reason proves which account's model the start worker resolved, without Docker.
+    private static final String IMAGE_REQUIRED = "PrimaryContainer.Image is required";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -139,8 +148,62 @@ class SageMakerIntegrationTest {
         }
     }
 
+    @Test
+    void endpointStartInAnotherAccountResolvesThatAccountsModel() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String endpoint = "sm-acct-ep-" + suffix;
+        createImagelessEndpoint(OTHER_ACCOUNT_AUTH, "sm-acct-model-" + suffix, "sm-acct-cfg-" + suffix, endpoint);
+
+        await().atMost(Duration.ofSeconds(15)).pollInterval(Duration.ofMillis(100))
+                .until(() -> endpointField(OTHER_ACCOUNT_AUTH, endpoint, "EndpointStatus"), equalTo("Failed"));
+        assertThat(endpointField(OTHER_ACCOUNT_AUTH, endpoint, "FailureReason"), equalTo(IMAGE_REQUIRED));
+    }
+
+    @Test
+    void endpointStartInAnotherAccountLeavesTheDefaultAccountsSameNamedEndpointAlone() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String model = "sm-shared-model-" + suffix;
+        String cfg = "sm-shared-cfg-" + suffix;
+        String endpoint = "sm-shared-ep-" + suffix;
+        createImagelessEndpoint(AUTH, model, cfg, endpoint);
+        await().atMost(Duration.ofSeconds(15)).pollInterval(Duration.ofMillis(100))
+                .until(() -> endpointField(AUTH, endpoint, "EndpointStatus"), equalTo("Failed"));
+        String defaultArn = endpointField(AUTH, endpoint, "EndpointArn");
+        assertThat(defaultArn, containsString(":000000000000:"));
+
+        createImagelessEndpoint(OTHER_ACCOUNT_AUTH, model, cfg, endpoint);
+        await().atMost(Duration.ofSeconds(15)).pollInterval(Duration.ofMillis(100))
+                .until(() -> !"Creating".equals(endpointField(OTHER_ACCOUNT_AUTH, endpoint, "EndpointStatus"))
+                        || !defaultArn.equals(endpointField(AUTH, endpoint, "EndpointArn")));
+
+        assertThat(endpointField(AUTH, endpoint, "EndpointArn"), equalTo(defaultArn));
+        assertThat(endpointField(OTHER_ACCOUNT_AUTH, endpoint, "EndpointArn"), containsString(":111111111111:"));
+        assertThat(endpointField(OTHER_ACCOUNT_AUTH, endpoint, "EndpointStatus"), equalTo("Failed"));
+        assertThat(endpointField(OTHER_ACCOUNT_AUTH, endpoint, "FailureReason"), equalTo(IMAGE_REQUIRED));
+    }
+
+    private void createImagelessEndpoint(String auth, String model, String cfg, String endpoint) {
+        post(auth, "SageMaker.CreateModel", """
+                {"ModelName":"%s","PrimaryContainer":{"Environment":{"MODE":"test"}}}
+                """.formatted(model)).then().statusCode(200);
+        post(auth, "SageMaker.CreateEndpointConfig", """
+                {"EndpointConfigName":"%s","ProductionVariants":[{"VariantName":"AllTraffic","ModelName":"%s","InitialInstanceCount":1,"InstanceType":"ml.t2.medium","InitialVariantWeight":1.0}]}
+                """.formatted(cfg, model)).then().statusCode(200);
+        post(auth, "SageMaker.CreateEndpoint", "{\"EndpointName\":\"%s\",\"EndpointConfigName\":\"%s\"}".formatted(endpoint, cfg))
+                .then().statusCode(200);
+    }
+
+    private String endpointField(String auth, String endpoint, String field) {
+        return post(auth, "SageMaker.DescribeEndpoint", "{\"EndpointName\":\"%s\"}".formatted(endpoint))
+                .then().statusCode(200).extract().path(field);
+    }
+
     private Response post(String target, String body) {
-        return given().header("Authorization", AUTH)
+        return post(AUTH, target, body);
+    }
+
+    private Response post(String auth, String target, String body) {
+        return given().header("Authorization", auth)
                 .header("X-Amz-Target", target)
                 .contentType("application/x-amz-json-1.1")
                 .body(body)

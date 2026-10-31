@@ -2,6 +2,8 @@
 
 Floci emulates SageMaker control-plane APIs and runs real Docker containers for local training jobs and hosted endpoints. Containers use the SageMaker `/opt/ml` contract rather than mocks.
 
+Containers are named `floci-aws-sagemaker-endpoint-<account>-<region>-<name>` and `floci-aws-sagemaker-training-<account>-<region>-<name>` (a configured `floci.docker.resource-namespace` follows `floci-aws-`), so same-named endpoints or training jobs in different accounts or regions run side by side.
+
 ## Supported operations
 
 | Area | Operations |
@@ -30,7 +32,7 @@ Floci emulates SageMaker control-plane APIs and runs real Docker containers for 
 | `DescribeEndpoint` | Returns an endpoint's status, scoped to the calling region. |
 | `DeleteEndpoint` | Stops and removes the endpoint's container; a start still in flight for this endpoint discards its result instead of resurrecting the deleted record. |
 | `ListEndpoints` | Lists endpoints for the calling region; supports `MaxResults` and `NextToken`. |
-| `UpdateEndpoint` | Swaps an endpoint to a new endpoint configuration, restarting its container; a superseded in-flight start discards its result. |
+| `UpdateEndpoint` | Swaps an endpoint to a new endpoint configuration by restarting its container, reporting `Creating` until the new container is `InService` (see [Endpoint hosting](#endpoint-hosting)); a superseded in-flight start discards its result. |
 | `CreateTrainingJob` | Runs `AlgorithmSpecification.TrainingImage` asynchronously against the `/opt/ml` contract and uploads the resulting model artifacts to S3. |
 | `DescribeTrainingJob` | Returns a training job's status, scoped to the calling region. |
 | `ListTrainingJobs` | Lists training jobs for the calling region; supports `NameContains`, `StatusEquals`, `MaxResults`, and `NextToken`. |
@@ -42,7 +44,9 @@ Floci emulates SageMaker control-plane APIs and runs real Docker containers for 
 
 ## Training contract
 
-`CreateTrainingJob` starts `AlgorithmSpecification.TrainingImage` with command `train` unless `ContainerEntrypoint`/`ContainerArguments` are supplied. Floci writes SageMaker config files under `/opt/ml/input/config`, downloads channel data from S3 into `/opt/ml/input/data/<channel>`, waits for container exit, and uploads `/opt/ml/model` as `model.tar.gz` under `OutputDataConfig.S3OutputPath/<TrainingJobName>/output/`.
+`CreateTrainingJob` starts `AlgorithmSpecification.TrainingImage` with command `train` unless `ContainerEntrypoint`/`ContainerArguments` are supplied. Floci writes SageMaker config files under `/opt/ml/input/config`, downloads every object under each channel's `S3Uri` prefix into `/opt/ml/input/data/<channel>` (keeping the folder structure below the prefix and skipping zero-byte folder-marker keys that end in `/`), waits for container exit, and uploads `/opt/ml/model` as `model.tar.gz` under `OutputDataConfig.S3OutputPath/<TrainingJobName>/output/`. Channel downloads, the artifact upload, and the `/aws/sagemaker/TrainingJobs` log stream use the account that created the job. If the training container is removed by anything other than `StopTrainingJob` before it exits, the job fails with `Training container was removed before it exited` rather than a made-up exit code.
+
+A container still running when `StoppingCondition.MaxRuntimeInSeconds` elapses receives `SIGTERM` and up to 120 seconds to save its model, as on AWS. Whatever it wrote to `/opt/ml/model` is uploaded as `model.tar.gz`, and the job ends `Stopped` with `SecondaryStatus` `MaxRuntimeExceeded` and no `FailureReason`. If the Docker stop call gives up before Docker answers, for example when [`floci.docker.api-timeout-seconds`](../configuration/docker.md) is shorter than that window and every retry times out, Floci keeps checking the container until it exits or 120 seconds have passed since the stop request, kills it if it is still running then, and only then uploads its model and removes it; the job still ends `Stopped`.
 
 ## GPU-backed training
 
@@ -82,9 +86,11 @@ Only the accelerator is substituted. An instance type also implies vCPU and memo
 
 ## Endpoint hosting
 
-`CreateEndpoint` starts the model image as a long-lived Docker container with command `serve`, port `8080`, `/ping` health checks, and `/invocations` runtime proxying. `ModelDataUrl` artifacts are downloaded from S3 and placed in `/opt/ml/model`.
+`CreateEndpoint` starts the model image as a long-lived Docker container with command `serve`, port `8080`, `/ping` health checks, and `/invocations` runtime proxying. A 4xx or 5xx response from the container is returned as a `ModelError` (HTTP 424) carrying the container's `OriginalStatusCode` and `OriginalMessage`. `ModelDataUrl` artifacts are downloaded from S3 in the account that created the endpoint and placed in `/opt/ml/model`.
 
 Endpoint containers are CPU-only for now; the `gpu` settings above apply to training jobs.
+
+`UpdateEndpoint` is simplified. AWS switches to the new endpoint configuration without downtime; Floci stops the current container and starts one for the new configuration. Until the new container passes its `/ping` check, `DescribeEndpoint` reports `EndpointStatus` `Creating` (AWS reports `Updating`) and `InvokeEndpoint` is rejected because the endpoint is not `InService`. If the new container fails to start, the endpoint becomes `Failed` with no container serving it, whereas AWS keeps serving the previous endpoint configuration.
 
 ## Examples
 

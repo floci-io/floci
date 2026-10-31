@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.sagemaker;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -75,7 +76,8 @@ public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
     }
 
     void startEndpointAsync(EndpointResource endpoint, SageMakerService service, long backoffMillis) {
-        executor.submit(() -> startEndpoint(endpoint, service, backoffMillis));
+        executor.submit(() -> RequestScopes.runAs(endpoint.accountId, endpoint.region,
+                () -> startEndpoint(endpoint, service, backoffMillis)));
     }
 
     private void startEndpoint(EndpointResource endpoint, SageMakerService service, long backoffMillis) {
@@ -87,7 +89,7 @@ public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
             if (image == null) {
                 throw new IllegalArgumentException("PrimaryContainer.Image is required");
             }
-            String name = ContainerStorageHelper.dockerName(config, "sagemaker-endpoint-" + endpoint.endpointName);
+            String name = containerName(config, "endpoint", endpoint.accountId, endpoint.region, endpoint.endpointName);
             lifecycleManager.removeIfExists(name);
             ContainerBuilder.Builder builder = containerBuilder.newContainer(image)
                     .withName(name)
@@ -109,7 +111,7 @@ public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
             endpoint.containerId = containerId;
             endpoint.invokeHost = ep.host();
             endpoint.invokePort = ep.port();
-            containers.put(endpoint.endpointName, containerId);
+            containers.put(key(endpoint), containerId);
             waitForPing(endpoint.invokeHost, endpoint.invokePort);
             endpoint.endpointStatus = "InService";
             endpoint.failureReason = null;
@@ -137,17 +139,34 @@ public class SageMakerEndpointManager implements ContainerTeardown, Resettable {
         }
         LOG.infov("SageMaker endpoint {0} start superseded by a delete or newer update; discarding result",
                 endpoint.endpointName);
-        String containerId = endpoint.containerId != null ? endpoint.containerId : containers.remove(endpoint.endpointName);
+        String containerId = endpoint.containerId != null ? endpoint.containerId : containers.remove(key(endpoint));
         if (containerId != null) {
             lifecycleManager.stopAndRemove(containerId, null);
         }
     }
 
     public void stopEndpoint(EndpointResource endpoint) {
-        String containerId = endpoint.containerId != null ? endpoint.containerId : containers.remove(endpoint.endpointName);
+        String containerId = endpoint.containerId != null ? endpoint.containerId : containers.remove(key(endpoint));
         if (containerId != null) {
             lifecycleManager.stopAndRemove(containerId, null);
         }
+    }
+
+    private static String key(EndpointResource endpoint) {
+        return resourceKey(endpoint.accountId, endpoint.region, endpoint.endpointName);
+    }
+
+    /**
+     * Docker name for a SageMaker container. Endpoint and training job names are unique only within one
+     * account's region, and a start force-removes whatever already holds its name, so both are part of it.
+     */
+    static String containerName(EmulatorConfig config, String kind, String accountId, String region, String name) {
+        return ContainerStorageHelper.dockerName(config, "sagemaker-" + kind + "-" + accountId + "-" + region + "-" + name);
+    }
+
+    /** Key for a resource's in-flight worker state, for the same reason {@link #containerName} is qualified. */
+    static String resourceKey(String accountId, String region, String name) {
+        return accountId + "/" + region + "/" + name;
     }
 
     @Override

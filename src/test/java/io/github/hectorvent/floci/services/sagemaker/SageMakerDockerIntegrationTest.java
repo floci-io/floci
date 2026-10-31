@@ -4,18 +4,23 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.Event;
 import com.github.dockerjava.api.model.EventType;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.github.hectorvent.floci.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
+import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -30,6 +35,8 @@ import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -39,6 +46,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SageMakerDockerIntegrationTest {
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/sagemaker/aws4_request";
+    private static final String OTHER_ACCOUNT = "111111111111";
+    private static final String OTHER_ACCOUNT_AUTH =
+            "AWS4-HMAC-SHA256 Credential=" + OTHER_ACCOUNT + "/20260205/us-east-1/sagemaker/aws4_request";
 
     @Inject DockerClient dockerClient;
     @Inject S3Service s3Service;
@@ -84,6 +94,73 @@ class SageMakerDockerIntegrationTest {
     }
 
     @Test
+    void trainingJobPastMaxRuntimeIsStoppedWithTheModelItSavedOnSigterm() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "sm-maxrt-" + suffix;
+        s3Service.createBucket(bucket, "us-east-1");
+        String job = "sm-maxrt-" + suffix;
+        post("SageMaker.CreateTrainingJob", """
+                {
+                  "TrainingJobName":"%s",
+                  "AlgorithmSpecification":{
+                    "TrainingImage":"%s",
+                    "ContainerEntrypoint":["/bin/sh","-c"],
+                    "ContainerArguments":["trap 'mkdir -p /opt/ml/model && echo saved > /opt/ml/model/model.txt; exit 0' TERM; while true; do sleep 1 & wait $!; done"]
+                  },
+                  "OutputDataConfig":{"S3OutputPath":"s3://%s/output"},
+                  "ResourceConfig":{"InstanceType":"ml.m5.large","InstanceCount":1,"VolumeSizeInGB":1},
+                  "StoppingCondition":{"MaxRuntimeInSeconds":2}
+                }
+                """.formatted(job, TestImages.BUSYBOX, bucket)).then().statusCode(200);
+
+        String status = awaitTerminalStatus("Stopped", () -> post("SageMaker.DescribeTrainingJob",
+                "{\"TrainingJobName\":\"%s\"}".formatted(job)).then().statusCode(200).extract().path("TrainingJobStatus"));
+        assertEquals("Stopped", status, () -> post("SageMaker.DescribeTrainingJob",
+                "{\"TrainingJobName\":\"%s\"}".formatted(job)).then().extract().path("FailureReason"));
+        String artifact = post("SageMaker.DescribeTrainingJob", "{\"TrainingJobName\":\"%s\"}".formatted(job))
+                .then().statusCode(200)
+                .body("SecondaryStatus", equalTo("MaxRuntimeExceeded"))
+                .body("FailureReason", nullValue())
+                .extract().path("ModelArtifacts.S3ModelArtifacts");
+        S3Uri uri = S3Uri.parse(artifact);
+        assertEquals("saved\n", modelFile(s3Service.getObject(uri.bucket(), uri.key()).getData(), "model.txt"));
+    }
+
+    @Test
+    void trainingJobInAnotherAccountReadsAndWritesThatAccountsBucket() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bucket = "sm-acct-train-" + suffix;
+        RequestScopes.runAs(OTHER_ACCOUNT, () -> {
+            s3Service.createBucket(bucket, "us-east-1");
+            s3Service.putObject(bucket, "input/data.txt", "hello".getBytes(StandardCharsets.UTF_8), "text/plain", Map.of());
+        });
+        String job = "sm-acct-train-" + suffix;
+        post(OTHER_ACCOUNT_AUTH, "SageMaker.CreateTrainingJob", """
+                {
+                  "TrainingJobName":"%s",
+                  "AlgorithmSpecification":{
+                    "TrainingImage":"%s",
+                    "ContainerEntrypoint":["/bin/sh","-c"],
+                    "ContainerArguments":["mkdir -p /opt/ml/model && cp /opt/ml/input/data/train/data.txt /opt/ml/model/model.txt"]
+                  },
+                  "InputDataConfig":[{"ChannelName":"train","DataSource":{"S3DataSource":{"S3Uri":"s3://%s/input"}},"ContentType":"text/plain","TrainingInputMode":"File"}],
+                  "OutputDataConfig":{"S3OutputPath":"s3://%s/output"},
+                  "ResourceConfig":{"InstanceType":"ml.m5.large","InstanceCount":1,"VolumeSizeInGB":1},
+                  "StoppingCondition":{"MaxRuntimeInSeconds":60}
+                }
+                """.formatted(job, TestImages.BUSYBOX, bucket, bucket)).then().statusCode(200);
+
+        String status = awaitTerminalStatus("Completed", () -> post(OTHER_ACCOUNT_AUTH, "SageMaker.DescribeTrainingJob",
+                "{\"TrainingJobName\":\"%s\"}".formatted(job)).then().statusCode(200).extract().path("TrainingJobStatus"));
+        assertEquals("Completed", status, () -> post(OTHER_ACCOUNT_AUTH, "SageMaker.DescribeTrainingJob",
+                "{\"TrainingJobName\":\"%s\"}".formatted(job)).then().extract().path("FailureReason"));
+        String artifact = post(OTHER_ACCOUNT_AUTH, "SageMaker.DescribeTrainingJob", "{\"TrainingJobName\":\"%s\"}".formatted(job))
+                .then().statusCode(200).extract().path("ModelArtifacts.S3ModelArtifacts");
+        S3Uri uri = S3Uri.parse(artifact);
+        assertNotNull(RequestScopes.callAs(OTHER_ACCOUNT, () -> s3Service.getObject(uri.bucket(), uri.key())).getData());
+    }
+
+    @Test
     void endpointHostsRealContainerAndRuntimeProxiesInvocations() throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
         String bucket = "sm-ep-" + suffix;
@@ -110,6 +187,32 @@ class SageMakerDockerIntegrationTest {
     }
 
     @Test
+    void containerClientErrorIsReturnedAsModelError() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String model = "sm-4xx-model-" + suffix;
+        String cfg = "sm-4xx-cfg-" + suffix;
+        String endpoint = "sm-4xx-endpoint-" + suffix;
+        String script = "trap 'exit 0' TERM; cat > /server.py <<'PY'\nfrom http.server import BaseHTTPRequestHandler,HTTPServer\nclass H(BaseHTTPRequestHandler):\n def do_GET(self):\n  self.send_response(200 if self.path == '/ping' else 404); self.end_headers()\n def do_POST(self):\n  n=int(self.headers.get('content-length','0')); self.rfile.read(n); b=b'bad input'; self.send_response(400); self.send_header('Content-Type','text/plain'); self.send_header('Content-Length',str(len(b))); self.end_headers(); self.wfile.write(b)\nHTTPServer(('0.0.0.0',8080),H).serve_forever()\nPY\npython /server.py & wait $!";
+        post("SageMaker.CreateModel", """
+                {"ModelName":"%s","PrimaryContainer":{"Image":"%s","ContainerEntrypoint":["/bin/sh","-c"],"ContainerArguments":[%s]}}
+                """.formatted(model, TestImages.PYTHON_ALPINE, json(script))).then().statusCode(200);
+        post("SageMaker.CreateEndpointConfig", """
+                {"EndpointConfigName":"%s","ProductionVariants":[{"VariantName":"AllTraffic","ModelName":"%s","InitialInstanceCount":1,"InstanceType":"ml.t2.medium","InitialVariantWeight":1.0}]}
+                """.formatted(cfg, model)).then().statusCode(200);
+        post("SageMaker.CreateEndpoint", "{\"EndpointName\":\"%s\",\"EndpointConfigName\":\"%s\"}".formatted(endpoint, cfg))
+                .then().statusCode(200);
+        waitForEndpoint(endpoint, "InService");
+        given().header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/runtime.sagemaker/aws4_request")
+                .contentType("text/plain").body("hello")
+                .when().post("/endpoints/%s/invocations".formatted(endpoint))
+                .then().statusCode(424)
+                .body("__type", equalTo("ModelError"))
+                .body("OriginalStatusCode", equalTo(400))
+                .body("OriginalMessage", equalTo("bad input"));
+        post("SageMaker.DeleteEndpoint", "{\"EndpointName\":\"%s\"}".formatted(endpoint)).then().statusCode(200);
+    }
+
+    @Test
     void stoppingATrainingJobDoesNotGetRelabeledFailed() throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
         String bucket = "sm-stop-" + suffix;
@@ -130,7 +233,7 @@ class SageMakerDockerIntegrationTest {
                 """.formatted(job, TestImages.BUSYBOX, bucket)).then().statusCode(200);
         // Wait for the container to actually be running, blocked on an empty pipe, so the stop
         // races a real running container rather than one still being staged.
-        awaitContainerRunning("floci-aws-sagemaker-training-" + job);
+        awaitContainerRunning("floci-aws-sagemaker-training-000000000000-us-east-1-" + job);
         post("SageMaker.StopTrainingJob", "{\"TrainingJobName\":\"%s\"}".formatted(job)).then().statusCode(200);
         post("SageMaker.DescribeTrainingJob", "{\"TrainingJobName\":\"%s\"}".formatted(job))
                 .then().statusCode(200).body("TrainingJobStatus", equalTo("Stopped"));
@@ -162,7 +265,7 @@ class SageMakerDockerIntegrationTest {
         // rather than polling for the container means a container that is created and discarded
         // between two polls is still seen: events are queued and replayed from the watch's start.
         try (ContainerDestroyWatch discarded =
-                new ContainerDestroyWatch(dockerClient, "floci-aws-sagemaker-endpoint-" + endpoint)) {
+                new ContainerDestroyWatch(dockerClient, "floci-aws-sagemaker-endpoint-000000000000-us-east-1-" + endpoint)) {
             post("SageMaker.CreateEndpoint", "{\"EndpointName\":\"%s\",\"EndpointConfigName\":\"%s\"}".formatted(endpoint, cfg))
                     .then().statusCode(200);
             post("SageMaker.DeleteEndpoint", "{\"EndpointName\":\"%s\"}".formatted(endpoint)).then().statusCode(200);
@@ -210,6 +313,19 @@ class SageMakerDockerIntegrationTest {
         }
     }
 
+    private static String modelFile(byte[] modelTarGz, String name) throws IOException {
+        try (TarArchiveInputStream tar = new TarArchiveInputStream(
+                new GzipCompressorInputStream(new ByteArrayInputStream(modelTarGz)))) {
+            TarArchiveEntry entry;
+            while ((entry = tar.getNextEntry()) != null) {
+                if (entry.getName().equals(name)) {
+                    return new String(tar.readAllBytes(), StandardCharsets.UTF_8);
+                }
+            }
+        }
+        throw new AssertionError(name + " is not in the model archive");
+    }
+
     private void awaitContainerRunning(String nameFragment) {
         await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(100)).until(() ->
                 !dockerClient.listContainersCmd().withNameFilter(List.of(nameFragment)).exec().isEmpty());
@@ -238,7 +354,11 @@ class SageMakerDockerIntegrationTest {
     }
 
     private Response post(String target, String body) {
-        return given().header("Authorization", AUTH).header("X-Amz-Target", target)
+        return post(AUTH, target, body);
+    }
+
+    private Response post(String auth, String target, String body) {
+        return given().header("Authorization", auth).header("X-Amz-Target", target)
                 .contentType("application/x-amz-json-1.1").body(body).when().post("/");
     }
 

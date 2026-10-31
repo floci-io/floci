@@ -5,6 +5,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -12,12 +13,19 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
+import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.sagemaker.model.SageMakerEntities.EndpointResource;
 import io.github.hectorvent.floci.services.sagemaker.model.SageMakerEntities.ModelResource;
 import io.github.hectorvent.floci.services.sagemaker.model.SageMakerEntities.TrainingJobResource;
+import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.testing.DockerArchiveUploadFixture;
+import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
+import jakarta.enterprise.event.Event;
+import jakarta.enterprise.inject.Instance;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
@@ -25,6 +33,7 @@ import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
@@ -32,15 +41,19 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.net.SocketException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -60,23 +73,27 @@ class SageMakerArchiveRetryTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private final DockerArchiveUploadFixture uploads = new DockerArchiveUploadFixture(docker, "container");
     private final byte[] payload = "model-data".repeat(2000).getBytes(StandardCharsets.UTF_8);
+    private EmulatorConfig config;
+    private ContainerBuilder builder;
     private SageMakerEndpointManager manager;
     private SageMakerTrainingRunner runner;
     private TrainingJobResource job;
 
+    @TempDir
+    Path tempDir;
+
     @BeforeEach
     void setUp() {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().dockerNetwork()).thenReturn(Optional.empty());
         when(config.services().sagemaker().dockerNetwork()).thenReturn(Optional.empty());
         when(config.docker().resourceNamespace()).thenReturn(Optional.empty());
         when(config.docker().logMaxSize()).thenReturn("10m");
         when(config.docker().logMaxFile()).thenReturn("3");
-        ContainerBuilder builder = new ContainerBuilder(config,
+        builder = new ContainerBuilder(config,
                 mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class));
         manager = new SageMakerEndpointManager(builder, lifecycle, config, mock(ContainerDetector.class), s3);
-        runner = new SageMakerTrainingRunner(builder, lifecycle, mock(ContainerLogStreamer.class), config,
-                mock(ContainerDetector.class), s3, mapper, mock(SageMakerGpuResolver.class));
+        runner = trainingRunner(s3);
         job = new TrainingJobResource();
         job.trainingJobName = "retry-training";
         job.region = "us-east-1";
@@ -87,7 +104,8 @@ class SageMakerArchiveRetryTest {
         S3Object input = new S3Object("bucket", "input/nested/data.csv", payload, "text/plain");
         when(s3.getObject("bucket", "model.bin"))
                 .thenReturn(new S3Object("bucket", "model.bin", payload, "application/octet-stream"));
-        when(s3.listObjects("bucket", "input/", null, 1000)).thenReturn(List.of(input));
+        when(s3.listObjectsWithPrefixes("bucket", "input/", null, 1000, null, null))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(input), List.of(), false, null));
         when(s3.getObject("bucket", "input/nested/data.csv")).thenReturn(input);
         when(lifecycle.create(any(ContainerSpec.class))).thenReturn("container");
         when(lifecycle.getDockerClient()).thenReturn(docker);
@@ -127,8 +145,42 @@ class SageMakerArchiveRetryTest {
                 "{\"train\":{\"ContentType\":\"application/octet-stream\",\"TrainingInputMode\":\"File\"}}"
                         .getBytes(StandardCharsets.UTF_8),
                 "opt/ml/input/data/train/nested/data.csv", payload));
-        verify(s3).listObjects("bucket", "input/", null, 1000);
+        verify(s3).listObjectsWithPrefixes("bucket", "input/", null, 1000, null, null);
         verify(s3).getObject("bucket", "input/nested/data.csv");
+    }
+
+    @Test
+    void trainingUploadCopiesEveryObjectUnderThePrefixAcrossListPages() throws Exception {
+        S3Service store = inMemoryS3();
+        store.createBucket("bucket", "us-east-1");
+        Set<String> expected = new HashSet<>();
+        for (int i = 0; i < 1001; i++) {
+            String name = "part-%04d.csv".formatted(i);
+            store.putObject("bucket", "input/" + name, payload, "text/csv", Map.of());
+            expected.add("opt/ml/input/data/train/" + name);
+        }
+
+        trainingRunner(store).copyTrainingInput("container", job, 0);
+
+        Set<String> channelFiles = new HashSet<>(archivedEntries().keySet());
+        channelFiles.removeIf(name -> !name.startsWith("opt/ml/input/data/train/"));
+        assertEquals(1001, channelFiles.size());
+        assertEquals(expected, channelFiles);
+    }
+
+    @Test
+    void trainingUploadSkipsFolderMarkersInsteadOfWritingThemAsFiles() throws Exception {
+        S3Service store = inMemoryS3();
+        store.createBucket("bucket", "us-east-1");
+        store.putObject("bucket", "input/sub/", new byte[0], "application/x-directory", Map.of());
+        store.putObject("bucket", "input/sub/a.csv", payload, "text/csv", Map.of());
+
+        trainingRunner(store).copyTrainingInput("container", job, 0);
+
+        Map<String, byte[]> entries = archivedEntries();
+        assertArrayEquals(payload, entries.get("opt/ml/input/data/train/sub/a.csv"));
+        assertFalse(entries.containsKey("opt/ml/input/data/train/sub"),
+                "a folder marker must not become a regular file that shadows the folder");
     }
 
     @Test
@@ -259,7 +311,22 @@ class SageMakerArchiveRetryTest {
         assertEquals(1, uploads.completed.size());
     }
 
-    private void assertArchive(Map<String, byte[]> expected) throws Exception {
+    @SuppressWarnings("unchecked")
+    private S3Service inMemoryS3() {
+        EmulatorConfig s3Config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(s3Config.storage().persistentPath()).thenReturn(tempDir.toString());
+        when(s3Config.storage().services().s3().mode()).thenReturn(Optional.of("memory"));
+        return new S3Service(new InMemoryStorageFactory("000000000000"), s3Config, mock(SqsService.class),
+                mock(SnsService.class), mock(Instance.class), mock(EventBridgeService.class), mock(Event.class),
+                new RegionResolver("us-east-1", "000000000000"), mapper, mock(IamService.class));
+    }
+
+    private SageMakerTrainingRunner trainingRunner(S3Service store) {
+        return new SageMakerTrainingRunner(builder, lifecycle, mock(ContainerLogStreamer.class), config,
+                mock(ContainerDetector.class), store, mapper, mock(SageMakerGpuResolver.class));
+    }
+
+    private Map<String, byte[]> archivedEntries() throws Exception {
         Map<String, byte[]> actual = new LinkedHashMap<>();
         try (TarArchiveInputStream tar = new TarArchiveInputStream(new ByteArrayInputStream(uploads.completed.getFirst()))) {
             TarArchiveEntry entry;
@@ -268,6 +335,11 @@ class SageMakerArchiveRetryTest {
                 actual.put(entry.getName(), tar.readAllBytes());
             }
         }
+        return actual;
+    }
+
+    private void assertArchive(Map<String, byte[]> expected) throws Exception {
+        Map<String, byte[]> actual = archivedEntries();
         assertEquals(expected.keySet(), actual.keySet());
         for (String name : expected.keySet()) {
             assertArrayEquals(expected.get(name), actual.get(name), name);
