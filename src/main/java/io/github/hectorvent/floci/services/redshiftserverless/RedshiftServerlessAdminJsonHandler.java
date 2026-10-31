@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsJsonTimestamp;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.redshiftserverless.model.CustomDomainAssociation;
@@ -387,7 +388,7 @@ public class RedshiftServerlessAdminJsonHandler {
     }
 
     private static double epoch(Instant instant) {
-        return instant.toEpochMilli() / 1000.0;
+        return EpochSeconds.fromInstant(instant);
     }
     // ── Tracks, managed workgroups and reservations ────────────────────────
 

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJsonTimestamp;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.services.glue.model.*;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.glue.schemaregistry.model.Registry;
@@ -1179,7 +1180,7 @@ public class GlueJsonHandler {
     }
 
     private static double epochSeconds(Instant instant) {
-        return instant.toEpochMilli() / 1000.0;
+        return EpochSeconds.fromInstant(instant);
     }
 
     private static String iso(Instant instant) {

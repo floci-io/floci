@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.glue;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.storage.WriteProfile;
@@ -673,7 +674,7 @@ public class GlueTriggerService {
     }
 
     private static double epochSeconds(Instant instant) {
-        return instant.toEpochMilli() / 1000.0;
+        return EpochSeconds.fromInstant(instant);
     }
 
     /**

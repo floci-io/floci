@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -1655,7 +1656,7 @@ public class FisService implements TagHandler {
     }
 
     private double now() {
-        return Instant.now().toEpochMilli() / 1000.0;
+        return EpochSeconds.fromInstant(Instant.now());
     }
 
     private String key(String region, String type, String id) {

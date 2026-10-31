@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -129,7 +130,7 @@ public class EksPodIdentityAssociationService {
                 cluster.getAccountId() != null ? cluster.getAccountId() : regionResolver.getDefaultAccountId());
         String associationArn = AwsArnUtils.Arn.of("eks", region, accountId,
                 "podidentityassociation/" + cluster.getName() + "/" + associationId).toString();
-        double now = Instant.now().toEpochMilli() / 1000.0;
+        double now = EpochSeconds.fromInstant(Instant.now());
         String externalId = UUID.randomUUID().toString();
 
         PodIdentityAssociation association = new PodIdentityAssociation(
@@ -206,7 +207,7 @@ public class EksPodIdentityAssociationService {
                 ? request.disableSessionTags() : current.disableSessionTags();
         String newPolicy = request.policy() != null ? request.policy() : current.policy();
 
-        double now = Instant.now().toEpochMilli() / 1000.0;
+        double now = EpochSeconds.fromInstant(Instant.now());
         PodIdentityAssociation updated = new PodIdentityAssociation(
                 current.clusterName(),
                 current.namespace(),

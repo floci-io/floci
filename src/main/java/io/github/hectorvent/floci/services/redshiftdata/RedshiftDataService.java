@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
@@ -1344,7 +1345,7 @@ public class RedshiftDataService implements Resettable {
     }
 
     static double epochSeconds(Instant instant) {
-        return instant.toEpochMilli() / 1000.0;
+        return EpochSeconds.fromInstant(instant);
     }
 
     private String clusterIdentifierOrNull(JsonNode request) {

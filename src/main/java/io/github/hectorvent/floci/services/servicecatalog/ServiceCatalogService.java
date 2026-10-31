@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.PassedRoleLookup;
@@ -71,7 +72,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
     }
 
     private double nowEpochSeconds() {
-        return Instant.now(clock).toEpochMilli() / 1000.0;
+        return EpochSeconds.fromInstant(Instant.now(clock));
     }
 
     public ObjectNode createPortfolio(JsonNode request, String region, String accountId) {

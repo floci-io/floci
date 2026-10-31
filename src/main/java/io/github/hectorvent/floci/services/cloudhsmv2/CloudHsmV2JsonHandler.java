@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.Backup;
 import io.github.hectorvent.floci.services.cloudhsmv2.model.BackupRetentionPolicy;
@@ -242,7 +243,7 @@ public class CloudHsmV2JsonHandler {
             node.put("SecurityGroup", cluster.getSecurityGroup());
         }
         if (cluster.getCreateTimestamp() != null) {
-            node.put("CreateTimestamp", cluster.getCreateTimestamp().toEpochMilli() / 1000.0);
+            node.put("CreateTimestamp", EpochSeconds.fromInstant(cluster.getCreateTimestamp()));
         }
         if (cluster.getBackupPolicy() != null) {
             node.put("BackupPolicy", cluster.getBackupPolicy());
@@ -431,7 +432,7 @@ public class CloudHsmV2JsonHandler {
         Backup backup = service.copyBackupToRegion(destRegion, backupId, region);
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode destBackup = objectMapper.createObjectNode();
-        destBackup.put("CreateTimestamp", backup.getCreateTimestamp().toEpochMilli() / 1000.0);
+        destBackup.put("CreateTimestamp", EpochSeconds.fromInstant(backup.getCreateTimestamp()));
         destBackup.put("SourceBackup", backup.getSourceBackup());
         destBackup.put("SourceCluster", backup.getSourceCluster());
         destBackup.put("SourceRegion", backup.getSourceRegion());
@@ -479,13 +480,13 @@ public class CloudHsmV2JsonHandler {
             node.put("HsmType", backup.getHsmType());
         }
         if (backup.getCreateTimestamp() != null) {
-            node.put("CreateTimestamp", backup.getCreateTimestamp().toEpochMilli() / 1000.0);
+            node.put("CreateTimestamp", EpochSeconds.fromInstant(backup.getCreateTimestamp()));
         }
         if (backup.getDeleteTimestamp() != null) {
-            node.put("DeleteTimestamp", backup.getDeleteTimestamp().toEpochMilli() / 1000.0);
+            node.put("DeleteTimestamp", EpochSeconds.fromInstant(backup.getDeleteTimestamp()));
         }
         if (backup.getCopyTimestamp() != null) {
-            node.put("CopyTimestamp", backup.getCopyTimestamp().toEpochMilli() / 1000.0);
+            node.put("CopyTimestamp", EpochSeconds.fromInstant(backup.getCopyTimestamp()));
         }
         if (backup.getNeverExpires() != null) {
             node.put("NeverExpires", "True".equalsIgnoreCase(backup.getNeverExpires()));

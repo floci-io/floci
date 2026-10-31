@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.transfer.model.HomeDirectoryMapping;
@@ -359,7 +360,7 @@ public class TransferHandler {
                 kNode.put("SshPublicKeyId", k.getSshPublicKeyId());
                 kNode.put("SshPublicKeyBody", k.getSshPublicKeyBody());
                 if (k.getDateImported() != null) {
-                    kNode.put("DateImported", k.getDateImported().toEpochMilli() / 1000.0);
+                    kNode.put("DateImported", EpochSeconds.fromInstant(k.getDateImported()));
                 }
                 keys.add(kNode);
             }

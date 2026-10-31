@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.ecr.model.AuthorizationData;
 import io.github.hectorvent.floci.services.ecr.model.Image;
@@ -728,7 +729,7 @@ public class EcrJsonHandler {
                 request.path("principalArn").asText(null), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("principalArn", exclusion.principalArn());
-        response.put("createdAt", exclusion.createdAt().toEpochMilli() / 1000.0);
+        response.put("createdAt", EpochSeconds.fromInstant(exclusion.createdAt()));
         return Response.ok(response).build();
     }
 

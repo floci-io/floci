@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -134,7 +135,7 @@ public class EksAddonService {
 
         List<String> associationArns = createOrLinkPodIdentityAssociations(cluster, addonName, request.podIdentityAssociations());
 
-        double now = Instant.now().toEpochMilli() / 1000.0;
+        double now = EpochSeconds.fromInstant(Instant.now());
         String addonArn = generateAddonArn(cluster, addonName);
         Optional<AddonInfo> addonInfo = catalog.findAddon(addonName);
         String owner = addonInfo.map(AddonInfo::owner).orElse("aws");
@@ -257,7 +258,7 @@ public class EksAddonService {
             params.add(new UpdateParam("PodIdentityAssociations", serializeAssociations(request.podIdentityAssociations())));
         }
 
-        double now = Instant.now().toEpochMilli() / 1000.0;
+        double now = EpochSeconds.fromInstant(Instant.now());
         Addon updatedAddon = new Addon(
                 current.addonArn(),
                 current.addonName(),
@@ -324,7 +325,7 @@ public class EksAddonService {
                 "DELETING",
                 current.health(),
                 current.createdAt(),
-                Instant.now().toEpochMilli() / 1000.0,
+                EpochSeconds.fromInstant(Instant.now()),
                 current.serviceAccountRoleArn(),
                 current.configurationValues(),
                 current.tags(),

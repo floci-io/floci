@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -314,7 +315,7 @@ public class SsmJsonHandler {
             if (h.getKeyId() != null) {
                 node.put("KeyId", h.getKeyId());
             }
-            node.put("LastModifiedDate", h.getLastModifiedDate().toEpochMilli() / 1000.0);
+            node.put("LastModifiedDate", EpochSeconds.fromInstant(h.getLastModifiedDate()));
             if (h.getDescription() != null) {
                 node.put("Description", h.getDescription());
             }
@@ -402,7 +403,7 @@ public class SsmJsonHandler {
             node.put("ARN", p.getArn());
             node.put("Type", p.getType());
             node.put("Version", p.getVersion());
-            node.put("LastModifiedDate", p.getLastModifiedDate().toEpochMilli() / 1000.0);
+            node.put("LastModifiedDate", EpochSeconds.fromInstant(p.getLastModifiedDate()));
             if (p.getDescription() != null) {
                 node.put("Description", p.getDescription());
             }
@@ -773,7 +774,7 @@ public class SsmJsonHandler {
             ObjectNode docNode = objectMapper.createObjectNode();
             docNode.put("Name", d.getName());
             if (d.getCreatedDate() != null) {
-                docNode.put("CreatedDate", d.getCreatedDate().toEpochMilli() / 1000.0);
+                docNode.put("CreatedDate", EpochSeconds.fromInstant(d.getCreatedDate()));
             }
             docNode.put("DocumentType", d.getDocumentType());
             docNode.put("DocumentVersion", String.valueOf(d.getDocumentVersion()));
@@ -998,7 +999,7 @@ public class SsmJsonHandler {
             node.put("ScheduleExpression", assoc.getScheduleExpression());
         }
         if (assoc.getLastExecutionDate() != null) {
-            node.put("LastExecutionDate", assoc.getLastExecutionDate().toEpochMilli() / 1000.0);
+            node.put("LastExecutionDate", EpochSeconds.fromInstant(assoc.getLastExecutionDate()));
         }
         return node;
     }
@@ -1049,7 +1050,7 @@ public class SsmJsonHandler {
                 statusNode.put("Message", assoc.getStatus().getMessage());
             }
             if (assoc.getStatus().getDate() != null) {
-                statusNode.put("Date", assoc.getStatus().getDate().toEpochMilli() / 1000.0);
+                statusNode.put("Date", EpochSeconds.fromInstant(assoc.getStatus().getDate()));
             }
             if (assoc.getStatus().getAdditionalInfo() != null) {
                 statusNode.put("AdditionalInfo", assoc.getStatus().getAdditionalInfo());
@@ -1063,10 +1064,10 @@ public class SsmJsonHandler {
             desc.set("Overview", overviewNode);
         }
         if (assoc.getCreatedDate() != null) {
-            desc.put("Date", assoc.getCreatedDate().toEpochMilli() / 1000.0);
+            desc.put("Date", EpochSeconds.fromInstant(assoc.getCreatedDate()));
         }
         if (assoc.getLastExecutionDate() != null) {
-            desc.put("LastExecutionDate", assoc.getLastExecutionDate().toEpochMilli() / 1000.0);
+            desc.put("LastExecutionDate", EpochSeconds.fromInstant(assoc.getLastExecutionDate()));
         }
         if (assoc.getComplianceSeverity() != null) {
             desc.put("ComplianceSeverity", assoc.getComplianceSeverity());
@@ -1319,7 +1320,7 @@ public class SsmJsonHandler {
         }
         node.put("Type", p.getType());
         node.put("Version", p.getVersion());
-        node.put("LastModifiedDate", p.getLastModifiedDate().toEpochMilli() / 1000.0);
+        node.put("LastModifiedDate", EpochSeconds.fromInstant(p.getLastModifiedDate()));
         node.put("ARN", p.getArn());
         if (p.getDataType() != null) {
             node.put("DataType", p.getDataType());
@@ -1404,7 +1405,7 @@ public class SsmJsonHandler {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("SettingId", s.getSettingId());
         node.put("SettingValue", s.getSettingValue());
-        node.put("LastModifiedDate", s.getLastModifiedDate().toEpochMilli() / 1000.0);
+        node.put("LastModifiedDate", EpochSeconds.fromInstant(s.getLastModifiedDate()));
         node.put("LastModifiedUser", s.getLastModifiedUser());
         node.put("ARN", s.getArn());
         node.put("Status", s.getStatus());
@@ -1489,8 +1490,8 @@ public class SsmJsonHandler {
         node.put("DocumentName", c.getDocumentName());
         if (c.getDocumentVersion() != null) node.put("DocumentVersion", c.getDocumentVersion());
         if (c.getComment() != null) node.put("Comment", c.getComment());
-        if (c.getRequestedDateTime() != null) node.put("RequestedDateTime", c.getRequestedDateTime().toEpochMilli() / 1000.0);
-        if (c.getExpiresAfter() != null) node.put("ExpiresAfter", c.getExpiresAfter().toEpochMilli() / 1000.0);
+        if (c.getRequestedDateTime() != null) node.put("RequestedDateTime", EpochSeconds.fromInstant(c.getRequestedDateTime()));
+        if (c.getExpiresAfter() != null) node.put("ExpiresAfter", EpochSeconds.fromInstant(c.getExpiresAfter()));
         // c is the same live, shared Command object SsmCommandService's writers (updateCommandStatus,
         // cancelCommand) synchronize on before touching Status/StatusDetails together. Reading the
         // pair here without the same lock would let this read straddle a concurrent writer's update -
@@ -1528,7 +1529,7 @@ public class SsmJsonHandler {
         if (inv.getComment() != null) node.put("Comment", inv.getComment());
         node.put("DocumentName", inv.getDocumentName());
         if (inv.getDocumentVersion() != null) node.put("DocumentVersion", inv.getDocumentVersion());
-        if (inv.getRequestedDateTime() != null) node.put("RequestedDateTime", inv.getRequestedDateTime().toEpochMilli() / 1000.0);
+        if (inv.getRequestedDateTime() != null) node.put("RequestedDateTime", EpochSeconds.fromInstant(inv.getRequestedDateTime()));
         // Same reasoning as commandToNode: inv is the same live, shared CommandInvocation object its
         // writers (cancelCommand, direct/agent completion, timeout sweeps) now synchronize on.
         synchronized (inv) {
@@ -1563,8 +1564,8 @@ public class SsmJsonHandler {
         if (info.getIpAddress() != null) node.put("IPAddress", info.getIpAddress());
         if (info.getComputerName() != null) node.put("ComputerName", info.getComputerName());
         node.put("ResourceType", info.getResourceType());
-        if (info.getLastPingDateTime() != null) node.put("LastPingDateTime", info.getLastPingDateTime().toEpochMilli() / 1000.0);
-        if (info.getRegistrationDate() != null) node.put("RegistrationDate", info.getRegistrationDate().toEpochMilli() / 1000.0);
+        if (info.getLastPingDateTime() != null) node.put("LastPingDateTime", EpochSeconds.fromInstant(info.getLastPingDateTime()));
+        if (info.getRegistrationDate() != null) node.put("RegistrationDate", EpochSeconds.fromInstant(info.getRegistrationDate()));
         return node;
     }
 

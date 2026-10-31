@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 
@@ -358,7 +359,7 @@ final class SesV2Json {
      * ISO string, as the v1 Query path writes, breaks the SDK's unixTimestamp unmarshaller.
      */
     static double epochSeconds(Instant instant) {
-        return instant.toEpochMilli() / 1000.0;
+        return EpochSeconds.fromInstant(instant);
     }
 
     static void putTimestamp(ObjectNode node, String field, Instant value) {
