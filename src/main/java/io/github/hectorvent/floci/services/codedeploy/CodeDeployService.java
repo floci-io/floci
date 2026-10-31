@@ -352,6 +352,10 @@ public class CodeDeployService {
     }
 
     public Application getApplication(String region, String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ApplicationNameRequiredException",
+                    "Application name is required", 400);
+        }
         Application app = applicationsFor(region).get(name);
         if (app == null) {
             throw new AwsException("ApplicationDoesNotExistException",
