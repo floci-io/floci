@@ -33,9 +33,13 @@ class ElastiCacheUserGroupIntegrationTest {
     private static final String DESCRIBE = "DescribeUserGroupsResponse.DescribeUserGroupsResult.UserGroups.member.";
 
     private static RequestSpecification request(String action) {
+        return request(action, AUTH_HEADER);
+    }
+
+    private static RequestSpecification request(String action, String authorization) {
         return given()
             .formParam("Action", action)
-            .header("Authorization", AUTH_HEADER);
+            .header("Authorization", authorization);
     }
 
     private static void createUser(String userId, String userName) {
@@ -285,11 +289,7 @@ class ElastiCacheUserGroupIntegrationTest {
             .body("DescribeUsersResponse.DescribeUsersResult.Users.member.AccessString", equalTo("on ~* +@all"));
 
         // another account has its own default user
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization",
-                    "AWS4-HMAC-SHA256 Credential=111111111111/20260412/us-east-1/elasticache/aws4_request")
-            .formParam("Action", "DescribeUsers")
+        request("DescribeUsers", "AWS4-HMAC-SHA256 Credential=111111111111/20260412/us-east-1/elasticache/aws4_request")
             .formParam("UserId", "default")
         .when()
             .post("/")

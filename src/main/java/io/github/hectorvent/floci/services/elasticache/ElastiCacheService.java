@@ -2121,7 +2121,7 @@ public class ElastiCacheService implements ResourceProvider {
         if (users.get(DEFAULT_USER_ID).isPresent()) {
             return;
         }
-        // re-checked under the user lock, so concurrent first touches seed it once
+        // re-checked under the lock tag updates hold, so a racing seed cannot overwrite a tag just added
         synchronized (userGroupLock) {
             if (users.get(DEFAULT_USER_ID).isEmpty()) {
                 ElastiCacheUser user = new ElastiCacheUser(DEFAULT_USER_ID, DEFAULT_USER_ID, AuthMode.NO_AUTH,
