@@ -405,6 +405,10 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         return loadBalancers.getOrDefault(region, Map.of()).get(arn);
     }
 
+    Listener getListener(String region, String arn) {
+        return listeners.getOrDefault(region, Map.of()).get(arn);
+    }
+
     /** Capacity reservation status for a load balancer. All fields are {@code null} when no
      *  capacity is reserved, which is always the case in Floci (capacity cannot be reserved). */
     public record CapacityReservation(Integer decreaseRequestsRemaining,
