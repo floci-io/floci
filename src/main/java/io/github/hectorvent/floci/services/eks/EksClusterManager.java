@@ -718,16 +718,16 @@ public class EksClusterManager
             }
         }
 
-        String auditPolicyLocalFile = null;
-        if (hasLoggingEnabled(cluster, "audit")) {
-            auditPolicyLocalFile = writeAuditPolicyFile(cluster);
-            if (auditPolicyLocalFile != null) {
-                serverArgs.add("--kube-apiserver-arg=audit-policy-file=" + AUDIT_POLICY_CONTAINER_PATH);
-                serverArgs.add("--kube-apiserver-arg=audit-log-path=" + AUDIT_LOG_CONTAINER_PATH);
-                serverArgs.add("--kube-apiserver-arg=audit-log-maxage=" + AUDIT_LOG_MAXAGE);
-                serverArgs.add("--kube-apiserver-arg=audit-log-maxbackup=" + AUDIT_LOG_MAXBACKUP);
-                serverArgs.add("--kube-apiserver-arg=audit-log-maxsize=" + AUDIT_LOG_MAXSIZE);
-            }
+        // The API server audits whether or not the audit log type is on: its flags are fixed when the
+        // container starts, and UpdateClusterConfig can turn audit on later. Only the follower that
+        // ships the file to CloudWatch Logs depends on the log type.
+        String auditPolicyLocalFile = writeAuditPolicyFile(cluster);
+        if (auditPolicyLocalFile != null) {
+            serverArgs.add("--kube-apiserver-arg=audit-policy-file=" + AUDIT_POLICY_CONTAINER_PATH);
+            serverArgs.add("--kube-apiserver-arg=audit-log-path=" + AUDIT_LOG_CONTAINER_PATH);
+            serverArgs.add("--kube-apiserver-arg=audit-log-maxage=" + AUDIT_LOG_MAXAGE);
+            serverArgs.add("--kube-apiserver-arg=audit-log-maxbackup=" + AUDIT_LOG_MAXBACKUP);
+            serverArgs.add("--kube-apiserver-arg=audit-log-maxsize=" + AUDIT_LOG_MAXSIZE);
         }
 
         List<String> callerArgs = resolveCallerArgs(cluster);
@@ -1341,6 +1341,17 @@ public class EksClusterManager
                 .execStartCmd(execCreate.getId())
                 .exec(logStreamer.execLogCallbackForAccount(
                         accountId, logGroup, logStream, region, "eks-audit:" + clusterName, false));
+    }
+
+    /**
+     * Follows the cluster's current log types, after UpdateClusterConfig changed them. Serialised, so
+     * two updates racing cannot leave the first one's followers attached after the second's types.
+     */
+    public void reattachClusterLogs(Cluster cluster) {
+        synchronized (clusterLogHandles) {
+            closeQuietly(clusterLogHandles.remove(clusterResourceName(cluster)));
+            attachClusterLogsFromNow(cluster);
+        }
     }
 
     Closeable getLogHandle(Cluster cluster) {

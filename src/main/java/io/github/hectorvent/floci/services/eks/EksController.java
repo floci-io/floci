@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import io.github.hectorvent.floci.services.eks.model.PodIdentityAssociation;
 import io.github.hectorvent.floci.services.eks.model.Update;
 import io.github.hectorvent.floci.services.eks.model.UpdateAddonRequest;
+import io.github.hectorvent.floci.services.eks.model.UpdateClusterConfigRequest;
 import io.github.hectorvent.floci.services.eks.model.UpdatePodIdentityAssociationRequest;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -88,6 +89,13 @@ public class EksController {
     public Response describeCluster(@PathParam("name") String name) {
         Cluster cluster = eksService.describeCluster(name);
         return Response.ok(Map.of("cluster", toClusterResponse(cluster))).build();
+    }
+
+    @POST
+    @Path("/clusters/{name}/update-config")
+    public Response updateClusterConfig(@PathParam("name") String name, UpdateClusterConfigRequest request) {
+        Update update = eksService.updateClusterConfig(name, request);
+        return Response.ok(Map.of("update", update)).build();
     }
 
     @DELETE

@@ -135,6 +135,10 @@ public class Cluster {
 
     private AccessConfig accessConfig;
 
+    @JsonProperty("upgradePolicy")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private UpgradePolicy upgradePolicy;
+
     public AccessConfig getAccessConfig() { return accessConfig; }
     public void setAccessConfig(AccessConfig accessConfig) { this.accessConfig = accessConfig; }
 
@@ -155,6 +159,9 @@ public class Cluster {
         }
         joinedInstanceIds.put(instanceId, region);
     }
+
+    public UpgradePolicy getUpgradePolicy() { return upgradePolicy; }
+    public void setUpgradePolicy(UpgradePolicy upgradePolicy) { this.upgradePolicy = upgradePolicy; }
 
     public Cluster() {}
 
@@ -266,6 +273,7 @@ public class Cluster {
         c.defaultStorageClass = this.defaultStorageClass;
         c.joinedInstanceIds = this.joinedInstanceIds != null ? new ConcurrentHashMap<>(this.joinedInstanceIds) : null;
         c.accessConfig = this.accessConfig;
+        c.upgradePolicy = this.upgradePolicy;
         return c;
     }
 }
