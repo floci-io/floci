@@ -902,11 +902,12 @@ public class CloudFrontServingController {
     /**
      * A custom origin a viewer's WebSocket handshake is tunneled to: the URI and the address it
      * resolved to, the headers the origin request carries before the upgrade fields, and the origin's
-     * connection and response timeouts for the handshake.
+     * connection, response and response completion timeouts for the handshake.
      */
     record WebSocketOrigin(URI uri, InetAddress address,
                            List<CloudFrontOriginRequestBuilder.Header> headers,
-                           Duration connectTimeout, Duration responseTimeout) {
+                           Duration connectTimeout, Duration responseTimeout,
+                           Duration responseCompletionTimeout) {
     }
 
     /**
@@ -954,7 +955,7 @@ public class CloudFrontServingController {
             CloudFrontOriginHttpClient.OriginTimeouts timeouts = originTimeouts(origin);
             return new WebSocketOrigin(target.uri(), address,
                     CloudFrontOriginHttpClient.originRequestHeaders(originRequest.headers(), target.originHeaders()),
-                    timeouts.connectTimeout(), timeouts.responseTimeout());
+                    timeouts.connectTimeout(), timeouts.responseTimeout(), timeouts.responseCompletionTimeout());
         } catch (IOException | RuntimeException e) {
             // The ordinary GET meets the same failure and answers it as CloudFront does.
             LOG.debugv("CloudFront answers a WebSocket handshake as a GET: {0}", e.getClass().getSimpleName());

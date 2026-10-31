@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
+import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
@@ -9,6 +10,7 @@ import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.RestAssured;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
@@ -29,6 +31,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.restassured.RestAssured.given;
@@ -37,6 +40,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.doReturn;
 
 /**
  * Tunnels WebSocket connections through a distribution whose custom origin is an ALB listener, as
@@ -68,10 +72,14 @@ class CloudFrontWebSocketIntegrationTest {
     @Inject
     CloudFrontService cloudFrontService;
 
+    @InjectSpy
+    ServiceConfigAccess serviceConfigAccess;
+
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
 
     private final AtomicReference<String> originCustomHeader = new AtomicReference<>();
+    private final AtomicInteger originUpgrades = new AtomicInteger();
     private HttpServer backend;
     private HttpClient client;
     private String loadBalancerArn;
@@ -85,15 +93,20 @@ class CloudFrontWebSocketIntegrationTest {
                     originCustomHeader.set(request.getHeader("X-Origin-Verify"));
                     if (!"websocket".equalsIgnoreCase(request.getHeader("Upgrade"))) {
                         request.response().setStatusCode(400).end("not an upgrade");
+                        return;
+                    }
+                    originUpgrades.incrementAndGet();
+                    if (request.path().startsWith("/stall/")) {
+                        // Refuses the upgrade, then never finishes the body.
+                        request.response().setChunked(true).setStatusCode(503).write("partial");
                     } else if (!request.path().startsWith("/socket.io/")) {
                         request.response().headers().add("X-Multi", "one").add("X-Multi", "two");
                         request.response().setStatusCode(404).end("upgrade refused");
                     } else {
                         String query = request.query();
-                        request.toWebSocket()
-                                .onSuccess(socket -> socket.textMessageHandler(
-                                        text -> socket.writeTextMessage(query + ":" + text)))
-                                .onFailure(err -> request.response().setStatusCode(400).end("bad handshake"));
+                        // A handshake without Sec-WebSocket-Key is answered 400 by Vert.x itself.
+                        request.toWebSocket().onSuccess(socket -> socket.textMessageHandler(
+                                text -> socket.writeTextMessage(query + ":" + text)));
                     }
                 })
                 .listen(0, "127.0.0.1")
@@ -188,7 +201,32 @@ class CloudFrontWebSocketIntegrationTest {
                 .body(equalTo("not an upgrade"));
     }
 
+    @Test
+    void endsRefusalWhoseBodyStallsPastOriginReadTimeout() {
+        Distribution distribution = createDistribution(policyBehavior(ALL_VIEWER), 1);
+
+        // A refusal that never ends would leave connect() waiting past its 5 s limit (a TimeoutException).
+        assertThrows(ExecutionException.class, () -> connect(distribution, "/stall/?transport=websocket"));
+        assertEquals(1, originUpgrades.get());
+    }
+
+    @Test
+    void disabledCloudFrontDoesNotTunnel() {
+        Distribution distribution = createDistribution(policyBehavior(ALL_VIEWER));
+        doReturn(false).when(serviceConfigAccess).isEnabled("cloudfront");
+
+        ExecutionException failure = assertThrows(ExecutionException.class,
+                () -> connect(distribution, "/socket.io/?transport=websocket"));
+
+        assertInstanceOf(UpgradeRejectedException.class, failure.getCause());
+        assertEquals(0, originUpgrades.get());
+    }
+
     private Distribution createDistribution(DefaultCacheBehavior behavior) {
+        return createDistribution(behavior, null);
+    }
+
+    private Distribution createDistribution(DefaultCacheBehavior behavior, Integer originReadTimeoutSeconds) {
         Origin origin = new Origin();
         origin.setId("alb");
         origin.setDomainName("127.0.0.1");
@@ -196,6 +234,9 @@ class CloudFrontWebSocketIntegrationTest {
         customOriginConfig.put("HTTPPort", String.valueOf(LISTENER_PORT));
         customOriginConfig.put("HTTPSPort", "443");
         customOriginConfig.put("OriginProtocolPolicy", "http-only");
+        if (originReadTimeoutSeconds != null) {
+            customOriginConfig.put("OriginReadTimeout", String.valueOf(originReadTimeoutSeconds));
+        }
         origin.setCustomOriginConfig(customOriginConfig);
         origin.setCustomHeaders(List.of(new LinkedHashMap<>(Map.of(
                 "HeaderName", "X-Origin-Verify", "HeaderValue", "shared-secret"))));

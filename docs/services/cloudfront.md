@@ -242,7 +242,8 @@ PUT, PATCH and DELETE).
   AWS. An HTTP/1.1 GET with `Upgrade: websocket` and `Connection: Upgrade` goes to the origin the
   matched behavior selects with its `Upgrade` and `Connection` fields, and once the origin answers
   `101 Switching Protocols` the viewer and origin connections are joined. Any other origin answer is
-  relayed as an ordinary response, without custom error responses or a response headers policy. The
+  relayed as an ordinary response, without custom error responses or a response headers policy,
+  within the origin's response and response completion timeouts. The
   `Sec-WebSocket-*` fields follow the behavior's forwarding settings as any other header does, so the
   behavior must forward all viewer headers (the `AllViewer` origin request policy, or legacy cache
   settings) or at least `Sec-WebSocket-Key` and `Sec-WebSocket-Version`. A WebSocket handshake to an
