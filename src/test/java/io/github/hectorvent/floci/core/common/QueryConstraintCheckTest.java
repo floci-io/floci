@@ -277,6 +277,35 @@ class QueryConstraintCheckTest {
     }
 
     /**
+     * A pattern is compiled through {@link VendoredPatterns}, so a model that writes a code point
+     * above U+FFFF as a five-digit escape is read as the code point it spells: a supplementary
+     * character the class admits is not refused, and a C1 control it excludes still is. Compiled
+     * as the model writes it, Java would answer both the other way round.
+     */
+    @Test
+    void aPatternCarryingAWideEscapeIsCompiledAsTheModelMeansIt() throws Exception {
+        QueryConstraintCheck check = QueryConstraintCheck.of(MAPPER.readTree("""
+                {
+                  "operations": {"Put": "PutRequest"},
+                  "shapes": {
+                    "PutRequest": {"type": "structure", "members": {"Name": "wideType"}},
+                    "wideType": {"type": "string",
+                      "pattern": "[\\\\u0020-\\\\u007E\\\\u10000-\\\\u10FFFF]+"}
+                  }
+                }
+                """));
+
+        assertEquals(List.of(), check.violations("Put",
+                params("Name", "ok" + Character.toString(0x1F600))));
+
+        assertEquals(List.of("Value 'ok" + Character.toString(0x81) + "' at 'name' failed to satisfy"
+                + " constraint: Member must satisfy regular expression pattern:"
+                + " [\\u0020-\\u007E\\u10000-\\u10FFFF]+"),
+                check.violations("Put", params("Name", "ok" + Character.toString(0x81))),
+                "the message quotes the pattern as the model wrote it");
+    }
+
+    /**
      * A list's members are held to the element's own constraints, each named under the index the
      * request spelled rather than the position it sits at, which is what #6478 settled for a member
      * of a Query list. A member present and empty is still a member.
