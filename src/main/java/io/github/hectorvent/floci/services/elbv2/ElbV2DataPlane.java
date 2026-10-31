@@ -86,6 +86,14 @@ public class ElbV2DataPlane {
             "connection", "keep-alive", "transfer-encoding", "upgrade", "te", "trailers", "proxy-authorization", "proxy-authenticate"
     );
     private static final String PRESERVE_HOST_HEADER_ATTRIBUTE = "routing.http.preserve_host_header.enabled";
+    /*
+     * ALB HTTP header quotas: 64 KB for the request header block, 16 KB for the request line and
+     * 32 KB for the response header block. Vert.x defaults to 8 KB and 4 KB, so a browser carrying
+     * several JWT cookies got 431 from the listener and an oversized target response failed to proxy.
+     */
+    static final int MAX_REQUEST_HEADER_SIZE = 64 * 1024;
+    static final int MAX_REQUEST_LINE_LENGTH = 16 * 1024;
+    static final int MAX_RESPONSE_HEADER_SIZE = 32 * 1024;
     private static final String IDLE_TIMEOUT_ATTRIBUTE = "idle_timeout.timeout_seconds";
     private static final long DEFAULT_IDLE_TIMEOUT_SECONDS = 60;
     private static final int MAX_LAMBDA_BODY_BYTES = 1024 * 1024;
@@ -209,7 +217,8 @@ public class ElbV2DataPlane {
         proxyClient = vertx.createHttpClient(new HttpClientOptions()
                 .setMaxPoolSize(100)
                 .setConnectTimeout(5000)
-                .setKeepAlive(true));
+                .setKeepAlive(true)
+                .setMaxHeaderSize(MAX_RESPONSE_HEADER_SIZE));
     }
 
     @PreDestroy
@@ -477,7 +486,9 @@ public class ElbV2DataPlane {
         boolean secure = portIsSecure(port);
         HttpServerOptions options = new HttpServerOptions()
                 .setHost("0.0.0.0")
-                .setPort(port);
+                .setPort(port)
+                .setMaxHeaderSize(MAX_REQUEST_HEADER_SIZE)
+                .setMaxInitialLineLength(MAX_REQUEST_LINE_LENGTH);
         if (secure) {
             state.tlsKeyManager = new ReloadingKeyManager(new ElbV2TlsKeyManager(vertx, tlsKeyCertOptions(port)));
             options.setSsl(true)
