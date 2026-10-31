@@ -414,11 +414,18 @@ public class EventBridgeInvoker {
         if (redshiftTargetAuthorizer == null) {
             return;
         }
+        // A cluster runs by name in the rule's account, whatever account the target ARN names, so that is the
+        // cluster the role has to be allowed on.
+        String statementTarget = request.has("ClusterIdentifier")
+                ? AwsArnUtils.Arn.of("redshift", targetRegion, ruleAccount,
+                        "cluster:" + request.path("ClusterIdentifier").asText()).toString()
+                : targetArn;
         List<EventBridgeRedshiftTargetAuthorizer.Permission> permissions = new ArrayList<>();
         permissions.add(new EventBridgeRedshiftTargetAuthorizer.Permission(
-                batch ? "redshift-data:BatchExecuteStatement" : "redshift-data:ExecuteStatement", targetArn));
-        String secret = request.path("SecretArn").asText(null);
-        if (secret != null) {
+                batch ? "redshift-data:BatchExecuteStatement" : "redshift-data:ExecuteStatement", statementTarget));
+        // The Data API ignores a blank value, so it picks the credentials the same way.
+        String secret = request.path("SecretArn").asText("");
+        if (!secret.isBlank()) {
             // A secret named without its ARN has no resource to authorize against, and the Data API
             // rejects it as an invalid SecretArn before reading it, so no permission is checked for it.
             if (AwsArnUtils.isArn(secret)) {
@@ -428,7 +435,7 @@ public class EventBridgeInvoker {
         } else if (request.has("WorkgroupName")) {
             permissions.add(new EventBridgeRedshiftTargetAuthorizer.Permission(
                     "redshift-serverless:GetCredentials", targetArn));
-        } else if (request.has("DbUser")) {
+        } else if (!request.path("DbUser").asText("").isBlank()) {
             String cluster = request.path("ClusterIdentifier").asText();
             permissions.add(new EventBridgeRedshiftTargetAuthorizer.Permission("redshift:GetClusterCredentials",
                     AwsArnUtils.Arn.of("redshift", targetRegion, ruleAccount,

@@ -92,6 +92,52 @@ class EventBridgeRedshiftTargetAuthorizationTest {
     }
 
     @Test
+    void clusterTargetNamingAnotherAccountIsCheckedAgainstTheClusterThatRuns() {
+        RedshiftDataParameters parameters = parameters("dev");
+        parameters.setSql("select 1");
+
+        invoker.invokeTarget(target("arn:aws:redshift:us-east-1:999999999999:cluster:warehouse", parameters),
+                EVENT, "us-east-1");
+
+        assertEquals(List.of(new Permission("redshift-data:ExecuteStatement", CLUSTER_ARN)), permissions());
+    }
+
+    @Test
+    void blankSecretIsIgnoredAndTheDbUserCredentialsAreChecked() {
+        RedshiftDataParameters parameters = parameters("dev");
+        parameters.setDbUser("admin");
+        parameters.setSecretManagerArn("");
+        parameters.setSql("select 1");
+
+        invoker.invokeTarget(target(CLUSTER_ARN, parameters), EVENT, "us-east-1");
+
+        assertEquals(3, permissions().size());
+        assertEquals("redshift:GetClusterCredentials", permissions().get(1).action());
+    }
+
+    @Test
+    void blankSecretOnAServerlessTargetStillNeedsTheWorkgroupCredentials() {
+        RedshiftDataParameters parameters = parameters("dev");
+        parameters.setSecretManagerArn(" ");
+        parameters.setSql("select 1");
+
+        invoker.invokeTarget(target(WORKGROUP_ARN, parameters), EVENT, "us-west-2");
+
+        assertEquals(new Permission("redshift-serverless:GetCredentials", WORKGROUP_ARN), permissions().get(1));
+    }
+
+    @Test
+    void blankDbUserAddsNoCredentialsPermission() {
+        RedshiftDataParameters parameters = parameters("dev");
+        parameters.setDbUser("");
+        parameters.setSql("select 1");
+
+        invoker.invokeTarget(target(CLUSTER_ARN, parameters), EVENT, "us-east-1");
+
+        assertEquals(List.of(new Permission("redshift-data:ExecuteStatement", CLUSTER_ARN)), permissions());
+    }
+
+    @Test
     void secretNamedWithoutAnArnAddsNoPermissionBecauseTheDataApiRejectsIt() {
         RedshiftDataParameters parameters = parameters("dev");
         parameters.setSecretManagerArn("db");
