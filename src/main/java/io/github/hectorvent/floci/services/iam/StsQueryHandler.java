@@ -186,7 +186,7 @@ public class StsQueryHandler {
 
         if (durationSeconds > 3600 && iamService.isRoleSession(callerAccessKeyId(), callerSessionToken(params))) {
             return AwsQueryResponse.error("ValidationError",
-                    "The requested DurationSeconds exceeds the one hour session limit for roles assumed by role chaining.",
+                    "The requested DurationSeconds exceeds the 1 hour session limit for roles assumed by role chaining.",
                     AwsNamespaces.STS, 400);
         }
 
