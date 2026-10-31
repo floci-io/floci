@@ -1020,6 +1020,7 @@ public class S3Controller {
                               @Context UriInfo uriInfo,
                               @Context HttpHeaders httpHeaders) {
         S3Service.RequestAuthorization authorization = S3Service.RequestAuthorization.unsigned();
+        S3Object deleteMarker = null;
         try {
             key = extractObjectKey(uriInfo, bucket, key);
             authorization = S3RequestAuthorizationParser.parseIfRequired(
@@ -1087,7 +1088,13 @@ public class S3Controller {
             // entity-write time races concurrent overwrites and can pair one version's
             // Content-Length/checksum headers with another version's bytes. The open stream keeps
             // serving the snapshot's bytes, and is closed here unless a response took it over.
-            S3Service.ObjectRead read = s3Service.openObject(bucket, key, versionId);
+            S3Service.ObjectRead read;
+            try {
+                read = s3Service.openObject(bucket, key, versionId);
+            } catch (AwsException e) {
+                deleteMarker = deleteMarkerReached(e, bucket, key, versionId);
+                throw deleteMarker == null ? e : deleteMarkerError(e, "GET", versionId);
+            }
             S3Object obj = read.object();
             boolean bodyHandedOff = false;
             try {
@@ -1145,7 +1152,7 @@ public class S3Controller {
                     return websiteError;
                 }
             }
-            return xmlErrorResponse(e, bucket);
+            return withDeleteMarker(xmlErrorResponse(e, bucket), deleteMarker, versionId);
         }
     }
 
@@ -1371,6 +1378,7 @@ public class S3Controller {
                                @Context UriInfo uriInfo,
                                @Context HttpHeaders httpHeaders) {
         S3Service.RequestAuthorization authorization = S3Service.RequestAuthorization.unsigned();
+        S3Object deleteMarker = null;
         try {
             key = extractObjectKey(uriInfo, bucket, key);
             authorization = S3RequestAuthorizationParser.parseIfRequired(
@@ -1396,7 +1404,13 @@ public class S3Controller {
             }
             s3Service.authorizeGetObject(bucket, key, versionId, authorization);
 
-            S3Object obj = s3Service.headObject(bucket, key, versionId);
+            S3Object obj;
+            try {
+                obj = s3Service.headObject(bucket, key, versionId);
+            } catch (AwsException e) {
+                deleteMarker = deleteMarkerReached(e, bucket, key, versionId);
+                throw deleteMarker == null ? e : deleteMarkerError(e, "HEAD", versionId);
+            }
             S3Service.validateSseCustomerAccess(
                     obj,
                     httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
@@ -1450,7 +1464,7 @@ public class S3Controller {
                     return headOnlyResponse(websiteError);
                 }
             }
-            return xmlErrorResponse(e, bucket);
+            return withDeleteMarker(xmlErrorResponse(e, bucket), deleteMarker, versionId);
         }
     }
 
@@ -3723,6 +3737,54 @@ public class S3Controller {
     @ServerExceptionMapper
     public Response mapEscapedAwsException(AwsException e) {
         return xmlErrorResponse(e);
+    }
+
+    /**
+     * The delete marker a GetObject or HeadObject read reached when it failed with {@code e}, or null.
+     * A read of a key whose current version is a marker, or of the marker's own version, fails with
+     * NoSuchKey.
+     */
+    private S3Object deleteMarkerReached(AwsException e, String bucket, String key, String versionId) {
+        if (!"NoSuchKey".equals(e.getErrorCode())) {
+            return null;
+        }
+        return s3Service.findDeleteMarker(bucket, key, versionId).orElse(null);
+    }
+
+    /**
+     * The error S3 answers a read that reached a delete marker with: NoSuchKey, as if the object were
+     * deleted, when the marker is the current version, and 405 MethodNotAllowed for a request naming the
+     * marker's version.
+     */
+    private static AwsException deleteMarkerError(AwsException noSuchKey, String method, String versionId) {
+        if (versionId == null) {
+            return noSuchKey;
+        }
+        return new AwsException("MethodNotAllowed", "The specified method is not allowed against this resource.",
+                405, Map.of("Method", method, "ResourceType", "DeleteMarker"));
+    }
+
+    /**
+     * Adds the headers S3 sends with the error for a read that reached {@code marker}, if there is one:
+     * x-amz-delete-marker, the marker's x-amz-version-id and, on the 405 refusal of a request naming
+     * the marker's version, its Last-Modified and Allow: DELETE.
+     */
+    private static Response withDeleteMarker(Response error, S3Object marker, String versionId) {
+        if (marker == null) {
+            return error;
+        }
+        Response.ResponseBuilder response = Response.fromResponse(error);
+        if (versionId == null) {
+            response.header("x-amz-delete-marker", "true");
+        } else {
+            // xmlErrorResponse adds x-amz-delete-marker for a refusal naming a DeleteMarker.
+            response.header("Last-Modified", RFC_822.format(marker.getLastModified()))
+                    .header("Allow", "DELETE");
+        }
+        if (marker.getVersionId() != null) {
+            response.header("x-amz-version-id", marker.getVersionId());
+        }
+        return response.build();
     }
 
     private Response xmlErrorResponse(AwsException e) {

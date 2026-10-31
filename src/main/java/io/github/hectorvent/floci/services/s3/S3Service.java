@@ -2164,6 +2164,17 @@ public class S3Service implements Resettable, ResourceProvider {
         return copyObject(getStoredObject(bucketName, key, versionId));
     }
 
+    /**
+     * The delete marker a read of the version {@code versionId} names, or of the current version
+     * when it is null, reaches, if there is one.
+     */
+    public Optional<S3Object> findDeleteMarker(String bucketName, String key, String versionId) {
+        return resolveBucketEntry(bucketName)
+                .flatMap(bucket -> findStoredVersionForAccount(bucket.account(), bucketName, key, versionId))
+                .map(StoredVersion::object)
+                .filter(S3Object::isDeleteMarker);
+    }
+
     public GetObjectAttributesResult getObjectAttributes(String bucketName, String key, String versionId,
                                                          Set<ObjectAttributeName> attributes,
                                                          Integer maxParts, Integer partNumberMarker) {
