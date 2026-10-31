@@ -43,6 +43,7 @@ public class DbCluster {
     private Instant createdAt;
     private int proxyPort;
     private Map<String, String> tags = new LinkedHashMap<>();
+    private int backupRetentionPeriod = 1;
     private List<DbRoleAssociation> associatedRoles = new ArrayList<>();
     private String engineMode;
     private boolean storageEncrypted;
@@ -192,6 +193,9 @@ public class DbCluster {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>(); }
+
+    public int getBackupRetentionPeriod() { return backupRetentionPeriod; }
+    public void setBackupRetentionPeriod(int backupRetentionPeriod) { this.backupRetentionPeriod = backupRetentionPeriod; }
 
     public String getEngineMode() { return engineMode; }
     public void setEngineMode(String engineMode) { this.engineMode = engineMode; }
