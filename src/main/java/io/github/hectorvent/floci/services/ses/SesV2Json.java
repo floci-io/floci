@@ -67,15 +67,6 @@ final class SesV2Json {
         throw new AwsException(SERIALIZATION_EXCEPTION, null, 400);
     }
 
-    static JsonNode requireObjectOrAbsent(JsonNode parent, String fieldName) {
-        JsonNode child = parent.path(fieldName);
-        if (!child.isMissingNode() && !child.isNull() && !child.isObject()) {
-            throw new AwsException("BadRequestException",
-                    fieldName + " must be a JSON object.", 400);
-        }
-        return child;
-    }
-
     /**
      * Parse a JSON {@code Tags} array node into a list of tag records. Returns {@code null}
      * when the node is missing or null so callers can decide whether that is an error
