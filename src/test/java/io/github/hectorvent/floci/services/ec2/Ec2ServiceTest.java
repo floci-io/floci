@@ -340,7 +340,7 @@ class Ec2ServiceTest {
                 List.of(), null, null);
         Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
                 mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
-                mock(Ec2SnapshotBlockPublicAccessService.class), mock(Ec2IpamService.class),
+                mock(Ec2BlockPublicAccessService.class), mock(Ec2IpamService.class),
                 new RegionResolver("us-east-1", "000000000000"));
         clearInvocations(volumeStore);
 
@@ -363,7 +363,7 @@ class Ec2ServiceTest {
         service.associateAddress("us-east-1", elastic.getAllocationId(), launched.get(1).getInstanceId());
         Ec2QueryHandler handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
                 mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
-                mock(Ec2SnapshotBlockPublicAccessService.class), mock(Ec2IpamService.class),
+                mock(Ec2BlockPublicAccessService.class), mock(Ec2IpamService.class),
                 new RegionResolver("us-east-1", "000000000000"));
         // The first read settles the pending launches, which reads the addresses once per launch.
         handler.handle("DescribeInstances", new MultivaluedHashMap<>(), "us-east-1");
@@ -5613,7 +5613,7 @@ class Ec2ServiceTest {
             assertTrue(service.describeKeyPairs("us-east-1", List.of(), List.of(),
                     Map.of("key-type", List.of("ed25519"))).isEmpty());
             String xml = (String) new Ec2QueryHandler(service, mock(EmulatorConfig.class), mock(FlowLogService.class),
-                    mock(Ec2EbsEncryptionService.class), mock(Ec2SnapshotBlockPublicAccessService.class),
+                    mock(Ec2EbsEncryptionService.class), mock(Ec2BlockPublicAccessService.class),
                     mock(Ec2IpamService.class), new RegionResolver("us-east-1", "000000000000"))
                     .handle("DescribeKeyPairs", new MultivaluedHashMap<>(), "us-east-1").getEntity();
             assertTrue(xml.contains("<keyPairId>key-unreadable</keyPairId>"), xml);

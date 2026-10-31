@@ -52,20 +52,20 @@ public class Ec2QueryHandler {
     private final EmulatorConfig config;
     private final FlowLogService flowLogService;
     private final Ec2EbsEncryptionService ebsEncryptionService;
-    private final Ec2SnapshotBlockPublicAccessService snapshotBlockPublicAccessService;
+    private final Ec2BlockPublicAccessService blockPublicAccessService;
     private final Ec2IpamService ipamService;
     private final RegionResolver regionResolver;
 
     @Inject
     public Ec2QueryHandler(Ec2Service service, EmulatorConfig config, FlowLogService flowLogService,
                            Ec2EbsEncryptionService ebsEncryptionService,
-                           Ec2SnapshotBlockPublicAccessService snapshotBlockPublicAccessService,
+                           Ec2BlockPublicAccessService blockPublicAccessService,
                            Ec2IpamService ipamService, RegionResolver regionResolver) {
         this.service = service;
         this.config = config;
         this.flowLogService = flowLogService;
         this.ebsEncryptionService = ebsEncryptionService;
-        this.snapshotBlockPublicAccessService = snapshotBlockPublicAccessService;
+        this.blockPublicAccessService = blockPublicAccessService;
         this.ipamService = ipamService;
         this.regionResolver = regionResolver;
     }
@@ -102,6 +102,10 @@ public class Ec2QueryHandler {
                 case "GetEbsDefaultKmsKeyId" -> handleGetEbsDefaultKmsKeyId(region);
                 case "ModifyEbsDefaultKmsKeyId" -> handleModifyEbsDefaultKmsKeyId(params, region);
                 case "ResetEbsDefaultKmsKeyId" -> handleResetEbsDefaultKmsKeyId(region);
+                // AMI block public access
+                case "EnableImageBlockPublicAccess" -> handleEnableImageBlockPublicAccess(params, region);
+                case "DisableImageBlockPublicAccess" -> handleDisableImageBlockPublicAccess(params, region);
+                case "GetImageBlockPublicAccessState" -> handleGetImageBlockPublicAccessState(params, region);
                 // Snapshot block public access
                 case "EnableSnapshotBlockPublicAccess" -> handleEnableSnapshotBlockPublicAccess(params, region);
                 case "DisableSnapshotBlockPublicAccess" -> handleDisableSnapshotBlockPublicAccess(params, region);
@@ -720,36 +724,56 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    private Response handleEnableImageBlockPublicAccess(MultivaluedMap<String, String> p, String region) {
+        String state = p.getFirst(Ec2BlockPublicAccessService.Setting.IMAGE.parameterName());
+        blockPublicAccessService.validateEnableState(Ec2BlockPublicAccessService.Setting.IMAGE, state);
+        checkDryRun(p);
+        return blockPublicAccessResponse("EnableImageBlockPublicAccessResponse", "imageBlockPublicAccessState",
+                blockPublicAccessService.enable(Ec2BlockPublicAccessService.Setting.IMAGE, region, state), null);
+    }
+
+    private Response handleDisableImageBlockPublicAccess(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        return blockPublicAccessResponse("DisableImageBlockPublicAccessResponse", "imageBlockPublicAccessState",
+                blockPublicAccessService.disable(Ec2BlockPublicAccessService.Setting.IMAGE, region), null);
+    }
+
+    private Response handleGetImageBlockPublicAccessState(MultivaluedMap<String, String> p, String region) {
+        checkDryRun(p);
+        return blockPublicAccessResponse("GetImageBlockPublicAccessStateResponse", "imageBlockPublicAccessState",
+                blockPublicAccessService.getState(Ec2BlockPublicAccessService.Setting.IMAGE, region), "account");
+    }
+
     private Response handleEnableSnapshotBlockPublicAccess(MultivaluedMap<String, String> p, String region) {
         // Validate State before honoring DryRun. AWS returns DryRunOperation only once the
         // request would otherwise have succeeded, so a bad State still fails on its own error.
-        String state = p.getFirst("State");
-        snapshotBlockPublicAccessService.validateEnableState(state);
+        String state = p.getFirst(Ec2BlockPublicAccessService.Setting.SNAPSHOT.parameterName());
+        blockPublicAccessService.validateEnableState(Ec2BlockPublicAccessService.Setting.SNAPSHOT, state);
         checkDryRun(p);
-        return snapshotBlockPublicAccessResponse("EnableSnapshotBlockPublicAccessResponse",
-                snapshotBlockPublicAccessService.enableSnapshotBlockPublicAccess(region, state),
-                null);
+        return blockPublicAccessResponse("EnableSnapshotBlockPublicAccessResponse", "state",
+                blockPublicAccessService.enable(Ec2BlockPublicAccessService.Setting.SNAPSHOT, region, state), null);
     }
 
     private Response handleDisableSnapshotBlockPublicAccess(MultivaluedMap<String, String> p, String region) {
         checkDryRun(p);
-        return snapshotBlockPublicAccessResponse("DisableSnapshotBlockPublicAccessResponse",
-                snapshotBlockPublicAccessService.disableSnapshotBlockPublicAccess(region), null);
+        return blockPublicAccessResponse("DisableSnapshotBlockPublicAccessResponse", "state",
+                blockPublicAccessService.disable(Ec2BlockPublicAccessService.Setting.SNAPSHOT, region), null);
     }
 
     private Response handleGetSnapshotBlockPublicAccessState(MultivaluedMap<String, String> p, String region) {
         // Only GetSnapshotBlockPublicAccessState carries managedBy, and Floci has no
         // declarative-policy layer, so the account always owns the state.
         checkDryRun(p);
-        return snapshotBlockPublicAccessResponse("GetSnapshotBlockPublicAccessStateResponse",
-                snapshotBlockPublicAccessService.getSnapshotBlockPublicAccessState(region), "account");
+        return blockPublicAccessResponse("GetSnapshotBlockPublicAccessStateResponse", "state",
+                blockPublicAccessService.getState(Ec2BlockPublicAccessService.Setting.SNAPSHOT, region), "account");
     }
 
-    private Response snapshotBlockPublicAccessResponse(String rootElement, String state, String managedBy) {
+    private Response blockPublicAccessResponse(String rootElement, String stateElement, String state,
+                                               String managedBy) {
         XmlBuilder xml = new XmlBuilder()
                 .start(rootElement, AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
-                .elem("state", state)
+                .elem(stateElement, state)
                 .elem("managedBy", managedBy)
                 .end(rootElement);
         return xmlResponse(xml.build());

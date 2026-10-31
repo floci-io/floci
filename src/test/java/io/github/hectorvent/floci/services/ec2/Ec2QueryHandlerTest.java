@@ -664,7 +664,7 @@ class Ec2QueryHandlerTest {
     private Ec2QueryHandler handler(Ec2Service service, RegionResolver regionResolver) {
         return new Ec2QueryHandler(
                 service, mock(EmulatorConfig.class), mock(FlowLogService.class),
-                mock(Ec2EbsEncryptionService.class), mock(Ec2SnapshotBlockPublicAccessService.class),
+                mock(Ec2EbsEncryptionService.class), mock(Ec2BlockPublicAccessService.class),
                 mock(Ec2IpamService.class), regionResolver);
     }
 

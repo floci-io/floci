@@ -721,7 +721,7 @@ class Ec2ServicePersistenceTest {
                 .map(KeyPair::getKeyName).toList());
 
         String xml = (String) new Ec2QueryHandler(restarted, mock(EmulatorConfig.class), mock(FlowLogService.class),
-                mock(Ec2EbsEncryptionService.class), mock(Ec2SnapshotBlockPublicAccessService.class),
+                mock(Ec2EbsEncryptionService.class), mock(Ec2BlockPublicAccessService.class),
                 mock(Ec2IpamService.class), new RegionResolver(REGION, "000000000000"))
                 .handle("DescribeKeyPairs", new MultivaluedHashMap<>(), REGION).getEntity();
         assertTrue(xml.contains("<keyType>rsa</keyType>"), xml);
@@ -828,7 +828,7 @@ class Ec2ServicePersistenceTest {
         }
         Response response = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
                 mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
-                mock(Ec2SnapshotBlockPublicAccessService.class), mock(Ec2IpamService.class),
+                mock(Ec2BlockPublicAccessService.class), mock(Ec2IpamService.class),
                 new RegionResolver(REGION, "000000000000"))
                 .handle(action, form, REGION);
         String body = String.valueOf(response.getEntity());

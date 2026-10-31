@@ -1208,6 +1208,18 @@ These are account-level settings scoped per region, not per volume, and nothing 
 
 An account that has never set a key reports `alias/aws/ebs`, the AWS-managed EBS key every account starts with, rather than an empty value — the module runner fails hard on a missing `KmsKeyId`, so the fallback is what keeps it running. `ResetEbsDefaultKmsKeyId` returns to that same alias. `ModifyEbsDefaultKmsKeyId` requires `KmsKeyId` and rejects a blank one with `MissingParameter`; the key is stored as given and is not checked against KMS.
 
+### AMI Block Public Access
+
+| Action | Description |
+|--------|-------------|
+| EnableImageBlockPublicAccess | Sets the region's AMI sharing block to `block-new-sharing`. |
+| DisableImageBlockPublicAccess | Returns the region to `unblocked`. |
+| GetImageBlockPublicAccessState | Reads the region's current state and manager. |
+
+This is an account-level setting scoped per region. A region that was never configured reports `unblocked`. Enable accepts only `block-new-sharing`; callers use Disable to return to `unblocked`. Get reports `managedBy` as `account` because Floci has no declarative-policy layer.
+
+All three actions support `DryRun`. A successful dry run returns `DryRunOperation` and does not change the stored state. Enable validates `ImageBlockPublicAccessState` before checking `DryRun`, so missing and invalid values keep their normal errors. The state applies immediately, and existing public AMIs remain public.
+
 ### Snapshot Block Public Access
 
 | Action | Description |
