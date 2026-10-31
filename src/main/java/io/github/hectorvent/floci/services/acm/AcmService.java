@@ -650,11 +650,29 @@ public class AcmService implements ResourceProvider {
         if (cert.getType() != CertificateType.PRIVATE || cert.getStatus() != CertificateStatus.ISSUED) {
             throw new AwsException("InvalidArnException", "Certificate is not a private issued certificate", 400);
         }
-        // TODO: certificate/key reissuance material is not regenerated in this local emulator.
-        Instant now = Instant.now();
-        cert.setIssuedAt(now);
-        cert.setNotBefore(now);
-        cert.setNotAfter(now.plusSeconds(365L * 24L * 60L * 60L));
+        // A renewed private certificate is new material under the same ARN: a fresh key pair of the
+        // same algorithm, which ExportCertificate then returns alongside the renewed body.
+        KeyAlgorithm alg = cert.getKeyAlgorithm() != null ? cert.getKeyAlgorithm() : KeyAlgorithm.RSA_2048;
+        List<String> sans = new ArrayList<>();
+        if (cert.getSubjectAlternativeNames() != null) {
+            for (String san : cert.getSubjectAlternativeNames()) {
+                if (!san.equals(cert.getDomainName())) {
+                    sans.add(san);
+                }
+            }
+        }
+        CertificateGenerator.GeneratedCertificate generated = certificateAuthority.issueServerCertificate(
+            cert.getDomainName(), sans, alg, null);
+        cert.setIssuedAt(Instant.now());
+        cert.setNotBefore(generated.notBefore());
+        cert.setNotAfter(generated.notAfter());
+        cert.setSerial(generated.serial());
+        cert.setSubject(generated.subject());
+        cert.setIssuer(generated.issuer());
+        cert.setSignatureAlgorithm(generated.signatureAlgorithm());
+        cert.setCertificateBody(generated.certificatePem());
+        cert.setPrivateKey(generated.privateKeyPem());
+        cert.setCertificateChain(certificateAuthority.caPem());
         store.put(regionKey(region, cert.extractCertificateId()), cert);
         return cert;
     }

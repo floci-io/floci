@@ -491,6 +491,52 @@ class AcmServiceTest {
                 "an EC private key is exportable too");
     }
 
+    @ParameterizedTest
+    @EnumSource(value = KeyAlgorithm.class, names = {"RSA_2048", "EC_prime256v1"})
+    void renewReissuesThePrivateCertificateUnderTheSameArn(KeyAlgorithm algorithm) throws Exception {
+        Certificate requested = service.requestCertificate("renew.example.test", List.of("www.renew.example.test"),
+                ValidationMethod.DNS, null, algorithm, PCA_ARN, new CertificateOptions(null, "ENABLED"),
+                Map.of("team", "edge"), null, REGION);
+        String arn = requested.getArn();
+        String originalBody = requested.getCertificateBody();
+        String originalKey = requested.getPrivateKey();
+        String originalSerial = requested.getSerial();
+
+        Certificate renewed = service.renewCertificate(arn, REGION);
+
+        Certificate stored = service.getCertificate(arn, REGION);
+        assertEquals(arn, renewed.getArn());
+        assertTrue(!originalBody.equals(stored.getCertificateBody()), "the renewed body is new material");
+        assertTrue(!originalSerial.equals(stored.getSerial()), "the renewed leaf has its own serial");
+        assertTrue(!originalKey.equals(stored.getPrivateKey()), "renewal mints a fresh key pair");
+        X509Certificate leaf = assertChainsToTheCa(stored);
+        assertEquals(algorithm, generator.detectKeyAlgorithm(leaf.getPublicKey()));
+        assertEquals(List.of("renew.example.test", "www.renew.example.test"), stored.getSubjectAlternativeNames());
+        assertEquals(List.of("renew.example.test", "www.renew.example.test"),
+                leaf.getSubjectAlternativeNames().stream().map(san -> san.get(1)).toList());
+        assertEquals(Map.of("team", "edge"), stored.getTags());
+        assertEquals("ENABLED", stored.getCertOptions().export());
+        assertEquals(CertificateStatus.ISSUED, stored.getStatus());
+
+        String passphrase = Base64.getEncoder().encodeToString("abcd1234".getBytes(StandardCharsets.US_ASCII));
+        Certificate exported = service.exportCertificate(arn, passphrase, REGION);
+        assertEquals(stored.getCertificateBody(), exported.getCertificateBody());
+        assertEquals(ca.caPem(), exported.getCertificateChain());
+    }
+
+    @Test
+    void renewRefusesAPublicCertificateWithoutTouchingItsMaterial() {
+        Certificate requested = service.requestCertificate("renew-public.example.test", null, ValidationMethod.DNS,
+                null, null, null, null, null, REGION);
+        String originalBody = requested.getCertificateBody();
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> service.renewCertificate(requested.getArn(), REGION));
+
+        assertEquals("InvalidArnException", failure.getErrorCode());
+        assertEquals(originalBody, service.getCertificate(requested.getArn(), REGION).getCertificateBody());
+    }
+
     @Test
     void concurrentRequestsEachGetTheirOwnCertificateChainedToTheCa() throws Exception {
         int threads = 16;
