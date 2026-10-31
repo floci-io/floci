@@ -955,43 +955,44 @@ public class RedshiftService implements ManagedSecretRotator {
             createSnapshot(finalSnapshotIdentifier, identifier, retentionPeriod);
         }
 
-        Cluster removed;
-        try {
-            removed = mutate(() -> removeCluster(identifier, cluster));
-        } catch (RuntimeException e) {
-            if (!skipSnapshot) {
-                discardFinalSnapshotOfSurvivingCluster(identifier, finalSnapshotIdentifier, e);
+        Cluster removed = mutate(() -> {
+            try {
+                stopProxyBeforeRemoval(identifier, cluster);
+            } catch (RuntimeException e) {
+                if (!skipSnapshot) {
+                    discardUnusedFinalSnapshot(finalSnapshotIdentifier, e);
+                }
+                throw e;
             }
-            throw e;
-        }
+            return removeCluster(identifier, cluster);
+        });
         emitEvent(RedshiftEventCatalog.CLUSTER_DELETED, identifier, "Amazon Redshift cluster '" + identifier
                 + "' has been deleted at " + eventTime() + ". A final snapshot was "
                 + (skipSnapshot ? "not " : "") + "saved.");
         return removed;
     }
 
-    // The cluster is still there, so the caller will retry with the same final snapshot identifier;
-    // a leftover snapshot would turn that retry into ClusterSnapshotAlreadyExists.
-    private void discardFinalSnapshotOfSurvivingCluster(String identifier, String finalSnapshotIdentifier,
-                                                        RuntimeException deletionFailure) {
-        if (clusters.get(identifier).isEmpty()) {
-            return;
-        }
+    // Only valid before the container is touched: the database is intact, the caller will retry with the
+    // same final snapshot identifier, and a leftover snapshot would turn that retry into
+    // ClusterSnapshotAlreadyExists. Once the container teardown starts the snapshot may be the only copy.
+    private void discardUnusedFinalSnapshot(String finalSnapshotIdentifier, RuntimeException deletionFailure) {
         try {
-            mutate(() -> removeSnapshot(finalSnapshotIdentifier));
+            removeSnapshot(finalSnapshotIdentifier);
         } catch (RuntimeException cleanupFailure) {
             deletionFailure.addSuppressed(cleanupFailure);
         }
     }
 
-    private Cluster removeCluster(String identifier, Cluster cluster) {
-        // Tear down the auth proxy and return its port before stopping the container.
-        // If it fails, abort deletion so the metadata remains and the user can retry.
+    // Tear down the auth proxy and return its port before stopping the container.
+    // If it fails, abort deletion so the metadata remains and the user can retry.
+    private void stopProxyBeforeRemoval(String identifier, Cluster cluster) {
         if (!stopProxyAndReleasePortSafely(identifier, cluster.getProxyPort())) {
             throw new AwsException("InternalFailure",
                     "Failed to stop auth proxy; cluster " + identifier + " was not deleted", 500);
         }
+    }
 
+    private Cluster removeCluster(String identifier, Cluster cluster) {
         containerManager.stop(clusters.accountId(), identifier);
         proxyManager.forgetSpectrumRuntime(relayKey(clusters.accountId(), identifier));
         clusters.delete(identifier);
