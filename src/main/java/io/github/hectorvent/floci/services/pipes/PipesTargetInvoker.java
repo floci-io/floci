@@ -65,6 +65,8 @@ public class PipesTargetInvoker {
         String targetArn = pipe.getTarget();
 
         JsonNode tp = pipe.getTargetParameters();
+        // A target's dynamic parameters read the event as it arrived, never what the template renders.
+        String event = payload;
         if (tp != null && tp.has("InputTemplate")) {
             payload = applyInputTemplate(tp.get("InputTemplate").asText(), payload);
         }
@@ -76,7 +78,7 @@ public class PipesTargetInvoker {
         } else if (targetArn.contains(":sns:")) {
             invokeSns(targetArn, payload, region);
         } else if (targetArn.contains(":events:")) {
-            invokeEventBridge(targetArn, payload, region, tp);
+            invokeEventBridge(targetArn, payload, region, tp, event);
         } else if (targetArn.contains(":states:")) {
             invokeStepFunctions(targetArn, payload, region);
         } else {
@@ -175,7 +177,7 @@ public class PipesTargetInvoker {
         LOG.debugv("Pipe delivered to SNS: {0}", arn);
     }
 
-    private void invokeEventBridge(String arn, String payload, String region, JsonNode tp) {
+    private void invokeEventBridge(String arn, String payload, String region, JsonNode tp, String event) {
         String busName = arn.substring(arn.lastIndexOf('/') + 1);
         String ebRegion = extractRegionFromArn(arn, region);
         String source = "aws.pipes";
@@ -183,10 +185,10 @@ public class PipesTargetInvoker {
         if (tp != null) {
             JsonNode ebParams = tp.path("EventBridgeEventBusParameters");
             if (ebParams.has("Source")) {
-                source = ebParams.get("Source").asText();
+                source = eventBusParameter("Source", ebParams.get("Source").asText(), event);
             }
             if (ebParams.has("DetailType")) {
-                detailType = ebParams.get("DetailType").asText();
+                detailType = eventBusParameter("DetailType", ebParams.get("DetailType").asText(), event);
             }
         }
         Map<String, Object> entry = Map.of(
@@ -210,6 +212,36 @@ public class PipesTargetInvoker {
         LOG.debugv("Pipe delivered to EventBridge: {0}", arn);
     }
 
+    /**
+     * An event bus parameter's value: as written, or where the whole value is a JSON path, what that
+     * path names in the event. A path naming nothing fails the delivery, so no event goes to the bus
+     * under a literal or empty value.
+     */
+    private String eventBusParameter(String name, String value, String event) {
+        if (!value.startsWith("$.")) {
+            return value;
+        }
+        String extracted = extractJsonPath(value, event);
+        if (extracted == null) {
+            throw new AwsException("InternalException",
+                    "Pipe target parameter " + name + " names nothing in the event: " + value, 500);
+        }
+        return unquoted(extracted);
+    }
+
+    /** The text of a JSON string as {@link #extractJsonPath} gives it; anything else stays as it is. */
+    private String unquoted(String extracted) {
+        if (!extracted.startsWith("\"")) {
+            return extracted;
+        }
+        try {
+            return objectMapper.readTree(extracted).asText();
+        } catch (JsonProcessingException e) {
+            LOG.debugv("Keeping the extracted value, which is no JSON string: {0}", e.getOriginalMessage());
+            return extracted;
+        }
+    }
+
     private void invokeStepFunctions(String arn, String payload, String region) {
         String sfnRegion = extractRegionFromArn(arn, region);
         String executionName = "pipes-" + UUID.randomUUID();
@@ -219,6 +251,10 @@ public class PipesTargetInvoker {
 
     String applyInputTemplate(String template, String payload) {
         Matcher m = TEMPLATE_PLACEHOLDER.matcher(template);
+        // A template that is one placeholder substitutes a string verbatim: <$.Detail> naming a serialized
+        // object puts that object on the bus, where added quotes would be refused as MalformedDetail.
+        boolean wholeTemplate = m.matches();
+        m.reset();
         String ingestionTime = objectMapper.valueToTree(Instant.now().toString()).toString();
         StringBuilder sb = new StringBuilder();
         while (m.find()) {
@@ -229,6 +265,8 @@ public class PipesTargetInvoker {
                     : extractJsonPath(jsonPath, payload);
             if (value == null) {
                 value = quoted ? "" : objectMapper.valueToTree("").toString();
+            } else if (wholeTemplate) {
+                value = unquoted(value);
             } else if (quoted && value.length() >= 2 && value.startsWith("\"") && value.endsWith("\"")) {
                 // A JSON string placeholder already has quotes from extractJsonPath. The
                 // surrounding template quotes must remain the only pair of quotes.

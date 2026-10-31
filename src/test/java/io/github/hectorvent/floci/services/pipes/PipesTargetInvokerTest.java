@@ -34,6 +34,7 @@ import static org.mockito.Mockito.*;
 class PipesTargetInvokerTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final String BUS_ARN = "arn:aws:events:us-east-1:000000000000:event-bus/orders-bus";
 
     @Mock private LambdaService lambdaService;
     @Mock private SqsService sqsService;
@@ -49,6 +50,14 @@ class PipesTargetInvokerTest {
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         invoker = new PipesTargetInvoker(lambdaService, sqsService, snsService,
                 eventBridgeService, stepFunctionsService, MAPPER, config);
+    }
+
+    private ObjectNode eventBusParameters(String source, String detailType) {
+        ObjectNode tp = MAPPER.createObjectNode();
+        ObjectNode ebParams = tp.putObject("EventBridgeEventBusParameters");
+        ebParams.put("Source", source);
+        ebParams.put("DetailType", detailType);
+        return tp;
     }
 
     private Pipe createPipe(String targetArn, ObjectNode targetParameters) {
@@ -211,6 +220,81 @@ class PipesTargetInvokerTest {
         assertEquals("default", entry.get("EventBusName"));
         assertEquals("aws.pipes", entry.get("Source"));
         assertEquals("PipeForwarded", entry.get("DetailType"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void eventBridge_readsSourceAndDetailTypeOffThePayload() {
+        Pipe pipe = createPipe(BUS_ARN, eventBusParameters("$.Source", "$.DetailType"));
+
+        invoker.invoke(pipe, "{\"Source\":\"orders\",\"DetailType\":\"Order Placed\",\"id\":1}", "us-east-1");
+
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(eventBridgeService).putEvents(captor.capture(), eq("us-east-1"));
+        Map<String, Object> entry = captor.getValue().get(0);
+        assertEquals("orders", entry.get("Source"));
+        assertEquals("Order Placed", entry.get("DetailType"));
+        assertEquals("{\"Source\":\"orders\",\"DetailType\":\"Order Placed\",\"id\":1}", entry.get("Detail"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void eventBridge_readsTheParametersOffThePayloadBeforeTheTemplateRenders() {
+        ObjectNode tp = eventBusParameters("$.Source", "$.DetailType");
+        tp.put("InputTemplate", "<$.Detail>");
+        Pipe pipe = createPipe(BUS_ARN, tp);
+
+        invoker.invoke(pipe, """
+                {"Source":"orders","DetailType":"Order Placed","Detail":"{\\"id\\":\\"k1\\"}"}""", "us-east-1");
+
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(eventBridgeService).putEvents(captor.capture(), eq("us-east-1"));
+        Map<String, Object> entry = captor.getValue().get(0);
+        assertEquals("orders", entry.get("Source"));
+        assertEquals("Order Placed", entry.get("DetailType"));
+        assertEquals("{\"id\":\"k1\"}", entry.get("Detail"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void eventBridge_aStaticValueStaysAsWritten() {
+        Pipe pipe = createPipe(BUS_ARN, eventBusParameters("orders", "$.DetailType"));
+
+        invoker.invoke(pipe, "{\"Source\":\"ignored\",\"DetailType\":\"Order Placed\"}", "us-east-1");
+
+        ArgumentCaptor<List<Map<String, Object>>> captor = ArgumentCaptor.forClass(List.class);
+        verify(eventBridgeService).putEvents(captor.capture(), eq("us-east-1"));
+        assertEquals("orders", captor.getValue().get(0).get("Source"));
+        assertEquals("Order Placed", captor.getValue().get(0).get("DetailType"));
+    }
+
+    @Test
+    void eventBridge_aPathNamingNothingThrowsAndPutsNoEvent() {
+        Pipe pipe = createPipe(BUS_ARN, eventBusParameters("$.Source", "$.DetailType"));
+
+        RuntimeException ex = assertThrows(RuntimeException.class,
+                () -> invoker.invoke(pipe, "{\"Source\":\"orders\"}", "us-east-1"));
+
+        assertTrue(ex.getMessage().contains("$.DetailType"), ex.getMessage());
+        verifyNoInteractions(eventBridgeService);
+    }
+
+    @Test
+    void inputTemplate_ofOnePlaceholderNamingAStringRendersItVerbatim() {
+        assertEquals("{\"id\":\"k1\"}", invoker.applyInputTemplate("<$.Detail>",
+                "{\"Detail\":\"{\\\"id\\\":\\\"k1\\\"}\"}"));
+        assertEquals("plain text", invoker.applyInputTemplate("<$.Detail>", "{\"Detail\":\"plain text\"}"));
+    }
+
+    @Test
+    void inputTemplate_ofOnePlaceholderNamingANonStringStaysAsItIs() {
+        assertEquals("42", invoker.applyInputTemplate("<$.count>", "{\"count\":42}"));
+        assertEquals("{\"id\":1}", invoker.applyInputTemplate("<$.nested>", "{\"nested\":{\"id\":1}}"));
+    }
+
+    @Test
+    void inputTemplate_aPlaceholderAsAValueStillTakesQuotes() {
+        assertEquals("{\"id\": \"m1\"}", invoker.applyInputTemplate("{\"id\": <$.messageId>}", "{\"messageId\":\"m1\"}"));
     }
 
     @Test
