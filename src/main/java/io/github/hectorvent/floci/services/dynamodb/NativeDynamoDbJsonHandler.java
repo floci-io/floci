@@ -69,6 +69,9 @@ public class NativeDynamoDbJsonHandler {
     private static final int MAX_BACKUP_ARN_LENGTH = 1024;
     private static final Instant MAX_TIME_RANGE_BOUND = Instant.ofEpochMilli(99_999_999_999_999L);
     private static final int MAX_RECOVERY_PERIOD_DAYS = 35;
+    // The warm throughput a new on-demand table or index starts with.
+    private static final long ON_DEMAND_WARM_READ_UNITS = 12000;
+    private static final long ON_DEMAND_WARM_WRITE_UNITS = 4000;
 
     private final DynamoDbService dynamoDbService;
     private final NativeDynamoDbTableService tableService;
@@ -2324,7 +2327,8 @@ public class NativeDynamoDbJsonHandler {
         }
         if (described.has("GlobalSecondaryIndexes")) {
             for (JsonNode gsi : described.get("GlobalSecondaryIndexes")) {
-                ((ObjectNode) gsi).remove(List.of("IndexArn", "IndexStatus", "IndexSizeBytes", "ItemCount"));
+                ((ObjectNode) gsi).remove(
+                        List.of("IndexArn", "IndexStatus", "IndexSizeBytes", "ItemCount", "WarmThroughput"));
                 ((ObjectNode) gsi.get("ProvisionedThroughput")).remove("NumberOfDecreasesToday");
             }
             features.set("GlobalSecondaryIndexes", described.get("GlobalSecondaryIndexes"));
@@ -3299,6 +3303,7 @@ public class NativeDynamoDbJsonHandler {
                     }
                     gsiNode.set("OnDemandThroughput", gsiOdt);
                 }
+                gsiNode.set("WarmThroughput", gsiWarmThroughput(table, gsi));
 
                 gsiArray.add(gsiNode);
             }
@@ -3357,6 +3362,21 @@ public class NativeDynamoDbJsonHandler {
         }
 
         return node;
+    }
+
+    /**
+     * AWS reports a provisioned index's warm throughput as its provisioned capacity, and an on-demand
+     * one's as the values a new on-demand index starts with. An index is ACTIVE as soon as it exists here.
+     */
+    private ObjectNode gsiWarmThroughput(TableDefinition table, GlobalSecondaryIndex gsi) {
+        boolean onDemand = "PAY_PER_REQUEST".equals(table.getBillingMode());
+        ObjectNode warmThroughput = objectMapper.createObjectNode();
+        warmThroughput.put("ReadUnitsPerSecond",
+                onDemand ? ON_DEMAND_WARM_READ_UNITS : gsi.getProvisionedThroughput().getReadCapacityUnits());
+        warmThroughput.put("WriteUnitsPerSecond",
+                onDemand ? ON_DEMAND_WARM_WRITE_UNITS : gsi.getProvisionedThroughput().getWriteCapacityUnits());
+        warmThroughput.put("Status", "ACTIVE");
+        return warmThroughput;
     }
 
     /**
