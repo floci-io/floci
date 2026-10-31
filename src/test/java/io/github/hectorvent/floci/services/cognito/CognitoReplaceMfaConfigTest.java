@@ -10,6 +10,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
+import java.util.concurrent.CyclicBarrier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -62,6 +63,31 @@ class CognitoReplaceMfaConfigTest {
         assertTrue(before.getSoftwareTokenMfaEnabled());
         assertNotNull(before.getEmailMfaConfiguration());
         assertEquals("OPTIONAL", service.describeUserPool(poolId).getMfaConfiguration());
+    }
+
+    @Test
+    void tagsAddedWhileTheMfaSettingsAreReplacedAreKept() throws Exception {
+        String arn = service.describeUserPool(poolId).getArn();
+        int tags = 200;
+        CyclicBarrier start = new CyclicBarrier(2);
+        Thread tagger = new Thread(() -> {
+            try {
+                start.await();
+                for (int i = 0; i < tags; i++) {
+                    service.tagResource(arn, Map.of("key" + i, "value"));
+                }
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+        tagger.start();
+        start.await();
+        while (tagger.isAlive()) {
+            service.replaceUserPoolMfaConfig(poolId, "OPTIONAL", true, null, null);
+        }
+        tagger.join();
+
+        assertEquals(tags, service.listTagsForResource(arn).size());
     }
 
     @Test
