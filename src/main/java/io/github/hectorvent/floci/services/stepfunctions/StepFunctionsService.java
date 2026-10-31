@@ -8,7 +8,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnShapes;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -539,11 +538,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
      * account under account isolation.
      */
     private static boolean isInRegion(String key, String region) {
-        if (!AwsArnUtils.isArnFor(key, "states")) {
-            return false;
-        }
-        AwsArnUtils.Arn arn = AwsArnUtils.parse(key);
-        return arn.partition().equals(AwsRegions.partitionFor(region)) && arn.region().equals(region);
+        return AwsArnUtils.parseIfArnIn(key, "states", region).isPresent();
     }
 
     public List<StateMachine> listStateMachines(String region) {
