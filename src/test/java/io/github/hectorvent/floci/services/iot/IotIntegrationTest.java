@@ -261,6 +261,69 @@ class IotIntegrationTest {
     }
 
     @Test
+    @Order(10)
+    void updateThingKeepsMergesOrReplacesAttributesAsTheAttributePayloadAsks() {
+        String thing = "update-semantics-thing";
+        given()
+            .contentType("application/json")
+            .body("{\"attributePayload\": {\"attributes\": {\"env\": \"dev\", \"owner\": \"iot\"}}}")
+        .when()
+            .post("/things/" + thing)
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .body("{\"expectedVersion\": 1}")
+        .when()
+            .patch("/things/" + thing)
+        .then()
+            .statusCode(200)
+            .body("version", equalTo(2));
+        given()
+        .when()
+            .get("/things/" + thing)
+        .then()
+            .statusCode(200)
+            .body("attributes", equalTo(Map.of("env", "dev", "owner", "iot")));
+
+        given()
+            .contentType("application/json")
+            .body("{\"attributePayload\": {\"attributes\": {\"site\": \"north\", \"owner\": \"\"}, \"merge\": true}}")
+        .when()
+            .patch("/things/" + thing)
+        .then()
+            .statusCode(200)
+            .body("version", equalTo(3));
+        given()
+        .when()
+            .get("/things/" + thing)
+        .then()
+            .statusCode(200)
+            .body("attributes", equalTo(Map.of("env", "dev", "site", "north")));
+
+        given()
+            .contentType("application/json")
+            .body("{\"attributePayload\": {\"attributes\": {\"site\": \"south\"}}}")
+        .when()
+            .patch("/things/" + thing)
+        .then()
+            .statusCode(200);
+        given()
+        .when()
+            .get("/things/" + thing)
+        .then()
+            .statusCode(200)
+            .body("attributes", equalTo(Map.of("site", "south")));
+
+        given()
+        .when()
+            .delete("/things/" + thing)
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     @Order(11)
     void deleteThingRemovesThing() {
         given()

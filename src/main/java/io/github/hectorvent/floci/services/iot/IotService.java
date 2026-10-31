@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.core.common.CertificateMaterialException;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -56,6 +57,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.cert.CertificateEncodingException;
 import java.security.cert.X509Certificate;
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -95,6 +97,7 @@ public class IotService {
     /** The {@code FirehoseSeparator} shape of the IoT API model. */
     private static final Pattern FIREHOSE_SEPARATOR = Pattern.compile("([\\n\\t])|(\\r\\n)|(,)");
     public static final int MAX_POLICY_VERSIONS = 5;
+    private static final Duration DELETED_SHADOW_VERSION_RETENTION = Duration.ofHours(48);
 
     /** One lock for every policy version write and the policy delete, so a cap check, an append and a delete cannot interleave. */
     private final Object policyWriteLock = new Object();
@@ -293,6 +296,7 @@ public class IotService {
         return paginate(listThings(region), maxResults, nextToken);
     }
 
+    /** Replaces the thing's attributes with {@code attributes}, as a CloudFormation update does, and keeps its thing type. */
     public Thing updateThing(String thingName, Map<String, String> attributes, Long expectedVersion, String region) {
         return updateThing(thingName, attributes, false, null, false, expectedVersion, region);
     }
@@ -686,12 +690,37 @@ public class IotService {
                 .toList();
     }
 
+    /** The account helpers use the request's account when {@code accountId} is null. */
     private static <V> Optional<V> getForAccount(StorageBackend<String, V> store, String accountId, String key) {
-        return store instanceof AccountAwareStorageBackend<V> aware ? aware.getForAccount(accountId, key) : store.get(key);
+        return accountId != null && store instanceof AccountAwareStorageBackend<V> aware
+                ? aware.getForAccount(accountId, key)
+                : store.get(key);
     }
 
     private static <V> Set<String> keysForAccount(StorageBackend<String, V> store, String accountId) {
         return store instanceof AccountAwareStorageBackend<V> aware ? aware.keysForAccount(accountId) : store.keys();
+    }
+
+    private static <V> List<V> scanForAccount(StorageBackend<String, V> store, String accountId, Predicate<String> keyFilter) {
+        return accountId != null && store instanceof AccountAwareStorageBackend<V> aware
+                ? aware.scanForAccount(accountId, keyFilter)
+                : store.scan(keyFilter);
+    }
+
+    private static <V> void putForAccount(StorageBackend<String, V> store, String accountId, String key, V value) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {
+            aware.putForAccount(accountId, key, value);
+        } else {
+            store.put(key, value);
+        }
+    }
+
+    private static <V> void deleteForAccount(StorageBackend<String, V> store, String accountId, String key) {
+        if (accountId != null && store instanceof AccountAwareStorageBackend<V> aware) {
+            aware.deleteForAccount(accountId, key);
+        } else {
+            store.delete(key);
+        }
     }
 
     public IotPolicy createPolicy(String policyName, String policyDocument, String region) {
@@ -930,7 +959,7 @@ public class IotService {
      * one, the stored metadata, the version and the current time. Publishes nothing.
      */
     public JsonNode getThingShadow(String thingName, String shadowName, String region) {
-        IotShadow shadow = shadowStore.get(shadowKey(region, thingName, shadowName))
+        IotShadow shadow = liveShadow(shadowKey(region, thingName, shadowName))
                 .orElseThrow(() -> shadowNotFound(thingName));
         ObjectNode document = storedShadowDocument(shadow);
         ObjectNode state = (ObjectNode) document.get("state");
@@ -974,14 +1003,22 @@ public class IotService {
         return deleteThingShadow(thingName, shadowName, null, region, Runnable::run);
     }
 
-    /** Deletes the shadow and returns the delete/accepted document after publishing it. */
+    /**
+     * Deletes the shadow and returns the delete/accepted document after publishing it. Its version
+     * is kept, see {@link #deletedVersion}.
+     */
     JsonNode deleteThingShadow(String thingName, String shadowName, String clientToken, String region,
                                Executor ruleRunner) {
         ObjectNode accepted = objectMapper.createObjectNode();
         synchronized (shadowWriteLock) {
             String key = shadowKey(region, thingName, shadowName);
-            IotShadow shadow = shadowStore.get(key).orElseThrow(() -> shadowNotFound(thingName));
-            shadowStore.delete(key);
+            IotShadow shadow = liveShadow(key).orElseThrow(() -> shadowNotFound(thingName));
+            IotShadow deleted = new IotShadow();
+            deleted.setThingName(shadow.getThingName());
+            deleted.setShadowName(shadow.getShadowName());
+            deleted.setVersion(shadow.getVersion());
+            deleted.setDeletedAt(Instant.now());
+            shadowStore.put(key, deleted);
             accepted.put("version", shadow.getVersion());
         }
         accepted.put("timestamp", Instant.now().getEpochSecond());
@@ -994,7 +1031,8 @@ public class IotService {
     /** The read-modify-write of one update; the caller holds {@link #shadowWriteLock}. */
     private ShadowUpdate writeShadowUpdate(String thingName, String shadowName, JsonNode request, String region) {
         String key = shadowKey(region, thingName, shadowName);
-        IotShadow existing = shadowStore.get(key).orElse(null);
+        IotShadow stored = shadowStore.get(key).orElse(null);
+        IotShadow existing = stored == null || stored.getDeletedAt() != null ? null : stored;
         long currentVersion = existing == null ? 0 : existing.getVersion();
         if (request.hasNonNull("version") && request.path("version").asLong() != currentVersion) {
             throw new AwsException("ConflictException", "Version conflict", 409);
@@ -1008,7 +1046,7 @@ public class IotService {
         JsonNode requestState = request.path("state");
         mergeShadowSection(state, metadata, "desired", requestState.path("desired"), timestamp);
         mergeShadowSection(state, metadata, "reported", requestState.path("reported"), timestamp);
-        long version = currentVersion + 1;
+        long version = (existing == null ? deletedVersion(stored) : currentVersion) + 1;
         document.put("version", version);
         document.put("timestamp", timestamp);
 
@@ -1053,6 +1091,23 @@ public class IotService {
 
     private AwsException shadowNotFound(String thingName) {
         return new AwsException("ResourceNotFoundException", "Shadow not found: " + thingName, 404);
+    }
+
+    /** The shadow stored under {@code key}, unless it was deleted. */
+    private Optional<IotShadow> liveShadow(String key) {
+        return shadowStore.get(key).filter(shadow -> shadow.getDeletedAt() == null);
+    }
+
+    /**
+     * The version a shadow created again continues from: as on AWS, the deleted shadow's when it
+     * was deleted less than 48 hours ago, otherwise 0.
+     */
+    private static long deletedVersion(IotShadow deleted) {
+        if (deleted == null || deleted.getDeletedAt() == null
+                || deleted.getDeletedAt().isBefore(Instant.now().minus(DELETED_SHADOW_VERSION_RETENTION))) {
+            return 0;
+        }
+        return deleted.getVersion();
     }
 
     private ObjectNode emptyShadowDocument() {
@@ -1162,6 +1217,7 @@ public class IotService {
     public List<String> listNamedShadowsForThing(String thingName, String region) {
         String prefix = "shadow:" + region + ":" + thingName + ":";
         return shadowStore.scan(key -> key.startsWith(prefix)).stream()
+                .filter(shadow -> shadow.getDeletedAt() == null)
                 .map(IotShadow::getShadowName)
                 .filter(name -> name != null && !name.isBlank())
                 .sorted()
@@ -1173,19 +1229,17 @@ public class IotService {
     }
 
     /**
-     * A publish from outside the broker, such as the data plane Publish API: retained, recorded and
-     * run through the topic rules before it returns, then delivered to the broker's matching
-     * subscribers. {@code clientId} is what a rule's clientid() reports, null for the data plane.
+     * A publish from outside the broker: the QoS is checked, the retained message is stored and the
+     * topic rules run before it returns. When {@code clientId} is null, as on the data plane, the
+     * message is then delivered to matching subscribers. A publish that names a client is one the
+     * broker is already fanning out itself.
      */
     public void publish(String topic, byte[] payload, boolean retain, int qos, String region, String clientId) {
-        if (qos == 2) {
-            throw new AwsException("InvalidRequestException", "QoS 2 is currently not supported", 400);
-        }
-        if (qos != 0 && qos != 1) {
-            throw new AwsException("InvalidRequestException", "Invalid QoS value: " + qos, 400);
-        }
+        validatePublishQos(qos);
         publish(topic, payload, retain, qos, region, clientId, Runnable::run);
-        mqttBrokerService.publish(topic, payload, qos);
+        if (clientId == null) {
+            mqttBrokerService.publish(topic, payload == null ? new byte[0] : payload, qos);
+        }
     }
 
     /**
@@ -1194,25 +1248,57 @@ public class IotService {
      */
     public void publish(String topic, byte[] payload, boolean retain, int qos, String region, String clientId,
                         Executor ruleRunner) {
+        publish(topic, payload, retain, qos, region, clientId, null, ruleRunner);
+    }
+
+    /**
+     * {@code accountId} is the account the message belongs to, whose retained message it sets and
+     * whose rules it runs through; null for the request's account.
+     */
+    public void publish(String topic, byte[] payload, boolean retain, int qos, String region, String clientId,
+                        String accountId, Executor ruleRunner) {
         byte[] eventPayload = payload == null ? new byte[0] : payload;
         if (retain) {
             if (eventPayload.length == 0) {
-                retainedMessageStore.delete(retainedMessageKey(topic));
+                deleteForAccount(retainedMessageStore, accountId, retainedMessageKey(topic));
             } else {
                 IotRetainedMessage retained = new IotRetainedMessage();
                 retained.setTopic(topic);
                 retained.setPayload(Base64.getEncoder().encodeToString(eventPayload));
                 retained.setQos(qos);
                 retained.setLastModifiedTime(Instant.now());
-                retainedMessageStore.put(retainedMessageKey(topic), retained);
+                putForAccount(retainedMessageStore, accountId, retainedMessageKey(topic), retained);
             }
         }
-        handlePublish(topic, eventPayload, true, region, clientId, ruleRunner);
+        handlePublish(topic, eventPayload, true, region, clientId, accountId, ruleRunner);
     }
 
-    public void deleteConnection(String clientId, boolean cleanSession) {
+    /**
+     * An IoT Data {@code Publish} over HTTP: stored, recorded and run through the rules as
+     * {@link #publish} does, then delivered once to the topic's MQTT subscribers. A reserved
+     * {@code $aws/} topic is not delivered; the broker publishes the service's own response.
+     */
+    public void publishOverHttp(String topic, byte[] payload, boolean retain, int qos, String region) {
+        byte[] message = payload == null ? new byte[0] : payload;
+        validatePublishQos(qos);
+        publish(topic, message, retain, qos, region, null, Runnable::run);
+        if (!topic.startsWith("$aws/")) {
+            mqttBrokerService.publish(topic, message, qos);
+        }
+    }
+
+    private static void validatePublishQos(int qos) {
+        if (qos == 2) {
+            throw new AwsException("InvalidRequestException", "QoS 2 is currently not supported", 400);
+        }
+        if (qos != 0 && qos != 1) {
+            throw new AwsException("InvalidRequestException", "Invalid QoS value: " + qos, 400);
+        }
+    }
+
+    public void deleteConnection(String clientId, boolean cleanSession, boolean preventWillMessage) {
         validateMqttClientId(clientId);
-        boolean disconnected = mqttBrokerService.disconnectClient(clientId, cleanSession);
+        boolean disconnected = mqttBrokerService.disconnectClient(clientId, cleanSession, preventWillMessage);
         if (!disconnected) {
             throw new AwsException("ResourceNotFoundException", "MQTT client is not connected: " + clientId, 404);
         }
@@ -1224,7 +1310,7 @@ public class IotService {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "MQTT client is not connected: " + clientId, 404));
     }
 
-    public Page<String> listSubscriptions(String clientId, Integer maxResults, String nextToken) {
+    public Page<IotMqttBrokerService.Subscription> listSubscriptions(String clientId, Integer maxResults, String nextToken) {
         getConnection(clientId);
         return paginate(mqttBrokerService.listSubscriptions(clientId), maxResults, nextToken);
     }
@@ -1240,6 +1326,10 @@ public class IotService {
     public IotRetainedMessage getRetainedMessage(String topic) {
         return retainedMessageStore.get(retainedMessageKey(topic))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Retained message not found: " + topic, 404));
+    }
+
+    Optional<IotRetainedMessage> findRetainedMessage(String accountId, String topic) {
+        return getForAccount(retainedMessageStore, accountId, retainedMessageKey(topic));
     }
 
     public Page<IotRetainedMessage> listRetainedMessages(Integer maxResults, String nextToken) {
@@ -1334,12 +1424,23 @@ public class IotService {
                 .toList(), maxResults, nextToken);
     }
 
+    /**
+     * The attributes change only when the attribute payload carries some, and with {@code merge}
+     * they are merged as {@link #updateThing} merges a thing's.
+     */
     public IotThingGroup updateThingGroup(String thingGroupName, JsonNode properties, Long expectedVersion, String region) {
         IotThingGroup group = describeThingGroup(thingGroupName, region);
         if (expectedVersion != null && group.getVersion() != expectedVersion) {
             throw new AwsException("VersionConflictException", "Thing group version does not match expectedVersion", 409);
         }
-        updateThingGroupProperties(group, properties);
+        group.setDescription(properties.path("thingGroupDescription").asText(null));
+        JsonNode attributePayload = properties.path("attributePayload");
+        if (attributePayload.path("attributes").isObject()) {
+            Map<String, String> attributes = parseAttributePayload(attributePayload);
+            group.setAttributes(attributePayload.path("merge").asBoolean(false)
+                    ? mergedAttributes(group.getAttributes(), attributes)
+                    : attributes);
+        }
         group.setVersion(group.getVersion() + 1);
         thingGroupStore.put(thingGroupKey(region, thingGroupName), group);
         return group;
@@ -1593,19 +1694,34 @@ public class IotService {
 
     void handlePublish(String topic, byte[] payload, boolean evaluateRules, String region, String clientId,
                        Executor ruleRunner) {
+        handlePublish(topic, payload, evaluateRules, region, clientId, null, ruleRunner);
+    }
+
+    void handlePublish(String topic, byte[] payload, boolean evaluateRules, String region, String clientId,
+                       String accountId, Executor ruleRunner) {
         byte[] eventPayload = payload == null ? new byte[0] : payload;
         publishEventRecorder.record(topic, eventPayload);
         if (!evaluateRules) {
             return;
         }
         ruleRunner.execute(() -> {
-            for (IotTopicRule rule : rulesForPublish(region)) {
+            for (IotTopicRule rule : rulesForPublish(region, accountId)) {
                 if (!rule.isRuleDisabled()) {
                     matchAndProject(rule, topic, clientId, eventPayload)
-                            .ifPresent(document -> executeTopicRule(rule, topic, eventPayload, document));
+                            .ifPresent(document -> runAsRuleOwner(rule, () -> executeTopicRule(rule, topic, eventPayload, document)));
                 }
             }
         });
+    }
+
+    /**
+     * Runs a rule's actions as the account that owns the rule, in the rule's region: some actions
+     * find their target by name in the caller's account (a Kinesis stream, a Firehose delivery
+     * stream, a log group), and an MQTT publish's rules run on the broker's worker, outside any request.
+     */
+    private void runAsRuleOwner(IotTopicRule rule, Runnable actions) {
+        RequestScopes.runAs(AwsArnUtils.accountOrDefault(rule.getRuleArn(), config.defaultAccountId()),
+                AwsArnUtils.regionOrDefault(rule.getRuleArn(), config.defaultRegion()), actions);
     }
 
     /**
@@ -1640,12 +1756,13 @@ public class IotService {
         return compiled.query();
     }
 
-    private List<IotTopicRule> rulesForPublish(String region) {
+    /** The rules of {@code accountId}, or of the request's account when it is null. */
+    private List<IotTopicRule> rulesForPublish(String region, String accountId) {
         if (region != null) {
             return listTopicRules(region);
         }
         // MQTT and unsigned data-plane publishes carry no region, so every region's rules apply.
-        return topicRuleStore.scan(key -> true).stream()
+        return scanForAccount(topicRuleStore, accountId, key -> true).stream()
                 .sorted(Comparator.comparing(IotTopicRule::getRuleName))
                 .toList();
     }
@@ -1898,7 +2015,6 @@ public class IotService {
             case "dynamoDBv2" -> {
                 String tableName = action.path("putItem").path("tableName").asText(null);
                 if (tableName != null && !tableName.isBlank()) {
-                    // An MQTT publish evaluates rules with no request account, so the write names the rule's owner explicitly.
                     Scope scope = new Scope(
                             AwsArnUtils.accountOrDefault(rule.getRuleArn(), config.defaultAccountId()), region);
                     dynamoDb.items().putItem(scope, tableName, toDynamoDbItem(payload), null, null, null);
@@ -2114,8 +2230,9 @@ public class IotService {
         int i = 0;
         for (; i < filterParts.length; i++) {
             String filterPart = filterParts[i];
+            // AWS IoT: sensor/# matches sensor/ and below, but not the parent topic sensor.
             if ("#".equals(filterPart)) {
-                return i == filterParts.length - 1;
+                return i == filterParts.length - 1 && i < topicParts.length;
             }
             if (i >= topicParts.length) {
                 return false;
@@ -2300,6 +2417,19 @@ public class IotService {
             attributesNode.fields().forEachRemaining(entry -> attributes.put(entry.getKey(), entry.getValue().asText()));
         }
         return attributes;
+    }
+
+    /** {@code stored} with {@code update} merged in, as AWS's {@code AttributePayload.merge}: an empty value removes the attribute. */
+    private static Map<String, String> mergedAttributes(Map<String, String> stored, Map<String, String> update) {
+        Map<String, String> merged = new TreeMap<>(stored == null ? Map.of() : stored);
+        update.forEach((name, value) -> {
+            if (value == null || value.isEmpty()) {
+                merged.remove(name);
+            } else {
+                merged.put(name, value);
+            }
+        });
+        return merged;
     }
 
     private String blankToNull(String value) {

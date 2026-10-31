@@ -93,7 +93,7 @@ public class IotDataController {
                             byte[] payload) {
         // Unsigned or non-SigV4 publishes carry no usable region; both count as unresolved
         String region = regionResolver.resolveRegionFromAuthOrNull(headers.getHeaderString("Authorization"));
-        iotService.publish(topic, payload == null ? new byte[0] : payload, Boolean.TRUE.equals(retain), qos == null ? 0 : qos, region, null);
+        iotService.publishOverHttp(topic, payload, Boolean.TRUE.equals(retain), qos == null ? 0 : qos, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -103,7 +103,7 @@ public class IotDataController {
     public Response deleteConnection(@PathParam("clientId") String clientId,
                                      @QueryParam("cleanSession") Boolean cleanSession,
                                      @QueryParam("preventWillMessage") Boolean preventWillMessage) {
-        iotService.deleteConnection(clientId, Boolean.TRUE.equals(cleanSession));
+        iotService.deleteConnection(clientId, Boolean.TRUE.equals(cleanSession), Boolean.TRUE.equals(preventWillMessage));
         return Response.ok().build();
     }
 
@@ -112,13 +112,13 @@ public class IotDataController {
     public Response listSubscriptions(@PathParam("clientId") String clientId,
                                       @QueryParam("maxResults") Integer maxResults,
                                       @QueryParam("nextToken") String nextToken) {
-        IotService.Page<String> page = iotService.listSubscriptions(clientId, maxResults, nextToken);
+        IotService.Page<IotMqttBrokerService.Subscription> page = iotService.listSubscriptions(clientId, maxResults, nextToken);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode subscriptions = response.putArray("subscriptions");
-        for (String topicFilter : page.items()) {
+        for (IotMqttBrokerService.Subscription item : page.items()) {
             ObjectNode subscription = subscriptions.addObject();
-            subscription.put("topicFilter", topicFilter);
-            subscription.put("qos", 0);
+            subscription.put("topicFilter", item.topicFilter());
+            subscription.put("qos", item.qos());
         }
         if (page.nextToken() != null) {
             response.put("nextToken", page.nextToken());

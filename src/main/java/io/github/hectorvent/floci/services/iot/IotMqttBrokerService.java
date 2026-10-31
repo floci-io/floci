@@ -16,6 +16,7 @@ import io.quarkus.tls.CertificateUpdatedEvent;
 import io.quarkus.tls.TlsConfiguration;
 import io.quarkus.tls.TlsConfigurationRegistry;
 import io.quarkus.tls.runtime.config.TlsConfig;
+import io.smallrye.common.vertx.VertxContext;
 import io.vertx.core.Vertx;
 import io.vertx.core.WorkerExecutor;
 import io.vertx.core.buffer.Buffer;
@@ -27,6 +28,7 @@ import io.vertx.mqtt.MqttEndpoint;
 import io.vertx.mqtt.MqttServer;
 import io.vertx.mqtt.MqttServerOptions;
 import io.vertx.mqtt.MqttTopicSubscription;
+import io.vertx.mqtt.MqttWill;
 import io.vertx.mqtt.messages.MqttPublishMessage;
 import io.vertx.mqtt.messages.MqttSubscribeMessage;
 import io.vertx.mqtt.messages.MqttUnsubscribeMessage;
@@ -51,6 +53,7 @@ import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -374,6 +377,7 @@ public class IotMqttBrokerService implements Resettable {
         return server != null;
     }
 
+    /** A message Floci itself publishes, such as a shadow response or a republish, delivered at QoS 0. */
     void publish(String topic, byte[] payload) {
         publish(topic, payload, 0);
     }
@@ -383,10 +387,15 @@ public class IotMqttBrokerService implements Resettable {
     }
 
     boolean disconnectClient(String clientId, boolean cleanSession) {
+        return disconnectClient(clientId, cleanSession, false);
+    }
+
+    /** IoT Data {@code DeleteConnection}: the session's Last Will is published unless {@code preventWillMessage}. */
+    boolean disconnectClient(String clientId, boolean cleanSession, boolean preventWillMessage) {
         ClientSession session;
         synchronized (sessionLock) {
             session = sessionsByClient.get(clientId);
-            if (session == null || !endSession(session, API_INITIATED_DISCONNECT)) {
+            if (session == null || !endSession(session, API_INITIATED_DISCONNECT, !preventWillMessage)) {
                 return false;
             }
             if (cleanSession) {
@@ -435,9 +444,9 @@ public class IotMqttBrokerService implements Resettable {
         }
     }
 
-    List<String> listSubscriptions(String clientId) {
-        return subscriptionsByClient.getOrDefault(clientId, Map.of()).keySet().stream()
-                .sorted()
+    List<Subscription> listSubscriptions(String clientId) {
+        return subscriptionsByClient.getOrDefault(clientId, Map.of()).values().stream()
+                .sorted(Comparator.comparing(Subscription::topicFilter))
                 .toList();
     }
 
@@ -524,7 +533,8 @@ public class IotMqttBrokerService implements Resettable {
      * {@code clientIp} and {@code clientPort} are the address the client connected from: the
      * socket's, or for a WebSocket client the one the bridge recorded at the upgrade, as the
      * bridge's own socket is loopback. {@code connectNanos} is when the CONNECT arrived, which
-     * the keep-alive runs from.
+     * the keep-alive runs from. A clean session starts without the subscriptions an earlier
+     * persistent session of its client id left.
      */
     private void admit(MqttEndpoint endpoint, IotService.RegisteredDevice device, String clientIp, int clientPort,
                        long connectNanos) {
@@ -550,11 +560,15 @@ public class IotMqttBrokerService implements Resettable {
                     device == null ? config.defaultRegion() : device.region(),
                     System.currentTimeMillis(),
                     endpoint.keepAliveTimeSeconds(),
-                    new AtomicInteger());
+                    new AtomicInteger(),
+                    Will.of(endpoint.will()));
             ClientSession previous = sessionsByClient.put(clientId, session);
             if (previous != null && previous.endpoint() != endpoint) {
                 endSession(previous, DUPLICATE_CLIENTID);
                 replaced = previous;
+            }
+            if (cleanSession) {
+                subscriptionsByClient.remove(clientId);
             }
         }
         if (replaced != null) {
@@ -727,15 +741,34 @@ public class IotMqttBrokerService implements Resettable {
             session.endpoint().publishAcknowledge(message.messageId());
         }
 
-        String topic = message.topicName();
+        routePublish(session, message.topicName(), payload, message.isRetain(), message.qosLevel().value(), ruleState.get());
+    }
+
+    /**
+     * Routes a message the session published, or its Last Will: a reserved {@code $aws/} topic to
+     * the shadow service, anything else retained when asked, recorded, handed to the rule worker
+     * under the rule state {@code admitted} and fanned out to subscribers.
+     */
+    private void routePublish(ClientSession session, String topic, byte[] payload, boolean retain, int qos, long admitted) {
         if (topic.startsWith("$aws/")) {
-            iotService.get().handleReservedMqttPublish(topic, payload, rules -> evaluateRulesOnWorker(topic, rules));
+            iotService.get().handleReservedMqttPublish(topic, payload, rules -> evaluateRulesOnWorker(topic, rules, admitted));
             return;
         }
 
-        iotService.get().publish(topic, payload, message.isRetain(), message.qosLevel().value(), null,
-                session.clientId(), rules -> evaluateRulesOnWorker(topic, rules));
-        fanOut(topic, payload, message.qosLevel().value());
+        publishAsSession(session, topic, payload, retain, qos, admitted);
+        fanOut(topic, payload, qos);
+    }
+
+    /**
+     * Stores, records and hands to the rule worker a message of the session in its account, which
+     * the topic namespace, retained messages and rules belong to on AWS: the device certificate's
+     * account on the TLS listener, the default one otherwise. The account is passed explicitly
+     * because the event loop opens no request scope; the rule worker opens one for each matched
+     * rule, in that rule's account.
+     */
+    private void publishAsSession(ClientSession session, String topic, byte[] payload, boolean retain, int qos, long admitted) {
+        iotService.get().publish(topic, payload, retain, qos, null, session.clientId(), session.accountId(),
+                rules -> evaluateRulesOnWorker(topic, rules, admitted));
     }
 
     /**
@@ -745,7 +778,10 @@ public class IotMqttBrokerService implements Resettable {
      * {@link #MAX_PENDING_RULE_EVALUATIONS} evaluations are pending, running or waiting; beyond
      * that a publish's rules are skipped. A reset or a stop skips the rules of publishes still
      * waiting, and a publish received during the reset or while the broker is stopped never runs
-     * its rules.
+     * its rules. A publish scheduled from a duplicated Vert.x context, such as the Last Will that
+     * DeleteConnection publishes from its HTTP request, is submitted from that context's root, since
+     * the worker task runs on the submitting context and a duplicated one carries the request's CDI
+     * request scope.
      */
     void evaluateRulesOnWorker(String topic, Runnable rules) {
         evaluateRulesOnWorker(topic, rules, ruleState.get());
@@ -765,6 +801,20 @@ public class IotMqttBrokerService implements Resettable {
             return;
         }
         AtomicBoolean released = new AtomicBoolean();
+        if (VertxContext.isOnDuplicatedContext()) {
+            try {
+                VertxContext.getRootContext(Vertx.currentContext())
+                        .runOnContext(ignored -> submitRuleEvaluation(topic, rules, admitted, released));
+            } catch (RuntimeException dispatchFailure) {
+                releaseRuleEvaluation(released);
+                throw dispatchFailure;
+            }
+            return;
+        }
+        submitRuleEvaluation(topic, rules, admitted, released);
+    }
+
+    private void submitRuleEvaluation(String topic, Runnable rules, long admitted, AtomicBoolean released) {
         try {
             ruleWorker.executeBlocking(() -> {
                 try {
@@ -823,33 +873,40 @@ public class IotMqttBrokerService implements Resettable {
                 .orElse(-1);
     }
 
+    /**
+     * As on AWS IoT, only a topic filter without wildcards receives a retained message: the one
+     * stored for exactly that topic in the session's account.
+     */
     private void deliverRetained(ClientSession session, List<Subscription> subscriptions) {
-        if (subscriptions.isEmpty()) {
-            return;
-        }
         Set<String> deliveredTopics = new HashSet<>();
-        for (IotRetainedMessage retained : iotService.get().listRetainedMessages(null, null).items()) {
-            if (!deliveredTopics.add(retained.getTopic())) {
+        for (Subscription subscription : subscriptions) {
+            String topic = subscription.topicFilter();
+            if (topic.contains("+") || topic.contains("#") || !deliveredTopics.add(topic)) {
                 continue;
             }
-            int granted = grantedQos(subscriptions, retained.getTopic());
-            if (granted < 0) {
+            Optional<IotRetainedMessage> retained = iotService.get().findRetainedMessage(session.accountId(), topic);
+            if (retained.isEmpty()) {
                 continue;
             }
-            byte[] payload = Base64.getDecoder().decode(retained.getPayload());
+            byte[] payload = Base64.getDecoder().decode(retained.get().getPayload());
             // Publish kept a qos outside 0 and 1 as sent before it refused one, so a stored message may carry one.
-            MqttQoS delivered = MqttQoS.valueOf(Math.clamp(retained.getQos(), 0, granted));
-            session.endpoint().publish(retained.getTopic(), Buffer.buffer(payload), delivered, false, true, session.packetId(delivered));
+            MqttQoS delivered = MqttQoS.valueOf(Math.clamp(retained.get().getQos(), 0, subscription.qos()));
+            session.endpoint().publish(topic, Buffer.buffer(payload), delivered, false, true, session.packetId(delivered));
         }
+    }
+
+    /** Ends the session; its Last Will is published for every reason but the client's own DISCONNECT. */
+    private boolean endSession(ClientSession session, String reason) {
+        return endSession(session, reason, !CLIENT_INITIATED_DISCONNECT.equals(reason));
     }
 
     /**
      * Ends the session once: the first reason reported wins, and only that one publishes the
-     * disconnected event, records how the session ended for fleet indexing, and gets true. The
-     * versionNumber counts up only while the session is still the client id's current one, so a
-     * session replaced by a newer connection leaves it alone.
+     * disconnected event, then the Last Will when {@code publishWill}, records how the session
+     * ended for fleet indexing, and gets true. The versionNumber counts up only while the session
+     * is still the client id's current one, so a session replaced by a newer connection leaves it alone.
      */
-    private boolean endSession(ClientSession session, String reason) {
+    private boolean endSession(ClientSession session, String reason, boolean publishWill) {
         synchronized (sessionLock) {
             if (!session.ended().compareAndSet(false, true)) {
                 return false;
@@ -862,8 +919,21 @@ public class IotMqttBrokerService implements Resettable {
                 subscriptionsByClient.remove(session.clientId());
             }
             publishPresence(session, "disconnected", reason);
+            if (publishWill && session.will() != null) {
+                publishWill(session);
+            }
             return true;
         }
+    }
+
+    /**
+     * Publishes the session's Last Will as the session would have published it, scheduled like a
+     * lifecycle event because the caller holds the session lock and possibly an endpoint's monitor.
+     */
+    private void publishWill(ClientSession session) {
+        Will will = session.will();
+        long admitted = ruleState.get();
+        vertx.runOnContext(ignored -> routePublish(session, will.topic(), will.payload(), will.retain(), will.qos(), admitted));
     }
 
     /**
@@ -899,8 +969,7 @@ public class IotMqttBrokerService implements Resettable {
         // Its rules are admitted under the rule state at the time of the event.
         long admitted = ruleState.get();
         vertx.runOnContext(ignored -> {
-            iotService.get().publish(topic, payload, false, 0, null, session.clientId(),
-                    rules -> evaluateRulesOnWorker(topic, rules, admitted));
+            publishAsSession(session, topic, payload, false, 0, admitted);
             fanOut(topic, payload, 0);
         });
     }
@@ -934,8 +1003,9 @@ public class IotMqttBrokerService implements Resettable {
         String[] topicLevels = topic.split("/", -1);
         for (int i = 0; i < filterLevels.length; i++) {
             String filterLevel = filterLevels[i];
+            // AWS IoT: sensor/# matches sensor/ and below, but not the parent topic sensor.
             if ("#".equals(filterLevel)) {
-                return i == filterLevels.length - 1;
+                return i == filterLevels.length - 1 && i < topicLevels.length;
             }
             if (i >= topicLevels.length) {
                 return false;
@@ -974,7 +1044,8 @@ public class IotMqttBrokerService implements Resettable {
             String region,
             long connectedAt,
             int keepAliveDuration,
-            AtomicInteger packetIds) {
+            AtomicInteger packetIds,
+            Will will) {
 
         /**
          * The packet identifier of a copy sent at {@code qos}: none at QoS 0, otherwise the session's
@@ -1002,7 +1073,23 @@ public class IotMqttBrokerService implements Resettable {
     private record HistoryKey(String accountId, String region, String clientId) {
     }
 
-    private record Subscription(String topicFilter, int qos) {
+    /** The Last Will a CONNECT carried; null when it carried none or its topic is not a valid topic name. */
+    private record Will(String topic, byte[] payload, int qos, boolean retain) {
+
+        static Will of(MqttWill will) {
+            if (will == null || !will.isWillFlag()) {
+                return null;
+            }
+            String topic = will.getWillTopic();
+            if (topic == null || topic.isEmpty() || topic.contains("#") || topic.contains("+")) {
+                return null;
+            }
+            byte[] payload = will.getWillMessageBytes();
+            return new Will(topic, payload == null ? new byte[0] : payload, will.getWillQos(), will.isWillRetain());
+        }
+    }
+
+    record Subscription(String topicFilter, int qos) {
     }
 
     record ConnectionInfo(String clientId, String address, int port) {

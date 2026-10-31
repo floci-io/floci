@@ -359,7 +359,7 @@ class IotMqttBrokerDeviceVerificationTest {
     /** The payload the broker handed the IoT service for the one publish on {@code topic}, an MQTT client's publish. */
     private JsonNode publishedEvent(String topic) throws IOException {
         ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
-        verify(service, timeout(10_000)).publish(eq(topic), payload.capture(), eq(false), eq(0), isNull(), eq("sensor-1"), any());
+        verify(service, timeout(10_000)).publish(eq(topic), payload.capture(), eq(false), eq(0), isNull(), eq("sensor-1"), any(), any());
         return new ObjectMapper().readTree(payload.getValue());
     }
 

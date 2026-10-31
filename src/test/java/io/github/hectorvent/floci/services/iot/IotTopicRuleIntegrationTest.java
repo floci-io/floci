@@ -168,6 +168,40 @@ class IotTopicRuleIntegrationTest {
     }
 
     @Test
+    void aMultiLevelWildcardRuleDoesNotFireForTheParentTopic() throws Exception {
+        String parent = "devices/phase8/parent/" + System.nanoTime();
+        String target = parent + "-republished";
+        String rule = "phase8ParentRule" + System.nanoTime();
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "topicRulePayload": {
+                    "sql": "SELECT * FROM '%s/#'",
+                    "actions": [{"republish": {"roleArn": "arn:aws:iam::000000000000:role/iot-rule-role", "topic": "%s"}}]
+                  }
+                }
+                """.formatted(parent, target))
+        .when()
+            .put("/rules/" + rule)
+        .then()
+            .statusCode(200);
+
+        try {
+            given().contentType("text/plain").body("parent").when().post("/topics/" + parent).then().statusCode(200);
+            given().contentType("text/plain").body("child").when().post("/topics/" + parent + "/child").then().statusCode(200);
+
+            awaitPublishedEvent(target, "child".getBytes(StandardCharsets.UTF_8));
+            assertFalse(eventRecorder.recentEvents().stream()
+                    .anyMatch(event -> target.equals(event.topic())
+                            && Arrays.equals("parent".getBytes(StandardCharsets.UTF_8), event.payload())),
+                    "a rule on " + parent + "/# fired for " + parent);
+        } finally {
+            given().when().delete("/rules/" + rule).then().statusCode(200);
+        }
+    }
+
+    @Test
     void matchingTopicRuleSendsPayloadToSqs() {
         String queueUrl = given()
             .contentType("application/x-www-form-urlencoded")

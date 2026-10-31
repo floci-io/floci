@@ -9,11 +9,12 @@ Status: complete for the local emulator slice.
 Supported MVP 1 behavior:
 
 - Thing CRUD with idempotent identical `CreateThing`, duplicate-conflict semantics, `UpdateThing.expectedVersion`, and list pagination. `UpdateThing` honours `attributePayload.merge` (an empty value removes an attribute), `thingTypeName` and `removeThingType`, and `DeleteThing` honours `expectedVersion`.
+- `UpdateThing` applies `attributePayload` as AWS does: without one the stored attributes are kept, with `merge: true` the attributes sent are added or replaced and one sent with an empty value is removed, and otherwise the attributes sent replace the stored ones. `thingTypeName` associates an existing thing type that is not deprecated, `removeThingType` removes the association, and sending both is `InvalidRequestException`. `UpdateThingGroup` applies its `attributePayload` the same way; AWS does not document an omitted one for groups, and Floci keeps the stored attributes.
 - Certificate basics: `CreateKeysAndCertificate`, `CreateCertificateFromCsr`, `DescribeCertificate`, `ListCertificates`, `UpdateCertificate`, and `DeleteCertificate` with active/attached delete constraints. `CreateKeysAndCertificate` returns a real X.509 client certificate issued by Floci's local CA (`GET /_floci/ca.pem`) with a fresh RSA 2048 key pair, valid until 2049-12-31T23:59:59Z as on AWS, and `certificateId` is the SHA-256 of the certificate's DER encoding as on AWS. `DescribeCertificate` reports `validity` and `certificateMode`. `CreateCertificateFromCsr` signs the request's public key (RSA of at least 2048 bits, or EC on P-256, P-384 or P-521) with the same CA and, as on AWS, returns no private key. `RegisterCertificateWithoutCA` registers a certificate from any issuer, as on AWS: no CA is checked, the status defaults to `INACTIVE`, `DescribeCertificate` reports `certificateMode` `SNI_ONLY`, a certificate already registered is `ResourceAlreadyExistsException`, and a PEM that does not parse is `CertificateValidationException`.
 - Policy basics: `CreatePolicy`, `GetPolicy`, `ListPolicies`, `DeletePolicy`, policy version lifecycle, `AttachPolicy`, `DetachPolicy`, `ListAttachedPolicies`, and `ListTargetsForPolicy`.
 - Thing principal basics: `AttachThingPrincipal`, `DetachThingPrincipal`, `ListThingPrincipals`, `ListPrincipalThings`, and the paginated `ListThingPrincipalsV2` and `ListPrincipalThingsV2`. Exclusive attachment is not modelled, so the V2 lists report every attachment as `NON_EXCLUSIVE_THING`, and a `thingPrincipalType` filter of `EXCLUSIVE_THING` returns none.
 - Tags for things, certificates, policies, and topic rules.
-- IoT Data retained messages: retained `Publish`, `GetRetainedMessage`, and paginated `ListRetainedMessages`. Both read actions report `lastModifiedTime` as integer epoch milliseconds, as required by the IoT Data API.
+- IoT Data retained messages: retained `Publish`, `GetRetainedMessage`, and paginated `ListRetainedMessages`. Both read actions report `lastModifiedTime` as integer epoch milliseconds, as required by the IoT Data API. As on AWS IoT, an MQTT subscription receives a retained message only when its topic filter names that topic exactly; a filter with `+` or `#` receives none. An MQTT publish keeps its retained message in its session's account (see [Rules Engine](#rules-engine)), and a subscription receives the retained messages of its own session's account.
 - Shadow null-delete and version-conflict behavior for HTTP and shared service paths.
 - Topic rule duplicate/delete/replace semantics, plus `republish`, `sqs`, `sns`, `s3`, `dynamoDBv2`, `kinesis`, `lambda`, `firehose`, and `cloudwatchLogs` action dispatch.
 
@@ -33,16 +34,15 @@ Supported MVP 2 behavior:
 - Jobs control plane: `CreateJob`, `DescribeJob`, and `ListJobs`, including thing ARN targets and static thing group targets.
 - Jobs data plane: pending-job listing, `StartNextPendingJobExecution`, `DescribeJobExecution`, and `UpdateJobExecution` with version conflicts and terminal-state checks.
 - Endpoint discovery accepts `iot:Jobs` and `iot:CredentialProvider` in addition to IoT Data endpoint types.
-- MQTT clients can use QoS 1 subscribe/publish paths with broker PUBACK and delivery behavior.
+- MQTT clients can publish and subscribe at QoS 0 and QoS 1. The broker acknowledges a QoS 1 publish with `PUBACK` and delivers each message at the lower of its publish QoS and the highest QoS granted to the subscriber's matching subscriptions, as MQTT specifies; a retained message goes out at the lower of its stored QoS and the subscription's. `ListSubscriptions` reports the QoS granted to each subscription. Messages Floci publishes itself (shadow responses, lifecycle events, `republish` and `SendDirectMessage`) are delivered at QoS 0.
+- IoT Data `Publish` over HTTP reaches the matching MQTT subscribers on every listener, as on AWS, besides storing the retained message and running the topic rules. A publish to a reserved `$aws/` topic is not delivered to subscribers.
 - IoT Data connection APIs for live MQTT sessions: `GetConnection`, `DeleteConnection`, `ListSubscriptions`, and `SendDirectMessage`.
-- `DeleteConnection` closes active MQTT client sessions through the embedded broker and optionally purges broker session state for `cleanSession=true`.
+- `DeleteConnection` closes active MQTT client sessions through the embedded broker, optionally purges broker session state for `cleanSession=true`, and publishes the client's [Last Will](#last-will) unless `preventWillMessage=true`.
 - IoT rules can dispatch matching payloads to SQS, SNS, S3, DynamoDB v2, Kinesis, Lambda, Kinesis Data Firehose, CloudWatch Logs, and MQTT republish targets.
 
 Current MVP 2 limitations:
 
-- `DeleteConnection.preventWillMessage` is accepted for SDK request compatibility, but the embedded broker does not expose selective Last Will suppression.
 - HTTP IoT Data `Publish` reaches MQTT subscribers as an MQTT publish does, whatever account and region they connected in: the broker has neither, where AWS runs one per account and region. It refuses a `qos` other than 0 or 1 with AWS's `InvalidRequestException`. Its MQTT 5 metadata (`contentType`, `correlationData`, `messageExpiry`, `payloadFormatIndicator`, `responseTopic`, `userProperties`) is accepted but not forwarded.
-- A retained message is also sent on a subscription to a wildcard filter that matches its topic. AWS sends it only to a subscription naming its exact topic.
 - A QoS 1 copy sent to a subscriber is never retried, and no limit applies to how many stay unacknowledged. AWS holds further copies once a client has 100 unacknowledged and retries them for up to an hour (16 minutes for MQTT 5).
 - `SendDirectMessage` publishes to the requested MQTT topic through the embedded broker. Unlike AWS IoT Core, it does not yet bypass subscription matching to deliver to a client that is not subscribed to that topic.
 - `GetConnection` and `ListSubscriptions` report live in-memory broker state only; offline persistent session subscription reporting is not modeled yet.
@@ -183,6 +183,7 @@ Broker scope:
 - Target real AWS IoT/device SDK style MQTT clients, not only handcrafted packet tests.
 - Support MQTT v3 and MQTT 5 CONNECT handling used by local compatibility tests.
 - Support QoS 0 and QoS 1 publish/subscribe behavior for the local AWS IoT slice. A publish, over MQTT or through IoT Data `Publish`, reaches each matching subscriber at the lower of its own and the subscription's QoS, with RETAIN 0, as on AWS. A retained message sent on subscribe carries RETAIN 1 at the lower of its stored and the subscription's QoS.
+- Match subscriptions as AWS IoT does: `sensor/#` receives `sensor/` and every topic below `sensor`, but not `sensor` itself, which the MQTT specification would also deliver.
 - Accept PUBLISH payloads up to 128 KB on 1883, 8883 and `/mqtt`, the AWS IoT Core quota (packets up to 146 KB including the variable header). A larger publish disconnects the client without acknowledgement, delivery or rule evaluation, as on AWS.
 - Serve MQTT over TLS on 8883 next to plaintext 1883 when TLS is enabled, and verify the device certificate and its `iot:Connect` permission there.
 - Keep the plaintext listener permissive except for a `CONNECT` that names a [custom authorizer](#authorizers); topic-level authorization (`Publish`, `Subscribe`, `Receive`) is follow-up scope.
@@ -288,7 +289,7 @@ in AWS's order:
 | IoT Data `DeleteConnection` | `API_INITIATED_DISCONNECT` |
 | A PUBLISH above 128 KB, or a QoS 2 PUBLISH | `CLIENT_ERROR` |
 
-An event goes the way a client publish goes: it is evaluated by the topic rules of every region,
+An event goes the way a client publish goes: it is evaluated by the topic rules of every region of the session's account,
 where `clientid()` returns the client id the event is about and `topic(3)` is `presence`, and
 delivered to matching MQTT subscribers. As on AWS, a topic filter whose first level is `#` or `+`
 does not match the lifecycle topics, both for subscriptions and for a rule's `FROM`: `#` and
@@ -301,6 +302,15 @@ Differences from AWS and limits:
 - A client id containing `#` or `+` gets no lifecycle events, as on AWS.
 - A broker shutdown publishes no disconnected events.
 - `connect_failed`, `subscribed` and `unsubscribed` events are not emitted.
+
+### Last Will
+
+As on AWS, the Last Will a client sets in its `CONNECT` is published when its session ends for any reason other than the client's own `DISCONNECT`: a dropped connection, a keep-alive timeout, a takeover of its client id, a `CLIENT_ERROR`, or IoT Data `DeleteConnection` unless `preventWillMessage=true`. It goes the way the client's own publish would, after the session's disconnected event: stored as the retained message when its retain flag is set, evaluated by the topic rules with `clientid()` the departed client, and delivered to matching subscribers.
+
+Differences from AWS and limits:
+
+- A broker shutdown publishes no Last Will.
+- An MQTT 5 `DISCONNECT` with reason code `0x04` (disconnect with Will Message) publishes no Last Will, and the MQTT 5 Will Delay Interval is not applied: the Last Will is published as soon as the session ends.
 
 ## Reserved Topics
 
@@ -328,6 +338,8 @@ A successful classic or named shadow change reaches MQTT subscribers and the top
 
 An update merges into the stored shadow as on AWS. A nested object merges key by key at any depth: every leaf the update does not name keeps its value and its metadata timestamp, and `{}` sent onto a stored object or section changes nothing. A `null` deletes the key and its metadata. A nested object emptied that way stays as `{}`, but a `desired` or `reported` section that ends up empty is not kept. An object sent for a missing key adds its non-null values: `{}` adds `{}`, and an object holding only nulls adds nothing. An array or a scalar replaces the stored value whole, and so does an object sent onto a scalar or an array, which AWS stores as sent, null leaves included.
 
+As on AWS, a shadow created again within 48 hours of its delete continues the deleted shadow's version: after a delete at version 2, the next update returns version 3. A shadow deleted longer ago starts again at version 1. Until it is created again, a deleted shadow is not returned by `GetThingShadow` or `ListNamedShadowsForThing`, and deleting it again is `ResourceNotFoundException`. A `version` sent with the update that creates it again is compared with 0, as for a shadow that never existed.
+
 An empty `name` is the classic shadow. A name that is not 1 to 64 of `$`, `a-z`, `A-Z`, `0-9`, `:`, `_` and `-` fails with `InvalidRequestException` (`Bad Request`), and an MQTT request on such a named topic, empty name included, is ignored as on AWS, with no `rejected`. A name containing `$` other than the reserved `$package` fails with `InvalidRequestException` (`Invalid shadow name : <name>`), which an MQTT request receives as a `400` `rejected`. `$package` is served as an ordinary named shadow: AWS's reserved document schema, and its omission of `metadata`, are not emulated.
 
 Shadow events are evaluated only against the rules of the shadow's region. A REST change belongs to the region of its SigV4 credential, and MQTT shadows live in the default region (`FLOCI_DEFAULT_REGION`). `clientid()` is `N/A` for every shadow event, as on AWS. The MQTT broker itself has no region or account, so its subscribers receive the shadow events of every region and account, as they receive a republish.
@@ -346,7 +358,7 @@ Implementation notes:
 Current accepted limitation:
 
 - Certificate and `iot:Connect` checks are enforced on 8883 only; topic-level authorization is not enforced on either port yet.
-- Persistent offline sessions are not modeled yet.
+- Persistent sessions are modeled only as far as their subscriptions go: a client that reconnects with `cleanSession=false` keeps the subscriptions of its earlier session, and a clean connect discards them, as on AWS. Messages are not queued for an offline persistent session, and `CONNACK` always reports `sessionPresent=false`.
 - QoS 2 and advanced MQTT 5 property semantics remain follow-up scope.
 - At most 1,000 MQTT publishes are pending rule evaluation, running or waiting. While that many are pending, further publishes are still delivered to subscribers but their topic rules are skipped, with one warning logged until the backlog drains.
 - REST shadow errors are not published to `rejected`.
@@ -386,10 +398,12 @@ Supported rule behavior:
 - `CreateTopicRule`, `GetTopicRule`, `ListTopicRules`, `EnableTopicRule`, `DisableTopicRule`, and `DeleteTopicRule` through AWS SDK-compatible IoT control-plane paths.
 - Rule SQL parsing and evaluation for the subset described under [Rule SQL](#rule-sql): the `SELECT` projection,
   the `FROM` topic filter, and the `WHERE` predicate.
-- MQTT-style topic filter matching for exact topics, `+`, and terminal `#`.
+- MQTT-style topic filter matching for exact topics, `+`, and terminal `#`. As on AWS IoT, `sensor/#` matches `sensor/` and every topic below `sensor`, but not the parent topic `sensor` itself.
 - IoT Data `Publish` and MQTT publishes use the same rule dispatch path. An IoT Data `Publish` evaluates its rules before it returns. An MQTT publish evaluates them on the broker's rule worker, so neither its PUBACK nor its fan-out waits for rule actions, and a republished message can reach subscribers before or after the source message's other deliveries; AWS gives no ordering guarantee there either.
 - Rule matching is region-scoped: an IoT Data `Publish` evaluates the rules of the region named by its SigV4 credential, and a rule's actions target the rule's own region.
 - Publishes that carry no region (MQTT, or an IoT Data `Publish` whose `Authorization` header is absent or not SigV4) are evaluated against every region's rules.
+- An MQTT publish, a Last Will and a lifecycle event are evaluated against the rules of their session's account, as the AWS topic namespace belongs to an account: the device certificate's account for a session on the TLS listener, the default account for a plaintext or WebSocket session.
+- A rule's actions run as the account that owns the rule, in the rule's region, for MQTT and IoT Data publishes alike, so an action that names its target, such as a Kinesis stream, a Firehose delivery stream or a CloudWatch Logs group, finds it in the rule's account and region.
 - Device shadow events on the `$aws/things/...` response topics reach rules as well, evaluated only against the rules of the shadow's region; see [Shadow Events](#shadow-events).
 - Actions receive the projected document, which is the payload itself for a statement that selects only `*`.
 - `republish` action republishes to another MQTT topic through `IotMqttBrokerService`.

@@ -49,6 +49,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -62,6 +63,7 @@ class IotMqttEnabledIntegrationTest {
 
     static final int AWS_MAX_PAYLOAD = 128 * 1024;
     private static final String BROKER_URI = "tcp://127.0.0.1:" + IotMqttTlsProfile.PLAIN_PORT;
+    private static final byte[] WILL_PAYLOAD = "gone".getBytes(StandardCharsets.UTF_8);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final String BUILDING_RULE_SQL = "SELECT *, topic() AS topic, clientid() AS cid "
             + "FROM '$aws/things/+/shadow/name/building/update/accepted' WHERE endswith(clientToken, 'inbound')";
@@ -116,6 +118,93 @@ class IotMqttEnabledIntegrationTest {
         .then()
             .statusCode(404)
             .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    void aCleanSessionDoesNotInheritTheSubscriptionsOfAnEarlierPersistentSession() throws Exception {
+        String clientId = uniqueClientId("clean-after-persistent");
+        String topic = "phase/persistent/" + System.nanoTime();
+        MqttConnectOptions persistent = MqttTestClient.connectOptions();
+        persistent.setCleanSession(false);
+        try (MqttTestClient client = MqttTestClient.connect(clientId, persistent)) {
+            client.subscribe(topic);
+        }
+
+        try (MqttTestClient client = connectMqttClientId(clientId)) {
+            given()
+            .when()
+                .get("/connections/{clientId}/subscriptions", clientId)
+            .then()
+                .statusCode(200)
+                .body("subscriptions", empty());
+            try (MqttTestClient publisher = connectMqtt("clean-after-persistent-pub")) {
+                publisher.publish(topic, "stale".getBytes(StandardCharsets.UTF_8));
+            }
+            client.assertNoPublish();
+        }
+    }
+
+    @Test
+    void lastWillIsPublishedWhenTheClientDropsWithoutDisconnect() throws Exception {
+        String willTopic = "lwt/" + System.nanoTime();
+
+        try (MqttTestClient subscriber = connectMqtt("lwt-lost-sub")) {
+            subscriber.subscribe(willTopic, 1);
+            MqttTestClient publisher = connectWithWill(uniqueClientId("lwt-lost-pub"), willTopic);
+            publisher.closeWithoutDisconnect();
+
+            MqttPublish will = subscriber.takePublish();
+            assertEquals(willTopic, will.topic());
+            assertArrayEquals(WILL_PAYLOAD, will.payload());
+            subscriber.assertNoPublish();
+        }
+    }
+
+    @Test
+    void lastWillIsNotPublishedAfterAClientDisconnect() throws Exception {
+        String willTopic = "lwt/" + System.nanoTime();
+
+        try (MqttTestClient subscriber = connectMqtt("lwt-clean-sub")) {
+            subscriber.subscribe(willTopic, 1);
+            connectWithWill(uniqueClientId("lwt-clean-pub"), willTopic).close();
+
+            subscriber.assertNoPublish();
+        }
+    }
+
+    @Test
+    void deleteConnectionPublishesTheLastWillUnlessPreventWillMessageIsSet() throws Exception {
+        String willTopic = "lwt/" + System.nanoTime();
+
+        try (MqttTestClient subscriber = connectMqtt("lwt-api-sub")) {
+            subscriber.subscribe(willTopic, 1);
+
+            String prevented = uniqueClientId("lwt-api-prevented");
+            try (MqttTestClient client = connectWithWill(prevented, willTopic)) {
+                given()
+                    .queryParam("preventWillMessage", true)
+                .when()
+                    .delete("/connections/{clientId}", prevented)
+                .then()
+                    .statusCode(200);
+                client.awaitDisconnected();
+            }
+            subscriber.assertNoPublish();
+
+            String allowed = uniqueClientId("lwt-api-allowed");
+            try (MqttTestClient client = connectWithWill(allowed, willTopic)) {
+                given()
+                    .queryParam("preventWillMessage", false)
+                .when()
+                    .delete("/connections/{clientId}", allowed)
+                .then()
+                    .statusCode(200);
+                client.awaitDisconnected();
+            }
+            MqttPublish will = subscriber.takePublish();
+            assertEquals(willTopic, will.topic());
+            assertArrayEquals(WILL_PAYLOAD, will.payload());
+        }
     }
 
     @Test
@@ -265,6 +354,152 @@ class IotMqttEnabledIntegrationTest {
                 assertEquals(1, retained.qos());
                 assertTrue(retained.retained());
             }
+        }
+    }
+
+    @Test
+    void deliveryQosIsTheLowerOfThePublishQosAndTheSubscriptionQos() throws Exception {
+        String topic = "phase/qos/" + System.nanoTime();
+        byte[] payload = "qos".getBytes(StandardCharsets.UTF_8);
+
+        try (MqttTestClient atLeastOnce = connectMqtt("qos-sub-1"); MqttTestClient atMostOnce = connectMqtt("qos-sub-0")) {
+            atLeastOnce.subscribe(topic, 1);
+            atMostOnce.subscribe(topic, 0);
+            try (MqttTestClient publisher = connectMqtt("qos-pub")) {
+                publisher.publish(topic, payload, 1);
+                publisher.publish(topic, payload, 0);
+            }
+            // One connection's publishes reach a subscriber in order; an IoT Data publish is fanned out from another thread.
+            assertEquals(List.of(1, 0), List.of(atLeastOnce.takePublish().qos(), atLeastOnce.takePublish().qos()));
+            assertEquals(List.of(0, 0), List.of(atMostOnce.takePublish().qos(), atMostOnce.takePublish().qos()));
+
+            given()
+                .contentType("application/octet-stream")
+                .queryParam("qos", 1)
+                .body(payload)
+            .when()
+                .post("/topics/" + topic)
+            .then()
+                .statusCode(200);
+
+            assertEquals(1, atLeastOnce.takePublish().qos());
+            assertEquals(0, atMostOnce.takePublish().qos());
+        }
+    }
+
+    @Test
+    void aRetainedMessageIsDeliveredAtTheLowerOfItsQosAndTheSubscriptionQos() throws Exception {
+        String topic = "phase/qos-retained/" + System.nanoTime();
+        given()
+            .contentType("application/octet-stream")
+            .queryParam("retain", true)
+            .queryParam("qos", 1)
+            .body("kept".getBytes(StandardCharsets.UTF_8))
+        .when()
+            .post("/topics/" + topic)
+        .then()
+            .statusCode(200);
+        cleanup.register(() -> given().contentType("application/octet-stream").queryParam("retain", true).body(new byte[0])
+                .when().post("/topics/" + topic).then().statusCode(200));
+
+        try (MqttTestClient atLeastOnce = connectMqtt("qos-retained-sub-1")) {
+            atLeastOnce.subscribe(topic, 1);
+            assertEquals(1, atLeastOnce.takePublish().qos());
+        }
+        try (MqttTestClient atMostOnce = connectMqtt("qos-retained-sub-0")) {
+            atMostOnce.subscribe(topic, 0);
+            assertEquals(0, atMostOnce.takePublish().qos());
+        }
+    }
+
+    @Test
+    void listSubscriptionsReportsTheGrantedQosOfEachSubscription() throws Exception {
+        String clientId = uniqueClientId("qos-list");
+        String prefix = "phase/qos-list/" + System.nanoTime();
+
+        try (MqttTestClient client = connectMqttClientId(clientId)) {
+            client.subscribe(prefix + "/a", 1);
+            client.subscribe(prefix + "/b", 0);
+
+            given()
+            .when()
+                .get("/connections/{clientId}/subscriptions", clientId)
+            .then()
+                .statusCode(200)
+                .body("subscriptions[0].topicFilter", equalTo(prefix + "/a"))
+                .body("subscriptions[0].qos", equalTo(1))
+                .body("subscriptions[1].topicFilter", equalTo(prefix + "/b"))
+                .body("subscriptions[1].qos", equalTo(0));
+        }
+    }
+
+    @Test
+    void httpPublishIsDeliveredOnceToMqttSubscribers() throws Exception {
+        String topic = "phase/http/" + System.nanoTime();
+        byte[] payload = "over-http".getBytes(StandardCharsets.UTF_8);
+
+        try (MqttTestClient subscriber = connectMqtt("http-publish-sub")) {
+            subscriber.subscribe(topic);
+
+            given()
+                .contentType("application/octet-stream")
+                .body(payload)
+            .when()
+                .post("/topics/" + topic)
+            .then()
+                .statusCode(200);
+
+            MqttPublish received = subscriber.takePublish();
+            assertEquals(topic, received.topic());
+            assertArrayEquals(payload, received.payload());
+            subscriber.assertNoPublish();
+        }
+    }
+
+    @Test
+    void aMultiLevelWildcardSubscriptionDoesNotReceiveItsParentTopic() throws Exception {
+        String parent = "p/" + System.nanoTime();
+
+        try (MqttTestClient subscriber = connectMqtt("parent-sub")) {
+            subscriber.subscribe(parent + "/#");
+            try (MqttTestClient publisher = connectMqtt("parent-pub")) {
+                publisher.publish(parent, "parent".getBytes(StandardCharsets.UTF_8));
+                publisher.publish(parent + "/", "empty-level".getBytes(StandardCharsets.UTF_8));
+                publisher.publish(parent + "/x", "child".getBytes(StandardCharsets.UTF_8));
+            }
+
+            assertEquals(parent + "/", subscriber.takePublish().topic());
+            assertEquals(parent + "/x", subscriber.takePublish().topic());
+            subscriber.assertNoPublish();
+        }
+    }
+
+    @Test
+    void onlyASubscriptionNamingTheTopicExactlyReceivesItsRetainedMessage() throws Exception {
+        String device = "phase/retained/" + System.nanoTime();
+        String topic = device + "/state";
+        byte[] payload = "kept".getBytes(StandardCharsets.UTF_8);
+        given()
+            .contentType("application/octet-stream")
+            .queryParam("retain", true)
+            .body(payload)
+        .when()
+            .post("/topics/" + topic)
+        .then()
+            .statusCode(200);
+        cleanup.register(() -> given().contentType("application/octet-stream").queryParam("retain", true).body(new byte[0])
+                .when().post("/topics/" + topic).then().statusCode(200));
+
+        try (MqttTestClient wildcard = connectMqtt("retained-wildcard-sub")) {
+            wildcard.subscribe(device + "/+", 1);
+            wildcard.subscribe(device + "/#", 1);
+            wildcard.assertNoPublish();
+        }
+        try (MqttTestClient exact = connectMqtt("retained-exact-sub")) {
+            exact.subscribe(topic, 1);
+            MqttPublish retained = exact.takePublish();
+            assertEquals(topic, retained.topic());
+            assertArrayEquals(payload, retained.payload());
         }
     }
 
@@ -893,6 +1128,13 @@ class IotMqttEnabledIntegrationTest {
         return MqttTestClient.connect(clientId);
     }
 
+    /** A QoS 1, non-retained Last Will of {@link #WILL_PAYLOAD} on {@code willTopic}. */
+    private MqttTestClient connectWithWill(String clientId, String willTopic) throws MqttException {
+        MqttConnectOptions options = MqttTestClient.connectOptions();
+        options.setWill(willTopic, WILL_PAYLOAD, 1, false);
+        return MqttTestClient.connect(clientId, options);
+    }
+
     private String uniqueClientId(String clientId) {
         return clientId + "-" + System.nanoTime();
     }
@@ -972,6 +1214,10 @@ class IotMqttEnabledIntegrationTest {
         }
 
         static MqttTestClient connect(String clientId) throws MqttException {
+            return connect(clientId, connectOptions());
+        }
+
+        static MqttTestClient connect(String clientId, MqttConnectOptions options) throws MqttException {
             MqttClient client = new MqttClient(BROKER_URI, clientId, new MemoryPersistence());
             client.setTimeToWait(10_000);
             MqttTestClient testClient = new MqttTestClient(client);
@@ -989,7 +1235,7 @@ class IotMqttEnabledIntegrationTest {
                 public void deliveryComplete(IMqttDeliveryToken token) {
                 }
             });
-            client.connect(connectOptions());
+            client.connect(options);
             return testClient;
         }
 
@@ -1016,6 +1262,14 @@ class IotMqttEnabledIntegrationTest {
         MqttPublish takePublish() throws InterruptedException {
             return Optional.ofNullable(publishes.poll(2, TimeUnit.SECONDS))
                     .orElseThrow(() -> new AssertionError("No MQTT publish received"));
+        }
+
+        void assertNoPublish() throws InterruptedException {
+            MqttPublish unexpected = publishes.poll(2, TimeUnit.SECONDS);
+            if (unexpected != null) {
+                throw new AssertionError("Unexpected MQTT publish on " + unexpected.topic() + ": "
+                        + new String(unexpected.payload(), StandardCharsets.UTF_8));
+            }
         }
 
         void awaitDisconnected() throws InterruptedException {

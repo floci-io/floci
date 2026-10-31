@@ -71,6 +71,57 @@ class IotDataIntegrationTest {
     }
 
     @Test
+    void aShadowCreatedAgainAfterItsDeleteContinuesTheDeletedVersion() {
+        String thing = "recreated-shadow-" + System.nanoTime();
+        given().contentType("application/json").body("{\"state\":{\"desired\":{\"color\":\"blue\"}}}")
+            .when().post("/things/" + thing + "/shadow").then().statusCode(200).body("version", equalTo(1));
+        given().contentType("application/json").body("{\"state\":{\"reported\":{\"color\":\"green\"}}}")
+            .when().post("/things/" + thing + "/shadow").then().statusCode(200).body("version", equalTo(2));
+
+        given()
+        .when()
+            .delete("/things/" + thing + "/shadow")
+        .then()
+            .statusCode(200)
+            .body("version", equalTo(2));
+        given().when().get("/things/" + thing + "/shadow").then().statusCode(404);
+        given().when().delete("/things/" + thing + "/shadow").then().statusCode(404);
+
+        given()
+            .contentType("application/json")
+            .body("{\"state\":{\"desired\":{\"color\":\"red\"}}}")
+        .when()
+            .post("/things/" + thing + "/shadow")
+        .then()
+            .statusCode(200)
+            .body("version", equalTo(3));
+        given()
+        .when()
+            .get("/things/" + thing + "/shadow")
+        .then()
+            .statusCode(200)
+            .body("version", equalTo(3))
+            .body("state.desired.color", equalTo("red"))
+            .body("state.reported", nullValue());
+
+        given().queryParam("name", "settings").contentType("application/json").body("{\"state\":{\"desired\":{\"mode\":\"auto\"}}}")
+            .when().post("/things/" + thing + "/shadow").then().statusCode(200).body("version", equalTo(1));
+        given().queryParam("name", "settings")
+            .when().delete("/things/" + thing + "/shadow").then().statusCode(200);
+        given()
+        .when()
+            .get("/api/things/shadow/ListNamedShadowsForThing/" + thing)
+        .then()
+            .statusCode(200)
+            .body("results", not(hasItem("settings")));
+        given().queryParam("name", "settings").contentType("application/json").body("{\"state\":{\"desired\":{\"mode\":\"eco\"}}}")
+            .when().post("/things/" + thing + "/shadow").then().statusCode(200).body("version", equalTo(2));
+
+        given().when().delete("/things/" + thing + "/shadow").then().statusCode(200);
+        given().queryParam("name", "settings").when().delete("/things/" + thing + "/shadow").then().statusCode(200);
+    }
+
+    @Test
     void namedShadowLifecycleAndPublish() {
         given()
             .contentType("application/json")

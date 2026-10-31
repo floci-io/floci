@@ -3,11 +3,14 @@ package io.github.hectorvent.floci.services.iot;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 class IotThingOrganizationIntegrationTest {
@@ -107,6 +110,185 @@ class IotThingOrganizationIntegrationTest {
         given()
         .when()
             .delete("/thing-types/mvp2-sensor")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void updateThingSetsAndRemovesTheThingType() {
+        String type = "update-type-sensor";
+        String thing = "update-type-thing";
+        given()
+            .contentType("application/json")
+            .body("{\"thingTypeProperties\": {\"thingTypeDescription\": \"sensors\"}}")
+        .when()
+            .post("/thing-types/" + type)
+        .then()
+            .statusCode(200);
+        given()
+            .contentType("application/json")
+            .body("{\"attributePayload\": {\"attributes\": {\"model\": \"a1\"}}}")
+        .when()
+            .post("/things/" + thing)
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .body("{\"thingTypeName\": \"" + type + "\"}")
+        .when()
+            .patch("/things/" + thing)
+        .then()
+            .statusCode(200);
+        given()
+        .when()
+            .get("/things/" + thing)
+        .then()
+            .statusCode(200)
+            .body("thingTypeName", equalTo(type))
+            .body("attributes.model", equalTo("a1"));
+
+        given()
+            .contentType("application/json")
+            .body("{\"removeThingType\": true}")
+        .when()
+            .patch("/things/" + thing)
+        .then()
+            .statusCode(200);
+        given()
+        .when()
+            .get("/things/" + thing)
+        .then()
+            .statusCode(200)
+            .body("thingTypeName", nullValue())
+            .body("attributes.model", equalTo("a1"));
+        given()
+        .when()
+            .delete("/thing-types/" + type)
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .delete("/things/" + thing)
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void updateThingRefusesAMissingOrDeprecatedThingTypeAndAConflictingRemoval() {
+        String type = "update-type-deprecated";
+        String thing = "update-type-refused";
+        given()
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post("/things/" + thing)
+        .then()
+            .statusCode(200);
+        given()
+            .contentType("application/json")
+            .body("{\"thingTypeProperties\": {}}")
+        .when()
+            .post("/thing-types/" + type)
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .body("{\"thingTypeName\": \"update-type-missing\"}")
+        .when()
+            .patch("/things/" + thing)
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
+        given()
+            .contentType("application/json")
+            .body("{\"thingTypeName\": \"" + type + "\", \"removeThingType\": true}")
+        .when()
+            .patch("/things/" + thing)
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+        given()
+        .when()
+            .post("/thing-types/" + type + "/deprecate")
+        .then()
+            .statusCode(200);
+        given()
+            .contentType("application/json")
+            .body("{\"thingTypeName\": \"" + type + "\"}")
+        .when()
+            .patch("/things/" + thing)
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
+        given()
+        .when()
+            .get("/things/" + thing)
+        .then()
+            .statusCode(200)
+            .body("thingTypeName", nullValue())
+            .body("version", equalTo(1));
+
+        given()
+        .when()
+            .delete("/things/" + thing)
+        .then()
+            .statusCode(200);
+        given()
+        .when()
+            .delete("/thing-types/" + type)
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void updateThingGroupKeepsOrMergesAttributesAsTheAttributePayloadAsks() {
+        String group = "update-semantics-group";
+        given()
+            .contentType("application/json")
+            .body("{\"thingGroupProperties\": {\"attributePayload\": {\"attributes\": {\"fleet\": \"alpha\", \"site\": \"north\"}}}}")
+        .when()
+            .post("/thing-groups/" + group)
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .body("{\"thingGroupProperties\": {\"thingGroupDescription\": \"renamed\"}}")
+        .when()
+            .patch("/thing-groups/" + group)
+        .then()
+            .statusCode(200)
+            .body("version", equalTo(2));
+        given()
+        .when()
+            .get("/thing-groups/" + group)
+        .then()
+            .statusCode(200)
+            .body("thingGroupProperties.attributePayload.attributes", equalTo(Map.of("fleet", "alpha", "site", "north")));
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {"thingGroupProperties": {"attributePayload": {"attributes": {"fleet": "beta", "site": ""}, "merge": true}}}
+                """)
+        .when()
+            .patch("/thing-groups/" + group)
+        .then()
+            .statusCode(200)
+            .body("version", equalTo(3));
+        given()
+        .when()
+            .get("/thing-groups/" + group)
+        .then()
+            .statusCode(200)
+            .body("thingGroupProperties.attributePayload.attributes", equalTo(Map.of("fleet", "beta")));
+
+        given()
+        .when()
+            .delete("/thing-groups/" + group)
         .then()
             .statusCode(200);
     }

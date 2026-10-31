@@ -34,6 +34,8 @@ import org.junit.jupiter.api.function.Executable;
 import org.mockito.ArgumentCaptor;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -219,6 +221,22 @@ class IotServiceTest {
 
         verify(sqs).sendMessage(eq(QUEUE_URL), eq("{\"v\":1}"), eq(0), eq(REGION));
         verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
+    }
+
+    @Test
+    void publishOverHttpRunsTheRulesAndFansOutOnceExceptOnAReservedTopic() throws Exception {
+        createRule("metricsRule", sqsThenLambdaRule(null));
+        byte[] payload = "{\"v\":1}".getBytes(StandardCharsets.UTF_8);
+
+        service.publishOverHttp(TOPIC, payload, false, 1, null);
+        service.publishOverHttp("$aws/things/sensor-1/shadow/update", payload, false, 0, null);
+        service.publish(TOPIC, payload, false, 0, null, "sensor-1");
+
+        verify(broker, times(1)).publish(TOPIC, payload, 1);
+        verify(broker, times(1)).publish(anyString(), any(), anyInt());
+        verify(broker, never()).publish(anyString(), any());
+        verify(sqs, times(2)).sendMessage(eq(QUEUE_URL), eq("{\"v\":1}"), eq(0), eq(REGION));
+        assertEquals(List.of(TOPIC, "$aws/things/sensor-1/shadow/update", TOPIC), recordedTopics());
     }
 
     /** As AWS IoT does for rule topic filters: a wildcard first level does not match a lifecycle topic. */
@@ -1327,6 +1345,43 @@ class IotServiceTest {
         verify(broker, times(1)).publish(eq("$aws/things/sensor-4/shadow/delete/accepted"), any());
         AwsException e = assertThrows(AwsException.class, () -> service.getThingShadow("sensor-4", null, REGION));
         assertEquals(404, e.getHttpStatus());
+    }
+
+    @Test
+    void aShadowCreatedAgainWithin48HoursOfItsDeleteContinuesTheDeletedVersion() throws Exception {
+        service.updateThingShadow("sensor-21", "building", json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+        service.updateThingShadow("sensor-21", "building", json("{\"state\":{\"desired\":{\"color\":\"red\"}}}"), REGION);
+        service.deleteThingShadow("sensor-21", "building", REGION);
+
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.getThingShadow("sensor-21", "building", REGION)).getHttpStatus());
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.deleteThingShadow("sensor-21", "building", REGION)).getHttpStatus());
+        assertEquals(List.of(), service.listNamedShadowsForThing("sensor-21", REGION));
+        recorder.clear();
+
+        JsonNode accepted = service.updateThingShadow("sensor-21", "building",
+                json("{\"state\":{\"desired\":{\"color\":\"green\"}}}"), REGION);
+
+        assertEquals(3, accepted.get("version").asLong());
+        JsonNode documents = recordedPayload("$aws/things/sensor-21/shadow/name/building/update/documents");
+        assertTrue(documents.get("previous").isNull(), "a shadow created again has no previous document");
+        assertEquals(3, documents.at("/current/version").asLong());
+        assertEquals(List.of("building"), service.listNamedShadowsForThing("sensor-21", REGION));
+    }
+
+    @Test
+    void aShadowCreatedAgainMoreThan48HoursAfterItsDeleteStartsAgainAtVersionOne() throws Exception {
+        IotShadow deleted = new IotShadow();
+        deleted.setThingName("sensor-22");
+        deleted.setVersion(5);
+        deleted.setDeletedAt(Instant.now().minus(Duration.ofHours(49)));
+        shadows.put("shadow:" + REGION + ":sensor-22:", deleted);
+
+        assertEquals(404, assertThrows(AwsException.class,
+                () -> service.getThingShadow("sensor-22", null, REGION)).getHttpStatus());
+        assertEquals(1, service.updateThingShadow("sensor-22", null,
+                json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION).get("version").asLong());
     }
 
     @Test

@@ -29,6 +29,7 @@ import io.quarkus.tls.CertificateUpdatedEvent;
 import io.quarkus.tls.TlsConfiguration;
 import io.quarkus.tls.TlsConfigurationRegistry;
 import io.quarkus.tls.runtime.config.TlsConfig;
+import io.smallrye.common.vertx.VertxContext;
 import io.vertx.core.Context;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
@@ -85,6 +86,7 @@ import java.security.cert.Certificate;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -522,6 +524,56 @@ class IotMqttBrokerServiceTest {
     }
 
     /**
+     * Fan-out reaches one subscriber from several threads at once (publishing connections' event
+     * loops, IoT Data requests, lifecycle events). Each QoS 1 delivery is held until all of them
+     * are in flight together, and each carries its own packet identifier.
+     */
+    @Test
+    void concurrentQos1DeliveriesToOneClientCarryDistinctPacketIdentifiers() throws Exception {
+        when(iotService.get()).thenReturn(mock(IotService.class));
+        int deliveries = 8;
+        CountDownLatch allInFlight = new CountDownLatch(deliveries);
+        List<Integer> packetIds = Collections.synchronizedList(new ArrayList<>());
+        MqttEndpoint subscriber = mock(MqttEndpoint.class);
+        when(subscriber.clientIdentifier()).thenReturn("qos1-subscriber");
+        when(subscriber.isConnected()).thenReturn(true);
+        when(subscriber.publish(anyString(), any(), eq(MqttQoS.AT_LEAST_ONCE), anyBoolean(), anyBoolean(), anyInt()))
+                .thenAnswer(invocation -> {
+                    packetIds.add(invocation.getArgument(5));
+                    allInFlight.countDown();
+                    allInFlight.await(10, TimeUnit.SECONDS);
+                    return null;
+                });
+        broker.handleEndpoint(subscriber, false);
+        ArgumentCaptor<Handler<MqttSubscribeMessage>> subscribe = handlerCaptor();
+        verify(subscriber).subscribeHandler(subscribe.capture());
+        MqttTopicSubscription requested = mock(MqttTopicSubscription.class);
+        when(requested.topicName()).thenReturn("devices/+/metrics");
+        when(requested.qualityOfService()).thenReturn(MqttQoS.AT_LEAST_ONCE);
+        MqttSubscribeMessage subscription = mock(MqttSubscribeMessage.class);
+        when(subscription.topicSubscriptions()).thenReturn(List.of(requested));
+        subscribe.getValue().handle(subscription);
+
+        ExecutorService publishers = Executors.newFixedThreadPool(deliveries);
+        try {
+            List<Future<?>> published = new ArrayList<>();
+            for (int i = 0; i < deliveries; i++) {
+                String topic = "devices/d" + i + "/metrics";
+                published.add(publishers.submit(() -> broker.publish(topic, "{}".getBytes(StandardCharsets.UTF_8), 1)));
+            }
+            for (Future<?> outcome : published) {
+                outcome.get(30, TimeUnit.SECONDS);
+            }
+        } finally {
+            publishers.shutdownNow();
+        }
+
+        assertEquals(deliveries, packetIds.size(), "QoS 1 deliveries with a packet identifier the broker chose: " + packetIds);
+        assertEquals(deliveries, new HashSet<>(packetIds).size(), "distinct packet identifiers: " + packetIds);
+        assertTrue(packetIds.stream().allMatch(id -> id >= 1 && id <= 65_535), packetIds.toString());
+    }
+
+    /**
      * A WebSocket client's CONNECT reaches the broker from the bridge's loopback socket, so the
      * policies its custom authorizer returns are evaluated against the address the bridge recorded
      * for the WebSocket client.
@@ -876,7 +928,8 @@ class IotMqttBrokerServiceTest {
             deleting.shutdown();
             reconnecting.shutdown();
         }
-        assertEquals(List.of("devices/reconnecting/commands"), racing.listSubscriptions("reconnecting"));
+        assertEquals(List.of(new IotMqttBrokerService.Subscription("devices/reconnecting/commands", 0)),
+                racing.listSubscriptions("reconnecting"));
     }
 
     @Test
@@ -1079,6 +1132,43 @@ class IotMqttBrokerServiceTest {
             assertEquals(List.of(), presence("disconnected", "stopped"));
         } finally {
             disconnect(client);
+        }
+    }
+
+    @Test
+    void aBrokerStopPublishesNoLastWill() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttClient client = connectPlainWithWill("stopped-will", "wills/stopped");
+        try {
+            awaitPresence("connected", "stopped-will", 1);
+
+            broker.stop();
+            awaitDisconnected(client);
+            awaitClosed(plainPort);
+            awaitClosed(tlsPort);
+            broker.startIfEnabled();
+            barrier();
+
+            assertEquals(List.of(), recordedOn("wills/stopped"));
+        } finally {
+            disconnect(client);
+        }
+    }
+
+    @Test
+    void aTakeoverPublishesTheLastWillOfTheReplacedSession() throws Exception {
+        startBrokerRecordingPublishes();
+        MqttClient replaced = connectPlainWithWill("taken-over", "wills/taken-over");
+        MqttClient current = connectPlain("taken-over");
+        try {
+            awaitPresence("disconnected", "taken-over", 1);
+            barrier();
+
+            assertEquals(List.of("gone"), recordedOn("wills/taken-over"));
+            assertEquals("DUPLICATE_CLIENTID", presence("disconnected", "taken-over").get(0).get("disconnectReason").asText());
+        } finally {
+            replaced.close(true);
+            disconnect(current);
         }
     }
 
@@ -1554,6 +1644,26 @@ class IotMqttBrokerServiceTest {
         assertFalse(beyondBoundRan.get(), "the evaluation beyond the bound never ran");
     }
 
+    /**
+     * DeleteConnection ends a session from an HTTP request, whose duplicated Vert.x context holds that
+     * request's CDI request scope; the rules of the session's Last Will and lifecycle event must not
+     * run with that context current.
+     */
+    @Test
+    void rulesSubmittedFromADuplicatedContextRunOffIt() throws Exception {
+        Context requestContext = VertxContext.createNewDuplicatedContext(vertx.getOrCreateContext());
+        AtomicReference<Boolean> ranOnDuplicatedContext = new AtomicReference<>();
+        CountDownLatch ran = new CountDownLatch(1);
+
+        requestContext.runOnContext(ignored -> broker.evaluateRulesOnWorker("devices/d1/metrics", () -> {
+            ranOnDuplicatedContext.set(VertxContext.isOnDuplicatedContext());
+            ran.countDown();
+        }));
+
+        assertTrue(ran.await(10, TimeUnit.SECONDS), "the rules ran");
+        assertFalse(ranOnDuplicatedContext.get(), "the rules ran on the request's duplicated context");
+    }
+
     @Test
     void drainedRulesReleaseCapacityWhileTheirCallerContextIsBlocked() throws Exception {
         String topic = "devices/d1/metrics";
@@ -1715,9 +1825,9 @@ class IotMqttBrokerServiceTest {
         when(iotService.get()).thenReturn(service);
         AtomicBoolean rulesRan = new AtomicBoolean();
         doAnswer(invocation -> {
-            invocation.<Executor>getArgument(6).execute(() -> rulesRan.set(true));
+            invocation.<Executor>getArgument(7).execute(() -> rulesRan.set(true));
             return null;
-        }).when(service).publish(eq(topic), any(), anyBoolean(), anyInt(), any(), any(), any());
+        }).when(service).publish(eq(topic), any(), anyBoolean(), anyInt(), any(), any(), any(), any());
         MqttEndpoint endpoint = mock(MqttEndpoint.class);
         when(endpoint.clientIdentifier()).thenReturn("reset-race");
         broker.handleEndpoint(endpoint, false);
@@ -1735,7 +1845,7 @@ class IotMqttBrokerServiceTest {
         assertTrue(eventHandled.await(10, TimeUnit.SECONDS), "the queued lifecycle event was handled");
         broker.ruleWorker.executeBlocking(() -> null, false).toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
         assertTrue(disconnected.get(), "DeleteConnection ended the session");
-        verify(service).publish(eq(topic), any(), anyBoolean(), anyInt(), any(), any(), any());
+        verify(service).publish(eq(topic), any(), anyBoolean(), anyInt(), any(), any(), any(), any());
         assertFalse(rulesRan.get(), "the event's rules, admitted before the reset, were skipped");
     }
 
@@ -2042,13 +2152,36 @@ class IotMqttBrokerServiceTest {
     }
 
     private MqttClient connectPlain(String clientId) throws MqttException {
+        return connectPlain(clientId, plainOptions());
+    }
+
+    /** A plaintext client whose Last Will is {@code gone} on {@code willTopic}. */
+    private MqttClient connectPlainWithWill(String clientId, String willTopic) throws MqttException {
+        MqttConnectOptions options = plainOptions();
+        options.setWill(willTopic, "gone".getBytes(StandardCharsets.UTF_8), 0, false);
+        return connectPlain(clientId, options);
+    }
+
+    private MqttClient connectPlain(String clientId, MqttConnectOptions options) throws MqttException {
         MqttClient client = new MqttClient("tcp://127.0.0.1:" + plainPort, clientId, new MemoryPersistence());
-        MqttConnectOptions options = new MqttConnectOptions();
-        options.setConnectionTimeout(10);
-        options.setAutomaticReconnect(false);
         client.connect(options);
         client.setTimeToWait(10_000);
         return client;
+    }
+
+    private static MqttConnectOptions plainOptions() {
+        MqttConnectOptions options = new MqttConnectOptions();
+        options.setConnectionTimeout(10);
+        options.setAutomaticReconnect(false);
+        return options;
+    }
+
+    /** The payloads recorded on one topic, as UTF-8, in publish order. */
+    private List<String> recordedOn(String topic) {
+        return recorder.recentEvents().stream()
+                .filter(event -> event.topic().equals(topic))
+                .map(event -> new String(event.payload(), StandardCharsets.UTF_8))
+                .toList();
     }
 
     private static void disconnect(MqttClient client) throws MqttException {
