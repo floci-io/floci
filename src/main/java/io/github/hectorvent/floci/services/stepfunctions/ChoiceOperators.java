@@ -467,6 +467,12 @@ public final class ChoiceOperators {
         if (p == null || p.isEmpty() || p.charAt(0) != '$') {
             return false;
         }
+        // A JSONPath workflow variable ($name, $name.field, $name[0]) is a valid reference on AWS.
+        java.util.regex.Matcher variable = java.util.regex.Pattern
+                .compile("^\\$[A-Za-z_][A-Za-z0-9_]*((?:[.\\[].*)?)$").matcher(p);
+        if (variable.matches()) {
+            return variable.group(1).isEmpty() || isReferencePath("$" + variable.group(1));
+        }
         if (p.startsWith("$$")) {
             p = "$" + p.substring(2);
         }
