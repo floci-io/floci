@@ -14,6 +14,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.POST;
 import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
@@ -32,13 +33,24 @@ public class AccessAnalyzerController {
     private final AccessAnalyzerService accessAnalyzerService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
+    private final PolicyValidationService policyValidationService;
 
     @Inject
     public AccessAnalyzerController(AccessAnalyzerService accessAnalyzerService,
-                                    RegionResolver regionResolver, ObjectMapper objectMapper) {
+                                    RegionResolver regionResolver, ObjectMapper objectMapper,
+                                    PolicyValidationService policyValidationService) {
         this.accessAnalyzerService = accessAnalyzerService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.policyValidationService = policyValidationService;
+    }
+
+    @POST
+    @Path("/policy/validation")
+    public Response validatePolicy(String body, @QueryParam("maxResults") String maxResults,
+                                    @QueryParam("nextToken") String nextToken) {
+        return Response.ok(policyValidationService.validate(readTree(body),
+                Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken)).build();
     }
 
     @GET

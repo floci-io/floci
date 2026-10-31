@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsProtocolClaimFilter;
 import io.github.hectorvent.floci.core.common.AwsQueryServiceResolver;
 import io.github.hectorvent.floci.core.common.ProtocolClaim;
 import io.github.hectorvent.floci.core.common.WireProtocol;
+import io.github.hectorvent.floci.services.accessanalyzer.AccessAnalyzerController;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbPartiQLParser;
 import io.github.hectorvent.floci.services.eks.EksController;
 import io.github.hectorvent.floci.services.route53.Route53Controller;
@@ -642,6 +643,12 @@ public class IamActionRegistry {
 
     /** The serving method identifies these actions even when path encoding or matrix parameters vary. */
     public String resolveMatchedRoute(String credentialScope, ResourceInfo resourceInfo) {
+        if ("access-analyzer".equals(credentialScope) && resourceInfo != null
+                && AccessAnalyzerController.class.equals(resourceInfo.getResourceClass())
+                && resourceInfo.getResourceMethod() != null
+                && "validatePolicy".equals(resourceInfo.getResourceMethod().getName())) {
+            return "access-analyzer:ValidatePolicy";
+        }
         if ("route53".equals(credentialScope) && resourceInfo != null
                 && Route53Controller.class.equals(resourceInfo.getResourceClass())
                 && resourceInfo.getResourceMethod() != null) {
