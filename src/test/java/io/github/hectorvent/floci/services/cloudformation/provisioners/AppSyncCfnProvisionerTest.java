@@ -5,8 +5,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
+import io.github.hectorvent.floci.services.appsync.AppSyncServiceFixture;
 import io.github.hectorvent.floci.services.appsync.model.ApiKey;
+import io.github.hectorvent.floci.services.appsync.model.AuthenticationType;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
+import io.github.hectorvent.floci.services.appsync.model.DataSourceType;
 import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import io.github.hectorvent.floci.services.appsync.model.Resolver;
@@ -19,6 +22,8 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -971,6 +976,417 @@ class AppSyncCfnProvisionerTest {
         ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
         verify(appSync).updateApiKey(eq(API_ID), eq("da2-key"), captor.capture());
         assertTrue(updateRequest(captor).isEmpty());
+    }
+
+    // ── Rollback of an in-place update ───────────────────────────────────────
+
+    private static final String SNAPSHOT = CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR;
+
+    /** Every request the mock received on an update method, oldest first. */
+    @SuppressWarnings("unchecked")
+    private static List<Map<String, Object>> requests(ArgumentCaptor<Map<String, Object>> captor) {
+        return captor.getAllValues();
+    }
+
+    @Test
+    void graphqlApiRollbackPutsBackWhatTheUpdateChangedAndCleared() throws Exception {
+        GraphqlApi before = api();
+        before.setAuthenticationType(AuthenticationType.API_KEY);
+        before.setOwnerContact("team");
+        before.setXrayEnabled(true);
+        before.setTags(Map.of("env", "dev"));
+        before.setUserPoolConfig(Map.of("awsRegion", "eu-west-1"));
+        before.setApiType("MERGED");
+        before.setVisibility("PRIVATE");
+        when(appSync.getGraphqlApi(API_ID)).thenReturn(before);
+        when(appSync.getEnvironmentVariables(API_ID)).thenReturn(Map.of("STAGE", "dev"));
+        when(appSync.updateGraphqlApi(eq(API_ID), any(), eq("eu-west-1"))).thenReturn(api());
+        StackResource r = resource("AWS::AppSync::GraphQLApi", "GraphQlApi");
+
+        provisioner.provision(r, mapper.readTree(
+                "{\"Name\":\"renamed-api\",\"AuthenticationType\":\"AWS_IAM\","
+                        + "\"ApiType\":\"GRAPHQL\",\"Visibility\":\"GLOBAL\","
+                        + "\"EnvironmentVariables\":{\"STAGE\":\"prod\"}}"),
+                updateCtx(API_ID, "{\"Name\":\"account-api\",\"AuthenticationType\":\"API_KEY\","
+                        + "\"OwnerContact\":\"team\",\"UserPoolConfig\":{\"AwsRegion\":\"eu-west-1\"}}"));
+        assertTrue(r.getAttributes().containsKey(SNAPSHOT));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync, Mockito.times(2)).updateGraphqlApi(eq(API_ID), captor.capture(), eq("eu-west-1"));
+        Map<String, Object> restore = requests(captor).get(1);
+        assertEquals("account-api", restore.get("name"));
+        assertEquals("API_KEY", restore.get("authenticationType"));
+        assertEquals("team", restore.get("ownerContact"));
+        assertEquals(Map.of("awsRegion", "eu-west-1"), restore.get("userPoolConfig"));
+        assertEquals(true, restore.get("xrayEnabled"));
+        assertEquals(Map.of("env", "dev"), restore.get("tags"));
+        // The service ignores a null list, so an API that had none gets an empty one back.
+        assertEquals(List.of(), restore.get("additionalAuthenticationProviders"));
+        // A member the API never had is replayed as a clear.
+        assertTrue(restore.containsKey("introspectionConfig"));
+        assertNull(restore.get("introspectionConfig"));
+        // ApiType and Visibility are applied by the update, so the restore puts them back too.
+        assertEquals("MERGED", restore.get("apiType"));
+        assertEquals("PRIVATE", restore.get("visibility"));
+        verify(appSync).putEnvironmentVariables(API_ID, Map.of("STAGE", "dev"));
+        assertFalse(r.getAttributes().containsKey(SNAPSHOT));
+    }
+
+    @Test
+    void dataSourceRollbackPutsBackWhatTheUpdateChangedAndCleared() throws Exception {
+        DataSource before = new DataSource();
+        before.setName("accountDB");
+        before.setDataSourceArn("arn:ds");
+        before.setType(DataSourceType.AMAZON_DYNAMODB);
+        before.setDescription("old");
+        before.setDynamodbConfig(Map.of("tableName", "t"));
+        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(before);
+        when(appSync.updateDataSource(eq(API_ID), eq("accountDB"), any())).thenReturn(before);
+        StackResource r = resource("AWS::AppSync::DataSource", "GraphQlDsAccountDb");
+        r.getAttributes().put("ApiId", API_ID);
+        r.getAttributes().put("Name", "accountDB");
+
+        provisioner.provision(r, mapper.readTree(
+                "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"accountDB\",\"Type\":\"HTTP\","
+                        + "\"HttpConfig\":{\"Endpoint\":\"https://example.com\"}}"),
+                updateCtx("arn:ds", "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"accountDB\","
+                        + "\"Type\":\"AMAZON_DYNAMODB\",\"Description\":\"old\","
+                        + "\"DynamoDBConfig\":{\"TableName\":\"t\"}}"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync, Mockito.times(2)).updateDataSource(eq(API_ID), eq("accountDB"), captor.capture());
+        Map<String, Object> restore = requests(captor).get(1);
+        assertEquals("AMAZON_DYNAMODB", restore.get("type"));
+        assertEquals("old", restore.get("description"));
+        assertEquals(Map.of("tableName", "t"), restore.get("dynamodbConfig"));
+        // The config the update added is cleared again.
+        assertTrue(restore.containsKey("httpConfig"));
+        assertNull(restore.get("httpConfig"));
+        assertFalse(r.getAttributes().containsKey(SNAPSHOT));
+    }
+
+    @Test
+    void functionRollbackPutsBackWhatTheUpdateChangedAndCleared() throws Exception {
+        FunctionConfiguration before = new FunctionConfiguration();
+        before.setFunctionId("fn1");
+        before.setFunctionArn("arn:fn");
+        before.setName("old-name");
+        before.setDataSourceName("accountDB");
+        before.setDescription("old");
+        before.setFunctionVersion("2018-05-29");
+        before.setCode("export function request() {}");
+        when(appSync.getFunction(API_ID, "fn1")).thenReturn(before);
+        FunctionConfiguration after = new FunctionConfiguration();
+        after.setFunctionId("fn1");
+        after.setFunctionArn("arn:fn");
+        after.setName("new-name");
+        after.setDataSourceName("otherDB");
+        when(appSync.updateFunction(eq(API_ID), eq("fn1"), any())).thenReturn(after);
+        StackResource r = resource("AWS::AppSync::FunctionConfiguration", "GraphQlFn");
+        r.getAttributes().put("ApiId", API_ID);
+        r.getAttributes().put("FunctionId", "fn1");
+
+        provisioner.provision(r, mapper.readTree(
+                "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"new-name\",\"DataSourceName\":\"otherDB\"}"),
+                updateCtx("arn:fn", "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"old-name\","
+                        + "\"DataSourceName\":\"accountDB\",\"Description\":\"old\","
+                        + "\"Code\":\"export function request() {}\"}"));
+        assertEquals("new-name", r.getAttributes().get("Name"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync, Mockito.times(2)).updateFunction(eq(API_ID), eq("fn1"), captor.capture());
+        Map<String, Object> restore = requests(captor).get(1);
+        assertEquals("old-name", restore.get("name"));
+        assertEquals("accountDB", restore.get("dataSourceName"));
+        assertEquals("old", restore.get("description"));
+        assertEquals("export function request() {}", restore.get("code"));
+        assertEquals("2018-05-29", restore.get("functionVersion"));
+        // The engine keeps the attempted resource, so its attributes name the restored function.
+        assertEquals("old-name", r.getAttributes().get("Name"));
+        assertEquals("accountDB", r.getAttributes().get("DataSourceName"));
+        assertFalse(r.getAttributes().containsKey(SNAPSHOT));
+    }
+
+    @Test
+    void functionRollbackDropsADataSourceNameTheFunctionDidNotHave() throws Exception {
+        FunctionConfiguration before = new FunctionConfiguration();
+        before.setFunctionId("fn1");
+        before.setFunctionArn("arn:fn");
+        before.setName("fn-name");
+        when(appSync.getFunction(API_ID, "fn1")).thenReturn(before);
+        FunctionConfiguration after = new FunctionConfiguration();
+        after.setFunctionId("fn1");
+        after.setFunctionArn("arn:fn");
+        after.setName("fn-name");
+        after.setDataSourceName("otherDB");
+        when(appSync.updateFunction(eq(API_ID), eq("fn1"), any())).thenReturn(after);
+        StackResource r = resource("AWS::AppSync::FunctionConfiguration", "GraphQlFn");
+        r.getAttributes().put("ApiId", API_ID);
+        r.getAttributes().put("FunctionId", "fn1");
+
+        provisioner.provision(r, mapper.readTree(
+                "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"fn-name\",\"DataSourceName\":\"otherDB\"}"),
+                updateCtx("arn:fn", "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"fn-name\"}"));
+        assertEquals("otherDB", r.getAttributes().get("DataSourceName"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertFalse(r.getAttributes().containsKey("DataSourceName"));
+    }
+
+    @Test
+    void resolverRollbackPutsBackWhatTheUpdateChangedAndCleared() throws Exception {
+        Resolver before = new Resolver();
+        before.setApiId(API_ID);
+        before.setTypeName("Query");
+        before.setFieldName("getMessages");
+        before.setKind(ResolverKind.UNIT);
+        before.setDataSourceName("accountDB");
+        before.setRequestMappingTemplate("old request");
+        before.setResponseMappingTemplate("old response");
+        when(appSync.getResolver(API_ID, "Query", "getMessages")).thenReturn(before);
+        Resolver after = new Resolver();
+        after.setResolverArn("arn:resolver");
+        when(appSync.updateResolver(eq(API_ID), eq("Query"), eq("getMessages"), any())).thenReturn(after);
+        StackResource r = resource("AWS::AppSync::Resolver", "GraphQlResolver");
+        r.getAttributes().put("ApiId", API_ID);
+        r.getAttributes().put("TypeName", "Query");
+        r.getAttributes().put("FieldName", "getMessages");
+        String declared = "{\"ApiId\":\"" + API_ID + "\",\"TypeName\":\"Query\",\"FieldName\":\"getMessages\","
+                + "\"DataSourceName\":\"accountDB\",\"RequestMappingTemplate\":\"old request\","
+                + "\"ResponseMappingTemplate\":\"old response\"}";
+
+        provisioner.provision(r, mapper.readTree("{\"ApiId\":\"" + API_ID + "\",\"TypeName\":\"Query\","
+                        + "\"FieldName\":\"getMessages\",\"DataSourceName\":\"accountDB\","
+                        + "\"RequestMappingTemplate\":\"new request\"}"),
+                updateCtx("arn:resolver", declared));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync, Mockito.times(2)).updateResolver(eq(API_ID), eq("Query"), eq("getMessages"),
+                captor.capture());
+        Map<String, Object> restore = requests(captor).get(1);
+        assertEquals("old request", restore.get("requestMappingTemplate"));
+        assertEquals("old response", restore.get("responseMappingTemplate"));
+        assertEquals("UNIT", restore.get("kind"));
+        assertEquals("accountDB", restore.get("dataSourceName"));
+        // A member the resolver never carried is replayed as a clear.
+        assertTrue(restore.containsKey("pipelineConfig"));
+        assertNull(restore.get("pipelineConfig"));
+        assertFalse(r.getAttributes().containsKey(SNAPSHOT));
+    }
+
+    @Test
+    void apiKeyRollbackPutsBackADroppedDescriptionAndSkipsAnExpiryThatDidNotMove() throws Exception {
+        ApiKey before = new ApiKey();
+        before.setId("da2-key");
+        before.setDescription("old");
+        before.setExpires(1_900_000_000L);
+        when(appSync.getApiKey(API_ID, "da2-key")).thenReturn(before);
+        when(appSync.updateApiKey(eq(API_ID), eq("da2-key"), any())).thenReturn(before);
+        StackResource r = resource("AWS::AppSync::ApiKey", "GraphQlApiKey");
+        r.getAttributes().put("ApiId", API_ID);
+
+        provisioner.provision(r, mapper.readTree("{\"ApiId\":\"" + API_ID + "\",\"Expires\":1900000000}"),
+                updateCtx("da2-key", "{\"ApiId\":\"" + API_ID + "\",\"Description\":\"old\","
+                        + "\"Expires\":1900000000}"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync, Mockito.times(2)).updateApiKey(eq(API_ID), eq("da2-key"), captor.capture());
+        Map<String, Object> restore = requests(captor).get(1);
+        assertEquals("old", restore.get("description"));
+        // The store still holds the prior expiry, so sending it again could only trip the service's bounds.
+        assertFalse(restore.containsKey("expires"));
+    }
+
+    @Test
+    void apiKeyRollbackPutsBackAnExpiryTheUpdateMoved() throws Exception {
+        ApiKey before = new ApiKey();
+        before.setId("da2-key");
+        before.setExpires(1_900_000_000L);
+        ApiKey moved = new ApiKey();
+        moved.setId("da2-key");
+        moved.setExpires(1_950_000_000L);
+        when(appSync.getApiKey(API_ID, "da2-key")).thenReturn(before, moved);
+        when(appSync.updateApiKey(eq(API_ID), eq("da2-key"), any())).thenReturn(moved);
+        StackResource r = resource("AWS::AppSync::ApiKey", "GraphQlApiKey");
+        r.getAttributes().put("ApiId", API_ID);
+
+        provisioner.provision(r, mapper.readTree("{\"ApiId\":\"" + API_ID + "\",\"Expires\":1950000000}"),
+                updateCtx("da2-key", "{\"ApiId\":\"" + API_ID + "\",\"Expires\":1900000000}"));
+        provisioner.rollbackUpdate(r);
+
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync, Mockito.times(2)).updateApiKey(eq(API_ID), eq("da2-key"), captor.capture());
+        assertEquals(1_900_000_000L, ((Number) requests(captor).get(1).get("expires")).longValue());
+    }
+
+    @Test
+    void aRollbackThatTheServiceRefusesLeavesTheApiKeyAsTheUpdateLeftItAndKeepsTheSnapshot() throws Exception {
+        Instant start = Instant.parse("2026-01-01T00:00:00Z");
+        AppSyncServiceFixture.MutableClock clock = new AppSyncServiceFixture.MutableClock(start);
+        AppSyncService real = AppSyncServiceFixture.create(clock);
+        AppSyncCfnProvisioner onRealService = new AppSyncCfnProvisioner(real);
+        GraphqlApi created = real.createGraphqlApi(Map.of("name", "keys", "authenticationType", "API_KEY"), "eu-west-1");
+        long soonExpiry = start.getEpochSecond() + Duration.ofHours(25).getSeconds();
+        long laterExpiry = start.getEpochSecond() + Duration.ofDays(100).getSeconds();
+        ApiKey key = real.createApiKey(created.getApiId(), Map.of("description", "before", "expires", soonExpiry));
+        StackResource r = resource("AWS::AppSync::ApiKey", "GraphQlApiKey");
+        r.getAttributes().put("ApiId", created.getApiId());
+
+        onRealService.provision(r, mapper.readTree("{\"ApiId\":\"" + created.getApiId()
+                        + "\",\"Description\":\"after\",\"Expires\":" + laterExpiry + "}"),
+                updateCtx(key.getId(), "{\"ApiId\":\"" + created.getApiId() + "\",\"Description\":\"before\","
+                        + "\"Expires\":" + soonExpiry + "}"));
+        // Three hours on, the prior expiry is under a day away, which the service no longer accepts.
+        clock.set(start.plus(Duration.ofHours(3)));
+
+        AwsException refused = assertThrows(AwsException.class, () -> onRealService.rollbackUpdate(r));
+
+        assertEquals("ApiKeyValidityOutOfBoundsException", refused.getErrorCode());
+        ApiKey stored = real.getApiKey(created.getApiId(), key.getId());
+        assertEquals("after", stored.getDescription());
+        assertEquals(laterExpiry - laterExpiry % 3600, stored.getExpires());
+        assertTrue(r.getAttributes().containsKey(SNAPSHOT));
+    }
+
+    @Test
+    void anUpdateThatFailsPartWayPutsTheEntityBackBeforeItFails() throws Exception {
+        DataSource before = new DataSource();
+        before.setName("accountDB");
+        before.setType(DataSourceType.AMAZON_DYNAMODB);
+        before.setDescription("old");
+        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(before);
+        when(appSync.updateDataSource(eq(API_ID), eq("accountDB"), any()))
+                .thenThrow(new AwsException("BadRequestException", "refused", 400))
+                .thenReturn(before);
+        StackResource r = resource("AWS::AppSync::DataSource", "GraphQlDsAccountDb");
+        r.getAttributes().put("ApiId", API_ID);
+        r.getAttributes().put("Name", "accountDB");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, mapper.readTree(
+                "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"accountDB\",\"Type\":\"HTTP\"}"),
+                updateCtx("arn:ds", "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"accountDB\"}")));
+
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync, Mockito.times(2)).updateDataSource(eq(API_ID), eq("accountDB"), captor.capture());
+        assertEquals("AMAZON_DYNAMODB", requests(captor).get(1).get("type"));
+        assertEquals("old", requests(captor).get(1).get("description"));
+        assertFalse(r.getAttributes().containsKey(SNAPSHOT));
+        assertFalse(r.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    @Test
+    void anUndoThatFailsKeepsTheSnapshotAndReportsWhyForAContinueUpdateRollback() throws Exception {
+        DataSource before = new DataSource();
+        before.setName("accountDB");
+        before.setType(DataSourceType.AMAZON_DYNAMODB);
+        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(before);
+        when(appSync.updateDataSource(eq(API_ID), eq("accountDB"), any()))
+                .thenThrow(new AwsException("BadRequestException", "refused", 400))
+                .thenThrow(new AwsException("ConcurrentModificationException", "busy", 409));
+        StackResource attempted = resource("AWS::AppSync::DataSource", "GraphQlDsAccountDb");
+        attempted.getAttributes().put("ApiId", API_ID);
+        attempted.getAttributes().put("Name", "accountDB");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(attempted, mapper.readTree(
+                "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"accountDB\",\"Type\":\"HTTP\"}"),
+                updateCtx("arn:ds", "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"accountDB\"}")));
+
+        assertTrue(attempted.getAttributes().containsKey(SNAPSHOT));
+        assertTrue(attempted.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR).contains("busy"));
+        StackResource previous = resource("AWS::AppSync::DataSource", "GraphQlDsAccountDb");
+        provisioner.mergeFailedUpdateResourceTracking(previous, attempted);
+        assertEquals(attempted.getAttributes().get(SNAPSHOT), previous.getAttributes().get(SNAPSHOT));
+    }
+
+    @Test
+    void aRestoreThatFailsKeepsTheSnapshotForTheNextAttempt() throws Exception {
+        DataSource before = new DataSource();
+        before.setName("accountDB");
+        before.setType(DataSourceType.AMAZON_DYNAMODB);
+        when(appSync.getDataSource(API_ID, "accountDB")).thenReturn(before);
+        when(appSync.updateDataSource(eq(API_ID), eq("accountDB"), any()))
+                .thenReturn(before)
+                .thenThrow(new AwsException("ConcurrentModificationException", "busy", 409))
+                .thenReturn(before);
+        StackResource r = resource("AWS::AppSync::DataSource", "GraphQlDsAccountDb");
+        r.getAttributes().put("ApiId", API_ID);
+        r.getAttributes().put("Name", "accountDB");
+        provisioner.provision(r, mapper.readTree(
+                "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"accountDB\",\"Type\":\"HTTP\"}"),
+                updateCtx("arn:ds", "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"accountDB\"}"));
+
+        assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+        assertTrue(r.getAttributes().containsKey(SNAPSHOT));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+        assertFalse(r.getAttributes().containsKey(SNAPSHOT));
+    }
+
+    @Test
+    void aResourceTheFailedUpdateCreatedHasNothingToRestore() throws Exception {
+        DataSource created = new DataSource();
+        created.setName("accountDB");
+        created.setDataSourceArn("arn:ds");
+        when(appSync.createDataSource(eq(API_ID), any(), eq("eu-west-1"))).thenReturn(created);
+        StackResource r = resource("AWS::AppSync::DataSource", "GraphQlDsAccountDb");
+
+        provisioner.provision(r, mapper.readTree(
+                "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"accountDB\",\"Type\":\"HTTP\"}"), ctx());
+
+        // The engine deletes it from the recorded attributes; the provisioner answers no restore.
+        assertFalse(r.getAttributes().containsKey(SNAPSHOT));
+        assertFalse(provisioner.rollbackUpdate(r));
+        verify(appSync, never()).updateDataSource(anyString(), anyString(), any());
+    }
+
+    @Test
+    void aReplacementLeavesNoSnapshotAndKeepsTheUnsupportedAnswer() throws Exception {
+        ApiKey created = new ApiKey();
+        created.setId("da2-new");
+        when(appSync.createApiKey(eq("other-api"), any())).thenReturn(created);
+        StackResource r = resource("AWS::AppSync::ApiKey", "GraphQlApiKey");
+        r.getAttributes().put("ApiId", API_ID);
+
+        provisioner.provision(r, mapper.readTree("{\"ApiId\":\"other-api\"}"), updateCtx("da2-key"));
+
+        assertFalse(r.getAttributes().containsKey(SNAPSHOT));
+        assertFalse(provisioner.rollbackUpdate(r));
+    }
+
+    @Test
+    void aSnapshotAnEarlierUpdateLeftBehindIsDroppedWhenTheNextProvisionStarts() throws Exception {
+        ApiKey created = new ApiKey();
+        created.setId("da2-new");
+        when(appSync.createApiKey(eq(API_ID), any())).thenReturn(created);
+        StackResource r = resource("AWS::AppSync::ApiKey", "GraphQlApiKey");
+        r.getAttributes().put(SNAPSHOT, "{}");
+
+        provisioner.provision(r, mapper.readTree("{\"ApiId\":\"" + API_ID + "\"}"), ctx());
+
+        assertFalse(r.getAttributes().containsKey(SNAPSHOT));
+    }
+
+    @Test
+    void aCommittedUpdateDropsItsSnapshotAndOwesNoCleanup() {
+        StackResource r = resource("AWS::AppSync::ApiKey", "GraphQlApiKey");
+        r.getAttributes().put(SNAPSHOT, "{}");
+
+        assertFalse(provisioner.completeUpdate(r).applicable());
+        assertFalse(r.getAttributes().containsKey(SNAPSHOT));
+        r.getAttributes().put(SNAPSHOT, "{}");
+        provisioner.clearUpdate(r);
+        assertFalse(r.getAttributes().containsKey(SNAPSHOT));
     }
 
     // ── Deletes ──────────────────────────────────────────────────────────────
