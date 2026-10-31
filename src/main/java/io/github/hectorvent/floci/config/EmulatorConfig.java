@@ -1107,7 +1107,8 @@ public interface EmulatorConfig {
 
         /**
          * {@code immediate} follows the job run states without running anything; {@code docker} runs
-         * each Spark job run's {@code spark-submit} in a container of the release's EMR Serverless image.
+         * each Spark job run's {@code spark-submit} in a container of the application's custom image, or
+         * else of the release's EMR Serverless image.
          */
         @WithDefault("immediate")
         String runnerMode();
@@ -1115,9 +1116,10 @@ public interface EmulatorConfig {
         Optional<String> dockerNetwork();
 
         /**
-         * The image a {@code docker} job run uses, with {@code %s} standing for the application's
-         * release label, for example "registry.internal/emr-serverless/spark/%s:20250425". If omitted,
-         * Floci uses the release's public image on Amazon ECR Public.
+         * The image a {@code docker} job run uses when its application names no custom image, with
+         * {@code %s} standing for the application's release label, for example
+         * "registry.internal/emr-serverless/spark/%s:20250425". If omitted, Floci uses the release's public
+         * image on Amazon ECR Public.
          */
         Optional<String> imageTemplate();
 
@@ -1914,6 +1916,12 @@ public interface EmulatorConfig {
 
         @WithDefault("60")
         int snapshotExpirationSweepIntervalSeconds();
+
+        @WithDefault("true")
+        boolean snapshotCopyEnabled();
+
+        @WithDefault("60")
+        int snapshotCopySweepIntervalSeconds();
 
         @WithDefault("true")
         boolean scheduledActionsEnabled();

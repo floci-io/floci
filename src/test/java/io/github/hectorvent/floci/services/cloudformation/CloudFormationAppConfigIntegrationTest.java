@@ -80,7 +80,7 @@ class CloudFormationAppConfigIntegrationTest {
         appconfig().get(profilePath).then().statusCode(200)
                 .body("Name", equalTo("settings"), "LocationUri", equalTo("hosted"), "Type", equalTo("AWS.Freeform"));
         appconfig().get("/applications/" + app + "/configurationprofiles/" + physicalIds.get("Untyped"))
-                .then().statusCode(200).body("Type", nullValue());
+                .then().statusCode(200).body("Type", equalTo("AWS.Freeform"));
         appconfig().get("/deploymentstrategies/" + strategy).then().statusCode(200)
                 .body("Name", equalTo("gradual"), "DeploymentDurationInMinutes", equalTo(0),
                         "FinalBakeTimeInMinutes", equalTo(0), "GrowthFactor", equalTo(100f),

@@ -16,6 +16,7 @@ on:
     paths:
       - 'src/main/java/**'
       - 'src/main/resources/aws/**'
+      - 'src/main/resources/eks/addon-versions.json'
       - 'tools/partition/**'
       - 'tools/java_sources.py'
       - 'tools/rename/**'
@@ -33,6 +34,7 @@ on:
     paths:
       - 'src/main/java/**'
       - 'src/main/resources/aws/**'
+      - 'src/main/resources/eks/addon-versions.json'
       - 'tools/partition/**'
       - 'tools/java_sources.py'
       - 'tools/rename/**'

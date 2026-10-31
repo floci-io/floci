@@ -37,7 +37,8 @@ public class AthenaJsonHandler {
         return switch (action) {
             case "StartQueryExecution" -> {
                 String query = request.get("QueryString").asText();
-                String workGroup = request.has("WorkGroup") ? request.get("WorkGroup").asText() : "primary";
+                String named = text(request, "WorkGroup");
+                String workGroup = named != null ? named : "primary";
 
                 QueryExecutionContext context = null;
                 if (request.has("QueryExecutionContext")) {
@@ -83,7 +84,8 @@ public class AthenaJsonHandler {
                 yield Response.ok(Map.of()).build();
             }
             case "GetWorkGroup" -> {
-                String name = request.has("WorkGroup") ? request.get("WorkGroup").asText() : "primary";
+                String named = text(request, "WorkGroup");
+                String name = named != null ? named : "primary";
                 yield Response.ok(Map.of("WorkGroup", athenaService.getWorkGroup(name, region))).build();
             }
             case "ListWorkGroups" -> {

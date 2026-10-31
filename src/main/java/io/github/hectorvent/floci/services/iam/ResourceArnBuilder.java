@@ -78,6 +78,10 @@ public class ResourceArnBuilder {
     /** The segment a tagging route names before the ARN it tags, which it captures whole, slashes included. */
     private static final String API_GATEWAY_TAGS_SEGMENT = "tags";
 
+    /** The SSM actions whose {@code ResourceArn} names the parameter they act on, in place of {@code Name}. */
+    private static final Set<String> SSM_RESOURCE_POLICY_ACTIONS =
+            Set.of("PutResourcePolicy", "GetResourcePolicies", "DeleteResourcePolicy");
+
     private final ObjectMapper objectMapper;
     /**
      * Looked up lazily through a provider: this builder is constructed by the enforcement filter,
@@ -199,6 +203,10 @@ public class ResourceArnBuilder {
             case "dsql"           -> List.of(buildDsqlArn(path, ctx, region, accountId, partition));
             case "eks"            -> List.of(buildEksArn(path, ctx, region, accountId));
             case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
+            case "route53"        -> "route53:GetReusableDelegationSet".equals(operation)
+                    || "route53:DeleteReusableDelegationSet".equals(operation)
+                    ? List.of(buildRoute53DelegationSetArn(ctx, partition))
+                    : namedResources(credentialScope, operation, ctx, region, accountId, partition);
             default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
         };
     }
@@ -227,6 +235,17 @@ public class ResourceArnBuilder {
             }
         }
         return null;
+    }
+
+    private String buildRoute53DelegationSetArn(ContainerRequestContext ctx, String partition) {
+        String id = ctx.getUriInfo().getPathParameters().getFirst("Id");
+        if (id == null) {
+            return "*";
+        }
+        if (id.startsWith("/delegationset/")) {
+            id = id.substring(15);
+        }
+        return AwsArnUtils.Arn.global(partition, "route53", "", "delegationset/" + id).toString();
     }
 
     private String buildResourceGroupArn(ContainerRequestContext ctx, String region, String accountId) {
@@ -1759,6 +1778,14 @@ public class ResourceArnBuilder {
     private String buildSsmArn(ContainerRequestContext ctx, String region, String accountId) {
         JsonNode json = readJsonBody(ctx);
         if (json != null && json.isObject()) {
+            String operation = IamActionRegistry.targetOperation(ctx);
+            if (operation != null && SSM_RESOURCE_POLICY_ACTIONS.contains(operation)
+                    && json.hasNonNull("ResourceArn")) {
+                String resourceArn = json.get("ResourceArn").asText().trim();
+                if (AwsArnUtils.isArnFor(resourceArn, "ssm")) {
+                    return resourceArn;
+                }
+            }
             if (json.hasNonNull("Name")) {
                 String name = json.get("Name").asText().trim();
                 if (!name.isEmpty()) {

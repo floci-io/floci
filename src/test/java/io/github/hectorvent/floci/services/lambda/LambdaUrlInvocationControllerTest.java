@@ -20,6 +20,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -251,6 +252,25 @@ class LambdaUrlInvocationControllerTest {
     }
 
     @Test
+    void deleteRequestBodyIsPassedToTheFunction() {
+        byte[] body = "{\"ids\":[\"a\",\"b\"]}".getBytes(StandardCharsets.UTF_8);
+        JsonNode eventNode = eventFor(controller -> controller.handleDelete("url-id", "items",
+                headersWith("application/json"), uriInfoFor("http://localhost/lambda-url/url-id/items"), body));
+
+        assertEquals("DELETE", eventNode.get("requestContext").get("http").get("method").asText());
+        assertFalse(eventNode.get("isBase64Encoded").asBoolean());
+        assertEquals("{\"ids\":[\"a\",\"b\"]}", eventNode.get("body").asText());
+    }
+
+    @Test
+    void deleteWithoutBodyHasNullBody() {
+        JsonNode eventNode = eventFor(controller -> controller.handleDelete("url-id", "items",
+                headersWith("application/json"), uriInfoFor("http://localhost/lambda-url/url-id/items"), new byte[0]));
+
+        assertTrue(eventNode.get("body").isNull());
+    }
+
+    @Test
     void responseCookiesArrayBecomesMultipleSetCookieHeaders() {
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("my-function");
@@ -301,7 +321,7 @@ class LambdaUrlInvocationControllerTest {
         assertNull(response.getEntity());
     }
 
-    private JsonNode eventFor(HttpHeaders headers) {
+    private JsonNode eventFor(Function<LambdaUrlInvocationController, Response> call) {
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("my-function");
         fn.setFunctionArn(FUNCTION_ARN);
@@ -315,8 +335,7 @@ class LambdaUrlInvocationControllerTest {
         when(lambdaService.invokeArn(eq(FUNCTION_ARN), any(byte[].class), eq(InvocationType.RequestResponse)))
                 .thenReturn(invokeResult);
 
-        newController(lambdaService).handleGet("url-id", "", headers,
-                uriInfoFor("http://localhost/lambda-url/url-id/"));
+        call.apply(newController(lambdaService));
 
         ArgumentCaptor<byte[]> event = ArgumentCaptor.forClass(byte[].class);
         verify(lambdaService).invokeArn(eq(FUNCTION_ARN), event.capture(), eq(InvocationType.RequestResponse));
@@ -330,7 +349,8 @@ class LambdaUrlInvocationControllerTest {
         headers.getRequestHeaders().add("cookie", " c=3 ");
         headers.getRequestHeaders().putSingle("x-other", "v");
 
-        JsonNode eventNode = eventFor(headers);
+        JsonNode eventNode = eventFor(controller -> controller.handleGet("url-id", "", headers,
+                uriInfoFor("http://localhost/lambda-url/url-id/")));
 
         assertEquals(3, eventNode.get("cookies").size());
         assertEquals("a=1", eventNode.get("cookies").get(0).asText());
@@ -342,7 +362,8 @@ class LambdaUrlInvocationControllerTest {
 
     @Test
     void requestWithoutCookiesOmitsCookiesField() {
-        JsonNode eventNode = eventFor(headersWith(null));
+        JsonNode eventNode = eventFor(controller -> controller.handleGet("url-id", "", headersWith(null),
+                uriInfoFor("http://localhost/lambda-url/url-id/")));
 
         assertFalse(eventNode.has("cookies"));
     }

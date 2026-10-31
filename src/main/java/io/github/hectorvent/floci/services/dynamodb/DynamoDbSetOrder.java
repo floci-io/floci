@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.dynamodb;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
@@ -20,8 +19,6 @@ import java.util.function.Function;
  */
 final class DynamoDbSetOrder {
 
-    private static final List<String> SET_TYPES = List.of("SS", "NS", "BS");
-
     private record Keyed<K>(JsonNode member, K key) {}
 
     private DynamoDbSetOrder() {}
@@ -36,33 +33,6 @@ final class DynamoDbSetOrder {
             case "BS" -> sortedBy(members, DynamoDbSetOrder::bytesOf, Arrays::compareUnsigned);
             default -> sortedBy(members, DynamoDbSetOrder::utf8Of, Arrays::compareUnsigned);
         };
-    }
-
-    /** Reorders every set in the attributes in place, through maps and lists. */
-    static void sortSetsIn(JsonNode attributes) {
-        if (attributes == null || !attributes.isObject()) {
-            return;
-        }
-        for (JsonNode value : attributes) {
-            sortSetsInValue(value);
-        }
-    }
-
-    private static void sortSetsInValue(JsonNode value) {
-        if (!(value instanceof ObjectNode object)) {
-            return;
-        }
-        for (String setType : SET_TYPES) {
-            if (object.has(setType)) {
-                object.set(setType, sorted(setType, object.get(setType)));
-                return;
-            }
-        }
-        if (object.has("M")) {
-            sortSetsIn(object.get("M"));
-        } else if (object.has("L")) {
-            object.get("L").forEach(DynamoDbSetOrder::sortSetsInValue);
-        }
     }
 
     private static <K> ArrayNode sortedBy(JsonNode members, Function<String, K> key, Comparator<K> order) {

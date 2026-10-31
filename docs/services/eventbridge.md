@@ -114,6 +114,11 @@ suffix when present. These checks do not verify resource existence or permission
 
 EventBridge includes a default event bus (`default`) that accepts events from AWS services. Custom buses are for your own application events.
 
+Secrets Manager `PutSecretValue` and `UpdateSecret` calls publish `AWS API Call via CloudTrail`
+events here when a logging CloudTrail trail selects management writes. See
+[secret write events](secrets-manager.md#secret-write-events) for the required trail configuration
+and a pattern matching `detail.responseElements.arn`.
+
 ```bash
 # List rules on the default bus
 aws events list-rules --endpoint-url $AWS_ENDPOINT_URL
@@ -146,6 +151,40 @@ full event as the default input, plus `Input`, `InputPath`, and `InputTransforme
 the state machine from the account and region in its ARN.
 
 State machine aliases and versions are not supported as EventBridge targets.
+
+## Redshift Data API Targets
+
+A matching rule can submit one SQL statement to the Redshift Data API for a provisioned cluster, or
+multiple statements as one batch. A Redshift Serverless workgroup ARN is also supported. Configure
+the database and SQL in `RedshiftDataParameters`; `WithEvent` publishes the statement's terminal
+status event through Redshift Data API's existing EventBridge integration.
+
+```bash
+aws events put-targets \
+  --rule refresh-warehouse \
+  --targets '[{
+    "Id": "refresh-redshift",
+    "Arn": "arn:aws:redshift:us-east-1:000000000000:cluster:warehouse",
+    "RoleArn": "arn:aws:iam::000000000000:role/EventBridgeRedshiftRole",
+    "RedshiftDataParameters": {
+      "Database": "dev",
+      "DbUser": "admin",
+      "Sql": "refresh materialized view daily_totals",
+      "StatementName": "refresh-warehouse"
+    }
+  }]' \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+`Sqls` selects `BatchExecuteStatement`; otherwise the target submits `Sql` with
+`ExecuteStatement`. `SecretManagerArn` maps to the Data API's `SecretArn`. The target's ARN provides
+the region used for execution; statements run in the rule's account. The stored `RoleArn` is passed
+as the Data API principal; Floci does not assume the role or evaluate its IAM policies.
+
+String parameters, including entries in `Sqls`, can be complete JSONPath references such as
+`$.detail.database`, `$.detail.query` or `$.detail.queries[0]`. Paths resolve against the original event, before
+`Input`, `InputPath` or `InputTransformer`; embedded paths inside SQL text are left unchanged.
+Dispatch is rejected when the `redshift-data` service is disabled.
 
 ## Target Roles
 

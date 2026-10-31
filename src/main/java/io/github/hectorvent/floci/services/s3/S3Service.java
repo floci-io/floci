@@ -244,6 +244,16 @@ public class S3Service implements Resettable, ResourceProvider {
     private static final String INCOMING_BODIES = ".incoming";
     // Upload ID to part bytes, keyed by each part's storage ID.
     private final ConcurrentHashMap<String, Map<String, byte[]>> memoryMultipartStore = new ConcurrentHashMap<>();
+    private record MultipartPosition(String bucket, String key, String ownerAccountId, Instant initiated) {}
+
+    private static final int REMOVED_MULTIPART_POSITION_LIMIT = 1000;
+    private final Map<String, MultipartPosition> removedMultipartPositions = Collections.synchronizedMap(
+            new LinkedHashMap<>(64, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(Map.Entry<String, MultipartPosition> eldest) {
+                    return size() > REMOVED_MULTIPART_POSITION_LIMIT;
+                }
+            });
     private final ConcurrentHashMap<String, MultipartUpload> multipartUploads = new ConcurrentHashMap<>();
     // Account-level (S3 Control) Block Public Access config, one entry per AWS account.
     // Distinct from the bucket-level configuration held on each Bucket. Block Public Access is a
@@ -422,6 +432,7 @@ public class S3Service implements Resettable, ResourceProvider {
         memoryAnnotationStore.clear();
         memoryMultipartStore.clear();
         multipartUploads.clear();
+        removedMultipartPositions.clear();
         if (!inMemory) {
             // The reset above erases the annotation metadata through storageFactory.clearAll(),
             // so detached .s3ann payload files become unreachable: sweep the annotation payload
@@ -495,10 +506,6 @@ public class S3Service implements Resettable, ResourceProvider {
         String ownership = requestedOwnership == null ? "BucketOwnerEnforced" : requestedOwnership;
         if (!OBJECT_OWNERSHIP_VALUES.contains(ownership)) {
             throw new AwsException("InvalidArgument", "Invalid x-amz-object-ownership value: " + ownership, 400);
-        }
-        if (!isBlank(cannedAcl) && (!isBlank(grantRead) || !isBlank(grantWrite)
-                || !isBlank(grantFullControl) || !isBlank(grantReadAcp) || !isBlank(grantWriteAcp))) {
-            throw new AwsException("InvalidRequest", "Specifying both Canned ACLs and Header Grants is not allowed", 400);
         }
         String requestedAcl = resolveObjectAclXml(cannedAcl, grantRead, grantWrite,
                 grantFullControl, grantReadAcp, grantWriteAcp);
@@ -2576,23 +2583,9 @@ public class S3Service implements Resettable, ResourceProvider {
         List<String> commonPrefixes = List.of();
 
         if (delimiter != null && !delimiter.isEmpty()) {
-            Set<String> prefixSet = new LinkedHashSet<>();
-            List<S3Object> directObjects = new ArrayList<>();
-
-            for (S3Object obj : allObjects) {
-                String remainder = obj.getKey().substring(prefix != null ? prefix.length() : 0);
-                int delimIdx = remainder.indexOf(delimiter);
-                if (delimIdx >= 0) {
-                    String cp = (prefix != null ? prefix : "") + remainder.substring(0, delimIdx + delimiter.length());
-                    prefixSet.add(cp);
-                } else {
-                    directObjects.add(obj);
-                }
-            }
-
-            allObjects = directObjects;
-            commonPrefixes = new ArrayList<>(prefixSet);
-            Collections.sort(commonPrefixes);
+            DelimiterGroups<S3Object> groups = groupByDelimiter(allObjects, prefix, delimiter, S3Object::getKey);
+            allObjects = groups.direct();
+            commonPrefixes = groups.commonPrefixes();
         }
 
         allObjects.sort(Comparator.comparing(S3Object::getKey));
@@ -2648,6 +2641,27 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         return new ListObjectsResult(allObjects, commonPrefixes, isTruncated, nextContinuationToken);
+    }
+
+    private record DelimiterGroups<T>(List<T> direct, List<String> commonPrefixes) {}
+
+    private static <T> DelimiterGroups<T> groupByDelimiter(List<T> items, String prefix, String delimiter,
+                                                         Function<T, String> keyExtractor) {
+        List<T> direct = new ArrayList<>();
+        Set<String> prefixes = new LinkedHashSet<>();
+        for (T item : items) {
+            String key = keyExtractor.apply(item);
+            int index = delimiter == null || delimiter.isEmpty() ? -1
+                    : key.indexOf(delimiter, prefix == null ? 0 : prefix.length());
+            if (index < 0) {
+                direct.add(item);
+            } else {
+                prefixes.add(key.substring(0, index + delimiter.length()));
+            }
+        }
+        List<String> commonPrefixes = new ArrayList<>(prefixes);
+        Collections.sort(commonPrefixes);
+        return new DelimiterGroups<>(direct, commonPrefixes);
     }
 
     public S3Object copyObject(String sourceBucket, String sourceKey,
@@ -3093,23 +3107,9 @@ public class S3Service implements Resettable, ResourceProvider {
 
         List<String> commonPrefixes = List.of();
         if (delimiter != null && !delimiter.isEmpty()) {
-            Set<String> prefixSet = new LinkedHashSet<>();
-            List<S3Object> directVersions = new ArrayList<>();
-
-            for (S3Object obj : versions) {
-                String remainder = obj.getKey().substring(prefix != null ? prefix.length() : 0);
-                int delimIdx = remainder.indexOf(delimiter);
-                if (delimIdx >= 0) {
-                    String cp = (prefix != null ? prefix : "") + remainder.substring(0, delimIdx + delimiter.length());
-                    prefixSet.add(cp);
-                } else {
-                    directVersions.add(obj);
-                }
-            }
-
-            versions = directVersions;
-            commonPrefixes = new ArrayList<>(prefixSet);
-            Collections.sort(commonPrefixes);
+            DelimiterGroups<S3Object> groups = groupByDelimiter(versions, prefix, delimiter, S3Object::getKey);
+            versions = groups.direct();
+            commonPrefixes = groups.commonPrefixes();
         }
 
         // Sort by key, then newest first
@@ -4603,9 +4603,9 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /**
      * Starts a multipart upload of an object that gets {@code objectOptions} when it completes, as a
-     * PutObject takes them: its storage class, encryption, checksum algorithm, canned ACL or grants,
-     * tags and Object Lock settings. The ACL is checked here, so one S3 refuses fails the upload's
-     * creation rather than its completion.
+     * PutObject takes them: its storage class, content encoding, cache control, encryption, checksum
+     * algorithm, canned ACL or grants, tags and Object Lock settings. The ACL is checked here, so one
+     * S3 refuses fails the upload's creation rather than its completion.
      */
     public MultipartUpload initiateMultipartUpload(String bucket, String key, String contentType,
                                                    Map<String, String> metadata, String checksumType,
@@ -4636,6 +4636,7 @@ public class S3Service implements Resettable, ResourceProvider {
             SseCustomerKey customerKey = validateSseCustomerKey(sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
             rejectConflictingServerSideEncryption(normalizedServerSideEncryption, customerKey);
             MultipartUpload upload = new MultipartUpload(bucket, key, contentType);
+            upload.setUploadId(orderedMultipartUploadId(upload.getInitiated(), upload.getUploadId()));
             upload.setOwnerAccountId(getBucketOwnerAccountId(bucket));
             upload.setInitiatorAccountId(ownerId());
             if (metadata != null) {
@@ -4643,6 +4644,8 @@ public class S3Service implements Resettable, ResourceProvider {
             }
             upload.setStorageClass(ObjectAttributeName.normalizeStorageClass(storageClass));
             upload.setContentDisposition(contentDisposition);
+            upload.setContentEncoding(objectOptions.getContentEncoding());
+            upload.setCacheControl(objectOptions.getCacheControl());
             upload.setServerSideEncryption(normalizedServerSideEncryption);
             upload.setSseKmsKeyId("aws:kms".equals(normalizedServerSideEncryption) ? sseKmsKeyId : null);
             if (customerKey != null) {
@@ -5118,6 +5121,8 @@ public class S3Service implements Resettable, ResourceProvider {
                             new PutObjectOptions()
                                     .withStorageClass(upload.getStorageClass())
                                     .withContentDisposition(upload.getContentDisposition())
+                                    .withContentEncoding(upload.getContentEncoding())
+                                    .withCacheControl(upload.getCacheControl())
                                     .withServerSideEncryption(upload.getServerSideEncryption())
                                     .withSseKmsKeyId(upload.getSseKmsKeyId())
                                     .withAcl(upload.getAcl())
@@ -5292,6 +5297,89 @@ public class S3Service implements Resettable, ResourceProvider {
                 .filter(u -> u.getBucket().equals(bucket)
                         && (u.getOwnerAccountId() == null || ownerAccountId.equals(u.getOwnerAccountId())))
                 .toList();
+    }
+
+    public record MultipartListingEntry(String key, MultipartUpload upload) {}
+
+    public record ListMultipartUploadsResult(List<MultipartListingEntry> entries, boolean isTruncated,
+                                             String nextKeyMarker, String nextUploadIdMarker) {}
+
+    public ListMultipartUploadsResult listMultipartUploads(String bucket, String prefix, String delimiter,
+                                                           String keyMarker, String uploadIdMarker, int max) {
+        List<MultipartUpload> uploads = listMultipartUploads(bucket).stream()
+                .filter(upload -> prefix == null || upload.getKey().startsWith(prefix)).toList();
+        DelimiterGroups<MultipartUpload> groups = groupByDelimiter(uploads, prefix, delimiter, MultipartUpload::getKey);
+        List<MultipartListingEntry> entries = new ArrayList<>();
+        groups.direct().forEach(upload -> entries.add(new MultipartListingEntry(upload.getKey(), upload)));
+        groups.commonPrefixes().forEach(key -> entries.add(new MultipartListingEntry(key, null)));
+        Comparator<MultipartListingEntry> order = Comparator
+                .comparing(MultipartListingEntry::key, S3Service::compareMultipartKeys)
+                .thenComparing(entry -> entry.upload() == null ? Instant.MIN : entry.upload().getInitiated())
+                .thenComparing(entry -> entry.upload() == null ? "" : entry.upload().getUploadId());
+        entries.sort(order);
+        MultipartListingEntry markedUpload = entries.stream()
+                .filter(entry -> entry.upload() != null && entry.key().equals(keyMarker)
+                        && entry.upload().getUploadId().equals(uploadIdMarker))
+                .findFirst().orElse(null);
+        MultipartPosition removedMarker = uploadIdMarker == null ? null : removedMultipartPositions.get(uploadIdMarker);
+        if (removedMarker != null && (!removedMarker.bucket().equals(bucket)
+                || !removedMarker.key().equals(keyMarker)
+                || !Objects.equals(removedMarker.ownerAccountId(), getBucketOwnerAccountId(bucket)))) {
+            removedMarker = null;
+        }
+        Instant markerInitiated = markedUpload != null ? markedUpload.upload().getInitiated()
+                : removedMarker != null ? removedMarker.initiated() : multipartMarkerInitiated(uploadIdMarker);
+        List<MultipartListingEntry> remaining = entries.stream().filter(entry -> {
+            if (keyMarker == null) {
+                return true;
+            }
+            int comparison = compareMultipartKeys(entry.key(), keyMarker);
+            return comparison > 0 || (comparison == 0 && uploadIdMarker != null && entry.upload() != null
+                    && (markerInitiated != null
+                            ? entry.upload().getInitiated().isAfter(markerInitiated)
+                                || (entry.upload().getInitiated().equals(markerInitiated)
+                                    && entry.upload().getUploadId().compareTo(uploadIdMarker) > 0)
+                            : entry.upload().getUploadId().compareTo(uploadIdMarker) > 0));
+        }).toList();
+        boolean truncated = max > 0 && remaining.size() > max;
+        List<MultipartListingEntry> page = remaining.subList(0, Math.min(max, remaining.size()));
+        MultipartListingEntry last = truncated ? page.getLast() : null;
+        return new ListMultipartUploadsResult(page, truncated, last == null ? null : last.key(),
+                last == null ? null : last.upload() == null ? "" : last.upload().getUploadId());
+    }
+
+    // UUIDv8 custom fields retain the exact initiation time without changing the opaque UUID wire shape.
+    // This lets pagination survive history eviction. The remaining 54 bits are random.
+    private static String orderedMultipartUploadId(Instant initiated, String randomId) {
+        int subMillisecondNanos = initiated.getNano() % 1_000_000;
+        long most = (initiated.toEpochMilli() << 16) | 0x8000L | (subMillisecondNanos >>> 8);
+        long least = 0x8000_0000_0000_0000L | ((long) (subMillisecondNanos & 0xff) << 54)
+                | (UUID.fromString(randomId).getLeastSignificantBits() & 0x003f_ffff_ffff_ffffL);
+        return new UUID(most, least).toString();
+    }
+
+    private static Instant multipartMarkerInitiated(String uploadId) {
+        if (uploadId == null) {
+            return null;
+        }
+        try {
+            UUID id = UUID.fromString(uploadId);
+            if (id.version() != 8 || id.variant() != 2) {
+                return null;
+            }
+            int subMillisecondNanos = (int) (((id.getMostSignificantBits() & 0xfff) << 8)
+                    | ((id.getLeastSignificantBits() >>> 54) & 0xff));
+            if (subMillisecondNanos >= 1_000_000) {
+                return null;
+            }
+            return Instant.ofEpochMilli(id.getMostSignificantBits() >>> 16).plusNanos(subMillisecondNanos);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+    }
+
+    private static int compareMultipartKeys(String left, String right) {
+        return Arrays.compareUnsigned(left.getBytes(StandardCharsets.UTF_8), right.getBytes(StandardCharsets.UTF_8));
     }
 
     public MultipartUpload listParts(String bucket, String key, String uploadId) {
@@ -6207,8 +6295,8 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /**
      * What AWS reports for a bucket nobody configured: since April 2023 every new bucket starts with
-     * all four Block Public Access settings on. This is only what GetPublicAccessBlock answers. The
-     * bucket stores no configuration, so enforcement on the write paths is unchanged.
+     * all four Block Public Access settings on. The bucket stores no configuration; the default is
+     * applied when the configuration is read and when the write paths enforce it.
      */
     static final String DEFAULT_PUBLIC_ACCESS_BLOCK_XML = new XmlBuilder()
             .start("PublicAccessBlockConfiguration", AwsNamespaces.S3)
@@ -6260,8 +6348,15 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private S3BlockPublicAccessSettings blockPublicAccessFor(Bucket bucket, String bucketOwnerAccount) {
-        return S3BlockPublicAccessSettings.parse(bucket.getPublicAccessBlockConfiguration())
-                .mostRestrictive(accountBlockPublicAccess(bucketOwnerAccount));
+        return bucketBlockPublicAccess(bucket).mostRestrictive(accountBlockPublicAccess(bucketOwnerAccount));
+    }
+
+    /** A bucket nobody configured enforces the default it reports; an explicit or deleted configuration does not. */
+    private static S3BlockPublicAccessSettings bucketBlockPublicAccess(Bucket bucket) {
+        if (bucket.getPublicAccessBlockConfiguration() == null && !bucket.isPublicAccessBlockDeleted()) {
+            return S3BlockPublicAccessSettings.parse(DEFAULT_PUBLIC_ACCESS_BLOCK_XML);
+        }
+        return S3BlockPublicAccessSettings.parse(bucket.getPublicAccessBlockConfiguration());
     }
 
     private S3BlockPublicAccessSettings accountBlockPublicAccess(String accountId) {
@@ -6578,10 +6673,10 @@ public class S3Service implements Resettable, ResourceProvider {
     /**
      * Resolves the ACL to store for an object/bucket from a canned ACL and/or the explicit
      * ACL grant headers (x-amz-grant-read, x-amz-grant-write, x-amz-grant-full-control,
-     * x-amz-grant-read-acp, x-amz-grant-write-acp). If both are somehow present, the canned ACL
-     * takes precedence - real S3 instead rejects that combination with 400 "Conflicting header
-     * values", but Floci doesn't model that validation yet. Returns null if neither is set, so
-     * callers can fall back to a pre-existing ACL (e.g. an explicit AccessControlPolicy XML body).
+     * x-amz-grant-read-acp, x-amz-grant-write-acp). A canned ACL together with any grant header is
+     * refused with 400 InvalidRequest, as S3 does; blank values count as absent. Returns null if
+     * neither is set, so callers can fall back to a pre-existing ACL (e.g. an explicit
+     * AccessControlPolicy XML body).
      */
     String resolveObjectAclXml(String cannedAcl, String grantRead, String grantWrite,
                                 String grantFullControl, String grantReadAcp, String grantWriteAcp) {
@@ -6593,11 +6688,15 @@ public class S3Service implements Resettable, ResourceProvider {
                                        String grantRead, String grantWrite,
                                        String grantFullControl, String grantReadAcp,
                                        String grantWriteAcp) {
-        if (cannedAcl != null && !cannedAcl.isBlank()) {
+        boolean hasGrants = !isBlank(grantRead) || !isBlank(grantWrite) || !isBlank(grantFullControl)
+                || !isBlank(grantReadAcp) || !isBlank(grantWriteAcp);
+        if (!isBlank(cannedAcl) && hasGrants) {
+            throw new AwsException("InvalidRequest", "Specifying both Canned ACLs and Header Grants is not allowed", 400);
+        }
+        if (!isBlank(cannedAcl)) {
             return cannedObjectAclXml(ownerAccount, cannedAcl);
         }
-        if (isBlank(grantRead) && isBlank(grantWrite) && isBlank(grantFullControl)
-                && isBlank(grantReadAcp) && isBlank(grantWriteAcp)) {
+        if (!hasGrants) {
             return null;
         }
         List<String> grants = new ArrayList<>();
@@ -6886,12 +6985,15 @@ public class S3Service implements Resettable, ResourceProvider {
         }
 
         String region = bucket.getRegion();
-        String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region, bucket.isVersioningEnabled(),
-                sequencer);
+        String eventTime = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
+        String requestId = UUID.randomUUID().toString();
+        ObjectNode event = buildS3Event(bucketName, key, eventName, obj, region,
+                bucket.isVersioningEnabled(), sequencer, eventTime, requestId);
 
         for (QueueNotification qn : config.getQueueConfigurations()) {
             if (qn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && qn.matchesKey(key)) {
                 try {
+                    String eventJson = notificationEventJson(event, qn.id());
                     sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), eventJson, 0,
                             extractRegionFromArn(qn.queueArn()));
                     LOG.debugv("Fired S3 event {0} to SQS {1}", eventName, qn.queueArn());
@@ -6904,6 +7006,7 @@ public class S3Service implements Resettable, ResourceProvider {
         for (TopicNotification tn : config.getTopicConfigurations()) {
             if (tn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && tn.matchesKey(key)) {
                 try {
+                    String eventJson = notificationEventJson(event, tn.id());
                     snsService.publish(tn.topicArn(), null, eventJson, "Amazon S3 Notification",
                             extractRegionFromArn(tn.topicArn()));
                     LOG.debugv("Fired S3 event {0} to SNS {1}", eventName, tn.topicArn());
@@ -6923,6 +7026,7 @@ public class S3Service implements Resettable, ResourceProvider {
                             throw new AwsException("InvalidParameterValueException",
                                     "Invalid Lambda function ARN: " + ln.functionArn(), 400);
                         }
+                        String eventJson = notificationEventJson(event, ln.id());
                         invokeLambda(lambdaRegion, ln.functionArn(), eventJson.getBytes(StandardCharsets.UTF_8));
                         LOG.debugv("Fired S3 event {0} to Lambda {1}", eventName, ln.functionArn());
                     } catch (Exception e) {
@@ -7054,16 +7158,17 @@ public class S3Service implements Resettable, ResourceProvider {
         }
     }
 
-    private String buildS3EventJson(String bucketName, String key, String eventName,
-                                    S3Object obj, String region, boolean isVersionEnabled, String sequencer) {
+    private ObjectNode buildS3Event(String bucketName, String key, String eventName,
+                                    S3Object obj, String region, boolean isVersionEnabled, String sequencer,
+                                    String eventTime, String requestId) {
         try {
-            String eventTime = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
             long size = obj != null ? obj.getSize() : 0;
             String eTag = obj != null && obj.getETag() != null ? obj.getETag().replace("\"", "") : "";
-            String requestId = UUID.randomUUID().toString();
-
             ObjectNode bucketNode = objectMapper.createObjectNode();
             bucketNode.put("name", bucketName);
+            String bucketOwner = resolveBucketEntry(bucketName)
+                    .map(AccountAwareStorageBackend.OwnedEntry::account).orElseGet(this::ownerId);
+            bucketNode.putObject("ownerIdentity").put("principalId", bucketOwner);
             bucketNode.put("arn", AwsArnUtils.Arn.global(bucketPartition(bucketName), "s3", "", bucketName).toString());
 
             ObjectNode objectNode = objectMapper.createObjectNode();
@@ -7092,15 +7197,29 @@ public class S3Service implements Resettable, ResourceProvider {
             record.putObject("userIdentity").put("principalId", lifecycle ? ServicePrincipals.of("s3") : "AWS:EMULATOR");
             record.putObject("requestParameters")
                     .put("sourceIPAddress", lifecycle ? ServicePrincipals.of("s3") : "127.0.0.1");
-            record.putObject("responseElements").put("x-amz-request-id", requestId);
+            record.putObject("responseElements")
+                    .put("x-amz-request-id", requestId)
+                    .put("x-amz-id-2", requestId);
             record.set("s3", s3Node);
 
             ObjectNode root = objectMapper.createObjectNode();
             root.putArray("Records").add(record);
-            return objectMapper.writeValueAsString(root);
+            return root;
         } catch (Exception e) {
-            return "{\"Records\":[]}";
+            LOG.warnv("Failed to build S3 event for {0}: {1}", bucketName, e.getMessage());
+            ObjectNode empty = objectMapper.createObjectNode();
+            empty.putArray("Records");
+            return empty;
         }
+    }
+
+    private String notificationEventJson(ObjectNode event, String configurationId) throws JsonProcessingException {
+        ObjectNode copy = event.deepCopy();
+        if (copy.path("Records").path(0).path("s3") instanceof ObjectNode s3) {
+            s3.put("configurationId",
+                    configurationId == null || configurationId.isBlank() ? "emulator" : configurationId);
+        }
+        return objectMapper.writeValueAsString(copy);
     }
 
     /**
@@ -7139,7 +7258,20 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private void cleanupMultipart(String uploadId) {
-        multipartUploads.remove(uploadId);
+        MultipartUpload removed = multipartUploads.remove(uploadId);
+        if (removed != null) {
+            MultipartPosition position = new MultipartPosition(removed.getBucket(), removed.getKey(),
+                    removed.getOwnerAccountId(), removed.getInitiated());
+            removedMultipartPositions.put(uploadId, position);
+            boolean hasRemaining = multipartUploads.values().stream().anyMatch(upload ->
+                    upload.getBucket().equals(position.bucket()) && upload.getKey().equals(position.key())
+                            && Objects.equals(upload.getOwnerAccountId(), position.ownerAccountId()));
+            if (!hasRemaining) {
+                removedMultipartPositions.values().removeIf(previous -> previous.bucket().equals(position.bucket())
+                        && previous.key().equals(position.key())
+                        && Objects.equals(previous.ownerAccountId(), position.ownerAccountId()));
+            }
+        }
         if (inMemory) {
             memoryMultipartStore.remove(uploadId);
         } else {

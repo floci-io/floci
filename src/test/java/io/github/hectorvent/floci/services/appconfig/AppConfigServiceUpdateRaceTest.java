@@ -1,14 +1,11 @@
 package io.github.hectorvent.floci.services.appconfig;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.appconfig.model.Application;
 import io.github.hectorvent.floci.services.appconfig.model.ConfigurationProfile;
 import io.github.hectorvent.floci.services.appconfig.model.DeploymentStrategy;
 import io.github.hectorvent.floci.services.appconfig.model.Environment;
+import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import io.github.hectorvent.floci.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
 
@@ -132,15 +129,6 @@ class AppConfigServiceUpdateRaceTest {
 
     /** An AppConfig service whose {@code fileName} store is {@code store} and every other store in memory. */
     private static AppConfigService serviceWithStore(String fileName, StorageBackend<String, ?> store) {
-        return new AppConfigService(new StorageFactory(null, null) {
-            @Override
-            @SuppressWarnings("unchecked")
-            public <V> AccountAwareStorageBackend<V> create(String serviceName, String file,
-                    TypeReference<Map<String, V>> typeReference, WriteProfile profile) {
-                return file.equals(fileName)
-                        ? new AccountAwareStorageBackend<>((StorageBackend<String, V>) (Object) store, null, ACCOUNT)
-                        : AccountAwareStorageBackend.inMemory(ACCOUNT);
-            }
-        }, null);
+        return new AppConfigService(new InMemoryStorageFactory(ACCOUNT).withStore(fileName, store), null);
     }
 }

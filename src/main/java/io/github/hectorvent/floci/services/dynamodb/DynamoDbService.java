@@ -1490,7 +1490,7 @@ public class DynamoDbService {
                 }
             }
 
-            DynamoDbSetOrder.sortSetsIn(item);
+            item.setAll(DynamoDbNumberUtils.normalizeNumbersInItem(item));
 
             // Reject any attempt to modify a key attribute
             validateKeyNotModified(table, key, item);

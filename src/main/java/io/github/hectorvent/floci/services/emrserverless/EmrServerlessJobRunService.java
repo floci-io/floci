@@ -25,6 +25,7 @@ import io.github.hectorvent.floci.services.emrserverless.model.JobRunRecord;
 import io.github.hectorvent.floci.services.emrserverless.model.JobRunSummary;
 import io.github.hectorvent.floci.services.emrserverless.model.RuntimeConfiguration;
 import io.github.hectorvent.floci.services.emrserverless.model.StartJobRunRequest;
+import io.github.hectorvent.floci.services.emrserverless.model.WorkerTypeSpecification;
 import io.github.hectorvent.floci.services.iam.IamService;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -89,6 +90,8 @@ public class EmrServerlessJobRunService implements Resettable {
     // "If you don't specify the optional values, then CloudWatch publishes the logs to a default log group".
     private static final String DEFAULT_LOG_GROUP = "/aws/emr-serverless";
     private static final String SPARK_DRIVER = "SPARK_DRIVER";
+    // The worker type a Spark application's driver runs as.
+    private static final String DRIVER_WORKER_TYPE = "Driver";
     // No source gives AWS's wording for these; they are Floci's.
     static final String HIVE_NOT_RUN = "Floci runs Spark job runs only, and this is a Hive job run.";
     static final String INTERRUPTED = "Floci stopped while the job run was in progress.";
@@ -478,9 +481,9 @@ public class EmrServerlessJobRunService implements Resettable {
         Duration timeout = MODE_STREAMING.equals(run.getMode()) || minutes == null || minutes == 0
                 ? Duration.ZERO : Duration.ofMinutes(minutes);
         SparkJobRunner.Job job = new SparkJobRunner.Job(SERVICE, run.getJobRunId(), arn.accountId(), arn.region(),
-                run.getReleaseLabel(), imageTemplate, dockerNetwork, run.getExecutionRole(), sparkDefaults(app, run),
-                application(run.getJobDriver().getSparkSubmit()), null, timeout, driverLogFolder(app, run),
-                driverCloudWatchLogs(app, run));
+                run.getReleaseLabel(), imageTemplate, customImage(app), dockerNetwork, run.getExecutionRole(),
+                sparkDefaults(app, run), application(run.getJobDriver().getSparkSubmit()), null, timeout,
+                driverLogFolder(app, run), driverCloudWatchLogs(app, run));
         executing.add(run.getJobRunId());
         long launchedIn = generation;
         runExecutor.execute(() -> execute(job, launchedIn));
@@ -496,6 +499,21 @@ public class EmrServerlessJobRunService implements Resettable {
         }
         SparkJobRunner.Outcome ended = outcome;
         RequestScopes.runAs(job.accountId(), job.region(), () -> ended(job.runId(), ended, launchedIn));
+    }
+
+    /**
+     * The custom image a run's driver starts from, or null for the release's: the {@code Driver} worker type's,
+     * else the application's, which "EMR Serverless applies ... to all worker types". Local mode runs the
+     * executors in the driver's container, so an {@code Executor} image is not used.
+     */
+    static String customImage(Application app) {
+        WorkerTypeSpecification driver = app.getWorkerTypeSpecifications() != null
+                ? app.getWorkerTypeSpecifications().get(DRIVER_WORKER_TYPE) : null;
+        if (driver != null && driver.getImageConfiguration() != null
+                && driver.getImageConfiguration().getImageUri() != null) {
+            return driver.getImageConfiguration().getImageUri();
+        }
+        return app.getImageConfiguration() != null ? app.getImageConfiguration().getImageUri() : null;
     }
 
     /**

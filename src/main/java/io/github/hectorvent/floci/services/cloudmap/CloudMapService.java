@@ -22,6 +22,8 @@ import io.github.hectorvent.floci.services.cloudmap.model.Instance;
 import io.github.hectorvent.floci.services.cloudmap.model.Namespace;
 import io.github.hectorvent.floci.services.cloudmap.model.Operation;
 import io.github.hectorvent.floci.services.cloudmap.model.Service;
+import io.github.hectorvent.floci.services.route53.Route53Service;
+import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
 import io.netty.util.NetUtil;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -69,13 +71,15 @@ public class CloudMapService {
     private final StorageBackend<String, Instance> instanceStore;
     private final StorageBackend<String, Operation> operationStore;
     private final RegionResolver regionResolver;
+    private final Route53Service route53Service;
     private final ObjectMapper objectMapper;
     private final int completionDelaySeconds;
     private final ScheduledExecutorService scheduler;
 
     @Inject
     public CloudMapService(StorageFactory storageFactory, EmulatorConfig config,
-                           RegionResolver regionResolver, ObjectMapper objectMapper) {
+                           RegionResolver regionResolver, ObjectMapper objectMapper,
+                           Route53Service route53Service) {
         this.namespaceStore = storageFactory.create("cloudmap", "cloudmap-namespaces.json",
                 new TypeReference<Map<String, Namespace>>() {});
         this.serviceStore = storageFactory.create("cloudmap", "cloudmap-services.json",
@@ -85,6 +89,7 @@ public class CloudMapService {
         this.operationStore = storageFactory.create("cloudmap", "cloudmap-operations.json",
                 new TypeReference<Map<String, Operation>>() {});
         this.regionResolver = regionResolver;
+        this.route53Service = route53Service;
         this.objectMapper = objectMapper;
         this.completionDelaySeconds = config.services().cloudmap().operationCompletionDelaySeconds();
         this.scheduler = completionDelaySeconds > 0
@@ -115,7 +120,7 @@ public class CloudMapService {
     public Operation createPublicDnsNamespace(String name, String creatorRequestId,
                                               String description, Map<String, String> tags, String region) {
         Namespace ns = newNamespace(name, "DNS_PUBLIC", description, creatorRequestId, tags, region);
-        ns.setHostedZoneId(generateHostedZoneId());
+        ns.setHostedZoneId(createZone(ns, null));
         namespaceStore.put(ns.getId(), ns);
         return submitOperation("CREATE_NAMESPACE", "NAMESPACE", ns.getId(), region);
     }
@@ -127,7 +132,7 @@ public class CloudMapService {
         }
         Namespace ns = newNamespace(name, "DNS_PRIVATE", description, creatorRequestId, tags, region);
         ns.setVpc(vpc);
-        ns.setHostedZoneId(generateHostedZoneId());
+        ns.setHostedZoneId(createZone(ns, new VpcAssociation(vpc, region)));
         namespaceStore.put(ns.getId(), ns);
         return submitOperation("CREATE_NAMESPACE", "NAMESPACE", ns.getId(), region);
     }
@@ -191,6 +196,20 @@ public class CloudMapService {
         if (hasServices) {
             throw new AwsException("ResourceInUse",
                     "The namespace contains existing services and cannot be deleted.", 400);
+        }
+        if (ns.getHostedZoneId() != null) {
+            // The zone goes with the namespace. A zone holding records beyond the default NS/SOA
+            // is refused (HostedZoneNotEmpty) and the namespace is kept, rather than orphaning records.
+            try {
+                route53Service.deleteHostedZone(ns.getHostedZoneId());
+            } catch (AwsException e) {
+                if (!"NoSuchHostedZone".equals(e.getErrorCode())) {
+                    throw e;
+                }
+                // Already deleted through Route 53; nothing is orphaned, so the namespace still goes.
+                LOG.debugv("Hosted zone {0} of Cloud Map namespace {1} was already deleted",
+                        ns.getHostedZoneId(), id);
+            }
         }
         namespaceStore.delete(id);
         return submitOperation("DELETE_NAMESPACE", "NAMESPACE", id, region);
@@ -938,12 +957,9 @@ public class CloudMapService {
         return sb.toString();
     }
 
-    private String generateHostedZoneId() {
-        StringBuilder sb = new StringBuilder("Z");
-        String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-        for (int i = 0; i < 13; i++) {
-            sb.append(chars.charAt(random.nextInt(chars.length())));
-        }
-        return sb.toString();
+    /** Creates the Route 53 zone behind a DNS namespace (private when a VPC association is given). */
+    private String createZone(Namespace ns, VpcAssociation vpc) {
+        return route53Service.createHostedZone(ns.getName(), "cloudmap-" + ns.getId(),
+                "Created by Cloud Map namespace " + ns.getId(), vpc).zone().getId();
     }
 }

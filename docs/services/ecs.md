@@ -329,8 +329,13 @@ applied without rolling anything. An update replaces only the members it names: 
 array clears a member the way AWS clears it.
 
 When a service replaces or stops a task in Docker mode, the task remains `STOPPING` until its
-containers are removed. A failed Docker removal is retried on later reconciliation ticks, so the
-task is not reported as `STOPPED` while its container may still be serving.
+containers are removed. The service scheduler runs these Docker stops in the background, up to
+eight at a time, so a container waiting out its `stopTimeout` does not hold up the reconciliation
+of other tasks and services; a `DAEMON` replacement still starts only once the task it replaces
+is `STOPPED`. A failed Docker removal is retried on later reconciliation ticks, so the task is not
+reported as `STOPPED` while its container may still be serving. `StopTask` answers once its stop
+has landed, and on a task the scheduler is already stopping it waits for that stop rather than
+starting a second one.
 
 Every `awsvpc` task gets a real ENI in the subnet it asked for, in Docker and in mock mode alike,
 and reports it as an `attachments` entry with its `networkInterfaceId`, `privateIPv4Address` and
@@ -727,7 +732,11 @@ dropping it, so a later `DescribeContainerInstances` still answers for it, as on
 
 `ListContainerInstances` defaults to every instance other than the `INACTIVE` ones, validates
 `status` against the five documented values, and pages with `maxResults` (1 to 100) and
-`nextToken`. The cluster query language `filter` is accepted and ignored.
+`nextToken`. Its `filter` supports a single `runningTasksCount` numeric comparison with
+`==`, `!=`, `>`, `>=`, `<`, `<=` or their named equivalents. Other cluster query subjects
+and compound expressions are not implemented and return `InvalidParameterException`. The
+running count in list filtering and `DescribeContainerInstances` includes tasks whose desired
+status is `RUNNING`, even while their last status is `PENDING`.
 
 `UpdateContainerInstancesState` sets only `ACTIVE` or `DRAINING`, takes at most 10 instances per
 call, and refuses to drain an instance that is not `ACTIVE` first. It and

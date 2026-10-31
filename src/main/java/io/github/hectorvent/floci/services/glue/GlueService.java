@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.glue.model.ConnectionPasswordEncrypti
 import io.github.hectorvent.floci.services.glue.model.Crawler;
 import io.github.hectorvent.floci.services.glue.model.CrawlerTargets;
 import io.github.hectorvent.floci.services.glue.model.DataCatalogEncryptionSettings;
+import io.github.hectorvent.floci.services.glue.model.DataQualityRuleset;
 import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.EncryptionAtRest;
 import io.github.hectorvent.floci.services.glue.model.GluePolicy;
@@ -56,6 +57,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
@@ -78,6 +80,10 @@ public class GlueService {
     private static final int MAX_FUNCTION_PATTERN_LENGTH = 255;
     private static final int MAX_FUNCTION_RESULTS = 100;
     private static final int MAX_SECURITY_CONFIGURATION_NAME_LENGTH = 255;
+    private static final int MAX_DATA_QUALITY_NAME_LENGTH = 255;
+    private static final int MAX_DATA_QUALITY_DESCRIPTION_LENGTH = 2048;
+    private static final int MAX_DATA_QUALITY_RULESET_LENGTH = 65536;
+    private static final int MAX_TAGS = 50;
     private static final Set<String> CSV_HEADER_VALUES = Set.of("UNKNOWN", "PRESENT", "ABSENT");
     private static final Set<String> CSV_SERDE_VALUES = Set.of("OpenCSVSerDe", "LazySimpleSerDe", "None");
     private static final Set<String> CSV_CUSTOM_DATATYPES = Set.of(
@@ -198,6 +204,7 @@ public class GlueService {
     private final StorageBackend<String, GluePolicy> resourcePolicyStore;
     private final StorageBackend<String, DataCatalogEncryptionSettings> encryptionSettingsStore;
     private final StorageBackend<String, SecurityConfiguration> securityConfigurationStore;
+    private final StorageBackend<String, DataQualityRuleset> dataQualityRulesetStore;
     private final StorageBackend<String, Trigger> triggerStore;
     private final StorageBackend<String, Workflow> workflowStore;
     private final GlueSchemaRegistryService schemaRegistryService;
@@ -230,6 +237,8 @@ public class GlueService {
                 "glue", "catalog_encryption_settings.json", new TypeReference<>() {});
         this.securityConfigurationStore = storageFactory.create(
             "glue", "security_configurations.json", new TypeReference<>() {});
+        this.dataQualityRulesetStore = storageFactory.create(
+                "glue", "data_quality_rulesets.json", new TypeReference<>() {});
         this.triggerStore = storageFactory.create("glue", "triggers.json", new TypeReference<>() {});
         this.workflowStore = storageFactory.create("glue", "workflows.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
@@ -253,6 +262,7 @@ public class GlueService {
                 StorageBackend<String, GluePolicy> resourcePolicyStore,
                 StorageBackend<String, DataCatalogEncryptionSettings> encryptionSettingsStore,
                 StorageBackend<String, SecurityConfiguration> securityConfigurationStore,
+                StorageBackend<String, DataQualityRuleset> dataQualityRulesetStore,
                 StorageBackend<String, Trigger> triggerStore,
                 StorageBackend<String, Workflow> workflowStore,
                 GlueSchemaRegistryService schemaRegistryService,
@@ -274,6 +284,7 @@ public class GlueService {
         this.resourcePolicyStore = resourcePolicyStore;
         this.encryptionSettingsStore = encryptionSettingsStore;
         this.securityConfigurationStore = securityConfigurationStore;
+        this.dataQualityRulesetStore = dataQualityRulesetStore;
         this.triggerStore = triggerStore;
         this.workflowStore = workflowStore;
         this.schemaRegistryService = schemaRegistryService;
@@ -2992,6 +3003,10 @@ public class GlueService {
             } else if (resource.startsWith("connection/")) {
                 getConnection(resource.substring(11), false);
                 return;
+            } else if (resource.startsWith("dataQualityRuleset/")) {
+                getDataQualityRuleset(resource.substring("dataQualityRuleset/".length()),
+                        AwsArnUtils.parse(arn).region());
+                return;
             } else if (resource.startsWith("database/")) {
                 getDatabase(resource.substring(9));
                 return;
@@ -3010,6 +3025,220 @@ public class GlueService {
             }
         }
         throw new AwsException("EntityNotFoundException", "Resource " + arn + " not found or not supported.", 400);
+    }
+
+    // ── Data quality rulesets ─────────────────────────────────────────────────
+
+    /** The filters ListDataQualityRulesets takes; each one left null matches every ruleset. */
+    public record DataQualityRulesetFilter(String name, String description, Instant createdBefore,
+                                           Instant createdAfter, Instant lastModifiedBefore,
+                                           Instant lastModifiedAfter, DataQualityRuleset.TargetTable targetTable) {}
+
+    public DataQualityRuleset createDataQualityRuleset(String name, String description, String ruleset,
+                                                       DataQualityRuleset.TargetTable targetTable,
+                                                       String securityConfiguration, Map<String, String> tags,
+                                                       String region) {
+        validateDataQualityName(name, "Name");
+        validateDataQualityRulesetText(ruleset);
+        validateDataQualityDescription(description);
+        if (targetTable != null) {
+            validateDataQualityName(targetTable.tableName(), "TargetTable.TableName");
+            validateDataQualityName(targetTable.databaseName(), "TargetTable.DatabaseName");
+        }
+        if (securityConfiguration != null) {
+            validateDataQualityName(securityConfiguration, "DataQualitySecurityConfiguration");
+        }
+        if (tags != null && tags.size() > MAX_TAGS) {
+            throw new AwsException("InvalidInputException", "Tags must have at most " + MAX_TAGS + " entries.", 400);
+        }
+        String key = dataQualityRulesetKey(region, name);
+        synchronized (dataQualityRulesetStore) {
+            if (dataQualityRulesetStore.get(key).isPresent()) {
+                throw new AwsException("AlreadyExistsException", "Data quality ruleset already exists: " + name, 400);
+            }
+            Instant now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+            DataQualityRuleset created = new DataQualityRuleset();
+            created.setName(name);
+            created.setDescription(description);
+            created.setRuleset(ruleset);
+            created.setTargetTable(targetTable);
+            created.setDataQualitySecurityConfiguration(securityConfiguration);
+            created.setCreatedOn(now);
+            created.setLastModifiedOn(now);
+            dataQualityRulesetStore.put(key, created);
+            if (tags != null && !tags.isEmpty()) {
+                resourceGroupsTaggingService.tagResources(List.of(dataQualityRulesetArn(region, name)), tags, region);
+            }
+            LOG.infov("Created Glue data quality ruleset: {0}", name);
+            return created;
+        }
+    }
+
+    public DataQualityRuleset getDataQualityRuleset(String name, String region) {
+        validateDataQualityName(name, "Name");
+        return dataQualityRulesetStore.get(dataQualityRulesetKey(region, name))
+                .orElseThrow(() -> dataQualityRulesetNotFound(name));
+    }
+
+    /** Replaces the description and ruleset the request sets; a member left out keeps its value. */
+    public DataQualityRuleset updateDataQualityRuleset(String name, String description, String ruleset, String region) {
+        validateDataQualityName(name, "Name");
+        if (ruleset != null) {
+            validateDataQualityRulesetText(ruleset);
+        }
+        validateDataQualityDescription(description);
+        String key = dataQualityRulesetKey(region, name);
+        synchronized (dataQualityRulesetStore) {
+            DataQualityRuleset existing = dataQualityRulesetStore.get(key)
+                    .orElseThrow(() -> dataQualityRulesetNotFound(name));
+            if (description != null) {
+                existing.setDescription(description);
+            }
+            if (ruleset != null) {
+                existing.setRuleset(ruleset);
+            }
+            existing.setLastModifiedOn(Instant.now().truncatedTo(ChronoUnit.MILLIS));
+            dataQualityRulesetStore.put(key, existing);
+            return existing;
+        }
+    }
+
+    public void deleteDataQualityRuleset(String name, String region) {
+        validateDataQualityName(name, "Name");
+        String key = dataQualityRulesetKey(region, name);
+        synchronized (dataQualityRulesetStore) {
+            if (dataQualityRulesetStore.get(key).isEmpty()) {
+                throw dataQualityRulesetNotFound(name);
+            }
+            dataQualityRulesetStore.delete(key);
+            resourceGroupsTaggingService.deleteResources(List.of(dataQualityRulesetArn(region, name)), region);
+        }
+        LOG.infov("Deleted Glue data quality ruleset: {0}", name);
+    }
+
+    /** The Region's rulesets in name order, narrowed by the filter and by tags they all carry. */
+    public Page<DataQualityRuleset> listDataQualityRulesets(DataQualityRulesetFilter filter, Map<String, String> tags,
+                                                            Integer maxResults, String nextToken, String region) {
+        return paginate(() -> {
+            String prefix = region + ":";
+            String accountId = regionResolver.getAccountId();
+            List<DataQualityRuleset> matching = new ArrayList<>();
+            for (DataQualityRuleset candidate : dataQualityRulesetStore.scan(key -> key.startsWith(prefix))) {
+                if (matchesDataQualityFilter(candidate, filter, accountId) && (tags == null || tags.isEmpty()
+                        || hasTags(dataQualityRulesetArn(region, candidate.getName()), tags, region))) {
+                    matching.add(candidate);
+                }
+            }
+            matching.sort(Comparator.comparing(DataQualityRuleset::getName));
+            return matching;
+        }, maxResults, nextToken, 1000);
+    }
+
+    /**
+     * The number of rules in a DQDL ruleset: the entries of its top-level {@code Rules = [ ... ]}
+     * list, where a composite rule in parentheses counts as one. Null when the text has no such list.
+     */
+    public static Integer dataQualityRuleCount(String ruleset) {
+        if (ruleset == null) {
+            return null;
+        }
+        int start = ruleset.indexOf('[', Math.max(ruleset.indexOf("Rules"), 0));
+        if (start < 0) {
+            return null;
+        }
+        int depth = 0;
+        int count = 0;
+        boolean inEntry = false;
+        boolean quoted = false;
+        for (int i = start; i < ruleset.length(); i++) {
+            char c = ruleset.charAt(i);
+            if (quoted) {
+                if (c == '\\') {
+                    i++;
+                } else if (c == '"') {
+                    quoted = false;
+                }
+                continue;
+            }
+            switch (c) {
+                case '"' -> quoted = true;
+                case '[', '(' -> depth++;
+                case ']', ')' -> depth--;
+                default -> { }
+            }
+            if (depth == 0) {
+                return inEntry ? count + 1 : count;
+            }
+            if (depth == 1 && c == ',') {
+                count++;
+                inEntry = false;
+            } else if (!Character.isWhitespace(c) && !(depth == 1 && c == '[' && i == start)) {
+                inEntry = true;
+            }
+        }
+        return null;
+    }
+
+    /** A target table without a CatalogId is in the caller's own catalog, the account. */
+    private static boolean matchesDataQualityFilter(DataQualityRuleset ruleset, DataQualityRulesetFilter filter,
+                                                    String accountId) {
+        if (filter == null) {
+            return true;
+        }
+        DataQualityRuleset.TargetTable table = ruleset.getTargetTable();
+        return (filter.name() == null || filter.name().equals(ruleset.getName()))
+                && (filter.description() == null || filter.description().equals(ruleset.getDescription()))
+                && (filter.createdBefore() == null || ruleset.getCreatedOn().isBefore(filter.createdBefore()))
+                && (filter.createdAfter() == null || ruleset.getCreatedOn().isAfter(filter.createdAfter()))
+                && (filter.lastModifiedBefore() == null
+                        || ruleset.getLastModifiedOn().isBefore(filter.lastModifiedBefore()))
+                && (filter.lastModifiedAfter() == null
+                        || ruleset.getLastModifiedOn().isAfter(filter.lastModifiedAfter()))
+                && (filter.targetTable() == null || (table != null
+                        && Objects.equals(filter.targetTable().tableName(), table.tableName())
+                        && Objects.equals(filter.targetTable().databaseName(), table.databaseName())
+                        && (filter.targetTable().catalogId() == null
+                                || filter.targetTable().catalogId().equals(
+                                        table.catalogId() != null ? table.catalogId() : accountId))));
+    }
+
+    private String dataQualityRulesetArn(String region, String name) {
+        return regionResolver.buildArn("glue", region, "dataQualityRuleset/" + name);
+    }
+
+    private static String dataQualityRulesetKey(String region, String name) {
+        return region + ":" + name;
+    }
+
+    private static AwsException dataQualityRulesetNotFound(String name) {
+        return new AwsException("EntityNotFoundException", "Data quality ruleset not found: " + name, 400);
+    }
+
+    private static void validateDataQualityName(String value, String field) {
+        if (value == null || value.isBlank()) {
+            throw new AwsException("InvalidInputException", field + " is required.", 400);
+        }
+        if (value.length() > MAX_DATA_QUALITY_NAME_LENGTH) {
+            throw new AwsException("InvalidInputException",
+                    field + " must be between 1 and " + MAX_DATA_QUALITY_NAME_LENGTH + " characters.", 400);
+        }
+    }
+
+    private static void validateDataQualityRulesetText(String ruleset) {
+        if (ruleset == null || ruleset.isEmpty()) {
+            throw new AwsException("InvalidInputException", "Ruleset is required.", 400);
+        }
+        if (ruleset.length() > MAX_DATA_QUALITY_RULESET_LENGTH) {
+            throw new AwsException("InvalidInputException",
+                    "Ruleset must be at most " + MAX_DATA_QUALITY_RULESET_LENGTH + " characters.", 400);
+        }
+    }
+
+    private static void validateDataQualityDescription(String description) {
+        if (description != null && description.length() > MAX_DATA_QUALITY_DESCRIPTION_LENGTH) {
+            throw new AwsException("InvalidInputException",
+                    "Description must be at most " + MAX_DATA_QUALITY_DESCRIPTION_LENGTH + " characters.", 400);
+        }
     }
 
     public record Page<T>(List<T> items, String nextToken) {}

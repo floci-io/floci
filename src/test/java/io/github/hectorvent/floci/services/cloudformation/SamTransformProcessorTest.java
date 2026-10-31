@@ -154,6 +154,77 @@ class SamTransformProcessorTest {
                 aliasProps.path("FunctionVersion").path("Fn::GetAtt"));
     }
 
+    @Test
+    void expandSamTemplate_autoPublishAliasResolvesReferenceableProperty() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "FnPermission": {
+                  "Type": "AWS::Lambda::Permission",
+                  "Properties": {
+                    "Action": "lambda:InvokeFunction",
+                    "FunctionName": {"Ref": "Fn.Alias"},
+                    "Principal": "events.amazonaws.com"
+                  }
+                },
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs22.x",
+                    "AutoPublishAlias": "live",
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                }
+              },
+              "Outputs": {
+                "AliasArn": {"Value": {"Ref": "Fn.Alias"}},
+                "FunctionName": {"Value": {"Ref": "Fn"}}
+              }
+            }
+            """);
+
+        JsonNode expanded = processor.expandSamTemplate(template);
+        assertEquals("FnAliasLive", expanded.path("Resources").path("FnPermission")
+                .path("Properties").path("FunctionName").path("Ref").asText());
+        assertEquals("FnAliasLive", expanded.path("Outputs").path("AliasArn")
+                .path("Value").path("Ref").asText());
+        assertEquals("Fn", expanded.path("Outputs").path("FunctionName")
+                .path("Value").path("Ref").asText());
+    }
+
+    @Test
+    void expandSamTemplate_autoPublishAliasReferenceUsesGeneratedIdAfterCollision() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "FnAliasLive": {"Type": "AWS::S3::Bucket"},
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs22.x",
+                    "AutoPublishAlias": "live",
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                },
+                "FnPermission": {
+                  "Type": "AWS::Lambda::Permission",
+                  "Properties": {"FunctionName": {"Ref": "Fn.Alias"}}
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+        assertEquals("AWS::S3::Bucket", resources.path("FnAliasLive").path("Type").asText());
+        assertEquals("AWS::Lambda::Alias", resources.path("FnAliasLive2").path("Type").asText());
+        assertEquals("FnAliasLive2", resources.path("FnPermission").path("Properties")
+                .path("FunctionName").path("Ref").asText());
+    }
+
     /** The ids are the ones SAM gives the same function. */
     @Test
     void expandSamTemplate_autoPublishAliasVersionIdFollowsSamsHashInput() throws Exception {

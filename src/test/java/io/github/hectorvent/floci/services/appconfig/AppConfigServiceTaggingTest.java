@@ -1,10 +1,6 @@
 package io.github.hectorvent.floci.services.appconfig;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.appconfig.model.Application;
 import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import io.github.hectorvent.floci.testing.ParkingStore;
@@ -94,15 +90,6 @@ class AppConfigServiceTaggingTest {
 
     /** An AppConfig service whose application store is {@code store} and every other store in memory. */
     private static AppConfigService serviceWithApplicationStore(StorageBackend<String, Application> store) {
-        return new AppConfigService(new StorageFactory(null, null) {
-            @Override
-            @SuppressWarnings("unchecked")
-            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
-                    TypeReference<Map<String, V>> typeReference, WriteProfile profile) {
-                return fileName.equals(APPLICATIONS)
-                        ? new AccountAwareStorageBackend<>((StorageBackend<String, V>) (Object) store, null, ACCOUNT)
-                        : AccountAwareStorageBackend.inMemory(ACCOUNT);
-            }
-        }, null);
+        return new AppConfigService(new InMemoryStorageFactory(ACCOUNT).withStore(APPLICATIONS, store), null);
     }
 }
