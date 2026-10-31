@@ -30,7 +30,7 @@ public class SdkManagementTaskInvoker {
             "VersionIdsToStages", "Endpoints");
     private static final Set<String> TIMESTAMPS = Set.of("CreatedAt", "UpdatedAt", "StartedAt", "FinishedAt",
             "CreatedDate", "LastChangedDate", "LastAccessedDate", "LastRotatedDate", "NextRotationDate", "DeletedDate",
-            "LastModified", "StartingPositionTimestamp");
+            "LastModified", "StartingPositionTimestamp", "StabilityStatusAt");
 
     private final EcsJsonHandler ecs;
     private final LambdaController lambda;

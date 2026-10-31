@@ -48,6 +48,25 @@ class SdkManagementTaskInvokerTest {
     }
 
     @Test
+    void rendersTaskSetTimestampsAsIsoStrings() throws Exception {
+        when(registry.isServiceEnabled("ecs")).thenReturn(true);
+        JsonNode response = mapper.readTree("""
+                {"services":[{"serviceName":"example","taskSets":[{"id":"ecs-svc/1",
+                  "createdAt":1.5,"updatedAt":2,"stabilityStatusAt":3.25}]}]}
+                """);
+        when(ecs.handle(eq("DescribeServices"), any(), eq("us-east-1")))
+                .thenReturn(Response.ok(response).build());
+        JsonNode result = invoker.invoke(
+                StatesIntegration.parse("arn:aws:states:::aws-sdk:ecs:describeServices").orElseThrow(),
+                mapper.readTree("{\"Cluster\":\"example\",\"Services\":[\"example\"]}"), "us-east-1");
+
+        JsonNode taskSet = result.path("Services").path(0).path("TaskSets").path(0);
+        assertEquals("1970-01-01T00:00:01.500Z", taskSet.path("CreatedAt").asText());
+        assertEquals("1970-01-01T00:00:02.000Z", taskSet.path("UpdatedAt").asText());
+        assertEquals("1970-01-01T00:00:03.250Z", taskSet.path("StabilityStatusAt").asText());
+    }
+
+    @Test
     void aDisabledServiceFailsBeforeCallingItsHandler() {
         AslExecutor.FailStateException error = assertThrows(AslExecutor.FailStateException.class,
                 () -> invoker.invoke(integration(), mapper.createObjectNode(), "us-east-1"));
