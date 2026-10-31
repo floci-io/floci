@@ -6,17 +6,23 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.PersistentStorage;
+import io.github.hectorvent.floci.core.storage.WalStorage;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.AgentRuntime;
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.model.Memory;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
 
 /**
  * Persistence-across-restart coverage: writes a fully-populated agent runtime through
@@ -81,6 +87,42 @@ class BedrockAgentCorePersistenceTest {
         assertEquals(2, loaded.getEndpoints().size());
         assertTrue(loaded.getEndpoints().stream().anyMatch(e -> "prod".equals(e.getName())));
         assertTrue(loaded.getEndpoints().stream().anyMatch(e -> "DEFAULT".equals(e.getName())));
+    }
+
+    @Test
+    void tagsSentToCreateAgentRuntimeAreInTheWalRecord(@TempDir Path dir) throws IOException {
+        TypeReference<Map<String, AgentRuntime>> ref = new TypeReference<>() {};
+        Path wal = dir.resolve("runtimes.wal");
+        Path walAfterCrash = dir.resolve("runtimes-after-crash.wal");
+        WalStorage<String, AgentRuntime> writer =
+                new WalStorage<>(dir.resolve("runtimes.json"), wal, ref, 3_600_000L);
+        writer.load();
+        RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
+        BedrockAgentCoreControlController controller = new BedrockAgentCoreControlController(
+                new BedrockAgentCoreControlService(writer, regionResolver), regionResolver, mapper);
+
+        Response response = controller.createAgentRuntime(mock(HttpHeaders.class), """
+                {
+                  "agentRuntimeName": "walAgent",
+                  "agentRuntimeArtifact": {"containerConfiguration": {"containerUri": "x:latest"}},
+                  "networkConfiguration": {"networkMode": "PUBLIC"},
+                  "roleArn": "arn:aws:iam::000000000000:role/agent",
+                  "tags": {"team": "ml"}
+                }""");
+        assertEquals(202, response.getStatus());
+        String id = ((ObjectNode) response.getEntity()).path("agentRuntimeId").asText();
+
+        // A copy of the WAL is what a crash leaves behind: nothing later rewrites the runtime.
+        Files.copy(wal, walAfterCrash);
+        WalStorage<String, AgentRuntime> reader =
+                new WalStorage<>(dir.resolve("runtimes-after-crash.json"), walAfterCrash, ref, 3_600_000L);
+        reader.load();
+        try {
+            assertEquals(Map.of("team", "ml"), reader.get("runtime:" + REGION + ":" + id).orElseThrow().getTags());
+        } finally {
+            reader.shutdown();
+            writer.shutdown();
+        }
     }
 
     @Test

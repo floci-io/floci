@@ -85,6 +85,14 @@ public class BedrockAgentCoreControlService {
                                            String roleArn, String description, Map<String, String> environmentVariables,
                                            JsonNode authorizerConfiguration, JsonNode protocolConfiguration,
                                            String clientToken, String region) {
+        return createAgentRuntime(name, artifact, networkConfiguration, roleArn, description, environmentVariables,
+                authorizerConfiguration, protocolConfiguration, null, clientToken, region);
+    }
+
+    public AgentRuntime createAgentRuntime(String name, JsonNode artifact, JsonNode networkConfiguration,
+                                           String roleArn, String description, Map<String, String> environmentVariables,
+                                           JsonNode authorizerConfiguration, JsonNode protocolConfiguration,
+                                           Map<String, String> tags, String clientToken, String region) {
         if (clientToken != null) {
             Optional<AgentRuntime> replay = storage.scan(k -> k.startsWith(keyPrefix(region))).stream()
                     .filter(r -> clientToken.equals(r.getClientToken()))
@@ -139,6 +147,9 @@ public class BedrockAgentCoreControlService {
         }
         runtime.getVersions().add(snapshot(runtime, "1", now));
         runtime.getEndpoints().add(newEndpoint("DEFAULT", "1", null, now));
+        if (tags != null) {
+            runtime.getTags().putAll(tags);
+        }
 
         storage.put(key(region, id), runtime);
         LOG.infov("Created AgentCore runtime {0} (id={1})", name, id);

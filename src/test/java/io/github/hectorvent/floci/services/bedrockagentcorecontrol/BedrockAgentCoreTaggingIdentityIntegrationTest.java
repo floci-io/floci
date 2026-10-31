@@ -77,6 +77,34 @@ class BedrockAgentCoreTaggingIdentityIntegrationTest {
     }
 
     @Test
+    void aClientTokenReplayKeepsTheTagsOfTheOriginalCreate() {
+        String clientToken = "replay-create-runtime-tags-token-0001";
+        String firstArn = createRuntimeWithTags(clientToken, "{\"team\":\"ml\"}");
+        createRuntimeWithTags(clientToken, "{\"env\":\"dev\"}");
+
+        given().when().get("/tags/" + firstArn)
+                .then().statusCode(200)
+                .body("tags.team", equalTo("ml"))
+                .body("tags.env", nullValue());
+    }
+
+    private static String createRuntimeWithTags(String clientToken, String tags) {
+        return given().contentType("application/json")
+                .body("""
+                        {
+                          "agentRuntimeName": "replayTagAgent",
+                          "agentRuntimeArtifact": {"containerConfiguration": {"containerUri": "x:latest"}},
+                          "networkConfiguration": {"networkMode": "PUBLIC"},
+                          "roleArn": "arn:aws:iam::000000000000:role/agent",
+                          "clientToken": "%s",
+                          "tags": %s
+                        }""".formatted(clientToken, tags))
+                .when().put("/runtimes/")
+                .then().statusCode(202)
+                .extract().path("agentRuntimeArn");
+    }
+
+    @Test
     void nonDefaultAccountCanTagItsMemoryAndRejectsForeignIdentity() {
         String authorization = "AWS4-HMAC-SHA256 Credential=111111111111/20261028/us-east-1/bedrock-agentcore/aws4_request";
         String arn = given().header("Authorization", authorization).contentType("application/json")
