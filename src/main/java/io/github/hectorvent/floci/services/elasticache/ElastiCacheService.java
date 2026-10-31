@@ -2141,6 +2141,29 @@ public class ElastiCacheService implements ResourceProvider {
         // Storage backends hand back the live stored object, so validate everything
         // before the first setter — a rejected request must not leave changes behind.
         String normalizedEngine = (engine == null || engine.isBlank()) ? null : normalizeEngine(engine);
+        ElastiCacheUser modified = applyUserModification(userId, user, authMode, passwords, accessString,
+                appendAccessString, normalizedEngine);
+        if (accessString != null || appendAccessString != null) {
+            reapplyAccessString(userId, modified);
+        }
+        return modified;
+    }
+
+    /** Lets the open sessions of every cache the user can sign in to pick up its new access string. */
+    private void reapplyAccessString(String userId, ElastiCacheUser user) {
+        if (!user.isEnabled()) {
+            return;
+        }
+        for (ReplicationGroup group : groups.scan(k -> true)) {
+            if (effectiveUserIds(groups.accountId(), group).contains(userId)) {
+                proxyManager.refreshUser(group.getReplicationGroupId(), user.getUserName());
+            }
+        }
+    }
+
+    private ElastiCacheUser applyUserModification(String userId, ElastiCacheUser user, AuthMode authMode,
+                                                  List<String> passwords, String accessString,
+                                                  String appendAccessString, String normalizedEngine) {
         synchronized (userGroupLock) {
             String nextEngine = normalizedEngine != null ? normalizedEngine : user.getEngine();
             AuthMode nextAuthMode = authMode != null ? authMode : user.getAuthMode();

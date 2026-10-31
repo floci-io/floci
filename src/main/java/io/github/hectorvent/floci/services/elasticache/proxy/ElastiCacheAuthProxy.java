@@ -103,6 +103,24 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
         backendAcl.authenticate(backend, name, access);
     }
 
+    /**
+     * Applies the user's current access string to the backend user that its open sessions run as. A
+     * failure is logged and the sessions keep their old permissions until the user authenticates again.
+     */
+    public void refreshUser(String username) {
+        String name = username == null || username.isEmpty() ? "default" : username;
+        String access = passwordValidator.accessString(name);
+        if (access == null) {
+            return;
+        }
+        try {
+            backendAcl.reapply(backendHost(), backendPort(), name, access);
+        } catch (IOException e) {
+            LOG.warnv(e, "Could not apply the new permissions of user {0} to the open sessions of group {1}",
+                    name, groupId);
+        }
+    }
+
     @Override
     protected boolean authRequired() {
         if (passwordValidator.hasMembers()) {

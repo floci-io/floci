@@ -1367,6 +1367,48 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void modifyUserAccessStringIsAppliedToTheOpenSessionsOfTheGroupsThatHoldTheUser() {
+        service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null, "us-east-1");
+        service.createReplicationGroup("other", "test", AuthMode.PASSWORD, null, "us-east-1");
+        service.createUser("default-user-id", "default", AuthMode.PASSWORD, List.of("default-pass"),
+                "on ~* +@all", null);
+        service.createUser("app-user-id", "app", AuthMode.PASSWORD, List.of("app-pass"), "on ~* +@all", null);
+        service.createUserGroup("app-group", "redis", List.of("default-user-id", "app-user-id"), "us-east-1");
+        service.modifyReplicationGroup("grp", List.of("app-group"), null);
+
+        service.modifyUser("app-user-id", null, null, "on ~allowed:* -@all +get", null, null);
+
+        verify(proxyManager).refreshUser("grp", "app");
+        verify(proxyManager, never()).refreshUser(eq("other"), anyString());
+    }
+
+    @Test
+    void modifyUserAppendedAccessStringIsAppliedToTheOpenSessions() {
+        service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null, "us-east-1");
+        service.createUser("default-user-id", "default", AuthMode.PASSWORD, List.of("default-pass"),
+                "on ~* +@all", null);
+        service.createUserGroup("app-group", "redis", List.of("default-user-id"), "us-east-1");
+        service.modifyReplicationGroup("grp", List.of("app-group"), null);
+
+        service.modifyUser("default-user-id", null, null, null, "-flushall", null);
+
+        verify(proxyManager).refreshUser("grp", "default");
+    }
+
+    @Test
+    void modifyUserWithoutAnAccessStringChangeLeavesTheOpenSessionsAlone() {
+        service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null, "us-east-1");
+        service.createUser("default-user-id", "default", AuthMode.PASSWORD, List.of("default-pass"),
+                "on ~* +@all", null);
+        service.createUserGroup("app-group", "redis", List.of("default-user-id"), "us-east-1");
+        service.modifyReplicationGroup("grp", List.of("app-group"), null);
+
+        service.modifyUser("default-user-id", AuthMode.PASSWORD, List.of("new-pass"), null, null, null);
+
+        verify(proxyManager, never()).refreshUser(anyString(), anyString());
+    }
+
+    @Test
     void groupOfAnotherAccountDroppingItsLastUserGroupChangesTheProxyAuthModeOutsideTheRequest() {
         AtomicReference<String> account = new AtomicReference<>("111111111111");
         ElastiCacheService svc = serviceWith(storageFollowing(account), containerManager, proxyManager,
