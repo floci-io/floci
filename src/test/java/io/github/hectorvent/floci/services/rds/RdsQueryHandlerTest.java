@@ -508,7 +508,7 @@ class RdsQueryHandlerTest {
     @Test
     void modifyDbCluster_forwardsDbClusterParameterGroupName() {
         when(service.modifyDbCluster(eq("mycluster"), isNull(), isNull(),
-                isNull(), isNull(), isNull(), isNull(), isNull(), eq("app-cluster-params"), any()))
+                isNull(), isNull(), isNull(), isNull(), isNull(), eq("app-cluster-params"), eq(false), eq(false), any()))
                 .thenReturn(makeCluster("mycluster"));
         MultivaluedMap<String, String> p = params();
         p.putSingle("DBClusterIdentifier", "mycluster");
@@ -517,7 +517,7 @@ class RdsQueryHandlerTest {
         assertEquals(200, handler.handle("ModifyDBCluster", p).getStatus());
 
         verify(service).modifyDbCluster(eq("mycluster"), isNull(), isNull(),
-                isNull(), isNull(), isNull(), isNull(), isNull(), eq("app-cluster-params"), any());
+                isNull(), isNull(), isNull(), isNull(), isNull(), eq("app-cluster-params"), eq(false), eq(false), any());
     }
 
     @Test
@@ -772,7 +772,7 @@ class RdsQueryHandlerTest {
         when(service.listDbClusters(null, "us-west-2")).thenReturn(List.of());
         when(service.getDbCluster("mycluster", "us-west-2")).thenReturn(cluster);
         when(service.modifyDbCluster("mycluster", null, null,
-                null, null, null, null, null, null, "us-west-2"))
+                null, null, null, null, null, null, false, false, "us-west-2"))
                 .thenReturn(cluster);
 
         handler.handle("DescribeDBInstances", params(), "us-west-2");
@@ -799,7 +799,7 @@ class RdsQueryHandlerTest {
         verify(service).getDbCluster("mycluster", "us-west-2");
         verify(service).deleteDbCluster("mycluster", "us-west-2", true);
         verify(service).modifyDbCluster("mycluster", null, null,
-                null, null, null, null, null, null, "us-west-2");
+                null, null, null, null, null, null, false, false, "us-west-2");
     }
 
     @Test
@@ -879,7 +879,7 @@ class RdsQueryHandlerTest {
     void modifyDbClusterPassesManagedMasterUserSecretOptions() {
         DbCluster cluster = makeCluster("mycluster");
         when(service.modifyDbCluster(eq("mycluster"), isNull(), isNull(),
-                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), any()))
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false), eq(false), any()))
                 .thenReturn(cluster);
 
         MultivaluedMap<String, String> p = params();
@@ -889,7 +889,24 @@ class RdsQueryHandlerTest {
         handler.handle("ModifyDBCluster", p);
 
         verify(service).modifyDbCluster(eq("mycluster"), isNull(), isNull(),
-                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), any());
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false), eq(false), any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,true", "true,false", "false,true", "false,false"})
+    void modifyDbClusterForwardsRotationAndApplyImmediately(boolean rotatePassword, boolean applyImmediately) {
+        DbCluster cluster = makeCluster("mycluster");
+        when(service.modifyDbCluster("mycluster", null, null, null, null, null,
+                null, null, null, rotatePassword, applyImmediately, "us-west-2")).thenReturn(cluster);
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "mycluster");
+        p.add("RotateMasterUserPassword", Boolean.toString(rotatePassword));
+        p.add("ApplyImmediately", Boolean.toString(applyImmediately));
+
+        assertEquals(200, handler.handle("ModifyDBCluster", p, "us-west-2").getStatus());
+
+        verify(service).modifyDbCluster("mycluster", null, null, null, null, null,
+                null, null, null, rotatePassword, applyImmediately, "us-west-2");
     }
 
     @Test

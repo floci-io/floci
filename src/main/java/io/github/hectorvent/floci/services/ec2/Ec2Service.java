@@ -14461,6 +14461,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (requestedIp != null) {
                 requireRequestedPrivateIpFree(region, subnetId, requestedIp);
             }
+            // Secondaries are folded and checked before the primary is allocated, so a refused one
+            // leaves no lease behind on the VPC network. Their range is not checked, as before.
+            Set<String> secondaries = new LinkedHashSet<>();
+            for (String extra : privateIpAddresses == null ? List.<String>of() : privateIpAddresses) {
+                if (extra == null || extra.isBlank()) {
+                    continue;
+                }
+                String ip = canonicalIpv4(extra).orElse(extra);
+                if (!ip.equals(requestedIp) && secondaries.add(ip)) {
+                    requireRequestedPrivateIpFree(region, subnetId, ip);
+                }
+            }
             String primaryIp = requestedIp != null ? requestedIp : assignPrivateIp(region, subnetId);
             String primaryDns = AwsRegions.ec2PrivateIpDnsName(primaryIp, region);
 
@@ -14486,17 +14498,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             primary.setPrivateDnsName(primaryDns);
             primary.setPrimary(true);
             ipList.add(primary);
-            if (privateIpAddresses != null) {
-                for (String extra : privateIpAddresses) {
-                    if (extra == null || extra.isBlank() || extra.equals(primaryIp)) {
-                        continue;
-                    }
-                    NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
-                    secondary.setPrivateIpAddress(extra);
-                    secondary.setPrivateDnsName(AwsRegions.ec2PrivateIpDnsName(extra, region));
-                    secondary.setPrimary(false);
-                    ipList.add(secondary);
+            for (String extra : secondaries) {
+                if (extra.equals(primaryIp)) {
+                    continue;
                 }
+                NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
+                secondary.setPrivateIpAddress(extra);
+                secondary.setPrivateDnsName(AwsRegions.ec2PrivateIpDnsName(extra, region));
+                secondary.setPrimary(false);
+                ipList.add(secondary);
             }
             ni.setPrivateIpAddresses(ipList);
 
