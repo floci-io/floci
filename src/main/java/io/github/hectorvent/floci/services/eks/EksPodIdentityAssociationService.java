@@ -26,6 +26,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.UnaryOperator;
 
 /**
  * Manages EKS Pod Identity association metadata.
@@ -295,6 +296,31 @@ public class EksPodIdentityAssociationService {
                 .map(StoredAssociation::association)
                 .filter(a -> a.namespace().equals(namespace) && a.serviceAccount().equals(serviceAccount))
                 .findFirst();
+    }
+
+    /**
+     * Applies {@code change} to the tags of the association {@code associationArn} names on
+     * {@code cluster} and returns them, or empty when the cluster has no association with that ARN.
+     * This is how TagResource, UntagResource and ListTagsForResource reach an association.
+     */
+    public Optional<Map<String, String>> retag(Cluster cluster, String associationId, String associationArn,
+                                               UnaryOperator<Map<String, String>> change) {
+        String key = prefix(cluster) + associationId;
+        Optional<StoredAssociation> found = associations.get(key)
+                .filter(stored -> associationArn.equals(stored.association().associationArn()));
+        if (found.isEmpty()) {
+            return Optional.empty();
+        }
+        PodIdentityAssociation current = found.get().association();
+        Map<String, String> tags = Map.copyOf(change.apply(current.tags() == null ? Map.of() : current.tags()));
+        if (!tags.equals(current.tags())) {
+            PodIdentityAssociation retagged = new PodIdentityAssociation(current.clusterName(), current.namespace(),
+                    current.serviceAccount(), current.roleArn(), current.associationArn(), current.associationId(),
+                    tags, current.createdAt(), current.modifiedAt(), current.ownerArn(), current.targetRoleArn(),
+                    current.disableSessionTags(), current.externalId(), current.policy());
+            associations.put(key, new StoredAssociation(retagged, found.get().clientRequestToken()));
+        }
+        return Optional.of(tags);
     }
 
     private static String prefix(Cluster cluster) {

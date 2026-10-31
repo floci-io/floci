@@ -31,6 +31,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.UnaryOperator;
 
 /** Access-entry and access-policy management metadata; Kubernetes authorization is handled separately. */
 @ApplicationScoped
@@ -269,6 +270,38 @@ public class EksAccessEntryService {
         for (StoredEntry stored : entries.scan(key -> key.startsWith(prefix))) {
             entries.delete(prefix + stored.entry().principalArn());
         }
+    }
+
+    /**
+     * Applies {@code change} to the tags of the access entry {@code accessEntryArn} names on
+     * {@code cluster} and returns them, or empty when the cluster has no entry with that ARN. Entries
+     * are stored by principal, which the ARN does not carry whole, so the cluster's entries are
+     * searched. This is how TagResource, UntagResource and ListTagsForResource reach an entry.
+     */
+    public Optional<Map<String, String>> retag(Cluster cluster, String accessEntryArn,
+                                               UnaryOperator<Map<String, String>> change) {
+        String prefix = prefix(cluster);
+        for (String key : entries.keys()) {
+            if (!key.startsWith(prefix)) {
+                continue;
+            }
+            Optional<StoredEntry> found = entries.get(key)
+                    .filter(stored -> accessEntryArn.equals(stored.entry().accessEntryArn()));
+            if (found.isPresent()) {
+                StoredEntry stored = found.get();
+                AccessEntry current = stored.entry();
+                Map<String, String> tags = Map.copyOf(change.apply(current.tags() == null ? Map.of() : current.tags()));
+                if (!tags.equals(current.tags())) {
+                    AccessEntry retagged = new AccessEntry(current.accessEntryArn(), current.clusterName(),
+                            current.principalArn(), current.type(), current.username(), current.kubernetesGroups(),
+                            tags, current.createdAt(), current.modifiedAt());
+                    entries.put(key, new StoredEntry(retagged, stored.principalId(), stored.clientRequestToken(),
+                            stored.accessPolicies()));
+                }
+                return Optional.of(tags);
+            }
+        }
+        return Optional.empty();
     }
 
     private static String prefix(Cluster cluster) {
