@@ -117,11 +117,12 @@ public class ElastiCacheQueryHandler {
         AuthMode authMode;
         if (authToken != null && !authToken.isBlank()) {
             authMode = AuthMode.PASSWORD;
-        } else if ("true".equalsIgnoreCase(transitEncryption)) {
-            authMode = AuthMode.IAM;
         } else {
+            // Bug #4502: Do not conflate TransitEncryptionEnabled=true with IAM auth mode
             authMode = AuthMode.NO_AUTH;
         }
+        Boolean transitEncryptionEnabled = transitEncryption != null
+                ? Boolean.parseBoolean(transitEncryption) : null;
 
         try {
             ReplicationGroup group = service.createReplicationGroup(
@@ -146,7 +147,8 @@ public class ElastiCacheQueryHandler {
                             replicationGroupSettings(params),
                             parseTags(params),
                             extractMemberList(params, "UserGroupIds.member."),
-                            parseSecurityGroupIds(params)));
+                            parseSecurityGroupIds(params),
+                            transitEncryptionEnabled));
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("CreateReplicationGroup", AwsNamespaces.EC, result)).build();
         } catch (AwsException e) {
@@ -454,7 +456,8 @@ public class ElastiCacheQueryHandler {
                             params.getFirst("IpDiscovery"),
                             boolParam(params, "AtRestEncryptionEnabled"),
                             region,
-                            parseTags(params));
+                            parseTags(params),
+                            boolParam(params, "TransitEncryptionEnabled"));
             CacheCluster cluster = "memcached".equalsIgnoreCase(engine)
                     ? memcachedService.createCacheCluster(request)
                     : service.createCacheCluster(request);
@@ -471,9 +474,7 @@ public class ElastiCacheQueryHandler {
         if (authToken != null && !authToken.isBlank()) {
             return AuthMode.PASSWORD;
         }
-        if ("true".equalsIgnoreCase(params.getFirst("TransitEncryptionEnabled"))) {
-            return AuthMode.IAM;
-        }
+        // Bug #4502: Open-access TLS clusters remain NO_AUTH
         return AuthMode.NO_AUTH;
     }
 
@@ -1057,7 +1058,7 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             xml.elem("NumCacheNodes", (long) numCacheNodes)
                .elem("AutoMinorVersionUpgrade", true)
                .elem("AuthTokenEnabled", c.getAuthMode() == AuthMode.PASSWORD)
-               .elem("TransitEncryptionEnabled", c.getAuthMode() != null && c.getAuthMode() != AuthMode.NO_AUTH)
+               .elem("TransitEncryptionEnabled", c.isEncryptedInTransit())
                .elem("AtRestEncryptionEnabled", c.isAtRestEncryptionEnabled())
                .elem("SnapshotRetentionLimit", (long) c.getSnapshotRetentionLimit())
                .elem("SnapshotWindow", c.getSnapshotWindow() != null

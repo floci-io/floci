@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.elasticache.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -35,6 +36,7 @@ public class CacheCluster {
     private boolean atRestEncryptionEnabled;
     private List<String> securityGroupIds = new ArrayList<>();
     private Map<String, String> tags = new LinkedHashMap<>();
+    private Boolean transitEncryptionEnabled;
     private String serverlessCacheName;
     private String ownerAccountId;
     private String userGroupId;
@@ -143,4 +145,12 @@ public class CacheCluster {
 
     public int getContainerPort() { return containerPort; }
     public void setContainerPort(int containerPort) { this.containerPort = containerPort; }
+
+    public Boolean getTransitEncryptionEnabled() { return transitEncryptionEnabled; }
+    public void setTransitEncryptionEnabled(Boolean transitEncryptionEnabled) { this.transitEncryptionEnabled = transitEncryptionEnabled; }
+
+    @JsonIgnore
+    public boolean isEncryptedInTransit() {
+        return transitEncryptionEnabled != null ? transitEncryptionEnabled : (authMode != null && authMode != AuthMode.NO_AUTH);
+    }
 }
