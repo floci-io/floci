@@ -1674,17 +1674,23 @@ public class RdsQueryHandler {
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBParameterGroupName is required.", AwsNamespaces.RDS, 400);
         }
+        String sourceFilter = params.getFirst("Source");
         try {
             DbParameterGroup group = service.getDbParameterGroup(name, region);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
             for (Map.Entry<String, String> entry : group.getParameters().entrySet()) {
-                xml.start("member")
+                if (sourceFilter != null && !sourceFilter.isBlank()
+                        && !"user".equalsIgnoreCase(sourceFilter)) {
+                    // We only store user-modified parameters; system/engine-default are not modelled.
+                    continue;
+                }
+                xml.start("Parameter")
                    .elem("ParameterName", entry.getKey())
                    .elem("ParameterValue", entry.getValue())
                    .elem("Source", "user")
                    .elem("ApplyMethod", group.getApplyMethods().getOrDefault(entry.getKey(), "immediate"))
                    .elem("IsModifiable", true)
-                   .end("member");
+                   .end("Parameter");
             }
             xml.end("Parameters").start("Marker").end("Marker");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBParameters", AwsNamespaces.RDS, xml.build())).build();
@@ -1816,17 +1822,23 @@ public class RdsQueryHandler {
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBClusterParameterGroupName is required.", AwsNamespaces.RDS, 400);
         }
+        String sourceFilter = params.getFirst("Source");
         try {
             DbClusterParameterGroup group = service.getDbClusterParameterGroup(name, region);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
             for (Map.Entry<String, String> entry : group.getParameters().entrySet()) {
-                xml.start("member")
+                if (sourceFilter != null && !sourceFilter.isBlank()
+                        && !"user".equalsIgnoreCase(sourceFilter)) {
+                    // We only store user-modified parameters; system/engine-default are not modelled.
+                    continue;
+                }
+                xml.start("Parameter")
                    .elem("ParameterName", entry.getKey())
                    .elem("ParameterValue", entry.getValue())
                    .elem("Source", "user")
                    .elem("ApplyMethod", group.getApplyMethods().getOrDefault(entry.getKey(), "immediate"))
                    .elem("IsModifiable", true)
-                   .end("member");
+                   .end("Parameter");
             }
             xml.end("Parameters").start("Marker").end("Marker");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterParameters", AwsNamespaces.RDS, xml.build())).build();
