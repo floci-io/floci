@@ -59,7 +59,7 @@ public class PaymentCryptographyJsonHandler {
         Map<String, Object> declared = new LinkedHashMap<>();
         attributes.fields().forEachRemaining(entry ->
                 declared.put(entry.getKey(), entry.getValue().asText()));
-        PaymentCryptographyKey key = service.createKey(region, declared,
+        PaymentCryptographyKey key = service.createKey(region, declared, modesOfUse(attributes),
                 request.path("Exportable").asBoolean(false));
         return Map.of("Key", keyObject(key));
     }
@@ -163,6 +163,24 @@ public class PaymentCryptographyJsonHandler {
     }
 
     // ---- helpers ------------------------------------------------------------
+
+    /**
+     * The key's modes of use, as the request states them.
+     *
+     * <p>The attributes are read as text, and a mode is a boolean, so the
+     * modes are read from the request itself rather than from the flattened
+     * attributes: a boolean read as text is a string, and the key would come
+     * back with no modes at all.
+     */
+    private static Map<String, Boolean> modesOfUse(JsonNode attributes) {
+        Map<String, Boolean> modes = new LinkedHashMap<>();
+        JsonNode declared = attributes.get("KeyModesOfUse");
+        if (declared != null && declared.isObject()) {
+            declared.fields().forEachRemaining(entry ->
+                    modes.put(entry.getKey(), entry.getValue().asBoolean()));
+        }
+        return modes;
+    }
 
     private PaymentCryptographyKey requiredKey(JsonNode request, String region) {
         // The key is named in a different member by each operation:

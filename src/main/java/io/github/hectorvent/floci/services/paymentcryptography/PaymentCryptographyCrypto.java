@@ -63,14 +63,15 @@ final class PaymentCryptographyCrypto {
         try {
             byte[] s = encrypt(ZERO_BLOCK, key);
             byte[] k1 = new byte[16];
-            boolean carry = (s[0] & 0x80) != 0;
+            int carry = 0;
             for (int i = 15; i >= 0; i--) {
-                k1[i] = (byte) ((s[i] << 1) & 0xff);
-                if (i > 0) {
-                    k1[i] |= (byte) ((s[i - 1] & 0x80) != 0 ? 1 : 0);
-                }
+                // The bit that falls off the top of the block comes from the
+                // byte above it, so the carry travels down the block.
+                int nextCarry = (s[i] & 0x80) != 0 ? 1 : 0;
+                k1[i] = (byte) (((s[i] << 1) | carry) & 0xff);
+                carry = nextCarry;
             }
-            if (carry) {
+            if ((s[0] & 0x80) != 0) {
                 k1[15] ^= (byte) 0x87;
             }
             return k1;

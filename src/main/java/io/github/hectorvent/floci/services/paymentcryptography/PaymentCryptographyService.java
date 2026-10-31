@@ -33,6 +33,10 @@ import java.util.UUID;
 @ApplicationScoped
 public class PaymentCryptographyService implements Resettable {
 
+    /** The storage key, which is the one the catalog's descriptor names. */
+    private static final String STORAGE_KEY = "paymentcryptography";
+
+    /** The service in the ARN, which is the service's own name. */
     private static final String SERVICE = "payment-cryptography";
 
     private final StorageBackend<String, PaymentCryptographyKey> keyStore;
@@ -42,9 +46,9 @@ public class PaymentCryptographyService implements Resettable {
 
     @Inject
     public PaymentCryptographyService(StorageFactory storageFactory, RegionResolver regionResolver) {
-        this(storageFactory.create(SERVICE, "payment-cryptography-keys.json",
+        this(storageFactory.create(STORAGE_KEY, "payment-cryptography-keys.json",
                         new TypeReference<>() {}),
-                storageFactory.create(SERVICE, "payment-cryptography-aliases.json",
+                storageFactory.create(STORAGE_KEY, "payment-cryptography-aliases.json",
                         new TypeReference<>() {}),
                 regionResolver,
                 new SecureRandom());
@@ -70,7 +74,7 @@ public class PaymentCryptographyService implements Resettable {
 
     /** Creates a key with fresh AES-256 material. */
     public PaymentCryptographyKey createKey(String region, Map<String, Object> attributes,
-                                            boolean exportable) {
+                                            Map<String, Boolean> modesOfUse, boolean exportable) {
         PaymentCryptographyKey key = new PaymentCryptographyKey();
         key.setKeyId(UUID.randomUUID().toString().replace("-", ""));
         key.setRegion(region);
@@ -78,7 +82,7 @@ public class PaymentCryptographyService implements Resettable {
         key.setKeyAlgorithm(string(attributes, "KeyAlgorithm", "AES_256"));
         key.setKeyClass(string(attributes, "KeyClass", "SYMMETRIC_KEY"));
         key.setKeyUsage(string(attributes, "KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"));
-        key.setKeyModesOfUse(modesOfUse(attributes));
+        key.setKeyModesOfUse(modesOfUse);
         key.setExportable(exportable);
         key.setEnabled(true);
         key.setKeyState("CREATE_COMPLETE");
@@ -103,13 +107,14 @@ public class PaymentCryptographyService implements Resettable {
         }
         if (AwsArnUtils.looksLikeArn(identifier)) {
             for (PaymentCryptographyKey key : keyStore.scan(k -> true)) {
-                if (identifier.equals(key.getArn())) {
+                if (identifier.equals(key.getArn()) && region.equals(key.getRegion())) {
                     return key;
                 }
             }
             return null;
         }
-        return keyStore.get(identifier).orElse(null);
+        PaymentCryptographyKey byId = keyStore.get(identifier).orElse(null);
+        return byId != null && region.equals(byId.getRegion()) ? byId : null;
     }
 
     /** The keys of a region. */
@@ -146,7 +151,7 @@ public class PaymentCryptographyService implements Resettable {
     }
 
     /** Points a name at a key. The name must be free in the key's region. */
-    public PaymentCryptographyAlias createAlias(String aliasName, PaymentCryptographyKey key) {
+    public synchronized PaymentCryptographyAlias createAlias(String aliasName, PaymentCryptographyKey key) {
         if (findAlias(key.getRegion(), aliasName) != null) {
             throw new AwsException("ConflictException",
                     "Alias " + aliasName + " already exists", 400);
@@ -158,7 +163,7 @@ public class PaymentCryptographyService implements Resettable {
     }
 
     /** Points a name at another key, in the same region. */
-    public PaymentCryptographyAlias updateAlias(String aliasName, PaymentCryptographyKey key) {
+    public synchronized PaymentCryptographyAlias updateAlias(String aliasName, PaymentCryptographyKey key) {
         PaymentCryptographyAlias existing = findAlias(key.getRegion(), aliasName);
         if (existing == null) {
             throw new AwsException("ResourceNotFoundException",
@@ -171,7 +176,7 @@ public class PaymentCryptographyService implements Resettable {
     }
 
     /** Removes a name from a region. */
-    public void deleteAlias(String region, String aliasName) {
+    public synchronized void deleteAlias(String region, String aliasName) {
         if (findAlias(region, aliasName) == null) {
             throw new AwsException("ResourceNotFoundException",
                     "Alias " + aliasName + " is not found", 400);
@@ -230,18 +235,6 @@ public class PaymentCryptographyService implements Resettable {
      */
     private static String aliasKey(String aliasName, String region) {
         return region + "\u0000" + aliasName;
-    }
-
-    private static Map<String, Boolean> modesOfUse(Map<String, Object> attributes) {
-        Map<String, Boolean> modes = new LinkedHashMap<>();
-        Object declared = attributes.get("KeyModesOfUse");
-        if (declared instanceof Map<?, ?> map) {
-            for (Map.Entry<?, ?> entry : map.entrySet()) {
-                modes.put(String.valueOf(entry.getKey()),
-                        Boolean.TRUE.equals(entry.getValue()));
-            }
-        }
-        return modes;
     }
 
     private static String string(Map<String, Object> attributes, String name, String fallback) {
