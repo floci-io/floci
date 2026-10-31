@@ -87,6 +87,8 @@ public class IamConditionContextResolver {
     public static final String OBJECT_LOCK_RETAIN_UNTIL_DATE = "s3:object-lock-retain-until-date";
     public static final String OBJECT_LOCK_REMAINING_RETENTION_DAYS = "s3:object-lock-remaining-retention-days";
     public static final String OBJECT_LOCK_LEGAL_HOLD = "s3:object-lock-legal-hold";
+    public static final String SERVER_SIDE_ENCRYPTION = "s3:x-amz-server-side-encryption";
+    public static final String SERVER_SIDE_ENCRYPTION_KMS_KEY_ID = "s3:x-amz-server-side-encryption-aws-kms-key-id";
     static final String REQUEST_AUTH_TYPE = "lambda:Request/WebFunctionAuthType";
     static final String RESOURCE_AUTH_TYPE = "lambda:Resource/WebFunctionAuthType";
 
@@ -401,16 +403,63 @@ public class IamConditionContextResolver {
                  "s3:PutObjectVersionAnnotation", "s3:DeleteObjectAnnotation",
                  "s3:DeleteObjectVersionAnnotation" -> s3ExistingObjectTagConditionContext(ctx);
             // The Object Lock keys come from what the request sets: an object creation's headers, the
-            // retention and legal-hold bodies.
-            case "s3:PutObject" -> S3ObjectActions.objectCreationConditions(ctx::getHeaderString,
-                    s3RequestTagging(ctx), S3ObjectActions.isCopy(ctx.getMethod(), ctx::getHeaderString),
-                    clock.instant());
+            // retention and legal-hold bodies. A part or a completion creates nothing from its own
+            // headers, and is judged by the encryption its upload recorded.
+            case "s3:PutObject" -> isPartOrCompletion(ctx)
+                    ? s3UploadEncryptionConditionContext(ctx)
+                    : S3ObjectActions.objectCreationConditions(ctx::getHeaderString,
+                            s3RequestTagging(ctx), S3ObjectActions.isCopy(ctx.getMethod(), ctx::getHeaderString),
+                            clock.instant());
             case "s3:PutObjectRetention" -> S3ObjectActions.retentionBodyConditions(bodyText(ctx), clock.instant());
             case "s3:PutObjectLegalHold" -> S3ObjectActions.legalHoldBodyConditions(bodyText(ctx), clock.instant());
             case "s3:PutObjectTagging", "s3:PutObjectVersionTagging" -> merge(
                     s3ExistingObjectTagConditionContext(ctx), S3ObjectActions.taggingBodyConditions(bodyText(ctx)));
             default -> null;
         };
+    }
+
+    /**
+     * The encryption keys of a part or a completion: what its upload recorded when it was created, as
+     * measured on S3, since a part sends neither header. An upload not held offers neither.
+     */
+    private Map<String, List<String>> s3UploadEncryptionConditionContext(ContainerRequestContext ctx) {
+        if (!s3Service.isResolvable()) {
+            return null;
+        }
+        String bucket = s3BucketName(ctx.getUriInfo().getPath());
+        try {
+            return s3Service.get().multipartEncryptionConditions(bucket, s3RequestObjectKey(ctx, bucket),
+                    ctx.getUriInfo().getQueryParameters().getFirst("uploadId"));
+        } catch (AwsException expected) {
+            // The handler answers an upload not held as NoSuchUpload; here it offers no keys.
+            return null;
+        }
+    }
+
+    /**
+     * A part or a completion as S3Controller routes them: a PUT naming an upload and a part number, or a
+     * POST naming an upload and not asking for a new one. Any other PUT or POST naming an {@code uploadId}
+     * creates an object or an upload, whatever that parameter says, and is judged by its own headers.
+     */
+    private static boolean isPartOrCompletion(ContainerRequestContext ctx) {
+        MultivaluedMap<String, String> params = ctx.getUriInfo().getQueryParameters();
+        if (!params.containsKey("uploadId")) {
+            return false;
+        }
+        return "PUT".equalsIgnoreCase(ctx.getMethod())
+                ? params.containsKey("partNumber")
+                : "POST".equalsIgnoreCase(ctx.getMethod()) && !params.containsKey("uploads");
+    }
+
+    /**
+     * Whether a request checked as {@code s3:PutObject} is a part or a completion of an upload S3 does
+     * not hold. There is no encryption to judge it by, and S3 answers it {@code NoSuchUpload} under a
+     * policy on the encryption keys, as measured.
+     */
+    boolean namesUploadNotHeld(String action, ContainerRequestContext ctx) {
+        return "s3:PutObject".equals(action) && isPartOrCompletion(ctx)
+                && ctx.getHeaderString("x-amz-copy-source") == null
+                && s3UploadEncryptionConditionContext(ctx) == null && s3Service.isResolvable();
     }
 
     private static String bodyText(ContainerRequestContext ctx) {

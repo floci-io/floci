@@ -902,7 +902,7 @@ public class S3Controller {
             }
 
             if (uploadId != null && partNumber != null) {
-                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
+                s3Service.authorizeMultipartWrite(bucket, key, uploadId, authorization);
                 int parsedPartNumber = PartRange.parseUploadPartNumber(partNumber);
                 if (copySource != null && !copySource.isEmpty()) {
                     return handleUploadPartCopy(copySource, bucket, key, uploadId, parsedPartNumber,
@@ -1711,7 +1711,7 @@ public class S3Controller {
             }
 
             if (uploadId != null) {
-                s3Service.authorizeObjectWrite(bucket, key, "s3:PutObject", authorization);
+                s3Service.authorizeMultipartWrite(bucket, key, uploadId, authorization);
                 authorizeConditionalWriteRead(bucket, key, ifMatch, authorization);
                 List<CompletedPart> completedParts = parseCompleteMultipartBody(new String(body, StandardCharsets.UTF_8));
                 List<Integer> partNumbers = completedParts.stream().map(CompletedPart::partNumber).toList();

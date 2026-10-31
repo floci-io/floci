@@ -484,6 +484,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             }
         }
 
+        // A policy on the encryption keys would refuse this for keys it cannot have: the handler answers it.
+        if (conditionContextResolver.namesUploadNotHeld(action, ctx)) {
+            return;
+        }
+
         Map<String, List<String>> conditionContext = conditionContextResolver.resolve(credentialScope, action, ctx);
         // A request naming several resources is authorized once per resource, as on AWS, so a
         // permitted first target cannot carry later targets that the policy does not allow.
