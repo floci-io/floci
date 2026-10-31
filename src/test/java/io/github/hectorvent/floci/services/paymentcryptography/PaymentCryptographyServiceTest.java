@@ -35,7 +35,10 @@ class PaymentCryptographyServiceTest {
         attributes.put("KeyAlgorithm", "AES_256");
         attributes.put("KeyClass", "SYMMETRIC_KEY");
         attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
-        return service.createKey(region, attributes, true);
+        Map<String, Boolean> modes = new LinkedHashMap<>();
+        modes.put("Encrypt", Boolean.TRUE);
+        modes.put("Decrypt", Boolean.TRUE);
+        return service.createKey(region, attributes, modes, true);
     }
 
     @Test
@@ -57,6 +60,35 @@ class PaymentCryptographyServiceTest {
         // The CMAC of sixteen zero bytes under the key, leftmost three bytes.
         assertEquals(PaymentCryptographyCrypto.checkValue(key.getKeyMaterialHex()),
                 key.getKeyCheckValue());
+    }
+
+    @Test
+    void theCheckValueMatchesRfc4493() {
+        // RFC 4493's example 2: a sixteen-byte message under the RFC's key.
+        // A complete final block is masked with K1 and a padded one with K2,
+        // and the check value is the CMAC of sixteen zero bytes, so it is the
+        // complete-block case.
+        assertEquals("7AD386",
+                PaymentCryptographyCrypto.checkValue("2B7E151628AED2A6ABF7158809CF4F3C"));
+    }
+
+    @Test
+    void theKeyCarriesTheModesItWasAskedFor() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+
+        assertEquals(Boolean.TRUE, key.getKeyModesOfUse().get("Encrypt"));
+        assertEquals(Boolean.TRUE, key.getKeyModesOfUse().get("Decrypt"));
+    }
+
+    @Test
+    void aKeyInAnotherRegionIsNotThisRegionsKey() {
+        PaymentCryptographyKey west = createKey("us-west-2");
+
+        assertNull(service.findKey("us-east-1", west.getArn()),
+                "a key in another region was found in this one");
+        assertNull(service.findKey("us-east-1", west.getKeyId()),
+                "a key in another region was found in this one");
+        assertNotNull(service.findKey("us-west-2", west.getArn()));
     }
 
     @Test
