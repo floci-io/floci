@@ -13,6 +13,8 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -176,6 +178,62 @@ class S3NotificationDestinationValidationIntegrationTest {
     }
 
     @Test
+    void queueAndTopicCopiesKeepOperationMetadataAndTheirOwnRuleIds() throws Exception {
+        String directQueueArn = createQueue("event-direct", Map.of());
+        String subscribedQueueArn = createQueue("event-subscribed", Map.of());
+        String topicArn = createTopic("event-topic");
+        snsService.subscribe(topicArn, "sqs", subscribedQueueArn, REGION,
+                Map.of("RawMessageDelivery", "true"));
+        putNotification(notificationConfiguration(
+                queueConfiguration(directQueueArn, "<Id>queue-rule</Id>")
+                + topicConfiguration(topicArn, "<Id>topic-rule</Id>")), true)
+                .statusCode(200);
+        try {
+            given().body("payload").put("/" + bucket + "/a%20b%2Bc.txt").then().statusCode(200);
+
+            JsonNode queueEvent = objectMapper.readTree(receiveQueueMessage(queueUrls.get(0))
+                    .getFirst().getBody()).path("Records").get(0);
+            JsonNode topicEvent = objectMapper.readTree(receiveQueueMessage(queueUrls.get(1))
+                    .getFirst().getBody()).path("Records").get(0);
+            assertEquals("queue-rule", queueEvent.path("s3").path("configurationId").asText());
+            assertEquals("topic-rule", topicEvent.path("s3").path("configurationId").asText());
+            assertFalse(queueEvent.path("responseElements").path("x-amz-id-2").asText().isBlank());
+            assertEquals("000000000000", queueEvent.path("s3").path("bucket")
+                    .path("ownerIdentity").path("principalId").asText());
+            assertEquals(queueEvent.path("eventTime"), topicEvent.path("eventTime"));
+            assertEquals(queueEvent.path("responseElements"), topicEvent.path("responseElements"));
+            assertEquals(queueEvent.path("s3").path("object"), topicEvent.path("s3").path("object"));
+        } finally {
+            given().delete("/" + bucket + "/a%20b%2Bc.txt").then().statusCode(204);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", "<Id></Id>", "<Id> \t </Id>"})
+    void missingQueueAndTopicRuleIdsUseEmulator(String idXml) throws Exception {
+        String directQueueArn = createQueue("fallback-direct", Map.of());
+        String subscribedQueueArn = createQueue("fallback-subscribed", Map.of());
+        String topicArn = createTopic("fallback-topic");
+        snsService.subscribe(topicArn, "sqs", subscribedQueueArn, REGION,
+                Map.of("RawMessageDelivery", "true"));
+        putNotification(notificationConfiguration(
+                queueConfiguration(directQueueArn, idXml)
+                + topicConfiguration(topicArn, idXml)), true)
+                .statusCode(200);
+        try {
+            given().body("payload").put("/" + bucket + "/fallback.txt").then().statusCode(200);
+
+            for (String queueUrl : queueUrls) {
+                JsonNode event = objectMapper.readTree(receiveQueueMessage(queueUrl)
+                        .getFirst().getBody()).path("Records").get(0);
+                assertEquals("emulator", event.path("s3").path("configurationId").asText());
+            }
+        } finally {
+            given().delete("/" + bucket + "/fallback.txt").then().statusCode(204);
+        }
+    }
+
+    @Test
     void crossRegionTopicReceivesTestEventAndLaterObjectEvent() throws Exception {
         String topicRegion = "ap-southeast-2";
         String queueName = "notification-topic-cross-region-" + UUID.randomUUID().toString().substring(0, 8);
@@ -335,12 +393,20 @@ class S3NotificationDestinationValidationIntegrationTest {
     }
 
     private static String queueConfiguration(String arn) {
-        return "<QueueConfiguration><Queue>" + arn
+        return queueConfiguration(arn, "");
+    }
+
+    private static String queueConfiguration(String arn, String idXml) {
+        return "<QueueConfiguration>" + idXml + "<Queue>" + arn
                 + "</Queue><Event>s3:ObjectCreated:*</Event></QueueConfiguration>";
     }
 
     private static String topicConfiguration(String arn) {
-        return "<TopicConfiguration><Topic>" + arn
+        return topicConfiguration(arn, "");
+    }
+
+    private static String topicConfiguration(String arn, String idXml) {
+        return "<TopicConfiguration>" + idXml + "<Topic>" + arn
                 + "</Topic><Event>s3:ObjectCreated:*</Event></TopicConfiguration>";
     }
 

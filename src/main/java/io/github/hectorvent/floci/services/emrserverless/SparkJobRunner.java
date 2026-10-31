@@ -50,8 +50,10 @@ public interface SparkJobRunner {
     /**
      * What a run needs: the service it belongs to and its id there, which name its container; its account
      * and Region; its release, and the image template and Docker network to run it in (a null template is
-     * the release's public EMR Serverless image, a null network the global default); the execution role
-     * whose credentials it gets; the {@code spark-defaults} properties that apply to it;
+     * the release's public EMR Serverless image, a null network the global default); {@code customImage}, when
+     * not null, the image the run's application names, which it runs in place of the template's, resolved
+     * again for each run; the execution role whose credentials it gets; the {@code spark-defaults} properties
+     * that apply to it;
      * {@code application}, what follows Floci's own settings on {@code spark-submit}'s command line (the
      * run's options, then its application and that application's arguments); or {@code command}, when not
      * null, what the container runs in place of {@code spark-submit}, where a {@code spark-submit} it starts
@@ -62,9 +64,9 @@ public interface SparkJobRunner {
      * its driver's output goes while it runs (null for nowhere but Floci's log).
      */
     record Job(String service, String runId, String accountId, String region, String releaseLabel,
-               String imageTemplate, String dockerNetwork, String executionRole, Map<String, String> sparkDefaults,
-               List<String> application, List<String> command, Duration timeout, String logFolder,
-               CloudWatchLogs cloudWatchLogs) {
+               String imageTemplate, String customImage, String dockerNetwork, String executionRole,
+               Map<String, String> sparkDefaults, List<String> application, List<String> command, Duration timeout,
+               String logFolder, CloudWatchLogs cloudWatchLogs) {
     }
 
     /**

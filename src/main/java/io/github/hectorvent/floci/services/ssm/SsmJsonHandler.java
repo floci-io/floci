@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.ssm.model.CommandInvocation;
 import io.github.hectorvent.floci.services.ssm.model.InstanceInformation;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
+import io.github.hectorvent.floci.services.ssm.model.ParameterResourcePolicy;
 import io.github.hectorvent.floci.services.ssm.model.ParameterStringFilter;
 import io.github.hectorvent.floci.services.ssm.model.PatchBaselineIdentity;
 import io.github.hectorvent.floci.services.ssm.model.ServiceSetting;
@@ -74,6 +75,9 @@ public class SsmJsonHandler {
             case "AddTagsToResource" -> handleAddTagsToResource(request, region);
             case "ListTagsForResource" -> handleListTagsForResource(request, region);
             case "RemoveTagsFromResource" -> handleRemoveTagsFromResource(request, region);
+            case "PutResourcePolicy" -> handlePutResourcePolicy(request, region);
+            case "GetResourcePolicies" -> handleGetResourcePolicies(request, region);
+            case "DeleteResourcePolicy" -> handleDeleteResourcePolicy(request, region);
             // Run Command (public API)
             case "SendCommand" -> handleSendCommand(request, region);
             case "GetCommandInvocation" -> handleGetCommandInvocation(request, region);
@@ -1225,6 +1229,86 @@ public class SsmJsonHandler {
 
         ssmService.removeTagsFromResource(resourceId, tagKeys, region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private static final int GET_RESOURCE_POLICIES_MAX_RESULTS = 50;
+    private static final String GET_RESOURCE_POLICIES_TOKEN = "GetResourcePolicies:";
+    private static final String POLICY_PATTERN = "^(?!\\s*$).+";
+
+    private Response handlePutResourcePolicy(JsonNode request, String region) {
+        String resourceArn = optionalString(request, "ResourceArn");
+        String policy = optionalString(request, "Policy");
+        List<String> violations = new ArrayList<>();
+        addResourceArnViolation(violations, resourceArn);
+        if (policy == null) {
+            violations.add(SmithyValidationErrors.notNull("policy"));
+        } else if (policy.isBlank()) {
+            violations.add(SmithyValidationErrors.pattern("policy", policy, POLICY_PATTERN));
+        }
+        if (!violations.isEmpty()) {
+            throw SsmService.validationErrors(violations);
+        }
+
+        ParameterResourcePolicy stored = ssmService.putResourcePolicy(resourceArn, policy,
+                optionalText(request, "PolicyId"), optionalText(request, "PolicyHash"), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("PolicyId", stored.policyId());
+        response.put("PolicyHash", stored.policyHash());
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetResourcePolicies(JsonNode request, String region) {
+        String resourceArn = optionalString(request, "ResourceArn");
+        List<String> violations = new ArrayList<>();
+        addResourceArnViolation(violations, resourceArn);
+        if (!violations.isEmpty()) {
+            throw SsmService.validationErrors(violations);
+        }
+        PageRequest pageRequest = pageRequest(request, GET_RESOURCE_POLICIES_MAX_RESULTS);
+
+        PaginatedResult<ParameterResourcePolicy> page = page(pageRequest,
+                ssmService.getResourcePolicies(resourceArn, region), ParameterResourcePolicy::policyId,
+                GET_RESOURCE_POLICIES_MAX_RESULTS,
+                GET_RESOURCE_POLICIES_TOKEN + ssmService.accountId() + ":" + region + ":" + resourceArn);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode policies = response.putArray("Policies");
+        for (ParameterResourcePolicy p : page.items()) {
+            policies.addObject()
+                    .put("PolicyId", p.policyId())
+                    .put("PolicyHash", p.policyHash())
+                    .put("Policy", p.policy());
+        }
+        putNextToken(response, page);
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteResourcePolicy(JsonNode request, String region) {
+        String resourceArn = optionalString(request, "ResourceArn");
+        String policyId = optionalString(request, "PolicyId");
+        String policyHash = optionalString(request, "PolicyHash");
+        List<String> violations = new ArrayList<>();
+        addResourceArnViolation(violations, resourceArn);
+        if (policyId == null) {
+            violations.add(SmithyValidationErrors.notNull("policyId"));
+        }
+        if (policyHash == null) {
+            violations.add(SmithyValidationErrors.notNull("policyHash"));
+        }
+        if (!violations.isEmpty()) {
+            throw SsmService.validationErrors(violations);
+        }
+
+        ssmService.deleteResourcePolicy(resourceArn, policyId, policyHash, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private static void addResourceArnViolation(List<String> violations, String resourceArn) {
+        String violation = resourceArn == null
+                ? SmithyValidationErrors.notNull("resourceArn")
+                : SmithyValidationErrors.lengthOutOfRange("resourceArn", resourceArn, 20, 2048);
+        if (violation != null) {
+            violations.add(violation);
+        }
     }
 
     private ObjectNode parameterToNode(Parameter p) {

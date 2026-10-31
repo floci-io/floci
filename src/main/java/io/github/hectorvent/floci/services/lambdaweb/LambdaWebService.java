@@ -1344,7 +1344,7 @@ public class LambdaWebService implements Resettable {
                 throw new AwsException("ConflictException", "The policy was updated or deleted by another request."
                         + " Try again with the latest policy revisionId.", 409);
             }
-            fn.policy = policy;
+            fn.policy = LambdaWebPolicyText.kept(objectMapper, policy);
             fn.policyRevisionId = UUID.randomUUID().toString();
             fn.updatedAt = now();
             persist(region, fn);
@@ -1358,7 +1358,8 @@ public class LambdaWebService implements Resettable {
         if (fn.policy == null) {
             throw noPolicy();
         }
-        return new ResourcePolicy(fn.policy, fn.policyRevisionId);
+        String partition = regionResolver.partitionForRegion(region);
+        return new ResourcePolicy(LambdaWebPolicyText.read(objectMapper, fn.policy, partition), fn.policyRevisionId);
     }
 
     public void deleteResourcePolicy(String region, String resourceArn, String revisionId) {

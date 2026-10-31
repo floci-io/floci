@@ -6039,16 +6039,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return false;
         }
         return switch (optionKey) {
-            case "domain-name-servers" -> values.size() <= 4 &&
-                    (values.equals(List.of("AmazonProvidedDNS")) || values.stream().allMatch(this::isLiteralIp));
+            case "domain-name-servers" -> values.stream()
+                    .allMatch(value -> "AmazonProvidedDNS".equals(value) || isLiteralIp(value))
+                    && withinDhcpAddressLimits(values);
             case "ntp-servers" -> values.size() <= 8 && values.stream().allMatch(this::isLiteralIp)
-                    && values.stream().filter(value -> !value.contains(":")).count() <= 4
-                    && values.stream().filter(value -> value.contains(":")).count() <= 4;
+                    && withinDhcpAddressLimits(values);
             case "netbios-name-servers" -> values.size() <= 4 && values.stream().allMatch(this::isLiteralIp);
             case "netbios-node-type" -> values.size() == 1 && Set.of("1", "2", "4", "8").contains(values.getFirst());
             case "ipv6-address-preferred-lease-time" -> values.size() == 1 && validIpv6LeaseTime(values.getFirst());
             default -> true;
         };
+    }
+
+    private static boolean withinDhcpAddressLimits(List<String> values) {
+        return values.stream().filter(value -> !value.contains(":")).count() <= 4
+                && values.stream().filter(value -> value.contains(":")).count() <= 4;
     }
 
     private boolean isLiteralIp(String value) {
@@ -14456,6 +14461,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (requestedIp != null) {
                 requireRequestedPrivateIpFree(region, subnetId, requestedIp);
             }
+            // Secondaries are folded and checked before the primary is allocated, so a refused one
+            // leaves no lease behind on the VPC network. Their range is not checked, as before.
+            Set<String> secondaries = new LinkedHashSet<>();
+            for (String extra : privateIpAddresses == null ? List.<String>of() : privateIpAddresses) {
+                if (extra == null || extra.isBlank()) {
+                    continue;
+                }
+                String ip = canonicalIpv4(extra).orElse(extra);
+                if (!ip.equals(requestedIp) && secondaries.add(ip)) {
+                    requireRequestedPrivateIpFree(region, subnetId, ip);
+                }
+            }
             String primaryIp = requestedIp != null ? requestedIp : assignPrivateIp(region, subnetId);
             String primaryDns = AwsRegions.ec2PrivateIpDnsName(primaryIp, region);
 
@@ -14481,17 +14498,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             primary.setPrivateDnsName(primaryDns);
             primary.setPrimary(true);
             ipList.add(primary);
-            if (privateIpAddresses != null) {
-                for (String extra : privateIpAddresses) {
-                    if (extra == null || extra.isBlank() || extra.equals(primaryIp)) {
-                        continue;
-                    }
-                    NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
-                    secondary.setPrivateIpAddress(extra);
-                    secondary.setPrivateDnsName(AwsRegions.ec2PrivateIpDnsName(extra, region));
-                    secondary.setPrimary(false);
-                    ipList.add(secondary);
+            for (String extra : secondaries) {
+                if (extra.equals(primaryIp)) {
+                    continue;
                 }
+                NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
+                secondary.setPrivateIpAddress(extra);
+                secondary.setPrivateDnsName(AwsRegions.ec2PrivateIpDnsName(extra, region));
+                secondary.setPrimary(false);
+                ipList.add(secondary);
             }
             ni.setPrivateIpAddresses(ipList);
 

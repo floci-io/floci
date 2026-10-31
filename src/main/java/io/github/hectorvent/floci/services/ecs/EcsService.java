@@ -107,7 +107,9 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.function.LongPredicate;
 import java.util.function.Predicate;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -3515,6 +3517,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
             "ACTIVE", "DRAINING", "REGISTERING", "DEREGISTERING", "REGISTRATION_FAILED", "INACTIVE");
     /** "The only valid values for this action are ACTIVE and DRAINING." */
     private static final Set<String> UPDATABLE_CONTAINER_INSTANCE_STATUSES = Set.of("ACTIVE", "DRAINING");
+    private static final Pattern RUNNING_TASKS_COUNT_FILTER = Pattern.compile(
+            "^\\s*runningTasksCount\\s*(==|!=|>=|<=|>|<|equals|not_equals|greater_than_equal|"
+                    + "greater_than|less_than_equal|less_than)\\s*(-?\\d+)\\s*$");
     /** "A list of up to 10 container instance IDs or full ARN entries." */
     private static final int MAX_CONTAINER_INSTANCES_PER_UPDATE = 10;
     /** What the agent reports when a registration carried no versionInfo of its own. */
@@ -3640,20 +3645,23 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public List<String> listContainerInstances(String clusterRef, String status, String region) {
-        return listContainerInstances(clusterRef, status, null, null, region).arns();
+        return listContainerInstances(clusterRef, status, null, null, null, region).arns();
     }
 
     /**
      * Lists container instance ARNs. A request that names no status gets every instance other than
      * the {@code INACTIVE} ones, which is AWS's documented default rather than everything.
      */
-    public ListPage listContainerInstances(String clusterRef, String status, Integer maxResults,
-                                            String nextToken, String region) {
+    public ListPage listContainerInstances(String clusterRef, String status, String filter,
+                                            Integer maxResults, String nextToken, String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         if (status != null && !CONTAINER_INSTANCE_STATUSES.contains(status)) {
             throw new AwsException("InvalidParameterException",
                     "Invalid container instance status: " + status, 400);
         }
+        LongPredicate query = containerInstanceCountFilter(filter);
+        Map<String, Long> runningCounts = filter == null ? Map.of()
+                : runningTaskCountsForClusterArn(cluster.getClusterArn());
         String prefix = containerInstanceKey(cluster.getClusterArn(), "");
         List<String> arns = containerInstances.entrySet().stream()
                 .filter(e -> e.getKey().startsWith(prefix))
@@ -3661,9 +3669,65 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 .filter(ci -> status != null
                         ? status.equals(ci.getStatus())
                         : !STATUS_INACTIVE.equals(ci.getStatus()))
+                .filter(ci -> query.test(runningCounts.getOrDefault(ci.getContainerInstanceArn(), 0L)))
                 .map(ContainerInstance::getContainerInstanceArn)
                 .toList();
         return paginate(arns, maxResults, nextToken);
+    }
+
+    long runningTaskCountForInstance(String clusterRef, String instanceArn, String region) {
+        if (instanceArn == null) {
+            return 0;
+        }
+        String clusterArn = resolveClusterOrDefault(clusterRef, region).getClusterArn();
+        return tasks.values().stream()
+                .filter(EcsService::countsTowardRunningTasks)
+                .filter(task -> clusterArn.equals(task.getClusterArn()))
+                .filter(task -> instanceArn.equals(task.getContainerInstanceArn()))
+                .count();
+    }
+
+    Map<String, Long> runningTaskCountsForCluster(String clusterRef, String region) {
+        return runningTaskCountsForClusterArn(resolveClusterOrDefault(clusterRef, region).getClusterArn());
+    }
+
+    private Map<String, Long> runningTaskCountsForClusterArn(String clusterArn) {
+        return tasks.values().stream()
+                .filter(task -> clusterArn.equals(task.getClusterArn()))
+                .filter(EcsService::countsTowardRunningTasks)
+                .collect(Collectors.groupingBy(EcsTask::getContainerInstanceArn, Collectors.counting()));
+    }
+
+    private static boolean countsTowardRunningTasks(EcsTask task) {
+        return task.getContainerInstanceArn() != null
+                && TaskStatus.RUNNING.name().equals(task.getDesiredStatus());
+    }
+
+    private static LongPredicate containerInstanceCountFilter(String filter) {
+        if (filter == null) {
+            return count -> true;
+        }
+        Matcher matcher = RUNNING_TASKS_COUNT_FILTER.matcher(filter);
+        if (!matcher.matches()) {
+            throw new AwsException("InvalidParameterException",
+                    "Unsupported or invalid container instance filter: " + filter, 400);
+        }
+        long count;
+        try {
+            count = Long.parseLong(matcher.group(2));
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid runningTasksCount in container instance filter: " + filter, 400);
+        }
+        return switch (matcher.group(1)) {
+            case "==", "equals" -> running -> running == count;
+            case "!=", "not_equals" -> running -> running != count;
+            case ">", "greater_than" -> running -> running > count;
+            case ">=", "greater_than_equal" -> running -> running >= count;
+            case "<", "less_than" -> running -> running < count;
+            case "<=", "less_than_equal" -> running -> running <= count;
+            default -> throw new IllegalStateException("Unmatched container instance filter operator");
+        };
     }
 
     public ContainerInstance updateContainerAgent(String clusterRef, String instanceRef, String region) {

@@ -3724,6 +3724,62 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void updateItemSetArithmeticTrimsTrailingZeros() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":a", attributeValue("N", "10"));
+        exprValues.set(":b", attributeValue("N", "9.0"));
+
+        service.updateItem("Users", item("userId", "u1"), null,
+                "SET n = :a - :b", null, exprValues, null, region);
+
+        assertEquals("1", service.getItem("Users", item("userId", "u1"), region).get("n").get("N").asText());
+    }
+
+    @Test
+    void updateItemAddTrimsTrailingZeros() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode existing = item("userId", "u1");
+        existing.set("n", attributeValue("N", "1.5"));
+        service.putItem("Users", existing, region);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":a", attributeValue("N", "1.5"));
+
+        service.updateItem("Users", item("userId", "u1"), null,
+                "ADD n :a", null, exprValues, null, region);
+
+        assertEquals("3", service.getItem("Users", item("userId", "u1"), region).get("n").get("N").asText());
+    }
+
+    @Test
+    void updateItemAddToAMissingAttributeTrimsTrailingZeros() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":a", attributeValue("N", "1.50"));
+
+        service.updateItem("Users", item("userId", "u1"), null,
+                "ADD n :a", null, exprValues, null, region);
+
+        assertEquals("1.5", service.getItem("Users", item("userId", "u1"), region).get("n").get("N").asText());
+    }
+
+    @Test
+    void updateItemSetValueTrimsTrailingZeros() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":a", attributeValue("N", "01.50"));
+
+        service.updateItem("Users", item("userId", "u1"), null,
+                "SET n = :a", null, exprValues, null, region);
+
+        assertEquals("1.5", service.getItem("Users", item("userId", "u1"), region).get("n").get("N").asText());
+    }
+
+    @Test
     void updateItemSetParenthesizedArithmeticAppliesSubtraction() {
         String region = "eu-west-1";
         // "SET c = (c - :v)" must subtract identically to the unwrapped form.

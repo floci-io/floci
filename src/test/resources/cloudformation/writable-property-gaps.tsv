@@ -1,0 +1,674 @@
+AWS::ApiGateway::ApiKey	StageKeys	accepted and ignored, as the ApiGatewayApiKeyCfnProvisioner javadoc records
+AWS::ApiGateway::Authorizer	AuthType	accepted and ignored
+AWS::ApiGateway::Authorizer	AuthorizerCredentials	accepted and ignored
+AWS::ApiGateway::Authorizer	IdentityValidationExpression	accepted and ignored
+AWS::ApiGateway::Deployment	DeploymentCanarySettings	accepted and ignored
+AWS::ApiGateway::DomainName	EndpointAccessMode	accepted and ignored, as the ApiGatewayDomainCfnProvisioner javadoc records
+AWS::ApiGateway::DomainName	MutualTlsAuthentication	accepted and ignored, as the ApiGatewayDomainCfnProvisioner javadoc records
+AWS::ApiGateway::DomainName	OwnershipVerificationCertificateArn	accepted and ignored, as the ApiGatewayDomainCfnProvisioner javadoc records
+AWS::ApiGateway::DomainName	RoutingMode	accepted and ignored, as the ApiGatewayDomainCfnProvisioner javadoc records
+AWS::ApiGateway::Method	AuthorizationScopes	accepted and ignored
+AWS::ApiGateway::Method	OperationName	accepted and ignored
+AWS::ApiGateway::Method	RequestModels	accepted and ignored
+AWS::ApiGateway::Method	RequestValidatorId	accepted and ignored
+AWS::ApiGateway::RestApi	ApiKeySourceType	accepted and ignored
+AWS::ApiGateway::RestApi	BinaryMediaTypes	accepted and ignored
+AWS::ApiGateway::RestApi	CloneFrom	accepted and ignored
+AWS::ApiGateway::RestApi	DisableExecuteApiEndpoint	accepted and ignored
+AWS::ApiGateway::RestApi	EndpointAccessMode	accepted and ignored
+AWS::ApiGateway::RestApi	FailOnWarnings	accepted and ignored
+AWS::ApiGateway::RestApi	MinimumCompressionSize	accepted and ignored
+AWS::ApiGateway::RestApi	Mode	accepted and ignored
+AWS::ApiGateway::RestApi	Parameters	accepted and ignored
+AWS::ApiGateway::RestApi	Policy	accepted and ignored
+AWS::ApiGateway::RestApi	SecurityPolicy	accepted and ignored
+AWS::ApiGateway::RestApi	Tags	accepted and ignored
+AWS::ApiGateway::RestApi	Version	accepted and ignored
+AWS::ApiGateway::Stage	AccessLogSetting	accepted and ignored
+AWS::ApiGateway::Stage	CacheClusterEnabled	accepted and ignored
+AWS::ApiGateway::Stage	CacheClusterSize	accepted and ignored
+AWS::ApiGateway::Stage	CanarySetting	accepted and ignored
+AWS::ApiGateway::Stage	ClientCertificateId	accepted and ignored
+AWS::ApiGateway::Stage	DocumentationVersion	accepted and ignored
+AWS::ApiGateway::Stage	MethodSettings	accepted and ignored
+AWS::ApiGateway::Stage	Tags	accepted and ignored
+AWS::ApiGateway::Stage	TracingEnabled	accepted and ignored
+AWS::ApiGateway::Stage	Variables	accepted and ignored
+AWS::ApiGatewayV2::Api	BasePath	accepted and ignored
+AWS::ApiGatewayV2::Api	CredentialsArn	accepted and ignored
+AWS::ApiGatewayV2::Api	DisableExecuteApiEndpoint	accepted and ignored
+AWS::ApiGatewayV2::Api	DisableSchemaValidation	accepted and ignored
+AWS::ApiGatewayV2::Api	FailOnWarnings	accepted and ignored
+AWS::ApiGatewayV2::Api	IpAddressType	accepted and ignored
+AWS::ApiGatewayV2::Api	RouteKey	accepted and ignored
+AWS::ApiGatewayV2::Api	Target	accepted and ignored
+AWS::ApiGatewayV2::Api	Version	accepted and ignored
+AWS::ApiGatewayV2::Authorizer	AuthorizerCredentialsArn	accepted and ignored
+AWS::ApiGatewayV2::Authorizer	IdentityValidationExpression	accepted and ignored
+AWS::ApiGatewayV2::Deployment	StageName	accepted and ignored
+AWS::ApiGatewayV2::Integration	ContentHandlingStrategy	accepted and ignored
+AWS::ApiGatewayV2::Integration	CredentialsArn	accepted and ignored
+AWS::ApiGatewayV2::Integration	Description	accepted and ignored
+AWS::ApiGatewayV2::Integration	IntegrationSubtype	accepted and ignored
+AWS::ApiGatewayV2::Integration	PassthroughBehavior	accepted and ignored
+AWS::ApiGatewayV2::Integration	ResponseParameters	accepted and ignored
+AWS::ApiGatewayV2::Integration	TlsConfig	accepted and ignored
+AWS::ApiGatewayV2::Route	ApiKeyRequired	accepted and ignored
+AWS::ApiGatewayV2::Route	ModelSelectionExpression	accepted and ignored
+AWS::ApiGatewayV2::Route	OperationName	accepted and ignored
+AWS::ApiGatewayV2::Route	RequestModels	accepted and ignored
+AWS::ApiGatewayV2::Route	RequestParameters	accepted and ignored
+AWS::ApiGatewayV2::Route	RouteResponseSelectionExpression	accepted and ignored
+AWS::ApiGatewayV2::Stage	AccessLogSettings	accepted and ignored
+AWS::ApiGatewayV2::Stage	ClientCertificateId	accepted and ignored
+AWS::ApiGatewayV2::Stage	DefaultRouteSettings	accepted and ignored
+AWS::ApiGatewayV2::Stage	DeploymentId	accepted and ignored
+AWS::ApiGatewayV2::Stage	Description	accepted and ignored
+AWS::ApiGatewayV2::Stage	RouteSettings	accepted and ignored
+AWS::ApiGatewayV2::Stage	Tags	accepted and ignored
+AWS::AppConfig::ConfigurationProfile	KmsKeyIdentifier	accepted and not stored, as the AppConfigCfnProvisioner javadoc records
+AWS::AppConfig::ConfigurationProfile	RetrievalRoleArn	accepted and not stored, as the AppConfigCfnProvisioner javadoc records
+AWS::AppConfig::ConfigurationProfile	Tags	accepted and not stored, as the AppConfigCfnProvisioner javadoc records
+AWS::AppConfig::ConfigurationProfile	Validators	accepted and not stored, as the AppConfigCfnProvisioner javadoc records
+AWS::AppConfig::DeploymentStrategy	Tags	accepted and not stored, as the AppConfigCfnProvisioner javadoc records
+AWS::AppConfig::Environment	Tags	accepted and not stored, as the AppConfigCfnProvisioner javadoc records
+AWS::ApplicationAutoScaling::ScalingPolicy	PredictiveScalingPolicyConfiguration	accepted and ignored
+AWS::AutoScaling::AutoScalingGroup	AvailabilityZoneIds	accepted and ignored
+AWS::AutoScaling::AutoScalingGroup	AvailabilityZoneImpairmentPolicy	accepted and ignored
+AWS::AutoScaling::AutoScalingGroup	Context	accepted and ignored
+AWS::AutoScaling::AutoScalingGroup	DeletionProtection	accepted and ignored
+AWS::AutoScaling::AutoScalingGroup	InstanceId	accepted and ignored
+AWS::AutoScaling::AutoScalingGroup	InstanceLifecyclePolicy	accepted and ignored
+AWS::AutoScaling::AutoScalingGroup	LifecycleHookSpecificationList	accepted and ignored
+AWS::AutoScaling::AutoScalingGroup	NewInstancesProtectedFromScaleIn	accepted and ignored
+AWS::AutoScaling::AutoScalingGroup	NotificationConfigurations	accepted and ignored
+AWS::AutoScaling::AutoScalingGroup	PlacementGroup	accepted and ignored
+AWS::AutoScaling::AutoScalingGroup	SkipZonalShiftValidation	accepted and ignored
+AWS::AutoScaling::AutoScalingGroup	TrafficSources	accepted and ignored
+AWS::AutoScaling::LaunchConfiguration	BlockDeviceMappings	accepted and ignored
+AWS::AutoScaling::LaunchConfiguration	ClassicLinkVPCId	accepted and ignored
+AWS::AutoScaling::LaunchConfiguration	ClassicLinkVPCSecurityGroups	accepted and ignored
+AWS::AutoScaling::LaunchConfiguration	EbsOptimized	accepted and ignored
+AWS::AutoScaling::LaunchConfiguration	InstanceMonitoring	accepted and ignored
+AWS::AutoScaling::LaunchConfiguration	KernelId	accepted and ignored
+AWS::AutoScaling::LaunchConfiguration	PlacementTenancy	accepted and ignored
+AWS::AutoScaling::LaunchConfiguration	RamDiskId	accepted and ignored
+AWS::AutoScaling::LaunchConfiguration	SpotPrice	accepted and ignored
+AWS::AutoScaling::ScalingPolicy	MetricAggregationType	accepted and ignored, as the AutoScalingScalingPolicyCfnProvisioner javadoc records
+AWS::AutoScaling::ScalingPolicy	MinAdjustmentMagnitude	accepted and ignored, as the AutoScalingScalingPolicyCfnProvisioner javadoc records
+AWS::AutoScaling::ScalingPolicy	PredictiveScalingConfiguration	accepted and ignored, as the AutoScalingScalingPolicyCfnProvisioner javadoc records
+AWS::AutoScaling::ScalingPolicy	StepAdjustments	accepted and ignored, as the AutoScalingScalingPolicyCfnProvisioner javadoc records
+AWS::Backup::BackupVault	AccessPolicy	accepted and ignored, as the BackupVaultCfnProvisioner javadoc records
+AWS::Backup::BackupVault	LockConfiguration	accepted and ignored, as the BackupVaultCfnProvisioner javadoc records
+AWS::Backup::BackupVault	Notifications	accepted and ignored, as the BackupVaultCfnProvisioner javadoc records
+AWS::Batch::ComputeEnvironment	Context	accepted and ignored
+AWS::Batch::ComputeEnvironment	EcsSettings	accepted and ignored
+AWS::Batch::ComputeEnvironment	EksConfiguration	accepted and ignored
+AWS::Batch::ComputeEnvironment	ReplaceComputeEnvironment	accepted and ignored
+AWS::Batch::ComputeEnvironment	UnmanagedvCpus	accepted and ignored
+AWS::Batch::ComputeEnvironment	UpdatePolicy	accepted and ignored
+AWS::Batch::JobDefinition	ConsumableResourceProperties	accepted and ignored
+AWS::Batch::JobDefinition	EcsProperties	accepted and ignored
+AWS::Batch::JobDefinition	EksProperties	accepted and ignored
+AWS::Batch::JobDefinition	NodeProperties	accepted and ignored
+AWS::Batch::JobDefinition	PropagateTags	accepted and ignored
+AWS::Batch::JobDefinition	ResourceRetentionPolicy	accepted and ignored
+AWS::Batch::JobDefinition	SchedulingPriority	accepted and ignored
+AWS::Batch::JobQueue	JobStateTimeLimitActions	accepted and ignored
+AWS::Batch::JobQueue	SchedulingPolicyArn	accepted and ignored
+AWS::Batch::JobQueue	ServiceEnvironmentOrder	accepted and ignored
+AWS::BedrockAgentCore::Memory	IndexedKeys	accepted and not stored, a warning is logged
+AWS::BedrockAgentCore::Memory	MemoryStrategies	accepted and not stored, a warning is logged
+AWS::BedrockAgentCore::Memory	NamespaceKeys	accepted and not stored, a warning is logged
+AWS::BedrockAgentCore::Memory	StreamDeliveryResources	accepted and not stored, a warning is logged
+AWS::BedrockAgentCore::Runtime	CapacityProviderConfiguration	accepted and not stored, a warning is logged
+AWS::BedrockAgentCore::Runtime	FilesystemConfigurations	accepted and not stored, a warning is logged
+AWS::BedrockAgentCore::Runtime	LifecycleConfiguration	accepted and not stored, a warning is logged
+AWS::BedrockAgentCore::Runtime	PlatformVersion	accepted and not stored, a warning is logged
+AWS::BedrockAgentCore::Runtime	RequestHeaderConfiguration	accepted and not stored, a warning is logged
+AWS::BedrockAgentCore::RuntimeEndpoint	Tags	accepted and not stored, a warning is logged
+AWS::CertificateManager::Certificate	CertificateAuthorityArn	accepted and ignored
+AWS::CertificateManager::Certificate	DomainValidationOptions	accepted and ignored, as the AcmCfnProvisioner javadoc records
+AWS::CloudFormation::CustomResource	ServiceTimeout	accepted and ignored
+AWS::CloudFront::Distribution	Tags	accepted and ignored
+AWS::CloudFront::Function	FunctionMetadata	accepted and ignored
+AWS::CloudTrail::Trail	AggregationConfigurations	accepted and ignored
+AWS::CloudTrail::Trail	CloudWatchLogsLogGroupArn	accepted and ignored
+AWS::CloudTrail::Trail	CloudWatchLogsRoleArn	accepted and ignored
+AWS::CloudTrail::Trail	InsightSelectors	accepted and ignored
+AWS::CloudTrail::Trail	KMSKeyId	accepted and ignored
+AWS::CloudTrail::Trail	Tags	accepted and ignored
+AWS::CloudWatch::Alarm	ActionConfiguration	accepted and ignored
+AWS::CloudWatch::Alarm	EvaluateLowSampleCountPercentile	accepted and ignored
+AWS::CloudWatch::Alarm	EvaluationCriteria	accepted and ignored
+AWS::CloudWatch::Alarm	EvaluationInterval	accepted and ignored
+AWS::CloudWatch::Alarm	EvaluationWindow	accepted and ignored
+AWS::CloudWatch::Alarm	ExtendedStatistic	accepted and ignored
+AWS::CloudWatch::Alarm	Metrics	accepted and ignored
+AWS::CloudWatch::Alarm	Tags	accepted and ignored
+AWS::CloudWatch::Alarm	ThresholdMetricId	accepted and ignored
+AWS::CloudWatch::Alarm	WarmUpConfiguration	accepted and ignored
+AWS::CloudWatch::CompositeAlarm	ActionConfiguration	accepted and ignored
+AWS::Cognito::UserPoolClient	AuthSessionValidity	accepted and ignored
+AWS::Cognito::UserPoolClient	EnablePropagateAdditionalUserContextData	accepted and ignored
+AWS::Cognito::UserPoolDomain	Routing	accepted and ignored, as the CognitoCfnProvisioner javadoc records
+AWS::Config::ConfigRule	Compliance	accepted and ignored
+AWS::DynamoDB::GlobalTable	BillingMode	accepted and ignored
+AWS::DynamoDB::GlobalTable	GlobalTableSourceArn	accepted and ignored
+AWS::DynamoDB::GlobalTable	GlobalTableWitnesses	accepted and ignored
+AWS::DynamoDB::GlobalTable	MultiRegionConsistency	accepted and ignored
+AWS::DynamoDB::GlobalTable	ReadOnDemandThroughputSettings	accepted and ignored
+AWS::DynamoDB::GlobalTable	ReadProvisionedThroughputSettings	accepted and ignored
+AWS::DynamoDB::GlobalTable	SSESpecification	accepted and ignored
+AWS::DynamoDB::GlobalTable	TableType	accepted and ignored
+AWS::DynamoDB::GlobalTable	VectorIndexes	accepted and ignored
+AWS::DynamoDB::GlobalTable	WarmThroughput	accepted and ignored
+AWS::DynamoDB::GlobalTable	WriteOnDemandThroughputSettings	accepted and ignored
+AWS::DynamoDB::GlobalTable	WriteProvisionedThroughputSettings	accepted and ignored
+AWS::DynamoDB::Table	BillingMode	accepted and ignored
+AWS::DynamoDB::Table	ContributorInsightsSpecification	accepted and ignored
+AWS::DynamoDB::Table	DeletionProtectionEnabled	accepted and ignored
+AWS::DynamoDB::Table	ImportSourceSpecification	accepted and ignored
+AWS::DynamoDB::Table	KinesisStreamSpecification	accepted and ignored
+AWS::DynamoDB::Table	OnDemandThroughput	accepted and ignored
+AWS::DynamoDB::Table	PointInTimeRecoverySpecification	accepted and ignored
+AWS::DynamoDB::Table	ProvisionedThroughput	accepted and ignored
+AWS::DynamoDB::Table	ResourcePolicy	accepted and ignored
+AWS::DynamoDB::Table	SSESpecification	accepted and ignored
+AWS::DynamoDB::Table	TableClass	accepted and ignored
+AWS::DynamoDB::Table	VectorIndexes	accepted and ignored
+AWS::DynamoDB::Table	WarmThroughput	accepted and ignored
+AWS::EC2::EIP	Address	accepted and ignored
+AWS::EC2::EIP	Domain	accepted and ignored
+AWS::EC2::EIP	InstanceId	accepted and ignored
+AWS::EC2::EIP	IpamPoolId	accepted and ignored
+AWS::EC2::EIP	NetworkBorderGroup	accepted and ignored
+AWS::EC2::EIP	PublicIpv4Pool	accepted and ignored
+AWS::EC2::EIP	TransferAddress	accepted and ignored
+AWS::EC2::FlowLog	DeliverCrossAccountRole	accepted and ignored
+AWS::EC2::FlowLog	DestinationOptions	accepted and ignored
+AWS::EC2::FlowLog	LogGroupName	accepted and ignored
+AWS::EC2::FlowLog	TagFieldSpecifications	accepted and ignored
+AWS::EC2::FlowLog	Tags	accepted and ignored
+AWS::EC2::Instance	AdditionalInfo	accepted and ignored
+AWS::EC2::Instance	Affinity	accepted and ignored
+AWS::EC2::Instance	BlockDeviceMappings	accepted and ignored
+AWS::EC2::Instance	CpuOptions	accepted and ignored
+AWS::EC2::Instance	CreditSpecification	accepted and ignored
+AWS::EC2::Instance	DisableApiTermination	accepted and ignored
+AWS::EC2::Instance	EbsOptimized	accepted and ignored
+AWS::EC2::Instance	ElasticGpuSpecifications	accepted and ignored
+AWS::EC2::Instance	ElasticInferenceAccelerators	accepted and ignored
+AWS::EC2::Instance	EnclaveOptions	accepted and ignored
+AWS::EC2::Instance	HibernationOptions	accepted and ignored
+AWS::EC2::Instance	HostId	accepted and ignored
+AWS::EC2::Instance	HostResourceGroupArn	accepted and ignored
+AWS::EC2::Instance	InstanceInitiatedShutdownBehavior	accepted and ignored
+AWS::EC2::Instance	Ipv6AddressCount	accepted and ignored
+AWS::EC2::Instance	Ipv6Addresses	accepted and ignored
+AWS::EC2::Instance	KernelId	accepted and ignored
+AWS::EC2::Instance	LicenseSpecifications	accepted and ignored
+AWS::EC2::Instance	Monitoring	accepted and ignored
+AWS::EC2::Instance	PlacementGroupName	accepted and ignored
+AWS::EC2::Instance	PrivateDnsNameOptions	accepted and ignored
+AWS::EC2::Instance	PropagateTagsToVolumeOnCreation	accepted and ignored
+AWS::EC2::Instance	RamdiskId	accepted and ignored
+AWS::EC2::Instance	SecurityGroups	accepted and ignored
+AWS::EC2::Instance	SourceDestCheck	accepted and ignored
+AWS::EC2::Instance	SsmAssociations	accepted and ignored
+AWS::EC2::Instance	Tenancy	accepted and ignored
+AWS::EC2::Instance	Volumes	accepted and ignored
+AWS::EC2::LaunchTemplate	TagSpecifications	accepted and ignored
+AWS::EC2::LaunchTemplate	VersionDescription	accepted and ignored
+AWS::EC2::NatGateway	AvailabilityMode	accepted and ignored
+AWS::EC2::NatGateway	AvailabilityZoneAddresses	accepted and ignored
+AWS::EC2::NatGateway	MaxDrainDurationSeconds	accepted and ignored
+AWS::EC2::NatGateway	PrivateIpAddress	accepted and ignored
+AWS::EC2::NatGateway	SecondaryAllocationIds	accepted and ignored
+AWS::EC2::NatGateway	SecondaryPrivateIpAddressCount	accepted and ignored
+AWS::EC2::NatGateway	SecondaryPrivateIpAddresses	accepted and ignored
+AWS::EC2::NatGateway	VpcId	accepted and ignored
+AWS::EC2::NetworkAcl	Tags	accepted and ignored
+AWS::EC2::Route	CarrierGatewayId	accepted and ignored
+AWS::EC2::Route	CoreNetworkArn	accepted and ignored
+AWS::EC2::Route	InstanceId	accepted and ignored
+AWS::EC2::Route	LocalGatewayId	accepted and ignored
+AWS::EC2::Route	NetworkInterfaceId	accepted and ignored
+AWS::EC2::Route	OdbNetworkArn	accepted and ignored
+AWS::EC2::Route	TransitGatewayId	accepted and ignored
+AWS::EC2::Route	VpcEndpointId	accepted and ignored
+AWS::EC2::Subnet	AssignIpv6AddressOnCreation	accepted and ignored
+AWS::EC2::Subnet	AvailabilityZoneId	accepted and ignored
+AWS::EC2::Subnet	EnableDns64	accepted and ignored
+AWS::EC2::Subnet	EnableLniAtDeviceIndex	accepted and ignored
+AWS::EC2::Subnet	Ipv4IpamPoolId	accepted and ignored
+AWS::EC2::Subnet	Ipv4NetmaskLength	accepted and ignored
+AWS::EC2::Subnet	Ipv6CidrBlock	accepted and ignored
+AWS::EC2::Subnet	Ipv6IpamPoolId	accepted and ignored
+AWS::EC2::Subnet	Ipv6Native	accepted and ignored
+AWS::EC2::Subnet	Ipv6NetmaskLength	accepted and ignored
+AWS::EC2::Subnet	OutpostArn	accepted and ignored
+AWS::EC2::Subnet	PrivateDnsNameOptionsOnLaunch	accepted and ignored
+AWS::EC2::VPC	Ipv4IpamPoolId	accepted and ignored
+AWS::EC2::VPC	Ipv4NetmaskLength	accepted and ignored
+AWS::EC2::VPC	VpcEncryptionControl	accepted and ignored
+AWS::EC2::VPCEndpoint	DnsOptions	accepted and ignored
+AWS::EC2::VPCEndpoint	ResourceConfigurationArn	accepted and ignored
+AWS::EC2::VPCEndpoint	ServiceNetworkArn	accepted and ignored
+AWS::EC2::VPCEndpoint	ServiceRegion	accepted and ignored
+AWS::EC2::VPCEndpoint	Tags	accepted and ignored
+AWS::ECR::Repository	EmptyOnDelete	accepted and ignored
+AWS::ECR::Repository	EncryptionConfiguration	accepted and ignored
+AWS::ECR::Repository	ImageScanningConfiguration	accepted and ignored
+AWS::ECR::Repository	ImageTagMutabilityExclusionFilters	accepted and ignored
+AWS::ECS::CapacityProvider	ClusterName	accepted and ignored
+AWS::ECS::CapacityProvider	ManagedInstancesProvider	accepted and ignored
+AWS::ECS::Cluster	CapacityProviders	accepted and ignored
+AWS::ECS::Cluster	Configuration	accepted and ignored
+AWS::ECS::Cluster	DefaultCapacityProviderStrategy	accepted and ignored
+AWS::ECS::Cluster	ServiceConnectDefaults	accepted and ignored
+AWS::ECS::Cluster	Tags	accepted and ignored
+AWS::ECS::Service	AvailabilityZoneRebalancing	accepted and ignored
+AWS::ECS::Service	CapacityProviderStrategy	accepted and ignored
+AWS::ECS::Service	DeploymentConfiguration	accepted and ignored
+AWS::ECS::Service	DeploymentController	accepted and ignored
+AWS::ECS::Service	EnableECSManagedTags	accepted and ignored
+AWS::ECS::Service	EnableExecuteCommand	accepted and ignored
+AWS::ECS::Service	ForceNewDeployment	accepted and ignored
+AWS::ECS::Service	GatewayConnectors	accepted and ignored
+AWS::ECS::Service	HealthCheckGracePeriodSeconds	accepted and ignored
+AWS::ECS::Service	Monitoring	accepted and ignored
+AWS::ECS::Service	PlacementConstraints	accepted and ignored
+AWS::ECS::Service	PlacementStrategies	accepted and ignored
+AWS::ECS::Service	PlatformVersion	accepted and ignored
+AWS::ECS::Service	PropagateTags	accepted and ignored
+AWS::ECS::Service	Role	accepted and ignored
+AWS::ECS::Service	SchedulingStrategy	accepted and ignored
+AWS::ECS::Service	ServiceConnectConfiguration	accepted and ignored
+AWS::ECS::Service	ServiceRegistries	accepted and ignored
+AWS::ECS::Service	Tags	accepted and ignored
+AWS::ECS::Service	VolumeConfigurations	accepted and ignored
+AWS::ECS::Service	VpcLatticeConfigurations	accepted and ignored
+AWS::ECS::TaskDefinition	EnableFaultInjection	accepted and ignored
+AWS::ECS::TaskDefinition	EphemeralStorage	accepted and ignored
+AWS::ECS::TaskDefinition	IpcMode	accepted and ignored
+AWS::ECS::TaskDefinition	PidMode	accepted and ignored
+AWS::ECS::TaskDefinition	PlacementConstraints	accepted and ignored
+AWS::ECS::TaskDefinition	ProxyConfiguration	accepted and ignored
+AWS::ECS::TaskDefinition	RuntimePlatform	accepted and ignored
+AWS::ECS::TaskDefinition	Tags	accepted and ignored
+AWS::ECS::TaskDefinition	Volumes	accepted and ignored
+AWS::EKS::Cluster	AccessConfig	accepted and ignored
+AWS::EKS::Cluster	ActiveCertificateAuthorityId	accepted and ignored
+AWS::EKS::Cluster	BootstrapSelfManagedAddons	accepted and ignored
+AWS::EKS::Cluster	CertificateAuthority	accepted and ignored
+AWS::EKS::Cluster	ComputeConfig	accepted and ignored
+AWS::EKS::Cluster	ControlPlaneScalingConfig	accepted and ignored
+AWS::EKS::Cluster	DeletionProtection	accepted and ignored
+AWS::EKS::Cluster	EncryptionConfig	accepted and ignored
+AWS::EKS::Cluster	Force	accepted and ignored
+AWS::EKS::Cluster	KubeApiServerConfig	accepted and ignored
+AWS::EKS::Cluster	KubeControllerManagerConfig	accepted and ignored
+AWS::EKS::Cluster	KubeSchedulerConfig	accepted and ignored
+AWS::EKS::Cluster	KubernetesNetworkConfig	accepted and ignored
+AWS::EKS::Cluster	Logging	accepted and ignored
+AWS::EKS::Cluster	OutpostConfig	accepted and ignored
+AWS::EKS::Cluster	RemoteNetworkConfig	accepted and ignored
+AWS::EKS::Cluster	ResourcesVpcConfig	accepted and ignored
+AWS::EKS::Cluster	RollbackConfig	accepted and ignored
+AWS::EKS::Cluster	StorageConfig	accepted and ignored
+AWS::EKS::Cluster	Tags	accepted and ignored
+AWS::EKS::Cluster	UpgradePolicy	accepted and ignored
+AWS::EKS::Cluster	ZonalShiftConfig	accepted and ignored
+AWS::EKS::Nodegroup	AmiType	accepted and ignored
+AWS::EKS::Nodegroup	CapacityType	accepted and ignored
+AWS::EKS::Nodegroup	DiskSize	accepted and ignored
+AWS::EKS::Nodegroup	ForceUpdateEnabled	accepted and ignored
+AWS::EKS::Nodegroup	InstanceTypes	accepted and ignored
+AWS::EKS::Nodegroup	Labels	accepted and ignored
+AWS::EKS::Nodegroup	LaunchTemplate	accepted and ignored
+AWS::EKS::Nodegroup	NodeRepairConfig	accepted and ignored
+AWS::EKS::Nodegroup	ReleaseVersion	accepted and ignored
+AWS::EKS::Nodegroup	RemoteAccess	accepted and ignored
+AWS::EKS::Nodegroup	ScalingConfig	accepted and ignored
+AWS::EKS::Nodegroup	Tags	accepted and ignored
+AWS::EKS::Nodegroup	Taints	accepted and ignored
+AWS::EKS::Nodegroup	UpdateConfig	accepted and ignored
+AWS::EKS::Nodegroup	Version	accepted and ignored
+AWS::EKS::Nodegroup	WarmPoolConfig	accepted and ignored
+AWS::ElastiCache::CacheCluster	AZMode	accepted and ignored, a warning is logged
+AWS::ElastiCache::CacheCluster	AutoMinorVersionUpgrade	accepted and ignored
+AWS::ElastiCache::CacheCluster	LogDeliveryConfigurations	accepted and ignored, a warning is logged
+AWS::ElastiCache::CacheCluster	NotificationTopicArn	accepted and ignored, a warning is logged
+AWS::ElastiCache::CacheCluster	PreferredAvailabilityZones	accepted and ignored, a warning is logged
+AWS::ElastiCache::CacheCluster	SnapshotArns	accepted and ignored, a warning is logged
+AWS::ElastiCache::CacheCluster	SnapshotName	accepted and ignored, a warning is logged
+AWS::ElastiCache::CacheCluster	TransitEncryptionEnabled	accepted and ignored
+AWS::ElastiCache::ServerlessCache	FinalSnapshotName	accepted and ignored
+AWS::ElasticLoadBalancingV2::Listener	AlpnPolicy	accepted and ignored
+AWS::ElasticLoadBalancingV2::Listener	ListenerAttributes	accepted and ignored
+AWS::ElasticLoadBalancingV2::Listener	MutualAuthentication	accepted and ignored
+AWS::ElasticLoadBalancingV2::Listener	Tags	accepted and ignored
+AWS::ElasticLoadBalancingV2::ListenerRule	Tags	accepted and ignored
+AWS::ElasticLoadBalancingV2::ListenerRule	Transforms	accepted and ignored
+AWS::ElasticLoadBalancingV2::LoadBalancer	EnableCapacityReservationProvisionStabilize	accepted and ignored
+AWS::ElasticLoadBalancingV2::LoadBalancer	EnablePrefixForIpv6SourceNat	accepted and ignored
+AWS::ElasticLoadBalancingV2::LoadBalancer	EnforceSecurityGroupInboundRulesOnPrivateLinkTraffic	accepted and ignored
+AWS::ElasticLoadBalancingV2::LoadBalancer	Ipv4IpamPoolId	accepted and ignored
+AWS::ElasticLoadBalancingV2::LoadBalancer	LoadBalancerAttributes	accepted and ignored
+AWS::ElasticLoadBalancingV2::LoadBalancer	MinimumLoadBalancerCapacity	accepted and ignored
+AWS::ElasticLoadBalancingV2::TargetGroup	TargetControlPort	accepted and ignored
+AWS::ElasticLoadBalancingV2::TargetGroup	TargetGroupAttributes	accepted and ignored
+AWS::ElasticLoadBalancingV2::TargetGroup	Targets	accepted and ignored
+AWS::Events::Archive	KmsKeyIdentifier	documented as ignored (docs/services/cloudformation.md, EventBridge)
+AWS::Events::EventBus	DeadLetterConfig	rejected with a ValidationError, not supported by Floci
+AWS::Events::EventBus	EventSourceName	rejected with a ValidationError, not supported by Floci
+AWS::Events::EventBus	KmsKeyIdentifier	rejected with a ValidationError, not supported by Floci
+AWS::Events::EventBus	LogConfig	rejected with a ValidationError, not supported by Floci
+AWS::IAM::ManagedPolicy	Description	accepted and ignored
+AWS::IAM::ManagedPolicy	Groups	accepted and ignored
+AWS::IAM::ManagedPolicy	Path	accepted and ignored
+AWS::IAM::ManagedPolicy	PolicyDocument	accepted and ignored
+AWS::IAM::ManagedPolicy	Users	accepted and ignored
+AWS::IAM::Policy	PolicyDocument	accepted and ignored
+AWS::IAM::Role	MaxSessionDuration	accepted and ignored
+AWS::IAM::Role	Tags	accepted and ignored
+AWS::IAM::User	LoginProfile	documented as ignored (docs/services/cloudformation.md, IAM)
+AWS::KMS::Key	BypassPolicyLockoutSafetyCheck	accepted and ignored
+AWS::KMS::Key	EnableKeyRotation	accepted and ignored
+AWS::KMS::Key	Enabled	accepted and ignored
+AWS::KMS::Key	KeyPolicy	accepted and ignored
+AWS::KMS::Key	KeySpec	accepted and ignored
+AWS::KMS::Key	KeyUsage	accepted and ignored
+AWS::KMS::Key	MultiRegion	accepted and ignored
+AWS::KMS::Key	Origin	accepted and ignored
+AWS::KMS::Key	PendingWindowInDays	accepted and ignored
+AWS::KMS::Key	RotationPeriodInDays	accepted and ignored
+AWS::Kinesis::Stream	DesiredShardLevelMetrics	accepted and ignored
+AWS::Kinesis::Stream	MaxRecordSizeInKiB	accepted and ignored
+AWS::Kinesis::Stream	RecordDistributionStrategy	accepted and ignored
+AWS::Kinesis::Stream	StreamEncryption	accepted and ignored
+AWS::Kinesis::Stream	WarmThroughputMiBps	accepted and ignored
+AWS::KinesisFirehose::DeliveryStream	AmazonOpenSearchServerlessDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
+AWS::KinesisFirehose::DeliveryStream	AmazonopensearchserviceDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
+AWS::KinesisFirehose::DeliveryStream	DatabaseSourceConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
+AWS::KinesisFirehose::DeliveryStream	DeliveryStreamEncryptionConfigurationInput	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
+AWS::KinesisFirehose::DeliveryStream	DeliveryStreamType	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
+AWS::KinesisFirehose::DeliveryStream	DirectPutSourceConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
+AWS::KinesisFirehose::DeliveryStream	ElasticsearchDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
+AWS::KinesisFirehose::DeliveryStream	HttpEndpointDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
+AWS::KinesisFirehose::DeliveryStream	IcebergDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
+AWS::KinesisFirehose::DeliveryStream	KinesisStreamSourceConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
+AWS::KinesisFirehose::DeliveryStream	MSKSourceConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
+AWS::KinesisFirehose::DeliveryStream	RedshiftDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
+AWS::KinesisFirehose::DeliveryStream	SnowflakeDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
+AWS::KinesisFirehose::DeliveryStream	SplunkDestinationConfiguration	documented as ignored (docs/services/cloudformation.md, Kinesis Data Firehose)
+AWS::Lambda::Alias	ProvisionedConcurrencyConfig	accepted and ignored
+AWS::Lambda::EventSourceMapping	AmazonManagedKafkaEventSourceConfig	accepted and ignored
+AWS::Lambda::EventSourceMapping	DocumentDBEventSourceConfig	accepted and ignored
+AWS::Lambda::EventSourceMapping	KmsKeyArn	accepted and ignored
+AWS::Lambda::EventSourceMapping	LoggingConfig	accepted and ignored
+AWS::Lambda::EventSourceMapping	MetricsConfig	accepted and ignored
+AWS::Lambda::EventSourceMapping	ParallelizationFactor	documented as ignored (docs/services/cloudformation.md, Lambda)
+AWS::Lambda::EventSourceMapping	ProvisionedPollerConfig	accepted and ignored
+AWS::Lambda::EventSourceMapping	Queues	accepted and ignored
+AWS::Lambda::EventSourceMapping	SelfManagedKafkaEventSourceConfig	accepted and ignored
+AWS::Lambda::EventSourceMapping	Tags	accepted and ignored
+AWS::Lambda::EventSourceMapping	TumblingWindowInSeconds	documented as ignored (docs/services/cloudformation.md, Lambda)
+AWS::Lambda::Function	CapacityProviderConfig	accepted and ignored
+AWS::Lambda::Function	CodeSigningConfigArn	accepted and ignored
+AWS::Lambda::Function	FunctionScalingConfig	accepted and ignored
+AWS::Lambda::Function	KmsKeyArn	accepted and ignored
+AWS::Lambda::Function	PublishToLatestPublished	accepted and ignored
+AWS::Lambda::Function	RecursiveLoop	accepted and ignored
+AWS::Lambda::Function	RuntimeManagementConfig	accepted and ignored
+AWS::Lambda::Function	SnapStart	accepted and ignored
+AWS::Lambda::Function	TenancyConfig	accepted and ignored
+AWS::Lambda::MicrovmImage	AdditionalOsCapabilities	accepted and ignored
+AWS::Lambda::MicrovmImage	BaseImageVersion	accepted and ignored
+AWS::Lambda::MicrovmImage	CpuConfigurations	accepted and ignored
+AWS::Lambda::MicrovmImage	EgressNetworkConnectors	accepted and ignored
+AWS::Lambda::MicrovmImage	EnvironmentVariables	accepted and ignored
+AWS::Lambda::MicrovmImage	Hooks	accepted and ignored
+AWS::Lambda::MicrovmImage	Logging	accepted and ignored
+AWS::Lambda::MicrovmImage	Resources	accepted and ignored
+AWS::Lambda::MicrovmImage	Tags	accepted and ignored
+AWS::Lambda::NetworkConnector	Tags	accepted and ignored
+AWS::Lambda::Version	CodeSha256	accepted and ignored
+AWS::Lambda::Version	FunctionScalingConfig	accepted and ignored
+AWS::Lambda::Version	ProvisionedConcurrencyConfig	accepted and ignored
+AWS::Lambda::Version	RuntimePolicy	accepted and ignored
+AWS::Logs::LogGroup	BearerTokenAuthenticationEnabled	accepted and ignored
+AWS::Logs::LogGroup	DataProtectionPolicy	accepted and ignored
+AWS::Logs::LogGroup	DeletionProtectionEnabled	accepted and ignored
+AWS::Logs::LogGroup	FieldIndexPolicies	accepted and ignored
+AWS::Logs::LogGroup	KmsKeyId	accepted and ignored
+AWS::Logs::LogGroup	LogGroupClass	accepted and ignored
+AWS::Logs::LogGroup	ResourcePolicyDocument	accepted and ignored
+AWS::Organizations::Account	RoleName	accepted and ignored
+AWS::Pipes::Pipe	KmsKeyIdentifier	accepted and ignored
+AWS::Pipes::Pipe	LogConfiguration	accepted and ignored
+AWS::RDS::DBCluster	AllocatedStorage	accepted and ignored
+AWS::RDS::DBCluster	AutoMinorVersionUpgrade	accepted and ignored
+AWS::RDS::DBCluster	AvailabilityZones	accepted and ignored
+AWS::RDS::DBCluster	BacktrackWindow	accepted and ignored
+AWS::RDS::DBCluster	BackupRetentionPeriod	accepted and ignored
+AWS::RDS::DBCluster	CopyTagsToSnapshot	accepted and ignored
+AWS::RDS::DBCluster	DBClusterInstanceClass	accepted and ignored
+AWS::RDS::DBCluster	DBInstanceParameterGroupName	accepted and ignored
+AWS::RDS::DBCluster	DatabaseInsightsMode	accepted and ignored
+AWS::RDS::DBCluster	DeleteAutomatedBackups	accepted and ignored
+AWS::RDS::DBCluster	DeletionProtection	accepted and ignored
+AWS::RDS::DBCluster	Domain	accepted and ignored
+AWS::RDS::DBCluster	DomainIAMRoleName	accepted and ignored
+AWS::RDS::DBCluster	EnableCloudwatchLogsExports	accepted and ignored
+AWS::RDS::DBCluster	EnableGlobalWriteForwarding	accepted and ignored
+AWS::RDS::DBCluster	EnableLocalWriteForwarding	accepted and ignored
+AWS::RDS::DBCluster	EngineLifecycleSupport	accepted and ignored
+AWS::RDS::DBCluster	GlobalClusterIdentifier	accepted and ignored
+AWS::RDS::DBCluster	Iops	accepted and ignored
+AWS::RDS::DBCluster	ManageMasterUserPassword	accepted and ignored
+AWS::RDS::DBCluster	MasterUserAuthenticationType	accepted and ignored
+AWS::RDS::DBCluster	MasterUserSecret	accepted and ignored
+AWS::RDS::DBCluster	MonitoringInterval	accepted and ignored
+AWS::RDS::DBCluster	MonitoringRoleArn	accepted and ignored
+AWS::RDS::DBCluster	NetworkType	accepted and ignored
+AWS::RDS::DBCluster	PerformanceInsightsEnabled	accepted and ignored
+AWS::RDS::DBCluster	PerformanceInsightsKmsKeyId	accepted and ignored
+AWS::RDS::DBCluster	PerformanceInsightsRetentionPeriod	accepted and ignored
+AWS::RDS::DBCluster	Port	accepted and ignored
+AWS::RDS::DBCluster	PreferredBackupWindow	accepted and ignored
+AWS::RDS::DBCluster	PreferredMaintenanceWindow	accepted and ignored
+AWS::RDS::DBCluster	ReplicationSourceIdentifier	accepted and ignored
+AWS::RDS::DBCluster	ScalingConfiguration	accepted and ignored
+AWS::RDS::DBCluster	StorageType	accepted and ignored
+AWS::RDS::DBCluster	Tags	accepted and ignored
+AWS::RDS::DBCluster	VpcSecurityGroupIds	accepted and ignored
+AWS::RDS::DBCluster	WithExpressConfiguration	accepted and ignored
+AWS::RDS::DBClusterParameterGroup	Parameters	accepted and ignored
+AWS::RDS::DBClusterParameterGroup	Tags	accepted and ignored
+AWS::RDS::DBInstance	AdditionalStorageVolumes	accepted and ignored
+AWS::RDS::DBInstance	AllowMajorVersionUpgrade	accepted and ignored
+AWS::RDS::DBInstance	ApplyImmediately	accepted and ignored
+AWS::RDS::DBInstance	AutoMinorVersionUpgrade	accepted and ignored
+AWS::RDS::DBInstance	AutomaticBackupReplicationKmsKeyId	accepted and ignored
+AWS::RDS::DBInstance	AutomaticBackupReplicationRegion	accepted and ignored
+AWS::RDS::DBInstance	AutomaticBackupReplicationRetentionPeriod	accepted and ignored
+AWS::RDS::DBInstance	AvailabilityZone	accepted and ignored
+AWS::RDS::DBInstance	BackupRetentionPeriod	accepted and ignored
+AWS::RDS::DBInstance	BackupTarget	accepted and ignored
+AWS::RDS::DBInstance	CertificateRotationRestart	accepted and ignored
+AWS::RDS::DBInstance	CharacterSetName	accepted and ignored
+AWS::RDS::DBInstance	CopyTagsToSnapshot	accepted and ignored
+AWS::RDS::DBInstance	CustomIAMInstanceProfile	accepted and ignored
+AWS::RDS::DBInstance	DBClusterSnapshotIdentifier	accepted and ignored
+AWS::RDS::DBInstance	DBSecurityGroups	accepted and ignored
+AWS::RDS::DBInstance	DBSnapshotIdentifier	accepted and ignored
+AWS::RDS::DBInstance	DBSystemId	accepted and ignored
+AWS::RDS::DBInstance	DatabaseInsightsMode	accepted and ignored
+AWS::RDS::DBInstance	DedicatedLogVolume	accepted and ignored
+AWS::RDS::DBInstance	DeleteAutomatedBackups	accepted and ignored
+AWS::RDS::DBInstance	DeletionProtection	accepted and ignored
+AWS::RDS::DBInstance	Domain	accepted and ignored
+AWS::RDS::DBInstance	DomainAuthSecretArn	accepted and ignored
+AWS::RDS::DBInstance	DomainDnsIps	accepted and ignored
+AWS::RDS::DBInstance	DomainFqdn	accepted and ignored
+AWS::RDS::DBInstance	DomainIAMRoleName	accepted and ignored
+AWS::RDS::DBInstance	DomainOu	accepted and ignored
+AWS::RDS::DBInstance	EnableCloudwatchLogsExports	accepted and ignored
+AWS::RDS::DBInstance	EnablePerformanceInsights	accepted and ignored
+AWS::RDS::DBInstance	EngineLifecycleSupport	accepted and ignored
+AWS::RDS::DBInstance	Iops	accepted and ignored
+AWS::RDS::DBInstance	KmsKeyId	accepted and ignored
+AWS::RDS::DBInstance	LicenseModel	accepted and ignored
+AWS::RDS::DBInstance	ManageMasterUserPassword	accepted and ignored
+AWS::RDS::DBInstance	MasterUserAuthenticationType	accepted and ignored
+AWS::RDS::DBInstance	MasterUserSecret	accepted and ignored
+AWS::RDS::DBInstance	MaxAllocatedStorage	accepted and ignored
+AWS::RDS::DBInstance	MonitoringInterval	accepted and ignored
+AWS::RDS::DBInstance	MonitoringRoleArn	accepted and ignored
+AWS::RDS::DBInstance	MultiAZ	accepted and ignored
+AWS::RDS::DBInstance	NcharCharacterSetName	accepted and ignored
+AWS::RDS::DBInstance	NetworkType	accepted and ignored
+AWS::RDS::DBInstance	OptionGroupName	accepted and ignored
+AWS::RDS::DBInstance	PerformanceInsightsKMSKeyId	accepted and ignored
+AWS::RDS::DBInstance	PerformanceInsightsRetentionPeriod	accepted and ignored
+AWS::RDS::DBInstance	Port	accepted and ignored
+AWS::RDS::DBInstance	PreferredBackupWindow	accepted and ignored
+AWS::RDS::DBInstance	PreferredMaintenanceWindow	accepted and ignored
+AWS::RDS::DBInstance	ProcessorFeatures	accepted and ignored
+AWS::RDS::DBInstance	PromotionTier	accepted and ignored
+AWS::RDS::DBInstance	PubliclyAccessible	accepted and ignored
+AWS::RDS::DBInstance	ReplicaMode	accepted and ignored
+AWS::RDS::DBInstance	RestoreTime	accepted and ignored
+AWS::RDS::DBInstance	SourceDBClusterIdentifier	accepted and ignored
+AWS::RDS::DBInstance	SourceDBInstanceAutomatedBackupsArn	accepted and ignored
+AWS::RDS::DBInstance	SourceDBInstanceIdentifier	accepted and ignored
+AWS::RDS::DBInstance	SourceDbiResourceId	accepted and ignored
+AWS::RDS::DBInstance	SourceRegion	accepted and ignored
+AWS::RDS::DBInstance	StorageEncrypted	accepted and ignored
+AWS::RDS::DBInstance	StorageThroughput	accepted and ignored
+AWS::RDS::DBInstance	StorageType	accepted and ignored
+AWS::RDS::DBInstance	Tags	accepted and ignored
+AWS::RDS::DBInstance	Timezone	accepted and ignored
+AWS::RDS::DBInstance	UseDefaultProcessorFeatures	accepted and ignored
+AWS::RDS::DBInstance	UseLatestRestorableTime	accepted and ignored
+AWS::RDS::DBInstance	VPCSecurityGroups	accepted and ignored
+AWS::RDS::DBParameterGroup	Parameters	accepted and ignored
+AWS::RDS::DBParameterGroup	Tags	accepted and ignored
+AWS::RDS::DBProxyTargetGroup	Tags	accepted and ignored
+AWS::RDS::DBSubnetGroup	Tags	accepted and ignored
+AWS::Redshift::Cluster	AllowVersionUpgrade	accepted and ignored
+AWS::Redshift::Cluster	AquaConfigurationStatus	accepted and ignored
+AWS::Redshift::Cluster	AutomatedSnapshotRetentionPeriod	accepted and ignored
+AWS::Redshift::Cluster	AvailabilityZone	accepted and ignored
+AWS::Redshift::Cluster	AvailabilityZoneRelocation	accepted and ignored
+AWS::Redshift::Cluster	AvailabilityZoneRelocationStatus	accepted and ignored
+AWS::Redshift::Cluster	Classic	accepted and ignored
+AWS::Redshift::Cluster	ClusterSecurityGroups	accepted and ignored
+AWS::Redshift::Cluster	ClusterType	accepted and ignored
+AWS::Redshift::Cluster	ClusterVersion	accepted and ignored
+AWS::Redshift::Cluster	DeferMaintenance	accepted and ignored
+AWS::Redshift::Cluster	DeferMaintenanceDuration	accepted and ignored
+AWS::Redshift::Cluster	DeferMaintenanceEndTime	accepted and ignored
+AWS::Redshift::Cluster	DeferMaintenanceStartTime	accepted and ignored
+AWS::Redshift::Cluster	DestinationRegion	accepted and ignored
+AWS::Redshift::Cluster	ElasticIp	accepted and ignored
+AWS::Redshift::Cluster	Encrypted	accepted and ignored
+AWS::Redshift::Cluster	Endpoint	accepted and ignored
+AWS::Redshift::Cluster	EnhancedVpcRouting	accepted and ignored
+AWS::Redshift::Cluster	HsmClientCertificateIdentifier	accepted and ignored
+AWS::Redshift::Cluster	HsmConfigurationIdentifier	accepted and ignored
+AWS::Redshift::Cluster	IamRoles	accepted and ignored
+AWS::Redshift::Cluster	KmsKeyId	accepted and ignored
+AWS::Redshift::Cluster	LoggingProperties	accepted and ignored
+AWS::Redshift::Cluster	MaintenanceTrackName	accepted and ignored
+AWS::Redshift::Cluster	ManualSnapshotRetentionPeriod	accepted and ignored
+AWS::Redshift::Cluster	MultiAZ	accepted and ignored
+AWS::Redshift::Cluster	NamespaceResourcePolicy	accepted and ignored
+AWS::Redshift::Cluster	OwnerAccount	accepted and ignored
+AWS::Redshift::Cluster	PreferredMaintenanceWindow	accepted and ignored
+AWS::Redshift::Cluster	PubliclyAccessible	accepted and ignored
+AWS::Redshift::Cluster	ResourceAction	accepted and ignored
+AWS::Redshift::Cluster	RevisionTarget	accepted and ignored
+AWS::Redshift::Cluster	RotateEncryptionKey	accepted and ignored
+AWS::Redshift::Cluster	SnapshotClusterIdentifier	accepted and ignored
+AWS::Redshift::Cluster	SnapshotCopyGrantName	accepted and ignored
+AWS::Redshift::Cluster	SnapshotCopyManual	accepted and ignored
+AWS::Redshift::Cluster	SnapshotCopyRetentionPeriod	accepted and ignored
+AWS::Redshift::ClusterSecurityGroup	Description	accepted and ignored
+AWS::Redshift::ClusterSecurityGroup	Tags	accepted and ignored
+AWS::Redshift::ClusterSubnetGroup	Tags	accepted and ignored
+AWS::RedshiftServerless::Namespace	FinalSnapshotName	accepted and ignored
+AWS::RedshiftServerless::Namespace	FinalSnapshotRetentionPeriod	accepted and ignored
+AWS::RedshiftServerless::Namespace	NamespaceResourcePolicy	accepted and ignored
+AWS::RedshiftServerless::Namespace	RedshiftIdcApplicationArn	accepted and ignored
+AWS::RedshiftServerless::Namespace	SnapshotCopyConfigurations	accepted and ignored
+AWS::RedshiftServerless::Workgroup	RecoveryPointId	documented as ignored (docs/services/cloudformation.md, Redshift Serverless)
+AWS::RedshiftServerless::Workgroup	SnapshotArn	documented as ignored (docs/services/cloudformation.md, Redshift Serverless)
+AWS::RedshiftServerless::Workgroup	SnapshotName	documented as ignored (docs/services/cloudformation.md, Redshift Serverless)
+AWS::RedshiftServerless::Workgroup	SnapshotOwnerAccount	documented as ignored (docs/services/cloudformation.md, Redshift Serverless)
+AWS::RedshiftServerless::Workgroup	Workgroup	accepted and ignored
+AWS::Route53::HostedZone	DelegationSetId	accepted and ignored
+AWS::Route53::HostedZone	HostedZoneFeatures	accepted and ignored
+AWS::Route53::HostedZone	QueryLoggingConfig	accepted and ignored
+AWS::Route53::RecordSet	CidrRoutingConfig	accepted and ignored
+AWS::Route53::RecordSet	Comment	accepted and ignored
+AWS::Route53::RecordSet	GeoLocation	accepted and ignored
+AWS::Route53::RecordSet	MultiValueAnswer	accepted and ignored
+AWS::S3::Bucket	AbacStatus	accepted and ignored
+AWS::S3::Bucket	AccelerateConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
+AWS::S3::Bucket	AccessControl	silently dropped, as the S3CfnProvisioner javadoc records
+AWS::S3::Bucket	AnalyticsConfigurations	silently dropped, as the S3CfnProvisioner javadoc records
+AWS::S3::Bucket	BucketNamePrefix	accepted and ignored
+AWS::S3::Bucket	BucketNamespace	accepted and ignored
+AWS::S3::Bucket	IntelligentTieringConfigurations	silently dropped, as the S3CfnProvisioner javadoc records
+AWS::S3::Bucket	InventoryConfigurations	silently dropped, as the S3CfnProvisioner javadoc records
+AWS::S3::Bucket	LoggingConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
+AWS::S3::Bucket	MetadataConfiguration	accepted and ignored
+AWS::S3::Bucket	MetadataTableConfiguration	accepted and ignored
+AWS::S3::Bucket	MetricsConfigurations	silently dropped, as the S3CfnProvisioner javadoc records
+AWS::S3::Bucket	ObjectLockConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
+AWS::S3::Bucket	ObjectLockEnabled	accepted and ignored
+AWS::S3::Bucket	ReplicationConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
+AWS::S3::Bucket	WebsiteConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
+AWS::SNS::Subscription	DeliveryPolicy	accepted and ignored
+AWS::SNS::Subscription	Region	accepted and ignored
+AWS::SNS::Subscription	ReplayPolicy	accepted and ignored
+AWS::SNS::Subscription	SubscriptionRoleArn	accepted and ignored
+AWS::SNS::Topic	ArchivePolicy	accepted and ignored
+AWS::SNS::Topic	DataProtectionPolicy	accepted and ignored
+AWS::SNS::Topic	DeliveryStatusLogging	accepted and ignored
+AWS::SNS::Topic	DisplayName	accepted and ignored
+AWS::SNS::Topic	KmsMasterKeyId	accepted and ignored
+AWS::SNS::Topic	SignatureVersion	accepted and ignored
+AWS::SNS::Topic	Tags	accepted and ignored
+AWS::SNS::Topic	TracingConfig	accepted and ignored
+AWS::SQS::QueuePolicy	PolicyDocument	accepted and ignored
+AWS::SQS::QueuePolicy	Queues	accepted and ignored
+AWS::SSM::Parameter	AllowedPattern	accepted and ignored
+AWS::SSM::Parameter	DataType	accepted and ignored
+AWS::SSM::Parameter	Description	accepted and ignored
+AWS::SSM::Parameter	Policies	accepted and ignored
+AWS::SSM::Parameter	Tier	accepted and ignored
+AWS::SecretsManager::Secret	ReplicaRegions	accepted and ignored
+AWS::SecretsManager::Secret	Type	accepted and ignored
+AWS::ServiceDiscovery::PrivateDnsNamespace	Properties	accepted and ignored
+AWS::ServiceDiscovery::PublicDnsNamespace	Properties	accepted and ignored
+AWS::ServiceDiscovery::Service	ServiceAttributes	accepted and ignored
+AWS::Transfer::Server	Certificate	rejected with a ValidationError, not supported by Floci
+AWS::Transfer::Server	CreateWithHostKey	rejected with a ValidationError, not supported by Floci
+AWS::Transfer::Server	IpAddressType	rejected with a ValidationError, not supported by Floci
+AWS::Transfer::Server	PostAuthenticationLoginBanner	rejected with a ValidationError, not supported by Floci
+AWS::Transfer::Server	PreAuthenticationLoginBanner	rejected with a ValidationError, not supported by Floci
+AWS::Transfer::Server	ProtocolDetails	rejected with a ValidationError, not supported by Floci
+AWS::Transfer::Server	S3StorageOptions	rejected with a ValidationError, not supported by Floci
+AWS::Transfer::Server	StructuredLogDestinations	rejected with a ValidationError, not supported by Floci
+AWS::Transfer::Server	WorkflowDetails	rejected with a ValidationError, not supported by Floci
+AWS::Transfer::User	Policy	rejected with a ValidationError, not supported by Floci (docs/services/cloudformation.md, Transfer Family)
+AWS::Transfer::User	PosixProfile	rejected with a ValidationError, not supported by Floci (docs/services/cloudformation.md, Transfer Family)
+AWS::WAFv2::LoggingConfiguration	LoggingFilter	accepted and ignored
+AWS::WAFv2::LoggingConfiguration	RedactedFields	accepted and ignored
+AWS::WAFv2::WebACL	ApplicationConfig	accepted and ignored
+AWS::WAFv2::WebACL	MonetizationConfig	accepted and ignored
+AWS::WAFv2::WebACL	OnSourceDDoSProtectionConfig	accepted and ignored

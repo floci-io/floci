@@ -798,8 +798,8 @@ public class EcsResponseWriter {
         return n;
     }
 
-    public ObjectNode containerInstanceNode(ContainerInstance ci) {
-        return containerInstanceNode(ci, true, true);
+    public ObjectNode containerInstanceNode(ContainerInstance ci, String clusterRef, String region) {
+        return containerInstanceNode(ci, clusterRef, region, true, true);
     }
 
     /**
@@ -809,14 +809,32 @@ public class EcsResponseWriter {
      *                      omitted, tags and container instance health status aren't included in
      *                      the response."
      */
-    public ObjectNode containerInstanceNode(ContainerInstance ci, boolean includeTags,
-                                             boolean includeHealth) {
+    public ObjectNode containerInstanceNode(ContainerInstance ci, String clusterRef, String region,
+                                             boolean includeTags, boolean includeHealth) {
+        return containerInstanceNode(ci, service.runningTaskCountForInstance(
+                clusterRef, ci.getContainerInstanceArn(), region), includeTags, includeHealth);
+    }
+
+    public ArrayNode containerInstanceNodes(List<ContainerInstance> instances, String clusterRef, String region,
+                                             boolean includeTags, boolean includeHealth) {
+        ArrayNode nodes = objectMapper.createArrayNode();
+        if (instances.isEmpty()) {
+            return nodes;
+        }
+        Map<String, Long> runningCounts = service.runningTaskCountsForCluster(clusterRef, region);
+        instances.forEach(ci -> nodes.add(containerInstanceNode(ci,
+                runningCounts.getOrDefault(ci.getContainerInstanceArn(), 0L), includeTags, includeHealth)));
+        return nodes;
+    }
+
+    private ObjectNode containerInstanceNode(ContainerInstance ci, long runningTaskCount,
+                                              boolean includeTags, boolean includeHealth) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("containerInstanceArn", ci.getContainerInstanceArn());
         n.put("ec2InstanceId", ci.getEc2InstanceId());
         n.put("status", ci.getStatus());
         if (ci.getStatusReason() != null) { n.put("statusReason", ci.getStatusReason()); }
-        n.put("runningTasksCount", ci.getRunningTasksCount());
+        n.put("runningTasksCount", runningTaskCount);
         n.put("pendingTasksCount", ci.getPendingTasksCount());
         n.put("agentConnected", ci.isAgentConnected());
         if (ci.getAgentUpdateStatus() != null) { n.put("agentUpdateStatus", ci.getAgentUpdateStatus()); }

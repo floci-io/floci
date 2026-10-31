@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.route53.model.AliasTarget;
 import io.github.hectorvent.floci.services.route53.model.HealthCheck;
 import io.github.hectorvent.floci.services.route53.model.HealthCheckConfig;
+import io.github.hectorvent.floci.services.route53.model.HostedZone;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.github.hectorvent.floci.services.route53.model.VpcAssociation;
@@ -72,6 +73,45 @@ class Route53ServiceTest {
         RegionResolver regionResolver = new RegionResolver("us-east-1", ACCOUNT);
 
         return new Route53Service(storageFactory, config, regionResolver, ec2Service);
+    }
+
+    @Test
+    void hostedZonesByNameUseReversedLabelsAndFilteredPageBoundary() {
+        Route53Service service = newService();
+        String firstId = service.createHostedZone("z.example.com.", "byname-first", null, null).zone().getId();
+        String lastId = service.createHostedZone("a.other.com.", "byname-last", null, null).zone().getId();
+
+        assertEquals(List.of(firstId, lastId), service.listHostedZonesByName(null, 0).stream()
+                .map(HostedZone::getId).toList());
+
+        Route53Pagination.Page<HostedZone> lastPage = service.pageHostedZonesByName("a.other.com.", null, 1);
+        assertEquals(List.of(lastId), lastPage.items().stream().map(HostedZone::getId).toList());
+        assertFalse(lastPage.isTruncated());
+    }
+
+    @Test
+    void reversedDnsNameKeepsAnEscapedDotInsideItsLabel() {
+        assertEquals("com.example.a\\.b.", Route53Service.reversedDnsName("a\\.b.example.com."));
+    }
+
+    @Test
+    void hostedZonesByNameContinueAcrossNamesAndLimitPagesToOneHundred() {
+        Route53Service service = newService();
+        for (int i = 0; i < 101; i++) {
+            service.createHostedZone("zone-" + String.format("%03d", i) + ".example.test.",
+                    "byname-cap-" + i, null, null);
+        }
+
+        assertEquals(101, service.listHostedZonesByName(null, 0).size());
+        Route53Pagination.Page<HostedZone> firstPage = service.pageHostedZonesByName(null, null, 200);
+        assertEquals(100, firstPage.items().size());
+        assertTrue(firstPage.isTruncated());
+
+        HostedZone nextZone = firstPage.nextItem();
+        Route53Pagination.Page<HostedZone> secondPage = service.pageHostedZonesByName(
+                nextZone.getName(), nextZone.getId(), 200);
+        assertEquals(List.of(nextZone.getId()), secondPage.items().stream().map(HostedZone::getId).toList());
+        assertFalse(secondPage.isTruncated());
     }
 
     @ParameterizedTest(name = "configured names ending in {0}")

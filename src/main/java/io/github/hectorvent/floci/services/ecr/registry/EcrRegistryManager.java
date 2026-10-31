@@ -69,6 +69,14 @@ public class EcrRegistryManager {
             "^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\." + AwsPartitions.dnsSuffixRegex() + "/(.+)$");
 
     /**
+     * The Region of an image in an ECR repository: in {@code <account>.dkr.ecr.<region>.<host>/<repo>}, AWS's
+     * form and Floci's {@code repositoryUri} in the default URI style, or in
+     * {@code localhost:<port>/<account>/<region>/<repo>}, Floci's in the path style.
+     */
+    private static final Pattern ECR_IMAGE_REGION = Pattern.compile("^(?:[0-9]{12}\\.dkr\\.ecr\\.([a-z0-9-]+)\\.[^/]+"
+            + "|localhost(?:\\.floci\\.io)?:[0-9]+/[0-9]{12}/([a-z0-9-]+))/.+$");
+
+    /**
      * The container name actually in use. Differs from {@link #registryContainerName()} only when
      * a legacy-named container surviving a pre-migration version was adopted.
      */
@@ -151,6 +159,18 @@ public class EcrRegistryManager {
         String rewritten = "localhost:" + advertisedPort() + "/" + internalRepoName(account, region, repoAndTag);
         LOG.infov("Rewriting ECR image URI {0} -> {1}", image, rewritten);
         return rewritten;
+    }
+
+    /**
+     * The Region of the ECR repository an image URI names, AWS-shaped or one Floci's ECR hands out; empty for an
+     * image outside ECR.
+     */
+    public static Optional<String> imageRegion(String image) {
+        Matcher m = image != null ? ECR_IMAGE_REGION.matcher(image) : null;
+        if (m == null || !m.matches()) {
+            return Optional.empty();
+        }
+        return Optional.of(m.group(1) != null ? m.group(1) : m.group(2));
     }
 
     private boolean isPresentOnDaemon(String image) {

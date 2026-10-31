@@ -755,6 +755,16 @@ curl http://{apiId}.execute-api.{region}.localhost.floci.io:4566/{stageName}/{pa
 APIs created or updated with `disableExecuteApiEndpoint` reject requests to
 this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
 
+HTTP API route selection prefers an exact method-and-path key. Otherwise, a
+matching non-greedy path outranks a greedy `{proxy+}` path; among comparable
+templates, literal segments outrank `{parameter}` segments at the first
+position where they differ. For `/pets/dog`, `GET /pets/dog` wins over
+`GET /pets/{pet}`, which wins over `GET /pets/{proxy+}`. Among greedy routes,
+a longer literal prefix such as `GET /pets/dogs/{proxy+}` wins over
+`GET /pets/{proxy+}`. For equally specific paths, a method-specific route
+wins over `ANY`; `$default` handles requests no other route matches. Route
+selection determines which route's authorizer and integration handle the request.
+
 HTTP API Lambda REQUEST authorizers resolve header, query string, context, and
 stage variable sources once, in configured order. Format `2.0` carries the values
 in an `identitySource` array; format `1.0` carries them as comma-separated

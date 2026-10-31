@@ -35,13 +35,16 @@ public class SecretsManagerJsonHandler {
     private final SecretsManagerService service;
     private final ObjectMapper objectMapper;
     private final IamEnforcementFilter iamEnforcementFilter;
+    private final SecretsManagerEventPublisher eventPublisher;
 
     @Inject
     public SecretsManagerJsonHandler(SecretsManagerService service, ObjectMapper objectMapper,
-                                     IamEnforcementFilter iamEnforcementFilter) {
+                                     IamEnforcementFilter iamEnforcementFilter,
+                                     SecretsManagerEventPublisher eventPublisher) {
         this.service = service;
         this.objectMapper = objectMapper;
         this.iamEnforcementFilter = iamEnforcementFilter;
+        this.eventPublisher = eventPublisher;
     }
 
     /**
@@ -59,7 +62,7 @@ public class SecretsManagerJsonHandler {
      *                      resource
      */
     public Response handle(String action, JsonNode request, String region, String authorization) {
-        return switch (action) {
+        Response response = switch (action) {
             case "CreateSecret" -> handleCreateSecret(request, region);
             case "GetSecretValue" -> handleGetSecretValue(request, region);
             case "PutSecretValue" -> handlePutSecretValue(request, region);
@@ -87,6 +90,10 @@ public class SecretsManagerJsonHandler {
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
         };
+        if (response.getStatus() == 200 && ("PutSecretValue".equals(action) || "UpdateSecret".equals(action))) {
+            eventPublisher.secretWritten(action, request, (JsonNode) response.getEntity(), region, authorization);
+        }
+        return response;
     }
 
     private Response handleBatchGetSecretValue(JsonNode request, String region) {

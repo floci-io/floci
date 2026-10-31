@@ -426,6 +426,21 @@ class EventBridgeInvokerTest {
     }
 
     @Test
+    void escapedFieldNamesAreSharedByInputPathAndInputTransformer() {
+        String event = """
+                {"detail":{"sql/query":[{"name~1/query":"select 1"}],
+                  "name~/query":"select 2","name/query":"wrong"}}
+                """;
+        String path = "$.detail.sql/query[0].name~1/query";
+        assertEquals("select 1", invoker.applyInputPath(path, event));
+
+        InputTransformer transformer = new InputTransformer(
+                Map.of("sql", path), "{\"sql\":<sql>}");
+        assertEquals("{\"sql\":\"select 1\"}", invoker.applyInputTransformer(transformer, event));
+        assertEquals("select 2", invoker.extractJsonPath("$.detail.name~/query", event));
+    }
+
+    @Test
     void applyInputPath_extractsNestedField() {
         String event = "{\"source\":\"aws.s3\",\"detail\":{\"bucket\":\"my-bucket\",\"key\":\"file.txt\"}}";
         String result = invoker.applyInputPath("$.detail", event);

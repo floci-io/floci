@@ -4594,6 +4594,60 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void anInterfaceRefusedForAHeldSecondaryLeasesNoPrimaryOnTheVpcNetwork() {
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = mockedVpcNetworkService(vpcNetworks);
+        String subnetId = privateIpSubnet(service);
+        service.createNetworkInterface("us-east-1", subnetId, "holder", "10.50.1.70",
+                List.of(), List.of(), List.of());
+        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId)).thenReturn(Optional.of("10.50.1.10"));
+
+        assertEquals("InvalidIPAddress.InUse", assertThrows(AwsException.class, () -> service.createNetworkInterface(
+                "us-east-1", subnetId, "clash", null, List.of("10.50.1.70"), List.of(), List.of())).getErrorCode());
+        verify(vpcNetworks, never()).allocatePrivateIp(anyString(), anyString());
+    }
+
+    @Test
+    void aZeroPaddedSecondaryIsFoldedBeforeItIsChecked() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String subnetId = privateIpSubnet(service);
+        service.createNetworkInterface("us-east-1", subnetId, "holder", "10.50.1.70",
+                List.of(), List.of(), List.of());
+
+        assertEquals("InvalidIPAddress.InUse", assertThrows(AwsException.class, () -> service.createNetworkInterface(
+                "us-east-1", subnetId, "padded", "10.50.1.80", List.of("10.50.1.070"), List.of(), List.of()))
+                .getErrorCode());
+
+        String eniId = service.createNetworkInterface("us-east-1", subnetId, "folded", "10.50.1.80",
+                List.of("10.50.1.080", "10.50.1.081", "10.50.1.81"), List.of(), List.of()).getNetworkInterfaceId();
+        NetworkInterface stored = service.describeNetworkInterfaces("us-east-1", List.of(eniId), Map.of())
+                .networkInterfaces().getFirst();
+        assertEquals(List.of("10.50.1.80", "10.50.1.81"), stored.getPrivateIpAddresses().stream()
+                .map(NetworkInterfacePrivateIpAddress::getPrivateIpAddress).toList());
+    }
+
+    @Test
+    void anAutoAssignedPrimaryEqualToARequestedSecondaryIsListedOnceAsPrimary() {
+        // The secondary is free and not stored yet, so the network may hand the same address out
+        // as the primary; the interface must not then list it a second time as a secondary.
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = mockedVpcNetworkService(vpcNetworks);
+        String subnetId = privateIpSubnet(service);
+        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId)).thenReturn(Optional.of("10.50.1.10"));
+
+        String eniId = service.createNetworkInterface("us-east-1", subnetId, "overlap", null,
+                List.of("10.50.1.10"), List.of(), List.of()).getNetworkInterfaceId();
+
+        NetworkInterface stored = service.describeNetworkInterfaces("us-east-1", List.of(eniId), Map.of())
+                .networkInterfaces().getFirst();
+        assertEquals("10.50.1.10", stored.getPrivateIpAddress());
+        assertEquals(List.of(Map.entry("10.50.1.10", true)), stored.getPrivateIpAddresses().stream()
+                .map(a -> Map.entry(a.getPrivateIpAddress(), a.isPrimary())).toList());
+    }
+
+    @Test
     void anAddressAnotherAccountHoldsIsNotHandedOutWhenTheWalkRunsTheNetworkDry() {
         // The walk skips the only address the shared network still offers, which another account's
         // interface holds, and the synthesised fallback's own scan sees only the caller's account.

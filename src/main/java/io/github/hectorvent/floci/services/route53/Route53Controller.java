@@ -25,6 +25,7 @@ import jakarta.ws.rs.core.Response;
 
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamReader;
+
 import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -169,23 +170,32 @@ public class Route53Controller {
     @GET
     @Path("/hostedzonesbyname")
     public Response listHostedZonesByName(@QueryParam("dnsname") String dnsName,
+                                           @QueryParam("hostedzoneid") String hostedZoneId,
                                            @QueryParam("maxitems") @DefaultValue("100") int maxItems) {
         try {
-            List<HostedZone> zones = service.listHostedZonesByName(dnsName, maxItems);
-            long total = service.getHostedZoneCount();
-            boolean truncated = zones.size() == maxItems && zones.size() < total;
+            if (maxItems <= 0) {
+                throw new AwsException("InvalidInput", "MaxItems must be a positive integer.", 400);
+            }
+            Route53Pagination.Page<HostedZone> page = service.pageHostedZonesByName(dnsName, hostedZoneId, maxItems);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("ListHostedZonesByNameResponse", NS)
                     .start("HostedZones");
-            for (HostedZone zone : zones) {
+            for (HostedZone zone : page.items()) {
                 xml.raw(xmlHostedZone(zone));
             }
             xml.end("HostedZones")
-               .elem("IsTruncated", String.valueOf(truncated))
+               .elem("IsTruncated", String.valueOf(page.isTruncated()))
                .elem("MaxItems", String.valueOf(maxItems));
             if (dnsName != null && !dnsName.isEmpty()) {
                 xml.elem("DNSName", dnsName);
+            }
+            if (hostedZoneId != null && !hostedZoneId.isEmpty()) {
+                xml.elem("HostedZoneId", hostedZoneId);
+            }
+            if (page.isTruncated()) {
+                xml.elem("NextDNSName", page.nextItem().getName())
+                   .elem("NextHostedZoneId", page.nextMarker());
             }
             xml.end("ListHostedZonesByNameResponse");
 
