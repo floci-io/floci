@@ -25,6 +25,10 @@ services:
     doc: docs/services/acm.md
     sources:
       - { path: services/acm/AcmJsonHandler.java, mode: switch }
+  - service: paymentcryptography
+    doc: docs/services/payment-cryptography.md
+    sources:
+      - { path: services/paymentcryptography/PaymentCryptographyJsonHandler.java, mode: switch }
   - service: applicationautoscaling
     doc: docs/services/applicationautoscaling.md
     sources:

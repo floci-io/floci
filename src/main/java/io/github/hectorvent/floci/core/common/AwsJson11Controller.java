@@ -44,6 +44,7 @@ import io.github.hectorvent.floci.services.marketplace.MarketplaceMeteringContro
 import io.github.hectorvent.floci.services.memorydb.MemoryDbHandler;
 import io.github.hectorvent.floci.services.networkfirewall.NetworkFirewallJsonHandler;
 import io.github.hectorvent.floci.services.organizations.OrganizationsJsonHandler;
+import io.github.hectorvent.floci.services.paymentcryptography.PaymentCryptographyJsonHandler;
 import io.github.hectorvent.floci.services.pricing.PricingJsonHandler;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataJsonHandler;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessJsonHandler;
@@ -96,6 +97,7 @@ public class AwsJson11Controller {
     private final MemoryDbHandler memoryDbHandler;
     private final WafV2Handler wafV2Handler;
     private final CloudWatchLogsHandler cloudWatchLogsHandler;
+    private final PaymentCryptographyJsonHandler paymentCryptographyJsonHandler;
     private final SecretsManagerJsonHandler secretsManagerJsonHandler;
     private final KinesisJsonHandler kinesisJsonHandler;
     private final KinesisAnalyticsV2JsonHandler kinesisAnalyticsV2JsonHandler;
@@ -156,6 +158,7 @@ public class AwsJson11Controller {
                                MemoryDbHandler memoryDbHandler,
                                WafV2Handler wafV2Handler,
                                CloudWatchLogsHandler cloudWatchLogsHandler,
+                               PaymentCryptographyJsonHandler paymentCryptographyJsonHandler,
                                SecretsManagerJsonHandler secretsManagerJsonHandler,
                                KinesisJsonHandler kinesisJsonHandler,
                                KinesisAnalyticsV2JsonHandler kinesisAnalyticsV2JsonHandler,
@@ -214,6 +217,7 @@ public class AwsJson11Controller {
         this.memoryDbHandler = memoryDbHandler;
         this.wafV2Handler = wafV2Handler;
         this.cloudWatchLogsHandler = cloudWatchLogsHandler;
+        this.paymentCryptographyJsonHandler = paymentCryptographyJsonHandler;
         this.secretsManagerJsonHandler = secretsManagerJsonHandler;
         this.kinesisJsonHandler = kinesisJsonHandler;
         this.kinesisAnalyticsV2JsonHandler = kinesisAnalyticsV2JsonHandler;
@@ -319,6 +323,7 @@ public class AwsJson11Controller {
                 case "wafv2" -> wafV2Handler.handle(action, request, region);
                 case "memorydb" -> memoryDbHandler.handle(action, request, region);
                 case "logs" -> cloudWatchLogsHandler.handle(action, request, region);
+                case "paymentcryptography" -> paymentCryptographyJsonHandler.handle(action, request, region);
                 case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region, authorization);
                 case "kinesis" -> kinesisJsonHandler.handle(action, request, region);
                 case "kinesisanalytics" -> kinesisAnalyticsV2JsonHandler.handle(action, request, region);
