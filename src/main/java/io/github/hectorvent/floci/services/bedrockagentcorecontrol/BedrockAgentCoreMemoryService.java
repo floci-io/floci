@@ -226,11 +226,11 @@ public class BedrockAgentCoreMemoryService {
 
     /** The memory a memory ARN names; ValidationException for any other ARN, ResourceNotFoundException when gone. */
     public Memory getByArn(String region, String arn) {
-        String[] parts = arn == null ? new String[0] : arn.split(":");
-        if (parts.length < 6 || !parts[5].startsWith("memory/")) {
+        String resource = BedrockAgentCoreArns.resource(arn);
+        if (resource == null || !resource.startsWith("memory/")) {
             throw new AwsException("ValidationException", "Unsupported resource ARN: " + arn, 400);
         }
-        return get(parts[5].substring("memory/".length()), region);
+        return get(resource.substring("memory/".length()), region);
     }
 
     private static String sanitize(String name) {

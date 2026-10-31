@@ -1,19 +1,94 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.AwsCanonicalUserId;
+import io.github.hectorvent.floci.testing.S3TestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.core.sync.RequestBody;
+import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.Owner;
+
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 @QuarkusTest
 class S3OwnerIdentityIntegrationTest {
 
     private static final String ACCOUNT_ONE = "000000000011";
     private static final String ACCOUNT_TWO = "000000000012";
+
+    @Test
+    void listObjectsV2FetchOwnerIncludesCanonicalOwnerOnlyWhenRequested() {
+        String bucket = "owner-identity-list-v2-" + UUID.randomUUID();
+        String key = "key.txt";
+        try (S3Client client = S3TestClients.pathStyle()) {
+            client.createBucket(request -> request.bucket(bucket));
+            try {
+                client.putObject(request -> request.bucket(bucket).key(key), RequestBody.fromString("x"));
+
+                assertNull(client.listObjectsV2(request -> request.bucket(bucket))
+                        .contents().getFirst().owner());
+                assertNull(client.listObjectsV2(request -> request.bucket(bucket).fetchOwner(false))
+                        .contents().getFirst().owner());
+
+                Owner v1Owner = client.listObjects(request -> request.bucket(bucket))
+                        .contents().getFirst().owner();
+                assertNotNull(v1Owner);
+                assertEquals(AwsCanonicalUserId.forAccount("741624100001"), v1Owner.id());
+
+                Owner owner = client.listObjectsV2(request -> request.bucket(bucket).fetchOwner(true))
+                        .contents().getFirst().owner();
+                assertNotNull(owner);
+                assertEquals(AwsCanonicalUserId.forAccount("741624100001"), owner.id());
+                assertEquals("floci", owner.displayName());
+            } finally {
+                client.deleteObject(request -> request.bucket(bucket).key(key));
+                client.deleteBucket(request -> request.bucket(bucket));
+            }
+        }
+    }
+
+    @Test
+    void listObjectsV2FetchOwnerUsesTheBucketAccountsCanonicalUserId() {
+        String bucket = "owner-account-v2-" + UUID.randomUUID();
+        String key = "key.txt";
+        createBucket(ACCOUNT_ONE, bucket);
+        try {
+            given().header("Authorization", authorization(ACCOUNT_ONE))
+            .when().put("/" + bucket + "/" + key)
+            .then().statusCode(200);
+
+            given().header("Authorization", authorization(ACCOUNT_ONE))
+                    .queryParam("list-type", "2")
+            .when().get("/" + bucket)
+            .then().statusCode(200)
+                    .body(containsString("<Key>" + key + "</Key>"))
+                    .body(not(containsString("<Owner>")));
+
+            given().header("Authorization", authorization(ACCOUNT_ONE))
+                    .queryParam("list-type", "2")
+                    .queryParam("fetch-owner", "true")
+            .when().get("/" + bucket)
+            .then().statusCode(200)
+                    .body(containsString("<Key>" + key + "</Key>"))
+                    .body(containsString("<Owner><ID>" + canonical(ACCOUNT_ONE)
+                            + "</ID><DisplayName>floci</DisplayName></Owner>"));
+        } finally {
+            given().header("Authorization", authorization(ACCOUNT_ONE))
+            .when().delete("/" + bucket + "/" + key)
+            .then().statusCode(204);
+            given().header("Authorization", authorization(ACCOUNT_ONE))
+            .when().delete("/" + bucket)
+            .then().statusCode(204);
+        }
+    }
 
     @Test
     void listBucketsOwnerIsTheCallersCanonicalUserId() {

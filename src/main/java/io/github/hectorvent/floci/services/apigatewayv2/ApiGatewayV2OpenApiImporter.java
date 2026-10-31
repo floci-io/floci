@@ -526,6 +526,7 @@ public class ApiGatewayV2OpenApiImporter {
             if (!identitySource.isEmpty()) {
                 request.put("identitySource", identitySource);
             }
+            putIfPresent(request, "authorizerCredentialsArn", stringValue(authDef.get("authorizerCredentials")));
             putIfPresent(request, "authorizerUri", stringValue(authDef.get("authorizerUri")));
             putIfPresent(request, "authorizerPayloadFormatVersion",
                     stringValue(authDef.get("authorizerPayloadFormatVersion")));
@@ -665,6 +666,7 @@ public class ApiGatewayV2OpenApiImporter {
         if (type != null) {
             request.put("integrationType", type.toUpperCase(Locale.ROOT));
         }
+        putIfPresent(request, "credentialsArn", stringValue(definition.get("credentials")));
         putIfPresent(request, "integrationUri", stringValue(definition.get("uri")));
         putIfPresent(request, "integrationMethod", stringValue(definition.get("httpMethod")));
         putIfPresent(request, "connectionType", upper(stringValue(definition.get("connectionType"))));

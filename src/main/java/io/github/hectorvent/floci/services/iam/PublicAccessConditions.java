@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import org.jboss.logging.Logger;
 
 import java.util.HashSet;
@@ -52,8 +53,7 @@ public final class PublicAccessConditions {
 
     /** An ARN of six fields whose account has no wildcard. */
     public static boolean pinsAccount(String arn) {
-        String[] fields = arn.split(":", 6);
-        return fields.length == 6 && !hasWildcard(fields[4]);
+        return AwsArnUtils.isArn(arn) && !hasWildcard(AwsArnUtils.parse(arn).accountId());
     }
 
     /**

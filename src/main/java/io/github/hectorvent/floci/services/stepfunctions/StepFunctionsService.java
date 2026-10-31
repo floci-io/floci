@@ -531,20 +531,23 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * Key prefix matching every Step Functions ARN in {@code region}. This store is keyed by the
-     * full ARN, unlike the other services, which key by {@code region::name}, so the prefix has to
-     * carry the region's partition or a list cannot find what a create wrote.
+     * True for a store key that is a Step Functions ARN in {@code region}. This store is keyed by
+     * the full ARN, unlike the other services, which key by {@code region::name}, so the match has
+     * to carry the region's partition or a list cannot find what a create wrote.
      *
-     * <p>Deliberately stops before the account segment: the store holds resources for more than
-     * one account under account isolation, so {@code RegionResolver.buildArn} is the wrong helper
-     * here, since it appends its own account id.
+     * <p>Deliberately ignores the account segment: the store holds resources for more than one
+     * account under account isolation.
      */
-    private static String regionArnPrefix(String region) {
-        return "arn:" + AwsRegions.partitionFor(region) + ":states:" + region + ":";
+    private static boolean isInRegion(String key, String region) {
+        if (!AwsArnUtils.isArnFor(key, "states")) {
+            return false;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(key);
+        return arn.partition().equals(AwsRegions.partitionFor(region)) && arn.region().equals(region);
     }
 
     public List<StateMachine> listStateMachines(String region) {
-        return stateMachineStore.scan(k -> k.startsWith(regionArnPrefix(region)));
+        return stateMachineStore.scan(k -> isInRegion(k, region));
     }
 
     public PaginatedResult<StateMachine> listStateMachines(String region, Integer maxResults, String nextToken) {
@@ -1249,8 +1252,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
     }
 
     public List<Activity> listActivities(String region) {
-        String prefix = regionArnPrefix(region);
-        return activityStore.scan(k -> k.startsWith(prefix) && k.contains(":activity:"));
+        return activityStore.scan(k -> isInRegion(k, region) && k.contains(":activity:"));
     }
 
     public PaginatedResult<Activity> listActivities(String region, Integer maxResults, String nextToken) {

@@ -173,7 +173,7 @@ cross-resource references.
 | S3 Vectors | `VectorBucket`, `Index` |
 | SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
 | SNS | `Topic`, `Subscription`, `TopicPolicy` |
-| SES | `EmailIdentity` (BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS's region- and identity-specific zone assignment) |
+| SES | `EmailIdentity` (BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS's region- and identity-specific zone assignment), `ReceiptRule` (stored in an existing SES receipt rule set; Ref and RuleName return the rule name; management plane only, with no inbound mail delivery) |
 | DynamoDB | `Table` (`TimeToLiveSpecification` applied on create and update; to rename an enabled TTL attribute, disable TTL in one update and enable the new attribute in a later one), `GlobalTable` |
 | Lambda | `Function` (Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `EventInvokeConfig` (also what a SAM function's `EventInvokeConfig` expands into), `MicrovmImage`, `NetworkConnector`, `Url`, `WebFunction` (control plane only; the endpoint domain does not serve requests yet), `WebFunctionEndpoint`, `WebFunctionRevision` (every property is createOnly, so a change mints a new revision). Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
 | IAM | `Role`, `User` (template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete), `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
@@ -682,6 +682,18 @@ A template that is null as a whole (`null`, `~`) is refused with `Template forma
 one Resources member must be defined.` `CreateStackSet` and `UpdateStackSet` refuse a template
 holding a `null` before the stack set keeps it, with the same message followed by the service
 exception's details, as on AWS.
+
+## Properties and `AWS::NoValue`
+
+A property, object member or list item given as `!Ref AWS::NoValue`, directly or as the branch an
+`Fn::If` picks, is removed before the resource is provisioned, on create, update and change sets,
+nested stacks and custom resources included, so it behaves as if the template left it out.
+
+A resource type can accept a writable property from the registry schema and never read it. Those
+properties are listed with the reason in `src/test/resources/cloudformation/writable-property-gaps.tsv`.
+Where the registry schema corpus is present under `local/aws/cfn-resource-schemas/us-east-1/`
+(gitignored, so not in CI), `CfnSchemaCoverageTest` fails when a writable property is neither read
+nor listed, and when a listed property has started to be read, so closing a gap deletes its row.
 
 ## Template URLs
 

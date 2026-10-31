@@ -80,6 +80,8 @@ public class DbInstance {
     // gone.
     private String readReplicaSourceDbInstanceIdentifier;
     private List<String> readReplicaDbInstanceIdentifiers = new ArrayList<>();
+    /** The ARNs of this instance's automated backups replicated to other Regions. */
+    private List<String> automatedBackupReplicationArns = new ArrayList<>();
     private String readReplicationStatus;
 
     private String dockerVolumeName;
@@ -241,6 +243,12 @@ public class DbInstance {
     public String getReadReplicaSourceDbInstanceIdentifier() { return readReplicaSourceDbInstanceIdentifier; }
     public void setReadReplicaSourceDbInstanceIdentifier(String readReplicaSourceDbInstanceIdentifier) {
         this.readReplicaSourceDbInstanceIdentifier = readReplicaSourceDbInstanceIdentifier;
+    }
+
+    public List<String> getAutomatedBackupReplicationArns() { return automatedBackupReplicationArns; }
+    public void setAutomatedBackupReplicationArns(List<String> automatedBackupReplicationArns) {
+        this.automatedBackupReplicationArns = automatedBackupReplicationArns != null
+                ? new ArrayList<>(automatedBackupReplicationArns) : new ArrayList<>();
     }
 
     public List<String> getReadReplicaDbInstanceIdentifiers() { return readReplicaDbInstanceIdentifiers; }

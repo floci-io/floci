@@ -8,9 +8,12 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -80,6 +83,54 @@ class CloudFrontControllerTest {
 
             assertTrue(XmlParser.extractAll(secondXml, "NextMarker").isEmpty());
             assertEquals(List.of("gamma", "omega"), XmlParser.extractAll(secondXml, "Name"));
+        }
+    }
+
+    @Test
+    void getFunctionReturnsTheDecodedFunctionCode() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+        byte[] code = "function handler(event) { return event.request; }"
+                .getBytes(StandardCharsets.UTF_8);
+        CloudFrontFunction fn = function("routing");
+        fn.setFunctionCode(Base64.getEncoder().encodeToString(code));
+        fn.setEtag("etag-code");
+        when(service.describeFunction("routing", "DEVELOPMENT")).thenReturn(fn);
+
+        try (Response response = controller.getFunction("routing", "DEVELOPMENT")) {
+            assertEquals(200, response.getStatus());
+            assertEquals("application/octet-stream", response.getHeaderString("Content-Type"));
+            assertEquals("etag-code", response.getHeaderString("ETag"));
+            assertArrayEquals(code, (byte[]) response.getEntity());
+        }
+    }
+
+    @Test
+    void getFunctionReturnsAnEmptyBodyWhenTheCodeIsMissing() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+        CloudFrontFunction fn = function("routing");
+        fn.setEtag("etag-empty");
+        when(service.describeFunction("routing", null)).thenReturn(fn);
+
+        try (Response response = controller.getFunction("routing", null)) {
+            assertEquals(200, response.getStatus());
+            assertArrayEquals(new byte[0], (byte[]) response.getEntity());
+        }
+    }
+
+    @Test
+    void getFunctionServesAPlainTextCodePersistedByAnOlderFlociVersion() {
+        CloudFrontService service = mock(CloudFrontService.class);
+        CloudFrontController controller = new CloudFrontController(service);
+        String legacyCode = "function handler(event) { return event.request; }";
+        CloudFrontFunction fn = function("routing");
+        fn.setFunctionCode(legacyCode);
+        when(service.describeFunction("routing", null)).thenReturn(fn);
+
+        try (Response response = controller.getFunction("routing", null)) {
+            assertEquals(200, response.getStatus());
+            assertArrayEquals(legacyCode.getBytes(StandardCharsets.UTF_8), (byte[]) response.getEntity());
         }
     }
 

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.route53.Route53HostedZoneTestSupport;
 import io.github.hectorvent.floci.services.route53.Route53Service;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
@@ -234,20 +235,7 @@ class CloudFormationRoute53RecordSetIntegrationTest {
     }
 
     private String createHostedZone(String zoneName, String callerReference) {
-        String location = given()
-            .contentType("application/xml")
-            .header("Authorization", ROUTE53_AUTH)
-            .body("""
-                    <?xml version="1.0" encoding="UTF-8"?>
-                    <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
-                      <Name>%s</Name>
-                      <CallerReference>%s</CallerReference>
-                    </CreateHostedZoneRequest>
-                    """.formatted(zoneName, callerReference))
-        .when().post("/2013-04-01/hostedzone")
-        .then().statusCode(201)
-            .extract().header("Location");
-        return location.substring(location.lastIndexOf('/') + 1);
+        return Route53HostedZoneTestSupport.createZone(zoneName, callerReference, ROUTE53_AUTH);
     }
 
     private void changeRecordSet(String zoneId, String action, String name, String address) {

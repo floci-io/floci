@@ -128,6 +128,125 @@ class S3GlobalBucketNamespaceTest {
         assertTrue(objects.scanForAccount(ACCOUNT_B, key -> true).isEmpty());
     }
 
+    @Test
+    void crossAccountObjectOwnerFollowsOwnershipChanges() {
+        S3Service service = globalOwnerService();
+        caller.set(ACCOUNT_A);
+        createBucketWithOwnership(service, "owner-switch-bucket", "ObjectWriter");
+        caller.set(ACCOUNT_B);
+        putOwnedObject(service, "owner-switch-bucket", "writer.txt", null);
+
+        caller.set(ACCOUNT_A);
+        assertObjectOwner(service, "owner-switch-bucket", "writer.txt", ACCOUNT_B);
+        setOwnership(service, "owner-switch-bucket", "BucketOwnerEnforced");
+        assertObjectOwner(service, "owner-switch-bucket", "writer.txt", ACCOUNT_A);
+        setOwnership(service, "owner-switch-bucket", "ObjectWriter");
+        assertObjectOwner(service, "owner-switch-bucket", "writer.txt", ACCOUNT_B);
+    }
+
+    @Test
+    void crossAccountObjectOwnerFollowsBucketOwnershipModes() {
+        S3Service service = globalOwnerService();
+        caller.set(ACCOUNT_A);
+        createBucketWithOwnership(service, "owner-enforced-bucket", "BucketOwnerEnforced");
+        caller.set(ACCOUNT_B);
+        putOwnedObject(service, "owner-enforced-bucket", "enforced.txt", null);
+        caller.set(ACCOUNT_A);
+        assertObjectOwner(service, "owner-enforced-bucket", "enforced.txt", ACCOUNT_A);
+
+        createBucketWithOwnership(service, "owner-preferred-bucket", "BucketOwnerPreferred");
+        caller.set(ACCOUNT_B);
+        putOwnedObject(service, "owner-preferred-bucket", "writer.txt", null);
+        putOwnedObject(service, "owner-preferred-bucket", "bucket-owner.txt", "bucket-owner-full-control");
+        caller.set(ACCOUNT_A);
+        assertObjectOwner(service, "owner-preferred-bucket", "writer.txt", ACCOUNT_B);
+        assertObjectOwner(service, "owner-preferred-bucket", "bucket-owner.txt", ACCOUNT_A);
+
+        createBucketWithOwnership(service, "owner-writer-acl-bucket", "ObjectWriter");
+        caller.set(ACCOUNT_B);
+        putOwnedObject(service, "owner-writer-acl-bucket", "writer-grant.txt", "bucket-owner-full-control");
+        caller.set(ACCOUNT_A);
+        assertObjectOwner(service, "owner-writer-acl-bucket", "writer-grant.txt", ACCOUNT_B);
+        assertTrue(service.getObjectAcl("owner-writer-acl-bucket", "writer-grant.txt", null)
+                .contains("<ID>" + AwsCanonicalUserId.forAccount(ACCOUNT_A) + "</ID>"));
+        caller.set(ACCOUNT_B);
+        service.putObjectAcl("owner-writer-acl-bucket", "writer-grant.txt", null,
+                "", "bucket-owner-full-control", null, null, null, null, null);
+        caller.set(ACCOUNT_A);
+        assertObjectOwner(service, "owner-writer-acl-bucket", "writer-grant.txt", ACCOUNT_B);
+        assertTrue(service.getObjectAcl("owner-writer-acl-bucket", "writer-grant.txt", null)
+                .contains("<ID>" + AwsCanonicalUserId.forAccount(ACCOUNT_A) + "</ID>"));
+    }
+
+    @Test
+    void deletingOwnershipControlsRestoresWriterOwnershipForNewObjects() {
+        S3Service service = globalOwnerService();
+        caller.set(ACCOUNT_A);
+        createBucketWithOwnership(service, "owner-controls-deleted-bucket", "BucketOwnerPreferred");
+        caller.set(ACCOUNT_B);
+        putOwnedObject(service, "owner-controls-deleted-bucket", "before.txt", "bucket-owner-full-control");
+        caller.set(ACCOUNT_A);
+        assertObjectOwner(service, "owner-controls-deleted-bucket", "before.txt", ACCOUNT_A);
+        service.deleteBucketOwnershipControls("owner-controls-deleted-bucket");
+        caller.set(ACCOUNT_B);
+        putOwnedObject(service, "owner-controls-deleted-bucket", "after.txt", "bucket-owner-full-control");
+        caller.set(ACCOUNT_A);
+        assertObjectOwner(service, "owner-controls-deleted-bucket", "before.txt", ACCOUNT_A);
+        assertObjectOwner(service, "owner-controls-deleted-bucket", "after.txt", ACCOUNT_B);
+    }
+
+    @Test
+    void copyAndMultipartCompletionKeepTheObjectWriterAsOwner() {
+        S3Service service = globalOwnerService();
+        caller.set(ACCOUNT_A);
+        createBucketWithOwnership(service, "owner-copy-mpu-bucket", "ObjectWriter");
+        caller.set(ACCOUNT_B);
+        putOwnedObject(service, "owner-copy-mpu-bucket", "source.txt", null);
+        service.copyObject("owner-copy-mpu-bucket", "source.txt", "owner-copy-mpu-bucket", "copy.txt");
+        MultipartUpload upload = service.initiateMultipartUpload(
+                "owner-copy-mpu-bucket", "multipart.txt", "text/plain");
+        service.uploadPart("owner-copy-mpu-bucket", "multipart.txt", upload.getUploadId(), 1,
+                "part-one".getBytes(UTF_8));
+        service.completeMultipartUpload("owner-copy-mpu-bucket", "multipart.txt", upload.getUploadId(),
+                List.of(1), null, null);
+        caller.set(ACCOUNT_A);
+        assertObjectOwner(service, "owner-copy-mpu-bucket", "source.txt", ACCOUNT_B);
+        assertObjectOwner(service, "owner-copy-mpu-bucket", "copy.txt", ACCOUNT_B);
+        assertObjectOwner(service, "owner-copy-mpu-bucket", "multipart.txt", ACCOUNT_B);
+    }
+
+    private S3Service globalOwnerService() {
+        Instance<RequestContext> context = mutableContext();
+        AccountAwareStorageBackend<Bucket> buckets =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), context, DEFAULT_ACCT);
+        AccountAwareStorageBackend<S3Object> objects =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), context, DEFAULT_ACCT);
+        return new S3Service(buckets, objects, Path.of("s3-gns-owner-test"), true, true);
+    }
+
+    private static void createBucketWithOwnership(S3Service service, String bucket, String ownership) {
+        service.createBucket(bucket, "us-east-1", ownership, null, null, null, null, null, null);
+    }
+
+    private static void setOwnership(S3Service service, String bucket, String ownership) {
+        service.putBucketOwnershipControls(bucket, "<OwnershipControls><Rule><ObjectOwnership>"
+                + ownership + "</ObjectOwnership></Rule></OwnershipControls>");
+    }
+
+    private static void putOwnedObject(S3Service service, String bucket, String key, String cannedAcl) {
+        service.putObject(bucket, key, "payload".getBytes(UTF_8), "text/plain", Map.of(),
+                new PutObjectOptions().withAcl(cannedAcl));
+    }
+
+    private static void assertObjectOwner(S3Service service, String bucket, String key, String ownerAccount) {
+        S3Object object = service.listObjects(bucket, key, null, 100).getFirst();
+        assertEquals(key, object.getKey());
+        assertEquals(ownerAccount, S3Service.effectiveObjectOwnerAccount(object,
+                service.getBucketOwnerAccountId(bucket), service.bucketOwnershipIsEnforced(bucket)));
+        assertTrue(service.getObjectAcl(bucket, key, null)
+                .contains("<Owner><ID>" + AwsCanonicalUserId.forAccount(ownerAccount) + "</ID>"));
+    }
+
     /**
      * CreateBucket only sees the caller's own buckets, so a caller that wants to know whether it
      * just created one asks ownsBucket, which stays owner-scoped where bucketExists spans accounts.

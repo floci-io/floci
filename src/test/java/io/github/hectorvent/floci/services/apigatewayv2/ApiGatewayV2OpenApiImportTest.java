@@ -40,6 +40,7 @@ class ApiGatewayV2OpenApiImportTest {
                     "x-amazon-apigateway-authorizer": {
                       "type": "request",
                       "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:auth/invocations",
+                      "authorizerCredentials": "arn:aws:iam::000000000000:role/authorizer",
                       "authorizerPayloadFormatVersion": "2.0",
                       "enableSimpleResponses": true,
                       "identitySource": "$request.header.Authorization,$context.routeKey",
@@ -53,6 +54,7 @@ class ApiGatewayV2OpenApiImportTest {
                   "get": {
                     "x-amazon-apigateway-integration": {
                       "type": "aws_proxy",
+                      "credentials": "arn:aws:iam::000000000000:role/integration",
                       "httpMethod": "POST",
                       "uri": "arn:aws:lambda:us-east-1:000000000000:function:items",
                       "payloadFormatVersion": "2.0",
@@ -65,6 +67,7 @@ class ApiGatewayV2OpenApiImportTest {
                     "security": [],
                     "x-amazon-apigateway-integration": {
                       "type": "aws_proxy",
+                      "credentials": "arn:aws:iam::000000000000:role/integration",
                       "httpMethod": "POST",
                       "uri": "arn:aws:lambda:us-east-1:000000000000:function:public",
                       "payloadFormatVersion": "2.0"
@@ -113,6 +116,8 @@ class ApiGatewayV2OpenApiImportTest {
         JsonNode authorizer = authorizers.get("items").get(0);
         assertEquals("LambdaAuth", authorizer.get("name").asText());
         assertEquals("REQUEST", authorizer.get("authorizerType").asText());
+        assertEquals("arn:aws:iam::000000000000:role/authorizer",
+                authorizer.path("authorizerCredentialsArn").asText());
         assertEquals("2.0", authorizer.get("authorizerPayloadFormatVersion").asText());
         assertTrue(authorizer.get("enableSimpleResponses").asBoolean());
         assertEquals(300, authorizer.get("authorizerResultTtlInSeconds").asInt());
@@ -125,6 +130,8 @@ class ApiGatewayV2OpenApiImportTest {
         assertEquals(2, integrations.get("items").size());
         JsonNode integration = integrations.get("items").get(0);
         assertEquals("AWS_PROXY", integration.get("integrationType").asText());
+        assertEquals("arn:aws:iam::000000000000:role/integration",
+                integration.path("credentialsArn").asText());
         assertEquals("POST", integration.get("integrationMethod").asText());
         assertEquals("2.0", integration.get("payloadFormatVersion").asText());
 

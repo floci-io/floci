@@ -20,7 +20,9 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -94,6 +96,10 @@ class CloudFrontCfnProvisionerTest {
 
     private JsonNode json(String json) throws Exception {
         return mapper.readTree(json);
+    }
+
+    private static String wireCode(String code) {
+        return Base64.getEncoder().encodeToString(code.getBytes(StandardCharsets.UTF_8));
     }
 
     private static ResponseHeadersPolicy responseHeadersPolicy(String id, String etag) {
@@ -831,7 +837,8 @@ class CloudFrontCfnProvisionerTest {
         ArgumentCaptor<CloudFrontFunction> captor = ArgumentCaptor.forClass(CloudFrontFunction.class);
         verify(cloudFront).createFunction(captor.capture());
         assertEquals("my-function", captor.getValue().getName());
-        assertEquals("function handler(event) { return event.request; }", captor.getValue().getFunctionCode());
+        assertEquals(wireCode("function handler(event) { return event.request; }"),
+                captor.getValue().getFunctionCode());
         assertEquals("example", captor.getValue().getComment());
         assertEquals("cloudfront-js-2.0", captor.getValue().getRuntime());
         verify(cloudFront).publishFunction("my-function", ETAG);
@@ -875,7 +882,7 @@ class CloudFrontCfnProvisionerTest {
 
         ArgumentCaptor<CloudFrontFunction> captor = ArgumentCaptor.forClass(CloudFrontFunction.class);
         verify(cloudFront).updateFunction(eq("my-function"), eq(ETAG), captor.capture());
-        assertEquals("new code", captor.getValue().getFunctionCode());
+        assertEquals(wireCode("new code"), captor.getValue().getFunctionCode());
         verify(cloudFront, never()).createFunction(any());
         verify(cloudFront).publishFunction("my-function", NEW_ETAG);
         verify(cloudFront).untagResource(FUNCTION_ARN, List.of("Old"));

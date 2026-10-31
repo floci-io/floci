@@ -69,7 +69,7 @@ PREFIX ?= $(HOME)/.local
 .PHONY: help dev build test native native-host run-native native-install native-image native-up native-down native-logs clean-sidecars clean-volumes compat docker-tests \
         docs-sync docs-check docs-test partition-check partition-baseline partition-audit partition-test rename-test \
         slr-check slr-table slr-audit slr-test \
-        aws-data-sync aws-data-check aws-data-test \
+        aws-data-sync aws-data-check aws-data-test eks-addons-sync \
         iam-namespaces-sync iam-namespaces-check iam-namespaces-verify iam-namespaces-test \
         iam-action-resources-sync iam-action-resources-check iam-action-resources-verify \
         iam-action-resources-test iam-authorized-actions-sync iam-authorized-actions-check \
@@ -362,6 +362,15 @@ aws-data-check: ## CI gate: the vendored AWS data must match a fresh generation
 	@$(MAKE) --no-print-directory iam-passed-network-connectors-check
 	@$(MAKE) --no-print-directory iam-tag-on-create-check
 	@$(MAKE) --no-print-directory iam-request-resources-check
+	@$(PYTHON) tools/aws/regen_eks_addon_versions.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/eks/addon-versions.json is malformed or misses an add-on or Kubernetes version."; \
+		echo "       Run 'make eks-addons-sync' and commit the result."; \
+		exit 1; \
+	}
+
+eks-addons-sync: ## Regenerate src/main/resources/eks/addon-versions.json from EKS (needs AWS credentials; commit the result)
+	$(PYTHON) tools/aws/regen_eks_addon_versions.py
 
 aws-data-test: ## Run the AWS data generators' unit tests
 	$(PYTHON) -m pytest tools/aws -q

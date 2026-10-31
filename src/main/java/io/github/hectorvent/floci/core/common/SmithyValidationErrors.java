@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -129,6 +130,29 @@ public final class SmithyValidationErrors {
     }
 
     /**
+     * The rules a string shape declares, worded the way AWS lists them inside a nested constraint
+     * set and in the order every capture of one here reads: the maximum length first, then the
+     * minimum, then the pattern, then the enum. A bound the shape does not declare is left out, a
+     * minimum of zero being no bound at all.
+     */
+    public static List<String> constraintSet(int min, int max, String pattern, List<String> allowed) {
+        List<String> rules = new ArrayList<>();
+        if (max != Integer.MAX_VALUE) {
+            rules.add("Member must have length less than or equal to " + max);
+        }
+        if (min > 0) {
+            rules.add("Member must have length greater than or equal to " + min);
+        }
+        if (pattern != null) {
+            rules.add("Member must satisfy regular expression pattern: " + pattern);
+        }
+        if (allowed != null && !allowed.isEmpty()) {
+            rules.add("Member must satisfy enum value set: " + allowed);
+        }
+        return rules;
+    }
+
+    /**
      * The violation for a list holding a value outside its members' enum. The list is checked as a
      * whole, so the whole list is the offending value and the enum constraint is nested.
      */
@@ -189,16 +213,23 @@ public final class SmithyValidationErrors {
             return constraint(path, value, "Member must have value less than or equal to " + max);
         }
 
-        /** The violation for a string outside its length bounds, or null for one inside. */
+        /**
+         * The violation for a string outside its length bounds, or null for one inside. A shape
+         * whose bounds are the same length names that length rather than the bound the value sits
+         * under, "Member must have length equal to 36", which is what this package answers for a
+         * report's job id and what the recorded refusals for such a member carry.
+         */
         public String lengthOutOfRange(String path, String value, int min, int max) {
             int length = value.codePointCount(0, value.length());
-            if (length < min) {
-                return lengthTooShort(path, value, min);
+            if (length >= min && length <= max) {
+                return null;
             }
-            if (length > max) {
-                return constraint(path, value, "Member must have length less than or equal to " + max);
+            if (min == max) {
+                return constraint(path, value, "Member must have length equal to " + min);
             }
-            return null;
+            return length < min
+                    ? lengthTooShort(path, value, min)
+                    : constraint(path, value, "Member must have length less than or equal to " + max);
         }
 
         /** The violation for a string under {@code min} characters, an empty one included. */
@@ -209,6 +240,16 @@ public final class SmithyValidationErrors {
         /** The violation for a string that does not match the pattern its shape declares. */
         public String pattern(String path, String value, String pattern) {
             return constraint(path, value, "Member must satisfy regular expression pattern: " + pattern);
+        }
+
+        /**
+         * The violation a map answers for a key outside the rules its key shape declares. The
+         * whole set is nested under the map's own name, whichever rule the key broke, rather than
+         * the entry that carried it being named: that is what IAM answers for an account property
+         * key and what eight other services here answer for a map of their own.
+         */
+        public String mapKeys(String path, String value, List<String> rules) {
+            return constraint(path, value, "Map keys must satisfy constraint: " + rules);
         }
 
         /** The violation for a value outside its enum, the values in the model's order. */

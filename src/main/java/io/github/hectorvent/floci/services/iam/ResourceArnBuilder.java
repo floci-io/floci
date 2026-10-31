@@ -78,6 +78,10 @@ public class ResourceArnBuilder {
     /** The segment a tagging route names before the ARN it tags, which it captures whole, slashes included. */
     private static final String API_GATEWAY_TAGS_SEGMENT = "tags";
 
+    /** The SSM actions whose {@code ResourceArn} names the parameter they act on, in place of {@code Name}. */
+    private static final Set<String> SSM_RESOURCE_POLICY_ACTIONS =
+            Set.of("PutResourcePolicy", "GetResourcePolicies", "DeleteResourcePolicy");
+
     private final ObjectMapper objectMapper;
     /**
      * Looked up lazily through a provider: this builder is constructed by the enforcement filter,
@@ -241,7 +245,7 @@ public class ResourceArnBuilder {
         if (group.isEmpty()) {
             return "*";
         }
-        return group.startsWith("arn:") ? group
+        return AwsArnUtils.looksLikeArn(group) ? group
                 : AwsArnUtils.Arn.of("resource-groups", region, accountId, "group/" + group).toString();
     }
 
@@ -1103,7 +1107,7 @@ public class ResourceArnBuilder {
 
     /** An identifier's name: an ARN's part after its last {@code :}, as the MicroVM service unwraps it. */
     private static String trailingName(String identifier) {
-        return identifier.startsWith("arn:") ? identifier.substring(identifier.lastIndexOf(':') + 1) : identifier;
+        return AwsArnUtils.looksLikeArn(identifier) ? identifier.substring(identifier.lastIndexOf(':') + 1) : identifier;
     }
 
     /**
@@ -1128,7 +1132,7 @@ public class ResourceArnBuilder {
                         type + tagged.substring(tagged.lastIndexOf(':') + 1)).toString();
             }
         }
-        if (!tagged.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(tagged)) {
             return "*";
         }
         try {
@@ -1355,7 +1359,7 @@ public class ResourceArnBuilder {
     /** The ARN a shared tagging route names, or {@code *} for any other route. */
     private String taggedResource(ContainerRequestContext ctx) {
         String arn = taggedArn(ctx);
-        return arn != null && arn.startsWith("arn:") ? arn : "*";
+        return AwsArnUtils.looksLikeArn(arn) ? arn : "*";
     }
 
     /**
@@ -1406,7 +1410,7 @@ public class ResourceArnBuilder {
         String rest = path.substring("/2025-03-07/".length());
         if (rest.startsWith("tags/") || rest.startsWith("resource-policy/")) {
             String arn = rest.substring(rest.indexOf('/') + 1);
-            return arn.startsWith("arn:") ? arn : "*";
+            return AwsArnUtils.looksLikeArn(arn) ? arn : "*";
         }
         if (!rest.startsWith("web-functions/")) {
             return "*";
@@ -1416,7 +1420,7 @@ public class ResourceArnBuilder {
             return "*";
         }
         String functionArn;
-        if (segments.getFirst().startsWith("arn:") && segments.size() > 1) {
+        if (AwsArnUtils.looksLikeArn(segments.getFirst()) && segments.size() > 1) {
             // A function ARN carries one slash: arn:...:web-function/<name>.
             functionArn = segments.get(0) + "/" + segments.get(1);
             segments.subList(0, 2).clear();
@@ -1428,7 +1432,7 @@ public class ResourceArnBuilder {
         if (segments.size() >= 2 && ("revisions".equals(segments.get(0)) || "endpoints".equals(segments.get(0)))) {
             String child = "revisions".equals(segments.get(0)) ? "revision" : "endpoint";
             String id = String.join("/", segments.subList(1, segments.size()));
-            if (id.startsWith("arn:") && id.contains("/" + child + "/")) {
+            if (AwsArnUtils.looksLikeArn(id) && id.contains("/" + child + "/")) {
                 // A revision or endpoint ARN ends in its id: arn:...:web-function/<name>/revision/<id>.
                 id = id.substring(id.lastIndexOf('/') + 1);
             }
@@ -1446,7 +1450,7 @@ public class ResourceArnBuilder {
     private static boolean readsInTheAccountItNames(String path, String name,
                                                     LambdaArnUtils.ResolvedFunctionRef ref,
                                                     ContainerRequestContext ctx) {
-        if (!"GET".equals(ctx.getMethod()) || !name.startsWith("arn:")) {
+        if (!"GET".equals(ctx.getMethod()) || !AwsArnUtils.looksLikeArn(name)) {
             return false;
         }
         String route = path.substring(path.indexOf("/functions/" + name) + "/functions/".length() + name.length());
@@ -1759,6 +1763,14 @@ public class ResourceArnBuilder {
     private String buildSsmArn(ContainerRequestContext ctx, String region, String accountId) {
         JsonNode json = readJsonBody(ctx);
         if (json != null && json.isObject()) {
+            String operation = IamActionRegistry.targetOperation(ctx);
+            if (operation != null && SSM_RESOURCE_POLICY_ACTIONS.contains(operation)
+                    && json.hasNonNull("ResourceArn")) {
+                String resourceArn = json.get("ResourceArn").asText().trim();
+                if (AwsArnUtils.isArnFor(resourceArn, "ssm")) {
+                    return resourceArn;
+                }
+            }
             if (json.hasNonNull("Name")) {
                 String name = json.get("Name").asText().trim();
                 if (!name.isEmpty()) {

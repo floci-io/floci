@@ -46,10 +46,15 @@ public final class SignedIamUsers {
      * Creates a user named {@code namePrefix} plus a random suffix, with one access key and the
      * inline policy {@code policyName} holding {@code policyDocument}. If a later step fails, the
      * parts already made are removed before the failure is rethrown.
+     *
+     * <p>The suffix is eight characters of a UUID rather than a whole one, which keeps the name
+     * inside the 64 characters {@code userNameType} declares: the constraints read ahead of the
+     * operation hold it to the bound AWS holds it to, where a prefix plus a whole UUID reaches 66
+     * and is refused before the user is made.
      */
     public static User createUser(URI endpoint, String namePrefix, String policyName, String policyDocument)
             throws Exception {
-        String name = namePrefix + UUID.randomUUID();
+        String name = namePrefix + UUID.randomUUID().toString().substring(0, 8);
         iam(endpoint, "CreateUser", Map.of("UserName", name)).then().statusCode(200);
         User user = new User(endpoint, name, policyName, null, null);
         try {

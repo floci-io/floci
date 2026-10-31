@@ -72,7 +72,7 @@ The existing seeded Control Tower portfolio participates in pagination.
 | `DescribeProvisionedProduct` | Return a provisioned product's details. |
 | `DescribeProvisionedProductPlan` | Return a provisioned product plan's identity fields; no `Status` or `ResourceChanges` is reported. |
 | `DescribeProvisioningParameters` | Return the provisioning parameters recorded on the product at creation; the response is empty if none were supplied. |
-| `DescribeRecord` | Look up a record by id; `ProvisionProduct` and `ExecuteProvisionedProductPlan` return a `RecordId` they never persist, so those are not found. |
+| `DescribeRecord` | Look up a persisted record by id, including `ProvisionProduct` records; `ExecuteProvisionedProductPlan` returns an ID that is not persisted. |
 | `DescribeServiceActionExecutionParameters` | Return a service action's execution parameters; always an empty list. |
 | `DisableAWSOrganizationsAccess` | Accept the disable request without persisting any state. |
 | `DisassociateBudgetFromResource` | Remove a budget-name association from a resource. |
@@ -93,7 +93,7 @@ The existing seeded Control Tower portfolio participates in pagination.
 | `ListPrincipalsForPortfolio` | List the principals associated with a portfolio. |
 | `ListProvisionedProductPlans` | List provisioned product plans with offset-based pagination; `PageSize` is capped at 20. |
 | `ListProvisioningArtifactsForServiceAction` | List provisioning artifacts for a service action; always an empty list. |
-| `ListRecordHistory` | Synthesise one `SUCCEEDED` record per stored provisioned product; the entries carry no `RecordId` and the real record store is not consulted. |
+| `ListRecordHistory` | List stored records, newest first, with their `RecordId`; older products without a stored creation record retain a synthetic history entry. Request filters and pagination are ignored. |
 | `ListResourcesForTagOption` | List the resources a TagOption is attached to. |
 | `ListServiceActions` | List every service action in the account, without context scoping. |
 | `ListServiceActionsForProvisioningArtifact` | List service actions for a provisioning artifact; always an empty list. |
@@ -201,16 +201,14 @@ When the resolved product is the Account Factory product, `ProvisionProduct` cre
   find anything from an executed plan.
 - **`GetProvisionedProductOutputs` always returns an empty `Outputs` list.** No CloudFormation
   stack outputs are modelled or persisted for any provisioned product.
-- **Two operations return a `RecordId` they never persist.** `ImportAsProvisionedProduct`,
-  `ExecuteProvisionedProductServiceAction`, `UpdateProvisionedProduct`,
+- **`ExecuteProvisionedProductPlan` returns a `RecordId` it never persists.** `ProvisionProduct`,
+  `ImportAsProvisionedProduct`, `ExecuteProvisionedProductServiceAction`, `UpdateProvisionedProduct`,
   `UpdateProvisionedProductProperties` and `TerminateProvisionedProduct` all store a record
-  that `DescribeRecord` can later find. `ProvisionProduct` and `ExecuteProvisionedProductPlan`
-  mint a `RecordId` for their response only, so looking either one up afterwards raises
-  `ResourceNotFoundException`.
-- **`ListRecordHistory` does not read the record store.** It synthesises one `SUCCEEDED`
-  entry per stored provisioned product, so the entries carry no `RecordId` and cannot be fed
-  back into `DescribeRecord`, and records from operations that persisted one never appear.
-  Request filters and pagination are ignored.
+  that `DescribeRecord` can later find. `ExecuteProvisionedProductPlan` mints an ID for its
+  response only, so looking it up afterwards raises `ResourceNotFoundException`.
+- **`ListRecordHistory` ignores request filters and pagination.** It returns stored records in
+  reverse chronological order. Products persisted before records were stored still appear as
+  synthetic entries without a `RecordId`; those entries cannot be used with `DescribeRecord`.
 - **`ListServiceActionsForProvisioningArtifact` always returns an empty list.** It validates
   that the product and provisioning artifact exist and then returns no summaries, even when
   associations for that artifact were stored (the inverse case,

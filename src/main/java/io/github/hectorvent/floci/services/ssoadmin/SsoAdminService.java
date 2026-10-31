@@ -739,7 +739,7 @@ public class SsoAdminService implements Resettable {
                 if (!kmsArnMatcher.matches() || !instance.primaryRegion().equals(kmsArnMatcher.group(1))) {
                     throw validation("The customer managed KMS key must be in the IAM Identity Center primary Region.");
                 }
-                String kmsAccountId = kmsKeyArn.split(":", 6)[4];
+                String kmsAccountId = AwsArnUtils.parse(kmsKeyArn).accountId();
                 if (!instance.ownerAccountId().equals(kmsAccountId)) {
                     throw validation("The customer managed KMS key must be owned by the IAM Identity Center instance account.");
                 }

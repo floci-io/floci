@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SsrfProtection;
+import io.github.hectorvent.floci.core.common.StarWildcard;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -2132,7 +2133,7 @@ public class SnsService implements Resettable, ResourceProvider {
             case "prefix" -> value.startsWith(expected);
             case "suffix" -> value.endsWith(expected);
             case "equals-ignore-case" -> value.equalsIgnoreCase(expected);
-            case "wildcard" -> wildcardMatches(expected, value);
+            case "wildcard" -> StarWildcard.matches(expected, value);
             case "cidr" -> cidrContains(expected, value);
             default -> false;
         };
@@ -2176,37 +2177,6 @@ public class SnsService implements Resettable, ResourceProvider {
         }
         Optional<Boolean> matched = evaluateNumericCondition(number, operand);
         return matched.isPresent() && !matched.get();
-    }
-
-    /**
-     * Anchored, case-sensitive glob. Each {@code *} matches any run of characters, including an
-     * empty one, and every other character matches only itself. This is a scan, not a regular
-     * expression, so {@code .} and other metacharacters stay literal.
-     */
-    private static boolean wildcardMatches(String pattern, String value) {
-        int patternIndex = 0;
-        int valueIndex = 0;
-        int starPattern = -1;
-        int starValue = -1;
-        while (valueIndex < value.length()) {
-            if (patternIndex < pattern.length() && pattern.charAt(patternIndex) == '*') {
-                starPattern = patternIndex++;
-                starValue = valueIndex;
-            } else if (patternIndex < pattern.length()
-                    && pattern.charAt(patternIndex) == value.charAt(valueIndex)) {
-                patternIndex++;
-                valueIndex++;
-            } else if (starPattern >= 0) {
-                patternIndex = starPattern + 1;
-                valueIndex = ++starValue;
-            } else {
-                return false;
-            }
-        }
-        while (patternIndex < pattern.length() && pattern.charAt(patternIndex) == '*') {
-            patternIndex++;
-        }
-        return patternIndex == pattern.length();
     }
 
     /**

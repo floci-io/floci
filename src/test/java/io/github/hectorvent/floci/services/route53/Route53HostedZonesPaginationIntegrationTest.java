@@ -117,18 +117,6 @@ class Route53HostedZonesPaginationIntegrationTest {
     }
 
     private String createZone(String name) {
-        String request = """
-                <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
-                  <Name>%s</Name>
-                  <CallerReference>pagination-%s-%s</CallerReference>
-                </CreateHostedZoneRequest>
-                """.formatted(name, name, System.nanoTime());
-        String location = given()
-                .contentType("application/xml")
-                .body(request)
-                .when().post("/2013-04-01/hostedzone")
-                .then().statusCode(201)
-                .extract().header("Location");
-        return location.substring(location.lastIndexOf('/') + 1);
+        return Route53HostedZoneTestSupport.createZone(name, "pagination-" + name + "-" + System.nanoTime());
     }
 }

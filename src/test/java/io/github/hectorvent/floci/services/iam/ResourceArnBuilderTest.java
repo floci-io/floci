@@ -1447,6 +1447,23 @@ class ResourceArnBuilderTest {
         assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/config-key", arn);
     }
 
+    @Test
+    void ssmResourcePolicyActionsActOnTheParameterTheirResourceArnNames() {
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.PutResourcePolicy");
+        setJsonBody("{\"ResourceArn\":\"arn:aws:ssm:us-east-1:000000000000:parameter/prod/db\",\"Policy\":\"{}\"}");
+        assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/prod/db",
+                builder.build("ssm", ctx, "us-east-1", "000000000000"));
+
+        // Any other action acts on the parameter its handler reads, its Name, whatever else the body carries.
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.GetParameter");
+        setJsonBody("{\"Name\":\"/prod/db\",\"ResourceArn\":\"arn:aws:ssm:us-east-1:000000000000:parameter/dev/db\"}");
+        assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/prod/db",
+                builder.build("ssm", ctx, "us-east-1", "000000000000"));
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn(null);
+        assertEquals("arn:aws:ssm:us-east-1:000000000000:parameter/prod/db",
+                builder.build("ssm", ctx, "us-east-1", "000000000000"));
+    }
+
     // ── SQS ─────────────────────────────────────────────────────────────────────
 
     @Test

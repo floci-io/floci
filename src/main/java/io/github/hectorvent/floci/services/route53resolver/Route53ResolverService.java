@@ -14,13 +14,18 @@ import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -45,6 +50,8 @@ import java.util.function.Predicate;
  */
 @ApplicationScoped
 public class Route53ResolverService {
+
+    private static final Logger LOG = Logger.getLogger(Route53ResolverService.class);
 
     public static final String MANAGED_OWNER_NAME = "Route 53 Resolver DNS Firewall";
 
@@ -87,6 +94,8 @@ public class Route53ResolverService {
      * carries {@code IpAddressCount} and no IP list, and the handlers return the stored node
      * verbatim, so holding the addresses on the resource would put an unmodeled member on the
      * wire. Read by the CreatorRequestId conflict check and ListResolverEndpointIpAddresses.
+     * Also holds the endpoint's region and, in {@code NetworkInterfaces}, the EC2 interface
+     * behind each address (see {@link #createEndpointInterfaces}).
      */
     private final StorageBackend<String, ObjectNode> endpointIpRequestStore;
     /**
@@ -96,9 +105,11 @@ public class Route53ResolverService {
      */
     private final StorageBackend<String, ObjectNode> tagStore;
     private final ObjectMapper objectMapper;
+    /** Null only in hermetic tests built without one; subnets are then treated as unknown. */
+    private final Ec2Service ec2Service;
 
     @Inject
-    public Route53ResolverService(StorageFactory storageFactory, ObjectMapper objectMapper) {
+    public Route53ResolverService(StorageFactory storageFactory, ObjectMapper objectMapper, Ec2Service ec2Service) {
         this.domainListStore = storageFactory.create("route53resolver", "route53resolver-domain-lists.json",
                 new TypeReference<Map<String, ObjectNode>>() {});
         this.endpointStore = storageFactory.create("route53resolver", "route53resolver-endpoints.json",
@@ -113,6 +124,7 @@ public class Route53ResolverService {
         this.tagStore = storageFactory.create("route53resolver", "route53resolver-tags.json",
                 new TypeReference<Map<String, ObjectNode>>() {});
         this.objectMapper = objectMapper;
+        this.ec2Service = ec2Service;
     }
 
     // Package-private for hermetic tests: pass in-memory StorageBackends directly, so a test
@@ -125,6 +137,17 @@ public class Route53ResolverService {
                            StorageBackend<String, ObjectNode> endpointIpRequestStore,
                            StorageBackend<String, ObjectNode> tagStore,
                            ObjectMapper objectMapper) {
+        this(domainListStore, endpointStore, ruleStore, ruleAssociationStore, endpointIpRequestStore, tagStore,
+                objectMapper, null);
+    }
+
+    Route53ResolverService(StorageBackend<String, ObjectNode> domainListStore,
+                           StorageBackend<String, ObjectNode> endpointStore,
+                           StorageBackend<String, ObjectNode> ruleStore,
+                           StorageBackend<String, ObjectNode> ruleAssociationStore,
+                           StorageBackend<String, ObjectNode> endpointIpRequestStore,
+                           StorageBackend<String, ObjectNode> tagStore,
+                           ObjectMapper objectMapper, Ec2Service ec2Service) {
         this.domainListStore = domainListStore;
         this.endpointStore = endpointStore;
         this.ruleStore = ruleStore;
@@ -132,6 +155,7 @@ public class Route53ResolverService {
         this.endpointIpRequestStore = endpointIpRequestStore;
         this.tagStore = tagStore;
         this.objectMapper = objectMapper;
+        this.ec2Service = ec2Service;
     }
 
     public List<FirewallDomainList> listFirewallDomainLists(String region) {
@@ -228,20 +252,156 @@ public class Route53ResolverService {
         endpoint.put("Direction", direction);
         endpoint.set("SecurityGroupIds", request.path("SecurityGroupIds").deepCopy());
         endpoint.put("IpAddressCount", ipAddresses.size());
-        endpoint.put("HostVPCId", "vpc-" + deterministicHex(id, 8));
+        ArrayNode normalized = normalizedIpRequests(ipAddresses);
+        Map<String, Subnet> subnets = subnetsOf(normalized, region);
+        // AWS: HostVPCId is the VPC of the endpoint's subnets (first subnet in request order).
+        // When EC2 knows none of them the invented vpc-<hex> is kept purely for back-compat with
+        // Floci's earlier accept-any-subnet behaviour; what AWS does there is unverified.
+        String hostVpc = null;
+        for (JsonNode r : ipAddresses) {
+            Subnet known = subnets.get(text(r, "SubnetId"));
+            if (known != null) {
+                hostVpc = known.getVpcId();
+                break;
+            }
+        }
+        endpoint.put("HostVPCId", hostVpc != null ? hostVpc : "vpc-" + deterministicHex(id, 8));
         endpoint.put("Status", "OPERATIONAL");
         endpoint.put("CreatorRequestId", text(request, "CreatorRequestId"));
         endpoint.put("CreationTime", Instant.now().toString());
         endpoint.put("ModificationTime", Instant.now().toString());
+        // Before anything is stored, so an address EC2 refuses leaves no endpoint behind.
+        ArrayNode interfaces = createEndpointInterfaces(id, normalized, subnets,
+                securityGroupIdsOf(request), region);
         endpointStore.put(id, endpoint);
-        endpointIpRequestStore.put(id,
-                objectMapper.createObjectNode().set("IpAddressRequests", normalizedIpRequests(ipAddresses)));
+        ObjectNode record = objectMapper.createObjectNode();
+        record.set("IpAddressRequests", normalized);
+        record.put("Region", region);
+        record.set("NetworkInterfaces", interfaces);
+        endpointIpRequestStore.put(id, record);
         putTags(endpoint, tags);
         return endpoint.deepCopy();
     }
 
-    public ObjectNode deleteResolverEndpoint(String id) {
+    private Map<String, Subnet> subnetsOf(JsonNode requests, String region) {
+        List<String> ids = new ArrayList<>();
+        requests.forEach(r -> {
+            String subnetId = text(r, "SubnetId");
+            if (subnetId != null && !ids.contains(subnetId)) {
+                ids.add(subnetId);
+            }
+        });
+        Map<String, Subnet> found = new LinkedHashMap<>();
+        if (ec2Service != null && !ids.isEmpty()) {
+            ec2Service.describeSubnets(region, ids, Map.of()).forEach(sn -> found.put(sn.getSubnetId(), sn));
+        }
+        return found;
+    }
+
+    private List<String> securityGroupIdsOf(JsonNode request) {
+        List<String> ids = new ArrayList<>();
+        request.path("SecurityGroupIds").forEach(sg -> ids.add(sg.asText()));
+        return ids;
+    }
+
+    /**
+     * One EC2 network interface per address, which is how AWS backs a resolver endpoint ("Resolver
+     * creates a network interface for each subnet and IP address", Route 53 developer guide), made
+     * the way ECS makes an awsvpc task's: created in the address's subnet with the request's
+     * {@code Ip}, or one EC2 picks, and the endpoint's security groups, then held for the service so
+     * the account cannot delete it from under the endpoint. EC2's allocator then keeps instances,
+     * other interfaces and other endpoints off the address, and refuses an explicit one in use.
+     *
+     * <p>Entries line up with {@code requests}: the interface's id and address, or null where none
+     * is made, for a subnet EC2 does not know (Floci has always accepted those) or an IPv6-only
+     * request. ponytail: Floci's EC2 interfaces are IPv4 only; IPv6 addresses are kept as given.
+     * A refusal deletes the interfaces already made and is raised in Route 53 Resolver's codes.
+     */
+    private ArrayNode createEndpointInterfaces(String endpointId, JsonNode requests, Map<String, Subnet> subnets,
+                                               List<String> securityGroupIds, String region) {
+        ArrayNode out = objectMapper.createArrayNode();
+        requests.forEach(r -> out.addNull());
+        List<String> created = new ArrayList<>();
+        try {
+            // Explicit addresses first, so an address EC2 picks for one entry is never one that a
+            // later entry asks for; the stored list keeps the request order.
+            for (boolean explicitPass : new boolean[] {true, false}) {
+                for (int i = 0; i < requests.size(); i++) {
+                    JsonNode r = requests.get(i);
+                    String subnetId = text(r, "SubnetId");
+                    String ip = text(r, "Ip");
+                    if ((ip != null) != explicitPass || !subnets.containsKey(subnetId)
+                            || (ip == null && text(r, "Ipv6") != null)) {
+                        continue;
+                    }
+                    NetworkInterface eni = ec2Service.createNetworkInterface(region, subnetId,
+                            "Route 53 Resolver: " + endpointId, ip, List.of(), securityGroupIds, List.of());
+                    created.add(eni.getNetworkInterfaceId());
+                    ec2Service.holdNetworkInterfaceForService(region, eni.getNetworkInterfaceId());
+                    out.set(i, objectMapper.createObjectNode()
+                            .put("NetworkInterfaceId", eni.getNetworkInterfaceId())
+                            .put("Ip", eni.getPrivateIpAddress()));
+                }
+            }
+        } catch (RuntimeException e) {
+            // Any failure, not only EC2's refusals, would otherwise leave the interfaces made so far.
+            deleteEndpointInterfaces(region, created);
+            throw e instanceof AwsException refusal ? asResolverRejection(refusal) : e;
+        }
+        return out;
+    }
+
+    /**
+     * EC2's refusal in a code CreateResolverEndpoint models. The model names no error for an
+     * address already in use or a subnet with none left, so those take InvalidRequestException
+     * ("The request is invalid"); anything else EC2 refuses here (an address outside the subnet, a
+     * security group it does not know) is a parameter that is not valid.
+     */
+    private static AwsException asResolverRejection(AwsException e) {
+        String code = switch (e.getErrorCode()) {
+            case "InvalidIPAddress.InUse", "InsufficientFreeAddressesInSubnet" -> "InvalidRequestException";
+            default -> INVALID_PARAMETER;
+        };
+        return new AwsException(code, e.getMessage(), 400);
+    }
+
+    /**
+     * Releases and deletes the interfaces, the way ECS tears down a task's. One that is already gone
+     * is skipped silently; any other failure is logged and the rest are still deleted, so one
+     * interface EC2 will not delete does not strand the others.
+     */
+    private void deleteEndpointInterfaces(String region, List<String> interfaceIds) {
+        for (String eniId : interfaceIds) {
+            try {
+                ec2Service.releaseNetworkInterfaceFromService(region, eniId);
+                ec2Service.deleteNetworkInterface(region, eniId);
+            } catch (AwsException e) {
+                if ("InvalidNetworkInterfaceID.NotFound".equals(e.getErrorCode())) {
+                    // Expected: the interface is already deleted, so there is nothing left to free.
+                    continue;
+                }
+                LOG.warnv("Could not delete network interface {0} of a Route 53 Resolver endpoint: {1}",
+                        eniId, e.getMessage());
+            }
+        }
+    }
+
+    // Synchronized with createResolverEndpoint, which stores the endpoint before its record: a delete
+    // between the two would find no interfaces to delete, and the create would then store the record.
+    public synchronized ObjectNode deleteResolverEndpoint(String id) {
         ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
+        // A record written before endpoints had interfaces has no NetworkInterfaces, so none to delete.
+        endpointIpRequestStore.get(id).ifPresent(record -> {
+            List<String> interfaceIds = new ArrayList<>();
+            record.path("NetworkInterfaces").forEach(eni -> {
+                if (text(eni, "NetworkInterfaceId") != null) {
+                    interfaceIds.add(text(eni, "NetworkInterfaceId"));
+                }
+            });
+            if (ec2Service != null) {
+                deleteEndpointInterfaces(text(record, "Region"), interfaceIds);
+            }
+        });
         endpointStore.delete(id);
         endpointIpRequestStore.delete(id);
         tagStore.delete(text(endpoint, "Arn"));
@@ -261,19 +421,22 @@ public class Route53ResolverService {
     /**
      * The endpoint's addresses as AWS {@code IpAddressResponse} entries, built from the
      * {@code IpAddresses} recorded at create time. {@code IpId} is derived from the endpoint,
-     * the entry and its position in the recorded list, so it is stable across calls. An
-     * address the request left for AWS to pick has no {@code Ip}: Floci does not allocate
-     * from the subnet.
+     * the entry and its position in the recorded list, so it is stable across calls. {@code Ip}
+     * is the address of the EC2 interface behind the entry; an entry with no interface (see
+     * {@link #createEndpointInterfaces}) has the request's {@code Ip}, or none.
      */
     public List<ObjectNode> listResolverEndpointIpAddresses(String id) {
         ObjectNode endpoint = require(endpointStore, id, "resolver endpoint");
+        // Read once, so the requests and their interfaces come from the same record.
+        JsonNode record = endpointIpRequestStore.get(id).orElse(null);
+        JsonNode recorded = record == null ? null : record.get("IpAddressRequests");
         // A missing record would otherwise read as an empty list beside a nonzero
         // IpAddressCount; fail loudly with the modeled InternalServiceErrorException instead.
-        JsonNode recorded = endpointIpRequestStore.get(id)
-                .map(node -> node.get("IpAddressRequests"))
-                .filter(JsonNode::isArray)
-                .orElseThrow(() -> new AwsException("InternalServiceErrorException",
-                        "No IP addresses recorded for resolver endpoint: " + id, 400));
+        if (recorded == null || !recorded.isArray()) {
+            throw new AwsException("InternalServiceErrorException",
+                    "No IP addresses recorded for resolver endpoint: " + id, 400);
+        }
+        JsonNode interfaces = record.path("NetworkInterfaces");
         List<ObjectNode> addresses = new ArrayList<>();
         for (int i = 0; i < recorded.size(); i++) {
             JsonNode request = recorded.get(i);
@@ -281,7 +444,10 @@ public class Route53ResolverService {
             // The index keeps repeated entries (two addresses in one subnet, both left for AWS
             // to pick) distinct; the stored list is normalised once at create, so it is stable.
             address.put("IpId", "rni-" + deterministicHex(id + "|" + i + "|" + canonicalKey(request), 17));
-            copyIfPresent(request, address, "SubnetId", "Ip", "Ipv6");
+            String ip = text(interfaces.path(i), "Ip");
+            putIfSet(address, "SubnetId", text(request, "SubnetId"));
+            putIfSet(address, "Ip", ip != null ? ip : text(request, "Ip"));
+            putIfSet(address, "Ipv6", text(request, "Ipv6"));
             address.put("Status", "ATTACHED");
             address.put("StatusMessage", "This IP address is operational.");
             address.set("CreationTime", endpoint.get("CreationTime"));
@@ -289,6 +455,12 @@ public class Route53ResolverService {
             addresses.add(address);
         }
         return addresses;
+    }
+
+    private static void putIfSet(ObjectNode target, String field, String value) {
+        if (value != null) {
+            target.put(field, value);
+        }
     }
 
     public ObjectNode updateResolverEndpoint(String id, JsonNode request) {
@@ -559,10 +731,8 @@ public class Route53ResolverService {
         if (arn == null || arn.isBlank()) {
             throw new AwsException(INVALID_PARAMETER, "ResourceArn is required", 400);
         }
-        String callerPrefix = "arn:" + AwsRegions.partitionFor(region) + ":route53resolver:" + region + ":"
-                + accountId + ":";
-        String resource = arn.startsWith(callerPrefix)
-                ? AwsArnUtils.resourceIfArnFor(arn, "route53resolver").orElse("") : "";
+        AwsArnUtils.Arn parsed = resolverArnIn(arn, region);
+        String resource = parsed != null && parsed.accountId().equals(accountId) ? parsed.resource() : "";
         int slash = resource.indexOf('/');
         StorageBackend<String, ObjectNode> store = slash < 0 ? null : switch (resource.substring(0, slash)) {
             case "resolver-endpoint" -> endpointStore;
@@ -575,6 +745,16 @@ public class Route53ResolverService {
                         stored -> arn.equals(text(stored, "Arn"))))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Resource not found: " + arn, 400));
+    }
+
+    /** The parsed ARN when it is a Route 53 Resolver ARN in {@code region} and its partition, else null. */
+    private static AwsArnUtils.Arn resolverArnIn(String arn, String region) {
+        if (!AwsArnUtils.isArnFor(arn, "route53resolver")) {
+            return null;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return parsed.partition().equals(AwsRegions.partitionFor(region)) && parsed.region().equals(region)
+                ? parsed : null;
     }
 
     /**
@@ -685,13 +865,9 @@ public class Route53ResolverService {
         if (creatorRequestId == null || creatorRequestId.isBlank()) {
             return Optional.empty();
         }
-        String regionPrefix = "arn:" + AwsRegions.partitionFor(region) + ":route53resolver:" + region + ":";
         return store.scan(key -> true).stream()
                 .filter(existing -> creatorRequestId.equals(text(existing, "CreatorRequestId")))
-                .filter(existing -> {
-                    String arn = text(existing, "Arn");
-                    return arn != null && arn.startsWith(regionPrefix);
-                })
+                .filter(existing -> resolverArnIn(text(existing, "Arn"), region) != null)
                 .findFirst()
                 .map(ObjectNode::deepCopy);
     }

@@ -609,7 +609,7 @@ public class S3Controller {
                     s3Service.isAuthEnforced(), httpHeaders, uriInfo);
             if (hasQueryParam(uriInfo, "uploads")) {
                 s3Service.authorizeBucketRead(bucket, "s3:ListBucketMultipartUploads", authorization);
-                return handleListMultipartUploads(bucket);
+                return handleListMultipartUploads(bucket, uriInfo);
             }
             if (hasQueryParam(uriInfo, "notification")) {
                 s3Service.authorizeBucketRead(bucket, "s3:GetBucketNotification", authorization);
@@ -764,6 +764,9 @@ public class S3Controller {
             List<S3Object> objects = result.objects();
             List<String> commonPrefixes = result.commonPrefixes();
             boolean v2 = "2".equals(listType);
+            String bucketOwnerAccount = (v1 || Boolean.parseBoolean(uriInfo.getQueryParameters().getFirst("fetch-owner")))
+                    ? s3Service.getBucketOwnerAccountId(bucket) : null;
+            boolean ownershipEnforced = bucketOwnerAccount != null && s3Service.bucketOwnershipIsEnforced(bucket);
 
             XmlBuilder xml = new XmlBuilder()
                     .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
@@ -782,8 +785,15 @@ public class S3Controller {
                    .elem("LastModified", ISO_FORMAT.format(obj.getLastModified()))
                    .elem("ETag", obj.getETag())
                    .elem("Size", obj.getSize())
-                   .elem("StorageClass", obj.getStorageClass())
-                   .end("Contents");
+                   .elem("StorageClass", obj.getStorageClass());
+                if (bucketOwnerAccount != null) {
+                    xml.start("Owner")
+                       .elem("ID", AwsCanonicalUserId.forAccount(S3Service.effectiveObjectOwnerAccount(
+                               obj, bucketOwnerAccount, ownershipEnforced)))
+                       .elem("DisplayName", S3Service.DEFAULT_OWNER_DISPLAY_NAME)
+                       .end("Owner");
+                }
+                xml.end("Contents");
             }
             for (String cp : commonPrefixes) {
                 xml.start("CommonPrefixes")
@@ -1641,6 +1651,9 @@ public class S3Controller {
                         new PutObjectOptions()
                                 .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
                                 .withContentDisposition(httpHeaders.getHeaderString("Content-Disposition"))
+                                .withContentEncoding(toPersistedContentEncoding(
+                                        httpHeaders.getHeaderString("Content-Encoding")))
+                                .withCacheControl(httpHeaders.getHeaderString("Cache-Control"))
                                 .withServerSideEncryption(httpHeaders.getHeaderString("x-amz-server-side-encryption"))
                                 .withSseKmsKeyId(httpHeaders.getHeaderString(
                                         "x-amz-server-side-encryption-aws-kms-key-id"))
@@ -2000,21 +2013,54 @@ public class S3Controller {
         return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
     }
 
-    private Response handleListMultipartUploads(String bucket) {
-        List<MultipartUpload> uploads = s3Service.listMultipartUploads(bucket);
+    private Response handleListMultipartUploads(String bucket, UriInfo uriInfo) {
+        MultivaluedMap<String, String> params = uriInfo.getQueryParameters();
+        String prefix = params.getFirst("prefix");
+        String delimiter = params.getFirst("delimiter");
+        String keyMarker = params.getFirst("key-marker");
+        String uploadIdMarker = params.getFirst("upload-id-marker");
+        String encodingType = params.getFirst("encoding-type");
+        String maxUploads = params.getFirst("max-uploads");
+        int max = resolveMaxUploads(maxUploads);
+        S3Service.ListMultipartUploadsResult result =
+                s3Service.listMultipartUploads(bucket, prefix, delimiter, keyMarker, uploadIdMarker, max);
         XmlBuilder xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("ListMultipartUploadsResult", AwsNamespaces.S3)
-                .elem("Bucket", bucket);
-        for (MultipartUpload upload : uploads) {
+                .elem("Bucket", bucket)
+                .elem("KeyMarker", maybeEncode(keyMarker == null ? "" : keyMarker, encodingType))
+                .elem("UploadIdMarker", uploadIdMarker == null ? "" : uploadIdMarker)
+                .elem("Prefix", maybeEncode(prefix, encodingType))
+                .elem("Delimiter", maybeEncode(delimiter, encodingType))
+                .elem("MaxUploads", max)
+                .elem("IsTruncated", result.isTruncated());
+        if (encodingType != null) {
+            xml.elem("EncodingType", encodingType);
+        }
+        if (result.isTruncated()) {
+            xml.elem("NextKeyMarker", maybeEncode(result.nextKeyMarker(), encodingType))
+               .elem("NextUploadIdMarker", result.nextUploadIdMarker());
+        }
+        for (S3Service.MultipartListingEntry entry : result.entries()) {
+            MultipartUpload upload = entry.upload();
+            if (upload == null) {
+                xml.start("CommonPrefixes").elem("Prefix", maybeEncode(entry.key(), encodingType))
+                   .end("CommonPrefixes");
+                continue;
+            }
             xml.start("Upload")
-               .elem("Key", upload.getKey())
+               .elem("Key", maybeEncode(upload.getKey(), encodingType))
                .elem("UploadId", upload.getUploadId())
                .elem("Initiated", ISO_FORMAT.format(upload.getInitiated()))
                .end("Upload");
         }
         xml.end("ListMultipartUploadsResult");
         return Response.ok(xml.build()).build();
+    }
+
+    private static int resolveMaxUploads(String value) {
+        return resolveListingLimit(value, "max-uploads", 1000,
+                "Argument max-uploads must be a non-negative integer");
     }
 
     private record CompletedPart(int partNumber, String eTag, S3Checksum checksum) {}
@@ -4420,18 +4466,22 @@ public class S3Controller {
      * a missing parameter as 1000. Zero is a valid request for an empty page. Anything else,
      * negative, non-numeric or overflowing, is rejected with the same InvalidArgument response.
      */
-    private static int resolveMaxKeys(String maxKeys) {
-        if (maxKeys == null) {
+    private static int resolveMaxKeys(String value) {
+        return resolveListingLimit(value, "maxKeys", Integer.MAX_VALUE,
+                "Argument maxKeys must be an integer between 0 and 2147483647");
+    }
+
+    private static int resolveListingLimit(String value, String argumentName, int cap, String message) {
+        if (value == null) {
             return 1000;
         }
-        if (maxKeys.matches("\\d{1,10}") && Long.parseLong(maxKeys) <= Integer.MAX_VALUE) {
-            return Integer.parseInt(maxKeys);
+        if (value.matches("\\d{1,10}") && Long.parseLong(value) <= Integer.MAX_VALUE) {
+            return Math.min(cap, Integer.parseInt(value));
         }
         Map<String, Object> detail = new LinkedHashMap<>();
-        detail.put("ArgumentName", "maxKeys");
-        detail.put("ArgumentValue", maxKeys);
-        throw new AwsException("InvalidArgument",
-                "Argument maxKeys must be an integer between 0 and 2147483647", 400, detail);
+        detail.put("ArgumentName", argumentName);
+        detail.put("ArgumentValue", value);
+        throw new AwsException("InvalidArgument", message, 400, detail);
     }
 
     private Response handlePutBucketWebsite(String bucket, byte[] body) {
