@@ -118,6 +118,24 @@ class OpenSearchVersionsTest {
     }
 
     @Test
+    void compatibleTargetsCoverLaterSupportedOpenSearch2xVersions() {
+        List<String> versions = List.of("OpenSearch_2.3", "OpenSearch_2.5", "OpenSearch_2.7",
+                "OpenSearch_2.9", "OpenSearch_2.11", "OpenSearch_2.13", "OpenSearch_2.15",
+                "OpenSearch_2.17", "OpenSearch_2.19");
+        for (int i = 0; i < versions.size() - 1; i++) {
+            assertEquals(versions.subList(i + 1, versions.size()),
+                    OpenSearchVersions.compatibleTargets(versions.get(i)), versions.get(i));
+        }
+    }
+
+    @Test
+    void compatibleTargetsCoverEverySupportedOpenSearch3xFrom2xBridge() {
+        assertEquals(List.of("OpenSearch_3.0", "OpenSearch_3.1", "OpenSearch_3.2", "OpenSearch_3.3",
+                "OpenSearch_3.4", "OpenSearch_3.5", "OpenSearch_3.6", "OpenSearch_3.7"),
+                OpenSearchVersions.compatibleTargets("OpenSearch_2.19"));
+    }
+
+    @Test
     void compatibleTargetsCoverLaterOpenSearch3xVersions() {
         List<String> versions = List.of("OpenSearch_3.0", "OpenSearch_3.1", "OpenSearch_3.2",
                 "OpenSearch_3.3", "OpenSearch_3.4", "OpenSearch_3.5", "OpenSearch_3.6", "OpenSearch_3.7");

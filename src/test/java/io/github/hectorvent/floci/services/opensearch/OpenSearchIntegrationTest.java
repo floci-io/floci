@@ -299,9 +299,11 @@ class OpenSearchIntegrationTest {
 
     @Test
     @Order(14)
-    void getCompatibleVersionsAndUpgradeWithinOpenSearchMajorVersion() {
+    void getCompatibleVersionsAndUpgradeAlongNewPaths() {
         for (String[] path : new String[][] {
                 {"OpenSearch_1.0", "OpenSearch_1.2"},
+                {"OpenSearch_2.3", "OpenSearch_2.5"},
+                {"OpenSearch_2.19", "OpenSearch_3.7"},
                 {"OpenSearch_3.6", "OpenSearch_3.7"}
         }) {
             String source = path[0];

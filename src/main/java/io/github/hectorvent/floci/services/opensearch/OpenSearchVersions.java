@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.opensearch;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -85,34 +86,44 @@ public final class OpenSearchVersions {
         // line, so non-2.19 2.x sources do NOT list any 3.x targets directly.
         // https://docs.aws.amazon.com/opensearch-service/latest/developerguide/version-migration.html
         COMPAT_MATRIX.put("Elasticsearch_7.10", List.of("OpenSearch_1.3", "OpenSearch_2.19"));
-        // The GetCompatibleVersions API example enumerates these 1.x hops.
+        // The GetCompatibleVersions API example lists every later minor within
+        // a major version. Derive those paths from the supported engine list so
+        // newly added OpenSearch versions also become upgrade targets.
         // https://docs.aws.amazon.com/opensearch-service/latest/APIReference/API_GetCompatibleVersions.html
-        COMPAT_MATRIX.put("OpenSearch_1.0", List.of("OpenSearch_1.1", "OpenSearch_1.2", "OpenSearch_1.3"));
-        COMPAT_MATRIX.put("OpenSearch_1.1", List.of("OpenSearch_1.2", "OpenSearch_1.3"));
-        COMPAT_MATRIX.put("OpenSearch_1.2", List.of("OpenSearch_1.3"));
+        List<String> openSearchVersions = VERSION_TO_IMAGE.keySet().stream()
+                .filter(version -> version.startsWith("OpenSearch_"))
+                .sorted(Comparator.comparingInt(OpenSearchVersions::majorVersion)
+                        .thenComparingInt(OpenSearchVersions::minorVersion))
+                .toList();
+        for (String source : openSearchVersions) {
+            int sourceMajor = majorVersion(source);
+            int sourceMinor = minorVersion(source);
+            List<String> targets = openSearchVersions.stream()
+                    .filter(target -> majorVersion(target) == sourceMajor
+                            && minorVersion(target) > sourceMinor)
+                    .toList();
+            if (!targets.isEmpty()) {
+                COMPAT_MATRIX.put(source, targets);
+            }
+        }
+
+        // Cross-major paths remain explicit, except that the 2.19 bridge uses
+        // every supported 3.x target and expands when the catalog does.
         COMPAT_MATRIX.put("OpenSearch_1.3", List.of("OpenSearch_2.19", "OpenSearch_2.17", "OpenSearch_2.15", "OpenSearch_2.13"));
-        COMPAT_MATRIX.put("OpenSearch_2.19", List.of("OpenSearch_3.0", "OpenSearch_3.1", "OpenSearch_3.6"));
-        COMPAT_MATRIX.put("OpenSearch_2.17", List.of("OpenSearch_2.19"));
-        COMPAT_MATRIX.put("OpenSearch_2.15", List.of("OpenSearch_2.19"));
-        COMPAT_MATRIX.put("OpenSearch_2.13", List.of("OpenSearch_2.19"));
-        COMPAT_MATRIX.put("OpenSearch_2.11", List.of("OpenSearch_2.13", "OpenSearch_2.19"));
-        COMPAT_MATRIX.put("OpenSearch_2.9", List.of("OpenSearch_2.11", "OpenSearch_2.13"));
-        // AWS documents 3.x to 3.x upgrades at the major-version level. Offer
-        // later supported 3.x releases, without same-version or downgrade paths.
-        COMPAT_MATRIX.put("OpenSearch_3.0", List.of("OpenSearch_3.1", "OpenSearch_3.2", "OpenSearch_3.3",
-                "OpenSearch_3.4", "OpenSearch_3.5", "OpenSearch_3.6", "OpenSearch_3.7"));
-        COMPAT_MATRIX.put("OpenSearch_3.1", List.of("OpenSearch_3.2", "OpenSearch_3.3", "OpenSearch_3.4",
-                "OpenSearch_3.5", "OpenSearch_3.6", "OpenSearch_3.7"));
-        COMPAT_MATRIX.put("OpenSearch_3.2", List.of("OpenSearch_3.3", "OpenSearch_3.4", "OpenSearch_3.5",
-                "OpenSearch_3.6", "OpenSearch_3.7"));
-        COMPAT_MATRIX.put("OpenSearch_3.3", List.of("OpenSearch_3.4", "OpenSearch_3.5", "OpenSearch_3.6",
-                "OpenSearch_3.7"));
-        COMPAT_MATRIX.put("OpenSearch_3.4", List.of("OpenSearch_3.5", "OpenSearch_3.6", "OpenSearch_3.7"));
-        COMPAT_MATRIX.put("OpenSearch_3.5", List.of("OpenSearch_3.6", "OpenSearch_3.7"));
-        COMPAT_MATRIX.put("OpenSearch_3.6", List.of("OpenSearch_3.7"));
+        COMPAT_MATRIX.put("OpenSearch_2.19", openSearchVersions.stream()
+                .filter(version -> majorVersion(version) == 3)
+                .toList());
     }
 
     private OpenSearchVersions() {
+    }
+
+    private static int majorVersion(String version) {
+        return Integer.parseInt(version.substring("OpenSearch_".length(), version.indexOf('.')));
+    }
+
+    private static int minorVersion(String version) {
+        return Integer.parseInt(version.substring(version.indexOf('.') + 1));
     }
 
     /** Versions advertised on {@code ListVersions}, newest-first. */
