@@ -83,6 +83,7 @@ class EventBridgeInvokerTest {
                         new HostVolumePolicy(emulatorConfig)),
                 stepFunctionsService,
                 redshiftDataService,
+                null,
                 serviceRegistry,
                 regionResolver,
                 new ObjectMapper(),
