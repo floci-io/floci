@@ -2121,7 +2121,7 @@ public class ElastiCacheService implements ResourceProvider {
         if (users.get(DEFAULT_USER_ID).isPresent()) {
             return;
         }
-        // re-checked under the lock ModifyUser holds, so a racing seed cannot overwrite its change
+        // re-checked under the user lock, so concurrent first touches seed it once
         synchronized (userGroupLock) {
             if (users.get(DEFAULT_USER_ID).isEmpty()) {
                 ElastiCacheUser user = new ElastiCacheUser(DEFAULT_USER_ID, DEFAULT_USER_ID, AuthMode.NO_AUTH,
@@ -2130,6 +2130,13 @@ public class ElastiCacheService implements ResourceProvider {
                         "user:" + DEFAULT_USER_ID));
                 users.put(DEFAULT_USER_ID, user);
             }
+        }
+    }
+
+    /** AWS: the built-in default user cannot be modified or deleted; a custom user named default can. */
+    private static void requireNotBuiltInDefault(String userId, String action) {
+        if (DEFAULT_USER_ID.equals(userId)) {
+            throw new AwsException("InvalidParameterValue", "The default user cannot be " + action + ".", 400);
         }
     }
 
@@ -2168,6 +2175,7 @@ public class ElastiCacheService implements ResourceProvider {
     public ElastiCacheUser modifyUser(String userId, AuthMode authMode, List<String> passwords,
                                       String accessString, String appendAccessString, String engine) {
         ElastiCacheUser user = getUser(userId);
+        requireNotBuiltInDefault(userId, "modified");
         // Storage backends hand back the live stored object, so validate everything
         // before the first setter — a rejected request must not leave changes behind.
         String normalizedEngine = (engine == null || engine.isBlank()) ? null : normalizeEngine(engine);
@@ -2206,9 +2214,7 @@ public class ElastiCacheService implements ResourceProvider {
         if (findUser(userId).isEmpty()) {
             throw new AwsException("UserNotFound", "User " + userId + " not found.", 404);
         }
-        if (DEFAULT_USER_ID.equals(userId)) {
-            throw new AwsException("InvalidParameterValue", "The default user cannot be deleted.", 400);
-        }
+        requireNotBuiltInDefault(userId, "deleted");
         synchronized (userGroupLock) {
             users.delete(userId);
             // AWS removes a deleted user from every user group it belongs to

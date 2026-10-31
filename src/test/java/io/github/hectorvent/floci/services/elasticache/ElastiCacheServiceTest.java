@@ -51,11 +51,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -700,12 +703,34 @@ class ElastiCacheServiceTest {
         AtomicReference<String> account = new AtomicReference<>("111111111111");
         ElastiCacheService svc = serviceWith(storageFollowing(account), containerManager, proxyManager,
                 clusterFormation);
-        svc.modifyUser("default", AuthMode.PASSWORD, List.of("secret"), null, null, null);
-        assertEquals(AuthMode.PASSWORD, svc.getUser("default").getAuthMode());
+        svc.createUser("app-user", "app", AuthMode.PASSWORD, List.of("pw"), "on ~* +@all", "redis");
+        ElastiCacheUser first = svc.getUser("default");
 
         account.set("222222222222");
-        assertEquals(AuthMode.NO_AUTH, svc.getUser("default").getAuthMode());
-        assertEquals(1, svc.listUsers(null, null).size());
+        // each account holds its own record, seeded on its own first touch
+        assertNotSame(first, svc.getUser("default"));
+        assertEquals(List.of("default"), svc.listUsers(null, null).stream().map(ElastiCacheUser::getUserId).toList());
+
+        account.set("111111111111");
+        assertSame(first, svc.getUser("default"));
+        assertEquals(Set.of("default", "app-user"), svc.listUsers(null, null).stream()
+                .map(ElastiCacheUser::getUserId).collect(Collectors.toSet()));
+    }
+
+    @Test
+    void theBuiltInDefaultUserCannotBeModified() {
+        AwsException ex = assertThrows(AwsException.class, () -> service.modifyUser(
+                "default", AuthMode.PASSWORD, List.of("secret"), "off -@all", null, null));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        ElastiCacheUser user = service.getUser("default");
+        assertEquals(AuthMode.NO_AUTH, user.getAuthMode());
+        assertEquals("on ~* +@all", user.getAccessString());
+
+        // a custom user named default is an ordinary user
+        service.createUser("my-default", "default", AuthMode.PASSWORD, List.of("pw"), "on ~* +@all", "redis");
+        assertEquals("off -@all", service.modifyUser("my-default", null, null, "off -@all", null, null)
+                .getAccessString());
     }
 
     @Test

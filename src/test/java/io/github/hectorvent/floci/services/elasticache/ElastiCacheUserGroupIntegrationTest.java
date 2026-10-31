@@ -267,6 +267,37 @@ class ElastiCacheUserGroupIntegrationTest {
             .statusCode(400)
             .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"));
 
+        request("ModifyUser")
+            .formParam("UserId", "default")
+            .formParam("AccessString", "off -@all")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"));
+
+        request("DescribeUsers")
+            .formParam("UserId", "default")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.AccessString", equalTo("on ~* +@all"));
+
+        // another account has its own default user
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=111111111111/20260412/us-east-1/elasticache/aws4_request")
+            .formParam("Action", "DescribeUsers")
+            .formParam("UserId", "default")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.ARN",
+                    endsWith(":111111111111:user:default"));
+
         request("DeleteUserGroup")
             .formParam("UserGroupId", "ug-it-builtin-default")
         .when()
