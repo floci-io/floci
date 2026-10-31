@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -38,7 +39,7 @@ class PaymentCryptographyServiceTest {
         Map<String, Boolean> modes = new LinkedHashMap<>();
         modes.put("Encrypt", Boolean.TRUE);
         modes.put("Decrypt", Boolean.TRUE);
-        return service.createKey(region, attributes, modes, true);
+        return service.createKey(region, attributes, modes, true, true, Map.of());
     }
 
     @Test
@@ -155,5 +156,56 @@ class PaymentCryptographyServiceTest {
 
         assertNull(service.findKey("us-east-1", key.getArn()));
         assertNull(service.findAlias("us-east-1", "alias/team/card-key"));
+    }
+
+    @Test
+    void aKeyMayBeCreatedDisabledAndWithTags() {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "AES_256");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+
+        PaymentCryptographyKey key = service.createKey("us-east-1", attributes, Map.of(), false,
+                false, Map.of("owner", "team"));
+
+        assertFalse(key.isEnabled(), "the key is enabled although it was created disabled");
+        assertEquals("team", key.getTags().get("owner"));
+    }
+
+    @Test
+    void aDeletedKeyDoesNotComeBackWhenItIsTagged() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+        service.deleteKey(key);
+
+        AwsException gone = assertThrows(AwsException.class,
+                () -> service.tag(key, Map.of("owner", "team")));
+        assertEquals("ResourceNotFoundException", gone.getErrorCode());
+        assertNull(service.findKey("us-east-1", key.getKeyId()),
+                "the key is in the store again after it was deleted");
+    }
+
+    @Test
+    void theKeysAreListedAPageAtATime() {
+        createKey("us-east-1");
+        createKey("us-east-1");
+        createKey("us-east-1");
+
+        PaymentCryptographyService.Page<PaymentCryptographyKey> first = service.listKeys("us-east-1", 2, null);
+        assertEquals(2, first.items().size());
+        assertNotNull(first.nextToken(), "there are more keys, so there is a token");
+
+        PaymentCryptographyService.Page<PaymentCryptographyKey> second =
+                service.listKeys("us-east-1", 2, first.nextToken());
+        assertEquals(1, second.items().size());
+        assertNull(second.nextToken(), "the last page has no token");
+    }
+
+    @Test
+    void aTokenThatNamesNoPageIsRefused() {
+        createKey("us-east-1");
+
+        AwsException bad = assertThrows(AwsException.class,
+                () -> service.listKeys("us-east-1", 2, "not a token"));
+        assertEquals("ValidationException", bad.getErrorCode());
     }
 }

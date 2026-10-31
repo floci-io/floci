@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 
 /**
  * The Payment Cryptography control plane.
@@ -33,7 +34,7 @@ public class PaymentCryptographyJsonHandler {
         return switch (action) {
             case "CreateKey" -> Response.ok(createKey(request, region)).build();
             case "GetKey" -> Response.ok(getKey(request, region)).build();
-            case "ListKeys" -> Response.ok(listKeys(region)).build();
+            case "ListKeys" -> Response.ok(listKeys(request, region)).build();
             case "DeleteKey" -> Response.ok(deleteKey(request, region)).build();
             case "CreateAlias" -> Response.ok(createAlias(request, region)).build();
             case "GetAlias" -> Response.ok(getAlias(request, region)).build();
@@ -64,8 +65,10 @@ public class PaymentCryptographyJsonHandler {
                 declared.put(entry.getKey(), entry.getValue().asText());
             }
         });
+        // A key may be created disabled, and it may be created with tags.
+        boolean enabled = request.has("Enabled") ? request.path("Enabled").asBoolean(true) : true;
         PaymentCryptographyKey key = service.createKey(region, declared, modesOfUse(attributes),
-                request.path("Exportable").asBoolean(false));
+                request.path("Exportable").asBoolean(false), enabled, tagsOf(request));
         return Map.of("Key", keyObject(key));
     }
 
@@ -74,12 +77,19 @@ public class PaymentCryptographyJsonHandler {
         return Map.of("Key", keyObject(key));
     }
 
-    private Map<String, Object> listKeys(String region) {
+    private Map<String, Object> listKeys(JsonNode request, String region) {
+        PaymentCryptographyService.Page<PaymentCryptographyKey> page = service.listKeys(region,
+                maxResults(request), request.path("NextToken").asText(null));
         List<Map<String, Object>> keys = new ArrayList<>();
-        for (PaymentCryptographyKey key : service.listKeys(region)) {
+        for (PaymentCryptographyKey key : page.items()) {
             keys.add(keyObject(key));
         }
-        return Map.of("Keys", keys);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("Keys", keys);
+        if (page.nextToken() != null) {
+            out.put("NextToken", page.nextToken());
+        }
+        return out;
     }
 
     private Map<String, Object> deleteKey(JsonNode request, String region) {
@@ -108,11 +118,18 @@ public class PaymentCryptographyJsonHandler {
 
     private Map<String, Object> listAliases(JsonNode request, String region) {
         String keyArn = request.hasNonNull("KeyArn") ? request.get("KeyArn").asText() : null;
+        PaymentCryptographyService.Page<PaymentCryptographyAlias> page = service.listAliases(region,
+                keyArn, maxResults(request), request.path("NextToken").asText(null));
         List<Map<String, Object>> aliases = new ArrayList<>();
-        for (PaymentCryptographyAlias alias : service.listAliases(region, keyArn)) {
+        for (PaymentCryptographyAlias alias : page.items()) {
             aliases.add(aliasObject(alias));
         }
-        return Map.of("Aliases", aliases);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("Aliases", aliases);
+        if (page.nextToken() != null) {
+            out.put("NextToken", page.nextToken());
+        }
+        return out;
     }
 
     private Map<String, Object> updateAlias(JsonNode request, String region) {
@@ -131,18 +148,7 @@ public class PaymentCryptographyJsonHandler {
 
     private Map<String, Object> tagResource(JsonNode request, String region) {
         PaymentCryptographyKey key = requiredKey(request, region);
-        Map<String, String> tags = new LinkedHashMap<>();
-        JsonNode declared = request.get("Tags");
-        if (declared != null && declared.isArray()) {
-            for (JsonNode tag : declared) {
-                String tagKey = tag.path("Key").asText();
-                if (tagKey.isEmpty()) {
-                    throw new AwsException("ValidationException", "each Tag requires Key", 400);
-                }
-                tags.put(tagKey, tag.path("Value").asText());
-            }
-        }
-        service.tag(key, tags);
+        service.tag(key, tagsOf(request));
         return Map.of();
     }
 
@@ -161,10 +167,43 @@ public class PaymentCryptographyJsonHandler {
 
     private Map<String, Object> listTagsForResource(JsonNode request, String region) {
         PaymentCryptographyKey key = requiredKey(request, region);
+        PaymentCryptographyService.Page<Map.Entry<String, String>> page = service.listTags(key,
+                maxResults(request), request.path("NextToken").asText(null));
         List<Map<String, Object>> tags = new ArrayList<>();
-        service.listTags(key).forEach((tagKey, tagValue) ->
-                tags.add(Map.of("Key", tagKey, "Value", tagValue)));
-        return Map.of("Tags", tags);
+        for (Map.Entry<String, String> tag : page.items()) {
+            tags.add(Map.of("Key", tag.getKey(), "Value", tag.getValue()));
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("Tags", tags);
+        if (page.nextToken() != null) {
+            out.put("NextToken", page.nextToken());
+        }
+        return out;
+    }
+
+    /** The number of results the caller asks for, or null when it asks for all of them. */
+    private static Integer maxResults(JsonNode request) {
+        JsonNode declared = request.get("MaxResults");
+        if (declared == null || !declared.isNumber()) {
+            return null;
+        }
+        return declared.asInt();
+    }
+
+    /** The tags of a request, as the name and the value of each. */
+    private static Map<String, String> tagsOf(JsonNode request) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        JsonNode declared = request.get("Tags");
+        if (declared != null && declared.isArray()) {
+            for (JsonNode tag : declared) {
+                String tagKey = tag.path("Key").asText();
+                if (tagKey.isEmpty()) {
+                    throw new AwsException("ValidationException", "each Tag requires Key", 400);
+                }
+                tags.put(tagKey, tag.path("Value").asText());
+            }
+        }
+        return tags;
     }
 
     // ---- helpers ------------------------------------------------------------

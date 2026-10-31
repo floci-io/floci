@@ -34,7 +34,12 @@
   the key's own region is a `ConflictException`.
 - **Tags are the region's:** they are not part of the replication process, so a key in
   another region carries its own tag set, and tagging one leaves the others alone.
-- **Deletion:** `DeleteKey` removes the key and the aliases that name it.
+- **Deletion:** `DeleteKey` removes the key and the aliases that name it. A key that
+  is gone does not come back: a tagging request for it is refused.
+- **Creating a key:** `CreateKey` takes `Exportable`, `Enabled` and `Tags`, and a key
+  created disabled or with tags comes back that way.
+- **Paging:** `ListKeys`, `ListAliases` and `ListTagsForResource` take `MaxResults`
+  and `NextToken`, and answer with one page and the token that asks for the next.
 - **Not yet emulated:** the data plane (`POST /encrypt` and the rest), the import and
   export formats, and the multi-region replication operations.
 
