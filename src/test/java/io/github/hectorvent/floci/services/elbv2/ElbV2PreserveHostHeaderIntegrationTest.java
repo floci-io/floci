@@ -45,8 +45,6 @@ class ElbV2PreserveHostHeaderIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260803/us-east-1/elasticloadbalancing/aws4_request";
     private static final int LISTENER_PORT = 7794;
     private static final String CLIENT_HOST = "client.example.test:8443";
-    /** Above the ALB listener's old 8 KB cap, so the large-header probe is not refused by its own ends. */
-    private static final int LARGE_HEADER_LIMIT = 64 * 1024;
 
     @Inject
     Vertx vertx;
@@ -90,7 +88,9 @@ class ElbV2PreserveHostHeaderIntegrationTest {
 
     @Test
     void preservesHostHeaderWhenLoadBalancerAttributeIsEnabled() throws Exception {
-        HttpServer backend = vertx.createHttpServer(new HttpServerOptions().setMaxHeaderSize(LARGE_HEADER_LIMIT))
+        HttpServer backend = vertx.createHttpServer(new HttpServerOptions()
+                        .setMaxHeaderSize(ElbV2DataPlane.MAX_REQUEST_HEADER_SIZE)
+                        .setMaxInitialLineLength(ElbV2DataPlane.MAX_REQUEST_LINE_LENGTH))
                 .requestHandler(request -> {
                     if ("/stream".equals(request.path())) {
                         request.body().onSuccess(body -> {
@@ -105,6 +105,7 @@ class ElbV2PreserveHostHeaderIntegrationTest {
                         String cookie = request.getHeader("Cookie");
                         request.response()
                                 .putHeader("X-Received-Cookie-Length", String.valueOf(cookie.length()))
+                                .putHeader("X-Received-Query-Length", String.valueOf(request.query().length()))
                                 .putHeader("X-Large", cookie)
                                 .end("ok");
                     } else {
@@ -246,11 +247,14 @@ class ElbV2PreserveHostHeaderIntegrationTest {
     }
 
     private void assertForwardsLargeHeaders(String loadBalancerArn) throws Exception {
-        // Several JWT cookies on a shared parent domain exceed Vert.x's 8 KB default.
-        String cookie = "a=" + "x".repeat(4000) + "; b=" + "y".repeat(4000)
-                + "; c=" + "z".repeat(4000) + "; d=" + "w".repeat(8000);
+        // Several JWT cookies on a shared parent domain exceed Vert.x's 8 KB default header block,
+        // while staying under the ALB's 16 KB single-header limit. The query passes Vert.x's 4 KB
+        // default request line.
+        String cookie = "a=" + "x".repeat(3600) + "; b=" + "y".repeat(3600) + "; c=" + "z".repeat(3600);
+        String query = "q=" + "q".repeat(10_000);
         String dnsName = loadBalancerDnsName(loadBalancerArn);
-        HttpClient client = vertx.createHttpClient(new HttpClientOptions().setMaxHeaderSize(LARGE_HEADER_LIMIT));
+        HttpClient client = vertx.createHttpClient(new HttpClientOptions()
+                .setMaxHeaderSize(ElbV2DataPlane.MAX_RESPONSE_HEADER_SIZE));
         try {
             HttpClientRequest request = client
                     .request(new RequestOptions()
@@ -258,7 +262,7 @@ class ElbV2PreserveHostHeaderIntegrationTest {
                             .setHost(dnsName)
                             .setPort(LISTENER_PORT)
                             .setMethod(HttpMethod.GET)
-                            .setURI("/large-headers"))
+                            .setURI("/large-headers?" + query))
                     .toCompletionStage()
                     .toCompletableFuture()
                     .get(2, TimeUnit.SECONDS);
@@ -271,6 +275,7 @@ class ElbV2PreserveHostHeaderIntegrationTest {
 
             assertEquals(200, response.statusCode());
             assertEquals(String.valueOf(cookie.length()), response.getHeader("X-Received-Cookie-Length"));
+            assertEquals(String.valueOf(query.length()), response.getHeader("X-Received-Query-Length"));
             assertEquals(cookie, response.getHeader("X-Large"));
         } finally {
             client.close();
