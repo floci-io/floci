@@ -4,9 +4,11 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.path.json.JsonPath;
 import io.restassured.path.xml.XmlPath;
 import io.restassured.response.Response;
@@ -16,6 +18,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.mockito.ArgumentCaptor;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -27,6 +30,12 @@ import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.startsWith;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.verify;
 
 /**
  * {@code AWS::EC2::KeyPair} through real stack operations. A created key, of the type and in the
@@ -48,6 +57,9 @@ class CloudFormationEc2KeyPairIntegrationTest {
 
     @Inject
     Ec2Service ec2Service;
+
+    @InjectSpy
+    SsmService ssmService;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -96,6 +108,31 @@ class CloudFormationEc2KeyPairIntegrationTest {
         deleteStack(stack);
         assertKeyPairMissing(name);
         assertParameterMissing("/ec2/keypair/" + id);
+    }
+
+    @Test
+    void aFailureAfterSavingThePrivateKeyRollsBackTheKeyAndParameter() throws Exception {
+        String stack = unique("cfn-key-partial-write");
+        String name = stack + "-key";
+        String failureReason = "simulated failure after saving the private key";
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw new IllegalStateException(failureReason);
+        }).when(ssmService).putParameter(startsWith("/ec2/keypair/"), anyString(),
+                eq("SecureString"), isNull(), eq(false), eq(REGION));
+
+        deploy("CreateStack", stack, template(Key.named(name), false));
+        assertStatus(stack, "ROLLBACK_COMPLETE");
+
+        assertTrue(events(stack).stream().anyMatch(event -> "Key".equals(event.get("LogicalResourceId"))
+                && "CREATE_FAILED".equals(event.get("ResourceStatus"))
+                && event.getOrDefault("ResourceStatusReason", "").contains(failureReason)));
+        ArgumentCaptor<String> parameterName = ArgumentCaptor.forClass(String.class);
+        verify(ssmService).putParameter(parameterName.capture(), anyString(),
+                eq("SecureString"), isNull(), eq(false), eq(REGION));
+        assertKeyPairMissing(name);
+        assertParameterMissing(parameterName.getValue());
+        deleteStack(stack);
     }
 
     @Test
