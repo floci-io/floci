@@ -13,8 +13,10 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -113,6 +115,40 @@ class ElastiCacheBackendAclTest {
                 () -> acl.reapply("localhost", server.getLocalPort(), "app", "on ~* +@all"));
 
         assertEquals("Could not establish the backend cache user's permissions", failure.getMessage());
+    }
+
+    @Test
+    void rulesAreReadUnderTheLockSoStaleRulesCannotOverwriteNewerRules() throws Exception {
+        login("app", "on ~app:* -@all +get");
+        int afterLogin = commands.size();
+
+        AtomicReference<String> currentRules = new AtomicReference<>("on ~app:* -@all +get +set");
+        acl.reapply("localhost", server.getLocalPort(), "app", currentRules::get);
+
+        currentRules.set("on ~app:* -@all +get");
+        acl.reapply("localhost", server.getLocalPort(), "app", currentRules::get);
+
+        List<List<String>> sent = commands.subList(afterLogin, commands.size());
+        assertEquals(4, sent.size());
+        assertTrue(sent.get(1).contains("+set"));
+        assertFalse(sent.get(3).contains("+set"));
+    }
+
+    @Test
+    void disabledUserAccessStringIsReappliedToBackend() throws Exception {
+        login("app", "on ~app:* -@all +get");
+        int afterLogin = commands.size();
+
+        acl.reapply("localhost", server.getLocalPort(), "app", "off -@all");
+
+        List<List<String>> sent = commands.subList(afterLogin, commands.size());
+        assertEquals(2, sent.size());
+        assertEquals("ACL", sent.get(1).get(0));
+        assertEquals("SETUSER", sent.get(1).get(1));
+        assertEquals("app", sent.get(1).get(2));
+        assertEquals("reset", sent.get(1).get(3));
+        assertEquals("off", sent.get(1).get(4));
+        assertEquals("-@all", sent.get(1).get(5));
     }
 
     private void login(String username, String accessString) throws IOException {

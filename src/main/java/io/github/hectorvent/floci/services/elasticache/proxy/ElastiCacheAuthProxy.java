@@ -96,11 +96,8 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
             throw new IOException("Cluster-mode user ACL transport is not supported yet");
         }
         String name = username == null || username.isEmpty() ? "default" : username;
-        String access = members ? passwordValidator.accessString(name) : "on ~* &* +@all";
-        if (access == null) {
-            throw new IOException("Cache user is no longer associated with this resource");
-        }
-        backendAcl.authenticate(backend, name, access);
+        backendAcl.authenticate(backend, name,
+                () -> members ? passwordValidator.accessString(name) : "on ~* &* +@all");
     }
 
     /**
@@ -109,12 +106,8 @@ public class ElastiCacheAuthProxy extends AbstractRedisAuthProxy {
      */
     public void refreshUser(String username) {
         String name = username == null || username.isEmpty() ? "default" : username;
-        String access = passwordValidator.accessString(name);
-        if (access == null) {
-            return;
-        }
         try {
-            backendAcl.reapply(backendHost(), backendPort(), name, access);
+            backendAcl.reapply(backendHost(), backendPort(), name, () -> passwordValidator.accessString(name));
         } catch (IOException e) {
             LOG.warnv(e, "Could not apply the new permissions of user {0} to the open sessions of group {1}",
                     name, groupId);

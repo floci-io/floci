@@ -1364,6 +1364,12 @@ class ElastiCacheServiceTest {
         svc.modifyUser("app-user-id", null, null, "on ~allowed:* -@all +get", null, null);
         account.set("000000000000");
         assertEquals("on ~allowed:* -@all +get", validator.getValue().accessString("app"));
+        account.set("111111111111");
+        svc.modifyUser("app-user-id", null, null, "off -@all", null, null);
+        account.set("000000000000");
+        assertEquals("off -@all", validator.getValue().accessString("app"));
+        assertFalse(validator.getValue().validatePassword("app", "app-pass"));
+        assertNull(validator.getValue().memberAuthMode("app"));
     }
 
     @Test
@@ -1406,6 +1412,37 @@ class ElastiCacheServiceTest {
         service.modifyUser("default-user-id", AuthMode.PASSWORD, List.of("new-pass"), null, null, null);
 
         verify(proxyManager, never()).refreshUser(anyString(), anyString());
+    }
+
+    @Test
+    void modifyUserDisablingUserAppliesToTheOpenSessions() {
+        service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null, "us-east-1");
+        service.createUser("default-user-id", "default", AuthMode.PASSWORD, List.of("default-pass"),
+                "on ~* +@all", null);
+        service.createUser("app-user-id", "app", AuthMode.PASSWORD, List.of("app-pass"), "on ~* +@all", null);
+        service.createUserGroup("app-group", "redis", List.of("default-user-id", "app-user-id"), "us-east-1");
+        service.modifyReplicationGroup("grp", List.of("app-group"), null);
+
+        service.modifyUser("app-user-id", null, null, "off -@all", null, null);
+
+        verify(proxyManager).refreshUser("grp", "app");
+    }
+
+    @Test
+    void modifyUserAccessStringIsAppliedToAssociatedServerlessCaches() {
+        ElastiCacheService.CreateCacheClusterRequest req = new ElastiCacheService.CreateCacheClusterRequest(
+                "serverless-backing", "valkey", null, null, 1, null, AuthMode.NO_AUTH, null, null, null,
+                0, null, null, null, null, null, null, false, "us-east-1", Map.of());
+        service.createServerlessBacking(req, "my-serverless", "000000000000", "app-group");
+
+        service.createUser("default-user-id", "default", AuthMode.PASSWORD, List.of("default-pass"),
+                "on ~* +@all", null);
+        service.createUser("app-user-id", "app", AuthMode.PASSWORD, List.of("app-pass"), "on ~* +@all", null);
+        service.createUserGroup("app-group", "valkey", List.of("default-user-id", "app-user-id"), "us-east-1");
+
+        service.modifyUser("app-user-id", null, null, "on ~allowed:* -@all +get", null, null);
+
+        verify(proxyManager).refreshUser("serverless-backing", "app");
     }
 
     @Test

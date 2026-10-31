@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 /** Keeps frontend passwords and IAM tokens out of the backend's private ACL credentials. */
 final class ElastiCacheBackendAcl {
@@ -26,7 +27,12 @@ final class ElastiCacheBackendAcl {
         return initialized;
     }
 
-    synchronized void authenticate(Socket backend, String username, String accessString) throws IOException {
+    synchronized void authenticate(Socket backend, String username, Supplier<String> accessStringSupplier)
+            throws IOException {
+        String accessString = accessStringSupplier.get();
+        if (accessString == null) {
+            throw new IOException("Cache user is no longer associated with this resource");
+        }
         List<String> accessRules = accessRules(accessString);
         backend.setSoTimeout(COMMAND_TIMEOUT_MILLIS);
         if (!initialized) {
@@ -45,20 +51,28 @@ final class ElastiCacheBackendAcl {
         backend.setSoTimeout(0);
     }
 
+    void authenticate(Socket backend, String username, String accessString) throws IOException {
+        authenticate(backend, username, () -> accessString);
+    }
+
     /**
      * Installs a changed access string on the backend user that sessions of {@code username} already run
      * as, so it applies to their open connections and not only to the next login. Nothing is done while
      * the backend has not been set up, or for a user nobody has authenticated as yet: the next login
      * installs the current rules.
      */
-    synchronized void reapply(String backendHost, int backendPort, String username, String accessString)
-            throws IOException {
+    synchronized void reapply(String backendHost, int backendPort, String username,
+                              Supplier<String> accessStringSupplier) throws IOException {
         if (!initialized) {
             return;
         }
         String backendName = backendName(username);
         String password = passwords.get(backendName);
         if (password == null) {
+            return;
+        }
+        String accessString = accessStringSupplier.get();
+        if (accessString == null) {
             return;
         }
         List<String> accessRules = accessRules(accessString);
@@ -68,6 +82,10 @@ final class ElastiCacheBackendAcl {
             command(backend, List.of("AUTH", administrator, administratorPassword));
             command(backend, userRules(backendName, accessRules, password));
         }
+    }
+
+    void reapply(String backendHost, int backendPort, String username, String accessString) throws IOException {
+        reapply(backendHost, backendPort, username, () -> accessString);
     }
 
     private String backendName(String username) {

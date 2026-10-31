@@ -53,8 +53,8 @@ These restrictions protect private backend credentials and key boundaries. AWS l
 [restricted cache commands](https://docs.aws.amazon.com/AmazonElastiCache/latest/dg/SupportedCommands.html).
 
 `ModifyUser` with `AccessString` or `AppendAccessString` is installed on the backend at once
-for every replication group that holds the user, so it applies to connections that are
-already open. A change that cannot be installed, such as one with a selector, is logged and
+for every replication group and serverless cache that holds the user, so it applies to connections
+that are already open. A change that cannot be installed, such as one with a selector, is logged and
 the open sessions keep their old permissions until the user authenticates again. Other
 changes, such as adding a user to a group or associating a user group with a cache, are
 installed on the next successful authentication; reconnect to apply them promptly.
