@@ -89,6 +89,15 @@ class LambdaWebCodeBucketIntegrationTest {
     }
 
     @Test
+    void theNullDeleteMarkerOfASuspendedBucketIsRefusedBeforeTheBucketPolicy() {
+        s3Service.putBucketVersioning(bucket, "Suspended");
+        put(bucket);
+        s3Service.deleteObject(bucket, "app.zip");
+        refused(null, "The latest version of the S3 object is a delete marker. Upload a new object version or pass"
+                + " an explicit S3ObjectVersion.");
+    }
+
+    @Test
     void lambdaNeedsGetObjectVersionUnderTheConditionsItSends() {
         s3Service.putBucketVersioning(bucket, "Enabled");
         put(bucket);
