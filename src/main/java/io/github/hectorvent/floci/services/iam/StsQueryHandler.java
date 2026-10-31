@@ -184,6 +184,12 @@ public class StsQueryHandler {
             return roleDurationError;
         }
 
+        if (durationSeconds > 3600 && iamService.isRoleSession(callerAccessKeyId(), callerSessionToken(params))) {
+            return AwsQueryResponse.error("ValidationError",
+                    "The requested DurationSeconds exceeds the one hour session limit for roles assumed by role chaining.",
+                    AwsNamespaces.STS, 400);
+        }
+
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
         String assumedRoleArn = assumedRoleArn(sessionRoleArn, accountId, roleName, sessionName);
         String roleId = (role != null && role.getRoleId() != null) ? role.getRoleId() : ("AROA" + randomId(16));
@@ -267,16 +273,21 @@ public class StsQueryHandler {
                 "role" + IamService.normalizePath(role.getPath()) + roleName);
     }
 
+    private String callerSessionToken(MultivaluedMap<String, String> params) {
+        String token = headers == null ? null : headers.getHeaderString("X-Amz-Security-Token");
+        if (token == null && params != null) {
+            token = getParam(params, "X-Amz-Security-Token");
+        }
+        if (token == null && uriInfo != null) {
+            token = uriInfo.getQueryParameters().getFirst("X-Amz-Security-Token");
+        }
+        return token;
+    }
+
     private Response handleGetCallerIdentity(MultivaluedMap<String, String> params) {
         String accountId = regionResolver.getAccountId();
         String accessKeyId = callerAccessKeyId();
-        String sessionToken = headers == null ? null : headers.getHeaderString("X-Amz-Security-Token");
-        if (sessionToken == null && params != null) {
-            sessionToken = getParam(params, "X-Amz-Security-Token");
-        }
-        if (sessionToken == null && uriInfo != null) {
-            sessionToken = uriInfo.getQueryParameters().getFirst("X-Amz-Security-Token");
-        }
+        String sessionToken = callerSessionToken(params);
         String arn = iamService.resolveCallerArn(accessKeyId)
                 .orElse(regionResolver.buildGlobalArn("iam", accountId, "root"));
         String userId = iamService.resolveCallerUserId(accessKeyId, sessionToken).orElse(accountId);

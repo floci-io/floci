@@ -999,6 +999,54 @@ class StsQueryHandlerTest {
         assertEquals(expiration, sessionExpiration.getValue());
     }
 
+    @ParameterizedTest
+    @CsvSource({"header,3601,400", "form,3601,400", "query,3601,400",
+            "empty-header,3601,200", "header,3600,200"})
+    void roleChainingUsesCallerTokenPrecedenceBeforeRegistration(String tokenSource, int duration, int status) {
+        IamRole role = new IamRole();
+        role.setRoleName("TestRole");
+        role.setArn("arn:aws:iam::000000000000:role/TestRole");
+        role.setMaxSessionDuration(7200);
+        IamService service = mock(IamService.class);
+        when(service.findRole(anyString(), anyString())).thenReturn(Optional.of(role));
+        when(service.isRoleSession("ASIACHAIN", "issued-token")).thenReturn(true);
+        StsQueryHandler handler = newHandler(service, new RegionResolver(REGION, "000000000000"));
+        handler.headers = mock(HttpHeaders.class);
+        when(handler.headers.getHeaderString("Authorization")).thenReturn(
+                "AWS4-HMAC-SHA256 Credential=ASIACHAIN/20261031/us-east-1/sts/aws4_request, "
+                        + "SignedHeaders=host, Signature=unused-in-unit-test");
+        handler.uriInfo = mock(UriInfo.class);
+        MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
+        query.putSingle("X-Amz-Security-Token", "issued-token");
+        when(handler.uriInfo.getQueryParameters()).thenReturn(query);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("RoleArn", role.getArn());
+        params.putSingle("RoleSessionName", "chained");
+        params.putSingle("DurationSeconds", Integer.toString(duration));
+        if ("header".equals(tokenSource)) {
+            when(handler.headers.getHeaderString("X-Amz-Security-Token")).thenReturn("issued-token");
+            params.putSingle("X-Amz-Security-Token", "wrong-form-token");
+        } else if ("empty-header".equals(tokenSource)) {
+            when(handler.headers.getHeaderString("X-Amz-Security-Token")).thenReturn("");
+            params.putSingle("X-Amz-Security-Token", "issued-token");
+        } else if ("form".equals(tokenSource)) {
+            params.putSingle("X-Amz-Security-Token", "issued-token");
+            query.putSingle("X-Amz-Security-Token", "wrong-query-token");
+        }
+
+        Response response = handler.handle("AssumeRole", params);
+
+        assertEquals(status, response.getStatus(), response.getEntity().toString());
+        if (status == 400) {
+            assertTrue(response.getEntity().toString().contains("role chaining"));
+            verify(service, never()).registerSession(anyString(), anyString(), anyString(), anyString(), any(),
+                    any(), anyString(), anyString(), anyString());
+        } else {
+            verify(service).registerSession(anyString(), anyString(), anyString(), eq(role.getArn()), any(),
+                    isNull(), eq("000000000000"), eq("chained"), anyString());
+        }
+    }
+
     private static String extract(Pattern pattern, String body) {
         Matcher matcher = pattern.matcher(body);
         assertTrue(matcher.find(), "expected " + pattern + " in " + body);

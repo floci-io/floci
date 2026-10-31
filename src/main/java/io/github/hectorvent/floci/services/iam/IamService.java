@@ -4480,6 +4480,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .isPresent();
     }
 
+    /** Role chaining requires a live role credential with this request's matching issued token. */
+    public boolean isRoleSession(String accessKeyId, String sessionToken) {
+        return currentSession(accessKeyId)
+                .filter(session -> hasMatchingSessionToken(session, sessionToken))
+                .map(SessionCredential::getRoleArn)
+                .filter(AwsArnUtils::isArn)
+                .map(AwsArnUtils::parse)
+                .filter(arn -> "iam".equals(arn.service()) && arn.resource().startsWith("role/"))
+                .isPresent();
+    }
+
     /**
      * The session token issued alongside a temporary credential, for callers that must tell a
      * missing token apart from one that does not match.

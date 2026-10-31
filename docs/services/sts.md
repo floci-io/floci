@@ -342,3 +342,8 @@ execution. Nonblank Authorization headers retain priority. See [signature checks
 AssumeRoleWithWebIdentity rejects a requested duration above the target role's
 `MaxSessionDuration` before issuing credentials. The default remains 3,600 seconds;
 existing token and trust-policy errors take precedence over this role-specific check.
+
+Role chaining limits `AssumeRole` to one hour, including when the target role permits a longer
+session. A live role credential must carry its matching session token. `GetSessionToken` user
+credentials are not role chaining. The cap is checked after trust and role-maximum validation,
+before registering the new session.
