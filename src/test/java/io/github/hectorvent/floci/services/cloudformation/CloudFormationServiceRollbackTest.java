@@ -191,8 +191,10 @@ class CloudFormationServiceRollbackTest {
         service.rollbackFailedExecution(stack, REGION, false, added, previousState,
                 new LinkedHashSet<>(List.of("Dup")));
 
-        assertEquals(List.of("UPDATE_ROLLBACK_IN_PROGRESS", "UPDATE_ROLLBACK_COMPLETE"), stack.statuses());
-        assertEquals(List.of("UPDATE_ROLLBACK_IN_PROGRESS", "UPDATE_ROLLBACK_COMPLETE"), stackEventStatuses(stack));
+        assertEquals(List.of("UPDATE_ROLLBACK_IN_PROGRESS", "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS",
+                "UPDATE_ROLLBACK_COMPLETE"), stack.statuses());
+        assertEquals(List.of("UPDATE_ROLLBACK_IN_PROGRESS", "UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS",
+                "UPDATE_ROLLBACK_COMPLETE"), stackEventStatuses(stack));
         stack.assertEachStatusFollowsItsEvent();
         assertEquals("The following resource(s) failed to create: [Dup].", stack.writes().getFirst().reason());
     }

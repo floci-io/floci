@@ -970,6 +970,40 @@ A stack that reached `UPDATE_ROLLBACK_FAILED` under an earlier Floci version kep
 state before the update. `ContinueUpdateRollback` then retries every `UPDATE_FAILED` resource and
 keeps the template the stack holds.
 
+## Stack status events
+
+Every status a stack records, root or nested, goes to the default EventBridge bus of the stack's
+account and Region, with source `aws.cloudformation` and detail type
+`CloudFormation Stack Status Change`, as
+[CloudFormation sends it](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/eventbridge-integration.html).
+`resources` holds the stack's ID, and the
+[detail](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/event-detail-stack-status-change.html)
+holds `stack-id`, `client-request-token` where there is one, and `status-details` with `status`,
+`detailed-status` and `status-reason`, each of the last two empty where there is nothing to say. A
+resource's progress sends nothing, a parent's record of a nested stack included. Each status is sent
+once.
+
+A failed create or update ends as it does on AWS. A root whose nested stack fails goes from
+`CREATE_IN_PROGRESS` to `ROLLBACK_IN_PROGRESS` and `ROLLBACK_COMPLETE`, or from `UPDATE_IN_PROGRESS`
+through `UPDATE_ROLLBACK_IN_PROGRESS` and `UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS` to
+`UPDATE_ROLLBACK_COMPLETE`, with no `CREATE_FAILED` or `UPDATE_FAILED`. A nested stack whose create
+fails sends `CREATE_FAILED`, and its rollback shows as `DELETE_IN_PROGRESS` and `DELETE_COMPLETE`.
+A failure in a root's own resource with its nested stack healthy, and a delete that fails, send the
+statuses CloudFormation documents from the same code; neither was read against AWS.
+
+The `client-request-token` is the `ClientRequestToken` of the operation that caused the status:
+`ExecuteChangeSet`, `CreateStack`, `UpdateStack`, `DeleteStack` or `ContinueUpdateRollback`, called
+directly or from a state machine's `aws-sdk:cloudformation` task. A rollback's statuses carry the token
+of the create or update that failed. The key is absent, never empty, on
+a nested stack's events, on the `REVIEW_IN_PROGRESS` of a new stack, and on the events of an operation
+given no token.
+
+Events are delivered in order by one background worker, apart from the stack operation and outside any
+lock on the stack. A delivery that fails is logged and changes nothing about the operation, and a slow
+target delays later events, never a stack. The worker's queue is in memory: an event still in it when
+Floci stops is dropped and counted in the log, and is not sent on the next start, even where the stack
+is persisted.
+
 ## Deleted Stacks
 
 A deleted stack is kept for a short window afterwards rather than being forgotten at

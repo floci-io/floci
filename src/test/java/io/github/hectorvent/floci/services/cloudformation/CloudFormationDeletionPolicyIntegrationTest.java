@@ -906,7 +906,7 @@ class CloudFormationDeletionPolicyIntegrationTest {
             assertThat(events, containsString("<ResourceStatus>CREATE_FAILED</ResourceStatus>"));
             assertThat(events, containsString("<ResourceStatusReason>Nested stack " + stackName
                     + "-ChildStack failed: The following resource(s) failed to create: [MyLogGroup]."
-                    + " Rollback requested by user.</ResourceStatusReason>"));
+                    + "</ResourceStatusReason>"));
         } finally {
             deleteStack(stackName);
         }

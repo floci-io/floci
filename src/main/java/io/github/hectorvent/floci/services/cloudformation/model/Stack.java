@@ -44,6 +44,13 @@ public class Stack {
      */
     private volatile String status = "CREATE_IN_PROGRESS";
     private String statusReason;
+    /** The stack that nests this one; null for a root stack. */
+    private String parentId;
+    /**
+     * The ClientRequestToken of this stack's current operation, null when it was given none. A nested
+     * stack never has one. Set before the operation's first record and read on its worker thread.
+     */
+    private volatile String clientRequestToken;
     private Instant creationTime = Instant.now();
     private Instant lastUpdatedTime;
     /** Set once the stack reaches DELETE_COMPLETE; null for every stack that is still there. */
@@ -93,6 +100,12 @@ public class Stack {
     public void setStatus(String status) { this.status = status; }
     public String getStatusReason() { return statusReason; }
     public void setStatusReason(String statusReason) { this.statusReason = statusReason; }
+    public String getParentId() { return parentId; }
+    public void setParentId(String parentId) { this.parentId = parentId; }
+    @JsonIgnore
+    public String getClientRequestToken() { return clientRequestToken; }
+    @JsonIgnore
+    public void setClientRequestToken(String clientRequestToken) { this.clientRequestToken = clientRequestToken; }
     public Instant getCreationTime() { return creationTime; }
     public void setCreationTime(Instant creationTime) { this.creationTime = creationTime; }
     public Instant getLastUpdatedTime() { return lastUpdatedTime; }
