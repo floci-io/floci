@@ -116,6 +116,13 @@ class S3AuthEnforcementIntegrationTest {
 
         given()
             .filter(LOCAL_SIGNER)
+        .when()
+            .delete("/" + PUBLIC_BUCKET + "?publicAccessBlock")
+        .then()
+            .statusCode(204);
+
+        given()
+            .filter(LOCAL_SIGNER)
             .contentType("application/json")
             .body(publicReadPolicy(PUBLIC_BUCKET))
         .when()
