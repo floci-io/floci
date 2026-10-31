@@ -627,8 +627,7 @@ class S3VersioningIntegrationTest {
         given().queryParam("versionId", "null").header("x-amz-acl", "private")
                 .when().put(added + "?acl").then().statusCode(404).body(noSuchVersion);
         given().queryParam("versionId", "null").queryParam("annotationName", "labels").body("x")
-                .when().put(added + "?annotation").then().statusCode(404)
-                .body(containsString("<Code>NoSuchKey</Code>"));
+                .when().put(added + "?annotation").then().statusCode(404).body(noSuchVersion);
         given().header("x-amz-copy-source", "/" + bucket + "/new?versionId=null")
                 .when().put("/" + bucket + "/copy-of-new").then().statusCode(404).body(noSuchVersion);
         given().when().get(added).then().statusCode(200).body(equalTo("new"));

@@ -1923,8 +1923,7 @@ public class S3Service implements Resettable, ResourceProvider {
         String accountId = ownedBucket.account();
         for (int attempt = 0; attempt < 10_000; attempt++) {
             StoredVersion stored = findStoredVersionForAccount(accountId, bucketName, key, "null")
-                    .orElseThrow(() -> new AwsException(
-                            "NoSuchVersion", "The specified version does not exist.", 404));
+                    .orElseThrow(() -> noSuchVersion(key, "null"));
             if (stored.object().isDeleteMarker()) {
                 throw new S3DeleteMarkerException(stored.object());
             }
@@ -2221,9 +2220,7 @@ public class S3Service implements Resettable, ResourceProvider {
                         "The specified bucket does not exist.", 404));
 
         S3Object object = findStoredObject(ownedBucket, bucketName, key, versionId)
-                .orElseThrow(() -> versionId != null
-                        ? new AwsException("NoSuchVersion", "The specified version does not exist.", 404)
-                        : noSuchKey(key));
+                .orElseThrow(() -> versionId != null ? noSuchVersion(key, versionId) : noSuchKey(key));
         if (object.isDeleteMarker()) {
             throw new S3DeleteMarkerException(object);
         }
@@ -2232,6 +2229,11 @@ public class S3Service implements Resettable, ResourceProvider {
 
     private static AwsException noSuchKey(String key) {
         return new AwsException("NoSuchKey", "The specified key does not exist.", 404, Map.of("Key", key));
+    }
+
+    private static AwsException noSuchVersion(String key, String versionId) {
+        return new AwsException("NoSuchVersion", "The specified version does not exist.", 404,
+                Map.of("Key", key, "VersionId", versionId));
     }
 
     /** The stored version {@code versionId} names, the current one when it is null, delete markers included. */
@@ -3372,12 +3374,11 @@ public class S3Service implements Resettable, ResourceProvider {
         AccountAwareStorageBackend.OwnedEntry<Bucket> ownedBucket = resolveBucketEntry(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
+        // GetObjectTagging names the key with its bucket.
+        String namedKey = "GET".equals(method) ? bucketName + "/" + key : key;
         S3Object object = findStoredVersionForAccount(ownedBucket.account(), bucketName, key, versionId)
                 .map(StoredVersion::object)
-                .orElseThrow(() -> versionId != null
-                        ? new AwsException("NoSuchVersion", "The specified version does not exist.", 404)
-                        // GetObjectTagging names the key with its bucket.
-                        : noSuchKey("GET".equals(method) ? bucketName + "/" + key : key));
+                .orElseThrow(() -> versionId != null ? noSuchVersion(namedKey, versionId) : noSuchKey(namedKey));
         if (object.isDeleteMarker()) {
             throw new AwsException("MethodNotAllowed",
                     "The specified method is not allowed against this resource.", 405,
@@ -3629,7 +3630,7 @@ public class S3Service implements Resettable, ResourceProvider {
     private S3Object resolveParentObject(String bucketName, String key, String versionId) {
         S3Object object = findStoredVersion(bucketName, key, versionId)
                 .map(StoredVersion::object)
-                .orElseThrow(() -> noSuchKey(key));
+                .orElseThrow(() -> versionId != null ? noSuchVersion(key, versionId) : noSuchKey(key));
         if (object.isDeleteMarker()) {
             throw noSuchKey(key);
         }
