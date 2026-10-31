@@ -11,6 +11,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
@@ -84,6 +85,40 @@ class RdsParameterGroupWireEncodingIntegrationTest {
             .statusCode(200)
             .body(containsString("<ParameterName>shared_buffers</ParameterName>"))
             .body(containsString("<ParameterName>max_connections</ParameterName>"));
+
+        // Source filter tests: only 'user' returns our stored parameters.
+        query("DescribeDBParameters")
+                .formParam("DBParameterGroupName", PG)
+                .formParam("Source", "user")
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<ParameterName>shared_buffers</ParameterName>"));
+
+        query("DescribeDBParameters")
+                .formParam("DBParameterGroupName", PG)
+                .formParam("Source", "system")
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<ParameterName>shared_buffers</ParameterName>")));
+
+        query("DescribeDBParameters")
+                .formParam("DBParameterGroupName", PG)
+                .formParam("Source", "engine-default")
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<ParameterName>shared_buffers</ParameterName>")));
+
+        // XML wrapper test: each row must be wrapped in <Parameter>, not <member>.
+        query("DescribeDBParameters")
+                .formParam("DBParameterGroupName", PG)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<member>")))
+            .body(containsString("<Parameter>"));
     }
 
     @Test
