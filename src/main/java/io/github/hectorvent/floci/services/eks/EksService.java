@@ -1270,6 +1270,17 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         return "eks";
     }
 
+    /** EKS models no {@code responseCode} on either tag write, so both answer 200. */
+    @Override
+    public int tagResourceSuccessStatus() {
+        return 200;
+    }
+
+    @Override
+    public int untagResourceSuccessStatus() {
+        return 200;
+    }
+
     @Override
     public void tagResource(String region, String resourceArn, Map<String, String> tags) {
         ReservedTags.rejectReservedTagsOnUpdate(tags);

@@ -12,7 +12,6 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anEmptyMap;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
-import static org.hamcrest.Matchers.lessThan;
 import static org.hamcrest.Matchers.not;
 
 /**
@@ -58,11 +57,11 @@ class EksResourceTaggingIntegrationTest {
             for (Map.Entry<String, String> resource : arns.entrySet()) {
                 String arn = resource.getValue();
                 eks().contentType("application/json").body(Map.of("tags", Map.of("team", resource.getKey(), "env", "dev")))
-                        .post("/tags/" + arn).then().statusCode(lessThan(300));
+                        .post("/tags/" + arn).then().statusCode(200);
                 eks().get("/tags/" + arn).then().statusCode(200)
                         .body("tags.team", equalTo(resource.getKey()))
                         .body("tags.env", equalTo("dev"));
-                eks().queryParam("tagKeys", "env").delete("/tags/" + arn).then().statusCode(lessThan(300));
+                eks().queryParam("tagKeys", "env").delete("/tags/" + arn).then().statusCode(200);
                 eks().get("/tags/" + arn).then().statusCode(200)
                         .body("tags", not(hasKey("env")))
                         .body("tags.team", equalTo(resource.getKey()));
