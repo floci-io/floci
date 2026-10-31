@@ -1,22 +1,13 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.AwsArnUtils;
-import io.github.hectorvent.floci.core.common.IamConditionContextResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
-import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
-import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
-import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.Decision;
-import io.github.hectorvent.floci.services.iam.IamService;
-import io.github.hectorvent.floci.services.iam.ScpProvider;
-import io.github.hectorvent.floci.services.iam.model.CallerContext;
-import io.github.hectorvent.floci.services.iam.model.IamRole;
+import io.github.hectorvent.floci.services.iam.ServiceRoleAuthorizer;
+import io.github.hectorvent.floci.services.iam.ServiceRoleAuthorizer.Permission;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -32,26 +23,13 @@ public class EventBridgeRedshiftTargetAuthorizer {
 
     private static final String EVENTS_PRINCIPAL = ServicePrincipals.of("events");
 
-    /** One IAM action the target's role needs, on the resource it acts on. */
-    public record Permission(String action, String resourceArn) {
-    }
-
     private final EmulatorConfig config;
-    private final IamService iamService;
-    private final IamPolicyEvaluator evaluator;
-    private final AssumeRolePolicyEvaluator trustEvaluator;
-    private final Instance<ScpProvider> scpProvider;
+    private final ServiceRoleAuthorizer authorizer;
 
     @Inject
-    public EventBridgeRedshiftTargetAuthorizer(EmulatorConfig config, IamService iamService,
-                                               IamPolicyEvaluator evaluator,
-                                               AssumeRolePolicyEvaluator trustEvaluator,
-                                               Instance<ScpProvider> scpProvider) {
+    public EventBridgeRedshiftTargetAuthorizer(EmulatorConfig config, ServiceRoleAuthorizer authorizer) {
         this.config = config;
-        this.iamService = iamService;
-        this.evaluator = evaluator;
-        this.trustEvaluator = trustEvaluator;
-        this.scpProvider = scpProvider;
+        this.authorizer = authorizer;
     }
 
     /**
@@ -70,51 +48,6 @@ public class EventBridgeRedshiftTargetAuthorizer {
         if (roleArn == null || roleArn.isBlank()) {
             return Optional.of("A Redshift target requires an IAM role, and this one names none.");
         }
-        AwsArnUtils.Arn parsed;
-        try {
-            parsed = AwsArnUtils.parse(roleArn);
-        } catch (IllegalArgumentException e) {
-            return Optional.of("The role " + roleArn + " is not a valid ARN.");
-        }
-        if (!"iam".equals(parsed.service()) || !parsed.resource().startsWith("role/")) {
-            return Optional.of("The role " + roleArn + " is not an IAM role.");
-        }
-        if (!accountId.equals(parsed.accountId())) {
-            return Optional.of("The role " + roleArn + " belongs to another account.");
-        }
-        String roleName = parsed.resource().substring(parsed.resource().lastIndexOf('/') + 1);
-        Optional<IamRole> role = iamService.findRole(accountId, roleName)
-                .filter(found -> IamService.roleArnMatches(roleArn, found));
-        if (role.isEmpty()) {
-            return Optional.of("The role " + roleArn + " does not exist.");
-        }
-        if (!trustEvaluator.allowsService(role.get().getAssumeRolePolicyDocument(), EVENTS_PRINCIPAL,
-                ruleArn, accountId)) {
-            return Optional.of("The role " + roleArn + " does not trust " + EVENTS_PRINCIPAL + ".");
-        }
-        CallerContext caller = iamService.resolvePrincipalContext(role.get().getArn());
-        List<List<String>> scpLevels = scpProvider.isResolvable()
-                ? scpProvider.get().effectiveScpLevels(accountId) : null;
-        if (scpLevels != null) {
-            caller = caller.withScpLevels(scpLevels);
-        }
-        for (Permission permission : permissions) {
-            if (evaluate(caller, role.get().getArn(), accountId, permission) != Decision.ALLOW) {
-                return Optional.of("The role " + roleArn + " is not authorized to perform "
-                        + permission.action() + " on " + permission.resourceArn() + ".");
-            }
-        }
-        return Optional.empty();
-    }
-
-    private Decision evaluate(CallerContext caller, String roleArn, String accountId, Permission permission) {
-        AwsArnUtils.Arn resource = AwsArnUtils.isArn(permission.resourceArn())
-                ? AwsArnUtils.parse(permission.resourceArn()) : null;
-        String region = resource != null ? resource.region() : null;
-        String resourceAccount = resource != null ? resource.accountId() : accountId;
-        Map<String, List<String>> context = IamConditionContextResolver.withGlobalContext(
-                Map.of("aws:PrincipalArn", List.of(roleArn)),
-                permission.resourceArn(), region, accountId, resourceAccount);
-        return evaluator.evaluate(caller, List.of(), permission.action(), permission.resourceArn(), context);
+        return authorizer.refusal(roleArn, accountId, EVENTS_PRINCIPAL, ruleArn, permissions);
     }
 }

@@ -2,11 +2,12 @@ package io.github.hectorvent.floci.services.eventbridge;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.services.eventbridge.EventBridgeRedshiftTargetAuthorizer.Permission;
 import io.github.hectorvent.floci.services.iam.AssumeRolePolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
+import io.github.hectorvent.floci.services.iam.ServiceRoleAuthorizer;
+import io.github.hectorvent.floci.services.iam.ServiceRoleAuthorizer.Permission;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import jakarta.enterprise.inject.Instance;
@@ -53,8 +54,9 @@ class EventBridgeRedshiftTargetAuthorizerTest {
         scps = mock(ScpProvider.class);
         when(scpProvider.isResolvable()).thenReturn(true);
         when(scpProvider.get()).thenReturn(scps);
-        authorizer = new EventBridgeRedshiftTargetAuthorizer(config, iamService, evaluator,
+        ServiceRoleAuthorizer serviceRoleAuthorizer = new ServiceRoleAuthorizer(config, iamService, evaluator,
                 new AssumeRolePolicyEvaluator(new ObjectMapper(), evaluator), scpProvider);
+        authorizer = new EventBridgeRedshiftTargetAuthorizer(config, serviceRoleAuthorizer);
     }
 
     private void role(String trust, String... policies) {

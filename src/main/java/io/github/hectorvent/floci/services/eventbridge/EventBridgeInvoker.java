@@ -27,6 +27,7 @@ import io.github.hectorvent.floci.services.eventbridge.model.RedshiftDataParamet
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.firehose.FirehoseService;
 import io.github.hectorvent.floci.services.firehose.model.Record;
+import io.github.hectorvent.floci.services.iam.ServiceRoleAuthorizer.Permission;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService;
@@ -420,8 +421,8 @@ public class EventBridgeInvoker {
                 ? AwsArnUtils.Arn.of("redshift", targetRegion, ruleAccount,
                         "cluster:" + request.path("ClusterIdentifier").asText()).toString()
                 : targetArn;
-        List<EventBridgeRedshiftTargetAuthorizer.Permission> permissions = new ArrayList<>();
-        permissions.add(new EventBridgeRedshiftTargetAuthorizer.Permission(
+        List<Permission> permissions = new ArrayList<>();
+        permissions.add(new Permission(
                 batch ? "redshift-data:BatchExecuteStatement" : "redshift-data:ExecuteStatement", statementTarget));
         // The Data API ignores a blank value, so it picks the credentials the same way.
         String secret = request.path("SecretArn").asText("");
@@ -429,18 +430,18 @@ public class EventBridgeInvoker {
             // A secret named without its ARN has no resource to authorize against, and the Data API
             // rejects it as an invalid SecretArn before reading it, so no permission is checked for it.
             if (AwsArnUtils.isArn(secret)) {
-                permissions.add(new EventBridgeRedshiftTargetAuthorizer.Permission(
+                permissions.add(new Permission(
                         "secretsmanager:GetSecretValue", secret));
             }
         } else if (request.has("WorkgroupName")) {
-            permissions.add(new EventBridgeRedshiftTargetAuthorizer.Permission(
+            permissions.add(new Permission(
                     "redshift-serverless:GetCredentials", targetArn));
         } else if (!request.path("DbUser").asText("").isBlank()) {
             String cluster = request.path("ClusterIdentifier").asText();
-            permissions.add(new EventBridgeRedshiftTargetAuthorizer.Permission("redshift:GetClusterCredentials",
+            permissions.add(new Permission("redshift:GetClusterCredentials",
                     AwsArnUtils.Arn.of("redshift", targetRegion, ruleAccount,
                             "dbuser:" + cluster + "/" + request.path("DbUser").asText()).toString()));
-            permissions.add(new EventBridgeRedshiftTargetAuthorizer.Permission("redshift:GetClusterCredentials",
+            permissions.add(new Permission("redshift:GetClusterCredentials",
                     AwsArnUtils.Arn.of("redshift", targetRegion, ruleAccount,
                             "dbname:" + cluster + "/" + request.path("Database").asText()).toString()));
         }
