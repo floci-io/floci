@@ -5299,6 +5299,40 @@ class CodeArtifactServiceTest {
                 eq("1.00"), eq("my-pkg.1.00.nupkg"));
     }
 
+    /**
+     * Raised by Greptile's review: this method's own claimed-origin cleanup removed the record
+     * keyed by the caller's raw version, but {@link CodeArtifactService#retainedVersionOriginConnection}'s
+     * own claim is keyed by its normalized spelling. Deleting a retained nuget version under an
+     * equivalent-but-different spelling (AWS's own worked example, {@code 1.00} against {@code
+     * 1.0.0}) removed the real asset but left the claim behind, so a later direct push of the
+     * same real version would still read back as {@code EXTERNAL} under the stale connection.
+     */
+    @Test
+    void deletePackageVersionsClearsARetainedClaimEvenUnderAnEquivalentNuGetVersionSpelling() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository created = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String repoId = created.getSidecarContainerIds().get("nuget");
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "nuget", null,
+                "my-pkg");
+        CodeArtifactService.RetainedVersionOriginClaimOutcome outcome = service.claimRetainedVersionOrigin(REGION,
+                "dom", null, "repo", "nuget", null, "my-pkg", "1.0.0", "public:nuget-org", fence);
+        service.finishRetainedVersionOriginAttempt(REGION, "dom", null, "repo", "nuget", null, "my-pkg", "1.0.0",
+                outcome.episodeId(), true);
+        assertEquals("public:nuget-org", service.retainedVersionOriginConnection(REGION, "dom", null, "repo",
+                "nuget", null, "my-pkg", "1.0.0").orElseThrow());
+
+        when(bagetterClient.listPackageVersions(eq(repoId), eq("dom"), eq("repo"), isNull(), eq("my-pkg")))
+                .thenReturn(List.of(new RepositorySidecarManager.PackageVersionTimestamp("1.00",
+                        Instant.ofEpochSecond(1000))));
+        when(bagetterClient.listPackageVersionAssetNames(eq(repoId), eq("dom"), eq("repo"), isNull(),
+                eq("my-pkg"), eq("1.00"))).thenReturn(List.of("my-pkg.1.00.nupkg"));
+
+        service.deletePackageVersions(REGION, "dom", null, "repo", "nuget", null, "my-pkg", List.of("1.00"), null);
+
+        assertTrue(service.retainedVersionOriginConnection(REGION, "dom", null, "repo", "nuget", null, "my-pkg",
+                "1.0.0").isEmpty());
+    }
+
     @Test
     void deletePackageVersionsFailsNotFoundForAContainerBackedVersionThatWasNeverPublished() {
         service.createDomain(REGION, "dom", null, Map.of());
