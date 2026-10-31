@@ -248,6 +248,9 @@ service you need already has a `*CfnProvisioner`, add your type there; otherwise
     `src/test/resources/cloudformation/getatt-attribute-gaps.tsv` with the reason.
     `CfnSchemaCoverageTest` requires every unset attribute to be either fixed or recorded, so
     "not emulated" stays distinguishable from "forgotten".
+    A new type also needs its row in `schema-surface.tsv` (same directory): run
+    `make cfn-schema-surface-sync`. A writable property the provisioner never reads goes in
+    `writable-property-gaps.tsv`.
 
 `SqsCfnProvisioner` is the smallest reference implementation; `Ec2LaunchTemplateCfnProvisioner`
 shows update-in-place and replacement handling; `LogsCfnProvisioner` shows a full reconcile-vs-replace

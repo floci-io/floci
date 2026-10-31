@@ -74,6 +74,7 @@ PREFIX ?= $(HOME)/.local
         iam-action-resources-sync iam-action-resources-check iam-action-resources-verify \
         iam-action-resources-test iam-authorized-actions-sync iam-authorized-actions-check \
         cfn-property-types-sync cfn-property-types-check cfn-property-types-verify cfn-property-types-test \
+        cfn-schema-surface-sync cfn-schema-surface-verify cfn-schema-surface-test \
         iam-authorized-actions-verify iam-authorized-actions-test iam-passed-roles-sync iam-passed-roles-check \
         iam-passed-roles-verify iam-passed-roles-test iam-passed-network-connectors-sync \
         iam-passed-network-connectors-check iam-passed-network-connectors-verify \
@@ -705,6 +706,25 @@ cfn-property-types-verify: ## CI gate (online): the vendored CloudFormation prop
 
 cfn-property-types-test: ## Run the CloudFormation property type generator's unit tests
 	$(PYTHON) -m pytest tools/aws/test_regen_cfn_property_types.py -q
+
+cfn-schema-surface-sync: ## Regenerate src/test/resources/cloudformation/schema-surface.tsv from AWS's resource schemas (commit the result)
+	$(PYTHON) tools/aws/regen_cfn_schema_surface.py
+
+cfn-schema-surface-verify: ## CI gate (online): the committed CloudFormation schema surface must still match AWS's schemas
+	@$(PYTHON) tools/aws/regen_cfn_schema_surface.py --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not read AWS's CloudFormation resource schemas, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: AWS has changed a resource schema the CloudFormation schema surface comes from."; \
+		echo "       Run 'make cfn-schema-surface-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+cfn-schema-surface-test: ## Run the CloudFormation schema surface generator's unit tests
+	$(PYTHON) -m pytest tools/aws/test_regen_cfn_schema_surface.py -q
 
 .PHONY: dynamodb-condition-keys-sync dynamodb-condition-keys-check dynamodb-condition-keys-verify
 dynamodb-condition-keys-sync: ## Regenerate DynamoDB IAM condition keys from AWS and botocore
