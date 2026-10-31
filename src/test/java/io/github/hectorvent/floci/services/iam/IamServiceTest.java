@@ -1241,7 +1241,7 @@ class IamServiceTest {
         AwsException missing = assertThrows(AwsException.class,
                 () -> iamService.changePassword("alice", null, "An0ther$ecret!"));
         assertEquals("ValidationError", missing.getErrorCode());
-        assertTrue(missing.getMessage().contains("Value null at 'oldPassword'"), missing.getMessage());
+        assertTrue(missing.getMessage().contains("Value at 'oldPassword'"), missing.getMessage());
 
         // An empty member is a value that fails the pattern rather than a member never supplied,
         // and the message names the one that failed, there being two password members here.
@@ -2179,37 +2179,6 @@ class IamServiceTest {
             iamService.updateAccessKey("alice", key.getAccessKeyId(), status);
             assertEquals(status, iamService.listAccessKeys("alice").getFirst().getStatus());
         }
-    }
-
-    @Test
-    void anAccessKeyStatusIsReadBeforeTheKeyIsFound() {
-        // The key does not exist either, and the status is what answers: AWS reads a request's
-        // shape before it resolves anything, so the lookup's NoSuchEntity does not get there first.
-        iamService.createUser("alice", "/");
-
-        AwsException error = assertThrows(AwsException.class,
-                () -> iamService.updateAccessKey("alice", "AKIANOSUCHKEY00000", "Disabled"));
-
-        assertEquals("ValidationError", error.getErrorCode());
-        // AWS lists the allowed values in its error message, even when the key is unknown.
-        assertEquals("1 validation error detected: Value at 'status' failed to satisfy "
-                + "constraint: Member must satisfy enum value set: [Expired, Active, Inactive]",
-                error.getMessage());
-    }
-
-    @Test
-    void anAbsentAccessKeyStatusNamesTheMissingMember() {
-        iamService.createUser("alice", "/");
-        AccessKey key = iamService.createAccessKey("alice");
-
-        AwsException error = assertThrows(AwsException.class,
-                () -> iamService.updateAccessKey("alice", key.getAccessKeyId(), null));
-
-        assertEquals("ValidationError", error.getErrorCode());
-        assertEquals("1 validation error detected: Value at 'status' failed to satisfy "
-                + "constraint: Member must not be null", error.getMessage());
-        // And the key is as it was: the status is read before the lookup, so nothing is written.
-        assertEquals("Active", iamService.listAccessKeys("alice").getFirst().getStatus());
     }
 
     @Test

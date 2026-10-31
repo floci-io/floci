@@ -168,9 +168,12 @@ public final class SmithyValidationErrors {
      * what {@code docs/services/iam.md} records as the reading. Choosing a form here rather than at
      * each message means a later capture changes one object instead of a package.
      *
-     * <p>This form applies only to violations that carry a value. Required-member omissions use
-     * {@link #notNull} or {@link #notNullWithoutValue}, depending on the operation. List size and
-     * whole-list checks use {@link #sizeOutOfRange} and {@link #notAllInEnum} separately.
+     * <p>A required member the request leaves out differs too, the word {@code null} sitting where
+     * the value would: a service that quotes its values carries it and one that does not leaves the
+     * member named alone, which is what {@link #notNull(String)} picks between. A list held to its
+     * member count and a list checked as a whole read the same either way, the list being what AWS
+     * names there rather than a value, so {@link SmithyValidationErrors#sizeOutOfRange} and
+     * {@link SmithyValidationErrors#notAllInEnum} stay outside this form.
      */
     public static final class Violations {
 
@@ -184,6 +187,18 @@ public final class SmithyValidationErrors {
 
         private Violations(boolean quoted) {
             this.quoted = quoted;
+        }
+
+        /**
+         * The violation for a required member the request leaves out. The word {@code null} stands
+         * where the value would, so a form that quotes its values writes it and a form that does
+         * not names the member alone, "Value at 'status' failed to satisfy constraint: Member must
+         * not be null", which is what IAM was captured answering for an omitted {@code Status}.
+         */
+        public String notNull(String path) {
+            return quoted
+                    ? SmithyValidationErrors.notNull(path)
+                    : SmithyValidationErrors.notNullWithoutValue(path);
         }
 
         /** One violation naming {@code constraint}, carrying {@code value} where this form does. */

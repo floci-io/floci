@@ -93,25 +93,28 @@ REQUIRED_BY_HAND = (
 
 # Members an operation answers in a wording the walk would move, each with the reason it keeps.
 #
-# `CreateServiceLinkedRole` keeps its principal and suffix in this hand-written list because the
-# service method applies the IAM validation helper to `AWSServiceName`, while `CustomSuffix` still
-# answers `InvalidInput`. `ServiceNamespaces` on `ListPoliciesGrantingServiceAccess` answers
-# `InvalidInput` too when the list arrives empty. `statusType` is answered without the value or the
-# permitted set, on all four operations that take it, which is what the recorded refusal carries,
-# and `Encoding` on `GetSSHPublicKey` is answered with the modelled `UnrecognizedPublicKeyEncoding`
-# rather than as a constraint at all. The simulators answer an empty `ActionNames`,
-# `PolicyInputList` or `PolicySourceArn` with a sentence of their own, "At least one ActionNames
-# member is required.", which no capture here moves. And `TagKeys` on the untag
-# operations is answered against the list as a whole, "Value at 'tagKeys' failed to satisfy
-# constraint: Member must satisfy constraint: [...]", where the walk names the member that broke
-# it under its own index: both forms are readings, and this is the one those operations merged.
+# A service-linked role's custom suffix answers `InvalidInput` rather than a validation error at
+# all, "Custom suffix is not allowed for <service>", which is a recorded refusal across roughly
+# eighty principals. `ServiceNamespaces` on `ListPoliciesGrantingServiceAccess` answers
+# `InvalidInput` too when the list arrives empty, and `Encoding` on `GetSSHPublicKey` is answered
+# with the modelled `UnrecognizedPublicKeyEncoding` rather than as a constraint at all. The
+# simulators answer an empty `ActionNames`, `PolicyInputList` or `PolicySourceArn` with a sentence
+# of their own, "At least one ActionNames member is required.", which no capture here moves. And
+# `TagKeys` on the untag operations is answered against the list as a whole, "Value at 'tagKeys'
+# failed to satisfy constraint: Member must satisfy constraint: [...]", where the walk names the
+# member that broke it under its own index: both forms are readings, and this is the one those
+# operations merged.
+#
+# Two entries came off this list on 2026-10-31, when captures from a real account answered them on
+# issue #6042. `AWSServiceName` was held back because the operation answered it as `InvalidInput`
+# with a sentence about its own bounds; AWS answers `ValidationError` naming the declared pattern,
+# so the walk reads it. `Status` on the four operations that share `statusType` was held back
+# because a 2025 recording carried neither the offending value nor the permitted set; AWS names the
+# set, and answers an omitted `Status` as a required member rather than as a value outside it, so
+# all four are read here with their `required` lists intact.
 MEMBERS_BY_HAND = {
-    "CreateServiceLinkedRole": ("AWSServiceName", "CustomSuffix"),
+    "CreateServiceLinkedRole": ("CustomSuffix",),
     "ListPoliciesGrantingServiceAccess": ("ServiceNamespaces",),
-    "UpdateAccessKey": ("Status",),
-    "UpdateSSHPublicKey": ("Status",),
-    "UpdateServiceSpecificCredential": ("Status",),
-    "UpdateSigningCertificate": ("Status",),
     "GetSSHPublicKey": ("Encoding",),
     "SimulateCustomPolicy": ("ActionNames", "PolicyInputList"),
     "SimulatePrincipalPolicy": ("ActionNames", "PolicyInputList", "PolicySourceArn"),
@@ -124,6 +127,73 @@ MEMBERS_BY_HAND = {
     "UntagServerCertificate": ("TagKeys",),
     "UntagUser": ("TagKeys",),
 }
+
+
+# The permitted set AWS lists inside a validation message, where this model declares the same values
+# in another order. `statusType`'s message was captured from a real account on 2026-10-31, on issue
+# #6042, as "Member must satisfy enum value set: [Expired, Active, Inactive]", which is the order
+# AWS's own model declares rather than the order botocore lists. The values are the model's either
+# way and the check below holds them to it: only the order is read from the capture.
+ENUM_ORDER = {
+    "statusType": ("Expired", "Active", "Inactive"),
+}
+
+
+def enum_order(model: dict, orders: dict[str, tuple[str, ...]] | None = None) -> dict:
+    """`model` with each named shape's enum in the order AWS lists it in, `ENUM_ORDER` by default."""
+    orders = ENUM_ORDER if orders is None else orders
+    shapes = dict(model["shapes"])
+    for name, order in orders.items():
+        declared = shapes[name]["enum"]
+        if sorted(declared) != sorted(order):
+            raise SystemExit(f"{name} declares {declared}, which is not a reordering of "
+                             f"{list(order)}: the capture is stale, read the model again")
+        shapes[name] = {**shapes[name], "enum": list(order)}
+    return {**model, "shapes": shapes}
+
+
+# The pattern AWS quotes inside a validation message, where this model declares another one for the
+# same member. Each entry names the shape the member resolves to and the pattern that shape
+# declares, so a model that changes either stops the run rather than quoting a text the capture no
+# longer answers for. Only the quoted text is read from the capture: what a value is held to stays
+# the model's.
+#
+# `CreateServiceLinkedRole`'s `AWSServiceName` resolves to `groupNameType`, the shape botocore gives
+# a group name, 1 to 128 characters of `[\w+=,.@-]+`. The capture on issue #6042, from a real
+# account on 2026-10-31, quotes `[\w+=.@-]*` for it, without the comma this model admits and with a
+# `*` where the model sets a minimum of 1. Only AWS's message is in hand rather than its shape, so
+# the member carries a shape of its own here with AWS's text beside the model's: the message is the
+# captured one and a comma is still admitted, which nothing in hand settles either way.
+QUOTED_PATTERNS = {
+    ("CreateServiceLinkedRole", "AWSServiceName"): ("groupNameType", r"[\w+=,.@-]+", r"[\w+=.@-]*"),
+}
+
+
+def quoted_patterns(model: dict, quoted: dict | None = None) -> dict:
+    """`model` with each named member on a shape of its own, carrying the pattern AWS quotes beside
+    the one the model declares, `QUOTED_PATTERNS` by default.
+
+    The shape is named after the member as the wire names it, `AWSServiceName` reading
+    `aWSServiceName` in a message and so taking `aWSServiceNameType`, since the shape it is copied
+    from is one several members share and only this one's message differs."""
+    quoted = QUOTED_PATTERNS if quoted is None else quoted
+    shapes = dict(model["shapes"])
+    for (operation, member), (shape_name, declared, text) in quoted.items():
+        request = model["operations"][operation]["input"]["shape"]
+        members = shapes[request]["members"]
+        if member not in members:
+            raise SystemExit(f"{operation} vendors no {member} to quote a pattern for: it is "
+                             f"answered by hand again, or the model dropped it")
+        if members[member]["shape"] != shape_name:
+            raise SystemExit(f"{operation}.{member} resolves to {members[member]['shape']}, not "
+                             f"{shape_name}: the capture is stale, read the model again")
+        if shapes[shape_name].get("pattern") != declared:
+            raise SystemExit(f"{shape_name} declares {shapes[shape_name].get('pattern')}, not "
+                             f"{declared}: the capture is stale, read the model again")
+        own = member[0].lower() + member[1:] + "Type"
+        shapes[own] = {**shapes[shape_name], "quotedPattern": text}
+        shapes[request] = {**shapes[request], "members": {**members, member: {"shape": own}}}
+    return {**model, "shapes": shapes}
 
 
 def members_by_hand(model: dict, members: dict[str, tuple[str, ...]] | None = None) -> dict:
@@ -154,9 +224,11 @@ def required_by_hand(model: dict, operations: tuple[str, ...] = REQUIRED_BY_HAND
 
 
 def prepare(model: dict) -> dict:
-    """The two reductions this generator makes, in the order they read: the required members an
-    operation answers for itself, and the members it answers in a wording of its own."""
-    return members_by_hand(required_by_hand(model))
+    """The four readings this generator makes, in the order they apply: the required members an
+    operation answers for itself, the members it answers in a wording of its own, the enum whose set
+    AWS lists in an order of its own, and the member whose pattern AWS quotes in a text of its
+    own."""
+    return quoted_patterns(enum_order(members_by_hand(required_by_hand(model))))
 
 
 def main(argv: list[str] | None = None) -> int:
