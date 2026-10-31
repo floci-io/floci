@@ -718,6 +718,15 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void createUserAsAnAccountsFirstCallFindsTheBuiltInDefaultUser() {
+        ElastiCacheService svc = serviceWith(storageFollowing(new AtomicReference<>("333333333333")),
+                containerManager, proxyManager, clusterFormation);
+        assertEquals("UserAlreadyExists", assertThrows(AwsException.class, () -> svc.createUser(
+                "default", "default", AuthMode.PASSWORD, List.of("pw"), "off -@all", "redis")).getErrorCode());
+        assertEquals("on ~* +@all", svc.getUser("default").getAccessString());
+    }
+
+    @Test
     void theBuiltInDefaultUserCannotBeModified() {
         AwsException ex = assertThrows(AwsException.class, () -> service.modifyUser(
                 "default", AuthMode.PASSWORD, List.of("secret"), "off -@all", null, null));
