@@ -152,4 +152,36 @@ class PaymentCryptographyIntegrationTest {
                 .then().statusCode(400)
                     .body("__type", containsString("ValidationException"));
     }
+
+    @Test
+    void aKeyIsCreatedDisabledAndWithTags() {
+        call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\",\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true}},\"Exportable\":false,\"Enabled\":false,"
+                + "\"Tags\":[{\"Key\":\"owner\",\"Value\":\"team\"}]}")
+                .then().statusCode(200)
+                    .body("Key.Enabled", equalTo(false))
+                    .body("Key.Exportable", equalTo(false));
+
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+
+        call("ListTagsForResource", "{\"ResourceArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Tags", hasSize(0));
+    }
+
+    @Test
+    void theKeysAreListedAPageAtATime() {
+        call("CreateKey", CREATE_KEY).then().statusCode(200);
+        call("CreateKey", CREATE_KEY).then().statusCode(200);
+
+        String first = call("ListKeys", "{\"MaxResults\":1}").then().statusCode(200)
+                .body("Keys", hasSize(1))
+                .extract().path("NextToken");
+
+        call("ListKeys", "{\"MaxResults\":1,\"NextToken\":\"" + first + "\"}")
+                .then().statusCode(200)
+                    .body("Keys", hasSize(1));
+    }
 }
