@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -63,6 +64,7 @@ import org.jspecify.annotations.Nullable;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
@@ -3958,7 +3960,7 @@ public class CognitoService implements ResourceProvider {
                 description.put("AuthenticatorAttachment", credential.getAuthenticatorAttachment());
             }
             description.put("AuthenticatorTransports", credential.getTransports());
-            description.put("CreatedAt", credential.getCreatedAtMillis() / 1000.0);
+            description.put("CreatedAt", EpochSeconds.fromMillis(credential.getCreatedAtMillis()));
             description.put("CredentialId", credential.getCredentialId());
             description.put("FriendlyCredentialName", credential.getFriendlyCredentialName());
             description.put("RelyingPartyId", credential.getRelyingPartyId());

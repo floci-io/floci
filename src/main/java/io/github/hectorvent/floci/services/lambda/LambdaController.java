@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
@@ -391,7 +392,7 @@ public class LambdaController {
             node.put("MaximumBatchingWindowInSeconds", esm.getMaximumBatchingWindowInSeconds());
         }
         node.put("State", esm.getState());
-        node.put("LastModified", (double) esm.getLastModified() / 1000.0);
+        node.put("LastModified", EpochSeconds.fromMillis(esm.getLastModified()));
         // Omitted rather than nulled when unset, so a mapping created without a starting position
         // reads back the way AWS returns it - and so Terraform sees the configured value on refresh
         // instead of treating the field as unset and forcing a replacement on every plan.
@@ -399,7 +400,7 @@ public class LambdaController {
             node.put("StartingPosition", esm.getStartingPosition());
         }
         if (esm.getStartingPositionTimestamp() != null) {
-            node.put("StartingPositionTimestamp", (double) esm.getStartingPositionTimestamp() / 1000.0);
+            node.put("StartingPositionTimestamp", EpochSeconds.fromMillis(esm.getStartingPositionTimestamp()));
         }
         ArrayNode responseTypes = node.putArray("FunctionResponseTypes");
 

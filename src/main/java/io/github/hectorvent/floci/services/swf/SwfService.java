@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.swf;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -1977,7 +1978,7 @@ public class SwfService implements Resettable {
     }
 
     private double now() {
-        return clock.millis() / 1000.0;
+        return EpochSeconds.fromMillis(clock.millis());
     }
 
     /** SWF task tokens are opaque; a random base64 blob matches how SDKs treat them. */

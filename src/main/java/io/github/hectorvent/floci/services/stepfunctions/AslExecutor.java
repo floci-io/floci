@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.CsvParser;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
@@ -560,7 +561,7 @@ public class AslExecutor {
             if (hasEnded(exec)) {
                 return;
             }
-            exec.setStopDate(System.currentTimeMillis() / 1000.0);
+            exec.setStopDate(EpochSeconds.fromMillis(System.currentTimeMillis()));
             exec.setStatus("TIMED_OUT");
         }
         onUpdate.accept(exec, history);
@@ -3505,7 +3506,7 @@ public class AslExecutor {
         MapRun mapRun = new MapRun();
         mapRun.setMapRunArn(identity.arn());
         mapRun.setExecutionArn(context.path("Execution").path("Id").asText(null));
-        mapRun.setStartDate(System.currentTimeMillis() / 1000.0);
+        mapRun.setStartDate(EpochSeconds.fromMillis(System.currentTimeMillis()));
         mapRun.setItemCount(itemCount);
         mapRun.setExecutionCount(executionCount);
         // ASL spells an unbounded Map as MaxConcurrency 0, or by omitting it; DescribeMapRun
@@ -3518,7 +3519,7 @@ public class AslExecutor {
     /** Kept for every Distributed Map, so the mapRunArn in the history resolves through DescribeMapRun. */
     private void recordMapRun(MapRun mapRun, String status, int succeededItems, int failedItems,
                               int succeededExecutions, int failedExecutions) {
-        mapRun.setStopDate(System.currentTimeMillis() / 1000.0);
+        mapRun.setStopDate(EpochSeconds.fromMillis(System.currentTimeMillis()));
         mapRun.setStatus(status);
         mapRun.setSucceededCount(succeededItems);
         mapRun.setFailedCount(failedItems);
@@ -6014,7 +6015,7 @@ public class AslExecutor {
             }
             exec.setError(error);
             exec.setCause(cause);
-            exec.setStopDate(System.currentTimeMillis() / 1000.0);
+            exec.setStopDate(EpochSeconds.fromMillis(System.currentTimeMillis()));
             exec.setStatus("FAILED");
         }
         chain.end("ExecutionFailed", failureDetails(error, cause));
@@ -6054,7 +6055,7 @@ public class AslExecutor {
                 if (hasEnded(exec)) {
                     return;
                 }
-                exec.setStopDate(System.currentTimeMillis() / 1000.0);
+                exec.setStopDate(EpochSeconds.fromMillis(System.currentTimeMillis()));
                 exec.setStatus("TIMED_OUT");
             }
         }
@@ -6074,7 +6075,7 @@ public class AslExecutor {
                 return;
             }
             exec.setOutput(output.toString());
-            exec.setStopDate(System.currentTimeMillis() / 1000.0);
+            exec.setStopDate(EpochSeconds.fromMillis(System.currentTimeMillis()));
             exec.setStatus("SUCCEEDED");
         }
         chain.end("ExecutionSucceeded",

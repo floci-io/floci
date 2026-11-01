@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.cloudwatch.dashboards.CloudWatchDashboardsService;
@@ -457,7 +458,7 @@ public class CloudWatchMetricsJsonHandler {
                     .put("HistoryData", item.historyData())
                     .put("HistoryItemType", item.historyItemType())
                     .put("HistorySummary", item.historySummary())
-                    .put("Timestamp", item.timestamp() / 1000.0);
+                    .put("Timestamp", EpochSeconds.fromMillis(item.timestamp()));
         }
         if (page.nextToken() != null) {
             response.put("NextToken", page.nextToken());

@@ -378,7 +378,7 @@ public class LightsailService implements ResourceProvider {
         ObjectNode response = mapper.createObjectNode();
         response.put("publicKeyBase64", publicKeyBase64(name));
         response.put("privateKeyBase64", privateKeyBase64(name));
-        response.put("createdAt", epochSeconds(Instant.now()));
+        response.put("createdAt", EpochSeconds.fromInstant(Instant.now()));
         return response;
     }
 
@@ -562,7 +562,7 @@ public class LightsailService implements ResourceProvider {
         resource.put("name", name);
         resource.put("arn", arn(region, resourceType, name));
         resource.put("supportCode", region + "/" + name);
-        resource.put("createdAt", epochSeconds(now));
+        resource.put("createdAt", EpochSeconds.fromInstant(now));
         resource.set("location", location(region, availabilityZone));
         resource.put("resourceType", resourceType);
         return resource;
@@ -575,13 +575,13 @@ public class LightsailService implements ResourceProvider {
         operation.put("id", id);
         operation.put("resourceName", resourceName);
         operation.put("resourceType", resourceType);
-        operation.put("createdAt", epochSeconds(now));
+        operation.put("createdAt", EpochSeconds.fromInstant(now));
         operation.set("location", location(region, region + "a"));
         operation.put("isTerminal", true);
         operation.put("operationDetails", operationType + " completed locally");
         operation.put("operationType", operationType);
         operation.put("status", "Succeeded");
-        operation.put("statusChangedAt", epochSeconds(now));
+        operation.put("statusChangedAt", EpochSeconds.fromInstant(now));
         operationStore.put(operationKey(region, id), operation);
         return operation;
     }
@@ -877,10 +877,6 @@ public class LightsailService implements ResourceProvider {
 
     private static String operationKey(String region, String operationId) {
         return region + ":" + operationId;
-    }
-
-    private static double epochSeconds(Instant instant) {
-        return EpochSeconds.fromInstant(instant);
     }
 
     private static String privateIpFor(String name) {

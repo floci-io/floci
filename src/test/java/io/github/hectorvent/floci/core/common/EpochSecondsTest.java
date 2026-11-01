@@ -21,6 +21,13 @@ class EpochSecondsTest {
     }
 
     @Test
+    void convertsLongEpochMillisWithoutLosingMillisecondFraction() {
+        assertEquals(1_790_312_384.592, EpochSeconds.fromMillis(1_790_312_384_592L));
+        assertEquals(-0.001, EpochSeconds.fromMillis(-1L));
+        assertEquals(0.001, EpochSeconds.fromMillis(1L));
+    }
+
+    @Test
     void retainsNullAndOverflowFailures() {
         assertThrows(NullPointerException.class, () -> EpochSeconds.fromInstant(null));
         assertThrows(ArithmeticException.class, () -> EpochSeconds.fromInstant(Instant.MAX));

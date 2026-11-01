@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.eks;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -81,7 +82,7 @@ public class EksAccessEntryService {
             throw new AwsException("InvalidRequestException",
                     "Access policies can only be associated with STANDARD access entries", 400);
         }
-        double now = clock.millis() / 1000.0;
+        double now = EpochSeconds.fromMillis(clock.millis());
         double associatedAt = stored.accessPolicies().stream()
                 .filter(existing -> existing.policyArn().equals(request.policyArn()))
                 .mapToDouble(AssociatedAccessPolicy::associatedAt).findFirst().orElse(now);
@@ -221,7 +222,7 @@ public class EksAccessEntryService {
         if (entries.get(key).isPresent()) {
             throw new AwsException("ResourceInUseException", "Access entry already exists", 409);
         }
-        double now = clock.millis() / 1000.0;
+        double now = EpochSeconds.fromMillis(clock.millis());
         String entryArn = new AwsArnUtils.Arn(clusterArn.partition(), "eks", clusterArn.region(), clusterArn.accountId(),
                 "access-entry/" + cluster.getName() + "/" + (role ? "role" : "user") + "/" + arn.accountId() + "/" + name
                         + "/" + UUID.randomUUID()).toString();

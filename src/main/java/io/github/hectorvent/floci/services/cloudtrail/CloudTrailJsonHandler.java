@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedEventSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.DataResource;
 import io.github.hectorvent.floci.services.cloudtrail.model.EventSelector;
@@ -226,16 +227,16 @@ public class CloudTrailJsonHandler {
         ObjectNode resp = mapper.createObjectNode();
         resp.put("IsLogging", status.logging());
         if (status.startLoggingTime() != null) {
-            resp.put("StartLoggingTime", status.startLoggingTime() / 1000.0);
+            resp.put("StartLoggingTime", EpochSeconds.fromMillis(status.startLoggingTime()));
         }
         if (status.latestDeliveryTime() != null) {
-            resp.put("LatestDeliveryTime", status.latestDeliveryTime() / 1000.0);
+            resp.put("LatestDeliveryTime", EpochSeconds.fromMillis(status.latestDeliveryTime()));
         }
         if (status.latestDeliveryError() != null) {
             resp.put("LatestDeliveryError", status.latestDeliveryError());
         }
         if (status.stopLoggingTime() != null) {
-            resp.put("StopLoggingTime", status.stopLoggingTime() / 1000.0);
+            resp.put("StopLoggingTime", EpochSeconds.fromMillis(status.stopLoggingTime()));
         }
         return Response.ok(resp).build();
     }

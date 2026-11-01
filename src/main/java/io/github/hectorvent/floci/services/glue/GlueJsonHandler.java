@@ -1172,15 +1172,11 @@ public class GlueJsonHandler {
         Map<String, Object> item = new LinkedHashMap<>();
         item.put("Name", ruleset.getName());
         putIfNotNull(item, "Description", ruleset.getDescription());
-        item.put("CreatedOn", epochSeconds(ruleset.getCreatedOn()));
-        item.put("LastModifiedOn", epochSeconds(ruleset.getLastModifiedOn()));
+        item.put("CreatedOn", EpochSeconds.fromInstant(ruleset.getCreatedOn()));
+        item.put("LastModifiedOn", EpochSeconds.fromInstant(ruleset.getLastModifiedOn()));
         putIfNotNull(item, "TargetTable", ruleset.getTargetTable());
         putIfNotNull(item, "RuleCount", GlueService.dataQualityRuleCount(ruleset.getRuleset()));
         return item;
-    }
-
-    private static double epochSeconds(Instant instant) {
-        return EpochSeconds.fromInstant(instant);
     }
 
     private static String iso(Instant instant) {
