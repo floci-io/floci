@@ -726,6 +726,21 @@ public class AslExecutor {
                                         JsonNode stateDef, JsonNode input, StateMachine sm,
                                         String topLevelQueryLanguage, JsonNode context, ObjectNode variables,
                                         long executionDeadlineNanos) throws Exception {
+        // JSONPath states read and Assign workflow variables through JSONPATH_SCOPE (see there).
+        JsonPathScope previousScope = JSONPATH_SCOPE.get();
+        JSONPATH_SCOPE.set(isJsonata(stateDef, topLevelQueryLanguage) ? null : new JsonPathScope(variables, context));
+        try {
+            return runEnteredStateBody(chain, name, enteredEventId, type, stateDef, input, sm,
+                    topLevelQueryLanguage, context, variables, executionDeadlineNanos);
+        } finally {
+            JSONPATH_SCOPE.set(previousScope);
+        }
+    }
+
+    private StateResult runEnteredStateBody(HistoryChain chain, String name, long enteredEventId, String type,
+                                            JsonNode stateDef, JsonNode input, StateMachine sm,
+                                            String topLevelQueryLanguage, JsonNode context, ObjectNode variables,
+                                            long executionDeadlineNanos) throws Exception {
         updateStateContext(context, name);
         boolean jsonata = isJsonata(stateDef, topLevelQueryLanguage);
         StateResult result;
@@ -918,6 +933,7 @@ public class AslExecutor {
             result = stateDef.get("Result");
         }
 
+        applyJsonPathAssign(stateDef, result);
         JsonNode output = mergeResult(stateDef, input, result);
         output = applyOutputPath(stateDef, output, context);
         return new StateResult(output, stateDef.path("Next").asText(null));
@@ -1048,7 +1064,8 @@ public class AslExecutor {
             JsonNode output = applyJsonataOutput(stateDef, input, taskResult, context, variables);
             return new StateResult(output, stateDef.path("Next").asText(null));
         } else {
-            // ResultSelector transforms the raw result before ResultPath merges it into the state input.
+            // Assign reads the raw task result; ResultSelector transforms it before ResultPath merges it.
+            applyJsonPathAssign(stateDef, taskResult);
             if (stateDef.has("ResultSelector")) {
                 taskResult = resolveParameters(stateDef.get("ResultSelector"), taskResult, context);
             }
@@ -2872,6 +2889,8 @@ public class AslExecutor {
         JsonNode choices = stateDef.path("Choices");
         for (JsonNode choice : choices) {
             if (evaluateCondition(choice, effectiveInput, context)) {
+                // A matched rule carries its own Assign; the state-level one applies on the Default path.
+                applyJsonPathAssign(choice, effectiveInput);
                 JsonNode output = applyOutputPath(stateDef, effectiveInput, context);
                 return new StateResult(output, choice.path("Next").asText());
             }
@@ -2879,6 +2898,7 @@ public class AslExecutor {
         // Default branch
         String defaultState = stateDef.path("Default").asText(null);
         if (defaultState != null) {
+            applyJsonPathAssign(stateDef, effectiveInput);
             JsonNode output = applyOutputPath(stateDef, effectiveInput, context);
             return new StateResult(output, defaultState);
         }
@@ -3173,7 +3193,8 @@ public class AslExecutor {
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
 
-        // ResultSelector transforms the raw branch results before ResultPath merges them in.
+        // Assign reads the raw branch results; ResultSelector transforms them before ResultPath merges them in.
+        applyJsonPathAssign(stateDef, results);
         JsonNode selected = stateDef.has("ResultSelector")
                 ? resolveParameters(stateDef.get("ResultSelector"), results, context)
                 : results;
@@ -3465,7 +3486,8 @@ public class AslExecutor {
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
 
-        // ResultSelector transforms the raw iteration results before ResultPath merges them in.
+        // Assign reads the raw iteration results; ResultSelector transforms them before ResultPath merges them in.
+        applyJsonPathAssign(stateDef, mapResult);
         JsonNode selected = stateDef.has("ResultSelector")
                 ? resolveParameters(stateDef.get("ResultSelector"), mapResult, context)
                 : mapResult;
@@ -4431,6 +4453,63 @@ public class AslExecutor {
         return resolvePath(path, input, context);
     }
 
+    /**
+     * Workflow variables of the JSONPath state running on this thread. AWS lets JSONPath states read
+     * variables through {@code $name} / {@code $name.path} references and write them with
+     * {@code Assign}; the JSONPath resolvers have no {@code variables} parameter, so
+     * {@link #runEnteredState} exposes the state's scope here for the duration of the state
+     * (Map iterations and Parallel branches run their own states, so each sees its own scope).
+     * Not set for JSONata states, which use {@code variables} directly.
+     */
+    private static final ThreadLocal<JsonPathScope> JSONPATH_SCOPE = new ThreadLocal<>();
+
+    private record JsonPathScope(ObjectNode variables, JsonNode context) {
+    }
+
+    private static final java.util.regex.Pattern VARIABLE_REFERENCE =
+            java.util.regex.Pattern.compile("^\\$([A-Za-z_][A-Za-z0-9_]*)((?:[.\\[].*)?)$");
+
+    /**
+     * Resolves a JSONPath workflow-variable reference ({@code $name}, {@code $name.field},
+     * {@code $name[0]}), or returns {@code null} when {@code path} is not one ({@code $}, {@code $.},
+     * {@code $[}, {@code $$}). An unknown variable fails the state with States.Runtime, as on AWS.
+     */
+    private JsonNode resolveVariableReference(String path) {
+        if (path == null || path.startsWith("$$") || path.startsWith("$.") || path.startsWith("$[")) {
+            return null;
+        }
+        java.util.regex.Matcher m = VARIABLE_REFERENCE.matcher(path);
+        if (!m.matches()) {
+            return null;
+        }
+        JsonPathScope scope = JSONPATH_SCOPE.get();
+        JsonNode value = scope == null ? null : scope.variables().get(m.group(1));
+        if (value == null) {
+            throw new FailStateException("States.Runtime",
+                    "The JSONPath variable reference '" + path + "' refers to an undefined variable '" + m.group(1) + "'");
+        }
+        String rest = m.group(2);
+        return rest.isEmpty() ? value : resolvePathNode("$" + rest, value, null);
+    }
+
+    /**
+     * JSONPath {@code Assign}: evaluated against the state result (Pass: after Parameters/Result; Task,
+     * Map, Parallel: the raw result, before ResultSelector; Choice: the effective input; Catch: the error
+     * output) with the variables as they were on state entry, then committed,
+     * so the next state sees the new values and one Assign block's entries don't see each other.
+     */
+    private void applyJsonPathAssign(JsonNode holder, JsonNode result) throws Exception {
+        JsonPathScope scope = JSONPATH_SCOPE.get();
+        if (scope == null || holder == null || !holder.has("Assign")) {
+            return;
+        }
+        JsonNode assigned = resolveParameters(holder.get("Assign"), result, scope.context());
+        if (assigned == null || !assigned.isObject()) {
+            throw new FailStateException("States.Runtime", "Assign must evaluate to an object");
+        }
+        assigned.fields().forEachRemaining(e -> scope.variables().set(e.getKey(), e.getValue()));
+    }
+
     private JsonNode mergeResult(JsonNode stateDef, JsonNode input, JsonNode result) throws Exception {
         if (!stateDef.has("ResultPath")) {
             return result;
@@ -4538,6 +4617,10 @@ public class AslExecutor {
         if (path.startsWith("States.")) {
             return evaluateIntrinsic(path, root, context);
         }
+        JsonNode variable = resolveVariableReference(path);
+        if (variable != null) {
+            return variable;
+        }
         if ("$$".equals(path)) {
             return context == null ? MissingNode.getInstance() : context;
         }
@@ -4584,6 +4667,10 @@ public class AslExecutor {
         }
         if (path.startsWith("States.")) {
             return evaluateIntrinsic(path, searchRoot, context);
+        }
+        JsonNode variable = resolveVariableReference(path);
+        if (variable != null) {
+            return variable;
         }
         if (!path.startsWith("$.") && !path.startsWith("$[")) {
             return NullNode.getInstance();
@@ -5798,6 +5885,10 @@ public class AslExecutor {
         if (context != null && "$$".equals(arg)) {
             return context;
         }
+        JsonNode variable = resolveVariableReference(arg);
+        if (variable != null) {
+            return variable;
+        }
         if (arg.startsWith("$.") || arg.startsWith("$[") || "$".equals(arg)) {
             return resolveIntrinsicReference(arg, root, context, root);
         }
@@ -6180,6 +6271,7 @@ public class AslExecutor {
                         catcher, "Catch[" + i + "]/", statesVar, errorOutput, variables);
                 return new StateResult(output, next);
             }
+            applyJsonPathAssign(catcher, errorOutput);
             return new StateResult(mergeResult(catcher, input, errorOutput), next);
         }
         return null;
