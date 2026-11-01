@@ -13,6 +13,7 @@ EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`)
 | `DescribeCluster` | Describe a cluster by name |
 | `ListClusters` | List all cluster names |
 | `DeleteCluster` | Delete a cluster |
+| `UpdateClusterConfig` | Update a cluster's upgrade policy, control-plane logging, or endpoint access |
 | `CreateAccessEntry` | Create STANDARD or EC2_LINUX access-entry metadata |
 | `DescribeAccessEntry` | Describe an access entry by IAM principal ARN |
 | `ListAccessEntries` | List principal ARNs with pagination |
@@ -29,7 +30,7 @@ EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`)
 | `DescribeAddon` | Describe an addon by cluster and addon name |
 | `ListAddons` | List addon names installed in a cluster with pagination |
 | `UpdateAddon` | Update addon configuration, version, or service account role |
-| `DescribeUpdate` | Describe an update for an addon |
+| `DescribeUpdate` | Describe an update for a cluster or an addon |
 | `DeleteAddon` | Delete an addon from a cluster |
 | `DescribeAddonVersions` | Describe supported addon versions by Kubernetes version or addon name |
 | `CreateNodegroup` | Create node group metadata for a cluster |
@@ -135,6 +136,12 @@ The webhook URL uses the hostname containers reach Floci on. When Floci runs nat
 The webhook carries `failurePolicy: Ignore`, and Floci admits the pod unchanged on any internal error, so a webhook that cannot be registered or cannot be reached never prevents a pod from being created. Registration failures log a warning and leave the cluster running.
 
 The manifest is written into the cluster's k3s server manifests directory (`/var/lib/rancher/k3s/server/manifests`) before the container starts, so k3s applies it as the API server comes up.
+
+## Cluster configuration updates
+
+`UpdateClusterConfig` applies one kind of update per call, like AWS: the upgrade policy (`STANDARD` or `EXTENDED`; clusters default to `EXTENDED`, as on AWS), control-plane log types (only the named types change), or public/private endpoint access and public access CIDRs (IPv6 blocks only on an `ipv6` cluster, as on AWS). The cluster must be `ACTIVE`. Turning on the `audit` log type works on a running cluster because every cluster's API server starts with the audit policy; a container started by an earlier Floci version and adopted at startup keeps its old flags, so its audit stream stays empty until the cluster is recreated. The update completes at once with status `Successful` and can be read back with `DescribeUpdate`.
+
+CloudFormation `AWS::EKS::Cluster` maps `UpgradePolicy.SupportType` on create.
 
 ## Addon management
 
@@ -300,7 +307,7 @@ EKS clusters support configuring KMS envelope encryption for secrets and control
 - **Backfill**: Existing persisted clusters created before this feature was introduced are automatically backfilled on startup with default disabled logging.
 - **CloudWatch Logs delivery**:
   - When the `api` log type is enabled on a cluster, Floci creates the CloudWatch Logs log group `/aws/eks/<cluster-name>/cluster` and streams control plane container output to a log stream named `kube-apiserver-<hash>`, where `<hash>` is the first 32 characters of the container ID.
-  - When the `audit` log type is enabled on a cluster, Floci configures k3s with the Amazon EKS control plane audit policy, writes audit logs to `/var/log/audit.log` inside the container, and streams audit records to a log stream named `kube-apiserver-audit-<hash>`. Audit records are available in CloudWatch Logs and are not echoed to the Floci console.
+  - Every cluster's API server runs with the Amazon EKS control plane audit policy and writes audit logs to `/var/log/audit.log` inside the container, so `UpdateClusterConfig` can turn `audit` on for a running cluster. While the `audit` log type is enabled, Floci streams the records written from then on to a log stream named `kube-apiserver-audit-<hash>`. Audit records are available in CloudWatch Logs and are not echoed to the Floci console.
   - When both `api` and `audit` are enabled, both streams are created and populated under `/aws/eks/<cluster-name>/cluster`. When neither is enabled, no log group or streams are created.
 - **Component streams deviation**: AWS EKS provisions separate log streams for each component (`kube-apiserver-*`, `kube-apiserver-audit-*`, `kube-controller-manager-*`, `kube-scheduler-*`, `authenticator-*`). Because Floci runs clusters on k3s, which embeds the Kubernetes API server, controller manager, and scheduler within a single process, control plane container logs are delivered to the single `kube-apiserver-<hash>` stream when `api` is enabled, and API server audit logs are delivered to `kube-apiserver-audit-<hash>` when `audit` is enabled. Other control plane log types (`authenticator`, `controllerManager`, `scheduler`) do not provision separate streams.
 - **Authenticator logs**: Authenticator webhook authentication events are logged directly by Floci.
@@ -1071,7 +1078,8 @@ eks.deleteCluster(r -> r.name("my-cluster"));
 
 The following EKS features are not yet supported:
 
-- `UpdateClusterConfig` / `UpdateClusterVersion`
+- `UpdateClusterVersion`
+- `UpdateClusterConfig` for anything other than the upgrade policy, logging and endpoint access (subnets, security groups, access config, compute, zonal shift, …): refused with `InvalidParameterException`
 - `UpdateNodegroupConfig` / `UpdateNodegroupVersion`
 - Add-ons (`CreateAddon`, `DescribeAddon`, `ListAddons`)
 - Identity provider configs

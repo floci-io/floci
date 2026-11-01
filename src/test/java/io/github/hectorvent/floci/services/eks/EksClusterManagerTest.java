@@ -100,6 +100,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
@@ -2478,7 +2479,8 @@ class EksClusterManagerTest {
             assertFalse(cmd.stream().anyMatch(a -> a.contains("service-account-issuer")));
             assertFalse(cmd.stream().anyMatch(a -> a.contains("api-audiences")));
 
-            verify(copyCmd, never()).withHostResource(anyString());
+            // Only the signing keys: every cluster now gets the audit policy copied in.
+            verify(copyCmd, never()).withHostResource(startsWith(tempDir.resolve("keys").toString()));
             assertFalse(Files.exists(tempDir.resolve("keys")));
         }
 
@@ -3923,7 +3925,7 @@ class EksClusterManagerTest {
         }
 
         @Test
-        void clusterWithoutAuditLoggingDoesNotAddAuditArgsOrInjectPolicyFile(@TempDir Path tempDir) {
+        void clusterWithoutAuditLoggingStillStartsTheApiServerAuditing(@TempDir Path tempDir) {
             when(eks.dataPath()).thenReturn(tempDir.toString());
             DockerClient dockerClient = Mockito.mock(DockerClient.class);
             CopyArchiveToContainerCmd copyCmd = Mockito.mock(CopyArchiveToContainerCmd.class, Mockito.RETURNS_SELF);
@@ -3941,10 +3943,10 @@ class EksClusterManagerTest {
             verify(builder).withCmd(cmdCaptor.capture());
             List<String> cmd = cmdCaptor.getValue();
 
-            assertFalse(cmd.stream().anyMatch(arg -> arg.contains("audit-policy-file")));
-            assertFalse(cmd.stream().anyMatch(arg -> arg.contains("audit-log-path")));
-
-            verify(copyCmd, never()).withRemotePath("/etc");
+            // UpdateClusterConfig can enable audit on the running container, so the flags must already be there.
+            assertTrue(cmd.contains("--kube-apiserver-arg=audit-policy-file=/etc/audit-policy.yaml"));
+            assertTrue(cmd.contains("--kube-apiserver-arg=audit-log-path=/var/log/audit.log"));
+            verify(copyCmd, atLeastOnce()).withRemotePath("/etc");
         }
 
         @Test
