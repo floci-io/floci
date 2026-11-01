@@ -94,7 +94,9 @@ jobs:
             | sed 's|^\./||; s|\.java$||' | LC_ALL=C sort \
             > "$GITHUB_WORKSPACE/all-classes.txt"
           cd "$GITHUB_WORKSPACE"
-          .github/ci/partition.sh all-classes.txt "$SHARD_TOTAL" "${{ matrix.shard }}" > shard.txt
+          python3 -m unittest discover -s .github/ci -p test_partition.py
+          .github/ci/partition.sh all-classes.txt "$SHARD_TOTAL" "${{ matrix.shard }}" \
+            .github/ci/test-durations.json > shard.txt
           # An empty includesFile makes surefire fall back to its default includes
           # and run the ENTIRE suite into this shard's timeout.
           test -s shard.txt
