@@ -107,6 +107,35 @@ public class ServiceQuotasService {
         return listQuotas(serviceCode, quotaCodeFilter, nextToken, maxResults, region, accountId, false);
     }
 
+    public ObjectNode listServices(String nextToken, Integer maxResults, String region, String accountId) {
+        if (maxResults != null && (maxResults < 1 || maxResults > 100)) {
+            throw new AwsException("IllegalArgumentException",
+                    "Invalid input: MaxResults must be between 1 and 100.", 400);
+        }
+        List<String> serviceCodes = new ArrayList<>(SERVICE_NAMES.keySet());
+        serviceCodes.sort(String::compareToIgnoreCase);
+        int start = decodeToken(nextToken);
+        if (start < 0 || start > serviceCodes.size()) {
+            throw new AwsException("InvalidPaginationTokenException", "Invalid NextToken.", 400);
+        }
+        int end = (maxResults == null) ? serviceCodes.size() : Math.min(serviceCodes.size(), start + maxResults);
+        String next = (end < serviceCodes.size()) ? encodeToken(end) : null;
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode array = response.putArray("Services");
+        for (int i = start; i < end; i++) {
+            String code = serviceCodes.get(i);
+            ObjectNode service = objectMapper.createObjectNode();
+            service.put("ServiceCode", code);
+            service.put("ServiceName", SERVICE_NAMES.getOrDefault(code, code));
+            array.add(service);
+        }
+        if (next != null) {
+            response.put("NextToken", next);
+        }
+        return response;
+    }
+
     private ObjectNode listQuotas(String serviceCode, String quotaCodeFilter, String nextToken,
                                   Integer maxResults, String region, String accountId, boolean applied) {
         requireServiceCode(serviceCode);
