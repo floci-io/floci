@@ -605,6 +605,7 @@ class DynamoDbPartiQLIntegrationTest {
     @Order(29)
     @ValueSource(strings = {
             "SELECT * FROM \"%s\" WHERE pk = 'x'",
+            "SELECT * FROM \"%s\".\"gsi\" WHERE pk = 'x'",
             "INSERT INTO \"%s\" VALUE {'pk': 'x'}",
             "UPDATE \"%s\" SET a = 1 WHERE pk = 'x'",
             "DELETE FROM \"%s\" WHERE pk = 'x'",
