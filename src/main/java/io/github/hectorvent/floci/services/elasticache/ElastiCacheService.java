@@ -1440,6 +1440,14 @@ public class ElastiCacheService implements ResourceProvider {
             throw new AwsException("InvalidParameterValue",
                     "NumCacheNodes should be 1 if engine is " + engine, 400);
         }
+        // In AWS ElastiCache, auth tokens require in-transit encryption.
+        // Issue #4502: Reject upfront before provisioning rather than creating plaintext cache.
+        boolean hasAuthToken = (request.authToken() != null && !request.authToken().isBlank())
+                || request.authMode() == AuthMode.PASSWORD;
+        if (hasAuthToken && Boolean.FALSE.equals(request.transitEncryptionEnabled())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Transit encryption must be enabled to use an auth token.", 400);
+        }
         // The snapshot members take the replication group's checks, so one request worded one way
         // is refused the same way whichever action carries it.
         cacheClusterSettings(request).validate();
@@ -1906,8 +1914,8 @@ public class ElastiCacheService implements ResourceProvider {
                         if (userGroup.isPresent()) {
                             requireAssociable(userGroup.get(), encryptedInTransit, group.getEngine(), group.getEngineVersion());
                             userGroupsToAdd.add(userGroup.get().getUserGroupId());
-                        } else if (users.get(id).isPresent()) {
-                            ElastiCacheUser u = users.get(id).get();
+                        } else if (findUser(id).isPresent()) {
+                            ElastiCacheUser u = findUser(id).get();
                             if (u.getAuthMode() == AuthMode.IAM) {
                                 if (!encryptedInTransit) {
                                     throw new AwsException("InvalidParameterCombination",
@@ -2225,8 +2233,15 @@ public class ElastiCacheService implements ResourceProvider {
         }
     }
 
+    /**
+     * Resolves a user by ID. Aligns with PR #7136 built-in user resolution.
+     */
+    private Optional<ElastiCacheUser> findUser(String userId) {
+        return users.get(userId);
+    }
+
     public ElastiCacheUser getUser(String userId) {
-        return users.get(userId).orElseThrow(() ->
+        return findUser(userId).orElseThrow(() ->
                 new AwsException("UserNotFound", "User " + userId + " not found.", 404));
     }
 
