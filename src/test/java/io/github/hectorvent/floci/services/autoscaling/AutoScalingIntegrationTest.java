@@ -1,11 +1,14 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -15,6 +18,7 @@ import static org.hamcrest.Matchers.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class AutoScalingIntegrationTest {
 
+    private static final String XML_NAMESPACE = "http://autoscaling.amazonaws.com/doc/2011-01-01/";
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260501/us-east-1/autoscaling/aws4_request";
     private static final String EC2_AUTH =
@@ -32,8 +36,8 @@ class AutoScalingIntegrationTest {
 
     @Test
     @Order(1)
-    void createLaunchConfiguration() {
-        given()
+    void createLaunchConfiguration() throws Exception {
+        String xml = given()
                 .formParam("Action", "CreateLaunchConfiguration")
                 .formParam("LaunchConfigurationName", "my-lc")
                 .formParam("ImageId", "ami-12345678")
@@ -44,7 +48,10 @@ class AutoScalingIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(200)
-                .body(containsString("CreateLaunchConfigurationResponse"));
+                .body(containsString("CreateLaunchConfigurationResponse"))
+                .extract().asString();
+
+        assertModeledNamespace(xml);
     }
 
     @Test
@@ -134,8 +141,8 @@ class AutoScalingIntegrationTest {
 
     @Test
     @Order(44)
-    void launchConfigurationRejectsInvalidInstanceMonitoringBoolean() {
-        given()
+    void launchConfigurationRejectsInvalidInstanceMonitoringBoolean() throws Exception {
+        String xml = given()
                 .formParam("Action", "CreateLaunchConfiguration")
                 .formParam("LaunchConfigurationName", "my-lc-invalid-monitoring")
                 .formParam("ImageId", "ami-12345678")
@@ -146,7 +153,10 @@ class AutoScalingIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(400)
-                .body(containsString("ValidationError"));
+                .body(containsString("ValidationError"))
+                .extract().asString();
+
+        assertModeledNamespace(xml);
     }
 
     @Test
@@ -192,8 +202,8 @@ class AutoScalingIntegrationTest {
 
     @Test
     @Order(4)
-    void describeAutoScalingGroups() {
-        given()
+    void describeAutoScalingGroups() throws Exception {
+        String xml = given()
                 .formParam("Action", "DescribeAutoScalingGroups")
                 .formParam("AutoScalingGroupNames.member.1", "my-asg")
                 .header("Authorization", AUTH)
@@ -208,7 +218,10 @@ class AutoScalingIntegrationTest {
                 .body(containsString("<MinSize>0</MinSize>"))
                 .body(containsString("<MaxSize>3</MaxSize>"))
                 .body(containsString("env"))
-                .body(containsString("test"));
+                .body(containsString("test"))
+                .extract().asString();
+
+        assertModeledNamespace(xml);
     }
 
     @Test
@@ -1201,8 +1214,8 @@ class AutoScalingIntegrationTest {
 
     @Test
     @Order(40)
-    void describeAutoScalingGroupsEmpty() {
-        given()
+    void describeAutoScalingGroupsEmpty() throws Exception {
+        String xml = given()
                 .formParam("Action", "DescribeAutoScalingGroups")
                 .formParam("AutoScalingGroupNames.member.1", "my-asg")
                 .header("Authorization", AUTH)
@@ -1210,7 +1223,20 @@ class AutoScalingIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(200)
-                .body(not(containsString("my-asg")));
+                .body(not(containsString("my-asg")))
+                .extract().asString();
+
+        assertModeledNamespace(xml);
+    }
+
+    private static void assertModeledNamespace(String xml) throws Exception {
+        Element root = XmlParser.parseDocument(xml).getDocumentElement();
+        assertThat(root.getNamespaceURI(), equalTo(XML_NAMESPACE));
+        NodeList descendants = root.getElementsByTagName("*");
+        for (int i = 0; i < descendants.getLength(); i++) {
+            assertThat(descendants.item(i).getNodeName(),
+                    descendants.item(i).getNamespaceURI(), equalTo(XML_NAMESPACE));
+        }
     }
 
     private static String createLaunchTemplate(String name) {

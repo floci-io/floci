@@ -22,7 +22,7 @@ public final class AwsNamespaces {
      *  in this namespace, never in the 2015-12-01 one. */
     public static final String ELB_CLASSIC = "http://elasticloadbalancing.amazonaws.com/doc/2012-06-01/";
     public static final String ELB_V2      = "https://elasticloadbalancing.amazonaws.com/doc/2015-12-01/";
-    public static final String AUTOSCALING = "https://autoscaling.amazonaws.com/doc/2011-01-01/";
+    public static final String AUTOSCALING = "http://autoscaling.amazonaws.com/doc/2011-01-01/";
     public static final String ELASTIC_BEANSTALK = "https://elasticbeanstalk.amazonaws.com/docs/2010-12-01/";
     public static final String ROUTE53     = "https://route53.amazonaws.com/doc/2013-04-01/";
     public static final String CLOUDFRONT  = "http://cloudfront.amazonaws.com/doc/2020-05-31/";

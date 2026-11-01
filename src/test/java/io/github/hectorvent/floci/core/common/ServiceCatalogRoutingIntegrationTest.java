@@ -81,6 +81,14 @@ class ServiceCatalogRoutingIntegrationTest {
     }
 
     @Test
+    void autoScalingUsesModeledQueryNamespace() {
+        ServiceDescriptor descriptor = catalog.byCredentialScope("autoscaling").orElseThrow();
+
+        assertEquals(ServiceProtocol.QUERY, descriptor.defaultProtocol());
+        assertEquals("http://autoscaling.amazonaws.com/doc/2011-01-01/", descriptor.xmlNamespace());
+    }
+
+    @Test
     void rdsDataResolvesAsRestJsonByCredentialScope() {
         ServiceDescriptor descriptor = catalog.byCredentialScope("rds-data").orElseThrow();
 

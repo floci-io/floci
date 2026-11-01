@@ -4,6 +4,8 @@ Floci implements the EC2 Auto Scaling API — stored-state management for launch
 
 **Protocol:** Query — `POST /` with `Action=` form parameter, credential scope `autoscaling`
 
+**XML namespace:** `http://autoscaling.amazonaws.com/doc/2011-01-01/`, as declared by the AWS service model.
+
 **ARN formats:**
 
 - `arn:aws:autoscaling:<region>:<account>:autoScalingGroup:<uuid>:autoScalingGroupName/<name>`
