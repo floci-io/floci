@@ -8,18 +8,17 @@ import com.github.dockerjava.api.exception.DockerClientException;
 import com.github.dockerjava.api.exception.InternalServerErrorException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.AuthConfig;
-import com.github.dockerjava.api.model.Info;
 import com.github.dockerjava.api.model.PullResponseItem;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.EmulatorConfig.EcsServiceConfig.ImagePullBehavior;
 import io.github.hectorvent.floci.core.common.docker.DockerClientProducer;
+import io.github.hectorvent.floci.core.common.docker.DockerPlatform;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -83,7 +82,7 @@ public class ImageCacheService {
                 return resolvedImage;
             }
             InspectImageResponse localImage = inspectLocalImage(imageUri);
-            if (matchesPlatform(localImage, requestedPlatform)) {
+            if (DockerPlatform.matches(localImage, requestedPlatform)) {
                 resolvedImage = resolvedImageReference(imageUri, localImage);
                 resolvedImages.put(imageKey, resolvedImage);
                 LOG.infov("Image already present locally, skipping pull: {0}", imageUri);
@@ -178,7 +177,7 @@ public class ImageCacheService {
 
     private InspectImageResponse cachedImage(ImageKey imageKey) {
         InspectImageResponse local = inspectLocalImage(imageKey.imageUri());
-        return matchesPlatform(local, imageKey.platform()) ? local : null;
+        return DockerPlatform.matches(local, imageKey.platform()) ? local : null;
     }
 
     /**
@@ -344,36 +343,9 @@ public class ImageCacheService {
         if (resolvedPlatform != null) {
             return resolvedPlatform;
         }
-        Info info = dockerClient.infoCmd().exec();
-        String architecture = info.getArchitecture();
-        if (architecture == null || architecture.isBlank()) {
-            throw new DockerClientException("Docker did not report its architecture");
-        }
-        String os = info.getOsType();
-        if (os == null || os.isBlank()) {
-            os = "linux";
-        }
-        String normalizedArchitecture = switch (architecture.toLowerCase(Locale.ROOT)) {
-            case "aarch64" -> "arm64";
-            case "x86_64" -> "amd64";
-            default -> architecture.toLowerCase(Locale.ROOT);
-        };
-        resolvedPlatform = os.toLowerCase(Locale.ROOT) + "/" + normalizedArchitecture;
+        resolvedPlatform = DockerPlatform.daemon(dockerClient);
         daemonPlatform = resolvedPlatform;
         return resolvedPlatform;
-    }
-
-    private static boolean matchesPlatform(InspectImageResponse image, String platform) {
-        if (image == null) {
-            return false;
-        }
-        if (platform == null) {
-            return true;
-        }
-        String[] parts = platform.split("/", 2);
-        return parts.length == 2
-                && parts[0].equals(image.getOs())
-                && parts[1].equals(image.getArch());
     }
 
     /**
