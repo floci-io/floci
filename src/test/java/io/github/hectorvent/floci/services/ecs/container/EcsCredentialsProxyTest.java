@@ -5,14 +5,11 @@ import com.github.dockerjava.api.command.InfoCmd;
 import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.command.InspectContainerResponse.ContainerState;
-import com.github.dockerjava.api.command.InspectImageCmd;
-import com.github.dockerjava.api.command.InspectImageResponse;
 import com.github.dockerjava.api.command.ListContainersCmd;
 import com.github.dockerjava.api.model.Container;
-import com.github.dockerjava.api.model.ContainerConfig;
 import com.github.dockerjava.api.model.Info;
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.docker.CachedImageStubs;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerExecStubs;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -22,8 +19,6 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.io.IOException;
-import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -54,17 +49,13 @@ class EcsCredentialsProxyTest {
     private DockerHostResolver dockerHostResolver;
     private EmulatorConfig config;
     private EcsCredentialsProxy proxy;
-    private String helperRecipe;
 
     @BeforeEach
-    void setUp() throws IOException {
+    void setUp() {
         dockerClient = mock(DockerClient.class);
         InfoCmd info = mock(InfoCmd.class);
         when(dockerClient.infoCmd()).thenReturn(info);
         when(info.exec()).thenReturn(new Info().withArchitecture("x86_64").withOsType("linux"));
-        try (InputStream recipe = getClass().getResourceAsStream("/docker/network-helper.Dockerfile")) {
-            helperRecipe = Digests.sha256Hex(recipe.readAllBytes());
-        }
         containerBuilder = mock(ContainerBuilder.class);
         lifecycleManager = mock(ContainerLifecycleManager.class);
         dockerHostResolver = mock(DockerHostResolver.class);
@@ -261,15 +252,8 @@ class EcsCredentialsProxyTest {
         when(config.services().ecs().taskRoleCredentials().proxyImage()).thenReturn("floci/network-helper:local");
         when(containerBuilder.resolveImage("floci/network-helper:local")).thenReturn("floci/network-helper:local");
         stubNoStaleContainerByName();
-        InspectImageCmd inspectImageCmd =
-                mock(InspectImageCmd.class);
-        when(dockerClient.inspectImageCmd(any())).thenReturn(inspectImageCmd);
-        InspectImageResponse image = mock(InspectImageResponse.class);
-        when(image.getOs()).thenReturn("linux");
-        when(image.getArch()).thenReturn("amd64");
-        when(image.getConfig()).thenReturn(new ContainerConfig()
-                .withLabels(Map.of("io.floci.helper.recipe-sha256", helperRecipe)));
-        when(inspectImageCmd.exec()).thenReturn(image);
+        CachedImageStubs.image(dockerClient, "floci/network-helper:local", "linux", "amd64",
+                CachedImageStubs.recipe("/docker/network-helper.Dockerfile"));
         when(lifecycleManager.createAndStart(any())).thenReturn(
                 new ContainerLifecycleManager.ContainerInfo(containerId, Map.of()));
         InspectContainerCmd inspectCmd = mock(InspectContainerCmd.class);

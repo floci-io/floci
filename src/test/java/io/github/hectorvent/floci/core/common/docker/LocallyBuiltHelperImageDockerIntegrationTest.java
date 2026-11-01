@@ -7,10 +7,10 @@ import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
+import io.github.hectorvent.floci.testing.DockerAvailability;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -25,11 +25,7 @@ import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 
-/**
- * Opt in only with DOCKER_HOST pointing to a disposable daemon and image cache. The test deliberately
- * replaces a shared base tag; the caller owns removal of that isolated daemon and its entire cache.
- */
-@EnabledIfSystemProperty(named = "floci.test.isolated-helper-docker", matches = "true")
+/** Builds and reuses a native helper when the configured Docker daemon answers. */
 class LocallyBuiltHelperImageDockerIntegrationTest {
     private static final String BASE = "busybox:1.37.0";
 
@@ -38,11 +34,7 @@ class LocallyBuiltHelperImageDockerIntegrationTest {
         EmulatorConfig config = new SmallRyeConfigBuilder().withMapping(EmulatorConfig.class)
                 .build().getConfigMapping(EmulatorConfig.class);
         try (DockerClient docker = spy(new DockerClientProducer(config).dockerClient())) {
-            try {
-                docker.pingCmd().exec();
-            } catch (RuntimeException e) {
-                Assumptions.abort("Docker daemon is unavailable");
-            }
+            Assumptions.assumeTrue(DockerAvailability.answers(docker), "Docker daemon is unavailable");
             String nativePlatform = DockerPlatform.daemon(docker);
             Assumptions.assumeTrue(nativePlatform.equals("linux/amd64") || nativePlatform.equals("linux/arm64"));
             String foreignPlatform = nativePlatform.equals("linux/amd64") ? "linux/arm64" : "linux/amd64";

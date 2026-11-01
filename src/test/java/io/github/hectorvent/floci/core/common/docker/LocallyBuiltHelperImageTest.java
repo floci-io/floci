@@ -5,11 +5,8 @@ import com.github.dockerjava.api.command.BuildImageCmd;
 import com.github.dockerjava.api.command.BuildImageResultCallback;
 import com.github.dockerjava.api.command.InfoCmd;
 import com.github.dockerjava.api.command.InspectImageCmd;
-import com.github.dockerjava.api.command.InspectImageResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
-import com.github.dockerjava.api.model.ContainerConfig;
 import com.github.dockerjava.api.model.Info;
-import io.github.hectorvent.floci.core.common.Digests;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -64,14 +61,7 @@ class LocallyBuiltHelperImageTest {
     @Test
     void buildsNothingWhenTheImageHasTheCurrentRecipeAndPlatform() throws Exception {
         stubResolvedImage();
-        InspectImageCmd inspectCmd = mock(InspectImageCmd.class);
-        when(dockerClient.inspectImageCmd(DEFAULT_IMAGE)).thenReturn(inspectCmd);
-        InspectImageResponse image = mock(InspectImageResponse.class);
-        when(image.getOs()).thenReturn("linux");
-        when(image.getArch()).thenReturn("amd64");
-        when(image.getConfig()).thenReturn(new ContainerConfig()
-                .withLabels(Map.of(LocallyBuiltHelperImage.RECIPE_LABEL, recipe())));
-        when(inspectCmd.exec()).thenReturn(image);
+        CachedImageStubs.image(dockerClient, DEFAULT_IMAGE, "linux", "amd64", recipe());
 
         LocallyBuiltHelperImage.ensureBuilt(dockerClient, containerBuilder,
                 DEFAULT_IMAGE, DEFAULT_IMAGE, DOCKERFILE);
@@ -97,14 +87,8 @@ class LocallyBuiltHelperImageTest {
     @CsvSource({"missing", "old-recipe"})
     void replacesNativeHelperFromAnOlderRecipe(String previous) {
         stubResolvedImage();
-        InspectImageResponse image = mock(InspectImageResponse.class);
-        when(image.getOs()).thenReturn("linux");
-        when(image.getArch()).thenReturn("amd64");
-        when(image.getConfig()).thenReturn(new ContainerConfig().withLabels("missing".equals(previous)
-                ? Map.of() : Map.of(LocallyBuiltHelperImage.RECIPE_LABEL, previous)));
-        InspectImageCmd inspect = mock(InspectImageCmd.class);
-        when(inspect.exec()).thenReturn(image);
-        when(dockerClient.inspectImageCmd(DEFAULT_IMAGE)).thenReturn(inspect);
+        CachedImageStubs.image(dockerClient, DEFAULT_IMAGE, "linux", "amd64",
+                "missing".equals(previous) ? null : previous);
         BuildImageCmd build = stubBuildReturning("sha256:rebuilt");
 
         LocallyBuiltHelperImage.ensureBuilt(dockerClient, containerBuilder,
@@ -118,14 +102,7 @@ class LocallyBuiltHelperImageTest {
     void replacesForeignCachedHelperWithTheDaemonPlatform(String host, String cached, String expected) throws Exception {
         daemon.withArchitecture(host);
         stubResolvedImage();
-        InspectImageResponse image = mock(InspectImageResponse.class);
-        when(image.getOs()).thenReturn("linux");
-        when(image.getArch()).thenReturn(cached);
-        when(image.getConfig()).thenReturn(new ContainerConfig()
-                .withLabels(Map.of(LocallyBuiltHelperImage.RECIPE_LABEL, recipe())));
-        InspectImageCmd inspect = mock(InspectImageCmd.class);
-        when(inspect.exec()).thenReturn(image);
-        when(dockerClient.inspectImageCmd(DEFAULT_IMAGE)).thenReturn(inspect);
+        CachedImageStubs.image(dockerClient, DEFAULT_IMAGE, "linux", cached, recipe());
         BuildImageCmd build = stubBuildReturning("sha256:rebuilt");
 
         LocallyBuiltHelperImage.ensureBuilt(dockerClient, containerBuilder,
@@ -162,10 +139,8 @@ class LocallyBuiltHelperImageTest {
         when(containerBuilder.resolveImage(DEFAULT_IMAGE)).thenReturn(DEFAULT_IMAGE);
     }
 
-    private static String recipe() throws Exception {
-        try (InputStream dockerfile = LocallyBuiltHelperImageTest.class.getResourceAsStream(DOCKERFILE)) {
-            return Digests.sha256Hex(dockerfile.readAllBytes());
-        }
+    private static String recipe() {
+        return CachedImageStubs.recipe(DOCKERFILE);
     }
 
     private void stubMissingImage() {
