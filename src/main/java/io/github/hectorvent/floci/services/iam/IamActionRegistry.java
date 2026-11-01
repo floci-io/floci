@@ -16,7 +16,11 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
+import org.jboss.resteasy.reactive.server.core.ResteasyReactiveRequestContext;
+import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestContext;
 
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
@@ -581,7 +585,7 @@ public class IamActionRegistry {
             return false;
         }
         String method = ctx.getMethod().toUpperCase();
-        String path = rawPath(ctx.getUriInfo());
+        String path = sentPath(ctx.getUriInfo());
         for (ActionRule rule : RULES) {
             if (rule.beforeS3QueryOverrides() && rule.matches(credentialScope, method, path, ctx)) {
                 return true;
@@ -665,7 +669,7 @@ public class IamActionRegistry {
         String method = ctx.getMethod().toUpperCase();
         // An S3 key may end in a slash, PUT /bucket// writes the key "/", and S3's rules already take a
         // bucket's one trailing slash, so an S3 path is matched as sent.
-        String path = "s3".equals(credentialScope) ? rawPath(ctx.getUriInfo()) : routedPath(ctx.getUriInfo());
+        String path = "s3".equals(credentialScope) ? sentPath(ctx.getUriInfo()) : routedPath(ctx);
 
         if ("s3".equals(credentialScope)) {
             // An S3 Control route is matched before the query overrides below, which would read the
@@ -698,15 +702,50 @@ public class IamActionRegistry {
     }
 
     /**
+     * The path the router matched, relative to the application root. A request no filter rewrote is matched
+     * on its normalized path, still percent-encoded but with encoded unreserved characters such as {@code %2E}
+     * decoded and dot segments removed, so {@code /functions/x/%2E%2E/fn} is {@code /functions/fn}; a request
+     * a filter rewrote is matched on its new path, decoded. {@link #sentPath} for a synthetic context.
+     */
+    static String rawPath(ContainerRequestContext ctx) {
+        ResteasyReactiveRequestContext request = routingContext(ctx);
+        return request == null ? sentPath(ctx.getUriInfo()) : rooted(request.getPathWithoutPrefix());
+    }
+
+    /**
      * The request path relative to the application root, as {@link UriInfo#getPath()} gives it, but
      * still percent-encoded.
      */
-    static String rawPath(UriInfo uriInfo) {
+    static String sentPath(UriInfo uriInfo) {
         String path = uriInfo.getRequestUri().getRawPath();
         String base = uriInfo.getBaseUri().getRawPath();
         if (base != null && base.length() > 1 && path.startsWith(base)) {
             path = path.substring(base.length() - 1);
         }
+        return rooted(path);
+    }
+
+    /**
+     * {@link #rawPath} decoded: the path {@link UriInfo#getPath()} would give for the route the router
+     * matched. {@link UriInfo#getPath()} itself for a synthetic context.
+     */
+    public static String decodedPath(ContainerRequestContext ctx) {
+        ResteasyReactiveRequestContext request = routingContext(ctx);
+        if (request == null) {
+            return ctx.getUriInfo().getPath();
+        }
+        String path = request.getPathWithoutPrefix();
+        boolean rewritten = !request.getPath().equals(request.serverRequest().getRequestNormalisedPath());
+        return rooted(rewritten ? path : URLDecoder.decode(path.replace("+", "%2B"), StandardCharsets.UTF_8));
+    }
+
+    private static ResteasyReactiveRequestContext routingContext(ContainerRequestContext ctx) {
+        return ctx instanceof ResteasyReactiveContainerRequestContext container
+                && container.getServerRequestContext() instanceof ResteasyReactiveRequestContext request
+                ? request : null;
+    }
+
+    private static String rooted(String path) {
         return path.startsWith("/") ? path : "/" + path;
     }
 
@@ -715,8 +754,8 @@ public class IamActionRegistry {
      * so a rule ending at the route's last segment has to match it too, or the request would pass as an
      * unknown action.
      */
-    static String routedPath(UriInfo uriInfo) {
-        String path = rawPath(uriInfo);
+    static String routedPath(ContainerRequestContext ctx) {
+        String path = rawPath(ctx);
         while (path.length() > 1 && path.endsWith("/")) {
             path = path.substring(0, path.length() - 1);
         }

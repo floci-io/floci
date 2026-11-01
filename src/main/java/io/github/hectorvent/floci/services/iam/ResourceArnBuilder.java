@@ -187,7 +187,8 @@ public class ResourceArnBuilder {
         if (credentialScope == null) {
             return List.of("*");
         }
-        String path = ctx.getUriInfo().getPath();
+        String path = "s3".equals(credentialScope) ? ctx.getUriInfo().getPath()
+                : IamActionRegistry.decodedPath(ctx);
         return switch (credentialScope) {
             case "s3"             -> buildS3Resources(operation, path, region);
             case "lambda"         -> List.of(buildLambdaArn(path, ctx, region, accountId));
@@ -253,7 +254,7 @@ public class ResourceArnBuilder {
         if (body == null) {
             return "*";
         }
-        String path = ctx.getUriInfo().getPath();
+        String path = IamActionRegistry.decodedPath(ctx);
         boolean create = path.endsWith("/groups") || path.endsWith("/groups/");
         String group = create ? body.path("Name").asText()
                 : body.path("Group").asText(body.path("GroupName").asText());
@@ -1019,7 +1020,7 @@ public class ResourceArnBuilder {
         if (!path.startsWith(layers)) {
             return null;
         }
-        String raw = IamActionRegistry.rawPath(ctx.getUriInfo());
+        String raw = IamActionRegistry.rawPath(ctx);
         if (!raw.startsWith(layers)) {
             return "*";
         }
@@ -1234,7 +1235,7 @@ public class ResourceArnBuilder {
      * stays escaped, so a segment cannot pass for more than one.
      */
     private static String buildApiGatewayArn(ContainerRequestContext ctx, String region, String partition) {
-        String[] raw = IamActionRegistry.routedPath(ctx.getUriInfo()).split("/", -1);
+        String[] raw = IamActionRegistry.routedPath(ctx).split("/", -1);
         List<String> segments = new ArrayList<>();
         for (int i = 1; i < raw.length; i++) {
             String segment = pathSegment(raw[i]);
@@ -1286,7 +1287,7 @@ public class ResourceArnBuilder {
             return slash < 0 || slash == tagged.length() - 1 ? "*"
                     : eksClusterArn(tagged.substring(slash + 1), region, accountId);
         }
-        String[] segments = IamActionRegistry.routedPath(ctx.getUriInfo()).substring(1).split("/", -1);
+        String[] segments = IamActionRegistry.routedPath(ctx).substring(1).split("/", -1);
         if (segments.length == 1) {
             JsonNode body = "clusters".equals(segments[0]) && "POST".equalsIgnoreCase(ctx.getMethod())
                     ? readJsonBody(ctx) : null;
@@ -1380,7 +1381,7 @@ public class ResourceArnBuilder {
      * names none.
      */
     public String taggedArn(ContainerRequestContext ctx) {
-        String path = ctx.getUriInfo().getPath();
+        String path = IamActionRegistry.decodedPath(ctx);
         for (String route : List.of("/tags", "/v1/tags")) {
             if (path.startsWith(route + "/")) {
                 return path.substring(route.length() + 1);
