@@ -238,7 +238,7 @@ botocore-bump: ## Bump the botocore pin to VERSION, move local/aws/botocore to t
 	@test -d local/aws/botocore/.git || { echo "error: local/aws/botocore is not checked out"; exit 1; }
 	@test -z "$$(git -C local/aws/botocore status --porcelain)" || { echo "error: local/aws/botocore has local changes"; exit 1; }
 	git -C local/aws/botocore fetch --depth 1 --no-tags origin "refs/tags/$(VERSION)"
-	git -C local/aws/botocore reset --hard --quiet FETCH_HEAD
+	git -C local/aws/botocore switch --detach --quiet FETCH_HEAD
 	@grep -q "__version__ = '$(VERSION)'" local/aws/botocore/botocore/__init__.py || { \
 		echo "error: local/aws/botocore at refs/tags/$(VERSION) does not report version $(VERSION)"; exit 1; }
 	sed -i.bak 's/^botocore==.*/botocore==$(VERSION)/' tools/aws/requirements.txt && rm tools/aws/requirements.txt.bak
