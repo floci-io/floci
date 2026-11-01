@@ -192,6 +192,7 @@ public class SchedulerService {
 
     public PaginatedResult<ScheduleGroup> listScheduleGroups(String namePrefix, Integer maxResults,
                                                              String nextToken, String region) {
+        requireNonEmptyToken(nextToken);
         return Pagination.paginate(listScheduleGroups(namePrefix, region), ScheduleGroup::getName,
                 maxResults, nextToken, MAX_PAGE_SIZE, MAX_PAGE_SIZE, MAX_TOKEN_LENGTH,
                 "ValidationException", pageNamespace("ListScheduleGroups", region));
@@ -338,10 +339,18 @@ public class SchedulerService {
 
     public PaginatedResult<Schedule> listSchedules(String groupName, String namePrefix, String state,
                                                    Integer maxResults, String nextToken, String region) {
+        requireNonEmptyToken(nextToken);
         return Pagination.paginate(listSchedules(groupName, namePrefix, state, region),
                 schedule -> schedule.getGroupName() + ":" + schedule.getName(),
                 maxResults, nextToken, MAX_PAGE_SIZE, MAX_PAGE_SIZE, MAX_TOKEN_LENGTH,
                 "ValidationException", pageNamespace("ListSchedules", region));
+    }
+
+    private static void requireNonEmptyToken(String nextToken) {
+        if (nextToken != null && nextToken.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "Pagination token must be between 1 and " + MAX_TOKEN_LENGTH + " characters.", 400);
+        }
     }
 
     private String pageNamespace(String operation, String region) {

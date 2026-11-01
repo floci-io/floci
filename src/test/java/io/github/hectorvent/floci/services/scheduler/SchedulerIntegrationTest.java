@@ -1260,10 +1260,12 @@ class SchedulerIntegrationTest {
                         .then().statusCode(400)
                         .body("__type", containsString("ValidationException"));
             }
-            given().queryParam("NextToken", "bogus-token")
-                    .when().get(path)
-                    .then().statusCode(400)
-                    .body("__type", containsString("ValidationException"));
+            for (String nextToken : List.of("bogus-token", "")) {
+                given().queryParam("NextToken", nextToken)
+                        .when().get(path)
+                        .then().statusCode(400)
+                        .body("__type", containsString("ValidationException"));
+            }
         }
     }
 }

@@ -805,6 +805,14 @@ class SchedulerServiceTest {
         AwsException foreign = assertThrows(AwsException.class, () ->
                 service.listSchedules(null, null, null, 1, groupToken, REGION));
         assertEquals("ValidationException", foreign.getErrorCode());
+        AwsException emptyGroups = assertThrows(AwsException.class, () ->
+                service.listScheduleGroups(null, 1, "", REGION));
+        assertEquals("ValidationException", emptyGroups.getErrorCode());
+        assertEquals(400, emptyGroups.getHttpStatus());
+        AwsException emptySchedules = assertThrows(AwsException.class, () ->
+                service.listSchedules(null, null, null, 1, "", REGION));
+        assertEquals("ValidationException", emptySchedules.getErrorCode());
+        assertEquals(400, emptySchedules.getHttpStatus());
     }
 
     @Test

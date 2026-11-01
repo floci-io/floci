@@ -35,6 +35,7 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
 import java.time.Instant;
 import java.util.HashMap;
@@ -113,10 +114,10 @@ public class SchedulerController {
     public Response listScheduleGroups(@Context HttpHeaders headers,
                                        @QueryParam("NamePrefix") String namePrefix,
                                        @QueryParam("MaxResults") String maxResults,
-                                       @QueryParam("NextToken") String nextToken) {
+                                       @Context UriInfo uriInfo) {
         String region = regionResolver.resolveRegion(headers);
         PaginatedResult<ScheduleGroup> page = schedulerService.listScheduleGroups(namePrefix,
-                Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken, region);
+                Pagination.parseMaxResults(maxResults, "ValidationException"), rawNextToken(uriInfo), region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("ScheduleGroups");
         for (ScheduleGroup group : page.items()) {
@@ -207,10 +208,10 @@ public class SchedulerController {
                                   @QueryParam("NamePrefix") String namePrefix,
                                   @QueryParam("State") String state,
                                   @QueryParam("MaxResults") String maxResults,
-                                  @QueryParam("NextToken") String nextToken) {
+                                  @Context UriInfo uriInfo) {
         String region = regionResolver.resolveRegion(headers);
         PaginatedResult<Schedule> page = schedulerService.listSchedules(groupName, namePrefix, state,
-                Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken, region);
+                Pagination.parseMaxResults(maxResults, "ValidationException"), rawNextToken(uriInfo), region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("Schedules");
         for (Schedule schedule : page.items()) {
@@ -223,6 +224,20 @@ public class SchedulerController {
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
+
+    /**
+     * Reads {@code NextToken} from the raw query so an explicit empty value stays {@code ""}:
+     * a {@code @QueryParam} binding reports it as absent, which would serve the first page
+     * instead of the ValidationException the modeled minimum length of 1 calls for.
+     */
+    private static String rawNextToken(UriInfo uriInfo) {
+        List<String> values = uriInfo.getQueryParameters().get("NextToken");
+        if (values == null || values.isEmpty()) {
+            return null;
+        }
+        String value = values.getFirst();
+        return value == null ? "" : value;
+    }
 
     private Map<String, Object> buildGroupResponse(ScheduleGroup group) {
         Map<String, Object> response = new HashMap<>();
