@@ -105,6 +105,30 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aCustomJarStepGetsItsPropertiesAndItsClustersCoreSiteAndSparkLog4j2() {
+        EmrStep report = sparkStep("report", "CONTINUE");
+        report.setJar("s3://bucket/jobs/report.jar");
+        report.setMainClass("com.example.Report");
+        report.setArgs(List.of("2026-11-01"));
+        report.setProperties(Map.of("report.title", "Nightly"));
+        EmrCluster requested = cluster("configured", true, report);
+        requested.setConfigurations("""
+                [{"Classification": "core-site", "Properties": {"fs.s3a.connection.maximum": "50"}},
+                 {"Classification": "spark-log4j2", "Properties": {"rootLogger.level": "warn"}}]""");
+        service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(List.of("--class", "com.example.Report", "s3://bucket/jobs/report.jar", "2026-11-01"),
+                job.application());
+        assertEquals(Map.of("SPARK_SUBMIT_OPTS", "'-Dreport.title=Nightly'"), job.environment());
+        assertEquals(Map.of("spark.hadoop.fs.s3a.connection.maximum", "50"), job.sparkDefaults());
+        assertEquals(Map.of("fs.s3a.connection.maximum", "50"), job.coreSite());
+        assertEquals(Map.of("rootLogger.level", "warn"), job.sparkLog4j2());
+    }
+
+    @Test
     void aStepsLogsGoUnderItsClustersLogUri() {
         EmrCluster requested = cluster("logged", true, sparkStep("report", "CONTINUE"));
         // The DescribeCluster example in the Management Guide has a LogUri in the s3n:// scheme.

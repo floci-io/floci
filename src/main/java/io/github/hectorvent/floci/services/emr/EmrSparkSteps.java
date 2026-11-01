@@ -47,8 +47,14 @@ final class EmrSparkSteps {
     private static final String SPARK_ENV = "spark-env";
     private static final String EXPORT = "export";
     private static final String SPARK_HIVE_SITE = "spark-hive-site";
-    // Spark puts a spark.hadoop. setting in the Hadoop configuration its Hive client reads, ahead of hive-site.xml.
+    // The release pages' core-site, which will "Change values in Hadoop's core-site.xml file", and spark-log4j2,
+    // which will "Change values in Spark's log4j2.properties file".
+    private static final String CORE_SITE = "core-site";
+    private static final String SPARK_LOG4J2 = "spark-log4j2";
+    // Spark puts a spark.hadoop. setting in its Hadoop configuration, ahead of core-site.xml and hive-site.xml.
     private static final String SPARK_HADOOP_PREFIX = "spark.hadoop.";
+    // spark-submit gives the JVM it runs an application's main class in the Java options of this variable.
+    private static final String SPARK_SUBMIT_OPTS = "SPARK_SUBMIT_OPTS";
     // The Release Guide's command-runner.jar tools that the EMR Serverless image does not have; its hadoop
     // has no MapReduce to run streaming or the LZO indexer.
     private static final Set<String> UNAVAILABLE_TOOLS = Set.of("hive-script", "pig-script", "hadoop-streaming",
@@ -151,22 +157,49 @@ final class EmrSparkSteps {
 
     /**
      * The Spark properties of a cluster's {@code Configurations}, the JSON array {@code RunJobFlow} was given,
-     * that a step's {@code spark-submit} gets as defaults: {@code spark-defaults}'s, and {@code spark-hive-site}'s
-     * as {@code spark.hadoop.} settings, which Spark's Hive client reads as it would {@code hive-site.xml}. A
-     * {@code spark.hadoop.} setting in {@code spark-defaults} wins over the same one in {@code spark-hive-site},
-     * as it would over {@code hive-site.xml}.
+     * that a step's {@code spark-submit} gets as defaults: {@code spark-defaults}'s, and {@code core-site}'s and
+     * {@code spark-hive-site}'s as {@code spark.hadoop.} settings, which Spark's Hadoop configuration, and its
+     * Hive client's, take as they would {@code core-site.xml} and {@code hive-site.xml}. A setting in
+     * {@code spark-hive-site} wins over the same one in {@code core-site}, as {@code hive-site.xml} does, and a
+     * {@code spark.hadoop.} setting in {@code spark-defaults} over both.
      */
     static Map<String, String> sparkDefaults(String configurations, ObjectMapper objectMapper) {
         Map<String, String> properties = new LinkedHashMap<>();
-        for (JsonNode configuration : classified(configurations, objectMapper, SPARK_HIVE_SITE)) {
-            configuration.path("Properties").properties().forEach(property ->
-                    properties.put(SPARK_HADOOP_PREFIX + property.getKey(), property.getValue().asText()));
-        }
-        for (JsonNode configuration : classified(configurations, objectMapper, SPARK_DEFAULTS)) {
-            configuration.path("Properties").properties()
-                    .forEach(property -> properties.put(property.getKey(), property.getValue().asText()));
-        }
+        coreSite(configurations, objectMapper)
+                .forEach((key, value) -> properties.put(SPARK_HADOOP_PREFIX + key, value));
+        properties(configurations, objectMapper, SPARK_HIVE_SITE)
+                .forEach((key, value) -> properties.put(SPARK_HADOOP_PREFIX + key, value));
+        properties.putAll(properties(configurations, objectMapper, SPARK_DEFAULTS));
         return properties;
+    }
+
+    /** The properties of a cluster's {@code core-site}, which its steps' {@code hadoop} command gets too. */
+    static Map<String, String> coreSite(String configurations, ObjectMapper objectMapper) {
+        return properties(configurations, objectMapper, CORE_SITE);
+    }
+
+    /** The properties of a cluster's {@code spark-log4j2}, which its steps' Spark gets in its log4j2.properties. */
+    static Map<String, String> sparkLog4j2(String configurations, ObjectMapper objectMapper) {
+        return properties(configurations, objectMapper, SPARK_LOG4J2);
+    }
+
+    /**
+     * The environment variables a step's container gets: its cluster's {@code spark-env} exports and, for a
+     * custom JAR step, its {@code Properties}, "Java properties that are set when the step runs. You can use
+     * these properties to pass key-value pairs to your main function", as system properties of the JVM its main
+     * class runs in, after any Java options the cluster exports to {@code spark-submit}, so that a step's own
+     * win. A {@code command-runner.jar} or {@code script-runner.jar} step's would be those of its runner's JVM,
+     * which Floci has none of, so they go nowhere.
+     */
+    static Map<String, String> environment(EmrStep step, String configurations, ObjectMapper objectMapper) {
+        Map<String, String> variables = sparkEnvironment(configurations, objectMapper);
+        String jar = step.getJar();
+        if (step.getProperties() != null && !step.getProperties().isEmpty() && jar != null && !jar.isBlank()
+                && !named(jar, COMMAND_RUNNER) && !named(jar, SCRIPT_RUNNER)) {
+            variables.merge(SPARK_SUBMIT_OPTS, javaOptions(step.getProperties()),
+                    (exported, own) -> exported + " " + own);
+        }
+        return variables;
     }
 
     /**
@@ -184,6 +217,25 @@ final class EmrSparkSteps {
             }
         }
         return variables;
+    }
+
+    // The properties of one classification in a cluster's Configurations, a later configuration's winning.
+    private static Map<String, String> properties(String configurations, ObjectMapper objectMapper,
+                                                  String classification) {
+        Map<String, String> properties = new LinkedHashMap<>();
+        for (JsonNode configuration : classified(configurations, objectMapper, classification)) {
+            configuration.path("Properties").properties()
+                    .forEach(property -> properties.put(property.getKey(), property.getValue().asText()));
+        }
+        return properties;
+    }
+
+    // Each property as a -D option, in single quotes, which spark-submit's launcher reads as a shell would,
+    // keeping what they hold, a quote itself written '\''.
+    private static String javaOptions(Map<String, String> properties) {
+        List<String> options = new ArrayList<>();
+        properties.forEach((key, value) -> options.add("'" + ("-D" + key + "=" + value).replace("'", "'\\''") + "'"));
+        return String.join(" ", options);
     }
 
     // The configurations of one classification in a cluster's Configurations, in their order.

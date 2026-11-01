@@ -65,13 +65,18 @@ public interface SparkJobRunner {
      * its container gets besides Floci's own, which they replace where a name is the same (empty for none);
      * its {@code spark.archives}, each a path with, after a {@code #}, the directory it is unpacked to, of
      * which those in S3 are unpacked into the container's working directory before the driver starts (empty
-     * for none); and the storage of the cluster it runs on (null for none, as for an EMR Serverless run).
+     * for none); the storage of the cluster it runs on (null for none, as for an EMR Serverless run); the
+     * {@code core-site.xml} properties its {@code hadoop} command gets, on a cluster, after those of the
+     * cluster's storage, which they replace where a name is the same (empty for none); and the
+     * {@code log4j2.properties} lines its Spark gets after those of its configuration, which they replace where
+     * a key is the same (empty for none).
      */
     record Job(String service, String runId, String accountId, String region, String releaseLabel,
                String imageTemplate, String customImage, String dockerNetwork, String executionRole,
                Map<String, String> sparkDefaults, List<String> application, List<String> command, Duration timeout,
                String logFolder, CloudWatchLogs cloudWatchLogs, Map<String, String> environment,
-               List<String> archives, Storage storage) {
+               List<String> archives, Storage storage, Map<String, String> coreSite,
+               Map<String, String> sparkLog4j2) {
     }
 
     /**

@@ -28,6 +28,7 @@ import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
+import org.mockito.ArgumentMatcher;
 import org.mockito.InOrder;
 
 import java.io.ByteArrayInputStream;
@@ -455,6 +456,117 @@ class EmrServerlessSparkRunnerTest {
                         + " \"$include\" \"$FLOCI_HADOOP_SITE\" '</configuration>' > \"$hadoop_conf/core-site.xml\"")
                 && entrypoint.get(2).contains(
                         "export HADOOP_CONF_DIR=\"$hadoop_conf\" PATH=\"/tmp/floci-bin:$PATH\"")));
+    }
+
+    @Test
+    void aStepsHadoopCommandGetsItsClustersCoreSiteAfterItsHdfsEscapedForXml() {
+        Map<String, String> coreSite = new LinkedHashMap<>();
+        coreSite.put("fs.permissions.umask-mode", "077");
+        coreSite.put("floci.note", "a<b & \"c\" 'd'");
+
+        // A later property wins over an earlier one in the same file.
+        assertEquals(String.join("\n",
+                "<property><name>fs.defaultFS</name><value>hdfs:///</value></property>",
+                "<property><name>fs.hdfs.impl</name><value>org.apache.hadoop.fs.viewfs.ViewFileSystemOverloadScheme"
+                        + "</value></property>",
+                "<property><name>fs.viewfs.mounttable.default.linkFallback</name><value>file:///mnt/hdfs</value>"
+                        + "</property>",
+                "<property><name>fs.permissions.umask-mode</name><value>077</value></property>",
+                "<property><name>floci.note</name><value>a&lt;b &amp; &quot;c&quot; &apos;d&apos;</value></property>"),
+                EmrServerlessSparkRunner.hadoopSite(
+                        clusterJob(List.of("hadoop", "fs", "-ls", "/"), coreSite, Map.of())));
+    }
+
+    @Test
+    void aSparkStepWithLog4j2LinesRunsSparkSubmitOnAConfigurationOfItsOwnThatEndsWithThem() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        Map<String, String> sparkLog4j2 = new LinkedHashMap<>();
+        sparkLog4j2.put("rootLogger.level", "warn");
+        sparkLog4j2.put("logger.app.name", "com.example.app");
+
+        runner(builder).run(clusterJob(null, Map.of(), sparkLog4j2), progress);
+
+        verify(spec).withEnv("FLOCI_SPARK_LOG4J2", "rootLogger.level = warn\nlogger.app.name = com.example.app");
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.size() == 5
+                && entrypoint.subList(0, 2).equals(List.of("/bin/bash", "-c"))
+                && entrypoint.get(2).startsWith(String.join("\n",
+                        "conf=/tmp/floci-spark-conf",
+                        "mkdir -p \"$conf\"",
+                        "cp -rL \"${SPARK_CONF_DIR:-/usr/lib/spark/conf}/.\" \"$conf\" 2>/dev/null",
+                        "if [ -n \"${FLOCI_SPARK_LOG4J2:-}\" ]; then",
+                        "  printf '\\n%s\\n' \"$FLOCI_SPARK_LOG4J2\" >> \"$conf/log4j2.properties\"",
+                        "fi",
+                        "export SPARK_CONF_DIR=\"$conf\"",
+                        "exec \"$@\""))
+                && entrypoint.subList(3, 5).equals(List.of("floci", "/usr/lib/spark/bin/spark-submit"))));
+        ArgumentMatcher<List<String>> theStepsApplication =
+                arguments -> arguments.getLast().equals("s3://bucket/jobs/report.py");
+        verify(spec).withCmd(argThat(theStepsApplication));
+    }
+
+    @Test
+    void aStepsSparkConfigurationIsACopyOfTheFolderASparkEnvExportNamesElseTheImages() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        String copy = "\ncp -rL \"${SPARK_CONF_DIR:-/usr/lib/spark/conf}/.\" \"$conf\" 2>/dev/null\n";
+
+        runner(builder).run(clusterJob(null, Map.of(), Map.of("rootLogger.level", "warn")), progress);
+        runner(builder).run(clusterJob(List.of("spark-submit", "s3://bucket/jobs/report.py"), Map.of(), Map.of()),
+                progress);
+
+        // A Spark step's wrapper, then a command's, links followed as a folder a bootstrap action wrote may hold them.
+        verify(spec, times(2)).withEntrypoint(argThat(entrypoint -> entrypoint.size() > 2
+                && entrypoint.get(2).contains(copy)));
+    }
+
+    @Test
+    void aCommandsSparkGetsTheJobsLog4j2LinesToo() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(clusterJob(List.of("spark-submit", "s3://bucket/jobs/report.py"), Map.of(),
+                Map.of("rootLogger.level", "error")), progress);
+
+        verify(spec).withEnv("FLOCI_SPARK_LOG4J2", "rootLogger.level = error");
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "  printf '\\n%s\\n' \"$FLOCI_SPARK_LOG4J2\" >> \"$conf/log4j2.properties\"\n")
+                && entrypoint.get(2).contains(
+                        "printf '\\n%s\\n' \"$FLOCI_SPARK_DEFAULTS\" >> \"$conf/spark-defaults.conf\"")
+                && entrypoint.get(2).endsWith("exec \"$@\"")));
+    }
+
+    @Test
+    void aStepWithoutLog4j2LinesRunsSparkSubmitAsItIs() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(stepJob(Map.of()), progress);
+
+        verify(spec).withEntrypoint(List.of("/usr/lib/spark/bin/spark-submit"));
+        verify(spec, never()).withEnv(eq("FLOCI_SPARK_LOG4J2"), anyString());
+    }
+
+    @Test
+    void log4j2LinesReachLog4jAsTheClusterGaveThem() throws IOException {
+        Map<String, String> sparkLog4j2 = new LinkedHashMap<>();
+        sparkLog4j2.put("appender.file.fileName", "C:\\logs\\spark.log");
+        sparkLog4j2.put("odd key=with:separators", "#not a comment\nnor a second line");
+        sparkLog4j2.put("appender.console.layout.pattern", "  %m%n");
+
+        // Log4j's PropertiesConfigurationFactory loads log4j2.properties with Properties.load.
+        Properties loaded = new Properties();
+        loaded.load(new StringReader(
+                EmrServerlessSparkRunner.sparkLog4j2File(clusterJob(null, Map.of(), sparkLog4j2))));
+
+        assertEquals("C:\\logs\\spark.log", loaded.getProperty("appender.file.fileName"));
+        assertEquals("#not a comment\nnor a second line", loaded.getProperty("odd key=with:separators"));
+        // Properties.load skips the spaces after the separator, so a value's own leading ones are escaped.
+        assertEquals("  %m%n", loaded.getProperty("appender.console.layout.pattern"));
     }
 
     @Test
@@ -896,19 +1008,21 @@ class EmrServerlessSparkRunnerTest {
                                           SparkJobRunner.CloudWatchLogs cloudWatchLogs) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 imageTemplate, null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults,
-                application, null, timeout, logFolder, cloudWatchLogs, Map.of(), List.of(), null);
+                application, null, timeout, logFolder, cloudWatchLogs, Map.of(), List.of(), null, Map.of(), Map.of());
     }
 
     private static SparkJobRunner.Job customImageJob(String customImage) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 null, customImage, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
-                List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), List.of(), null);
+                List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), List.of(), null,
+                Map.of(), Map.of());
     }
 
     private static SparkJobRunner.Job archiveJob(List<String> archives) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 null, null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
-                List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), archives, null);
+                List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), archives, null,
+                Map.of(), Map.of());
     }
 
     private static SparkJobRunner.Job commandJob(List<String> command, Map<String, String> sparkDefaults) {
@@ -920,13 +1034,23 @@ class EmrServerlessSparkRunnerTest {
         return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults, List.of(), command,
                 Duration.ZERO, null, null, Map.of("PYSPARK_PYTHON", "/usr/bin/python3.11"), List.of(),
-                storage);
+                storage, Map.of(), Map.of());
+    }
+
+    // A step on a cluster with core-site and spark-log4j2 properties: a command, or a Spark step for a null one.
+    private static SparkJobRunner.Job clusterJob(List<String> command, Map<String, String> coreSite,
+                                                 Map<String, String> sparkLog4j2) {
+        return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
+                null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
+                command == null ? List.of("s3://bucket/jobs/report.py") : List.of(), command, Duration.ZERO, null,
+                null, Map.of(), List.of(), STORAGE, coreSite, sparkLog4j2);
     }
 
     // A Spark step on a cluster, which has storage.
     private static SparkJobRunner.Job stepJob(Map<String, String> sparkDefaults) {
         return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults,
-                List.of("s3://bucket/jobs/report.py"), null, Duration.ZERO, null, null, Map.of(), List.of(), STORAGE);
+                List.of("s3://bucket/jobs/report.py"), null, Duration.ZERO, null, null, Map.of(), List.of(), STORAGE,
+                Map.of(), Map.of());
     }
 }

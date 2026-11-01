@@ -129,9 +129,10 @@ but for its bootstrap actions and its storage.
   run with the step's other arguments; a path not in S3 is run as it is, a bare name from `/home/hadoop`
   when a file there has it, one a former step left there included. `hadoop fs` and `hdfs dfs` reach the
   cluster's HDFS (see **Storage**). A `spark-submit` they start runs in local mode on Floci's S3 with the
-  cluster's `spark-defaults` and `spark-hive-site`, which Floci puts in a Spark configuration of its own,
-  ahead of the image's EMR Serverless master; its own `--master yarn` or `--deploy-mode cluster` fails, as
-  there is no YARN.
+  cluster's `spark-defaults`, `core-site`, `spark-hive-site` and `spark-log4j2`, which Floci puts in a Spark
+  configuration of its own, a copy of the folder a `spark-env` export of `SPARK_CONF_DIR` names, else of the
+  image's, ahead of the image's EMR Serverless master; its own `--master yarn` or `--deploy-mode cluster`
+  fails, as there is no YARN.
 * **Storage**: a cluster's primary node keeps its disks while the cluster lives, and so does Floci: each
   step's container mounts the cluster's two Docker volumes, one at `/home/hadoop` and one at `/mnt`, so what
   a step leaves there is there for the steps after it, and for steps running at the same time. HDFS, "best
@@ -139,9 +140,10 @@ but for its bootstrap actions and its storage.
   is the `hdfs` folder of `/mnt`. In Spark, `hdfs://` paths, and paths without a scheme ("hdfs:// (or no
   prefix)"), lead there through Hadoop's `ViewFileSystemOverloadScheme`, a relative path under
   `/user/hadoop` as in HDFS, and a structured streaming query keeps its checkpoints through Spark's file
-  system checkpoint manager; the cluster's `spark-defaults` can set any of these otherwise. A command's
-  `hadoop fs` gets the same, through a copy of the image's Hadoop configuration, or of the folder a
-  `spark-env` export of `HADOOP_CONF_DIR` names; the image's `hdfs` command cannot run, so `hdfs dfs` runs
+  system checkpoint manager; the cluster's `spark-defaults` and `core-site` can set any of these otherwise.
+  A command's `hadoop fs` gets the same, through a copy of the image's Hadoop configuration, or of the
+  folder a `spark-env` export of `HADOOP_CONF_DIR` names, with the cluster's `core-site` after it, which
+  wins; the image's `hdfs` command cannot run, so `hdfs dfs` runs
   as `hadoop fs`, and its other commands fail. What the bootstrap actions left in `/home/hadoop` or `/mnt`
   comes with the image the steps run in, and Docker copies it into the
   volumes when the first step starts. The volumes go once the cluster has ended and its last step is done
@@ -234,14 +236,25 @@ but for its bootstrap actions and its storage.
   driver, and start no other step; a driver a hard stop left running is removed when the EMR service
   starts, before any step can start, unless `reconcile-containers-on-startup` is off.
 * **What `spark-submit` gets**: the step's arguments, after the `spark-defaults` properties of the
-  cluster's `Configurations` and its `spark-hive-site` ones as `spark.hadoop.` settings, which Spark's Hive
-  client reads as it would `hive-site.xml`, so the Management Guide's `hive.metastore.client.factory.class`
-  for the Glue Data Catalog applies; a `spark.hadoop.` setting in `spark-defaults` wins over the same one in
-  `spark-hive-site`. `s3://` and `s3a://` paths reach Floci's S3 through S3A, on releases
+  cluster's `Configurations` and its `core-site` and `spark-hive-site` ones as `spark.hadoop.` settings,
+  which Spark's Hadoop configuration, and its Hive client's, take as they would `core-site.xml` and
+  `hive-site.xml`, so the Management Guide's `hive.metastore.client.factory.class` for the Glue Data Catalog
+  applies; a `spark-hive-site` setting wins over the same one in `core-site`, and a `spark.hadoop.` setting
+  in `spark-defaults` over both. `s3://` and `s3a://` paths reach Floci's S3 through S3A, on releases
   before 7.10.0 too, where `s3://` would otherwise be EMRFS, so the application and its files can be read
   from there; the Glue Data Catalog client is pointed at Floci's Glue, and `hdfs://` paths, and those
-  without a scheme, at the cluster's HDFS. A step's `Properties` are not applied, nor are the other
-  classifications (`core-site`, `hadoop-env`, `spark-log4j2` and the rest).
+  without a scheme, at the cluster's HDFS. The cluster's `spark-log4j2` properties, which "Change values in
+  Spark's log4j2.properties file", follow the `log4j2.properties` of the folder a `spark-env` export of
+  `SPARK_CONF_DIR` names, else of the image's, in a copy of the step's own, a later key winning, so
+  `rootLogger.level` set to `warn` quiets Spark's `INFO` lines. Other classifications (`hadoop-env`,
+  `spark-metrics`, `spark-log4j` for releases before 6.8.0 and the rest) are not applied.
+* **A step's `Properties`**: "Java properties that are set when the step runs. You can use these properties
+  to pass key-value pairs to your main function", as the API Reference puts it. A custom JAR step's are
+  system properties of the JVM its main class runs in, which `System.getProperty` reads, passed to
+  `spark-submit` in `SPARK_SUBMIT_OPTS` after any Java options a `spark-env` export puts there, so a step's
+  own win. A `command-runner.jar` or `script-runner.jar` step's would be those of the runner's own JVM,
+  which Floci has none of, and a JVM's system properties do not pass to a process it starts, so they go
+  nowhere. This is Floci's reading, as that sentence is the only source.
 * **`spark-env`**: the variables the cluster's `spark-env` exports, in its nested `export` classification,
   are in each step's container environment, `PYSPARK_PYTHON` or `JAVA_HOME` say, replacing any of Floci's
   own with the same name. They are set as given, with no shell expansion of a `$VARIABLE` in

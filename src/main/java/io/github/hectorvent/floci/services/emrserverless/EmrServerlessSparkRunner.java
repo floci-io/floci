@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.S3Uri;
+import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLaunches;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -67,6 +68,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private static final String SPARK_SUBMIT = "/usr/lib/spark/bin/spark-submit";
     private static final String SPARK_DEFAULTS_VARIABLE = "FLOCI_SPARK_DEFAULTS";
     private static final String HADOOP_SITE_VARIABLE = "FLOCI_HADOOP_SITE";
+    private static final String SPARK_LOG4J2_VARIABLE = "FLOCI_SPARK_LOG4J2";
     // A cluster's HDFS, as Hadoop settings: hdfs:// paths, and those without a scheme ("hdfs:// (or no prefix)"),
     // lead to the HDFS folder of the cluster's /mnt volume, through a view of it under the hdfs scheme, as the
     // image has no HDFS of its own.
@@ -79,29 +81,35 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private static final SparkSetting FILE_SYSTEM_CHECKPOINTS = new SparkSetting(
             "spark.sql.streaming.checkpointFileManagerClass",
             "org.apache.spark.sql.execution.streaming.FileSystemBasedCheckpointFileManager");
-    // HDFS_SETTINGS as core-site.xml properties, for the hadoop command; none needs escaping.
-    private static final String HADOOP_SITE = String.join("\n", HDFS_SETTINGS.stream()
-            .map(setting -> "<property><name>" + setting.key() + "</name><value>" + setting.value()
-                    + "</value></property>")
-            .toList());
+    // A Spark configuration of the container's own: a copy of the folder a spark-env export of SPARK_CONF_DIR names,
+    // else of the image's, links followed, whose log4j2.properties ends with the job's lines, passed in
+    // SPARK_LOG4J2_VARIABLE, a later line winning. What is added to a file starts on a line of its own, as the
+    // image's log4j2.properties has no line break at its end.
+    private static final List<String> SPARK_CONF_COPY = List.of(
+            "conf=/tmp/floci-spark-conf",
+            "mkdir -p \"$conf\"",
+            "cp -rL \"${SPARK_CONF_DIR:-/usr/lib/spark/conf}/.\" \"$conf\" 2>/dev/null",
+            "if [ -n \"${" + SPARK_LOG4J2_VARIABLE + ":-}\" ]; then",
+            "  printf '\\n%s\\n' \"$" + SPARK_LOG4J2_VARIABLE + "\" >> \"$conf/log4j2.properties\"",
+            "fi",
+            "export SPARK_CONF_DIR=\"$conf\"");
+    // A Spark step whose job has log4j2.properties lines runs spark-submit after this.
+    private static final String SPARK_CONF_WRAPPER = String.join("\n", concat(SPARK_CONF_COPY, "exec \"$@\""));
     // A command runs after this sets up a Spark configuration of its own, so a spark-submit it starts runs
     // locally on Floci's S3: the image's spark-defaults.conf names EMR Serverless's resource manager as its
     // master, which a system property cannot override, so its master and that manager's lines give way to
     // local mode, Floci's settings and the job's spark-defaults, passed in SPARK_DEFAULTS_VARIABLE.
-    private static final String COMMAND_WRAPPER = String.join("\n",
-            "conf=/tmp/floci-spark-conf",
-            "mkdir -p \"$conf\"",
-            "cp -r /usr/lib/spark/conf/. \"$conf\" 2>/dev/null",
+    private static final String COMMAND_WRAPPER = String.join("\n", concat(SPARK_CONF_COPY,
             "touch \"$conf/spark-defaults.conf\"",
             "sed -i -e '/^spark\\.master[[:space:]]/d' -e '/^spark\\.submit\\.deployMode[[:space:]]/d'"
                     + " -e '/^spark\\.submit\\.customResourceManager/d' \"$conf/spark-defaults.conf\"",
-            "printf '%s\\n' \"$" + SPARK_DEFAULTS_VARIABLE + "\" >> \"$conf/spark-defaults.conf\"",
-            "export SPARK_CONF_DIR=\"$conf\"",
+            "printf '\\n%s\\n' \"$" + SPARK_DEFAULTS_VARIABLE + "\" >> \"$conf/spark-defaults.conf\"",
             // On a cluster, the hadoop command gets its HDFS too, through a copy of its Hadoop configuration (the
             // image's, or the folder a spark-env export names), links followed, whose core-site.xml takes in the
             // original's through Hadoop's XInclude, whatever its XML, then HADOOP_SITE_VARIABLE's properties, which
-            // win. Its script runs only once its HDFS, MapReduce and YARN homes name folders that are there, and the
-            // image has /usr/lib/hadoop alone. The image's hdfs command cannot run, so hdfs dfs runs as hadoop fs.
+            // win (see hadoopSite). Its script runs only once its HDFS, MapReduce and YARN homes name folders that
+            // are there, and the image has /usr/lib/hadoop alone. The image's hdfs command cannot run, so hdfs dfs
+            // runs as hadoop fs.
             "if [ -n \"${" + HADOOP_SITE_VARIABLE + ":-}\" ]; then",
             "  hadoop_conf=/tmp/floci-hadoop-conf source_conf=\"${HADOOP_CONF_DIR:-/etc/hadoop/conf}\"",
             "  mkdir -p \"$hadoop_conf\" /tmp/floci-bin",
@@ -121,7 +129,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "  export HADOOP_MAPRED_HOME=\"${HADOOP_MAPRED_HOME:-/usr/lib/hadoop}\"",
             "  export HADOOP_YARN_HOME=\"${HADOOP_YARN_HOME:-/usr/lib/hadoop}\"",
             "fi",
-            "exec \"$@\"");
+            "exec \"$@\""));
     // The archives a driver needs in its working directory are put in this folder of its container, each in a
     // numbered folder of its own, which the copy creates.
     private static final String ARCHIVES_FOLDER = "/tmp/floci-archives";
@@ -221,17 +229,22 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                     .withEnv(environment(
                             awsEnv.sdkBaselineEnv(job.region(), Optional.empty(), credentials, job.accountId()),
                             job.environment()));
+            // bash -c's script gets "floci" as its $0, and what runs after it as its arguments, "$@".
             if (job.command() == null) {
-                container.withEntrypoint(unpackingFirst(archives, List.of(SPARK_SUBMIT)))
+                List<String> sparkSubmit = job.sparkLog4j2().isEmpty() ? List.of(SPARK_SUBMIT)
+                        : List.of("/bin/bash", "-c", SPARK_CONF_WRAPPER, "floci", SPARK_SUBMIT);
+                container.withEntrypoint(unpackingFirst(archives, sparkSubmit))
                         .withCmd(sparkSubmitArguments(job, endpoint));
             } else {
-                // bash -c's script gets "floci" as its $0, and the command as its arguments, "$@".
                 container.withEntrypoint(unpackingFirst(archives, List.of("/bin/bash", "-c", COMMAND_WRAPPER, "floci")))
                         .withCmd(job.command())
                         .withEnv(SPARK_DEFAULTS_VARIABLE, sparkDefaultsFile(job, endpoint));
                 if (job.storage() != null) {
-                    container.withEnv(HADOOP_SITE_VARIABLE, HADOOP_SITE);
+                    container.withEnv(HADOOP_SITE_VARIABLE, hadoopSite(job));
                 }
+            }
+            if (!job.sparkLog4j2().isEmpty()) {
+                container.withEnv(SPARK_LOG4J2_VARIABLE, sparkLog4j2File(job));
             }
             if (job.storage() != null) {
                 container.withNamedVolume(job.storage().home(), "/home/hadoop")
@@ -554,10 +567,46 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         return file.toString();
     }
 
+    /**
+     * The {@code core-site.xml} properties a step's {@code hadoop} command gets: its cluster's HDFS, then the
+     * job's {@code core-site}, which wins, as a later property does in one file.
+     */
+    static String hadoopSite(Job job) {
+        List<String> properties = new ArrayList<>();
+        for (SparkSetting setting : HDFS_SETTINGS) {
+            properties.add(siteProperty(setting.key(), setting.value()));
+        }
+        job.coreSite().forEach((name, value) -> properties.add(siteProperty(name, value)));
+        return String.join("\n", properties);
+    }
+
+    /**
+     * The lines a job's Spark gets after those of its configuration's {@code log4j2.properties}, which Log4j
+     * reads as a {@code Properties} file, so each key and value is escaped for it.
+     */
+    static String sparkLog4j2File(Job job) {
+        List<String> lines = new ArrayList<>();
+        job.sparkLog4j2().forEach((key, value) ->
+                lines.add(propertiesEscaped(key, true) + " = " + propertiesEscaped(value, false)));
+        return String.join("\n", lines);
+    }
+
+    private static String siteProperty(String name, String value) {
+        return "<property><name>" + XmlBuilder.escape(name) + "</name><value>" + XmlBuilder.escape(value)
+                + "</value></property>";
+    }
+
+    private static List<String> concat(List<String> lines, String... more) {
+        List<String> all = new ArrayList<>(lines);
+        all.addAll(List.of(more));
+        return all;
+    }
+
     // A backslash starts an escape and a line break ends a setting; in a key, whitespace, '=' and ':' end it,
-    // and a leading '#' or '!' makes the line a comment.
+    // and a leading '#' or '!' makes the line a comment; the spaces a value starts with are skipped.
     private static String propertiesEscaped(String text, boolean key) {
         StringBuilder escaped = new StringBuilder();
+        boolean leading = true;
         for (char c : text.toCharArray()) {
             switch (c) {
                 case '\\' -> escaped.append("\\\\");
@@ -565,9 +614,11 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 case '\r' -> escaped.append("\\r");
                 case '\t' -> escaped.append("\\t");
                 case '\f' -> escaped.append("\\f");
-                case ' ', '=', ':', '#', '!' -> escaped.append(key ? "\\" : "").append(c);
+                case ' ' -> escaped.append(key || leading ? "\\ " : " ");
+                case '=', ':', '#', '!' -> escaped.append(key ? "\\" : "").append(c);
                 default -> escaped.append(c);
             }
+            leading = leading && c == ' ';
         }
         return escaped.toString();
     }

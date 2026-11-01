@@ -10,6 +10,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -181,6 +182,80 @@ class EmrSparkStepsTest {
                 EmrSparkSteps.sparkEnvironment(configurations, objectMapper));
         assertEquals(Map.of(), EmrSparkSteps.sparkEnvironment(null, objectMapper));
         assertEquals(Map.of(), EmrSparkSteps.sparkEnvironment("[{", objectMapper));
+    }
+
+    @Test
+    void coreSitePropertiesReachSparkAsHadoopSettingsThatSparkHiveSiteAndSparkDefaultsOverride() {
+        // The Release Guide's core-site example, with two settings the later classifications set again.
+        String configurations = """
+                [{"Classification": "core-site", "Properties": {"hadoop.security.groups.cache.secs": "250",
+                  "fs.s3a.connection.maximum": "50", "hive.exec.scratchdir": "/tmp/core"}},
+                 {"Classification": "spark-hive-site", "Properties": {"hive.exec.scratchdir": "/tmp/hive"}},
+                 {"Classification": "spark-defaults", "Properties": {
+                  "spark.hadoop.fs.s3a.connection.maximum": "100"}}]
+                """;
+
+        assertEquals(Map.of("spark.hadoop.hadoop.security.groups.cache.secs", "250",
+                        "spark.hadoop.fs.s3a.connection.maximum", "100",
+                        "spark.hadoop.hive.exec.scratchdir", "/tmp/hive"),
+                EmrSparkSteps.sparkDefaults(configurations, objectMapper));
+        // The hadoop command gets core-site's alone, as they are.
+        assertEquals(Map.of("hadoop.security.groups.cache.secs", "250", "fs.s3a.connection.maximum", "50",
+                "hive.exec.scratchdir", "/tmp/core"), EmrSparkSteps.coreSite(configurations, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.coreSite(null, objectMapper));
+    }
+
+    @Test
+    void theClustersSparkLog4j2PropertiesComeFromItsConfigurations() {
+        String configurations = """
+                [{"Classification": "spark-log4j2", "Properties": {"rootLogger.level": "warn",
+                  "logger.app.name": "com.example.app", "logger.app.level": "debug"}},
+                 {"Classification": "spark-defaults", "Properties": {"spark.executor.cores": "2"}}]
+                """;
+
+        assertEquals(Map.of("rootLogger.level", "warn", "logger.app.name", "com.example.app",
+                "logger.app.level", "debug"), EmrSparkSteps.sparkLog4j2(configurations, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.sparkLog4j2(null, objectMapper));
+    }
+
+    @Test
+    void aCustomJarStepsPropertiesAreJavaSystemPropertiesOfTheJvmItsMainClassRunsIn() {
+        EmrStep step = step("s3://bucket/jobs/app.jar", "com.example.Report", "2026-11-01");
+        Map<String, String> properties = new LinkedHashMap<>();
+        properties.put("report.title", "Nightly report");
+        properties.put("report.owner", "it's the data team's");
+        step.setProperties(properties);
+        String configurations = """
+                [{"Classification": "spark-env", "Properties": {}, "Configurations": [
+                   {"Classification": "export", "Properties": {"SPARK_SUBMIT_OPTS": "-Dreport.region=eu",
+                    "PYSPARK_PYTHON": "/usr/bin/python3.11"}}]}]
+                """;
+
+        // After the cluster's own, which they win over as later options; each quoted, a quote written '\''.
+        String own = "'-Dreport.title=Nightly report' '-Dreport.owner=it'\\''s the data team'\\''s'";
+        assertEquals(Map.of("SPARK_SUBMIT_OPTS", "-Dreport.region=eu " + own, "PYSPARK_PYTHON", "/usr/bin/python3.11"),
+                EmrSparkSteps.environment(step, configurations, objectMapper));
+        assertEquals(Map.of("SPARK_SUBMIT_OPTS", own), EmrSparkSteps.environment(step, null, objectMapper));
+    }
+
+    @Test
+    void aRunnersPropertiesAreItsJvmsWhichFlociHasNoneOf() {
+        Map<String, String> properties = Map.of("report.title", "Nightly report");
+        EmrStep sparkSubmit = step("command-runner.jar", null, "spark-submit", "s3://bucket/jobs/report.py");
+        EmrStep script = step("s3://eu-west-1.elasticmapreduce/libs/script-runner/script-runner.jar", null,
+                "s3://bucket/scripts/prepare.sh");
+        sparkSubmit.setProperties(properties);
+        script.setProperties(properties);
+        String configurations = """
+                [{"Classification": "spark-env", "Configurations": [
+                   {"Classification": "export", "Properties": {"PYSPARK_PYTHON": "/usr/bin/python3.11"}}]}]
+                """;
+
+        assertEquals(Map.of("PYSPARK_PYTHON", "/usr/bin/python3.11"),
+                EmrSparkSteps.environment(sparkSubmit, configurations, objectMapper));
+        assertEquals(Map.of("PYSPARK_PYTHON", "/usr/bin/python3.11"),
+                EmrSparkSteps.environment(script, configurations, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.environment(step("s3://bucket/jobs/app.jar", null), null, objectMapper));
     }
 
     private static EmrStep step(String jar, String mainClass, String... args) {

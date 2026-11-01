@@ -1393,8 +1393,9 @@ public class EmrService implements Resettable {
                     EmrSparkSteps.sparkDefaults(cluster.getConfigurations(), SNAPSHOT_MAPPER),
                     application != null ? application : List.of(), command, Duration.ZERO,
                     EmrSparkSteps.logFolder(cluster, step), null,
-                    EmrSparkSteps.sparkEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER), List.of(),
-                    storage);
+                    EmrSparkSteps.environment(step, cluster.getConfigurations(), SNAPSHOT_MAPPER), List.of(),
+                    storage, EmrSparkSteps.coreSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                    EmrSparkSteps.sparkLog4j2(cluster.getConfigurations(), SNAPSHOT_MAPPER));
             StepLaunch launch = new StepLaunch(accountId, region, cluster.getId(), step.getId(), generation);
             executing.add(stepKey(accountId, step.getId()));
             stepExecutor.execute(() -> runStep(job, launch));
