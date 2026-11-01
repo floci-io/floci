@@ -46,6 +46,7 @@ AWS::BedrockAgentCore::RuntimeEndpoint	BedrockAgentCoreCfnProvisioner
 AWS::CDK::Metadata	CdkMetadataCfnProvisioner
 AWS::CertificateManager::Certificate	AcmCfnProvisioner
 AWS::CloudFormation::CustomResource	CustomResourceCfnProvisioner
+AWS::CloudFormation::StackSet	StackSetCfnProvisioner
 AWS::CloudFront::CachePolicy	CloudFrontCfnProvisioner
 AWS::CloudFront::Distribution	CloudFrontCfnProvisioner
 AWS::CloudFront::Function	CloudFrontCfnProvisioner
