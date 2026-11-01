@@ -413,6 +413,11 @@ public class IamActionRegistry {
         rule("eks", "POST",   "^/tags(/.+)?$",                                           "eks:TagResource"),
         rule("eks", "DELETE", "^/tags(/.+)?$",                                           "eks:UntagResource"),
 
+        // ── Bedrock ────────────────────────────────────────────────────────────
+        rule("bedrock", "POST",   "^/resource-policy$",   "bedrock:PutResourcePolicy"),
+        rule("bedrock", "GET",    "^/resource-policy/.+", "bedrock:GetResourcePolicy"),
+        rule("bedrock", "DELETE", "^/resource-policy/.+", "bedrock:DeleteResourcePolicy"),
+
         // ── SES v2 ─────────────────────────────────────────────────────────────
         // SES v1 is a Query API and resolves from its Action like any other; v2 is REST-JSON under
         // /v2/email, so every operation needs its own rule. One rule per operation in the SES v2

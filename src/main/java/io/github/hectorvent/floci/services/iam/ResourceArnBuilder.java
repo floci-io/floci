@@ -78,6 +78,9 @@ public class ResourceArnBuilder {
     /** The segment a tagging route names before the ARN it tags, which it captures whole, slashes included. */
     private static final String API_GATEWAY_TAGS_SEGMENT = "tags";
 
+    /** The route of Bedrock's resource-policy actions, which the ARN of the resource they act on may follow. */
+    private static final String BEDROCK_RESOURCE_POLICY_ROUTE = "/resource-policy";
+
     /** The SSM actions whose {@code ResourceArn} names the parameter they act on, in place of {@code Name}. */
     private static final Set<String> SSM_RESOURCE_POLICY_ACTIONS =
             Set.of("PutResourcePolicy", "GetResourcePolicies", "DeleteResourcePolicy");
@@ -207,6 +210,7 @@ public class ResourceArnBuilder {
                     || "route53:DeleteReusableDelegationSet".equals(operation)
                     ? List.of(buildRoute53DelegationSetArn(ctx, partition))
                     : namedResources(credentialScope, operation, ctx, region, accountId, partition);
+            case "bedrock"        -> List.of(buildBedrockArn(path, ctx));
             default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
         };
     }
@@ -1494,6 +1498,24 @@ public class ResourceArnBuilder {
         return DurableTokens.callbackExecutionArn(path.substring(callbacks + prefix.length(), action))
                 .filter(arn -> LambdaArnUtils.DURABLE_EXECUTION_ARN.matcher(arn).matches())
                 .orElse(null);
+    }
+
+    // ── Bedrock ──────────────────────────────────────────────────────────────────
+
+    /**
+     * The resource of a Bedrock route. The resource-policy actions act on the resource whose ARN they carry,
+     * in the path, or in the body's {@code resourceArn} for {@code PutResourcePolicy}, as the Service
+     * Authorization Reference gives them; every other route, and a value that is not an ARN, is {@code *}.
+     */
+    private String buildBedrockArn(String path, ContainerRequestContext ctx) {
+        String resourceArn = null;
+        if (path.startsWith(BEDROCK_RESOURCE_POLICY_ROUTE + "/")) {
+            resourceArn = path.substring(BEDROCK_RESOURCE_POLICY_ROUTE.length() + 1);
+        } else if (BEDROCK_RESOURCE_POLICY_ROUTE.equals(path) && "POST".equalsIgnoreCase(ctx.getMethod())) {
+            JsonNode body = readJsonBody(ctx);
+            resourceArn = body == null ? null : body.path("resourceArn").asText(null);
+        }
+        return AwsArnUtils.isArn(resourceArn) ? resourceArn : "*";
     }
 
     // ── SQS ─────────────────────────────────────────────────────────────────────

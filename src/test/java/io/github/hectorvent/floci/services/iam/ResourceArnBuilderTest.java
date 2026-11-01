@@ -1932,6 +1932,28 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void bedrockResourcePolicyRoutesResolveTheArnTheyCarry() {
+        String guardrail = "arn:aws:bedrock:us-east-1:000000000000:guardrail/abc123def456";
+        for (String method : List.of("GET", "DELETE")) {
+            when(ctx.getMethod()).thenReturn(method);
+            when(uriInfo.getPath()).thenReturn("/resource-policy/" + guardrail);
+            assertEquals(List.of(guardrail), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT), method);
+        }
+        when(ctx.getMethod()).thenReturn("POST");
+        when(uriInfo.getPath()).thenReturn("/resource-policy");
+        setJsonBody("{\"resourceArn\":\"" + guardrail + "\",\"resourcePolicy\":\"{}\"}");
+        assertEquals(List.of(guardrail), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
+        // A value that is not an ARN, and every other Bedrock route, name no resource.
+        setJsonBody("{\"resourceArn\":\"abc123def456\",\"resourcePolicy\":\"{}\"}");
+        assertEquals(List.of("*"), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
+        when(ctx.getMethod()).thenReturn("GET");
+        when(uriInfo.getPath()).thenReturn("/resource-policy/abc123def456");
+        assertEquals(List.of("*"), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
+        when(uriInfo.getPath()).thenReturn("/guardrails/abc123def456");
+        assertEquals(List.of("*"), builder.buildResources("bedrock", ctx, "us-east-1", ACCOUNT));
+    }
+
+    @Test
     void apiGatewayRoutesResolveThePathTheyNameWithNoAccount() {
         request("/restapis/abc123/stages");
         assertEquals(List.of("arn:aws:apigateway:us-east-1::/restapis/abc123/stages"),

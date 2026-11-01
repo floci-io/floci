@@ -136,7 +136,7 @@ CLIENTS_NOT_READ: dict[str, str] = {
 }
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ("apigateway", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes",
+HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes",
               "resource-groups", "s3", "scheduler", "secretsmanager", "sns", "sqs", "ssm", "sts")
 
 _LATER = "not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
@@ -162,7 +162,6 @@ NOT_COVERED: dict[str, str] = {
     "aws-marketplace": _LATER,
     "backup": _REST,
     "batch": _REST,
-    "bedrock": _LATER,
     "bedrock-agentcore": _REST,
     "cloudformation": _LATER,
     "cloudfront": _REST,
