@@ -10,9 +10,13 @@ import software.amazon.awssdk.services.paymentcryptography.model.KeyUsage;
 import software.amazon.awssdk.services.paymentcryptographydata.PaymentCryptographyDataClient;
 import software.amazon.awssdk.services.paymentcryptographydata.model.EncryptionDecryptionAttributes;
 import software.amazon.awssdk.services.paymentcryptographydata.model.EncryptionMode;
+import software.amazon.awssdk.services.paymentcryptographydata.model.GenerateAuthRequestCryptogramResponse;
 import software.amazon.awssdk.services.paymentcryptographydata.model.GenerateMacRequest;
 import software.amazon.awssdk.services.paymentcryptographydata.model.MacAlgorithm;
 import software.amazon.awssdk.services.paymentcryptographydata.model.MacAttributes;
+import software.amazon.awssdk.services.paymentcryptographydata.model.MajorKeyDerivationMode;
+import software.amazon.awssdk.services.paymentcryptographydata.model.SessionKeyDerivation;
+import software.amazon.awssdk.services.paymentcryptographydata.model.SessionKeyEmvCommon;
 import software.amazon.awssdk.services.paymentcryptographydata.model.SymmetricEncryptionAttributes;
 
 import java.nio.charset.StandardCharsets;
@@ -28,6 +32,10 @@ class PaymentCryptographyDataPlaneTest {
 
     /** A message long enough for the service to make a MAC over it. */
     private static final String MESSAGE = hex("a message to authenticate");
+
+    /** The transaction data of an authorization request, as hexadecimal. */
+    private static final String TRANSACTION_DATA =
+            "000000000100000000000008000000000000080010000000000000000000000000000000";
 
     private static PaymentCryptographyDataClient client;
     private static String keyArn;
@@ -122,6 +130,46 @@ class PaymentCryptographyDataPlaneTest {
                         .algorithm(MacAlgorithm.CMAC)
                         .build())))
                 .isNotNull();
+    }
+
+    @Test
+    void aKeyMakesAnAuthorizationCryptogramThatVerifies() {
+        // The ICC master key is sixteen bytes, so an AES-128 key holds it.
+        String key = TestFixtures.paymentCryptographyClient().createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_128)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS)
+                        .keyModesOfUse(m -> m.deriveKey(true)))
+                .exportable(true))
+                .key().keyArn();
+
+        GenerateAuthRequestCryptogramResponse generated = client.generateAuthRequestCryptogram(r -> r
+                .keyIdentifier(key)
+                .transactionData(TRANSACTION_DATA)
+                .majorKeyDerivationMode(MajorKeyDerivationMode.EMV_OPTION_A)
+                .sessionKeyDerivationAttributes(SessionKeyDerivation.builder()
+                        .emvCommon(SessionKeyEmvCommon.builder()
+                                .primaryAccountNumber("4111111111111111")
+                                .panSequenceNumber("0001")
+                                .applicationTransactionCounter("0000000000000001")
+                                .build())
+                        .build()));
+
+        assertThat(generated.authRequestCryptogram()).hasSize(16);
+
+        client.verifyAuthRequestCryptogram(r -> r
+                .keyIdentifier(key)
+                .authRequestCryptogram(generated.authRequestCryptogram())
+                .transactionData(TRANSACTION_DATA)
+                .majorKeyDerivationMode(MajorKeyDerivationMode.EMV_OPTION_A)
+                .sessionKeyDerivationAttributes(SessionKeyDerivation.builder()
+                        .emvCommon(SessionKeyEmvCommon.builder()
+                                .primaryAccountNumber("4111111111111111")
+                                .panSequenceNumber("0001")
+                                .applicationTransactionCounter("0000000000000001")
+                                .build())
+                        .build()));
     }
 
     @Test

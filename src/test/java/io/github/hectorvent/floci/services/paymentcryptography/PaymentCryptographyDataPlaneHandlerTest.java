@@ -183,18 +183,19 @@ class PaymentCryptographyDataPlaneHandlerTest {
     }
 
     @Test
-    void theOperationsOfThePaymentSchemesAreRefused() {
+    void theOperationsThatNeedAMaterialTheServiceDoesNotHaveAreRefused() {
+        // The translation of an AS2805 block is the one operation of these that the service
+        // does not serve: the byte layout of the cryptogram is in the standard and is not
+        // published, so a cryptogram the service produced would not open here.
         for (Runnable refused : new Runnable[] {
-                () -> handler.generatePinData(request(Map.of()), "us-east-1"),
-                () -> handler.verifyPinData(request(Map.of()), "us-east-1"),
-                () -> handler.translatePinData(request(Map.of()), "us-east-1"),
-                () -> handler.generateCardValidationData(request(Map.of()), "us-east-1"),
-                () -> handler.verifyCardValidationData(request(Map.of()), "us-east-1"),
-                () -> handler.verifyAuthRequestCryptogram(request(Map.of()), "us-east-1"),
+                () -> handler.translatePinData(request(Map.of(
+                        "IncomingKeyIdentifier", "arn:aws:payment-cryptography:us-east-1:000000000000:key/x",
+                        "OutgoingKeyIdentifier", "arn:aws:payment-cryptography:us-east-1:000000000000:key/y",
+                        "IncomingAs2805Attributes", Map.of("WrappingKeyIdentifier", "x"),
+                        "EncryptedPinBlock", "0011223344556677")), "us-east-1"),
                 () -> handler.translateKeyMaterial(request(Map.of()), "us-east-1")}) {
             AwsException refusal = assertThrows(AwsException.class, refused::run);
             assertEquals("ValidationException", refusal.getErrorCode());
-            assertTrue(refusal.getMessage().contains("not served"), refusal.getMessage());
         }
     }
 

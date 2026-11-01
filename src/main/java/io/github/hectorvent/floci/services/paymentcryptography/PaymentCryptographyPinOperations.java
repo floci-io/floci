@@ -477,8 +477,8 @@ final class PaymentCryptographyPinOperations {
             throw validation(label + " is required");
         }
         int pvki = declared.asInt();
-        if (pvki < 0 || pvki > 99) {
-            throw validation(label + " must be between 0 and 99");
+        if (pvki < 0 || pvki > 9) {
+            throw validation(label + " must be between 0 and 9");
         }
         return pvki;
     }

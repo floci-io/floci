@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.paymentcryptography;
 
+import io.github.hectorvent.floci.services.paymentcryptography.crypto.Ciphers;
+
 import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
+
 import java.security.GeneralSecurityException;
-import io.github.hectorvent.floci.services.paymentcryptography.crypto.Ciphers;
 import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.Locale;

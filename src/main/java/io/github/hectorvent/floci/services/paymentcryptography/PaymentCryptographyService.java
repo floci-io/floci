@@ -224,7 +224,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                 : PaymentCryptographyCrypto.randomMaterialHex(algorithm, secureRandom));
         key.setKeyCheckValue(
                 PaymentCryptographyCrypto.checkValue(key.getKeyMaterialHex(), algorithm));
-        key.setKeyCheckValueAlgorithm("CMAC");
+        key.setKeyCheckValueAlgorithm(algorithm.aes ? "CMAC" : "ANSI_X9_24");
         long now = Instant.now().getEpochSecond();
         key.setCreateTimestamp(now);
         key.setUsageStartTimestamp(now);

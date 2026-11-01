@@ -41,6 +41,8 @@ public class PaymentCryptographyDataPlaneHandler {
 
     private final PaymentCryptographyService service;
     private final PaymentCryptographyPinOperations pinOperations;
+    private final PaymentCryptographyCardValidationOperations cardValidation;
+    private final PaymentCryptographyAuthCryptogramOperations authCryptogram;
     private final SecureRandom random;
 
     @Inject
@@ -51,6 +53,8 @@ public class PaymentCryptographyDataPlaneHandler {
     PaymentCryptographyDataPlaneHandler(PaymentCryptographyService service, SecureRandom random) {
         this.service = service;
         this.pinOperations = new PaymentCryptographyPinOperations(service);
+        this.cardValidation = new PaymentCryptographyCardValidationOperations(service);
+        this.authCryptogram = new PaymentCryptographyAuthCryptogramOperations(service);
         this.random = random;
     }
 
@@ -175,14 +179,12 @@ public class PaymentCryptographyDataPlaneHandler {
 
     /** The cryptogram of an authorization request, verified. */
     public Map<String, Object> verifyAuthRequestCryptogram(JsonNode request, String region) {
-        refused("VerifyAuthRequestCryptogram");
-        return Map.of();
+        return authCryptogram.verify(request, region);
     }
 
     /** The cryptogram of an authorization request, generated. */
     public Map<String, Object> generateAuthRequestCryptogram(JsonNode request, String region) {
-        refused("GenerateAuthRequestCryptogram");
-        return Map.of();
+        return authCryptogram.generate(request, region);
     }
 
     /** The material of a key translated into another form. */

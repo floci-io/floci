@@ -36,9 +36,18 @@ client that talks to the control plane does not reach it by accident.
   the answer of a verification has no verdict in it.
 - **The modes of use of a key decide what it may be used for.** A key without the `Encrypt`
   mode is refused for an encryption, and a key with `NoRestrictions` is refused for nothing.
-- **The payment schemes' own algorithms are not served.** The card validation values, the
-  cryptograms and the PIN block formats belong to the schemes, so those operations are
-  refused rather than answered with a value this service made up.
+- **The PIN operations are the Visa path.** `GeneratePinData` and `VerifyPinData` compute
+  and check the PIN verification value, and `TranslatePinData` re-enciphers a block from one
+  PEK to another. The three ISO 9564-1 formats are served: format 0 and format 3 are TDES
+  blocks, and format 4 is an AES one that binds the PIN to the whole PAN.
+- **The card validation values and the cryptograms are the EMV ones.** The card
+  verification value is computed under the card verification key, and the authorization
+  request cryptogram under a session key that the transaction's derivation produces. The EMV
+  common session key, the EMV 2000 one, the Mastercard derivation and the Visa method, which
+  derives no session key at all, are served.
+- **Amex is refused rather than approximated.** The AEIPS session key derivation is
+  proprietary and there is nothing to verify it against, and a plausible wrong cryptogram is
+  worse than an error.
 
 The two-segment paths are moved to an internal prefix for the requests signed for this
 service, so a path-style request for a bucket of that name still reaches S3.

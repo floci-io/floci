@@ -268,6 +268,34 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void theDataPlaneMakesAPinBlock() {
+        String pek = call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_P0_PIN_ENCRYPTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}},\"Exportable\":true}")
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+        String pvk = call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_P1_PIN_GENERATION_KEY\","
+                + "\"KeyModesOfUse\":{\"Generate\":true,\"Verify\":true}},\"Exportable\":true}")
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        String body = "{\"EncryptionKeyIdentifier\":\"" + pek + "\","
+                + "\"GenerationKeyIdentifier\":\"" + pvk + "\","
+                + "\"PinBlockFormat\":\"ISO_FORMAT_0\","
+                + "\"PrimaryAccountNumber\":\"5081470082639564\","
+                + "\"GenerationAttributes\":{\"VisaPin\":{\"PinVerificationKeyIndex\":1}}}";
+
+        // The data plane is rest-json, so its body is plain JSON.
+        given().contentType("application/json")
+                .body(body)
+            .when().post("/pindata/generate")
+            .then().statusCode(200)
+                .body("EncryptedPinBlock", matchesPattern("[0-9A-F]{16}"))
+                .body("PinData.VerificationValue", matchesPattern("[0-9]{4,12}"));
+    }
+
+    @Test
     void aTaggingRequestNamesItsKeyInResourceArnOnly() {
         String named = call("CreateKey", CREATE_KEY).then().statusCode(200)
                 .extract().path("Key.KeyArn");
