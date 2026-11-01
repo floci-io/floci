@@ -93,6 +93,8 @@ class AppConfigServiceTest {
 
         Application application = new Application();
         application.setId("app");
+        application.setName("orders");
+        application.setDescription("Order processing");
         applicationStore.put("app", application);
         when(applicationStore.get("app")).thenReturn(Optional.of(application));
         Environment environment = new Environment();
@@ -105,6 +107,15 @@ class AppConfigServiceTest {
         profile.setApplicationId("app");
         when(profileStore.get("profile")).thenReturn(Optional.of(profile));
         service = new AppConfigService(storageFactory, mock(EmulatorConfig.class));
+    }
+
+    @Test
+    void updateApplicationPreservesOmittedFields() {
+        Application updated = service.updateApplication("app", Map.of("Name", "orders-v2"));
+
+        assertEquals("orders-v2", updated.getName());
+        assertEquals("Order processing", updated.getDescription());
+        verify(applicationStore).put("app", updated);
     }
 
     @Test

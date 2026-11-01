@@ -17,6 +17,7 @@ import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.PATCH;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
@@ -62,6 +63,14 @@ public class AppConfigController {
     @Path("/applications/{id}")
     public Response getApplication(@PathParam("id") String id) {
         return Response.ok(service.getApplication(id)).build();
+    }
+
+    @PATCH
+    @Path("/applications/{id}")
+    public Response updateApplication(@PathParam("id") String id, String body) throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> request = objectMapper.readValue(body, Map.class);
+        return Response.ok(service.updateApplication(id, request)).build();
     }
 
     @GET
