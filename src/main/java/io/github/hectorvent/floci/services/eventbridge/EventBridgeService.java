@@ -1625,11 +1625,15 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     }
 
     /**
-     * The ARN of the caller's connection or API destination of the name in the Region, which follows the name with
-     * the id it was minted with, as its handlers look it up.
+     * The ARN of the caller's connection or API destination of the one name in the Region, which follows the name
+     * with the id it was minted with, as its handlers look it up.
      */
     @Override
-    public Optional<String> find(String type, String name, String region) {
+    public Optional<String> find(String type, List<String> names, String region) {
+        if (names.size() != 1) {
+            return Optional.empty();
+        }
+        String name = names.getFirst();
         return switch (type) {
             case "connection" -> connectionStore.get(connectionKey(region, name)).map(Connection::getConnectionArn);
             case "api-destination" -> apiDestinationStore.get(apiDestinationKey(region, name)).map(ApiDestination::getArn);

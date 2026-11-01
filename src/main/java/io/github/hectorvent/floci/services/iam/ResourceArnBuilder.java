@@ -101,7 +101,7 @@ public class ResourceArnBuilder {
     private final Instance<KmsService> kmsService;
     /**
      * Looked up lazily for the same reason, to read the ARN a resource the request-resources table names by a name
-     * its service follows with a minted id is stored under.
+     * its service follows with a minted id, or by members its minted ARN does not hold, is stored under.
      */
     private final Instance<StoredResourceArns> storedResourceArns;
 
@@ -219,8 +219,8 @@ public class ResourceArnBuilder {
     /**
      * The resources a request of a namespace this builder has no branch for names, from the vendored table of
      * request resources (see {@link RequestResources}); {@code *} when it names none, or the operation is not one
-     * of the namespace. A resource whose service mints an id after its name is the one the namespace's
-     * {@link StoredResourceArns} finds under that name.
+     * of the namespace. A resource whose service mints an id after its name, or as all of its ARN, is the one the
+     * namespace's {@link StoredResourceArns} finds under that name or the members naming it.
      */
     private List<String> namedResources(String credentialScope, String operation, ContainerRequestContext ctx,
                                         String region, String accountId, String partition) {
