@@ -1710,8 +1710,8 @@ class NativeDynamoDbJsonHandlerTest {
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("PutItem", request, "eu-west-1"));
-        assertEquals("One or more parameter values were invalid: "
-                + "Input collection [, ]of type BS contains duplicates.", ex.getMessage());
+        assertEquals("1 validation error detected: One or more parameter values were invalid: "
+                + "Input collection [\"\",\"\"]of type BS contains duplicates.", ex.getMessage());
     }
 
     @Test
@@ -2196,6 +2196,138 @@ class NativeDynamoDbJsonHandlerTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("BatchGetItem", request, "eu-west-1"));
         assertEquals("Provided list of item keys contains duplicates", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            PutItem            | true  | {"TableName":"Missing","Item":{"userId":{"S":"u1"},"s":{"SS":["b","a","b"]}},"Expected":{"a":{"Exists":false}},"ConditionExpression":"attribute_not_exists(a)"}
+            PutItem            | true  | {"TableName":"Missing","Item":{"userId":{"S":"u1"}},"ExpressionAttributeValues":{":v":{"SS":["b","a","b"]}}}
+            UpdateItem         | true  | {"TableName":"Missing","Key":{"userId":{"SS":["b","a","b"]}},"UpdateExpression":"SET a = :a","ExpressionAttributeValues":{":a":{"S":"x"}}}
+            UpdateItem         | true  | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"AttributeUpdates":{"s":{"Action":"ADD","Value":{"SS":["b","a","b"]}}}}
+            DeleteItem         | true  | {"TableName":"Missing","Key":{"userId":{"SS":["b","a","b"]}}}
+            GetItem            | false | {"TableName":"Missing","Key":{"userId":{"S":"u1"},"s":{"SS":["b","a","b"]}}}
+            BatchGetItem       | false | {"RequestItems":{"Missing":{"Keys":[{"userId":{"SS":["b","a","b"]}}]}}}
+            Query              | false | {"TableName":"Missing","KeyConditionExpression":"userId = :p","ExpressionAttributeValues":{":p":{"SS":["b","a","b"]}}}
+            Scan               | false | {"TableName":"Missing","ScanFilter":{"s":{"ComparisonOperator":"EQ","AttributeValueList":[{"SS":["b","a","b"]}]}}}
+            TransactWriteItems | false | {"TransactItems":[{"Delete":{"TableName":"Missing","Key":{"userId":{"SS":["b","a","b"]}}}}]}
+            TransactGetItems   | false | {"TransactItems":[{"Get":{"TableName":"Missing","Key":{"userId":{"SS":["b","a","b"]}}}}]}
+            """)
+    void aRepeatedSetMemberIsRefusedWithTheNumbers(String operation, boolean enveloped, String request)
+            throws Exception {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle(operation, mapper.readTree(request), "eu-west-1"));
+        assertEquals((enveloped ? "1 validation error detected: " : "")
+                + "One or more parameter values were invalid: Input collection [\"a\", \"b\", \"b\"] contains duplicates.",
+                ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            [{"NULL":false},{"N":"abc"}]           | One or more parameter values were invalid: Null attribute value types must have the value of true
+            [{"N":"abc"},{"SS":[]}]                | The parameter cannot be converted to a numeric value: abc
+            [{"SS":[]},{"N":"abc"}]                | One or more parameter values were invalid: An string set  may not be empty
+            [{"NS":[]}]                            | One or more parameter values were invalid: An number set  may not be empty
+            [{"BS":[]}]                            | One or more parameter values were invalid: Binary sets should not be empty
+            [{"NS":["1","1","abc"]}]               | The parameter cannot be converted to a numeric value: abc
+            [{"NS":["1e2","100"]}]                 | One or more parameter values were invalid: Input collection contains duplicates.
+            [{"BS":["/w==","AA==","AA=="]}]        | One or more parameter values were invalid: Input collection ["AA==","/w==","AA=="]of type BS contains duplicates.
+            [{"SS":["c","b","c","a"]},{"N":"abc"}] | One or more parameter values were invalid: Input collection ["b", "c", "c", "a"] contains duplicates.
+            """)
+    void putItemReadsTheValuesInOrder(String values, String problem) throws Exception {
+        ObjectNode request = mapper.createObjectNode();
+        request.put("TableName", "Missing");
+        request.set("Item", item("userId", "u1").set("m", mapper.createObjectNode().set("L", mapper.readTree(values))));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: " + problem, ex.getMessage());
+    }
+
+    @Test
+    void aRepeatedStringIsQuotedAsRustsDebugFormatDoes() {
+        String member = "a\"\\\t\r\n\0\u0001\u007f \u00a0\u00e9\u0301\u09be\u0903\u200b\ue000\uD83D\uDE00";
+        ObjectNode set = mapper.createObjectNode();
+        set.putArray("SS").add(member).add(member);
+        ObjectNode request = mapper.createObjectNode();
+        request.put("TableName", "Missing");
+        request.set("Item", item("userId", "u1").set("s", set));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("PutItem", request, "eu-west-1"));
+        String quoted = "\"a\\\"\\\\\\t\\r\\n\\0\\u{1}\\u{7f} \\u{a0}\u00e9\\u{301}\\u{9be}\u0903\\u{200b}\\u{e000}\uD83D\uDE00\"";
+        assertEquals("1 validation error detected: One or more parameter values were invalid: Input collection ["
+                + quoted + ", " + quoted + "] contains duplicates.", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            {"Missing":[{"PutRequest":{"Item":{"userId":{"S":"u1"},"s":{"SS":["b","a","b"]}}}}]}  | One or more parameter values were invalid: Input collection [b, a, b] contains duplicates.
+            {"Missing":[{"PutRequest":{"Item":{"userId":{"S":"u1"},"s":{"NS":["1","1.0","abc"]}}}}]} | Input collection contains duplicates
+            {"Missing":[{"DeleteRequest":{"Key":{"userId":{"NULL":false}}}}]}                     | One or more parameter values were invalid: Null attribute value types must have the value of true
+            """)
+    void batchWriteItemReadsTheValuesInItsOlderWording(String requestItems, String message) throws Exception {
+        ObjectNode request = mapper.createObjectNode();
+        request.set("RequestItems", mapper.readTree(requestItems));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("BatchWriteItem", request, "eu-west-1"));
+        assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            PutItem          | {"TableName":"Missing","Item":{"userId":{"S":"u1"},"n":{"NULL":"TRUE"}}}                          |
+            PutItem          | {"TableName":"Missing","Item":{"userId":{"S":"u1"},"n":{"NULL":"False"}}}                         | 1 validation error detected: One or more parameter values were invalid: Null attribute value types must have the value of true
+            BatchWriteItem   | {"RequestItems":{"Missing":[{"PutRequest":{"Item":{"userId":{"S":"u1"},"n":{"NULL":"True"}}}}]}} |
+            BatchWriteItem   | {"RequestItems":{"Missing":[{"PutRequest":{"Item":{"userId":{"S":"u1"},"n":{"NULL":"FALSE"}}}}]}} | One or more parameter values were invalid: Null attribute value types must have the value of true
+            ExecuteStatement | {"Statement":"SELECT * FROM Absent WHERE userId = ?","Parameters":[{"L":[{"NULL":"TRUE"}]}]}     |
+            """)
+    void aNullFlagWrittenAsAStringIsReadInAnyCase(String operation, String request, String message) throws Exception {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle(operation, mapper.readTree(request), "eu-west-1"));
+        if (message == null) {
+            assertEquals("ResourceNotFoundException", ex.getErrorCode(), ex.getMessage());
+        } else {
+            assertEquals(message, ex.getMessage());
+        }
+    }
+
+    @Test
+    void aNullFlagWrittenAsAStringIsStoredAndComparedAsTrue() throws Exception {
+        createUsersTable("eu-west-1");
+        handler.handle("PutItem", mapper.readTree("""
+                {"TableName":"Users","Item":{"userId":{"S":"u1"},"n":{"NULL":"TRUE"},"l":{"L":[{"NULL":"True"}]}}}
+                """), "eu-west-1");
+        handler.handle("UpdateItem", mapper.readTree("""
+                {"TableName":"Users","Key":{"userId":{"S":"u1"}},"UpdateExpression":"SET m = :m",
+                 "ConditionExpression":"n = :v AND contains(l, :v)",
+                 "ExpressionAttributeValues":{":m":{"M":{"x":{"NULL":"tRuE"}}},":v":{"NULL":true}}}
+                """), "eu-west-1");
+
+        Response response = handler.handle("GetItem", mapper.readTree("""
+                {"TableName":"Users","Key":{"userId":{"S":"u1"}}}
+                """), "eu-west-1");
+        JsonNode item = mapper.convertValue(response.getEntity(), JsonNode.class).get("Item");
+        assertEquals(mapper.readTree("""
+                {"userId":{"S":"u1"},"n":{"NULL":true},"l":{"L":[{"NULL":true}]},"m":{"M":{"x":{"NULL":true}}}}
+                """), item);
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            [{"userId":{"N":"abc"}},{"userId":{"NULL":true}}]                    | The supplied Item contains a null AttributeValue
+            [{"userId":{"NULL":true}},{"userId":{"NULL":true}}]                  | The supplied Item contains a null AttributeValue
+            [{"userId":{"S":"a"}},{"userId":{"S":"a"}},{"userId":{"NULL":true}}] | Provided list of item keys contains duplicates
+            [{"userId":{"L":[{"NULL":false}]}}]                                  | One or more parameter values were invalid: Null attribute value types must have the value of true
+            """)
+    void batchGetItemRefusesANullKeyValueWhileItComparesTheKeys(String keys, String message) throws Exception {
+        ObjectNode request = mapper.createObjectNode();
+        request.set("RequestItems", mapper.createObjectNode().set("Missing",
+                mapper.createObjectNode().set("Keys", mapper.readTree(keys))));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("BatchGetItem", request, "eu-west-1"));
+        assertEquals(message, ex.getMessage());
     }
 
     @Test
