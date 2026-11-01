@@ -622,8 +622,7 @@ public class AppConfigService {
                     deployment.getApplicationId(), deployment.getConfigurationProfileId());
             String location = previous.getConfigurationLocationUri() != null
                     ? previous.getConfigurationLocationUri() : profile.getLocationUri();
-            if ("hosted".equals(location) && versionStore.get(deployment.getApplicationId() + "::"
-                    + deployment.getConfigurationProfileId() + "::" + previous.getConfigurationVersion()).isEmpty()) {
+            if ("hosted".equals(location) && !hasHostedConfigurationVersion(previous)) {
                 throw new AwsException("BadRequestException",
                         "The previous hosted configuration version is no longer available.", 400);
             }
@@ -640,6 +639,18 @@ public class AppConfigService {
         deploymentStore.put(deployment.getApplicationId() + "::" + deployment.getEnvironmentId()
                 + "::" + deploymentNumber, deployment);
         return deployment;
+    }
+
+    private boolean hasHostedConfigurationVersion(Deployment deployment) {
+        int versionNumber;
+        try {
+            versionNumber = Integer.parseInt(deployment.getConfigurationVersion());
+        } catch (NumberFormatException ignored) {
+            // Non-numeric deployed versions cannot identify content in the hosted version store.
+            return false;
+        }
+        return versionStore.get(deployment.getApplicationId() + "::" + deployment.getConfigurationProfileId()
+                + "::" + versionNumber).isPresent();
     }
 
     private Deployment refreshDeployment(Deployment deployment) {

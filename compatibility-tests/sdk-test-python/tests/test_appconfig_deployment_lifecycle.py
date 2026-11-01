@@ -9,10 +9,11 @@ import pytest
 from botocore.exceptions import ClientError
 
 
+@pytest.mark.parametrize("zero_padded", [False, True], ids=["decimal", "zero-padded"])
 @pytest.mark.parametrize("wait_for_completion", [False, True], ids=["baking", "complete"])
 @pytest.mark.parametrize("delete_previous", [False, True], ids=["restore", "deleted"])
 def test_deployment_rollback_restores_both_retrieval_apis(
-        aws_config, client_config, unique_name, wait_for_completion, delete_previous):
+        aws_config, client_config, unique_name, wait_for_completion, delete_previous, zero_padded):
     with ExitStack() as cleanup:
         client = boto3.client("appconfig", config=client_config, **aws_config)
         data = boto3.client("appconfigdata", config=client_config, **aws_config)
@@ -68,10 +69,12 @@ def test_deployment_rollback_restores_both_retrieval_apis(
             with response["Configuration"] as stream:
                 assert stream.read() == content
 
-        first = deploy(versions[0], strategies[0])
+        previous_version = ("0" if zero_padded else "") + str(versions[0])
+        first = deploy(previous_version, strategies[0])
         assert first["State"] == "COMPLETE"
         assert isinstance(first["StartedAt"], datetime)
         assert first["CompletedAt"] == first["StartedAt"]
+        assert_content(previous_version, b'{"version":1}')
         second = deploy(versions[1], strategies[1])
         target = {**scope, "DeploymentNumber": second["DeploymentNumber"]}
         assert second["State"] == "BAKING"
@@ -126,8 +129,8 @@ def test_deployment_rollback_restores_both_retrieval_apis(
             row["DeploymentNumber"]: row for row in client.list_deployments(**scope)["Items"]}
         assert listed[second["DeploymentNumber"]]["State"] == expected
         assert listed[second["DeploymentNumber"]]["CompletedAt"] == stopped["CompletedAt"]
-        assert_content(versions[0], b'{"version":1}')
+        assert_content(previous_version, b'{"version":1}')
         with pytest.raises(ClientError) as error:
             client.stop_deployment(**target, AllowRevert=True)
         assert error.value.response["Error"]["Code"] == "BadRequestException"
-        assert_content(versions[0], b'{"version":1}')
+        assert_content(previous_version, b'{"version":1}')

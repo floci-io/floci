@@ -9,6 +9,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
@@ -174,6 +176,46 @@ class AppConfigDeploymentLifecycleTest {
         assertNull(response.getCompletedAt());
         assertEquals("COMPLETE", completed.getState());
         assertEquals(START.plusSeconds(60).toString(), completed.getCompletedAt());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"01", "0001", "+1"})
+    void numericPreviousVersionUsesTheHostedStoreIdentity(String previousVersion) {
+        StorageFactory storage = factory();
+        AppConfigService service = service(storage, START);
+        Scope scope = scope(service);
+        deploy(service, scope, previousVersion, scope.fast());
+        Deployment current = deploy(service, scope, "2", scope.fast());
+
+        Deployment reverted = service.stopDeployment(scope.app(), scope.env(), current.getDeploymentNumber(), true);
+        assertEquals("REVERTED", reverted.getState());
+        assertEquals(previousVersion, service.getActiveVersion(scope.env(), scope.profile()));
+        assertEquals("COMPLETE", current.getState());
+        close(storage);
+
+        StorageFactory restarted = factory();
+        AppConfigService restored = service(restarted, START);
+        assertEquals(previousVersion, restored.getActiveVersion(scope.env(), scope.profile()));
+        assertEquals("REVERTED", restored.getDeployment(scope.app(), scope.env(),
+                current.getDeploymentNumber()).getState());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"invalid", "2147483648", "", "0003"})
+    void unavailablePreviousVersionRejectsRevertWithoutChangingActiveState(String previousVersion) {
+        StorageFactory storage = factory();
+        AppConfigService service = service(storage, START);
+        Scope scope = scope(service);
+        deploy(service, scope, previousVersion, scope.fast());
+        Deployment current = deploy(service, scope, "2", scope.fast());
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.stopDeployment(
+                scope.app(), scope.env(), current.getDeploymentNumber(), true));
+        assertEquals("BadRequestException", failure.getErrorCode());
+        assertEquals("2", service.getActiveVersion(scope.env(), scope.profile()));
+        assertEquals("COMPLETE", service.getDeployment(scope.app(), scope.env(),
+                current.getDeploymentNumber()).getState());
+        assertEquals("COMPLETE", current.getState());
     }
 
     private Scope scope(AppConfigService service) {
