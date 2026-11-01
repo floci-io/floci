@@ -22,7 +22,8 @@ class RdsSubnetOwnershipTest {
         try (Ec2Client ec2 = TestFixtures.ec2Client();
              RdsClient rds = TestFixtures.rdsClient();
              Ec2TestNetwork first = Ec2TestNetwork.create(ec2);
-             Ec2TestNetwork second = Ec2TestNetwork.create(ec2)) {
+             Ec2TestNetwork second = Ec2TestNetwork.create(ec2,
+                     List.of(TestFixtures.region().id() + "b"))) {
             String name = TestFixtures.uniqueName("rds-mixed-subnets");
             try {
                 assertThatThrownBy(() -> rds.createDBProxy(request -> request.dbProxyName(name)
@@ -30,7 +31,8 @@ class RdsSubnetOwnershipTest {
                         .roleArn("arn:aws:iam::000000000000:role/rds-proxy")
                         .defaultAuthScheme("IAM_AUTH")
                         .vpcSubnetIds(first.subnetId(), second.subnetId())))
-                        .isInstanceOf(InvalidSubnetException.class);
+                        .isInstanceOf(InvalidSubnetException.class)
+                        .hasMessageContaining("VpcSubnetIds must belong to one VPC.");
                 assertThatThrownBy(() -> rds.describeDBProxies(request -> request.dbProxyName(name)))
                         .isInstanceOf(DbProxyNotFoundException.class);
             } finally {
