@@ -87,7 +87,8 @@ class PartitionCrossServiceSmokeIntegrationTest {
             .contentType("application/x-amz-json-1.0")
             .body("{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\","
                 + "\"KeyClass\":\"SYMMETRIC_KEY\","
-                + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\"},"
+                + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}},"
                 + "\"Exportable\":true}")
         .when().post("/").then().statusCode(200)
             .extract().path("Key.KeyArn");

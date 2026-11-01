@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.paymentcryptography.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
@@ -12,6 +13,12 @@ import java.util.Map;
  * <p>The material is kept as hexadecimal, the way the service's own import and
  * export formats carry it, so a key that arrives from an import is the same
  * key that leaves from an export.
+ *
+ * <p>The material is not written to the store: it is held by the key while the
+ * emulator runs, and no operation of this service returns it or needs it, so
+ * leaving it out of the persisted key keeps it off the disk. A key read back
+ * from a store has no material, and the slice that exports a key decides how
+ * one is kept.
  */
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -32,6 +39,8 @@ public class PaymentCryptographyKey {
     private String keyMaterialHex;
     private long createTimestamp;
     private long usageStartTimestamp;
+    private long deletePendingTimestamp;
+    private long deleteTimestamp;
     private Map<String, String> tags = new HashMap<>();
 
     public String getKeyId() { return keyId; }
@@ -75,6 +84,8 @@ public class PaymentCryptographyKey {
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
 
+    /** The material of the key, which is held by the key and never written to the store. */
+    @JsonIgnore
     public String getKeyMaterialHex() { return keyMaterialHex; }
     public void setKeyMaterialHex(String keyMaterialHex) { this.keyMaterialHex = keyMaterialHex; }
 
@@ -85,6 +96,16 @@ public class PaymentCryptographyKey {
     public void setUsageStartTimestamp(long usageStartTimestamp) {
         this.usageStartTimestamp = usageStartTimestamp;
     }
+
+    /** When the key is deleted, zero while it is not scheduled for deletion. */
+    public long getDeletePendingTimestamp() { return deletePendingTimestamp; }
+    public void setDeletePendingTimestamp(long deletePendingTimestamp) {
+        this.deletePendingTimestamp = deletePendingTimestamp;
+    }
+
+    /** When the key was deleted, zero while it is not. */
+    public long getDeleteTimestamp() { return deleteTimestamp; }
+    public void setDeleteTimestamp(long deleteTimestamp) { this.deleteTimestamp = deleteTimestamp; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

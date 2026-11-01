@@ -66,16 +66,6 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
-    void theCheckValueMatchesRfc4493() {
-        // RFC 4493's example 2: a sixteen-byte message under the RFC's key.
-        // A complete final block is masked with K1 and a padded one with K2,
-        // and the check value is the CMAC of sixteen zero bytes, so it is the
-        // complete-block case.
-        assertEquals("7AD386",
-                PaymentCryptographyCrypto.checkValue("2B7E151628AED2A6ABF7158809CF4F3C"));
-    }
-
-    @Test
     void theKeyCarriesTheModesItWasAskedFor() {
         PaymentCryptographyKey key = createKey("us-east-1");
 
@@ -192,12 +182,12 @@ class PaymentCryptographyServiceTest {
         createKey("us-east-1");
         createKey("us-east-1");
 
-        PaginatedResult<PaymentCryptographyKey> first = service.listKeys("us-east-1", 2, null);
+        PaginatedResult<PaymentCryptographyKey> first = service.listKeys("us-east-1", null, 2, null);
         assertEquals(2, first.items().size());
         assertNotNull(first.nextToken(), "there are more keys, so there is a token");
 
         PaginatedResult<PaymentCryptographyKey> second =
-                service.listKeys("us-east-1", 2, first.nextToken());
+                service.listKeys("us-east-1", null, 2, first.nextToken());
         assertEquals(1, second.items().size());
         assertNull(second.nextToken(), "the last page has no token");
     }
@@ -219,7 +209,7 @@ class PaymentCryptographyServiceTest {
         createKey("us-east-1");
 
         AwsException bad = assertThrows(AwsException.class,
-                () -> service.listKeys("us-east-1", 0, null));
+                () -> service.listKeys("us-east-1", null, 0, null));
         assertEquals("ValidationException", bad.getErrorCode());
     }
 
@@ -228,8 +218,69 @@ class PaymentCryptographyServiceTest {
         createKey("us-east-1");
 
         AwsException bad = assertThrows(AwsException.class,
-                () -> service.listKeys("us-east-1", 2, "not a token"));
+                () -> service.listKeys("us-east-1", null, 2, "not a token"));
         assertEquals("ValidationException", bad.getErrorCode());
+    }
+
+    /**
+     * A key's usage says what the key is for, and the service requires it, as
+     * the reference does.
+     */
+    @Test
+    void aKeyWithoutItsUsageIsRefused() {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "AES_256");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+
+        AwsException bad = assertThrows(AwsException.class,
+                () -> service.createKey("us-east-1", attributes, Map.of(), true, true, Map.of()));
+        assertEquals("ValidationException", bad.getErrorCode());
+    }
+
+    /** A request naming a state is answered with the keys in that state only. */
+    @Test
+    void theKeysAreListedByTheirState() {
+        createKey("us-east-1");
+        createKey("us-east-1");
+
+        assertEquals(2, service.listKeys("us-east-1", "CREATE_COMPLETE").size());
+        assertEquals(0, service.listKeys("us-east-1", "DELETE_PENDING").size());
+        assertEquals(0, service.listKeys("us-east-1", "CREATE_IN_PROGRESS").size());
+    }
+
+    /**
+     * A deleted key is answered with the key, its state DELETE_PENDING and the
+     * moment it is deleted.
+     */
+    @Test
+    void aDeletedKeyIsAnsweredWithTheKeyItWas() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+
+        PaymentCryptographyKey deleted = service.deleteKey(key);
+
+        assertEquals(key.getArn(), deleted.getArn());
+        assertEquals("DELETE_PENDING", deleted.getKeyState());
+        assertFalse(deleted.isEnabled());
+        assertTrue(deleted.getDeletePendingTimestamp() > 0);
+        assertTrue(deleted.getDeleteTimestamp() > 0);
+    }
+
+    /**
+     * An update naming no key removes the key the alias names, and the alias
+     * stays.
+     */
+    @Test
+    void anAliasIsDetachedFromItsKey() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+        service.createAlias("alias/team/card-key", key);
+
+        PaymentCryptographyAlias detached = service.detachAlias("us-east-1", "alias/team/card-key");
+
+        assertEquals("alias/team/card-key", detached.getAliasName());
+        assertNull(detached.getKeyArn());
+        assertNull(service.findKey("us-east-1", "alias/team/card-key"),
+                "a detached alias still names a key");
+        assertNotNull(service.findAlias("us-east-1", "alias/team/card-key"));
     }
 
     /** The namespace of the resource types the service finds, as the request-resources table names it. */

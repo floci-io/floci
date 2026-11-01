@@ -15,6 +15,7 @@ import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 class PaymentCryptographyIntegrationTest {
@@ -150,7 +151,98 @@ class PaymentCryptographyIntegrationTest {
     void anUnsupportedOperationIsRefused() {
         call("EncryptKey", "{}")
                 .then().statusCode(400)
+                    .body("__type", containsString("UnknownOperationException"));
+    }
+
+    /**
+     * A key is created with the usage and the modes of use the reference
+     * requires, and a request without either of them is refused.
+     */
+    @Test
+    void aKeyWithoutItsUsageOrItsModesIsRefused() {
+        call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\",\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true}},\"Exportable\":true}")
+                .then().statusCode(400)
                     .body("__type", containsString("ValidationException"));
+        call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\",\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\"},\"Exportable\":true}")
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    /**
+     * A delete answers with the key, its state DELETE_PENDING and the moment it
+     * is deleted, as the reference does.
+     */
+    @Test
+    void aDeletedKeyIsAnsweredWithTheKey() {
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+
+        call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("Key.KeyArn", equalTo(arn))
+                    .body("Key.KeyState", equalTo("DELETE_PENDING"))
+                    .body("Key.Enabled", equalTo(false))
+                    .body("Key.DeletePendingTimestamp", notNullValue())
+                    .body("Key.DeleteTimestamp", notNullValue());
+    }
+
+    /**
+     * The waiting period the reference offers is read, and a request naming one
+     * outside it is refused.
+     */
+    @Test
+    void aWaitingPeriodOutsideTheServiceRangeIsRefused() {
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+
+        call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\",\"DeleteKeyInDays\":1}")
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+        call("DeleteKey", "{\"KeyIdentifier\":\"" + arn + "\",\"DeleteKeyInDays\":7}")
+                .then().statusCode(200);
+    }
+
+    /**
+     * A listing names the state of the keys it wants, and a request naming
+     * another state than the service knows is refused.
+     */
+    @Test
+    void theKeysAreListedByTheirState() {
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+
+        call("ListKeys", "{\"KeyState\":\"CREATE_COMPLETE\"}")
+                .then().statusCode(200)
+                    .body("Keys.KeyArn", hasItem(equalTo(arn)));
+        call("ListKeys", "{\"KeyState\":\"DELETE_PENDING\"}")
+                .then().statusCode(200)
+                    .body("Keys", hasSize(0));
+        call("ListKeys", "{\"KeyState\":\"NO_SUCH_STATE\"}")
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    /**
+     * The key of an alias is optional, so an update naming no key removes the
+     * key the alias names, and the alias stays.
+     */
+    @Test
+    void anAliasIsDetachedFromItsKeyByAnUpdateNamingNoKey() {
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        call("CreateAlias", "{\"AliasName\":\"alias/team/detached\",\"KeyArn\":\"" + arn + "\"}")
+                .then().statusCode(200);
+
+        call("UpdateAlias", "{\"AliasName\":\"alias/team/detached\"}")
+                .then().statusCode(200)
+                    .body("Alias.AliasName", equalTo("alias/team/detached"))
+                    .body("Alias.KeyArn", nullValue());
+
+        call("GetAlias", "{\"AliasName\":\"alias/team/detached\"}")
+                .then().statusCode(200)
+                    .body("Alias.AliasName", equalTo("alias/team/detached"));
     }
 
     @Test

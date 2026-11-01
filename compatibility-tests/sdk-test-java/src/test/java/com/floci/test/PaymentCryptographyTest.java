@@ -187,6 +187,53 @@ class PaymentCryptographyTest {
     }
 
     /**
+     * A delete answers with the key it deleted, its state DELETE_PENDING and the
+     * moment it is deleted, so a caller reads the key and not an empty answer.
+     */
+    @Test
+    void aDeletedKeyIsAnsweredWithTheKey() {
+        Key created = createAesKey();
+
+        Key deleted = client.deleteKey(k -> k.keyIdentifier(created.keyArn())).key();
+
+        assertThat(deleted).isNotNull();
+        assertThat(deleted.keyArn()).isEqualTo(created.keyArn());
+        assertThat(deleted.keyState()).isEqualTo(KeyState.DELETE_PENDING);
+        assertThat(deleted.deletePendingTimestamp()).isNotNull();
+        assertThat(deleted.enabled()).isFalse();
+    }
+
+    /** A listing names the state of the keys it wants, and the service answers with those keys alone. */
+    @Test
+    void theKeysAreListedByTheirState() {
+        Key key = createAesKey();
+
+        assertThat(client.listKeys(r -> r.keyState(KeyState.CREATE_COMPLETE).maxResults(100)).keys())
+                .anySatisfy(listed -> assertThat(listed.keyArn()).isEqualTo(key.keyArn()));
+        assertThat(client.listKeys(r -> r.keyState(KeyState.DELETE_PENDING).maxResults(100)).keys())
+                .noneSatisfy(listed -> assertThat(listed.keyArn()).isEqualTo(key.keyArn()));
+    }
+
+    /**
+     * The key of an alias is optional, so an update naming no key removes the key
+     * the alias names, and the alias stays.
+     */
+    @Test
+    void anAliasIsDetachedFromItsKeyByAnUpdateNamingNoKey() {
+        Key key = createAesKey();
+        String alias = "alias/compat/detached-" + keyIdOf(key.keyArn());
+        aliasNames.add(alias);
+
+        client.createAlias(a -> a.aliasName(alias).keyArn(key.keyArn()));
+
+        Alias detached = client.updateAlias(a -> a.aliasName(alias)).alias();
+
+        assertThat(detached.aliasName()).isEqualTo(alias);
+        assertThat(detached.keyArn()).isNull();
+        assertThat(client.getAlias(a -> a.aliasName(alias)).alias().aliasName()).isEqualTo(alias);
+    }
+
+    /**
      * A region the creating client did not sign for. It has to differ from the
      * region of the suite, or the key would be in that region too and the key
      * would be found.

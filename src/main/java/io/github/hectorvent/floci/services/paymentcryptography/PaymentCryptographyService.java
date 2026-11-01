@@ -20,7 +20,6 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -114,7 +113,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         key.setArn(regionResolver.buildArn(SERVICE, region, "key/" + key.getKeyId()));
         key.setKeyAlgorithm(algorithm);
         key.setKeyClass(keyClass);
-        key.setKeyUsage(string(attributes, "KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"));
+        key.setKeyUsage(usage(attributes));
         key.setKeyModesOfUse(modesOfUse);
         key.setExportable(exportable);
         key.setEnabled(enabled);
@@ -137,7 +136,10 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         }
         if (identifier.startsWith("alias/")) {
             PaymentCryptographyAlias alias = findAlias(region, identifier);
-            return alias == null ? null : keyStore.get(alias.getKeyId()).orElse(null);
+            if (alias == null || alias.getKeyId() == null) {
+                return null;
+            }
+            return keyStore.get(alias.getKeyId()).orElse(null);
         }
         if (AwsArnUtils.looksLikeArn(identifier)) {
             for (PaymentCryptographyKey key : keyStore.scan(k -> true)) {
@@ -157,18 +159,21 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * <p>The service answers with as many keys as the caller asks for, and a
      * token that asks for the page after that one. The key's own ARN is the
      * cursor, so a page can be resumed after the key it stopped at.
+     *
+     * <p>A request naming a state is answered with the keys in that state
+     * only, and with every key when it names none.
      */
-    public PaginatedResult<PaymentCryptographyKey> listKeys(String region, Integer maxResults,
-                                                              String nextToken) {
-        return Pagination.paginate(listKeys(region), PaymentCryptographyKey::getArn,
+    public PaginatedResult<PaymentCryptographyKey> listKeys(String region, String keyState,
+                                                              Integer maxResults, String nextToken) {
+        return Pagination.paginate(listKeys(region, keyState), PaymentCryptographyKey::getArn,
                 maxResults, nextToken, DEFAULT_PAGE_SIZE, MAX_RESULTS, PAGINATION_ERROR);
     }
 
-    /** The keys of a region. */
-    public List<PaymentCryptographyKey> listKeys(String region) {
+    /** The keys of a region, in the state the request names, or in any when it names none. */
+    public List<PaymentCryptographyKey> listKeys(String region, String keyState) {
         List<PaymentCryptographyKey> out = new ArrayList<>();
         for (PaymentCryptographyKey key : keyStore.scan(k -> true)) {
-            if (region.equals(key.getRegion())) {
+            if (region.equals(key.getRegion()) && (keyState == null || keyState.equals(key.getKeyState()))) {
                 out.add(key);
             }
         }
@@ -176,18 +181,31 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     }
 
     /**
-     * Removes a key. The service deletes a key the moment it is asked to.
+     * Removes a key and answers the key as the service does when a deletion is
+     * scheduled: the key's own metadata, its state {@code DELETE_PENDING} and
+     * the moment it is deleted.
+     *
+     * <p>The service deletes a key the moment it is asked to, so the waiting
+     * period the service offers is not one: the key is gone when the answer
+     * goes out, and the answer says when it is deleted in both of its
+     * timestamps.
      *
      * <p>The lock is the same one the tagging operations take, so a key that
      * is being tagged cannot be written back after it was deleted.
      */
-    public synchronized void deleteKey(PaymentCryptographyKey key) {
+    public synchronized PaymentCryptographyKey deleteKey(PaymentCryptographyKey key) {
+        long now = Instant.now().getEpochSecond();
+        key.setKeyState("DELETE_PENDING");
+        key.setEnabled(false);
+        key.setDeletePendingTimestamp(now);
+        key.setDeleteTimestamp(now);
         keyStore.delete(key.getKeyId());
         for (PaymentCryptographyAlias alias : aliasStore.scan(a -> true)) {
             if (key.getKeyId().equals(alias.getKeyId())) {
                 aliasStore.delete(aliasKey(alias.getAliasName(), alias.getRegion()));
             }
         }
+        return key;
     }
 
     // ---- aliases ------------------------------------------------------------
@@ -225,6 +243,24 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         }
         existing.setKeyArn(key.getArn());
         existing.setKeyId(key.getKeyId());
+        aliasStore.put(aliasKey(aliasName, existing.getRegion()), existing);
+        return existing;
+    }
+
+    /**
+     * Removes the key an alias names, leaving the alias itself.
+     *
+     * <p>The service answers an update that names no key this way: the alias
+     * names no key afterwards, and it answers with the alias alone.
+     */
+    public synchronized PaymentCryptographyAlias detachAlias(String region, String aliasName) {
+        PaymentCryptographyAlias existing = findAlias(region, aliasName);
+        if (existing == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Alias " + aliasName + " is not found", 400);
+        }
+        existing.setKeyArn(null);
+        existing.setKeyId(null);
         aliasStore.put(aliasKey(aliasName, existing.getRegion()), existing);
         return existing;
     }
@@ -385,24 +421,23 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         return value == null ? fallback : String.valueOf(value);
     }
 
-    /** The account that owns the key, from the region's own ARN. */
-    public String accountId() {
-        return regionResolver.getAccountId();
-    }
-
-    /** The region a key belongs to, lower-cased the way the service reports it. */
-    public static String normalizeRegion(String region) {
-        return region == null ? null : region.toLowerCase(Locale.ROOT);
+    /**
+     * The usage of the key the attributes name.
+     *
+     * <p>The service requires it, as the reference does: a key's usage says
+     * what the key is for, and a key without one is not a key.
+     */
+    private static String usage(Map<String, Object> attributes) {
+        Object value = attributes.get("KeyUsage");
+        if (value == null || String.valueOf(value).isBlank()) {
+            throw new AwsException("ValidationException", "KeyUsage is required", 400);
+        }
+        return String.valueOf(value);
     }
 
     @Override
     public void clear() {
         keyStore.clear();
         aliasStore.clear();
-    }
-
-    /** The key store, for the tests. */
-    Optional<PaymentCryptographyKey> storedKey(String keyId) {
-        return keyStore.get(keyId);
     }
 }
