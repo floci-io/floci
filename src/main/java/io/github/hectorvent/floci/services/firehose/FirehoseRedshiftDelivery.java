@@ -112,7 +112,10 @@ public class FirehoseRedshiftDelivery {
             throw new IllegalStateException("Database " + target.database() + " does not exist in workgroup "
                     + workgroup.workgroupName() + "; the only database is " + workgroup.database() + ".");
         }
-        return new Backend("workgroup " + workgroup.workgroupName(), workgroup.host(), workgroup.port(),
+        int port = workgroup.endpoint() != null && workgroup.endpoint().getPort() > 0
+                ? workgroup.endpoint().getPort()
+                : workgroup.port();
+        return new Backend("workgroup " + workgroup.workgroupName(), "127.0.0.1", port,
                 workgroup.database(), workgroup.masterUsername(), workgroup.adminPasswordSecretArn());
     }
 

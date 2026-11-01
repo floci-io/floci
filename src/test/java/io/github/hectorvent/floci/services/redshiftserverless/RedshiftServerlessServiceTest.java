@@ -955,6 +955,7 @@ class RedshiftServerlessServiceTest {
             assertEquals("analytics", target.database());
             assertEquals("root", target.masterUsername());
             assertEquals("Secret123", target.masterPassword());
+            assertEquals(created.getEndpoint().getPort(), target.endpoint().getPort());
         }
         String absentArn = "arn:aws:redshift-serverless:us-east-1:" + ACCOUNT_ID
                 + ":workgroup/00000000-0000-0000-0000-000000000000";

@@ -65,7 +65,8 @@ class FirehoseRedshiftDeliveryTest {
     private void workgroup(String database, String adminSecretArn) {
         when(serverless.getWorkgroupTarget("wg1", "us-east-1")).thenReturn(new WorkgroupTarget(
                 "arn:aws:redshift-serverless:us-east-1:000000000000:workgroup/id1", "wg1", "host.docker.internal",
-                41300, database, "workgroupadmin", "ignored", "workgroupadmin", List.of(), adminSecretArn));
+                5432, database, "workgroupadmin", "ignored", "workgroupadmin", List.of(), adminSecretArn,
+                new Endpoint("localhost", 41300)));
     }
 
     @Test
@@ -75,7 +76,7 @@ class FirehoseRedshiftDeliveryTest {
         delivery.copy("000000000000", "us-east-1", serverlessDestination(), "stage", "k1");
 
         assertEquals(1, executed.size());
-        assertEquals("jdbc:postgresql://host.docker.internal:41300/analytics?preferQueryMode=simple",
+        assertEquals("jdbc:postgresql://127.0.0.1:41300/analytics?preferQueryMode=simple",
                 executed.get(0)[0]);
         assertEquals("workgroupadmin", executed.get(0)[1]);
         assertEquals("Secret123", executed.get(0)[2]);
