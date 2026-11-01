@@ -1668,6 +1668,32 @@ public class RdsQueryHandler {
         return names;
     }
 
+    /** Floci models no system parameters: a describe of those sources lists nothing. */
+    private static boolean requestsUnmodeledSource(String source) {
+        return "system".equals(source) || "engine-default".equals(source);
+    }
+
+    /**
+     * Writes parameter rows to the XML builder, applying the Source filter.
+     */
+    private static void writeParameterRows(XmlBuilder xml, Map<String, String> parameters,
+                                           Map<String, String> applyMethods, String sourceFilter) {
+        if (requestsUnmodeledSource(sourceFilter)) {
+            return;
+        }
+        for (Map.Entry<String, String> entry : parameters.entrySet()) {
+            xml.start("Parameter")
+               .elem("ParameterName", entry.getKey())
+               .elem("ParameterValue", entry.getValue())
+               .elem("Source", "user")
+               .elem("IsModifiable", true)
+               .elem("ApplyMethod", applyMethods.getOrDefault(entry.getKey(), "immediate"))
+               .end("Parameter");
+        }
+    }
+
+
+
     private Response handleDescribeDbParameters(
             MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBParameterGroupName");
@@ -1677,15 +1703,7 @@ public class RdsQueryHandler {
         try {
             DbParameterGroup group = service.getDbParameterGroup(name, region);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
-            for (Map.Entry<String, String> entry : group.getParameters().entrySet()) {
-                xml.start("member")
-                   .elem("ParameterName", entry.getKey())
-                   .elem("ParameterValue", entry.getValue())
-                   .elem("Source", "user")
-                   .elem("ApplyMethod", group.getApplyMethods().getOrDefault(entry.getKey(), "immediate"))
-                   .elem("IsModifiable", true)
-                   .end("member");
-            }
+            writeParameterRows(xml, group.getParameters(), group.getApplyMethods(), params.getFirst("Source"));
             xml.end("Parameters").start("Marker").end("Marker");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBParameters", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
@@ -1819,15 +1837,7 @@ public class RdsQueryHandler {
         try {
             DbClusterParameterGroup group = service.getDbClusterParameterGroup(name, region);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
-            for (Map.Entry<String, String> entry : group.getParameters().entrySet()) {
-                xml.start("member")
-                   .elem("ParameterName", entry.getKey())
-                   .elem("ParameterValue", entry.getValue())
-                   .elem("Source", "user")
-                   .elem("ApplyMethod", group.getApplyMethods().getOrDefault(entry.getKey(), "immediate"))
-                   .elem("IsModifiable", true)
-                   .end("member");
-            }
+            writeParameterRows(xml, group.getParameters(), group.getApplyMethods(), params.getFirst("Source"));
             xml.end("Parameters").start("Marker").end("Marker");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterParameters", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
