@@ -10,7 +10,8 @@ import java.util.Optional;
  * ({@code scalable-target/<id>}, named by its service namespace, resource id and scalable dimension).
  *
  * <p>Implemented by the service that owns such resources (EventBridge, for its connections and API destinations;
- * Application Auto Scaling, for its scalable targets); looked up lazily by {@code ResourceArnBuilder} through
+ * Application Auto Scaling, for its scalable targets; Payment Cryptography, for the key an alias names); looked up
+ * lazily by {@code ResourceArnBuilder} through
  * {@code Instance<StoredResourceArns>} for the namespace a request is of, so IAM never depends on that service
  * directly.</p>
  */

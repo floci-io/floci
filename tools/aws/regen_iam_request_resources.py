@@ -129,8 +129,7 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 # are the ones its handlers mint.
 NAMESPACES = ("acm", "application-autoscaling", "athena", "bcm-data-exports", "bcm-pricing-calculator", "budgets", "ce", "cloudtrail",
               "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "cur", "ecr", "elasticloadbalancing",
-              "events", "firehose", "globalaccelerator", "kinesisanalytics", "payment-cryptography",
-              "servicediscovery", "servicequotas",
+              "events", "firehose", "globalaccelerator", "kinesisanalytics", "payment-cryptography", "servicediscovery", "servicequotas",
               "states", "textract", "timestream-influxdb", "translate")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their

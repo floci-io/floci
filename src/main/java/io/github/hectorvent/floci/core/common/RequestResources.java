@@ -380,16 +380,13 @@ public final class RequestResources {
      */
     private static String withId(String arn, RequestResourceMembers.ArnFormat format, String type,
                                  Map<String, String> filling, StoredResourceArns stored, String region) {
-        if (!format.minted()) {
-            return arn;
-        }
         if (stored != null && filling.size() == 1) {
             Optional<String> found = stored.find(type, List.of(filling.values().iterator().next()), region);
             if (found.isPresent()) {
                 return found.get();
             }
         }
-        return arn + "/*";
+        return format.minted() ? arn + "/*" : arn;
     }
 
     /**
