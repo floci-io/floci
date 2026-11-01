@@ -23,13 +23,15 @@ import java.util.Set;
  * {@code spark-submit}, as the Management Guide's Spark steps are written, and a custom JAR step, whose main
  * class {@code spark-submit} runs with the JAR on its class path. Any other {@code command-runner.jar} step
  * runs its command, and a {@code script-runner.jar} step its script, as the Release Guide's "Run commands
- * and scripts on an Amazon EMR cluster" describes them; an {@code s3-dist-cp} one runs Floci's own S3DistCp.
+ * and scripts on an Amazon EMR cluster" describes them, a {@code hadoop-streaming} or {@code hadoop-lzo} one
+ * through the image's {@code hadoop}, with MapReduce in local mode; an {@code s3-dist-cp} one runs Floci's own
+ * S3DistCp.
  */
 final class EmrSparkSteps {
 
     // No source gives AWS's wording for these; they are Floci's.
-    static final String NOT_RUN = "Floci does not run this step: hive-script, pig-script, hadoop-streaming and"
-            + " hadoop-lzo are not in the image steps run in.";
+    static final String NOT_RUN = "Floci does not run this step: hive-script and pig-script are not in the image"
+            + " steps run in.";
     static final String INTERRUPTED = "Floci stopped while the step was running.";
 
     private static final String COMMAND_RUNNER = "command-runner.jar";
@@ -55,10 +57,8 @@ final class EmrSparkSteps {
     private static final String SPARK_HADOOP_PREFIX = "spark.hadoop.";
     // spark-submit gives the JVM it runs an application's main class in the Java options of this variable.
     private static final String SPARK_SUBMIT_OPTS = "SPARK_SUBMIT_OPTS";
-    // The Release Guide's command-runner.jar tools that the EMR Serverless image does not have; its hadoop
-    // has no MapReduce to run streaming or the LZO indexer.
-    private static final Set<String> UNAVAILABLE_TOOLS = Set.of("hive-script", "pig-script", "hadoop-streaming",
-            "hadoop-lzo");
+    // The Release Guide's command-runner.jar tools that the EMR Serverless image does not have.
+    private static final Set<String> UNAVAILABLE_TOOLS = Set.of("hive-script", "pig-script");
     private static final String S3_DIST_CP = "s3-dist-cp";
     static final String S3_DIST_CP_RESOURCE = "emr/s3-dist-cp.py";
     // The line that ends the program where the command writes it out.
@@ -278,9 +278,9 @@ final class EmrSparkSteps {
     }
 
     /**
-     * Floci's S3DistCp: the image has neither {@code s3-dist-cp} nor MapReduce, so the command writes Floci's
-     * program into the container and runs it through {@code spark-submit}, which the command wrapper gives
-     * Floci's S3 and the cluster's HDFS. Read once, when the first {@code s3-dist-cp} step comes.
+     * Floci's S3DistCp: the image has no {@code s3-dist-cp}, so the command writes Floci's program into the
+     * container and runs it through {@code spark-submit}, which the command wrapper gives Floci's S3 and the
+     * cluster's HDFS. Read once, when the first {@code s3-dist-cp} step comes.
      */
     private static final class S3DistCp {
         static final String COMMAND = String.join("\n",
