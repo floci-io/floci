@@ -72,4 +72,21 @@ public class ContainerReachableEndpoint {
     public int port() {
         return config.tls().enabled() ? config.port() : httpPort;
     }
+
+    /**
+     * The base URL a custom resource's {@code ResponseURL} names: {@link #baseUrl()}, over https
+     * where Floci serves TLS.
+     *
+     * <p>AWS hands a custom resource a presigned Amazon S3 URL to PUT its response to
+     * (CloudFormation User Guide, CloudFormation custom resource request and response reference,
+     * ResponseURL), so a handler that PUTs with Node's {@code https} module, as AWS's own
+     * {@code cfn-response} does, refuses an http URL ({@code Protocol "http:" not supported}). With
+     * TLS enabled, {@code TlsProxyServer} serves https beside http on {@link EmulatorConfig#port()},
+     * and every container Floci launches trusts Floci's CA through {@code NODE_EXTRA_CA_CERTS} and
+     * the other bundle variables, so the https URL is reachable with no shim in the handler.
+     */
+    public String customResourceResponseBaseUrl() {
+        String base = baseUrl();
+        return config.tls().enabled() ? "https" + base.substring("http".length()) : base;
+    }
 }
