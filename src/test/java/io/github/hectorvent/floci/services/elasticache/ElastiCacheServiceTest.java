@@ -450,14 +450,16 @@ class ElastiCacheServiceTest {
 
     @Test
     void userGroupMembersDecideEachUsersAuthenticationMode() {
-        service.createReplicationGroup("grp", "test", AuthMode.IAM, null, "us-east-1");
+        service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
+                "grp", "test", AuthMode.IAM, null, "us-east-1", "redis", "7.0",
+                null, null, null, null, null, null, null, null, null, null, new ReplicationGroupSettings(null, null, null, null, null, true), Map.of(), null, null));
         assertFalse(service.hasMembers("grp"),
                 "a cache with no users associated keeps the group level authentication mode");
 
         service.createUser("default-user-id", "default", AuthMode.PASSWORD,
                 List.of("default-pass"), "on ~* +@all", null);
-        service.createUser("iam-user-id", "iam-app", AuthMode.IAM, List.of(), "on ~* +@all", null);
-        service.createUserGroup("iam-users", "redis", List.of("default-user-id", "iam-user-id"), "us-east-1");
+        service.createUser("iam-app", "iam-app", AuthMode.IAM, List.of(), "on ~* +@all", null);
+        service.createUserGroup("iam-users", "redis", List.of("default-user-id", "iam-app"), "us-east-1");
         service.modifyReplicationGroup("grp", List.of("iam-users"), null);
 
         assertTrue(service.hasMembers("grp"));
@@ -466,7 +468,7 @@ class ElastiCacheServiceTest {
                 "a password user cannot connect with an IAM token");
         assertNull(service.memberAuthMode("grp", "anyone"));
 
-        service.modifyUserGroup("iam-users", null, List.of("iam-user-id"), null);
+        service.modifyUserGroup("iam-users", null, List.of("iam-app"), null);
         assertNull(service.memberAuthMode("grp", "iam-app"), "removing the member revokes its access");
     }
 
@@ -474,7 +476,7 @@ class ElastiCacheServiceTest {
     void anEmptyUserGroupAdmitsNobody() {
         service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
                 "grp", "test", AuthMode.IAM, null, "us-east-1", "valkey", null, null, null, null, null,
-                null, null, null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(), null, null));
+                null, null, null, null, null, null, new ReplicationGroupSettings(null, null, null, null, null, true), Map.of(), null, null));
         service.createUserGroup("empty-users", "valkey", List.of(), "us-east-1");
         service.modifyReplicationGroup("grp", List.of("empty-users"), null);
 
@@ -524,7 +526,9 @@ class ElastiCacheServiceTest {
 
     @Test
     void removeUserGroupsDropsEveryUserGroupAndTheAccessControl() {
-        service.createReplicationGroup("grp", "test", AuthMode.IAM, null, "us-east-1");
+        service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
+                "grp", "test", AuthMode.IAM, null, "us-east-1", "redis", "7.0",
+                null, null, null, null, null, null, null, null, null, null, new ReplicationGroupSettings(null, null, null, null, null, true), Map.of(), null, null));
         service.createUser("default-user-id", "default", AuthMode.PASSWORD,
                 List.of("default-pass"), "on ~* +@all", null);
         service.createUserGroup("first-users", "redis", List.of("default-user-id"), "us-east-1");
@@ -756,7 +760,9 @@ class ElastiCacheServiceTest {
 
     @Test
     void validatePasswordAdmitsNoAuthUserWithAnyPassword() {
-        service.createReplicationGroup("grp-nopass", "test", AuthMode.IAM, null, "us-east-1");
+        service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
+                "grp-nopass", "test", AuthMode.IAM, null, "us-east-1", "redis", "7.0",
+                null, null, null, null, null, null, null, null, null, null, new ReplicationGroupSettings(null, null, null, null, null, true), Map.of(), null, null));
         service.createUser("nopass-user-id", "nopass-user", AuthMode.NO_AUTH,
                 List.of(), "on ~* +@all", null);
         service.modifyReplicationGroup("grp-nopass", List.of("nopass-user-id"), null);
@@ -769,11 +775,13 @@ class ElastiCacheServiceTest {
 
     @Test
     void memberAuthModeResolvesPasswordIamAndNoAuthUsers() {
-        service.createReplicationGroup("grp-mixed", "test", AuthMode.IAM, null, "us-east-1");
+        service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
+                "grp-mixed", "test", AuthMode.IAM, null, "us-east-1", "redis", "7.0",
+                null, null, null, null, null, null, null, null, null, null, new ReplicationGroupSettings(null, null, null, null, null, true), Map.of(), null, null));
         service.createUser("u-def", "default", AuthMode.PASSWORD, List.of("def-pass"), "on ~* +@all", null);
-        service.createUser("u-iam", "iam-user", AuthMode.IAM, List.of(), "on ~* +@all", null);
+        service.createUser("iam-user", "iam-user", AuthMode.IAM, List.of(), "on ~* +@all", null);
         service.createUser("u-nopass", "nopass-user", AuthMode.NO_AUTH, List.of(), "on ~* +@all", null);
-        service.modifyReplicationGroup("grp-mixed", List.of("u-def", "u-iam", "u-nopass"), null);
+        service.modifyReplicationGroup("grp-mixed", List.of("u-def", "iam-user", "u-nopass"), null);
 
         assertTrue(service.hasMembers("grp-mixed"));
         assertEquals(AuthMode.PASSWORD, service.memberAuthMode("grp-mixed", "default"));
@@ -785,13 +793,15 @@ class ElastiCacheServiceTest {
 
     @Test
     void disabledUserCannotAuthenticateAndHasNoMemberAuthMode() {
-        service.createReplicationGroup("grp-disabled", "test", AuthMode.IAM, null, "us-east-1");
+        service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
+                "grp-disabled", "test", AuthMode.IAM, null, "us-east-1", "redis", "7.0",
+                null, null, null, null, null, null, null, null, null, null, new ReplicationGroupSettings(null, null, null, null, null, true), Map.of(), null, null));
         service.createUser("u-def-off", "default", AuthMode.NO_AUTH, List.of(), "off -@all", null);
         service.createUser("u-pass-off", "disabled-pass", AuthMode.PASSWORD, List.of("secret"), "off -@all", null);
-        service.createUser("u-iam-off", "disabled-iam", AuthMode.IAM, List.of(), "off -@all", null);
+        service.createUser("disabled-iam", "disabled-iam", AuthMode.IAM, List.of(), "off -@all", null);
         service.createUser("u-pass-on", "enabled-pass", AuthMode.PASSWORD, List.of("secret"), "on ~* +@all", null);
         service.modifyReplicationGroup("grp-disabled",
-                List.of("u-def-off", "u-pass-off", "u-iam-off", "u-pass-on"), null);
+                List.of("u-def-off", "u-pass-off", "disabled-iam", "u-pass-on"), null);
 
         assertTrue(service.hasMembers("grp-disabled"));
 
@@ -2098,8 +2108,8 @@ class ElastiCacheServiceTest {
                     List.of("default-pass"), "on ~* +@all", null);
             svc.createUserGroup("shared-ug", "redis", List.of("default-user-id"), "us-east-1");
             svc.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
-                    "grp", "test", AuthMode.IAM, null, "us-east-1", "redis", null, null, null, null, null,
-                    null, null, null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(),
+                    "grp", "test", AuthMode.IAM, null, "us-east-1", "redis", "7.0", null, null, null, null,
+                    null, null, null, null, null, null, new ReplicationGroupSettings(null, null, null, null, null, true), Map.of(),
                     List.of("shared-ug"), null));
         });
         accountA.start();
@@ -2202,6 +2212,22 @@ class ElastiCacheServiceTest {
         assertEquals("NumCacheNodes should be 1 if engine is redis", ex.getMessage());
         verify(containerManager, never()).tryStart(eq("too-big"), anyString(), any());
         assertTrue(service.findCacheClusters("too-big").isEmpty());
+    }
+
+    @Test
+    void createCacheClusterWithAuthTokenAndTransitEncryptionDisabledIsRefused() {
+        ElastiCacheService.CreateCacheClusterRequest req = new ElastiCacheService.CreateCacheClusterRequest(
+                "no-tls-auth", "redis", null, null,
+                1, null, AuthMode.PASSWORD, "secret-auth-token", null, null,
+                null, null, null, null, null, null, null, null, "us-east-1", Map.of(), null, false);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createCacheCluster(req));
+
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("Transit encryption must be enabled to use an auth token.", ex.getMessage());
+        verify(containerManager, never()).tryStart(eq("no-tls-auth"), anyString(), any());
+        assertTrue(service.findCacheClusters("no-tls-auth").isEmpty());
     }
 
     @Test
@@ -2832,5 +2858,141 @@ class ElastiCacheServiceTest {
         service.deleteCacheCluster("no-docker");
         verify(containerManager, never()).stop(any());
         verify(containerManager).stopByGroupId("no-docker");
+    }
+
+    @Test
+    void createIamUserRejectsInvalidUserIdFormat() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createUser("1-invalid-id", "1-invalid-id", AuthMode.IAM, List.of(), "on ~* +@all", "redis"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createIamUserRejectsMismatchedUserIdAndUserName() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createUser("iam-user-1", "iam-user-2", AuthMode.IAM, List.of(), "on ~* +@all", "redis"));
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("UserId must be equal to UserName when AuthenticationMode Type is IAM."));
+    }
+
+    @Test
+    void createIamUserRejectsDefaultUserName() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createUser("default", "default", AuthMode.IAM, List.of(), "on ~* +@all", "redis"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("The default user cannot be configured to use IAM authentication."));
+    }
+
+    @Test
+    void modifyUserSwitchingToIamRejectsMismatchedUserIdAndUserName() {
+        service.createUser("mismatch-id", "mismatch-name", AuthMode.PASSWORD, List.of("pass"), "on ~* +@all", "redis");
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyUser("mismatch-id", AuthMode.IAM, List.of(), null, null, null));
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("UserId must be equal to UserName when AuthenticationMode Type is IAM."));
+    }
+
+    @Test
+    void modifyUserSwitchingToIamRejectsDefaultUserName() {
+        service.createUser("default", "default", AuthMode.PASSWORD, List.of("pass"), "on ~* +@all", "redis");
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyUser("default", AuthMode.IAM, List.of(), null, null, null));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("The default user cannot be configured to use IAM authentication."));
+    }
+
+    @Test
+    void modifyUserSwitchingToIamRejectsInvalidUserIdFormat() {
+        service.createUser("1-bad-id", "1-bad-id", AuthMode.PASSWORD, List.of("pass"), "on ~* +@all", "redis");
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyUser("1-bad-id", AuthMode.IAM, List.of(), null, null, null));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createReplicationGroupWithIamRequiresTransitEncryption() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createReplicationGroup("grp-iam-no-tls", "test", AuthMode.IAM, null, "us-east-1"));
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("Transit encryption must be enabled to use IAM authentication."));
+    }
+
+    @Test
+    void createReplicationGroupWithIamRejectsRedisVersionBelow7() {
+        ElastiCacheService.CreateReplicationGroupRequest req = new ElastiCacheService.CreateReplicationGroupRequest(
+                "grp-redis-62", "test", AuthMode.IAM, null, "us-east-1", "redis", "6.2",
+                null, null, null, null, null, null, null, null, null, null,
+                ReplicationGroupSettings.defaults(), Map.of(), null, null);
+        AwsException ex = assertThrows(AwsException.class, () -> service.createReplicationGroup(req));
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("IAM authentication is only supported for Redis version 7.0 and above."));
+    }
+
+    @Test
+    void createReplicationGroupWithIamRejectsValkeyVersionBelow72() {
+        ElastiCacheService.CreateReplicationGroupRequest req = new ElastiCacheService.CreateReplicationGroupRequest(
+                "grp-valkey-70", "test", AuthMode.IAM, null, "us-east-1", "valkey", "7.0",
+                null, null, null, null, null, null, null, null, null, null,
+                ReplicationGroupSettings.defaults(), Map.of(), null, null);
+        AwsException ex = assertThrows(AwsException.class, () -> service.createReplicationGroup(req));
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertTrue(ex.getMessage().contains("IAM authentication is only supported for Valkey version 7.2 and above."));
+    }
+
+    @Test
+    void modifyReplicationGroupAssociatingUserGroupWithIamUsersRequiresTransitEncryption() {
+        service.createReplicationGroup("grp-no-transit", "test", AuthMode.NO_AUTH, null, "us-east-1");
+        service.createUser("default", "default", AuthMode.PASSWORD, List.of("pass"), "on ~* +@all", "redis");
+        service.createUser("iam-member", "iam-member", AuthMode.IAM, List.of(), "on ~* +@all", "redis");
+        service.createUserGroup("iam-ug-notls", "redis", List.of("default", "iam-member"), "us-east-1");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyReplicationGroup("grp-no-transit", List.of("iam-ug-notls"), null));
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void modifyReplicationGroupAssociatingUserGroupWithIamUsersRejectsRedisVersionBelow7() {
+        ElastiCacheService.CreateReplicationGroupRequest req = new ElastiCacheService.CreateReplicationGroupRequest(
+                "grp-redis-62-enc", "test", AuthMode.PASSWORD, "some-token", "us-east-1", "redis", "6.2",
+                null, null, null, null, null, null, null, null, null, null,
+                ReplicationGroupSettings.defaults(), Map.of(), null, null);
+        service.createReplicationGroup(req);
+
+        service.createUser("default", "default", AuthMode.PASSWORD, List.of("pass"), "on ~* +@all", "redis");
+        service.createUser("iam-redis-user", "iam-redis-user", AuthMode.IAM, List.of(), "on ~* +@all", "redis");
+        service.createUserGroup("iam-redis-ug", "redis", List.of("default", "iam-redis-user"), "us-east-1");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyReplicationGroup("grp-redis-62-enc", List.of("iam-redis-ug"), null));
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void modifyReplicationGroupAssociatingUserGroupWithIamUsersRejectsValkeyVersionBelow72() {
+        ElastiCacheService.CreateReplicationGroupRequest req = new ElastiCacheService.CreateReplicationGroupRequest(
+                "grp-valkey-70-enc", "test", AuthMode.PASSWORD, "some-token", "us-east-1", "valkey", "7.0",
+                null, null, null, null, null, null, null, null, null, null,
+                ReplicationGroupSettings.defaults(), Map.of(), null, null);
+        service.createReplicationGroup(req);
+
+        service.createUser("iam-valkey-user", "iam-valkey-user", AuthMode.IAM, List.of(), "on ~* +@all", "valkey");
+        service.createUserGroup("iam-valkey-ug", "valkey", List.of("iam-valkey-user"), "us-east-1");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyReplicationGroup("grp-valkey-70-enc", List.of("iam-valkey-ug"), null));
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
     }
 }

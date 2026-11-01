@@ -72,6 +72,8 @@ public class ElastiCacheService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(ElastiCacheService.class);
 
+    private static final Pattern USER_ID_PATTERN =
+            Pattern.compile("^[a-zA-Z][a-zA-Z0-9-]{0,127}$");
     private final AccountAwareStorageBackend<ReplicationGroup> groups;
     private final AccountAwareStorageBackend<CacheCluster> cacheClusters;
     /**
@@ -224,7 +226,15 @@ public class ElastiCacheService implements ResourceProvider {
         ReplicationGroupSettings settings = request.settings() != null
                 ? request.settings() : ReplicationGroupSettings.defaults();
         settings.validate();
-        settings.validateTransitEncryption(request.authMode() != AuthMode.NO_AUTH);
+        // In AWS ElastiCache, auth tokens require in-transit encryption.
+        // Issue #4502: Reject upfront before provisioning rather than creating plaintext cache.
+        boolean hasAuthToken = (request.authToken() != null && !request.authToken().isBlank())
+                || request.authMode() == AuthMode.PASSWORD;
+        if (hasAuthToken && Boolean.FALSE.equals(settings.transitEncryptionEnabled())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Transit encryption must be enabled to use an auth token.", 400);
+        }
+        settings.validateTransitEncryption(effectiveTransitEncryption(request));
         // resolved with the other validations, before a port is taken or a container started
         ReplicationGroupSettings resolvedSettings =
                 settings.withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), request.region()));
@@ -236,6 +246,30 @@ public class ElastiCacheService implements ResourceProvider {
         }
     }
 
+    static boolean isEngineVersionAtLeast(String version, String required) {
+        if (version == null || version.isBlank()) {
+            return true;
+        }
+        String[] vParts = version.split("\\.");
+        String[] rParts = required.split("\\.");
+        int max = Math.max(vParts.length, rParts.length);
+        for (int i = 0; i < max; i++) {
+            int v = i < vParts.length ? parseVersionPart(vParts[i]) : 0;
+            int r = i < rParts.length ? parseVersionPart(rParts[i]) : 0;
+            if (v != r) {
+                return v > r;
+            }
+        }
+        return true;
+    }
+
+    private static int parseVersionPart(String s) {
+        try {
+            return Integer.parseInt(s.replaceAll("\\D.*", ""));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
     /**
      * Checks the user groups a create names and marks them in use until the create finishes,
      * under {@link #userGroupLock} so the check and the claim cannot straddle a DeleteUserGroup.
@@ -245,11 +279,13 @@ public class ElastiCacheService implements ResourceProvider {
             return List.of();
         }
         String engine = engineFor(request);
+        String engineVersion = request.engineVersion() != null ? request.engineVersion() : defaultEngineVersion(engine);
+        boolean transitEncrypted = effectiveTransitEncryption(request);
         synchronized (userGroupLock) {
             List<String> reserved = new ArrayList<>();
             for (String userGroupId : request.userGroupIds()) {
                 ElastiCacheUserGroup userGroup = getUserGroup(userGroupId);
-                requireAssociable(userGroup, request.authMode() != null && request.authMode() != AuthMode.NO_AUTH, engine);
+                requireAssociable(userGroup, transitEncrypted, engine, engineVersion);
                 reserved.add(userGroupReservationKey(userGroup.getUserGroupId()));
             }
             reserved.forEach(key -> reservedUserGroups.merge(key, 1, Integer::sum));
@@ -290,6 +326,15 @@ public class ElastiCacheService implements ResourceProvider {
             }
 
             try {
+                String engine = engineFor(request);
+                String engineVersion = request.engineVersion() != null ? request.engineVersion() : defaultEngineVersion(engine);
+                if (request.authMode() == AuthMode.IAM) {
+                    requireIamEngineVersionCompatible(engine, engineVersion);
+                    if (!isTransitEncryptionRequested(request)) {
+                        throw new AwsException("InvalidParameterCombination",
+                                "Transit encryption must be enabled to use IAM authentication.", 400);
+                    }
+                }
                 if (resolveClusterEnabled(request)) {
                     return provisionClusterModeGroup(request, resolvedSettings);
                 }
@@ -377,7 +422,16 @@ public class ElastiCacheService implements ResourceProvider {
             }
 
             synchronized (lockFor("rg:" + groupId)) {
-                groups.put(groupId, group);
+                // Re-verify under userGroupLock immediately before publishing to close race window (#4502)
+                synchronized (userGroupLock) {
+                    if (group.getUserGroupIds() != null) {
+                        for (String userGroupId : group.getUserGroupIds()) {
+                            ElastiCacheUserGroup userGroup = getUserGroup(userGroupId);
+                            requireAssociable(userGroup, group.isEncryptedInTransit(), group.getEngine(), group.getEngineVersion());
+                        }
+                    }
+                    groups.put(groupId, group);
+                }
                 if (handle != null) {
                     proxyManager.startProxy(groupId, authMode, proxyPort,
                             handle.getHost(), handle.getPort(),
@@ -478,7 +532,16 @@ public class ElastiCacheService implements ResourceProvider {
             group.setClusterNodes(nodes);
             applyCommonAttributes(group, request, resolvedSettings);
 
-            groups.put(groupId, group);
+            // Re-verify under userGroupLock immediately before publishing to close race window (#4502)
+            synchronized (userGroupLock) {
+                if (group.getUserGroupIds() != null) {
+                    for (String userGroupId : group.getUserGroupIds()) {
+                        ElastiCacheUserGroup userGroup = getUserGroup(userGroupId);
+                        requireAssociable(userGroup, group.isEncryptedInTransit(), group.getEngine(), group.getEngineVersion());
+                    }
+                }
+                groups.put(groupId, group);
+            }
             LOG.infov("Cluster-mode replication group {0} created, configuration endpoint={1}:{2}",
                     groupId, endpointHost, String.valueOf(configurationEndpoint.port()));
             return group;
@@ -513,6 +576,18 @@ public class ElastiCacheService implements ResourceProvider {
         if (request.tags() != null && !request.tags().isEmpty()) {
             group.setTags(new LinkedHashMap<>(request.tags()));
         }
+    }
+
+    private static boolean isTransitEncryptionRequested(CreateReplicationGroupRequest request) {
+        return request.settings() != null && Boolean.TRUE.equals(request.settings().transitEncryptionEnabled());
+    }
+
+    private static boolean effectiveTransitEncryption(CreateReplicationGroupRequest request) {
+        if (request.settings() != null && request.settings().transitEncryptionEnabled() != null) {
+            return request.settings().transitEncryptionEnabled();
+        }
+        return request.authMode() == AuthMode.PASSWORD
+                || (request.authToken() != null && !request.authToken().isBlank());
     }
 
     private String engineFor(CreateReplicationGroupRequest request) {
@@ -1272,18 +1347,64 @@ public class ElastiCacheService implements ResourceProvider {
             Boolean atRestEncryptionEnabled,
             String region,
             Map<String, String> tags,
-            Boolean autoMinorVersionUpgrade) {
-        public CreateCacheClusterRequest(String cacheClusterId, String engine, String engineVersion,
-                String cacheNodeType, Integer numCacheNodes, Integer port, AuthMode authMode,
-                String authToken, String cacheParameterGroupName, String cacheSubnetGroupName,
-                Integer snapshotRetentionLimit, String snapshotWindow, String preferredMaintenanceWindow,
-                String preferredAvailabilityZone, List<String> securityGroupIds, String networkType,
-                String ipDiscovery, Boolean atRestEncryptionEnabled, String region,
+            Boolean autoMinorVersionUpgrade,
+            Boolean transitEncryptionEnabled) {
+
+        public CreateCacheClusterRequest(
+                String cacheClusterId,
+                String engine,
+                String engineVersion,
+                String cacheNodeType,
+                Integer numCacheNodes,
+                Integer port,
+                AuthMode authMode,
+                String authToken,
+                String cacheParameterGroupName,
+                String cacheSubnetGroupName,
+                Integer snapshotRetentionLimit,
+                String snapshotWindow,
+                String preferredMaintenanceWindow,
+                String preferredAvailabilityZone,
+                List<String> securityGroupIds,
+                String networkType,
+                String ipDiscovery,
+                Boolean atRestEncryptionEnabled,
+                String region,
                 Map<String, String> tags) {
-            this(cacheClusterId, engine, engineVersion, cacheNodeType, numCacheNodes, port, authMode,
-                    authToken, cacheParameterGroupName, cacheSubnetGroupName, snapshotRetentionLimit,
-                    snapshotWindow, preferredMaintenanceWindow, preferredAvailabilityZone, securityGroupIds,
-                    networkType, ipDiscovery, atRestEncryptionEnabled, region, tags, null);
+            this(cacheClusterId, engine, engineVersion, cacheNodeType, numCacheNodes, port,
+                    authMode, authToken, cacheParameterGroupName, cacheSubnetGroupName,
+                    snapshotRetentionLimit, snapshotWindow, preferredMaintenanceWindow,
+                    preferredAvailabilityZone, securityGroupIds, networkType, ipDiscovery,
+                    atRestEncryptionEnabled, region, tags, null, null);
+        }
+
+        public CreateCacheClusterRequest(
+                String cacheClusterId,
+                String engine,
+                String engineVersion,
+                String cacheNodeType,
+                Integer numCacheNodes,
+                Integer port,
+                AuthMode authMode,
+                String authToken,
+                String cacheParameterGroupName,
+                String cacheSubnetGroupName,
+                Integer snapshotRetentionLimit,
+                String snapshotWindow,
+                String preferredMaintenanceWindow,
+                String preferredAvailabilityZone,
+                List<String> securityGroupIds,
+                String networkType,
+                String ipDiscovery,
+                Boolean atRestEncryptionEnabled,
+                String region,
+                Map<String, String> tags,
+                Boolean autoMinorVersionUpgrade) {
+            this(cacheClusterId, engine, engineVersion, cacheNodeType, numCacheNodes, port,
+                    authMode, authToken, cacheParameterGroupName, cacheSubnetGroupName,
+                    snapshotRetentionLimit, snapshotWindow, preferredMaintenanceWindow,
+                    preferredAvailabilityZone, securityGroupIds, networkType, ipDiscovery,
+                    atRestEncryptionEnabled, region, tags, autoMinorVersionUpgrade, null);
         }
     }
 
@@ -1349,6 +1470,14 @@ public class ElastiCacheService implements ResourceProvider {
         if (request.numCacheNodes() != null && request.numCacheNodes() != 1) {
             throw new AwsException("InvalidParameterValue",
                     "NumCacheNodes should be 1 if engine is " + engine, 400);
+        }
+        // In AWS ElastiCache, auth tokens require in-transit encryption.
+        // Issue #4502: Reject upfront before provisioning rather than creating plaintext cache.
+        boolean hasAuthToken = (request.authToken() != null && !request.authToken().isBlank())
+                || request.authMode() == AuthMode.PASSWORD;
+        if (hasAuthToken && Boolean.FALSE.equals(request.transitEncryptionEnabled())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Transit encryption must be enabled to use an auth token.", 400);
         }
         // The snapshot members take the replication group's checks, so one request worded one way
         // is refused the same way whichever action carries it.
@@ -1514,6 +1643,7 @@ public class ElastiCacheService implements ResourceProvider {
         cluster.setIpDiscovery(request.ipDiscovery() != null && !request.ipDiscovery().isBlank()
                 ? request.ipDiscovery() : "ipv4");
         cluster.setAtRestEncryptionEnabled(Boolean.TRUE.equals(request.atRestEncryptionEnabled()));
+        cluster.setTransitEncryptionEnabled(request.transitEncryptionEnabled());
         cluster.setAutoMinorVersionUpgrade(request.autoMinorVersionUpgrade());
         if (request.securityGroupIds() != null && !request.securityGroupIds().isEmpty()) {
             cluster.setSecurityGroupIds(new ArrayList<>(request.securityGroupIds()));
@@ -1654,7 +1784,7 @@ public class ElastiCacheService implements ResourceProvider {
 
                         @Override
                         public TransitEncryption transitEncryption() {
-                            return cluster.getAuthMode() != AuthMode.NO_AUTH
+                            return cluster.isEncryptedInTransit()
                                     ? TransitEncryption.REQUIRED : TransitEncryption.NONE;
                         }
                     });
@@ -1814,9 +1944,17 @@ public class ElastiCacheService implements ResourceProvider {
                     for (String id : userGroupIdsToAdd) {
                         Optional<ElastiCacheUserGroup> userGroup = userGroups.get(normalizeUserGroupId(id));
                         if (userGroup.isPresent()) {
-                            requireAssociable(userGroup.get(), encryptedInTransit, group.getEngine());
+                            requireAssociable(userGroup.get(), encryptedInTransit, group.getEngine(), group.getEngineVersion());
                             userGroupsToAdd.add(userGroup.get().getUserGroupId());
                         } else if (findUser(id).isPresent()) {
+                            ElastiCacheUser u = findUser(id).get();
+                            if (u.getAuthMode() == AuthMode.IAM) {
+                                if (!encryptedInTransit) {
+                                    throw new AwsException("InvalidParameterCombination",
+                                            "Transit encryption must be enabled to use IAM authentication.", 400);
+                                }
+                                requireIamEngineVersionCompatible(group.getEngine(), group.getEngineVersion());
+                            }
                             directUsersToAdd.add(id);
                         } else {
                             throw userGroupNotFound(id);
@@ -1925,6 +2063,9 @@ public class ElastiCacheService implements ResourceProvider {
         if (findUser(userId).isPresent()) {
             throw new AwsException("UserAlreadyExists",
                     "User " + userId + " already exists.", 400);
+        }
+        if (authMode == AuthMode.IAM) {
+            validateIamUser(userId, userName);
         }
 
         // Engine is required on AWS, but Floci's CreateUser accepted requests without
@@ -2226,6 +2367,30 @@ public class ElastiCacheService implements ResourceProvider {
         synchronized (userGroupLock) {
             String nextEngine = normalizedEngine != null ? normalizedEngine : user.getEngine();
             AuthMode nextAuthMode = authMode != null ? authMode : user.getAuthMode();
+            if (nextAuthMode == AuthMode.IAM) {
+                validateIamUser(userId, user.getUserName());
+                for (ElastiCacheUserGroup userGroup : userGroups.scan(k -> true)) {
+                    if (userGroup.getUserIds().contains(userId)) {
+                        for (ReplicationGroup group : replicationGroupsUsing(userGroup.getUserGroupId())) {
+                            if (!group.isEncryptedInTransit()) {
+                                throw new AwsException("InvalidParameterCombination",
+                                        "Transit encryption must be enabled to use IAM authentication.", 400);
+                            }
+                            requireIamEngineVersionCompatible(group.getEngine(), group.getEngineVersion());
+                        }
+                    }
+                }
+                // Validate replication groups where user is directly associated (#4502)
+                for (ReplicationGroup group : groups.scan(k -> true)) {
+                    if (group.getAssociatedUserIds() != null && group.getAssociatedUserIds().contains(userId)) {
+                        if (!group.isEncryptedInTransit()) {
+                            throw new AwsException("InvalidParameterCombination",
+                                    "Transit encryption must be enabled to use IAM authentication.", 400);
+                        }
+                        requireIamEngineVersionCompatible(group.getEngine(), group.getEngineVersion());
+                    }
+                }
+            }
             if (!nextEngine.equals(user.getEngine()) || nextAuthMode != user.getAuthMode()) {
                 // the user must still satisfy every user group that holds it
                 for (ElastiCacheUserGroup userGroup : userGroups.scan(k -> true)) {
@@ -2354,6 +2519,15 @@ public class ElastiCacheService implements ResourceProvider {
                     requireEngineCompatible(newEngine, id, cacheEngine);
                 }
             }
+            if (hasIamUser(members)) {
+                for (ReplicationGroup group : replicationGroupsUsing(id)) {
+                    if (!group.isEncryptedInTransit()) {
+                        throw new AwsException("InvalidParameterCombination",
+                                "Transit encryption must be enabled to use IAM authentication.", 400);
+                    }
+                    requireIamEngineVersionCompatible(group.getEngine(), group.getEngineVersion());
+                }
+            }
             userGroup.setEngine(newEngine);
             userGroup.setUserIds(members);
             userGroups.put(id, userGroup);
@@ -2474,13 +2648,63 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     /** RBAC needs in-transit encryption, and a valkey user group only serves valkey caches. */
-    private static void requireAssociable(ElastiCacheUserGroup userGroup, boolean encryptedInTransit, String engine) {
+    private void requireAssociable(ElastiCacheUserGroup userGroup, boolean encryptedInTransit, String engine, String engineVersion) {
+        if (hasIamUser(userGroup)) {
+            if (!encryptedInTransit) {
+                throw new AwsException("InvalidParameterCombination",
+                        "Transit encryption must be enabled to use IAM authentication.", 400);
+            }
+            requireIamEngineVersionCompatible(engine, engineVersion);
+        }
         if (!encryptedInTransit) {
             throw new AwsException("InvalidParameterCombination",
                     "User group " + userGroup.getUserGroupId()
                             + " can only be associated with a replication group that has in-transit encryption enabled.", 400);
         }
         requireEngineCompatible(userGroup.getEngine(), userGroup.getUserGroupId(), engine);
+    }
+
+    private boolean hasIamUser(Collection<String> userIds) {
+        if (userIds == null) {
+            return false;
+        }
+        for (String uid : userIds) {
+            ElastiCacheUser u = users.get(uid).orElse(null);
+            if (u != null && u.getAuthMode() == AuthMode.IAM) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasIamUser(ElastiCacheUserGroup userGroup) {
+        return userGroup != null && hasIamUser(userGroup.getUserIds());
+    }
+
+    private static void validateIamUser(String userId, String userName) {
+        if (!USER_ID_PATTERN.matcher(userId).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "The parameter UserId must be between 1 and 128 characters long, must contain only letters, numbers, and hyphens, and must start with a letter.", 400);
+        }
+        if ("default".equalsIgnoreCase(userName)) {
+            throw new AwsException("InvalidParameterValue",
+                    "The default user cannot be configured to use IAM authentication.", 400);
+        }
+        if (!userId.equals(userName)) {
+            throw new AwsException("InvalidParameterCombination",
+                    "UserId must be equal to UserName when AuthenticationMode Type is IAM.", 400);
+        }
+    }
+
+    private static void requireIamEngineVersionCompatible(String engine, String engineVersion) {
+        if ("redis".equalsIgnoreCase(engine) && !isEngineVersionAtLeast(engineVersion, "7.0")) {
+            throw new AwsException("InvalidParameterCombination",
+                    "IAM authentication is only supported for Redis version 7.0 and above.", 400);
+        }
+        if ("valkey".equalsIgnoreCase(engine) && !isEngineVersionAtLeast(engineVersion, "7.2")) {
+            throw new AwsException("InvalidParameterCombination",
+                    "IAM authentication is only supported for Valkey version 7.2 and above.", 400);
+        }
     }
 
     private static void requireEngineCompatible(String userGroupEngine, String userGroupId, String replicationGroupEngine) {
