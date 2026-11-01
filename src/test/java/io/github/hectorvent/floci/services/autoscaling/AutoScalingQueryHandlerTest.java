@@ -30,6 +30,39 @@ class AutoScalingQueryHandlerTest {
     private static final String REGION = "us-east-1";
 
     @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void repeatedDetachMembersCountEachDetachedInstanceOnce(boolean decrementDesiredCapacity) {
+        AutoScalingService service = new AutoScalingService();
+        service.regionResolver = new RegionResolver(REGION, "000000000000");
+        service.createAutoScalingGroup(REGION, "repeated-detach", null, "lt", null, "1", null,
+                0, 3, 3, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(),
+                "EC2", 0, List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
+        service.ec2Service = mock(Ec2Service.class);
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("repeated-detach")).getFirst();
+        for (String id : List.of("i-detached", "i-retained-one", "i-retained-two")) {
+            AsgInstance instance = new AsgInstance();
+            instance.setInstanceId(id);
+            instance.setLifecycleState("InService");
+            group.getInstances().add(instance);
+        }
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupName", "repeated-detach");
+        params.add("ShouldDecrementDesiredCapacity", Boolean.toString(decrementDesiredCapacity));
+        params.add("InstanceIds.member.1", "i-detached");
+        params.add("InstanceIds.member.1", "i-detached");
+        params.add("InstanceIds.member.3", "i-detached");
+
+        Response response = new AutoScalingQueryHandler(service).handle("DetachInstances", params, REGION);
+
+        assertEquals(200, response.getStatus());
+        assertEquals(decrementDesiredCapacity ? 2 : 3, group.getDesiredCapacity());
+        assertEquals(List.of("i-retained-one", "i-retained-two"),
+                group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+        verify(service.ec2Service).deleteSystemTag(
+                REGION, List.of("i-detached"), "aws:autoscaling:groupName", "repeated-detach");
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"AttachInstances", "DetachInstances", "SetInstanceProtection"})
     void instanceMutationsRetainSparseOrderedAndRepeatedMembers(String action) {
         AutoScalingService service = mock(AutoScalingService.class);
