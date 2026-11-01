@@ -599,10 +599,10 @@ public class NativeDynamoDbJsonHandler {
         if (!validationErrors.isEmpty()) {
             throw SmithyValidationErrors.validationException(validationErrors);
         }
+        requireReadableNumbers(request, VALIDATION_ENVELOPE);
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(item);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
-        DynamoDbNumberUtils.requireStorable(exprAttrValues, true);
 
         JsonNode expected = request.has("Expected") ? request.get("Expected") : null;
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(expected));
@@ -654,14 +654,13 @@ public class NativeDynamoDbJsonHandler {
         JsonNode attributesToGet = request.has("AttributesToGet") ? request.get("AttributesToGet") : null;
 
         DynamoDbAccessPathValidator.validateAttributesToGet(attributesToGet);
+        requireValidReturnConsumedCapacity(request);
+        requireReadableNumbers(request, "");
         if (attributesToGet != null && projectionExpression != null) {
             throw new AwsException("ValidationException",
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {AttributesToGet} Expression parameters: {ProjectionExpression}", 400);
         }
-
-        // Validate enums before table lookup
-        requireValidReturnConsumedCapacity(request);
 
         // Validate ProjectionExpression syntax and reserved words before item lookup
         if (projectionExpression != null) {
@@ -717,9 +716,9 @@ public class NativeDynamoDbJsonHandler {
         if (!delValidationErrors.isEmpty()) {
             throw SmithyValidationErrors.validationException(delValidationErrors);
         }
+        requireReadableNumbers(request, VALIDATION_ENVELOPE);
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
-        DynamoDbNumberUtils.requireStorable(exprAttrValues, true);
         JsonNode expectedDel = request.has("Expected") ? request.get("Expected") : null;
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(expectedDel));
 
@@ -783,13 +782,12 @@ public class NativeDynamoDbJsonHandler {
                     + "Member must satisfy enum value set: [NONE, ALL_OLD, ALL_NEW, UPDATED_OLD, UPDATED_NEW]");
         }
         requireValidReturnConsumedCapacity(request);
+        requireReadableNumbers(request, VALIDATION_ENVELOPE);
         DynamoDbExpressionSize.checkWrite(updateExpression, "UpdateExpression");
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
-        DynamoDbNumberUtils.requireStorable(exprAttrValues, true);
         ObjectNode attributeUpdateValues = legacyValues(attributeUpdates);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(attributeUpdateValues);
-        DynamoDbNumberUtils.requireStorable(attributeUpdateValues, true);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(
                 legacyValues(request.has("Expected") ? request.get("Expected") : null));
 
@@ -1068,6 +1066,26 @@ public class NativeDynamoDbJsonHandler {
         return values;
     }
 
+    private static final String VALIDATION_ENVELOPE = "1 validation error detected: ";
+    private static final List<String> VALUE_MAPS = List.of("Item", "Key", "ExpressionAttributeValues", "ExclusiveStartKey");
+    private static final List<String> LEGACY_CONDITIONS =
+            List.of("Expected", "AttributeUpdates", "KeyConditions", "QueryFilter", "ScanFilter");
+
+    // DynamoDB reads every number in the request before it checks the expressions, the keys or the table.
+    private void requireReadableNumbers(JsonNode request, String prefix) {
+        for (String member : VALUE_MAPS) {
+            requireReadableValues(request.path(member), prefix);
+        }
+        for (String member : LEGACY_CONDITIONS) {
+            requireReadableValues(legacyValues(request.get(member)), prefix);
+        }
+    }
+
+    private static void requireReadableValues(JsonNode values, String prefix) {
+        values.forEach(value ->
+                DynamoDbNumberUtils.forEachNumber(value, text -> DynamoDbNumberUtils.requireItemNumber(text, prefix)));
+    }
+
     private static final Set<String> VALID_SELECT = Set.of(
             "ALL_ATTRIBUTES", "ALL_PROJECTED_ATTRIBUTES", "SPECIFIC_ATTRIBUTES", "COUNT");
 
@@ -1117,6 +1135,7 @@ public class NativeDynamoDbJsonHandler {
                         ? List.of("AttributesToGet", "QueryFilter", "ConditionalOperator")
                         : List.of("AttributesToGet", "QueryFilter", "ConditionalOperator", "KeyConditions"),
                 List.of("ProjectionExpression", "FilterExpression", "KeyConditionExpression"));
+        requireReadableNumbers(request, "");
 
         if (keyConditionExpr == null && keyConditions == null) {
             throw new AwsException("ValidationException",
@@ -1133,7 +1152,6 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbExpressionSize.checkRead(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpression, "ProjectionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
-        DynamoDbNumberUtils.requireStorable(exprAttrValues, false);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(keyConditions), false);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(queryFilter), false);
         ExpressionEvaluator.validateSyntax(keyConditionExpr, "KeyConditionExpression");
@@ -1282,11 +1300,11 @@ public class NativeDynamoDbJsonHandler {
         rejectMixedParameters(request,
                 List.of("AttributesToGet", "ScanFilter", "ConditionalOperator"),
                 List.of("ProjectionExpression", "FilterExpression"));
+        requireReadableNumbers(request, "");
 
         DynamoDbExpressionSize.checkReadWithSize(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpressionScan, "ProjectionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
-        DynamoDbNumberUtils.requireStorable(exprAttrValues, false);
         ExpressionEvaluator.validateSyntax(filterExpr, "FilterExpression");
         // DynamoDB reports filter errors before projection errors.
         requireDefinedTokens(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
@@ -1513,6 +1531,18 @@ public class NativeDynamoDbJsonHandler {
             }
         }
 
+        String returnCCBatch = request.path("ReturnConsumedCapacity").asText("NONE");
+        requireValidReturnConsumedCapacity(request);
+        // BatchWriteItem still reads a number the way a PartiQL parameter is read.
+        Consumer<JsonNode> read = value ->
+                DynamoDbNumberUtils.forEachNumber(value, DynamoDbNumberUtils::requirePartiQLParameterNumber);
+        for (List<JsonNode> writes : items.values()) {
+            for (JsonNode writeReq : writes) {
+                writeReq.path("PutRequest").path("Item").forEach(read);
+                writeReq.path("DeleteRequest").path("Key").forEach(read);
+            }
+        }
+
         for (Map.Entry<String, List<JsonNode>> entry : items.entrySet()) {
             TableDefinition bwTable = dynamoDbService.requireTableForItemCall(entry.getKey(), region);
             Set<String> seen = new HashSet<>();
@@ -1530,8 +1560,6 @@ public class NativeDynamoDbJsonHandler {
         }
 
         // The per-table write cost needs the stored images from before the batch runs.
-        String returnCCBatch = request.path("ReturnConsumedCapacity").asText("NONE");
-        requireValidReturnConsumedCapacity(request);
         Map<String, DynamoDbWriteCapacity.Cost> costs = null;
         if (!"NONE".equals(returnCCBatch)) {
             costs = new LinkedHashMap<>();
@@ -1617,6 +1645,18 @@ public class NativeDynamoDbJsonHandler {
                         + ".member.Keys' failed to satisfy constraint: "
                         + "Member must have length less than or equal to 100");
             }
+        }
+
+        // DynamoDB compares the keys as sent before it reads their numbers.
+        for (JsonNode tableRequest : items.values()) {
+            Set<JsonNode> sent = new HashSet<>();
+            for (JsonNode key : tableRequest.path("Keys")) {
+                if (!sent.add(key)) {
+                    throw new AwsException("ValidationException",
+                            "Provided list of item keys contains duplicates", 400);
+                }
+            }
+            tableRequest.path("Keys").forEach(key -> requireReadableValues(key, ""));
         }
 
         for (Map.Entry<String, JsonNode> entry : items.entrySet()) {
@@ -2388,6 +2428,7 @@ public class NativeDynamoDbJsonHandler {
                 DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
                 DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Key"), false);
                 DynamoDbAttributeValueValidator.requireNestingWithinLimit(opExprAttrValues, false);
+                requireReadableNumbers(op, "");
                 DynamoDbExpressionSize.checkRead(op.path("UpdateExpression").textValue(), "UpdateExpression");
                 DynamoDbExpressionSize.checkReadWithSize(conditionExpression, "ConditionExpression");
                 ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
@@ -2535,6 +2576,7 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleTransactGetItems(JsonNode request, String region) {
         JsonNode transactItemsNode = requireValidTransactRequest(request);
+        transactItemsNode.forEach(txItem -> requireReadableNumbers(txItem.path("Get"), ""));
 
         for (JsonNode txItem : transactItemsNode) {
             DynamoDbExpressionSize.checkRead(txItem.path("Get").path("ProjectionExpression").textValue(),

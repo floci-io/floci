@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import java.math.BigDecimal;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.function.Consumer;
 
 /**
  * DynamoDB number validation and normalization.
@@ -121,57 +122,61 @@ final class DynamoDbNumberUtils {
         return toNormalizedString(stripped);
     }
 
-    // AWS checks every number in a request before the table lookup. Single-item write
-    // APIs wrap the error in the validation envelope, Query and Scan do not.
-    static void requireStorable(JsonNode attributes, boolean inValidationEnvelope) {
-        if (attributes == null || !attributes.isObject()) {
-            return;
-        }
-        for (JsonNode value : attributes) {
-            requireStorableValue(value, inValidationEnvelope ? "1 validation error detected: " : "");
-        }
-    }
-
-    private static void requireStorableValue(JsonNode value, String prefix) {
+    static void forEachNumber(JsonNode value, Consumer<String> check) {
         if (!value.isObject()) {
             return;
         }
-        if (value.has("N")) {
-            requireStorableNumber(value.get("N").asText(), prefix);
+        if (value.path("N").isTextual()) {
+            check.accept(value.get("N").asText());
         }
-        for (JsonNode n : value.path("NS")) {
-            requireStorableNumber(n.asText(), prefix);
+        for (JsonNode member : value.path("NS")) {
+            if (member.isTextual()) {
+                check.accept(member.asText());
+            }
         }
-        for (JsonNode element : value.path("L")) {
-            requireStorableValue(element, prefix);
-        }
-        for (JsonNode entry : value.path("M")) {
-            requireStorableValue(entry, prefix);
+        value.path("L").forEach(element -> forEachNumber(element, check));
+        value.path("M").forEach(element -> forEachNumber(element, check));
+    }
+
+    static void requireItemNumber(String text, String prefix) {
+        String problem = itemNumberProblem(text);
+        if (problem != null) {
+            throw new AwsException("ValidationException", prefix + problem, 400);
         }
     }
 
-    private static void requireStorableNumber(String numStr, String prefix) {
-        BigDecimal bd;
+    // An item call reads the exponent as a long and checks the range without wrapping around,
+    // unlike a PartiQL parameter. It counts the digits before it checks the range.
+    private static String itemNumberProblem(String text) {
+        int marker = exponentMarker(text);
+        BigDecimal mantissa;
+        long exponent;
         try {
-            bd = new BigDecimal(numStr);
+            mantissa = new BigDecimal(marker < 0 ? text : text.substring(0, marker));
+            exponent = marker < 0 ? 0 : Long.parseLong(text.substring(marker + 1));
         } catch (NumberFormatException e) {
-            throw new AwsException("ValidationException",
-                    "The parameter cannot be converted to a numeric value: " + numStr, 400);
+            return PARAMETER_NOT_NUMERIC + ": " + text;
         }
-        BigDecimal stripped = bd.stripTrailingZeros();
-        if (stripped.precision() > 38) {
-            throw new AwsException("ValidationException",
-                    prefix + TOO_MANY_DIGITS, 400);
+        if (38 < mantissa.stripTrailingZeros().precision()) {
+            return TOO_MANY_DIGITS;
         }
-        BigDecimal abs = stripped.abs();
-        if (abs.compareTo(MAX_ABS) >= 0) {
-            throw new AwsException("ValidationException",
-                    prefix + NUMBER_OVERFLOW, 400);
+        long magnitude = (long) mantissa.precision() - mantissa.scale() + 1;
+        if (127 - magnitude < exponent) {
+            return NUMBER_OVERFLOW;
         }
-        if (abs.signum() > 0 && abs.compareTo(MIN_ABS_NONZERO) < 0) {
-            throw new AwsException("ValidationException",
-                    prefix + NUMBER_UNDERFLOW, 400);
+        if (exponent < -128 - magnitude) {
+            return NUMBER_UNDERFLOW;
         }
+        return null;
+    }
+
+    private static int exponentMarker(String text) {
+        int lower = text.indexOf('e');
+        int upper = text.indexOf('E');
+        if (lower < 0 || upper < 0) {
+            return Math.max(lower, upper);
+        }
+        return Math.min(lower, upper);
     }
 
     // AWS answers with the overflow wording for any arithmetic result it cannot store,
