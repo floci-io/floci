@@ -94,10 +94,13 @@ The platform answers these cases itself, with the AWS HTML pages and `lambda-web
 | 400 | `Platform.MalformedRequest` | A method other than `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, `OPTIONS`, `DELETE` |
 | 403 | none | An `IamAuth` request with no valid signature or no permission. The endpoint's `rateLimit` 0 answers first, and a refused request takes no part of the `rateLimit` |
 | 404 | `Platform.InvalidEndpoint` | The `Host` is a `lambda-web` domain Floci did not mint |
+| 409 | `Platform.EndpointNotActive` | The endpoint is `Failed`. This page answers before the `rateLimit` 0 and `IamAuth` checks |
+| 409 | `Platform.RevisionNotActive` | The request goes to a revision that turned `Failed`. AWS's page was not seen, so Floci answers the `EndpointNotActive` page with this error type |
 | 429 | `Platform.EndpointMaxEnvThrottle` | Every environment is full and the endpoint runs `maxEnvironments` |
 | 429 | `Platform.EndpointRequestThrottle` | The requests exceed the endpoint's `rateLimit` |
 | 431 | `Platform.HeaderTooLarge` | The request line, the headers and the blank line pass 128 KiB, counted as `Name: value` lines. This page answers before every other check |
 | 502 | `Application.TimeoutListenError`, `Application.InitCodeError`, `Runtime.ImportCodeError`, `Runtime.Exit`, `Runtime.ExitError` | The server did not listen within 9 seconds, threw at import, could not find a module at import, or exited at start with status 0 or another status |
+| 502 | `Platform.CannotAssumeRole` | The environment cannot assume the execution role, which was deleted or no longer trusts Lambda |
 | 503 | `Platform.EndpointDisabled` | The endpoint's `rateLimit` is 0 |
 | 503 | `Runtime.OriginRequestError` | The process died while handling the request, or tens of milliseconds before it |
 | 504 | `Runtime.RequestTimeout` | No response within the revision's `timeoutSeconds` |
