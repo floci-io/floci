@@ -2851,7 +2851,7 @@ public class NativeDynamoDbJsonHandler {
 
     private void checkAttrSets(JsonNode attr) {
         if (attr == null) return;
-        if (attr.has("NULL") && !attr.get("NULL").asBoolean()) {
+        if (DynamoDbAttributeValueValidator.hasFalseNull(attr)) {
             throw new AwsException("ValidationException",
                     "One or more parameter values were invalid: Null attribute value types must have the value of true", 400);
         }

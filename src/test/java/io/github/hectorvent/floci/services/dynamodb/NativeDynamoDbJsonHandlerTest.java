@@ -2276,6 +2276,24 @@ class NativeDynamoDbJsonHandlerTest {
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
+            PutItem          | {"TableName":"Missing","Item":{"userId":{"S":"u1"},"n":{"NULL":"TRUE"}}}                          |
+            PutItem          | {"TableName":"Missing","Item":{"userId":{"S":"u1"},"n":{"NULL":"False"}}}                         | 1 validation error detected: One or more parameter values were invalid: Null attribute value types must have the value of true
+            BatchWriteItem   | {"RequestItems":{"Missing":[{"PutRequest":{"Item":{"userId":{"S":"u1"},"n":{"NULL":"True"}}}}]}} |
+            BatchWriteItem   | {"RequestItems":{"Missing":[{"PutRequest":{"Item":{"userId":{"S":"u1"},"n":{"NULL":"FALSE"}}}}]}} | One or more parameter values were invalid: Null attribute value types must have the value of true
+            ExecuteStatement | {"Statement":"SELECT * FROM Absent WHERE userId = ?","Parameters":[{"L":[{"NULL":"TRUE"}]}]}     |
+            """)
+    void aNullFlagWrittenAsAStringIsReadInAnyCase(String operation, String request, String message) throws Exception {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle(operation, mapper.readTree(request), "eu-west-1"));
+        if (message == null) {
+            assertEquals("ResourceNotFoundException", ex.getErrorCode(), ex.getMessage());
+        } else {
+            assertEquals(message, ex.getMessage());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
             [{"userId":{"N":"abc"}},{"userId":{"NULL":true}}]                    | The supplied Item contains a null AttributeValue
             [{"userId":{"NULL":true}},{"userId":{"NULL":true}}]                  | The supplied Item contains a null AttributeValue
             [{"userId":{"S":"a"}},{"userId":{"S":"a"}},{"userId":{"NULL":true}}] | Provided list of item keys contains duplicates

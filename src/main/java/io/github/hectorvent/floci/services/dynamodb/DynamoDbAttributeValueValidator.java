@@ -49,8 +49,17 @@ final class DynamoDbAttributeValueValidator {
         return null;
     }
 
+    // DynamoDB reads a NULL flag written as a string in any case.
+    static boolean hasFalseNull(JsonNode value) {
+        JsonNode flag = value.get("NULL");
+        if (flag == null) {
+            return false;
+        }
+        return flag.isTextual() ? !"true".equalsIgnoreCase(flag.textValue()) : !flag.asBoolean();
+    }
+
     private static String problemOf(JsonNode value) {
-        if (value.has("NULL") && !value.get("NULL").asBoolean()) {
+        if (hasFalseNull(value)) {
             return INVALID + "Null attribute value types must have the value of true";
         }
         if (value.path("N").isTextual()) {
