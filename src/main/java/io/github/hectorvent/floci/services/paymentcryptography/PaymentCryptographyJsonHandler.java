@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.paymentcryptography;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryptographyKey;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -12,7 +14,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
 
 /**
  * The Payment Cryptography control plane.
@@ -22,6 +23,9 @@ import java.util.Map.Entry;
  */
 @ApplicationScoped
 public class PaymentCryptographyJsonHandler {
+
+    /** The error a bad page size or a bad token is refused with. */
+    private static final String PAGINATION_ERROR = "ValidationException";
 
     private final PaymentCryptographyService service;
 
@@ -78,8 +82,9 @@ public class PaymentCryptographyJsonHandler {
     }
 
     private Map<String, Object> listKeys(JsonNode request, String region) {
-        PaymentCryptographyService.Page<PaymentCryptographyKey> page = service.listKeys(region,
-                maxResults(request), request.path("NextToken").asText(null));
+        PaginatedResult<PaymentCryptographyKey> page = service.listKeys(region,
+                Pagination.parseMaxResults(request, "MaxResults", PAGINATION_ERROR),
+                Pagination.parseNextToken(request, "NextToken", PAGINATION_ERROR));
         List<Map<String, Object>> keys = new ArrayList<>();
         for (PaymentCryptographyKey key : page.items()) {
             keys.add(keyObject(key));
@@ -118,8 +123,9 @@ public class PaymentCryptographyJsonHandler {
 
     private Map<String, Object> listAliases(JsonNode request, String region) {
         String keyArn = request.hasNonNull("KeyArn") ? request.get("KeyArn").asText() : null;
-        PaymentCryptographyService.Page<PaymentCryptographyAlias> page = service.listAliases(region,
-                keyArn, maxResults(request), request.path("NextToken").asText(null));
+        PaginatedResult<PaymentCryptographyAlias> page = service.listAliases(region,
+                keyArn, Pagination.parseMaxResults(request, "MaxResults", PAGINATION_ERROR),
+                Pagination.parseNextToken(request, "NextToken", PAGINATION_ERROR));
         List<Map<String, Object>> aliases = new ArrayList<>();
         for (PaymentCryptographyAlias alias : page.items()) {
             aliases.add(aliasObject(alias));
@@ -167,8 +173,9 @@ public class PaymentCryptographyJsonHandler {
 
     private Map<String, Object> listTagsForResource(JsonNode request, String region) {
         PaymentCryptographyKey key = requiredKey(request, region);
-        PaymentCryptographyService.Page<Map.Entry<String, String>> page = service.listTags(key,
-                maxResults(request), request.path("NextToken").asText(null));
+        PaginatedResult<Map.Entry<String, String>> page = service.listTags(key,
+                Pagination.parseMaxResults(request, "MaxResults", PAGINATION_ERROR),
+                Pagination.parseNextToken(request, "NextToken", PAGINATION_ERROR));
         List<Map<String, Object>> tags = new ArrayList<>();
         for (Map.Entry<String, String> tag : page.items()) {
             tags.add(Map.of("Key", tag.getKey(), "Value", tag.getValue()));
@@ -179,15 +186,6 @@ public class PaymentCryptographyJsonHandler {
             out.put("NextToken", page.nextToken());
         }
         return out;
-    }
-
-    /** The number of results the caller asks for, or null when it asks for all of them. */
-    private static Integer maxResults(JsonNode request) {
-        JsonNode declared = request.get("MaxResults");
-        if (declared == null || !declared.isNumber()) {
-            return null;
-        }
-        return declared.asInt();
     }
 
     /** The tags of a request, as the name and the value of each. */

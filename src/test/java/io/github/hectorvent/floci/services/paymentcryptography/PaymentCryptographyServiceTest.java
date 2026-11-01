@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.paymentcryptography;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryptographyAlias;
@@ -190,14 +191,23 @@ class PaymentCryptographyServiceTest {
         createKey("us-east-1");
         createKey("us-east-1");
 
-        PaymentCryptographyService.Page<PaymentCryptographyKey> first = service.listKeys("us-east-1", 2, null);
+        PaginatedResult<PaymentCryptographyKey> first = service.listKeys("us-east-1", 2, null);
         assertEquals(2, first.items().size());
         assertNotNull(first.nextToken(), "there are more keys, so there is a token");
 
-        PaymentCryptographyService.Page<PaymentCryptographyKey> second =
+        PaginatedResult<PaymentCryptographyKey> second =
                 service.listKeys("us-east-1", 2, first.nextToken());
         assertEquals(1, second.items().size());
         assertNull(second.nextToken(), "the last page has no token");
+    }
+
+    @Test
+    void aPageSizeBelowOneIsRefused() {
+        createKey("us-east-1");
+
+        AwsException bad = assertThrows(AwsException.class,
+                () -> service.listKeys("us-east-1", 0, null));
+        assertEquals("ValidationException", bad.getErrorCode());
     }
 
     @Test
