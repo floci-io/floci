@@ -5,6 +5,8 @@ import org.apache.hc.core5.http.ConnectionRequestTimeoutException;
 import org.apache.hc.core5.util.TimeValue;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.api.condition.DisabledOnOs;
+import org.junit.jupiter.api.condition.OS;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.io.IOException;
@@ -101,8 +103,9 @@ class FlociDockerHttpClientTest {
     // every caller's catch (Exception); at startup that took down the Windows binary. A directory
     // stands in for a busy pipe: it exists but cannot be opened for writing, so the open fails with
     // a plain FileSystemException and docker-java's wait loop reaches for Kernel32, which cannot
-    // load off Windows.
+    // load off Windows. Not on Windows, where Kernel32 loads and a directory is access-denied.
     @Test
+    @DisabledOnOs(OS.WINDOWS)
     @Timeout(30)
     void aNamedPipeTransportThatCannotLoadItsNativeLibraryFailsTheCallWithAnException(@TempDir Path dir)
             throws Exception {
@@ -120,8 +123,10 @@ class FlociDockerHttpClientTest {
 
     // Catches: a named pipe that does not exist (Windows without Docker running) spending the whole
     // connect timeout in docker-java's wait loop, and DockerRetry retrying it, so every Docker call
-    // took 30 s per attempt and the binary never answered its health check.
+    // took 30 s per attempt and the binary never answered its health check. Not on Windows, where
+    // a temp-directory path is not a pipe name.
     @Test
+    @DisabledOnOs(OS.WINDOWS)
     @Timeout(10)
     void aNamedPipeThatDoesNotExistFailsAtOnceAndIsNotRetried(@TempDir Path dir) throws Exception {
         try (FlociDockerHttpClient client = new FlociDockerHttpClient.Builder()

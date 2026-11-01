@@ -40,8 +40,9 @@ final class FailFastNamedPipeSocket extends NamedPipeSocket {
             // The pipe exists and had a free instance; docker-java reopens it below.
         } catch (NoSuchFileException | AccessDeniedException e) {
             throw e;
-        } catch (FileSystemException busy) {
-            // No free instance yet: docker-java's loop below waits for one.
+        } catch (FileSystemException expected) {
+            // A busy pipe, no free instance yet: docker-java's loop below waits for one, and fails
+            // with this same exception if none frees up within the timeout.
         }
         super.connect(endpoint, timeout);
     }
