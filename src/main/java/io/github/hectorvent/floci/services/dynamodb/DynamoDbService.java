@@ -4928,12 +4928,11 @@ public class DynamoDbService {
     }
 
     private TableDefinition requireActiveTable(String storageKey) {
-        TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(DynamoDbService::itemCallResourceNotFound);
-        if ("CREATING".equals(table.getTableStatus())) {
-            throw itemCallResourceNotFound();
-        }
-        return table;
+        return findActiveTable(storageKey).orElseThrow(DynamoDbService::itemCallResourceNotFound);
+    }
+
+    private Optional<TableDefinition> findActiveTable(String storageKey) {
+        return tableStore.get(storageKey).filter(table -> !"CREATING".equals(table.getTableStatus()));
     }
 
     /** Resolves a table for an item call, so a miss reports the message AWS uses there. */
@@ -4944,7 +4943,7 @@ public class DynamoDbService {
 
     /** Finds a table for an item call, which treats a CREATING table as absent. */
     public Optional<TableDefinition> findTableForItemCall(String tableName, String region) {
-        return findTable(tableName, region).filter(table -> !"CREATING".equals(table.getTableStatus()));
+        return findActiveTable(regionKey(region, canonicalTableName(region, tableName)));
     }
 
     /**
