@@ -70,6 +70,8 @@ format and survive restart. Gradual per-client rollout and alarm evaluation are 
 or a completed deployment as `REVERTED`, restoring the previous available configuration
 for that environment and profile. It rejects older deployments while a newer one is
 active, and rejects completed deployments outside their 72-hour revert window.
+If the previous hosted configuration version has been deleted, the stop is rejected
+with `BadRequestException` before changing the active version or stopping the deployment.
 Older persisted deployments without completion timestamps cannot be reverted because
 that window cannot be verified.
 

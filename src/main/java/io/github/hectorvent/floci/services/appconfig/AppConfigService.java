@@ -416,7 +416,7 @@ public class AppConfigService {
                 .toList();
     }
 
-    public void deleteHostedConfigurationVersion(String applicationIdentifier,
+    public synchronized void deleteHostedConfigurationVersion(String applicationIdentifier,
                                                   String profileIdentifier,
                                                   int versionNumber) {
         String appId = resolveApplication(applicationIdentifier).getId();
@@ -592,7 +592,7 @@ public class AppConfigService {
 
     public synchronized Deployment stopDeployment(String applicationIdentifier, String environmentIdentifier,
                                                    int deploymentNumber, boolean allowRevert) {
-        Deployment deployment = getDeployment(applicationIdentifier, environmentIdentifier, deploymentNumber);
+        Deployment deployment = copy(getDeployment(applicationIdentifier, environmentIdentifier, deploymentNumber));
         String state = deployment.getState();
         boolean completed = "COMPLETE".equals(state);
         if (!"DEPLOYING".equals(state) && !(allowRevert && ("BAKING".equals(state) || completed))) {
@@ -617,6 +617,17 @@ public class AppConfigService {
                 .filter(row -> row.getDeploymentNumber() < deploymentNumber)
                 .filter(row -> !"DEPLOYING".equals(row.getState()))
                 .findFirst().orElse(null);
+        if (previous != null) {
+            ConfigurationProfile profile = resolveConfigurationProfile(
+                    deployment.getApplicationId(), deployment.getConfigurationProfileId());
+            String location = previous.getConfigurationLocationUri() != null
+                    ? previous.getConfigurationLocationUri() : profile.getLocationUri();
+            if ("hosted".equals(location) && versionStore.get(deployment.getApplicationId() + "::"
+                    + deployment.getConfigurationProfileId() + "::" + previous.getConfigurationVersion()).isEmpty()) {
+                throw new AwsException("BadRequestException",
+                        "The previous hosted configuration version is no longer available.", 400);
+            }
+        }
         String activeKey = deployment.getEnvironmentId() + "::" + deployment.getConfigurationProfileId();
         if (previous == null) {
             activeConfigStore.delete(activeKey);
@@ -637,6 +648,7 @@ public class AppConfigService {
             Instant completed = Instant.parse(deployment.getStartedAt())
                     .plus(Duration.ofMinutes(deployment.getFinalBakeTimeInMinutes()));
             if (!clock.instant().isBefore(completed)) {
+                deployment = copy(deployment);
                 deployment.setState("COMPLETE");
                 deployment.setCompletedAt(completed.toString());
                 deploymentStore.put(deployment.getApplicationId() + "::" + deployment.getEnvironmentId()
@@ -702,7 +714,7 @@ public class AppConfigService {
      * is read from the profile.
      */
     private DeploymentSummary toDeploymentSummary(Deployment deployment) {
-        refreshDeployment(deployment);
+        deployment = refreshDeployment(deployment);
         DeploymentSummary summary = new DeploymentSummary();
         summary.setConfigurationProfileId(deployment.getConfigurationProfileId());
         summary.setConfigurationVersion(deployment.getConfigurationVersion());

@@ -10,8 +10,9 @@ from botocore.exceptions import ClientError
 
 
 @pytest.mark.parametrize("wait_for_completion", [False, True], ids=["baking", "complete"])
+@pytest.mark.parametrize("delete_previous", [False, True], ids=["restore", "deleted"])
 def test_deployment_rollback_restores_both_retrieval_apis(
-        aws_config, client_config, unique_name, wait_for_completion):
+        aws_config, client_config, unique_name, wait_for_completion, delete_previous):
     with ExitStack() as cleanup:
         client = boto3.client("appconfig", config=client_config, **aws_config)
         data = boto3.client("appconfigdata", config=client_config, **aws_config)
@@ -99,6 +100,21 @@ def test_deployment_rollback_restores_both_retrieval_apis(
                 client.stop_deployment(**target)
             assert error.value.response["Error"]["Code"] == "BadRequestException"
             assert_content(versions[1], b'{"version":2}')
+
+        if delete_previous:
+            client.delete_hosted_configuration_version(
+                ApplicationId=app, ConfigurationProfileId=profile, VersionNumber=versions[0])
+            before = client.get_deployment(**target)
+            with pytest.raises(ClientError) as error:
+                client.stop_deployment(**target, AllowRevert=True)
+            assert error.value.response["Error"]["Code"] == "BadRequestException"
+            assert error.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+            after = client.get_deployment(**target)
+            assert after["State"] == before["State"]
+            assert after.get("CompletedAt") == before.get("CompletedAt")
+            assert after["PercentageComplete"] == before["PercentageComplete"]
+            assert_content(versions[1], b'{"version":2}')
+            return
 
         stopped = client.stop_deployment(**target, AllowRevert=True)
         expected = "REVERTED" if wait_for_completion else "ROLLED_BACK"

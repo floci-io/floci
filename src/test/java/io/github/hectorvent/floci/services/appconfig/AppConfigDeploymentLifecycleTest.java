@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
@@ -21,6 +22,8 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
@@ -110,10 +113,77 @@ class AppConfigDeploymentLifecycleTest {
         close(storage);
     }
 
+    @Test
+    void deletedPreviousContentRejectsRevertWithoutChangingEitherStore() {
+        StorageFactory storage = factory();
+        AppConfigService service = service(storage, START);
+        Scope scope = scope(service);
+        deploy(service, scope, "1", scope.fast());
+        Deployment current = deploy(service, scope, "2", scope.fast());
+        service.deleteHostedConfigurationVersion(scope.app(), scope.profile(), 1);
+
+        AwsException failure = assertThrows(AwsException.class, () -> service.stopDeployment(
+                scope.app(), scope.env(), current.getDeploymentNumber(), true));
+        assertEquals("BadRequestException", failure.getErrorCode());
+        assertEquals("2", service.getActiveVersion(scope.env(), scope.profile()));
+        assertEquals("COMPLETE", service.getDeployment(scope.app(), scope.env(),
+                current.getDeploymentNumber()).getState());
+        assertEquals(START.toString(), current.getCompletedAt());
+        close(storage);
+
+        StorageFactory restarted = factory();
+        AppConfigService restored = service(restarted, START);
+        assertEquals("2", restored.getActiveVersion(scope.env(), scope.profile()));
+        assertEquals("COMPLETE", restored.getDeployment(scope.app(), scope.env(),
+                current.getDeploymentNumber()).getState());
+    }
+
+    @Test
+    void rollbackDoesNotMutateAnEarlierDeploymentResponse() {
+        StorageFactory storage = factory();
+        AppConfigService service = service(storage, START);
+        Scope scope = scope(service);
+        deploy(service, scope, "1", scope.fast());
+        Deployment baking = deploy(service, scope, "2", scope.bake());
+        Deployment response = service.getDeployment(scope.app(), scope.env(), baking.getDeploymentNumber());
+        Deployment stopped = service.stopDeployment(scope.app(), scope.env(), baking.getDeploymentNumber(), true);
+        assertNotSame(response, stopped);
+        assertEquals("BAKING", response.getState());
+        assertEquals(100.0f, response.getPercentageComplete());
+        assertNull(response.getCompletedAt());
+        assertEquals("ROLLED_BACK", stopped.getState());
+        assertEquals("1", service.getActiveVersion(scope.env(), scope.profile()));
+    }
+
+    @Test
+    void completionDoesNotMutateAnEarlierResponseAndListUsesTheNewSnapshot() {
+        StorageFactory storage = factory();
+        Clock clock = mock(Clock.class);
+        when(clock.instant()).thenReturn(START);
+        AppConfigService service = new AppConfigService(storage, mock(EmulatorConfig.class), clock);
+        Scope scope = scope(service);
+        Deployment baking = deploy(service, scope, "1", scope.bake());
+        Deployment response = service.getDeployment(scope.app(), scope.env(), baking.getDeploymentNumber());
+        when(clock.instant()).thenReturn(START.plusSeconds(60));
+
+        assertEquals("COMPLETE", service.listDeployments(scope.app(), scope.env(), 50, null)
+                .items().getFirst().getState());
+        Deployment completed = service.getDeployment(scope.app(), scope.env(), baking.getDeploymentNumber());
+        assertNotSame(response, completed);
+        assertEquals("BAKING", response.getState());
+        assertNull(response.getCompletedAt());
+        assertEquals("COMPLETE", completed.getState());
+        assertEquals(START.plusSeconds(60).toString(), completed.getCompletedAt());
+    }
+
     private Scope scope(AppConfigService service) {
         String app = service.createApplication(Map.of("Name", "deployment-lifecycle")).getId();
         String env = service.createEnvironment(app, Map.of("Name", "environment")).getId();
         String profile = service.createConfigurationProfile(app, Map.of("Name", "profile", "LocationUri", "hosted")).getId();
+        service.createHostedConfigurationVersion(app, profile, "one".getBytes(StandardCharsets.UTF_8),
+                "text/plain", "first");
+        service.createHostedConfigurationVersion(app, profile, "two".getBytes(StandardCharsets.UTF_8),
+                "text/plain", "second");
         String fast = service.createDeploymentStrategy(Map.of("Name", "fast", "FinalBakeTimeInMinutes", 0)).getId();
         String bake = service.createDeploymentStrategy(Map.of("Name", "bake", "FinalBakeTimeInMinutes", 1)).getId();
         return new Scope(app, env, profile, fast, bake);
