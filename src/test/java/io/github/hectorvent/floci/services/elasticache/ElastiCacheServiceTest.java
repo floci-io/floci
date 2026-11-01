@@ -449,7 +449,7 @@ class ElastiCacheServiceTest {
     void userGroupMembersDecideEachUsersAuthenticationMode() {
         service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
                 "grp", "test", AuthMode.IAM, null, "us-east-1", "redis", "7.0",
-                null, null, null, null, null, null, null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(), null, null, true));
+                null, null, null, null, null, null, null, null, null, null, new ReplicationGroupSettings(null, null, null, null, null, true), Map.of(), null, null));
         assertFalse(service.hasMembers("grp"),
                 "a cache with no users associated keeps the group level authentication mode");
 
@@ -473,7 +473,7 @@ class ElastiCacheServiceTest {
     void anEmptyUserGroupAdmitsNobody() {
         service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
                 "grp", "test", AuthMode.IAM, null, "us-east-1", "valkey", null, null, null, null, null,
-                null, null, null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(), null, null, true));
+                null, null, null, null, null, null, new ReplicationGroupSettings(null, null, null, null, null, true), Map.of(), null, null));
         service.createUserGroup("empty-users", "valkey", List.of(), "us-east-1");
         service.modifyReplicationGroup("grp", List.of("empty-users"), null);
 
@@ -525,7 +525,7 @@ class ElastiCacheServiceTest {
     void removeUserGroupsDropsEveryUserGroupAndTheAccessControl() {
         service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
                 "grp", "test", AuthMode.IAM, null, "us-east-1", "redis", "7.0",
-                null, null, null, null, null, null, null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(), null, null, true));
+                null, null, null, null, null, null, null, null, null, null, new ReplicationGroupSettings(null, null, null, null, null, true), Map.of(), null, null));
         service.createUser("default-user-id", "default", AuthMode.PASSWORD,
                 List.of("default-pass"), "on ~* +@all", null);
         service.createUserGroup("first-users", "redis", List.of("default-user-id"), "us-east-1");
@@ -680,7 +680,7 @@ class ElastiCacheServiceTest {
     void validatePasswordAdmitsNoAuthUserWithAnyPassword() {
         service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
                 "grp-nopass", "test", AuthMode.IAM, null, "us-east-1", "redis", "7.0",
-                null, null, null, null, null, null, null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(), null, null, true));
+                null, null, null, null, null, null, null, null, null, null, new ReplicationGroupSettings(null, null, null, null, null, true), Map.of(), null, null));
         service.createUser("nopass-user-id", "nopass-user", AuthMode.NO_AUTH,
                 List.of(), "on ~* +@all", null);
         service.modifyReplicationGroup("grp-nopass", List.of("nopass-user-id"), null);
@@ -695,7 +695,7 @@ class ElastiCacheServiceTest {
     void memberAuthModeResolvesPasswordIamAndNoAuthUsers() {
         service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
                 "grp-mixed", "test", AuthMode.IAM, null, "us-east-1", "redis", "7.0",
-                null, null, null, null, null, null, null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(), null, null, true));
+                null, null, null, null, null, null, null, null, null, null, new ReplicationGroupSettings(null, null, null, null, null, true), Map.of(), null, null));
         service.createUser("u-def", "default", AuthMode.PASSWORD, List.of("def-pass"), "on ~* +@all", null);
         service.createUser("iam-user", "iam-user", AuthMode.IAM, List.of(), "on ~* +@all", null);
         service.createUser("u-nopass", "nopass-user", AuthMode.NO_AUTH, List.of(), "on ~* +@all", null);
@@ -713,7 +713,7 @@ class ElastiCacheServiceTest {
     void disabledUserCannotAuthenticateAndHasNoMemberAuthMode() {
         service.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
                 "grp-disabled", "test", AuthMode.IAM, null, "us-east-1", "redis", "7.0",
-                null, null, null, null, null, null, null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(), null, null, true));
+                null, null, null, null, null, null, null, null, null, null, new ReplicationGroupSettings(null, null, null, null, null, true), Map.of(), null, null));
         service.createUser("u-def-off", "default", AuthMode.NO_AUTH, List.of(), "off -@all", null);
         service.createUser("u-pass-off", "disabled-pass", AuthMode.PASSWORD, List.of("secret"), "off -@all", null);
         service.createUser("disabled-iam", "disabled-iam", AuthMode.IAM, List.of(), "off -@all", null);
@@ -1948,8 +1948,8 @@ class ElastiCacheServiceTest {
             svc.createUserGroup("shared-ug", "redis", List.of("default-user-id"), "us-east-1");
             svc.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
                     "grp", "test", AuthMode.IAM, null, "us-east-1", "redis", "7.0", null, null, null, null,
-                    null, null, null, null, null, null, ReplicationGroupSettings.defaults(), Map.of(),
-                    List.of("shared-ug"), null, true));
+                    null, null, null, null, null, null, new ReplicationGroupSettings(null, null, null, null, null, true), Map.of(),
+                    List.of("shared-ug"), null));
         });
         accountA.start();
         assertTrue(startedLatch.await(5, TimeUnit.SECONDS), "create never reached container start");

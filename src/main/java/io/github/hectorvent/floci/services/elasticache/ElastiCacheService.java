@@ -203,36 +203,7 @@ public class ElastiCacheService implements ResourceProvider {
             ReplicationGroupSettings settings,
             Map<String, String> tags,
             List<String> userGroupIds,
-            List<String> securityGroupIds,
-            Boolean transitEncryptionEnabled) {
-
-        public CreateReplicationGroupRequest(
-                String replicationGroupId,
-                String description,
-                AuthMode authMode,
-                String authToken,
-                String region,
-                String engine,
-                String engineVersion,
-                String cacheNodeType,
-                String cacheParameterGroupName,
-                String cacheSubnetGroupName,
-                String clusterMode,
-                Integer numNodeGroups,
-                Integer replicasPerNodeGroup,
-                Integer numCacheClusters,
-                Boolean automaticFailoverEnabled,
-                Boolean multiAzEnabled,
-                Integer port,
-                ReplicationGroupSettings settings,
-                Map<String, String> tags,
-                List<String> userGroupIds,
-                List<String> securityGroupIds) {
-            this(replicationGroupId, description, authMode, authToken, region, engine, engineVersion,
-                    cacheNodeType, cacheParameterGroupName, cacheSubnetGroupName, clusterMode,
-                    numNodeGroups, replicasPerNodeGroup, numCacheClusters, automaticFailoverEnabled,
-                    multiAzEnabled, port, settings, tags, userGroupIds, securityGroupIds, null);
-        }
+            List<String> securityGroupIds) {
     }
 
     public ReplicationGroup createReplicationGroup(String groupId, String description,
@@ -593,17 +564,13 @@ public class ElastiCacheService implements ResourceProvider {
         group.setMultiAzEnabled(Boolean.TRUE.equals(request.multiAzEnabled()));
         group.setSnapshotWindow(ReplicationGroupSettings.DEFAULT_SNAPSHOT_WINDOW);
         resolvedSettings.applyTo(group);
-        if (Boolean.TRUE.equals(request.transitEncryptionEnabled())) {
-            group.setTransitEncryptionEnabled(true);
-        }
         if (request.tags() != null && !request.tags().isEmpty()) {
             group.setTags(new LinkedHashMap<>(request.tags()));
         }
     }
 
     private static boolean isTransitEncryptionRequested(CreateReplicationGroupRequest request) {
-        return Boolean.TRUE.equals(request.transitEncryptionEnabled())
-                || (request.settings() != null && Boolean.TRUE.equals(request.settings().transitEncryptionEnabled()));
+        return request.settings() != null && Boolean.TRUE.equals(request.settings().transitEncryptionEnabled());
     }
 
     private String engineFor(CreateReplicationGroupRequest request) {

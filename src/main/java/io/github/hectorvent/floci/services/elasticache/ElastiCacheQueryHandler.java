@@ -113,7 +113,6 @@ public class ElastiCacheQueryHandler {
                     "ReplicationGroupId is required.", AwsNamespaces.EC, 400);
         }
 
-        String transitEncryption = params.getFirst("TransitEncryptionEnabled");
         AuthMode authMode;
         if (authToken != null && !authToken.isBlank()) {
             authMode = AuthMode.PASSWORD;
@@ -121,8 +120,6 @@ public class ElastiCacheQueryHandler {
             // Bug #4502: Do not conflate TransitEncryptionEnabled=true with IAM auth mode
             authMode = AuthMode.NO_AUTH;
         }
-        Boolean transitEncryptionEnabled = transitEncryption != null
-                ? Boolean.parseBoolean(transitEncryption) : null;
 
         try {
             ReplicationGroup group = service.createReplicationGroup(
@@ -147,8 +144,7 @@ public class ElastiCacheQueryHandler {
                             replicationGroupSettings(params),
                             parseTags(params),
                             extractMemberList(params, "UserGroupIds.member."),
-                            parseSecurityGroupIds(params),
-                            transitEncryptionEnabled));
+                            parseSecurityGroupIds(params)));
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("CreateReplicationGroup", AwsNamespaces.EC, result)).build();
         } catch (AwsException e) {
@@ -164,7 +160,8 @@ public class ElastiCacheQueryHandler {
                 atRest == null ? null : !"false".equalsIgnoreCase(atRest.trim()),
                 params.getFirst("KmsKeyId"),
                 optionalInt(params.getFirst("SnapshotRetentionLimit")),
-                params.getFirst("SnapshotWindow"), params.getFirst("TransitEncryptionMode"));
+                params.getFirst("SnapshotWindow"), params.getFirst("TransitEncryptionMode"),
+                boolParam(params, "TransitEncryptionEnabled"));
     }
 
     private static Integer optionalInt(String value) {
