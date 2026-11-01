@@ -11174,11 +11174,6 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * Gives a cluster {@code CreateDBCluster} just made the roles the request named, all in one
-     * step: either every role is associated or none is. The handler deletes the new cluster when
-     * this refuses, so a failed create leaves nothing behind.
-     */
-    /**
      * Stores what a CreateDBCluster request carries beyond the arguments of {@code createDbCluster}: its Tags and
      * its KmsKeyId. Tags go on the cluster as AddTagsToResource would put them, so ListTagsForResource returns them.
      */
@@ -11198,6 +11193,11 @@ public class RdsService implements Resettable, ResourceProvider {
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
 
+    /**
+     * Gives a cluster {@code CreateDBCluster} just made the roles the request named, all in one
+     * step: either every role is associated or none is. The handler deletes the new cluster when
+     * this refuses, so a failed create leaves nothing behind.
+     */
     public synchronized DbCluster addRolesToNewDbCluster(String region, String clusterId,
                                                          List<DbRoleAssociation> roles) {
         // The features are checked below against the cluster's own engine.
