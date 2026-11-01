@@ -134,6 +134,12 @@ quarkus:
     additional-build-args:
       - --enable-url-protocols=http,https
       - --initialize-at-run-time=io.vertx.ext.mail.impl.sasl.NTLMEngineImpl
+      # JNA, which docker-java's named-pipe socket loads on Windows, binds its native dispatch
+      # library in Native's static initializer. Initialized at build time (the Quarkus default),
+      # that library loads into the builder and never into the binary, so every JNA call fails
+      # with UnsatisfiedLinkError on Native.open. The JNI and proxy metadata JNA needs at run time
+      # is under META-INF/native-image/net.java.dev.jna and META-INF/native-image/io.github.hectorvent.
+      - --initialize-at-run-time=com.sun.jna
       - --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.AcmService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator

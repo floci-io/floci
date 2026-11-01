@@ -18,6 +18,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
@@ -94,6 +95,55 @@ class FlociDockerHttpClientTest {
                 acceptor.interrupt();
             }
         }
+    }
+
+    // Catches: a named-pipe host whose JNA cannot load throwing an Error out of execute(), past
+    // every caller's catch (Exception); at startup that took down the Windows binary. A directory
+    // stands in for a busy pipe: it exists but cannot be opened for writing, so the open fails with
+    // a plain FileSystemException and docker-java's wait loop reaches for Kernel32, which cannot
+    // load off Windows.
+    @Test
+    @Timeout(30)
+    void aNamedPipeTransportThatCannotLoadItsNativeLibraryFailsTheCallWithAnException(@TempDir Path dir)
+            throws Exception {
+        try (FlociDockerHttpClient client = new FlociDockerHttpClient.Builder()
+                .dockerHost(URI.create("npipe://" + dir.toUri().getPath()))
+                .build()) {
+            for (int attempt = 1; attempt <= 2; attempt++) {
+                IllegalStateException failure = assertThrows(IllegalStateException.class,
+                        () -> client.execute(get("/_ping")));
+                assertTrue(failure.getCause() instanceof LinkageError,
+                        "attempt " + attempt + " should wrap the LinkageError, got " + failure.getCause());
+            }
+        }
+    }
+
+    // Catches: a named pipe that does not exist (Windows without Docker running) spending the whole
+    // connect timeout in docker-java's wait loop, and DockerRetry retrying it, so every Docker call
+    // took 30 s per attempt and the binary never answered its health check.
+    @Test
+    @Timeout(10)
+    void aNamedPipeThatDoesNotExistFailsAtOnceAndIsNotRetried(@TempDir Path dir) throws Exception {
+        try (FlociDockerHttpClient client = new FlociDockerHttpClient.Builder()
+                .dockerHost(URI.create("npipe://" + dir.resolve("no_such_pipe").toUri().getPath()))
+                .connectionTimeout(Duration.ofSeconds(30))
+                .build()) {
+            long start = System.nanoTime();
+            RuntimeException failure = assertThrows(RuntimeException.class, () -> client.execute(get("/_ping")));
+            long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - start);
+            assertTrue(elapsedMs < 5_000, "a missing pipe should fail at once, took " + elapsedMs + " ms");
+            assertTrue(hasCause(failure, NoSuchFileException.class), "expected a NoSuchFileException, got " + failure);
+            assertFalse(DockerRetry.isTransientIo(failure), "a missing pipe must not be retried");
+        }
+    }
+
+    private static boolean hasCause(Throwable t, Class<? extends Throwable> type) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (type.isInstance(c)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static DockerHttpClient.Request get(String path) {
