@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.iam.model;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -45,6 +46,13 @@ public record CallerContext(
     /** Copy of this context with the effective SCP levels attached. */
     public CallerContext withScpLevels(List<List<String>> levels) {
         return new CallerContext(identityPolicies, sessionPolicyDocument, boundaryPolicyDocument, levels, principalArn);
+    }
+
+    /** Copy of this context with one more identity policy, evaluated like the caller's own. */
+    public CallerContext withIdentityPolicy(String policyDocument) {
+        List<String> policies = new ArrayList<>(identityPolicies);
+        policies.add(policyDocument);
+        return new CallerContext(policies, sessionPolicyDocument, boundaryPolicyDocument, scpLevels, principalArn);
     }
 
     /** Copy of this context with the caller principal ARN attached. */

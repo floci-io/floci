@@ -1989,4 +1989,36 @@ class BackupIntegrationTest {
         backupService.deleteRecoveryPoint(vault, point, "us-east-1");
         backupService.deleteBackupVault(vault, "us-east-1");
     }
+
+    @Test
+    void ruleKeepsTargetLogicallyAirGappedBackupVaultArn() {
+        String airGapped = "arn:aws:backup:us-east-1:000000000000:backup-vault:air-gapped";
+        String rule = """
+            {"RuleName": "%s", "TargetBackupVaultName": "%s", "ScheduleExpression": "cron(0 12 * * ? *)"%s}""";
+        String withArn = rule.formatted("air", VAULT_NAME,
+                ", \"TargetLogicallyAirGappedBackupVaultArn\": \"" + airGapped + "\"");
+        String without = rule.formatted("plain", VAULT_NAME, "");
+        String id = given().header("Authorization", AUTH).contentType("application/json")
+                .body("{\"BackupPlan\": {\"BackupPlanName\": \"air-gapped-plan\", \"Rules\": ["
+                        + withArn + ", " + without + "]}}")
+                .when().put("/backup/plans/").then().statusCode(200)
+                .extract().path("BackupPlanId");
+        given().header("Authorization", AUTH).when().get("/backup/plans/" + id + "/").then().statusCode(200)
+                .body("BackupPlan.Rules[0].TargetLogicallyAirGappedBackupVaultArn", equalTo(airGapped))
+                .body("BackupPlan.Rules[1]", not(hasKey("TargetLogicallyAirGappedBackupVaultArn")));
+
+        // UpdateBackupPlan swaps which rule carries it; GetBackupPlan must reflect the update.
+        String updatedWith = rule.formatted("plain", VAULT_NAME,
+                ", \"TargetLogicallyAirGappedBackupVaultArn\": \"" + airGapped + "-2\"");
+        String updatedWithout = rule.formatted("air", VAULT_NAME, "");
+        given().header("Authorization", AUTH).contentType("application/json")
+                .body("{\"BackupPlan\": {\"BackupPlanName\": \"air-gapped-plan\", \"Rules\": ["
+                        + updatedWithout + ", " + updatedWith + "]}}")
+                .when().post("/backup/plans/" + id).then().statusCode(200);
+        given().header("Authorization", AUTH).when().get("/backup/plans/" + id + "/").then().statusCode(200)
+                .body("BackupPlan.Rules[0].RuleName", equalTo("air"))
+                .body("BackupPlan.Rules[0]", not(hasKey("TargetLogicallyAirGappedBackupVaultArn")))
+                .body("BackupPlan.Rules[1].TargetLogicallyAirGappedBackupVaultArn", equalTo(airGapped + "-2"));
+        given().header("Authorization", AUTH).when().delete("/backup/plans/" + id);
+    }
 }

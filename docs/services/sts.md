@@ -18,6 +18,14 @@
 | `AssumeRoot` | Opens a privileged session on a member account of the organization |
 | `GetWebIdentityToken` | Returns a signed JWT representing the calling identity |
 
+## Account-root token lifetime
+
+`GetSessionToken` and `GetFederationToken` sessions issued to Floci's account-root
+credential default to one hour and are capped at one hour, including larger valid
+`DurationSeconds` requests. IAM users retain the requested duration and the
+12-hour default. Existing input validation and temporary-caller rejection run
+before credentials are registered.
+
 ## Request Constraints
 
 Every operation that models a constraint is held to the one its model declares rather than to a
@@ -73,6 +81,8 @@ length at all, so a request sending it empty is a request that carries it: it re
 and is answered `ExpiredTradeInTokenException`, the refusal any token that cannot be redeemed gets,
 where the check it replaces called it absent. Nothing published says what AWS answers an empty
 trade-in token, and the model is what is in hand, so the blank is read as the value it is.
+
+SAML role sessions reject `DurationSeconds` above the target role maximum. Accepted requests retain the shorter assertion expiration.
 
 ## Privileged Root Sessions
 
@@ -248,6 +258,11 @@ as the account root, as the key itself does.
 `AssumeRole` and `AssumeRoleWithWebIdentity` require the target role to exist in IAM, returning `AccessDenied` (403)
 if it does not.
 
+`AssumeRole` rejects a `DurationSeconds` above the role's `MaxSessionDuration` with
+`ValidationError` (400), after trust validation and before registering credentials. The exact
+role limit is accepted; an omitted duration defaults to 3600 seconds. This role setting is
+checked even when IAM policy enforcement is disabled.
+
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, `AssumeRole` also evaluates the target role's trust policy
 (`AssumeRolePolicyDocument`) against the caller and returns `AccessDenied` if it is not permitted. AWS principal
 forms are matched: `"*"`, an account id, an account-root ARN (`arn:aws:iam::<acct>:root`), and exact principal ARNs;
@@ -323,3 +338,12 @@ When `FLOCI_AUTH_VALIDATE_SIGNATURES=true`, the shared signature verifier checks
 credentials for STS operations, including `GetCallerIdentity`, `GetSessionToken`, `GetFederationToken`
 and `AssumeRole`. It checks the request signature, credential scope, expiry and session token before
 execution. Nonblank Authorization headers retain priority. See [signature checks](../configuration/multi-account.md#signature-validation).
+
+AssumeRoleWithWebIdentity rejects a requested duration above the target role's
+`MaxSessionDuration` before issuing credentials. The default remains 3,600 seconds;
+existing token and trust-policy errors take precedence over this role-specific check.
+
+Role chaining limits `AssumeRole` to one hour, including when the target role permits a longer
+session. A live role credential must carry its matching session token. `GetSessionToken` user
+credentials are not role chaining. The cap is checked after trust and role-maximum validation,
+before registering the new session.

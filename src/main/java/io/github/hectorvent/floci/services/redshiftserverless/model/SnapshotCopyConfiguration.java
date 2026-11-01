@@ -3,9 +3,11 @@ package io.github.hectorvent.floci.services.redshiftserverless.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.time.Instant;
+
 /**
- * A Redshift Serverless snapshot copy configuration. Floci records it but copies nothing: a snapshot
- * that should appear in another Region is created there directly.
+ * A Redshift Serverless snapshot copy configuration. The copy sweep copies the namespace's snapshots
+ * into the destination Region.
  */
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -18,12 +20,14 @@ public class SnapshotCopyConfiguration {
     private String destinationKmsKeyId;
     private Integer snapshotRetentionPeriod;
     private String ownerId;
+    private Instant createdAt;
 
     public SnapshotCopyConfiguration() {
     }
 
     public SnapshotCopyConfiguration(SnapshotCopyConfiguration other) {
         this.ownerId = other.ownerId;
+        this.createdAt = other.createdAt;
         this.snapshotCopyConfigurationId = other.snapshotCopyConfigurationId;
         this.snapshotCopyConfigurationArn = other.snapshotCopyConfigurationArn;
         this.namespaceName = other.namespaceName;
@@ -86,5 +90,14 @@ public class SnapshotCopyConfiguration {
 
     public void setOwnerId(String ownerId) {
         this.ownerId = ownerId;
+    }
+
+    /** When the configuration was created; only snapshots taken from then on are copied. Never in a response. */
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+
+    public void setCreatedAt(Instant createdAt) {
+        this.createdAt = createdAt;
     }
 }

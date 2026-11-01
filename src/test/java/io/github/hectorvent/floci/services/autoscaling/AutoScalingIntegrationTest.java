@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import static io.github.hectorvent.floci.services.autoscaling.AutoScalingXmlAssertions.assertModeledNamespace;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
@@ -32,8 +33,8 @@ class AutoScalingIntegrationTest {
 
     @Test
     @Order(1)
-    void createLaunchConfiguration() {
-        given()
+    void createLaunchConfiguration() throws Exception {
+        String xml = given()
                 .formParam("Action", "CreateLaunchConfiguration")
                 .formParam("LaunchConfigurationName", "my-lc")
                 .formParam("ImageId", "ami-12345678")
@@ -44,7 +45,10 @@ class AutoScalingIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(200)
-                .body(containsString("CreateLaunchConfigurationResponse"));
+                .body(containsString("CreateLaunchConfigurationResponse"))
+                .extract().asString();
+
+        assertModeledNamespace(xml);
     }
 
     @Test
@@ -134,8 +138,8 @@ class AutoScalingIntegrationTest {
 
     @Test
     @Order(44)
-    void launchConfigurationRejectsInvalidInstanceMonitoringBoolean() {
-        given()
+    void launchConfigurationRejectsInvalidInstanceMonitoringBoolean() throws Exception {
+        String xml = given()
                 .formParam("Action", "CreateLaunchConfiguration")
                 .formParam("LaunchConfigurationName", "my-lc-invalid-monitoring")
                 .formParam("ImageId", "ami-12345678")
@@ -146,7 +150,10 @@ class AutoScalingIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(400)
-                .body(containsString("ValidationError"));
+                .body(containsString("ValidationError"))
+                .extract().asString();
+
+        assertModeledNamespace(xml);
     }
 
     @Test
@@ -192,8 +199,8 @@ class AutoScalingIntegrationTest {
 
     @Test
     @Order(4)
-    void describeAutoScalingGroups() {
-        given()
+    void describeAutoScalingGroups() throws Exception {
+        String xml = given()
                 .formParam("Action", "DescribeAutoScalingGroups")
                 .formParam("AutoScalingGroupNames.member.1", "my-asg")
                 .header("Authorization", AUTH)
@@ -208,7 +215,10 @@ class AutoScalingIntegrationTest {
                 .body(containsString("<MinSize>0</MinSize>"))
                 .body(containsString("<MaxSize>3</MaxSize>"))
                 .body(containsString("env"))
-                .body(containsString("test"));
+                .body(containsString("test"))
+                .extract().asString();
+
+        assertModeledNamespace(xml);
     }
 
     @Test
@@ -1201,8 +1211,8 @@ class AutoScalingIntegrationTest {
 
     @Test
     @Order(40)
-    void describeAutoScalingGroupsEmpty() {
-        given()
+    void describeAutoScalingGroupsEmpty() throws Exception {
+        String xml = given()
                 .formParam("Action", "DescribeAutoScalingGroups")
                 .formParam("AutoScalingGroupNames.member.1", "my-asg")
                 .header("Authorization", AUTH)
@@ -1210,7 +1220,10 @@ class AutoScalingIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(200)
-                .body(not(containsString("my-asg")));
+                .body(not(containsString("my-asg")))
+                .extract().asString();
+
+        assertModeledNamespace(xml);
     }
 
     private static String createLaunchTemplate(String name) {

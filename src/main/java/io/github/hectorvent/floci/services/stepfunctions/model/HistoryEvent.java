@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.stepfunctions.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.Map;
@@ -15,7 +16,7 @@ public class HistoryEvent {
     private Map<String, Object> details;
 
     public HistoryEvent() {
-        this.timestamp = System.currentTimeMillis() / 1000.0;
+        this.timestamp = EpochSeconds.fromMillis(System.currentTimeMillis());
     }
 
     public long getId() { return id; }

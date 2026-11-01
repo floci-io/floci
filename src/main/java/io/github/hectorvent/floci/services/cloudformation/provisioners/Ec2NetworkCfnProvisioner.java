@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.ManagedPrefixList;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
+import io.github.hectorvent.floci.services.ec2.model.NatGatewayAddress;
 import io.github.hectorvent.floci.services.ec2.model.PrefixListEntry;
 import io.github.hectorvent.floci.services.ec2.model.Route;
 import io.github.hectorvent.floci.services.ec2.model.RouteTable;
@@ -304,10 +305,12 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * Reconciles the template's {@code Tags} onto an entity: keys the template dropped are removed,
-     * the rest written. A template without a Tags property leaves whatever the entity carries.
+     * the rest written. A template without a Tags property clears them when the previous template
+     * declared Tags, and leaves whatever the entity carries when no template ever did.
      */
     private void applyTags(StackResource r, boolean reused, String resourceId, List<Tag> current, JsonNode props, ProvisionContext ctx) {
-        if (props == null || !props.has("Tags")) {
+        boolean declared = props != null && props.has("Tags");
+        if (!declared && !ctx.droppedProperties(props).contains("Tags")) {
             return;
         }
         Map<String, String> desired = ctx.resolveTags(props, "Tags");
@@ -372,6 +375,15 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         return tolerateNotFound(() -> ec2Service.describeNatGateways(region, List.of(natGatewayId), Map.of()).stream()
                 .filter(nat -> !"deleted".equals(nat.getState()))
                 .findFirst().orElse(null), "NatGatewayNotFound", natGatewayId);
+    }
+
+    /** Whether the gateway's primary address is {@code privateIpAddress}, both in canonical form. */
+    private static boolean holdsPrivateIp(NatGateway nat, String privateIpAddress) {
+        return nat.getNatGatewayAddresses().stream()
+                .filter(NatGatewayAddress::isPrimary)
+                .map(NatGatewayAddress::getPrivateIp)
+                .filter(Objects::nonNull)
+                .anyMatch(ip -> CidrCanonicalizer.sameBlock(ip + "/32", privateIpAddress + "/32"));
     }
 
     private ManagedPrefixList findPrefixList(String prefixListId, String region) {
@@ -455,13 +467,16 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         CfnRollback.guarded(r, ctx, !reuse, () -> ec2Service.deleteSubnet(ctx.region(), subnet.getSubnetId()),
                 () -> undoInPlace(r), () -> {
             applyTags(r, reuse, subnet.getSubnetId(), reuse ? existing.getTags() : List.of(), props, ctx);
-            if (mapPublicIpOnLaunch != null) {
-                if (reuse && ctx.isUpdate() && existing.isMapPublicIpOnLaunch() != Boolean.parseBoolean(mapPublicIpOnLaunch)) {
+            // A flag the previous template declared and this one drops goes back to false, the launch default.
+            String desiredMapPublicIp = mapPublicIpOnLaunch == null && reuse && ctx.droppedProperties(props).contains("MapPublicIpOnLaunch")
+                    ? "false" : mapPublicIpOnLaunch;
+            if (desiredMapPublicIp != null) {
+                if (reuse && ctx.isUpdate() && existing.isMapPublicIpOnLaunch() != Boolean.parseBoolean(desiredMapPublicIp)) {
                     ObjectNode prior = inPlacePrior(r, subnet.getSubnetId(), ctx);
                     prior.put("mapPublicIpOnLaunch", String.valueOf(existing.isMapPublicIpOnLaunch()));
                     writeInPlacePrior(r, prior);
                 }
-                ec2Service.modifySubnetAttribute(ctx.region(), subnet.getSubnetId(), "mapPublicIpOnLaunch", mapPublicIpOnLaunch);
+                ec2Service.modifySubnetAttribute(ctx.region(), subnet.getSubnetId(), "mapPublicIpOnLaunch", desiredMapPublicIp);
             }
         });
     }
@@ -587,8 +602,13 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void provisionNatGateway(StackResource r, JsonNode props, ProvisionContext ctx) {
+        Ec2Service.requireZonalNatGateway(ctx.resolveOptional(props, "AvailabilityMode"));
+        Ec2Service.requireNoSecondaryNatGatewayAddresses(ctx.resolveStringList(props, "SecondaryAllocationIds"),
+                ctx.resolveStringList(props, "SecondaryPrivateIpAddresses"),
+                ctx.resolveOptional(props, "SecondaryPrivateIpAddressCount"));
         String subnetId = ctx.resolveOptional(props, "SubnetId");
         String allocationId = ctx.resolveOptional(props, "AllocationId");
+        String privateIpAddress = ctx.resolveOrDefault(props, "PrivateIpAddress", null);
         require(NAT_GATEWAY, "SubnetId", subnetId);
         // ConnectivityType defaults to public in the schema; a public gateway needs an EIP, a
         // private one must not have one, as AWS validates.
@@ -600,14 +620,17 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         if ("private".equals(connectivityType) && allocationId != null && !allocationId.isBlank()) {
             throw new AwsException("ValidationError", "AWS::EC2::NatGateway with ConnectivityType private cannot have an AllocationId", 400);
         }
-        // SubnetId, AllocationId and ConnectivityType are createOnly: the same triple keeps the
-        // gateway, a change replaces it.
+        // SubnetId, AllocationId, ConnectivityType and PrivateIpAddress are createOnly: the same
+        // values keep the gateway, a change replaces it. With no PrivateIpAddress the gateway keeps
+        // the address it was given.
         NatGateway existing = ctx.isUpdate() ? findNatGateway(ctx.priorPhysicalId(), ctx.region()) : null;
         boolean reuse = existing != null && Objects.equals(subnetId, existing.getSubnetId())
                 && Objects.equals(allocationId, existing.getAllocationId())
-                && connectivityType.equalsIgnoreCase(existing.getConnectivityType() == null ? "public" : existing.getConnectivityType());
+                && connectivityType.equalsIgnoreCase(existing.getConnectivityType() == null ? "public" : existing.getConnectivityType())
+                && (privateIpAddress == null || holdsPrivateIp(existing, privateIpAddress));
         NatGateway nat = reuse ? existing
-                : ec2Service.createNatGateway(ctx.region(), subnetId, allocationId, connectivityType, tagList(props, ctx));
+                : ec2Service.createNatGateway(ctx.region(), subnetId, allocationId, connectivityType, privateIpAddress,
+                        tagList(props, ctx));
         if ("failed".equals(nat.getState())) {
             // The resource fails and its failed gateway is not left behind.
             ec2Service.deleteNatGateway(ctx.region(), nat.getNatGatewayId());
@@ -618,6 +641,12 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         }
         r.setPhysicalId(nat.getNatGatewayId());
         r.getAttributes().put("NatGatewayId", nat.getNatGatewayId());
+        nat.getNatGatewayAddresses().stream()
+                .filter(NatGatewayAddress::isPrimary)
+                .map(NatGatewayAddress::getNetworkInterfaceId)
+                .filter(Objects::nonNull)
+                .findFirst()
+                .ifPresent(eniId -> r.getAttributes().put("EniId", eniId));
         // The gateway holds its subnet and Elastic IP until it is deleted; an EIP's physical id is
         // its public IP.
         if (nat.getSubnetId() != null) {
@@ -695,7 +724,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
      *
      * <p>Entries and Tags are each brought to the template only when it declares them, or the
      * previous template did: a template that drops them clears them, and entries or tags no template
-     * ever declared are left alone. The other types here keep their tags when Tags is dropped.
+     * ever declared are left alone.
      */
     private void updatePrefixList(StackResource r, ManagedPrefixList existing, String name, String family,
                                   int maxEntries, List<PrefixListEntry> entries, JsonNode props, ProvisionContext ctx) {
@@ -731,18 +760,10 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
             }
             writeInPlacePrior(r, prior);
         }
-        JsonNode desiredTags = !props.has("Tags") && ctx.previouslyDeclared("Tags") ? untagged(props) : props;
         CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r), () -> {
-            applyTags(r, true, prefixListId, existing.getTags(), desiredTags, ctx);
+            applyTags(r, true, prefixListId, existing.getTags(), props, ctx);
             modifyPrefixList(ctx.region(), existing, name, maxEntries, changes);
         });
-    }
-
-    /** {@code props} with an empty Tags list, which removes the tags a previous template declared. */
-    private static JsonNode untagged(JsonNode props) {
-        ObjectNode copy = props.deepCopy();
-        copy.putArray("Tags");
-        return copy;
     }
 
     /**

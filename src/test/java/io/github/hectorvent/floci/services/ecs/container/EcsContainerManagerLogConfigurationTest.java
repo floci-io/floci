@@ -53,9 +53,9 @@ class EcsContainerManagerLogConfigurationTest {
         when(containerBuilder.resolveImage(anyString())).thenAnswer(invocation -> invocation.getArgument(0));
 
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
-        when(lifecycleManager.resolveImageForLaunch(any(), any()))
+        when(lifecycleManager.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(lifecycleManager.createAndStartEphemeral(any()))
+        when(lifecycleManager.createAndStartEphemeral(any(), any()))
                 .thenReturn(new ContainerInfo("docker-id", Map.of()));
 
         logStreamer = mock(ContainerLogStreamer.class);

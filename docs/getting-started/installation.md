@@ -12,7 +12,7 @@ docker pull floci/floci:latest
 
 ### Requirements
 
-- Docker 20.10+
+- Docker 23.0+ (the image layers are compressed with zstd, which older engines cannot pull)
 - `docker compose` v2+ (plugin syntax, not standalone `docker-compose`)
 
 ## Image Tags

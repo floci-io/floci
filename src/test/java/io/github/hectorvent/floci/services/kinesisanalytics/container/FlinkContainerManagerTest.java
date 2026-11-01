@@ -372,6 +372,9 @@ class FlinkContainerManagerTest {
                 "FLINK_PROPERTIES=jobmanager.rpc.address: localhost\ntaskmanager.numberOfTaskSlots: 3"));
         assertEquals("container:jm-id", tmSpec.networkMode());
         verify(awsEnv).sdkBaselineEnv("us-west-2", Optional.empty());
+        // Both JVMs trust Floci's CA, as the job's SDK clients need for Floci over HTTPS.
+        assertTrue(jmSpec.javaTrustStore());
+        assertTrue(tmSpec.javaTrustStore());
     }
 
     @Test

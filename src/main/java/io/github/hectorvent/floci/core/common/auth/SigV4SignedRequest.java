@@ -37,7 +37,12 @@ public record SigV4SignedRequest(String credential, String signedHeaders, String
 
     /** The signature in an {@code Authorization} header, or null when it is not a complete SigV4 one. */
     public static SigV4SignedRequest fromHeader(String authorization, String amzDate) {
-        SigV4AuthorizationHeader parsed = SigV4AuthorizationHeader.parse(authorization);
+        return fromHeader(authorization, amzDate, ALGORITHM);
+    }
+
+    /** The signature in an {@code Authorization} header of {@code algorithm}, or null when it is not complete. */
+    public static SigV4SignedRequest fromHeader(String authorization, String amzDate, String algorithm) {
+        SigV4AuthorizationHeader parsed = SigV4AuthorizationHeader.parse(authorization, algorithm);
         if (parsed == null || isBlank(parsed.credential()) || isBlank(parsed.signedHeaders())
                 || isBlank(parsed.signature()) || isBlank(amzDate)) {
             return null;

@@ -371,6 +371,14 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 .when().get(presigned.pathAndQuery())
                 .then().statusCode(200)
                 .body("url", equalTo(presigned.pathAndQuery()));
+
+        // SigV4a for a region set that covers the region passes, and loses its signature the same way.
+        LambdaWebRequestSigner.Signed asymmetric = new LambdaWebRequestSigner().sigV4a("us-*").sign("GET", domain, "/a");
+        given().header("Host", domain).headers(asymmetric.headers())
+                .when().get("/a")
+                .then().statusCode(200)
+                .body("headers.authorization", nullValue())
+                .body("headers.x-amz-region-set", equalTo("us-*"));
     }
 
     @Test

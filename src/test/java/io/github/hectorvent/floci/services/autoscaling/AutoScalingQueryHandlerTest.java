@@ -6,10 +6,14 @@ import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
 
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.services.autoscaling.AutoScalingXmlAssertions.XML_NAMESPACE;
+import static io.github.hectorvent.floci.services.autoscaling.AutoScalingXmlAssertions.assertModeledNamespace;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -17,6 +21,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class AutoScalingQueryHandlerTest {
 
     private static final String REGION = "us-east-1";
+
+    @Test
+    void describeAutoScalingInstancesEmptyUsesModeledNamespace() throws Exception {
+        AutoScalingService service = new AutoScalingService();
+        service.regionResolver = new RegionResolver(REGION, "000000000000");
+        AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
+
+        Response response = handler.handle("DescribeAutoScalingInstances", new MultivaluedHashMap<>(), REGION);
+
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        Element root = assertModeledNamespace(xml);
+        NodeList collections = root.getElementsByTagNameNS(XML_NAMESPACE, "AutoScalingInstances");
+        assertEquals(1, collections.getLength());
+        Element instances = (Element) collections.item(0);
+        assertEquals(0, instances.getElementsByTagName("*").getLength());
+    }
 
     @Test
     void startAndDescribeInstanceRefreshUseAwsQueryXmlShape() {
@@ -84,7 +105,7 @@ class AutoScalingQueryHandlerTest {
     }
 
     @Test
-    void updateAutoScalingGroupRejectsDesiredConfigurationChangeDuringActiveInstanceRefresh() {
+    void updateAutoScalingGroupRejectsDesiredConfigurationChangeDuringActiveInstanceRefresh() throws Exception {
         AutoScalingService service = new AutoScalingService();
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.createAutoScalingGroup(REGION,
@@ -137,10 +158,11 @@ class AutoScalingQueryHandlerTest {
         String xml = (String) response.getEntity();
         assertTrue(xml.contains("<Code>ValidationError</Code>"));
         assertTrue(xml.contains(AutoScalingService.ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE));
+        assertModeledNamespace(xml);
     }
 
     @Test
-    void describeAutoScalingGroupsIncludesInstanceLaunchTemplateMetadata() {
+    void describeAutoScalingGroupsIncludesInstanceLaunchTemplateMetadata() throws Exception {
         AutoScalingService service = new AutoScalingService();
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.createAutoScalingGroup(REGION,
@@ -186,6 +208,16 @@ class AutoScalingQueryHandlerTest {
         assertTrue(xml.contains("<LaunchTemplate>"));
         assertTrue(xml.contains("<LaunchTemplateId>lt-current</LaunchTemplateId>"));
         assertTrue(xml.contains("<Version>7</Version>"));
+        assertModeledNamespace(xml);
+
+        MultivaluedHashMap<String, String> instanceParams = new MultivaluedHashMap<>();
+        instanceParams.add("InstanceIds.member.1", "i-current");
+        Response instancesResponse = handler.handle("DescribeAutoScalingInstances", instanceParams, REGION);
+
+        assertEquals(200, instancesResponse.getStatus());
+        String instancesXml = (String) instancesResponse.getEntity();
+        assertTrue(instancesXml.contains("<InstanceId>i-current</InstanceId>"));
+        assertModeledNamespace(instancesXml);
     }
 
     @Test
@@ -212,7 +244,7 @@ class AutoScalingQueryHandlerTest {
         assertEquals(200, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("<SetInstanceProtectionResponse"));
         assertTrue(service.describeAutoScalingInstances(REGION, List.of("i-protected"))
-                .getFirst().isProtectedFromScaleIn());
+                .getFirst().instance().isProtectedFromScaleIn());
     }
 
     @Test
@@ -238,7 +270,7 @@ class AutoScalingQueryHandlerTest {
         assertEquals(200, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("<SetInstanceHealthResponse"));
         assertEquals("Unhealthy", service.describeAutoScalingInstances(REGION, List.of("i-unhealthy"))
-                .getFirst().getHealthStatus());
+                .getFirst().instance().getHealthStatus());
     }
 
     @Test
@@ -266,7 +298,7 @@ class AutoScalingQueryHandlerTest {
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("ValidationError"));
         assertEquals(false, service.describeAutoScalingInstances(REGION, List.of("i-flagless"))
-                .getFirst().isProtectedFromScaleIn(),
+                .getFirst().instance().isProtectedFromScaleIn(),
                 "a rejected request must not silently strip/apply protection");
     }
 
@@ -294,7 +326,7 @@ class AutoScalingQueryHandlerTest {
 
         assertEquals(400, response.getStatus());
         assertEquals(false, service.describeAutoScalingInstances(REGION, List.of("i-malformed"))
-                .getFirst().isProtectedFromScaleIn(),
+                .getFirst().instance().isProtectedFromScaleIn(),
                 "a malformed boolean must not silently coerce to false and succeed");
     }
 

@@ -97,12 +97,128 @@ public class SecurityHubService implements Resettable {
             throw invalid("ControlFindingGenerator must be SECURITY_CONTROL or STANDARD_CONTROL.");
         }
         validateTags(request == null ? null : request.get("Tags"));
+        JsonNode defaults = request == null ? null : request.get("EnableDefaultStandards");
+        if (defaults != null && !defaults.isNull() && !defaults.isBoolean()) {
+            throw invalid("EnableDefaultStandards must be a boolean.");
+        }
         state.setEnabled(true);
         if (controlFindingGenerator != null) {
             state.setControlFindingGenerator(controlFindingGenerator);
         }
         state.setHubTags(readTags(request == null ? null : request.get("Tags")));
+        // EnableDefaultStandards is true unless the caller says otherwise, as on AWS.
+        if (defaults == null || defaults.isNull() || defaults.booleanValue()) {
+            for (Standard standard : STANDARDS) {
+                if (standard.enabledByDefault()) {
+                    state.getStandardsSubscriptions().put(subscriptionArn(region, standard), standardsArn(region, standard));
+                }
+            }
+        }
         save(region, state);
+    }
+
+    // ── Standards ─────────────────────────────────────────────────────────────
+
+    /** A standard Security Hub offers: its path after the ARN's resource type, name, and scope. */
+    public record Standard(String path, String name, boolean global, boolean enabledByDefault) {}
+
+    public static final List<Standard> STANDARDS = List.of(
+            new Standard("ruleset/cis-aws-foundations-benchmark/v/1.2.0",
+                    "CIS AWS Foundations Benchmark v1.2.0", true, true),
+            new Standard("standards/aws-foundational-security-best-practices/v/1.0.0",
+                    "AWS Foundational Security Best Practices v1.0.0", false, true),
+            new Standard("standards/cis-aws-foundations-benchmark/v/1.4.0",
+                    "CIS AWS Foundations Benchmark v1.4.0", false, false),
+            new Standard("standards/cis-aws-foundations-benchmark/v/3.0.0",
+                    "CIS AWS Foundations Benchmark v3.0.0", false, false),
+            new Standard("standards/cis-aws-foundations-benchmark/v/5.0.0",
+                    "CIS AWS Foundations Benchmark v5.0.0", false, false),
+            new Standard("standards/nist-800-53/v/5.0.0",
+                    "NIST Special Publication 800-53 Revision 5", false, false),
+            new Standard("standards/pci-dss/v/3.2.1", "PCI DSS v3.2.1", false, false),
+            new Standard("standards/pci-dss/v/4.0.1", "PCI DSS v4.0.1", false, false),
+            new Standard("standards/aws-resource-tagging-standard/v/1.0.0",
+                    "AWS Resource Tagging Standard v1.0.0", false, false));
+
+    public String standardsArn(String region, Standard standard) {
+        return standard.global()
+                ? AwsArnUtils.Arn.global(regionResolver.partitionForRegion(region), "securityhub", "", standard.path()).toString()
+                : regionResolver.buildArn("securityhub", region, "", standard.path());
+    }
+
+    public String subscriptionArn(String region, Standard standard) {
+        return regionResolver.buildArn("securityhub", region,
+                "subscription/" + standard.path().substring(standard.path().indexOf('/') + 1));
+    }
+
+    /** BatchEnableStandards: subscribes each requested standard; enabling one twice is not an error. */
+    public synchronized Map<String, String> enableStandards(String region, JsonNode request) {
+        SecurityHubState state = requireSubscribed(region);
+        JsonNode requests = request == null ? null : request.get("StandardsSubscriptionRequests");
+        if (requests == null || !requests.isArray() || requests.isEmpty() || requests.size() > 25) {
+            throw invalid("StandardsSubscriptionRequests must hold 1 to 25 requests.");
+        }
+        Map<String, String> enabled = new LinkedHashMap<>();
+        for (JsonNode entry : requests) {
+            String arn = text(entry, "StandardsArn");
+            Standard standard = STANDARDS.stream().filter(s -> standardsArn(region, s).equals(arn)).findFirst()
+                    .orElseThrow(() -> invalid("StandardsArn " + arn + " is not a standard Security Hub offers in "
+                            + region + "."));
+            enabled.put(subscriptionArn(region, standard), arn);
+        }
+        state.getStandardsSubscriptions().putAll(enabled);
+        save(region, state);
+        return enabled;
+    }
+
+    /** BatchDisableStandards: removes the named subscriptions and reports each as DELETING. */
+    public synchronized Map<String, String> disableStandards(String region, JsonNode request) {
+        SecurityHubState state = requireSubscribed(region);
+        JsonNode arns = request == null ? null : request.get("StandardsSubscriptionArns");
+        if (arns == null || !arns.isArray() || arns.isEmpty() || arns.size() > 25) {
+            throw invalid("StandardsSubscriptionArns must hold 1 to 25 ARNs.");
+        }
+        // Every ARN is checked before any is removed: the state is the live stored object, so a
+        // removal before a later ARN failed would stick in memory without ever being saved.
+        Map<String, String> removed = new LinkedHashMap<>();
+        for (JsonNode arn : arns) {
+            String standardsArn = state.getStandardsSubscriptions().get(arn.asText());
+            if (standardsArn == null) {
+                throw new AwsException("ResourceNotFoundException",
+                        "Standards subscription " + arn.asText() + " was not found.", 404);
+            }
+            removed.put(arn.asText(), standardsArn);
+        }
+        removed.keySet().forEach(state.getStandardsSubscriptions()::remove);
+        save(region, state);
+        return removed;
+    }
+
+    /** GetEnabledStandards: every subscription, or only the named ones. */
+    public synchronized Map<String, String> enabledStandards(String region, JsonNode request) {
+        SecurityHubState state = requireSubscribed(region);
+        JsonNode arns = request == null ? null : request.get("StandardsSubscriptionArns");
+        Map<String, String> result = new LinkedHashMap<>();
+        state.getStandardsSubscriptions().forEach((subscription, standard) -> {
+            boolean wanted = arns == null || !arns.isArray() || arns.isEmpty();
+            if (!wanted) {
+                for (JsonNode arn : arns) {
+                    wanted |= subscription.equals(arn.asText());
+                }
+            }
+            if (wanted) {
+                result.put(subscription, standard);
+            }
+        });
+        return result;
+    }
+
+    private SecurityHubState requireSubscribed(String region) {
+        SecurityHubState state = state(region);
+        if (!state.isEnabled()) {
+            throw invalidAccess("Account " + regionResolver.getAccountId() + " is not subscribed to AWS Security Hub");
+        }
+        return state;
     }
 
     public synchronized void updateSecurityHubConfiguration(String region, JsonNode request) {
@@ -150,8 +266,8 @@ public class SecurityHubService implements Resettable {
         }
         String mode = requireLinkingMode(request);
         JsonNode regions = validateAggregatorRegions(mode, request.get("Regions"));
-        state.setAggregatorArn(AwsArnUtils.Arn.of("securityhub", region, regionResolver.getAccountId(),
-                "finding-aggregator/" + UUID.randomUUID()).toString());
+        state.setAggregatorArn(regionResolver.buildArn("securityhub", region,
+                "finding-aggregator/" + UUID.randomUUID()));
         state.setRegionLinkingMode(mode);
         state.setRegions(regions);
         save(region, state);
@@ -520,11 +636,11 @@ public class SecurityHubService implements Resettable {
     }
 
     public String hubArn(String region) {
-        return AwsArnUtils.Arn.of("securityhub", region, regionResolver.getAccountId(), "hub/default").toString();
+        return regionResolver.buildArn("securityhub", region, "hub/default");
     }
 
     public String policyArn(String region, String id) {
-        return AwsArnUtils.Arn.of("securityhub", region, regionResolver.getAccountId(), "configuration-policy/" + id).toString();
+        return regionResolver.buildArn("securityhub", region, "configuration-policy/" + id);
     }
 
     private static SecurityHubState copyConfigurationState(SecurityHubState source) {

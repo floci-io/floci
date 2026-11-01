@@ -10,6 +10,7 @@ import software.amazon.awssdk.services.cloudtrail.model.TrailNotFoundException;
 import software.amazon.awssdk.services.cloudtrail.model.UpdateTrailResponse;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("CloudTrail")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -108,5 +109,34 @@ class CloudTrailTest {
 
         assertThatThrownBy(() -> cloudTrail.getTrailStatus(r -> r.name(trailName)))
                 .isInstanceOf(TrailNotFoundException.class);
+    }
+
+    @Test
+    @Order(7)
+    void encryptionAndCloudWatchLogsRoundTrip() {
+        assumeFalse(TestFixtures.isRealAws(), "Uses placeholder KMS key, log group and role ARNs");
+        String key = "arn:aws:kms:us-east-1:000000000000:key/0f1e2d3c-4b5a-6978-8091-a2b3c4d5e6f7";
+        String group = "arn:aws:logs:us-east-1:000000000000:log-group:/trail:*";
+        String role = "arn:aws:iam::000000000000:role/trail-to-logs";
+        String name = TestFixtures.uniqueName("ct-enc");
+        try {
+            CreateTrailResponse created = cloudTrail.createTrail(r -> r.name(name).s3BucketName(bucketName)
+                    .kmsKeyId(key).cloudWatchLogsLogGroupArn(group).cloudWatchLogsRoleArn(role));
+            assertThat(created.kmsKeyId()).isEqualTo(key);
+            assertThat(created.cloudWatchLogsLogGroupArn()).isEqualTo(group);
+            assertThat(created.cloudWatchLogsRoleArn()).isEqualTo(role);
+
+            Trail described = cloudTrail.describeTrails(r -> r.trailNameList(name)).trailList().get(0);
+            assertThat(described.kmsKeyId()).isEqualTo(key);
+            assertThat(described.cloudWatchLogsLogGroupArn()).isEqualTo(group);
+            assertThat(described.cloudWatchLogsRoleArn()).isEqualTo(role);
+
+            UpdateTrailResponse updated = cloudTrail.updateTrail(r -> r.name(name).kmsKeyId(""));
+            assertThat(updated.kmsKeyId()).isNull();
+            assertThat(updated.cloudWatchLogsRoleArn()).isEqualTo(role);
+            assertThat(cloudTrail.describeTrails(r -> r.trailNameList(name)).trailList().get(0).kmsKeyId()).isNull();
+        } finally {
+            cloudTrail.deleteTrail(r -> r.name(name));
+        }
     }
 }

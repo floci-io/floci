@@ -82,7 +82,7 @@ public record StatesIntegration(String partition, String service, String api, bo
 
     /** The id without its suffix, as an error message names it. */
     public String withoutSuffix() {
-        return "arn:" + partition + ":states:::" + (sdk ? "aws-sdk:" : "") + service + ":" + api;
+        return AwsArnUtils.Arn.global(partition, "states", "", (sdk ? "aws-sdk:" : "") + service + ":" + api).toString();
     }
 
     @Override

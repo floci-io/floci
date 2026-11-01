@@ -104,6 +104,51 @@ class ElbV2ServiceTest {
         stubAlbSubnets(ec2Service);
     }
 
+    @Test
+    void describeListenersRequiresEveryExplicitArn() {
+        String lb = service.createLoadBalancer(REGION, "listener-lookup", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of()).getLoadBalancerArn();
+        String removed = service.createListener(REGION, lb, "HTTP", 8080, null,
+                List.of(), List.of(), List.of(), Map.of()).getListenerArn();
+        Listener retained = service.createListener(REGION, lb, "HTTP", 8081, null,
+                List.of(), List.of(), List.of(), Map.of());
+        service.deleteListener(REGION, removed);
+
+        for (List<String> requested : List.of(List.of(removed),
+                List.of(retained.getListenerArn(), removed), List.of(removed, retained.getListenerArn()))) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.describeListeners(REGION, null, requested));
+            assertEquals("ListenerNotFound", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+        }
+        AwsException otherRegion = assertThrows(AwsException.class,
+                () -> service.describeListeners("us-east-1", null, List.of(retained.getListenerArn())));
+        assertEquals("ListenerNotFound", otherRegion.getErrorCode());
+        assertEquals(List.of(retained), service.describeListeners(REGION, lb, List.of()));
+        assertEquals(List.of(retained),
+                service.describeListeners(REGION, null, List.of(retained.getListenerArn())));
+    }
+
+    @Test
+    void describeListenersRejectsADeletedBalancerAndItsListeners() {
+        String lb = service.createLoadBalancer(REGION, "deleted-listeners", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of()).getLoadBalancerArn();
+        assertTrue(service.describeListeners(REGION, lb, List.of()).isEmpty());
+        String listener = service.createListener(REGION, lb, "HTTP", 8080, null,
+                List.of(), List.of(), List.of(), Map.of()).getListenerArn();
+        service.deleteLoadBalancer(REGION, lb);
+
+        AwsException missingListener = assertThrows(AwsException.class,
+                () -> service.describeListeners(REGION, null, List.of(listener)));
+        assertEquals("ListenerNotFound", missingListener.getErrorCode());
+        assertEquals(400, missingListener.getHttpStatus());
+        AwsException missingBalancer = assertThrows(AwsException.class,
+                () -> service.describeListeners(REGION, lb, List.of()));
+        assertEquals("LoadBalancerNotFound", missingBalancer.getErrorCode());
+        assertEquals(400, missingBalancer.getHttpStatus());
+        assertTrue(service.describeListeners(REGION, null, List.of()).isEmpty());
+    }
+
     /**
      * Every type takes Subnets or SubnetMappings, so a balancer with neither is refused before a
      * subnet is looked up or anything is stored. The messages are the ones AWS gives an Application
@@ -911,6 +956,30 @@ class ElbV2ServiceTest {
         ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.captor();
         verify(reloadedDataPlane).publishListener(listenerCaptor.capture(), eq(REGION), any(), any(), any(), any());
         assertEquals(listenerArn, listenerCaptor.getValue().getListenerArn());
+    }
+
+    @Test
+    void modifyListenerAttributesValidatesTcpIdleTimeoutRange() {
+        String lb = service.createLoadBalancer(REGION, "nlb-attr", "internal", "network", "ipv4",
+                ALB_SUBNETS, List.of(), Map.of()).getLoadBalancerArn();
+        Listener listener = service.createListener(REGION, lb, "TCP", 9876, null,
+                List.of(), List.of(), List.of(), Map.of());
+        String listenerArn = listener.getListenerArn();
+
+        AwsException tooLow = assertThrows(AwsException.class, () ->
+                service.modifyListenerAttributes(REGION, listenerArn, Map.of("tcp.idle_timeout.seconds", "1")));
+        assertEquals("InvalidConfigurationRequest", tooLow.getErrorCode());
+
+        AwsException tooHigh = assertThrows(AwsException.class, () ->
+                service.modifyListenerAttributes(REGION, listenerArn, Map.of("tcp.idle_timeout.seconds", "6001")));
+        assertEquals("InvalidConfigurationRequest", tooHigh.getErrorCode());
+
+        AwsException nonNumeric = assertThrows(AwsException.class, () ->
+                service.modifyListenerAttributes(REGION, listenerArn, Map.of("tcp.idle_timeout.seconds", "abc")));
+        assertEquals("InvalidConfigurationRequest", nonNumeric.getErrorCode());
+
+        service.modifyListenerAttributes(REGION, listenerArn, Map.of("tcp.idle_timeout.seconds", "120"));
+        assertEquals("120", service.describeListenerAttributes(REGION, listenerArn).get("tcp.idle_timeout.seconds"));
     }
 
     @Test

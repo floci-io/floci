@@ -561,6 +561,14 @@ public class KinesisAnalyticsV2Service {
         return List.copyOf(describeApplication(applicationName, region).getSnapshots().values());
     }
 
+    public PaginatedResult<Snapshot> listApplicationSnapshots(String applicationName, String region,
+                                                              Integer limit, String nextToken) {
+        // AWS: ListSnapshotsInputLimit is 1 to 50 and NextToken is 1 to 512 with no pattern, so
+        // unlike ListApplications the token is not checked against a resource name here.
+        return Pagination.paginateUnencoded(listApplicationSnapshots(applicationName, region),
+                Snapshot::getSnapshotName, limit, nextToken, 50, 50, 512, "InvalidArgumentException");
+    }
+
     public void deleteApplicationSnapshot(String applicationName, String snapshotName,
                                           Instant snapshotCreationTimestamp) {
         deleteApplicationSnapshot(applicationName, snapshotName, snapshotCreationTimestamp,

@@ -15,6 +15,7 @@ import com.github.dockerjava.api.exception.NotModifiedException;
 import com.github.dockerjava.api.model.Bind;
 import com.github.dockerjava.api.model.Capability;
 import com.github.dockerjava.api.model.Container;
+import com.github.dockerjava.api.model.ContainerConfig;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.HostConfig;
@@ -137,9 +138,29 @@ public class ContainerLifecycleManager {
         return createAndStart(spec, true);
     }
 
+    /**
+     * Starts a disposable container for a specific Docker platform, reclaiming its anonymous
+     * volumes if startup fails.
+     *
+     * @param platform Docker platform, such as {@code linux/amd64}, or null for the daemon's own
+     */
+    public ContainerInfo createAndStartEphemeral(ContainerSpec spec, String platform) {
+        return createAndStart(spec, platform, true);
+    }
+
     private ContainerInfo createAndStart(ContainerSpec spec, boolean removeAnonymousVolumes) {
         String resolvedImage = imageCacheService.ensureImageExists(spec.image());
-        String containerId = create(spec, resolvedImage, null, removeAnonymousVolumes);
+        return createAndStart(spec, resolvedImage, null, removeAnonymousVolumes);
+    }
+
+    private ContainerInfo createAndStart(ContainerSpec spec, String platform, boolean removeAnonymousVolumes) {
+        String resolvedImage = imageCacheService.ensureImageExists(spec.image(), platform);
+        return createAndStart(spec, resolvedImage, platform, removeAnonymousVolumes);
+    }
+
+    private ContainerInfo createAndStart(ContainerSpec spec, String resolvedImage, String platform,
+                                         boolean removeAnonymousVolumes) {
+        String containerId = create(spec, resolvedImage, platform, removeAnonymousVolumes);
         try {
             return withPublishedHostPorts(startCreated(containerId, spec), spec);
         } catch (RuntimeException failure) {
@@ -164,9 +185,12 @@ public class ContainerLifecycleManager {
      * Resolves the image a container launch is about to run, pulling it as the ECS agent does
      * under {@code behavior}. A spec built from the returned image id runs exactly that image,
      * whatever a later pull of the same reference moves its tag to.
+     *
+     * @param platform the Docker platform the container runs, such as {@code linux/amd64}, or null
+     *        for the daemon's own
      */
-    public LaunchImage resolveImageForLaunch(String image, ImagePullBehavior behavior) {
-        return imageCacheService.resolveForLaunch(image, behavior);
+    public LaunchImage resolveImageForLaunch(String image, ImagePullBehavior behavior, String platform) {
+        return imageCacheService.resolveForLaunch(image, behavior, platform);
     }
 
     /**
@@ -222,13 +246,23 @@ public class ContainerLifecycleManager {
         if (caBundle.isEmpty()) {
             return createContainer(spec, resolvedImage, platform, hostConfig, spec.env());
         }
-        String containerId = createContainer(spec, resolvedImage, platform, hostConfig,
-                ContainerCaBundle.appendEnv(spec.env()));
-        if (copyCaBundle(containerId, caBundle.get())) {
+        List<String> env = ContainerCaBundle.appendEnv(spec.env());
+        Path javaTrustStore = null;
+        if (spec.javaTrustStore()) {
+            Optional<Path> trustStore = ContainerCaBundle.javaTrustStoreHostPath(config);
+            Optional<List<String>> imageEnv = trustStore.isPresent() ? imageEnv(resolvedImage) : Optional.empty();
+            if (imageEnv.isPresent()) {
+                javaTrustStore = trustStore.get();
+                env = ContainerCaBundle.appendJavaTrustEnv(env, imageEnv.get());
+            }
+        }
+        String containerId = createContainer(spec, resolvedImage, platform, hostConfig, env);
+        if (copyCaBundle(containerId, caBundle.get(), javaTrustStore)) {
             return containerId;
         }
-        // SSL_CERT_FILE and friends replace the image's trust store, so they must never name a
-        // file that is not there. Start over without them: the container keeps its own trust.
+        // SSL_CERT_FILE and friends replace the image's trust store, and so does JAVA_TOOL_OPTIONS
+        // the JVM's, so they must never name a file that is not there. Start over without them: the
+        // container keeps its own trust.
         if (removeAnonymousVolumes) {
             removeIfExistsStrict(containerId, true);
         } else {
@@ -361,28 +395,35 @@ public class ContainerLifecycleManager {
 
     /**
      * Copies the CA bundle into the created, not yet started, container so runtimes that read
-     * {@code SSL_CERT_FILE} and friends at init find it. A copy rather than a bind mount because
-     * when Floci itself runs in Docker its persistent path is not a host path the daemon can mount.
-     * Returns false, after logging why, when the copy failed; an image without {@code /etc} is the
-     * expected reason, and the caller then recreates the container without the trust variables.
+     * {@code SSL_CERT_FILE} and friends at init find it, and beside it the Java trust store, when
+     * {@code javaTrustStore} is not null, for the JVMs {@code JAVA_TOOL_OPTIONS} points at it. A copy
+     * rather than a bind mount because when Floci itself runs in Docker its persistent path is not a
+     * host path the daemon can mount. Returns false, after logging why, when a copy failed; an image
+     * without {@code /etc} is the expected reason, and the caller then recreates the container
+     * without the trust variables.
      */
-    private boolean copyCaBundle(String containerId, Path bundle) {
+    private boolean copyCaBundle(String containerId, Path bundle, Path javaTrustStore) {
         try {
             copyIntoContainerDir(containerId, bundle, ContainerCaBundle.FILE_NAME);
             LOG.debugv("Copied the CA bundle into container {0} at {1}", containerId, ContainerCaBundle.CONTAINER_PATH);
+            if (javaTrustStore != null) {
+                copyIntoContainerDir(containerId, javaTrustStore, ContainerCaBundle.JAVA_TRUST_STORE_FILE_NAME);
+            }
             return true;
         } catch (Exception e) {
-            LOG.warnv(e, "Could not copy the CA bundle into container {0}; creating it again without the trust "
-                    + "variables, so it keeps its own trust store and will not trust Floci HTTPS: {1}",
+            LOG.warnv(e, "Could not copy the CA bundle or its Java trust store into container {0}; creating it"
+                    + " again without the trust variables, so it keeps its own trust store and will not trust"
+                    + " Floci HTTPS: {1}",
                     containerId, e.getMessage());
             return false;
         }
     }
 
     /**
-     * Copies the CA bundle's Java trust store into {@code containerId}, before it starts, at
+     * Copies the CA bundle's Java trust store into {@code containerId} at
      * {@link ContainerCaBundle#JAVA_TRUST_STORE_PATH}, for a container whose JVMs are then pointed at
-     * it, as {@link ContainerCaBundle#JAVA_TRUST_SHELL_LINE} does. Returns whether it is there: false
+     * it, as {@link ContainerCaBundle#JAVA_TRUST_SHELL_LINE} does, and whose spec does not ask for it,
+     * as {@link ContainerBuilder.Builder#withJavaTrustStore} does. Returns whether it is there: false
      * when TLS is off, the boot wrote no trust store, or the copy failed, which is logged; the JVMs then
      * keep the image's trust store.
      */
@@ -986,6 +1027,22 @@ public class ContainerLifecycleManager {
             return Optional.of(env == null ? List.of() : List.of(env));
         } catch (Exception e) {
             LOG.debugv("Could not read environment of container {0}: {1}", containerId, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * The environment {@code resolvedImage} gives its containers, empty, after logging why, when it could
+     * not be read.
+     */
+    private Optional<List<String>> imageEnv(String resolvedImage) {
+        try {
+            ContainerConfig imageConfig = dockerClient.inspectImageCmd(resolvedImage).exec().getConfig();
+            String[] env = imageConfig == null ? null : imageConfig.getEnv();
+            return Optional.of(env == null ? List.of() : List.of(env));
+        } catch (Exception e) {
+            LOG.warnv("Could not read the environment of image {0}, so the JVMs in its container keep the image's"
+                    + " trust store and will not trust Floci HTTPS: {1}", resolvedImage, e.getMessage());
             return Optional.empty();
         }
     }

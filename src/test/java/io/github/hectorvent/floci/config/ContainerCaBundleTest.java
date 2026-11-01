@@ -267,6 +267,32 @@ class ContainerCaBundleTest {
         assertEquals(ContainerCaBundle.env(), ContainerCaBundle.appendEnv(List.of()));
     }
 
+    // Options after Floci's win, so a trust store they name replaces it, as the JVM test below shows.
+    @Test
+    void appendJavaTrustEnvPutsFlocisOptionAheadOfTheContainersOwnWhichReplacesTheImages() {
+        assertEquals(List.of("FOO=bar", "JAVA_TOOL_OPTIONS=" + ContainerCaBundle.JAVA_TRUST_OPTIONS + " -Xss2m"),
+                ContainerCaBundle.appendJavaTrustEnv(List.of("FOO=bar", "JAVA_TOOL_OPTIONS=-Xss2m"),
+                        List.of("JAVA_TOOL_OPTIONS=-Dimage=1")));
+    }
+
+    @Test
+    void appendJavaTrustEnvPutsFlocisOptionAheadOfTheImagesLastWhenTheContainerSetsNone() {
+        assertEquals(List.of("FOO=bar", "JAVA_TOOL_OPTIONS=" + ContainerCaBundle.JAVA_TRUST_OPTIONS + " -Dimage=2"),
+                ContainerCaBundle.appendJavaTrustEnv(List.of("FOO=bar"),
+                        List.of("PATH=/bin", "JAVA_TOOL_OPTIONS=-Dimage=1", "JAVA_TOOL_OPTIONS=-Dimage=2")));
+    }
+
+    @Test
+    void appendJavaTrustEnvGivesFlocisOptionAloneWhenNothingElseIsSet() {
+        List<String> alone = List.of("JAVA_TOOL_OPTIONS=" + ContainerCaBundle.JAVA_TRUST_OPTIONS);
+
+        assertEquals(alone, ContainerCaBundle.appendJavaTrustEnv(List.of(), List.of("PATH=/bin")));
+        assertEquals(alone, ContainerCaBundle.appendJavaTrustEnv(List.of("JAVA_TOOL_OPTIONS="), List.of()));
+        // A bare key unsets the image's value, so none is kept.
+        assertEquals(alone, ContainerCaBundle.appendJavaTrustEnv(List.of("JAVA_TOOL_OPTIONS"),
+                List.of("JAVA_TOOL_OPTIONS=-Dimage=1")));
+    }
+
     @Test
     void theJavaTrustStoreHoldsEveryCertificateOfTheBundleAsATrustedEntry() throws Exception {
         Path tlsDir = tempDir.resolve("tls");

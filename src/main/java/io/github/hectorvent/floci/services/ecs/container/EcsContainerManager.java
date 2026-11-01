@@ -271,6 +271,9 @@ public class EcsContainerManager {
 
         List<ContainerDefinition> launchOrder = orderForDependencies(
                 launchOrder(taskDef.getContainerDefinitions(), firelensRouter), firelensRouter);
+        String platform = taskDef.getRuntimePlatform() != null
+                ? taskDef.getRuntimePlatform().dockerPlatform()
+                : null;
 
         // Task-level volumes consumed by per-container mountPoints: host volumes map their
         // name -> absolute host source path; efsVolumeConfiguration volumes map their
@@ -326,7 +329,7 @@ public class EcsContainerManager {
             // tag again cannot swap the image under this task's reported digest.
             for (ContainerDefinition def : launchOrder) {
                 LaunchImage launchImage = lifecycleManager.resolveImageForLaunch(imagesByContainer.get(def),
-                        config.services().ecs().imagePullBehavior());
+                        config.services().ecs().imagePullBehavior(), platform);
                 imagesByContainer.put(def, launchImage.imageId());
                 if (launchImage.manifestDigest() != null) {
                     imageDigestsByContainer.put(def.getName(), launchImage.manifestDigest());
@@ -404,6 +407,7 @@ public class EcsContainerManager {
                         // own loopback.
                         .withHostDockerInternalOnLinux()
                         .withEmbeddedDns()
+                        .withJavaTrustStore()
                         .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                                 "ecs", taskId, regionResolver.getAccountId(), region))
                         .withLabels(ownerLabels());
@@ -521,7 +525,7 @@ public class EcsContainerManager {
                             // rejection is not swallowed, it propagates out of startTask and is
                             // surfaced by EcsService as the task's stoppedReason.
                             hostVolumePolicy.validate(sourcePath);
-                            if (mp.readOnly()) {
+                            if (Boolean.TRUE.equals(mp.readOnly())) {
                                 specBuilder.withReadOnlyBind(sourcePath, mp.containerPath());
                             } else {
                                 specBuilder.withBind(sourcePath, mp.containerPath());
@@ -534,7 +538,8 @@ public class EcsContainerManager {
                                 labels.put(ContainerStorageHelper.SERVICE_LABEL, "ecs");
                                 lifecycleManager.ensureVolume(ephemeralVolume, labels);
                             }
-                            specBuilder.withNamedVolume(ephemeralVolume, mp.containerPath(), mp.readOnly());
+                            specBuilder.withNamedVolume(ephemeralVolume, mp.containerPath(),
+                                    Boolean.TRUE.equals(mp.readOnly()));
                         } else {
                             LOG.warnv("Skipping mountPoint with unresolved volume {0} on container {1}",
                                     mp.sourceVolume(), def.getName());
@@ -549,7 +554,8 @@ public class EcsContainerManager {
                             throw new IllegalStateException("ECS volumesFrom source container "
                                     + volumeFrom.sourceContainer() + " has not started");
                         }
-                        specBuilder.withVolumesFrom(sourceContainerId, volumeFrom.readOnly());
+                        specBuilder.withVolumesFrom(sourceContainerId,
+                                Boolean.TRUE.equals(volumeFrom.readOnly()));
                     }
                 }
 
@@ -557,7 +563,7 @@ public class EcsContainerManager {
 
                 String dockerId;
                 if (def == firelensRouter) {
-                    dockerId = lifecycleManager.create(spec);
+                    dockerId = lifecycleManager.create(spec, platform);
                     try {
                         copyFirelensConfig(dockerId, firelensConfig, isFluentdRouter(firelensRouter),
                                 firelensExternalConfig, firelensBackoffMillis);
@@ -568,7 +574,7 @@ public class EcsContainerManager {
                     }
                     fluentHost = inspectContainerIp(dockerId);
                 } else {
-                    ContainerInfo info = lifecycleManager.createAndStartEphemeral(spec);
+                    ContainerInfo info = lifecycleManager.createAndStartEphemeral(spec, platform);
                     dockerId = info.containerId();
                 }
 
@@ -2365,7 +2371,7 @@ public class EcsContainerManager {
             lifecycleManager.ensureSharedVolume(efsVolumeName,
                     efsCfg.ownerUid(), efsCfg.ownerGid(), efsCfg.rootPermissions(), efsCfg.initImage());
         }
-        specBuilder.withNamedVolume(efsVolumeName, mp.containerPath(), mp.readOnly());
+        specBuilder.withNamedVolume(efsVolumeName, mp.containerPath(), Boolean.TRUE.equals(mp.readOnly()));
         PosixUser posixUser = accessPoint != null ? accessPoint.getPosixUser() : null;
         if (posixUser != null) {
             if (posixUser.getUid() == null || posixUser.getGid() == null) {

@@ -39,8 +39,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * {@code CURL_CA_BUNDLE}, {@code REQUESTS_CA_BUNDLE}) at it: the workload still reaches public
  * HTTPS endpoints. {@code NODE_EXTRA_CA_CERTS} appends to Node's roots and {@code AWS_CA_BUNDLE}
  * only applies to AWS SDK and CLI traffic, so both are harmless with the same file. The JVM reads none
- * of them, so the same certificates also go in a PKCS12 trust store, which a launcher whose workload is
- * Java copies in beside the bundle and points its JVMs at.
+ * of them, so the same certificates also go in a PKCS12 trust store, which goes in beside the bundle for a
+ * container whose workload may be Java, its JVMs pointed at it through {@code JAVA_TOOL_OPTIONS}.
  *
  * <p>Written by {@link TlsConfigSource} at boot; copied into containers by the Docker lifecycle
  * manager and mounted from a ConfigMap by the Kubernetes Lambda launcher. Plain class because the
@@ -60,6 +60,8 @@ public final class ContainerCaBundle {
     public static final String JAVA_TRUST_STORE_FILE_NAME = "floci-ca-bundle.p12";
     public static final String JAVA_TRUST_STORE_PATH = CONTAINER_DIR + "/" + JAVA_TRUST_STORE_FILE_NAME;
 
+    private static final String JAVA_TOOL_OPTIONS = "JAVA_TOOL_OPTIONS";
+
     /**
      * The JVM option that makes a JVM trust what the trust store at {@link #JAVA_TRUST_STORE_PATH} holds: its
      * path alone, as the store needs no password and the JVM reads it whatever store type it is told. A store a
@@ -71,7 +73,8 @@ public final class ContainerCaBundle {
      * A shell line after which every JVM the shell starts trusts the bundle, through {@code JAVA_TOOL_OPTIONS},
      * when the trust store is in the container, and only then, so a container without it keeps the image's
      * trust. Options already in {@code JAVA_TOOL_OPTIONS} come after Floci's, so a trust store of their own
-     * wins.
+     * wins. For a container the trust store is copied into on its own rather than with the bundle, such as one
+     * kept as an image, which would keep a {@code JAVA_TOOL_OPTIONS} given at its creation.
      */
     public static final String JAVA_TRUST_SHELL_LINE = "if [ -r " + JAVA_TRUST_STORE_PATH + " ]; then"
             + " export JAVA_TOOL_OPTIONS=\"" + JAVA_TRUST_OPTIONS + "${JAVA_TOOL_OPTIONS:+ $JAVA_TOOL_OPTIONS}\"; fi";
@@ -194,6 +197,41 @@ public final class ContainerCaBundle {
             }
         }
         return merged;
+    }
+
+    /**
+     * {@code env} with {@code JAVA_TOOL_OPTIONS} opening with {@link #JAVA_TRUST_OPTIONS}: ahead of the value
+     * {@code env} gives it, or, when it gives none, ahead of the value in {@code imageEnv}, the image's own,
+     * which a container's value replaces. Options after Floci's win, so a trust store they name replaces it.
+     */
+    public static List<String> appendJavaTrustEnv(List<String> env, List<String> imageEnv) {
+        List<String> merged = new ArrayList<>(env);
+        boolean set = false;
+        for (int i = 0; i < merged.size(); i++) {
+            if (isJavaToolOptions(merged.get(i))) {
+                merged.set(i, javaToolOptionsAfterFloci(merged.get(i)));
+                set = true;
+            }
+        }
+        if (!set) {
+            // The image's last entry is the one its containers get.
+            merged.add(javaToolOptionsAfterFloci(imageEnv.stream()
+                    .filter(ContainerCaBundle::isJavaToolOptions)
+                    .reduce((earlier, later) -> later)
+                    .orElse(JAVA_TOOL_OPTIONS)));
+        }
+        return merged;
+    }
+
+    private static boolean isJavaToolOptions(String entry) {
+        return entry.equals(JAVA_TOOL_OPTIONS) || entry.startsWith(JAVA_TOOL_OPTIONS + "=");
+    }
+
+    // The JAVA_TOOL_OPTIONS entry with Floci's option ahead of the options in entry, which a bare key gives none.
+    private static String javaToolOptionsAfterFloci(String entry) {
+        String options = entry.length() > JAVA_TOOL_OPTIONS.length()
+                ? entry.substring(JAVA_TOOL_OPTIONS.length() + 1) : "";
+        return JAVA_TOOL_OPTIONS + "=" + JAVA_TRUST_OPTIONS + (options.isBlank() ? "" : " " + options);
     }
 
     /**

@@ -64,7 +64,8 @@ public class ControlCatalogService implements Resettable {
         ObjectNode response = objectMapper.createObjectNode();
         String responseArn = definition.globalIdentifier() == null
                 ? controlArn
-                : "arn:" + partition + ":controlcatalog:::control/" + definition.globalIdentifier();
+                : AwsArnUtils.Arn.global(partition, "controlcatalog", "", "control/" + definition.globalIdentifier())
+                        .toString();
         response.put("Arn", responseArn);
         response.set("Aliases", stringArray(definition.aliases()));
         response.put("Name", definition.name());

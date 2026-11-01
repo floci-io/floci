@@ -2357,20 +2357,45 @@ final class CognitoAuthFlowHandler {
      * users of such a pool choose only which one is preferred. An SMS factor needs a pool that offers SMS
      * MFA and the user's phone number; an email factor needs the pool's EmailMfaConfiguration and the
      * user's email address.
+     * A pool that requires MFA does not assign either one when its attribute is the primary account-recovery
+     * destination, as in AWS, unless that would leave the user with no factor and no software-token setup.
+     * A factor the user turned on is never left out.
      */
     private List<String> mfaFactors(UserPool pool, CognitoUser user) {
+        List<String> factors = mfaFactors(pool, user, true);
+        // Leaving the recovery attribute out must never leave a pool that requires MFA with no factor at
+        // all: completePrimaryAuth would then issue tokens without a code. When software-token setup is not
+        // available as the alternative, offer the factors the filter dropped.
+        if (factors.isEmpty() && "ON".equals(pool.getMfaConfiguration())
+                && !Boolean.TRUE.equals(pool.getSoftwareTokenMfaEnabled())) {
+            return mfaFactors(pool, user, false);
+        }
+        return factors;
+    }
+
+    /**
+     * @param skipRecoveryAttribute leave out an email or phone factor that the pool would only assign because
+     *                              MFA is required, when that attribute is the primary recovery destination.
+     *                              A factor the user turned on themselves is always kept: AWS prompts for the
+     *                              user's enabled, preferred factor before it works out an assignment.
+     */
+    private List<String> mfaFactors(UserPool pool, CognitoUser user, boolean skipRecoveryAttribute) {
         boolean required = "ON".equals(pool.getMfaConfiguration());
         boolean messaging = service.verificationServicesConfigured();
+        boolean smsEnabled = user.getSmsMfaSettings() != null && user.getSmsMfaSettings().isEnabled();
+        boolean emailEnabled = user.getEmailMfaSettings() != null && user.getEmailMfaSettings().isEnabled();
         List<String> factors = new ArrayList<>();
         if (messaging && smsMfaOffered(pool) && user.getAttributes().get("phone_number") != null
-                && (required || (user.getSmsMfaSettings() != null && user.getSmsMfaSettings().isEnabled()))) {
+                && (smsEnabled || (required
+                        && (!skipRecoveryAttribute || service.isNotPrimaryRecoveryAttribute(pool, "phone_number"))))) {
             factors.add("SMS_MFA");
         }
         if (required ? CognitoService.softwareTokenMfaActive(pool, user) : CognitoService.softwareTokenMfaEnabled(user)) {
             factors.add("SOFTWARE_TOKEN_MFA");
         }
         if (messaging && pool.getEmailMfaConfiguration() != null && user.getAttributes().get("email") != null
-                && (required || (user.getEmailMfaSettings() != null && user.getEmailMfaSettings().isEnabled()))) {
+                && (emailEnabled || (required
+                        && (!skipRecoveryAttribute || service.isNotPrimaryRecoveryAttribute(pool, "email"))))) {
             factors.add("EMAIL_OTP");
         }
         return factors;

@@ -69,6 +69,9 @@ public class NativeDynamoDbJsonHandler {
     private static final int MAX_BACKUP_ARN_LENGTH = 1024;
     private static final Instant MAX_TIME_RANGE_BOUND = Instant.ofEpochMilli(99_999_999_999_999L);
     private static final int MAX_RECOVERY_PERIOD_DAYS = 35;
+    // The warm throughput a new on-demand table or index starts with.
+    private static final long ON_DEMAND_WARM_READ_UNITS = 12000;
+    private static final long ON_DEMAND_WARM_WRITE_UNITS = 4000;
 
     private final DynamoDbService dynamoDbService;
     private final NativeDynamoDbTableService tableService;
@@ -2324,7 +2327,8 @@ public class NativeDynamoDbJsonHandler {
         }
         if (described.has("GlobalSecondaryIndexes")) {
             for (JsonNode gsi : described.get("GlobalSecondaryIndexes")) {
-                ((ObjectNode) gsi).remove(List.of("IndexArn", "IndexStatus", "IndexSizeBytes", "ItemCount"));
+                ((ObjectNode) gsi).remove(
+                        List.of("IndexArn", "IndexStatus", "IndexSizeBytes", "ItemCount", "WarmThroughput"));
                 ((ObjectNode) gsi.get("ProvisionedThroughput")).remove("NumberOfDecreasesToday");
             }
             features.set("GlobalSecondaryIndexes", described.get("GlobalSecondaryIndexes"));
@@ -3299,6 +3303,7 @@ public class NativeDynamoDbJsonHandler {
                     }
                     gsiNode.set("OnDemandThroughput", gsiOdt);
                 }
+                gsiNode.set("WarmThroughput", gsiWarmThroughput(table, gsi));
 
                 gsiArray.add(gsiNode);
             }
@@ -3357,6 +3362,21 @@ public class NativeDynamoDbJsonHandler {
         }
 
         return node;
+    }
+
+    /**
+     * AWS reports a provisioned index's warm throughput as its provisioned capacity, and an on-demand
+     * one's as the values a new on-demand index starts with. An index is ACTIVE as soon as it exists here.
+     */
+    private ObjectNode gsiWarmThroughput(TableDefinition table, GlobalSecondaryIndex gsi) {
+        boolean onDemand = "PAY_PER_REQUEST".equals(table.getBillingMode());
+        ObjectNode warmThroughput = objectMapper.createObjectNode();
+        warmThroughput.put("ReadUnitsPerSecond",
+                onDemand ? ON_DEMAND_WARM_READ_UNITS : gsi.getProvisionedThroughput().getReadCapacityUnits());
+        warmThroughput.put("WriteUnitsPerSecond",
+                onDemand ? ON_DEMAND_WARM_WRITE_UNITS : gsi.getProvisionedThroughput().getWriteCapacityUnits());
+        warmThroughput.put("Status", "ACTIVE");
+        return warmThroughput;
     }
 
     /**
@@ -3520,8 +3540,88 @@ public class NativeDynamoDbJsonHandler {
         return Response.ok(response).build();
     }
 
+    private static final int MAX_STATEMENT_LENGTH = 8192;
+    private static final int MAX_NEXT_TOKEN_LENGTH = 32768;
+    private static final int MAX_CLIENT_REQUEST_TOKEN_LENGTH = 36;
+    private static final List<String> PARTIQL_RETURN_VALUES_ON_CONDITION_CHECK_FAILURE = List.of("ALL_OLD", "NONE");
+    // ExecuteTransaction and BatchExecuteStatement name only the first 10 violations.
+    private static final int MAX_PARTIQL_VIOLATIONS = 10;
+
+    private static void addStatementError(JsonNode member, String path, List<String> validationErrors) {
+        JsonNode statement = member.path("Statement");
+        if (statement.isMissingNode() || statement.isNull()) {
+            validationErrors.add(SmithyValidationErrors.notNull(path));
+            return;
+        }
+        addLengthError(member, "Statement", path, MAX_STATEMENT_LENGTH, validationErrors);
+    }
+
+    private static void addLengthError(JsonNode request, String member, String path, int max,
+                                       List<String> validationErrors) {
+        JsonNode value = request.get(member);
+        if (value == null || value.isNull()) {
+            return;
+        }
+        String error = SmithyValidationErrors.lengthOutOfRange(path, value.asText(), 1, max);
+        if (error != null) {
+            validationErrors.add(error);
+        }
+    }
+
+    private static void addLimitError(JsonNode request, List<String> validationErrors) {
+        JsonNode limit = request.get("Limit");
+        if (limit != null && !limit.isNull() && limit.asLong() < 1) {
+            validationErrors.add(SmithyValidationErrors.valueTooSmall("limit", limit.asText(), 1));
+        }
+    }
+
+    private static void addParametersError(JsonNode request, String path, List<String> validationErrors) {
+        JsonNode parameters = request.path("Parameters");
+        if (parameters.isArray() && parameters.isEmpty()) {
+            validationErrors.add(SmithyValidationErrors.lengthTooShort(path, "[]", 1));
+        }
+    }
+
+    private static void addPartiQLReturnValuesError(JsonNode request, String path, List<String> validationErrors) {
+        JsonNode value = request.get("ReturnValuesOnConditionCheckFailure");
+        if (value != null && !value.isNull()
+                && !PARTIQL_RETURN_VALUES_ON_CONDITION_CHECK_FAILURE.contains(value.asText())) {
+            validationErrors.add(SmithyValidationErrors.notInEnum(value.asText(), path,
+                    PARTIQL_RETURN_VALUES_ON_CONDITION_CHECK_FAILURE));
+        }
+    }
+
+    private static void addStatementListErrors(JsonNode statements, String path, List<String> validationErrors) {
+        if (!statements.isArray()) {
+            validationErrors.add(SmithyValidationErrors.notNull(path));
+            return;
+        }
+        if (statements.isEmpty()) {
+            validationErrors.add(SmithyValidationErrors.lengthTooShort(path, "[]", 1));
+        }
+        for (int i = 0; i < statements.size(); i++) {
+            JsonNode member = statements.get(i);
+            String memberPath = path + "." + (i + 1) + ".member.";
+            addPartiQLReturnValuesError(member, memberPath + "returnValuesOnConditionCheckFailure", validationErrors);
+            addStatementError(member, memberPath + "statement", validationErrors);
+            addParametersError(member, memberPath + "parameters", validationErrors);
+        }
+    }
+
+    private static void throwPartiQLValidationErrors(List<String> validationErrors) {
+        throwValidationErrors(validationErrors.subList(0, Math.min(validationErrors.size(), MAX_PARTIQL_VIOLATIONS)));
+    }
+
     private Response handleExecuteStatement(JsonNode request, String region) {
-        requireValidReturnConsumedCapacity(request);
+        decodePartiQLParameters(request.path("Parameters"));
+        List<String> validationErrors = new ArrayList<>();
+        addPartiQLReturnValuesError(request, "returnValuesOnConditionCheckFailure", validationErrors);
+        addLengthError(request, "NextToken", "nextToken", MAX_NEXT_TOKEN_LENGTH, validationErrors);
+        addLimitError(request, validationErrors);
+        addStatementError(request, "statement", validationErrors);
+        addReturnConsumedCapacityError(request, validationErrors);
+        addParametersError(request, "parameters", validationErrors);
+        throwValidationErrors(validationErrors);
         String statement = request.path("Statement").asText();
         List<JsonNode> parameters = toPartiQLParams(request.path("Parameters"));
         DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(statement, parameters);
@@ -3543,12 +3643,13 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleExecuteTransaction(JsonNode request, String region) {
         JsonNode stmts = request.path("TransactStatements");
-        if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
-            throw new AwsException("ValidationException", "TransactStatements must not be empty", 400);
-        }
+        stmts.forEach(s -> decodePartiQLParameters(s.path("Parameters")));
         List<String> validationErrors = new ArrayList<>();
+        addLengthError(request, "ClientRequestToken", "clientRequestToken", MAX_CLIENT_REQUEST_TOKEN_LENGTH,
+                validationErrors);
+        addStatementListErrors(stmts, "transactStatements", validationErrors);
         addReturnConsumedCapacityError(request, validationErrors);
-        throwValidationErrors(validationErrors);
+        throwPartiQLValidationErrors(validationErrors);
         try {
             List<DynamoDbPartiQLParser.Stmt> statements = new ArrayList<>();
             for (int i = 0; i < stmts.size(); i++) {
@@ -3671,11 +3772,12 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleBatchExecuteStatement(JsonNode request, String region) {
-        requireValidReturnConsumedCapacity(request);
         JsonNode stmts = request.path("Statements");
-        if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
-            throw new AwsException("ValidationException", "Statements must not be empty", 400);
-        }
+        stmts.forEach(s -> decodePartiQLParameters(s.path("Parameters")));
+        List<String> validationErrors = new ArrayList<>();
+        addReturnConsumedCapacityError(request, validationErrors);
+        addStatementListErrors(stmts, "statements", validationErrors);
+        throwPartiQLValidationErrors(validationErrors);
         ArrayNode responses = objectMapper.createArrayNode();
         Map<String, DynamoDbWriteCapacity.Cost> capacity = new LinkedHashMap<>();
         for (JsonNode s : stmts) {
@@ -3742,10 +3844,10 @@ public class NativeDynamoDbJsonHandler {
     // WHERE clauses are rejected per statement (characterised on real AWS,
     // eu-west-1, 2026-09-02).
     private void requireBatchSelectReadsByKey(DynamoDbPartiQLParser.Stmt.Select select, String region) {
+        TableDefinition table = dynamoDbService.requireTableForItemCall(select.table(), region);
         if (select.index() != null) {
             throw batchSelectNeedsKey();
         }
-        TableDefinition table = dynamoDbService.requireTableForItemCall(select.table(), region);
         DynamoDbPartiQLHandler.requireReadsWithinLimit(table, select.where());
         if (!DynamoDbPartiQLHandler.namesOnlyTheKey(table, select.where())) {
             throw batchSelectNeedsKey();
@@ -3768,10 +3870,43 @@ public class NativeDynamoDbJsonHandler {
         }
         List<JsonNode> params = new ArrayList<>();
         for (JsonNode parameter : node) {
-            DynamoDbAttributeValueValidator.requireParameterNestingWithinLimit(parameter);
-            checkAttrSets(parameter);
+            requirePartiQLParameter(parameter, 1);
             params.add(parameter);
         }
         return params;
+    }
+
+    // DynamoDB decodes the binary values of every statement before it checks anything else.
+    private static void decodePartiQLParameters(JsonNode parameters) {
+        for (JsonNode parameter : parameters) {
+            DynamoDbAttributeValueValidator.dropNullMembers(parameter);
+            DynamoDbAttributeValueValidator.requireBase64(parameter);
+        }
+    }
+
+    // DynamoDB reads the parameters in order and refuses the first value it cannot take. It reads the
+    // members of a map in the order of a HashMap sized for them, and a number before the type count.
+    private void requirePartiQLParameter(JsonNode value, int level) {
+        DynamoDbAttributeValueValidator.requireParameterLevelWithinLimit(level);
+        if (value.has("N")) {
+            DynamoDbNumberUtils.requirePartiQLParameterNumber(value.get("N").asText());
+        } else if (value.has("NS")) {
+            DynamoDbNumberUtils.requirePartiQLParameterNumberSet(value.get("NS"));
+        }
+        switch (DynamoDbAttributeValueValidator.typeOf(value)) {
+            case "M" -> {
+                Map<String, JsonNode> members = HashMap.newHashMap(value.get("M").size());
+                value.get("M").properties().forEach(member -> members.put(member.getKey(), member.getValue()));
+                for (JsonNode member : members.values()) {
+                    requirePartiQLParameter(member, level + 1);
+                }
+            }
+            case "L" -> {
+                for (JsonNode member : value.get("L")) {
+                    requirePartiQLParameter(member, level + 1);
+                }
+            }
+            default -> checkAttrSets(value);
+        }
     }
 }

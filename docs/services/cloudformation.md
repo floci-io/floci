@@ -11,7 +11,7 @@
 | `DescribeStacks` | Get stack status, parameters, and outputs |
 | `CreateStack` | Deploy a CloudFormation template |
 | `UpdateStack` | Update an existing stack |
-| `DeleteStack` | Delete a stack and its resources |
+| `DeleteStack` | Delete a stack and its resources, keeping those named in `RetainResources` once a delete has failed (see [Deletion Policies](#deletion-policies)) |
 | `ContinueUpdateRollback` | Retry the rollback of a stack in `UPDATE_ROLLBACK_FAILED`, optionally skipping resources or forcing past every failed one (see [Failed update rollbacks](#failed-update-rollbacks)) |
 | `UpdateTerminationProtection` | - |
 | `CreateChangeSet` | Create a change set |
@@ -173,7 +173,7 @@ cross-resource references.
 | S3 Vectors | `VectorBucket`, `Index` |
 | SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
 | SNS | `Topic`, `Subscription`, `TopicPolicy` |
-| SES | `EmailIdentity` (BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS's region- and identity-specific zone assignment) |
+| SES | `EmailIdentity` (BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS's region- and identity-specific zone assignment), `ReceiptRule` (stored in an existing SES receipt rule set; Ref and RuleName return the rule name; management plane only, with no inbound mail delivery) |
 | DynamoDB | `Table` (`TimeToLiveSpecification` applied on create and update; to rename an enabled TTL attribute, disable TTL in one update and enable the new attribute in a later one), `GlobalTable` |
 | Lambda | `Function` (Zip via S3/inline `ZipFile`, Image, and the `hot-reload` bind-mount bucket), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams; `ParallelizationFactor` and `TumblingWindowInSeconds` are ignored), `Version`, `Alias` (also what SAM's `AutoPublishAlias` expands into), `Permission`, `EventInvokeConfig` (also what a SAM function's `EventInvokeConfig` expands into), `MicrovmImage`, `NetworkConnector`, `Url`, `WebFunction` (control plane only; the endpoint domain does not serve requests yet), `WebFunctionEndpoint`, `WebFunctionRevision` (every property is createOnly, so a change mints a new revision). Inline `ZipFile` packages include the `cfn-response` (Node.js) / `cfnresponse` (Python) module AWS injects for that code path, so Solutions-style custom-resource handlers work. |
 | IAM | `Role`, `User` (template `LoginProfile` and `PermissionsBoundary` are ignored; an API-created login profile is removed on delete), `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
@@ -189,7 +189,7 @@ cross-resource references.
 | ElastiCache | `CacheCluster` (starts a real container; modifying an existing cluster in place is not supported), `SubnetGroup`, `User` (Tags are ignored), `UserGroup` (Tags are ignored), `ServerlessCache` (GetAtt uses the dotted Endpoint.* and ReaderEndpoint.* form) |
 | Redshift | `Cluster` (single-node container; Port and non-dev DBName ignored; ManageMasterPassword unsupported), `ClusterParameterGroup`, `ClusterSubnetGroup`, `ClusterSecurityGroup` (accepted; no EC2-Classic security group model), `EventSubscription` |
 | Redshift Serverless | `Namespace` (Managed admin credentials use Secrets Manager; GetAtt uses the dotted Namespace.* form), `Workgroup` (starts a real container; one workgroup per namespace; capacity, VPC and price-performance settings are stored only; snapshot restore properties are ignored; GetAtt uses the dotted Workgroup.* form) |
-| EC2 | `VPC` (deleted on stack teardown; a VPC with dependents outside the stack, including anything still holding a network interface in its subnets (an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone interface, an interface endpoint), fails the delete with `DependencyViolation`, as on AWS), `Subnet`, `SecurityGroup` (inline `SecurityGroupIngress`/`SecurityGroupEgress` supported), `SecurityGroupIngress`, `SecurityGroupEgress`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment`, `VPCEndpoint`, `NetworkAcl`, `NetworkAclEntry`, `SubnetNetworkAclAssociation`, `FlowLog`, `PrefixList` (updated in place; an update that changes `AddressFamily`, or `MaxEntries` together with `Entries`, fails) |
+| EC2 | `VPC` (deleted on stack teardown; a VPC with dependents outside the stack, including anything still holding a network interface in its subnets (an instance that is not terminated, a NAT gateway that is not deleted or failed, a standalone interface, an interface endpoint), fails the delete with `DependencyViolation`, as on AWS), `Subnet`, `SecurityGroup` (inline `SecurityGroupIngress`/`SecurityGroupEgress` supported), `SecurityGroupIngress`, `SecurityGroupEgress`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway` (zonal, primary address only; `AvailabilityMode` regional and the `Secondary*` address properties fail), `EIP`, `Instance`, `LaunchTemplate`, `VPCGatewayAttachment`, `VPCEndpoint`, `NetworkAcl`, `NetworkAclEntry`, `SubnetNetworkAclAssociation`, `FlowLog`, `KeyPair` (a created key's private key is stored in the `SecureString` parameter `/ec2/keypair/<KeyPairId>`, as on AWS, and deleted with the key), `PrefixList` (updated in place; an update that changes `AddressFamily`, or `MaxEntries` together with `Entries`, fails) |
 | Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
 | Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup`, `LifecycleHook`, `ScalingPolicy` |
 | Application Auto Scaling | `ScalableTarget` (`ScheduledActions` are accepted and not run; Floci has no scheduled scaling), `ScalingPolicy` |
@@ -203,7 +203,7 @@ cross-resource references.
 | CodePipeline | `Pipeline`, `CustomActionType`, `Webhook` |
 | CodeBuild | `Project` |
 | Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
-| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolResourceServer`, `UserPoolUser`, `UserPoolUserToGroupAttachment` |
+| Cognito | `UserPool` (`ProviderURL` is the local issuer of the tokens Floci mints, `<base-url>/<pool id>`; `EnabledMfas` is applied with `SetUserPoolMfaConfig`, as on AWS, and once `SMS_MFA` is on only `MfaConfiguration: OFF` turns it off), `UserPoolClient`, `UserPoolDomain`, `UserPoolGroup`, `UserPoolResourceServer`, `UserPoolUser`, `UserPoolUserToGroupAttachment` |
 | ACM | `Certificate` |
 | EventBridge | `Rule`, `EventBus`, `EventBusPolicy`, `ApiDestination`, `Archive` (`KmsKeyIdentifier` is ignored) |
 | EventBridge Scheduler | `Schedule`, `ScheduleGroup` |
@@ -432,6 +432,20 @@ status, named with its stack or by its ARN alone; a `StackName` that names no st
 - S3-backed code stays linked through `S3Bucket` / `S3Key`, so Lambda's reactive S3 sync continues to work for functions created by CloudFormation or CDK.
 - Hot-reload code (`S3Bucket: hot-reload`) is compared by host path: the same path is a no-op, a different path updates the bind mount in place.
 - `Tags` are applied when the function is created, including a replacement function. On `UpdateStack` the template's tags are applied and only the keys the previous template set and the new one drops are removed, so a tag added outside the template is kept, as in AWS.
+
+## SAM layers
+
+`AWS::Serverless::LayerVersion` expands into `AWS::Lambda::LayerVersion`. Packaged
+`ContentUri` values accept an S3 URI (including `?versionId=`) or a `Bucket`/`Key`/
+optional `Version` object. Local directories must first be packaged with the SAM CLI.
+The transform preserves layer metadata, runtime and architecture compatibility, and
+license information. `Ref` returns the published layer version ARN.
+
+As in SAM, the generated logical id changes with the layer definition, while the
+default layer name remains the original logical id. References and dependencies
+follow the generated resource. Layers default to `DeletionPolicy: Retain`;
+`RetentionPolicy: Delete` deletes the published version when the stack is deleted.
+An explicit resource `DeletionPolicy` is preserved unless `RetentionPolicy` overrides it.
 
 ## SAM published aliases
 
@@ -682,6 +696,31 @@ A template that is null as a whole (`null`, `~`) is refused with `Template forma
 one Resources member must be defined.` `CreateStackSet` and `UpdateStackSet` refuse a template
 holding a `null` before the stack set keeps it, with the same message followed by the service
 exception's details, as on AWS.
+
+## Properties and `AWS::NoValue`
+
+A property, object member or list item given as `!Ref AWS::NoValue`, directly or as the branch an
+`Fn::If` picks, is removed before the resource is provisioned, on create, update and change sets,
+nested stacks and custom resources included, so it behaves as if the template left it out.
+
+A resource type can accept a writable property from the registry schema and never read it. Those
+properties are listed with the reason in `src/test/resources/cloudformation/writable-property-gaps.tsv`.
+Where the registry schema corpus is present under `local/aws/cfn-resource-schemas/us-east-1/`
+(gitignored, so not in CI), `CfnSchemaCoverageTest` fails when a writable property is neither read
+nor listed, and when a listed property has started to be read, so closing a gap deletes its row.
+
+On AppSync resources, a property the previous template declared and the new template drops is cleared
+on `UpdateStack`; one the stack never declared keeps the value set outside it. A few members go back to
+their create default (`XrayEnabled`, `AdditionalAuthenticationProviders`, a function's `FunctionVersion`,
+a resolver's `Kind`). Not cleared: the identifiers, `Tags` and `EnvironmentVariables`, which the
+provisioner already drives to the template, required members (`AuthenticationType`, `Type`, a function's
+`DataSourceName`), create-only members, an API key's `Expires`, a GraphQL API's `ApiType` and
+`Visibility`, and a UNIT resolver's `DataSourceName`.
+
+On the EC2 networking types (`Subnet`, `InternetGateway`, `RouteTable`, `NatGateway`, `EIP`, `PrefixList`),
+a `Tags` property the previous template declared and the new one drops is cleared on `UpdateStack`, and
+`Subnet`'s `MapPublicIpOnLaunch` goes back to `false`. A resource whose templates never declared `Tags` keeps the ones set outside the stack. Other services follow
+[#6606](https://github.com/floci-io/floci/issues/6606).
 
 ## Template URLs
 
@@ -1006,6 +1045,12 @@ statuses:
 Resources in any other status (`DELETE_COMPLETE`, `DELETE_SKIPPED`, an in-progress status) and
 resources without a physical id are skipped. A resource that cannot be deleted leaves the stack in
 `DELETE_FAILED`, named in the status reason.
+
+A `DELETE_FAILED` stack can be deleted again with `RetainResources` naming the resources to keep:
+they stay in place and are reported as `DELETE_SKIPPED`, and the rest are deleted. As on AWS, the
+parameter is refused when the stack is in any other status, when it names a resource the stack does
+not have or has already deleted, or when it names one twice. A retry while that delete is still
+running must repeat the same list in the same order.
 
 Deviations from AWS to be aware of:
 

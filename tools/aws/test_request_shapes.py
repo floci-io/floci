@@ -293,7 +293,7 @@ def test_constraints_check_reports_a_changed_constraint(tmp_path, monkeypatch):
 
 def test_main_builds_from_the_prepared_model_and_checks_against_it(tmp_path, monkeypatch):
     # The one thing a generator may do to the model before the build, which IAM hands the driver to
-    # vendor a paged request for its paging members alone. Dropping the callback, or running it
+    # vendor a request without the members it answers for itself. Dropping the callback, or running it
     # after the build, would vendor the model as loaded, so the file is read both ways here: it
     # carries what `prepare` left, and the staleness check calls that file up to date only when it
     # prepares the model the same way.
@@ -324,10 +324,11 @@ def test_build_constraints_output_is_stable():
 
 
 @pytest.mark.parametrize("script, model, output, extra", [
-    # IAM vendors some operations for their paging members alone, so it hands the driver the
-    # reduction as well as the list.
+    # IAM vendors some operations in part, so it hands the driver its reductions as well as the
+    # list: the required members an operation answers for itself and the members it answers in a
+    # wording of its own.
     (regen_iam_shapes, "iam/2010-05-08", "iam-request-shapes.json",
-     {"prepare": regen_iam_shapes.paging_only}),
+     {"prepare": regen_iam_shapes.prepare}),
     (regen_sts_shapes, "sts/2011-06-15", "sts-request-shapes.json", {}),
 ])
 def test_each_constraints_script_runs_the_shared_main_with_its_operations(script, model, output, extra,

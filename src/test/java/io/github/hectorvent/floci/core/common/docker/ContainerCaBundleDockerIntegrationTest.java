@@ -34,7 +34,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * HTTPS site. Python is the runtime because it honours {@code SSL_CERT_FILE}, the variable that
  * replaces the trust store: the image's own root directory is pointed away, so if the bundle
  * lacked the public roots the second call would fail, and if it lacked the Floci CA the first
- * would. Skipped without a Docker daemon, like the other {@code *DockerIntegrationTest} classes.
+ * would. A JVM ignores that variable, so a Java container that asks for the trust store makes
+ * the same two calls on Corretto 8, the JVM of Lambda's oldest Java runtime: it reads the PKCS12
+ * store through {@code JAVA_TOOL_OPTIONS}, and that store replaces the JDK's own. Skipped without
+ * a Docker daemon, like the other {@code *DockerIntegrationTest} classes.
  */
 @QuarkusTest
 @TestProfile(ContainerCaBundleDockerIntegrationTest.Profile.class)
@@ -89,6 +92,55 @@ class ContainerCaBundleDockerIntegrationTest {
                 .withEntrypoint(List.of("python3", "-c", script))
                 .build();
 
+        assertExitsCleanly(spec);
+    }
+
+    @Test
+    void javaContainerAskingForTheTrustStoreTrustsFlociAndPublicRootsKeepingItsOwnOptions() {
+        String probe = """
+                import java.net.HttpURLConnection;
+                import java.net.URL;
+
+                public class Probe {
+                    public static void main(String[] args) throws Exception {
+                        check(200, status("https://host.docker.internal:%d/_floci/ca.pem"));
+                        // Any status will do: a handshake the store cannot verify throws instead.
+                        status("https://public.ecr.aws/");
+                        check("/etc/floci-ca-bundle.p12", System.getProperty("javax.net.ssl.trustStore"));
+                        check("kept", System.getProperty("floci.probe"));
+                        System.out.println("ok");
+                    }
+
+                    static int status(String url) throws Exception {
+                        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+                        connection.setConnectTimeout(20000);
+                        connection.setReadTimeout(20000);
+                        return connection.getResponseCode();
+                    }
+
+                    static void check(Object expected, Object actual) {
+                        if (!expected.equals(actual)) {
+                            throw new AssertionError("expected " + expected + ", got " + actual);
+                        }
+                    }
+                }
+                """.formatted(testSslPort);
+
+        ContainerSpec spec = containerBuilder.newContainer(TestImages.CORRETTO_8)
+                .withName("floci-java-trust-store-test-" + Long.toString(System.nanoTime(), 36))
+                .withHostDockerInternalOnLinux()
+                // The task's own option, which Floci's has to join rather than replace.
+                .withEnv("JAVA_TOOL_OPTIONS", "-Dfloci.probe=kept")
+                .withEnv("PROBE_SOURCE", probe)
+                .withJavaTrustStore()
+                .withEntrypoint(List.of("sh", "-c", "printf '%s' \"$PROBE_SOURCE\" > /tmp/Probe.java"
+                        + " && javac -d /tmp /tmp/Probe.java && java -cp /tmp Probe"))
+                .build();
+
+        assertExitsCleanly(spec);
+    }
+
+    private void assertExitsCleanly(ContainerSpec spec) {
         ContainerLifecycleManager.ContainerInfo info = lifecycle.createAndStart(spec);
         try {
             Integer status = dockerClient.waitContainerCmd(info.containerId())
@@ -127,10 +179,11 @@ class ContainerCaBundleDockerIntegrationTest {
 
     /**
      * Lays down what a TLS-on boot writes: the local CA, a leaf whose SANs include the name the
-     * container dials, and the bundle. The bootstrap config source reads system properties and the
-     * environment, which a test profile does not set, so the files are prepared here and the
-     * registry keys point at them; {@code floci.tls.enabled} is what makes the lifecycle manager
-     * inject the bundle. Quarkus binds every interface so the container reaches the test port.
+     * container dials, the bundle and its Java trust store. The bootstrap config source reads
+     * system properties and the environment, which a test profile does not set, so the files are
+     * prepared here and the registry keys point at them; {@code floci.tls.enabled} is what makes
+     * the lifecycle manager inject the bundle. Quarkus binds every interface so the container
+     * reaches the test port.
      */
     public static final class Profile implements QuarkusTestProfile {
 
@@ -146,7 +199,7 @@ class ContainerCaBundleDockerIntegrationTest {
                         List.of("localhost", "127.0.0.1", "host.docker.internal"), KeyAlgorithm.RSA_2048, null);
                 Files.writeString(CERT_FILE, leaf.certificatePem());
                 Files.writeString(KEY_FILE, leaf.privateKeyPem());
-                ContainerCaBundle.write(TLS_DIR, ca.certificatePath());
+                ContainerCaBundle.writeJavaTrustStore(ContainerCaBundle.write(TLS_DIR, ca.certificatePath()));
             } catch (IOException | GeneralSecurityException e) {
                 throw new IllegalStateException("Failed to prepare the TLS test files", e);
             }

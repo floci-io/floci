@@ -268,7 +268,8 @@ class WebIdentityTokenIntegrationTest {
 
     /**
      * {@code jwtAlgorithmType} publishes a fixed length of 5 and no enum, so the length is the
-     * declared constraint and the two values the Reference names are read from it.
+     * declared constraint, answered for the length it fixes rather than for a bound a value sits
+     * under, and the two values the Reference names are read from it.
      */
     @Test
     void aSigningAlgorithmIsHeldToItsLengthAndThenToTheTwoValues() {
@@ -276,7 +277,7 @@ class WebIdentityTokenIntegrationTest {
 
         token("RS25").when().post("/").then().statusCode(400)
             .body(MESSAGE, containsString("Value 'RS25' at 'signingAlgorithm' failed to satisfy"
-                    + " constraint: Member must have length greater than or equal to 5"));
+                    + " constraint: Member must have length equal to 5"));
 
         token("HS256").when().post("/").then().statusCode(400)
             .body(MESSAGE, containsString("Value 'HS256' at 'signingAlgorithm' failed to satisfy"

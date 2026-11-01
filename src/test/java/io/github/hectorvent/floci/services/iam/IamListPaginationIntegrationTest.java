@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.Totp;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import io.github.hectorvent.floci.testing.SamlMetadata;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
@@ -977,11 +978,7 @@ class IamListPaginationIntegrationTest {
     }
 
     private static String samlMetadata(String entityId) {
-        return "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\""
-                + entityId + "\"><md:IDPSSODescriptor><md:KeyDescriptor use=\"signing\">"
-                + "<ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data>"
-                + "<ds:X509Certificate>cGFnaW5n</ds:X509Certificate></ds:X509Data></ds:KeyInfo>"
-                + "</md:KeyDescriptor></md:IDPSSODescriptor></md:EntityDescriptor>";
+        return SamlMetadata.forEntity(entityId, "cGFnaW5n");
     }
 
     /** One fixture per paginated operation, each listing at least two items where it can. */

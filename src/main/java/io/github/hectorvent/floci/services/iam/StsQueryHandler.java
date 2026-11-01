@@ -179,6 +179,17 @@ public class StsQueryHandler {
             return trustDenied;
         }
 
+        Response roleDurationError = validateMaxSessionDuration(durationSeconds, role);
+        if (roleDurationError != null) {
+            return roleDurationError;
+        }
+
+        if (durationSeconds > 3600 && iamService.isRoleSession(callerAccessKeyId(), callerSessionToken(params))) {
+            return AwsQueryResponse.error("ValidationError",
+                    "The requested DurationSeconds exceeds the 1 hour session limit for roles assumed by role chaining.",
+                    AwsNamespaces.STS, 400);
+        }
+
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
         String assumedRoleArn = assumedRoleArn(sessionRoleArn, accountId, roleName, sessionName);
         String roleId = (role != null && role.getRoleId() != null) ? role.getRoleId() : ("AROA" + randomId(16));
@@ -262,16 +273,21 @@ public class StsQueryHandler {
                 "role" + IamService.normalizePath(role.getPath()) + roleName);
     }
 
+    private String callerSessionToken(MultivaluedMap<String, String> params) {
+        String token = headers == null ? null : headers.getHeaderString("X-Amz-Security-Token");
+        if (token == null && params != null) {
+            token = getParam(params, "X-Amz-Security-Token");
+        }
+        if (token == null && uriInfo != null) {
+            token = uriInfo.getQueryParameters().getFirst("X-Amz-Security-Token");
+        }
+        return token;
+    }
+
     private Response handleGetCallerIdentity(MultivaluedMap<String, String> params) {
         String accountId = regionResolver.getAccountId();
         String accessKeyId = callerAccessKeyId();
-        String sessionToken = headers == null ? null : headers.getHeaderString("X-Amz-Security-Token");
-        if (sessionToken == null && params != null) {
-            sessionToken = getParam(params, "X-Amz-Security-Token");
-        }
-        if (sessionToken == null && uriInfo != null) {
-            sessionToken = uriInfo.getQueryParameters().getFirst("X-Amz-Security-Token");
-        }
+        String sessionToken = callerSessionToken(params);
         String arn = iamService.resolveCallerArn(accessKeyId)
                 .orElse(regionResolver.buildGlobalArn("iam", accountId, "root"));
         String userId = iamService.resolveCallerUserId(accessKeyId, sessionToken).orElse(accountId);
@@ -324,7 +340,7 @@ public class StsQueryHandler {
         if (validation != null) {
             return validation;
         }
-        int durationSeconds = getIntParam(params, "DurationSeconds", 43200);
+        int durationSeconds = longTermTokenDuration(params);
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
@@ -371,6 +387,11 @@ public class StsQueryHandler {
             if (role == null || !IamService.roleArnMatches(roleArn, role)) {
                 return accessDenied(roleArn);
             }
+        }
+
+        Response roleDurationError = validateMaxSessionDuration(durationSeconds, role);
+        if (roleDurationError != null) {
+            return roleDurationError;
         }
 
         String accessKeyId = "ASIA" + randomId(16);
@@ -568,16 +589,17 @@ public class StsQueryHandler {
             throw new AwsException("AccessDenied", "Not authorized to perform sts:AssumeRoleWithSAML on resource: " + roleArn, 403);
         }
 
+        Response roleDurationError = validateMaxSessionDuration(durationSeconds, role);
+        if (roleDurationError != null) {
+            return roleDurationError;
+        }
+
         String sessionName = verified.subject().replaceAll("[^A-Za-z0-9+=,.@_-]", "_");
         if (sessionName.length() > 64) {
             sessionName = sessionName.substring(0, 64);
         }
         Instant requestedExpiration = clock.instant().plusSeconds(durationSeconds);
-        Instant roleExpiration = clock.instant().plusSeconds(role.getMaxSessionDuration());
         Instant expiration = verified.expiration().isBefore(requestedExpiration) ? verified.expiration() : requestedExpiration;
-        if (roleExpiration.isBefore(expiration)) {
-            expiration = roleExpiration;
-        }
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
@@ -604,6 +626,12 @@ public class StsQueryHandler {
         return auth == null ? null : accountResolver.extractAccessKeyId(auth);
     }
 
+    private int longTermTokenDuration(MultivaluedMap<String, String> params) {
+        int requested = getIntParam(params, "DurationSeconds", 43200);
+        // Session registration treats an unheld long-term key as Floci's account-root credential.
+        return iamService.isKnownAccessKey(callerAccessKeyId()) ? requested : Math.min(requested, 3600);
+    }
+
     private Response handleGetFederationToken(MultivaluedMap<String, String> params) {
         if (IamService.isTemporaryAccessKey(callerAccessKeyId())) {
             return AwsQueryResponse.error("AccessDenied", IamService.FEDERATION_TOKEN_SESSION_MESSAGE,
@@ -618,7 +646,7 @@ public class StsQueryHandler {
             return validation;
         }
         String name = getParam(params, "Name");
-        int durationSeconds = getIntParam(params, "DurationSeconds", 43200);
+        int durationSeconds = longTermTokenDuration(params);
 
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
@@ -839,6 +867,15 @@ public class StsQueryHandler {
         String encodedMessage = getParam(params, "EncodedMessage");
         String result = new XmlBuilder().elem("DecodedMessage", encodedMessage).build();
         return Response.ok(AwsQueryResponse.envelope("DecodeAuthorizationMessage", AwsNamespaces.STS, result)).build();
+    }
+
+    private static Response validateMaxSessionDuration(int durationSeconds, IamRole role) {
+        if (durationSeconds > role.getMaxSessionDuration()) {
+            return AwsQueryResponse.error("ValidationError",
+                    "The requested DurationSeconds exceeds the MaxSessionDuration set for this role.",
+                    AwsNamespaces.STS, 400);
+        }
+        return null;
     }
 
     /**

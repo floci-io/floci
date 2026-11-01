@@ -1,15 +1,11 @@
 package io.github.hectorvent.floci.services.configservice;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.configservice.model.AggregationAuthorization;
 import io.github.hectorvent.floci.services.configservice.model.ConformancePack;
+import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import io.github.hectorvent.floci.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
 
@@ -237,17 +233,7 @@ class AwsConfigServiceAggregationAuthorizationTest {
     void aPackDeleteWaitsForAnUpdateAlreadyInProgress() throws Exception {
         ParkingStore<Map<String, ConformancePack>> packs = new ParkingStore<>();
         AwsConfigService service = new AwsConfigService(new RegionResolver(REGION, ACCOUNT),
-                new StorageFactory(null, null) {
-                    @Override
-                    @SuppressWarnings("unchecked")
-                    public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
-                            TypeReference<Map<String, V>> typeReference, WriteProfile profile) {
-                        return fileName.equals("config-conformance-packs.json")
-                                ? new AccountAwareStorageBackend<>((StorageBackend<String, V>) (Object) packs,
-                                        null, ACCOUNT)
-                                : AccountAwareStorageBackend.inMemory(ACCOUNT);
-                    }
-                });
+                new InMemoryStorageFactory(ACCOUNT).withStore("config-conformance-packs.json", packs));
         service.initializeStorage();
         String arn = service.putConformancePack(REGION, "pack", "s3://bucket/v1.yaml", null)
                 .conformancePackArn();

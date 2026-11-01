@@ -104,6 +104,15 @@ public class AppConfigDataService {
     public ConfigurationData getLatestConfiguration(String token, String accept) {
         ConfigurationSession session = sessionStore.get(token)
                 .orElseThrow(() -> new AwsException("BadRequestException", "Invalid configuration token", 400));
+        synchronized (session) {
+            if (!token.equals(session.getCurrentToken())) {
+                throw new AwsException("BadRequestException", "Invalid configuration token", 400);
+            }
+            return pollConfiguration(session, token, accept);
+        }
+    }
+
+    private ConfigurationData pollConfiguration(ConfigurationSession session, String token, String accept) {
         appConfigService.getEnvironment(session.getApplicationId(), session.getEnvironmentId());
 
         int pollInterval = normalizePollInterval(session.getRequiredMinimumPollIntervalInSeconds());

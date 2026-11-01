@@ -176,7 +176,10 @@ public class PipesTargetInvoker {
     }
 
     private void invokeEventBridge(String arn, String payload, String region, JsonNode tp) {
-        String busName = arn.substring(arn.lastIndexOf('/') + 1);
+        String busName = AwsArnUtils.resourceIfArnFor(arn, "events")
+                .filter(resource -> resource.startsWith("event-bus/"))
+                .map(resource -> resource.substring("event-bus/".length()))
+                .orElse(arn);
         String ebRegion = extractRegionFromArn(arn, region);
         String source = "aws.pipes";
         String detailType = "PipeForwarded";

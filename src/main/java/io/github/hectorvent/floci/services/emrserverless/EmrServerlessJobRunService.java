@@ -25,6 +25,7 @@ import io.github.hectorvent.floci.services.emrserverless.model.JobRunRecord;
 import io.github.hectorvent.floci.services.emrserverless.model.JobRunSummary;
 import io.github.hectorvent.floci.services.emrserverless.model.RuntimeConfiguration;
 import io.github.hectorvent.floci.services.emrserverless.model.StartJobRunRequest;
+import io.github.hectorvent.floci.services.emrserverless.model.WorkerTypeSpecification;
 import io.github.hectorvent.floci.services.iam.IamService;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -38,6 +39,7 @@ import java.time.OffsetDateTime;
 import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -89,6 +91,15 @@ public class EmrServerlessJobRunService implements Resettable {
     // "If you don't specify the optional values, then CloudWatch publishes the logs to a default log group".
     private static final String DEFAULT_LOG_GROUP = "/aws/emr-serverless";
     private static final String SPARK_DRIVER = "SPARK_DRIVER";
+    // The worker type a Spark application's driver runs as.
+    private static final String DRIVER_WORKER_TYPE = "Driver";
+    // spark-submit's option for a Spark property, and its short form; and its option for spark.archives.
+    private static final String CONF_OPTION = "--conf";
+    private static final String CONF_SHORT_OPTION = "-c";
+    private static final String ARCHIVES_OPTION = "--archives";
+    // "Option that adds environment variables to the Spark driver."
+    private static final String DRIVER_ENV_PREFIX = "spark.emr-serverless.driverEnv.";
+    private static final String SPARK_ARCHIVES = "spark.archives";
     // No source gives AWS's wording for these; they are Floci's.
     static final String HIVE_NOT_RUN = "Floci runs Spark job runs only, and this is a Hive job run.";
     static final String INTERRUPTED = "Floci stopped while the job run was in progress.";
@@ -467,7 +478,8 @@ public class EmrServerlessJobRunService implements Resettable {
     /** Hands a container run to a thread of its own, which runs it to its end. */
     private void launch(JobRunRecord record, Application app) {
         JobRun run = record.getJobRun();
-        if (run.getJobDriver().getSparkSubmit() == null) {
+        JobDriver.SparkSubmit sparkSubmit = run.getJobDriver().getSparkSubmit();
+        if (sparkSubmit == null) {
             run.setStateDetails(HIVE_NOT_RUN);
             finish(record, STATE_FAILED, run.getCreatedAt());
             return;
@@ -477,10 +489,13 @@ public class EmrServerlessJobRunService implements Resettable {
         Long minutes = run.getExecutionTimeoutMinutes();
         Duration timeout = MODE_STREAMING.equals(run.getMode()) || minutes == null || minutes == 0
                 ? Duration.ZERO : Duration.ofMinutes(minutes);
+        Map<String, String> sparkDefaults = sparkDefaults(app, run);
+        Map<String, String> sparkProperties = sparkProperties(sparkDefaults, sparkSubmit);
         SparkJobRunner.Job job = new SparkJobRunner.Job(SERVICE, run.getJobRunId(), arn.accountId(), arn.region(),
-                run.getReleaseLabel(), imageTemplate, dockerNetwork, run.getExecutionRole(), sparkDefaults(app, run),
-                application(run.getJobDriver().getSparkSubmit()), null, timeout, driverLogFolder(app, run),
-                driverCloudWatchLogs(app, run));
+                run.getReleaseLabel(), imageTemplate, customImage(app), dockerNetwork, run.getExecutionRole(),
+                sparkDefaults, application(sparkSubmit), null, timeout, driverLogFolder(app, run),
+                driverCloudWatchLogs(app, run), driverEnvironment(sparkProperties), archives(sparkProperties),
+                null);
         executing.add(run.getJobRunId());
         long launchedIn = generation;
         runExecutor.execute(() -> execute(job, launchedIn));
@@ -499,6 +514,21 @@ public class EmrServerlessJobRunService implements Resettable {
     }
 
     /**
+     * The custom image a run's driver starts from, or null for the release's: the {@code Driver} worker type's,
+     * else the application's, which "EMR Serverless applies ... to all worker types". Local mode runs the
+     * executors in the driver's container, so an {@code Executor} image is not used.
+     */
+    static String customImage(Application app) {
+        WorkerTypeSpecification driver = app.getWorkerTypeSpecifications() != null
+                ? app.getWorkerTypeSpecifications().get(DRIVER_WORKER_TYPE) : null;
+        if (driver != null && driver.getImageConfiguration() != null
+                && driver.getImageConfiguration().getImageUri() != null) {
+            return driver.getImageConfiguration().getImageUri();
+        }
+        return app.getImageConfiguration() != null ? app.getImageConfiguration().getImageUri() : null;
+    }
+
+    /**
      * What follows Floci's own settings on a run's {@code spark-submit} command line: its
      * {@code sparkSubmitParameters}, split as a shell would split them, then its entry point and the
      * entry point's arguments.
@@ -511,6 +541,64 @@ public class EmrServerlessJobRunService implements Resettable {
             application.addAll(sparkSubmit.getEntryPointArguments());
         }
         return application;
+    }
+
+    /**
+     * A run's Spark properties as its driver gets them: its {@code spark-defaults}, then the {@code --conf}
+     * settings of its {@code sparkSubmitParameters}, which {@code spark-submit} lets win, a later one over an
+     * earlier. A setting without an {@code =}, which {@code spark-submit} refuses, sets nothing. The last
+     * {@code --archives} option is {@code spark.archives}, winning over any setting of it, as
+     * {@code spark-submit} has it.
+     */
+    static Map<String, String> sparkProperties(Map<String, String> sparkDefaults, JobDriver.SparkSubmit sparkSubmit) {
+        Map<String, String> properties = new LinkedHashMap<>(sparkDefaults);
+        List<String> parameters = EmrServerlessSparkRunner.splitParameters(sparkSubmit.getSparkSubmitParameters());
+        String archivesOption = null;
+        for (int i = 0; i < parameters.size(); i++) {
+            String parameter = parameters.get(i);
+            String setting = null;
+            if (parameter.startsWith(CONF_OPTION + "=")) {
+                setting = parameter.substring(CONF_OPTION.length() + 1);
+            } else if ((CONF_OPTION.equals(parameter) || CONF_SHORT_OPTION.equals(parameter))
+                    && i + 1 < parameters.size()) {
+                setting = parameters.get(++i);
+            } else if (parameter.startsWith(ARCHIVES_OPTION + "=")) {
+                archivesOption = parameter.substring(ARCHIVES_OPTION.length() + 1);
+            } else if (ARCHIVES_OPTION.equals(parameter) && i + 1 < parameters.size()) {
+                archivesOption = parameters.get(++i);
+            }
+            int equals = setting != null ? setting.indexOf('=') : -1;
+            if (equals > 0) {
+                properties.put(setting.substring(0, equals), setting.substring(equals + 1));
+            }
+        }
+        if (archivesOption != null) {
+            properties.put(SPARK_ARCHIVES, archivesOption);
+        }
+        return properties;
+    }
+
+    /** The environment variables a run's driver gets: its {@code spark.emr-serverless.driverEnv.<KEY>} properties. */
+    static Map<String, String> driverEnvironment(Map<String, String> sparkProperties) {
+        Map<String, String> environment = new LinkedHashMap<>();
+        sparkProperties.forEach((key, value) -> {
+            if (key.startsWith(DRIVER_ENV_PREFIX) && key.length() > DRIVER_ENV_PREFIX.length()) {
+                environment.put(key.substring(DRIVER_ENV_PREFIX.length()), value);
+            }
+        });
+        return environment;
+    }
+
+    /**
+     * A run's {@code spark.archives}: a comma-separated list, of which Spark takes each entry trimmed and drops
+     * the empty ones.
+     */
+    static List<String> archives(Map<String, String> sparkProperties) {
+        String archives = sparkProperties.get(SPARK_ARCHIVES);
+        if (archives == null) {
+            return List.of();
+        }
+        return Arrays.stream(archives.split(",")).map(String::trim).filter(archive -> !archive.isEmpty()).toList();
     }
 
     /**

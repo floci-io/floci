@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataSessions.Scope;
@@ -16,8 +17,6 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
-
-import static io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService.epochSeconds;
 
 final class RedshiftDataSessionListing {
     private static final Pattern CLUSTER = Pattern.compile("[a-z][a-z0-9]*(-[a-z0-9]+)*");
@@ -94,9 +93,9 @@ final class RedshiftDataSessionListing {
             ObjectNode node = result.addObject();
             node.put("SessionId", info.id());
             node.put("Status", info.status());
-            node.put("CreatedAt", epochSeconds(info.createdAt()));
-            node.put("UpdatedAt", epochSeconds(info.updatedAt()));
-            node.put("SessionTtl", epochSeconds(info.ttl()));
+            node.put("CreatedAt", EpochSeconds.fromInstant(info.createdAt()));
+            node.put("UpdatedAt", EpochSeconds.fromInstant(info.updatedAt()));
+            node.put("SessionTtl", EpochSeconds.fromInstant(info.ttl()));
             node.put("SessionAliveSeconds", info.keepAlive());
             node.put("Database", info.database());
             node.put("DbUser", info.user());

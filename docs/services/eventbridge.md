@@ -114,6 +114,11 @@ suffix when present. These checks do not verify resource existence or permission
 
 EventBridge includes a default event bus (`default`) that accepts events from AWS services. Custom buses are for your own application events.
 
+Secrets Manager `PutSecretValue` and `UpdateSecret` calls publish `AWS API Call via CloudTrail`
+events here when a logging CloudTrail trail selects management writes. See
+[secret write events](secrets-manager.md#secret-write-events) for the required trail configuration
+and a pattern matching `detail.responseElements.arn`.
+
 ```bash
 # List rules on the default bus
 aws events list-rules --endpoint-url $AWS_ENDPOINT_URL
@@ -147,6 +152,61 @@ the state machine from the account and region in its ARN.
 
 State machine aliases and versions are not supported as EventBridge targets.
 
+## Redshift Data API Targets
+
+A matching rule can submit one SQL statement to the Redshift Data API for a provisioned cluster, or
+multiple statements as one batch. A Redshift Serverless workgroup ARN is also supported. Configure
+the database and SQL in `RedshiftDataParameters`; `WithEvent` publishes the statement's terminal
+status event through Redshift Data API's existing EventBridge integration.
+
+```bash
+aws events put-targets \
+  --rule refresh-warehouse \
+  --targets '[{
+    "Id": "refresh-redshift",
+    "Arn": "arn:aws:redshift:us-east-1:000000000000:cluster:warehouse",
+    "RoleArn": "arn:aws:iam::000000000000:role/EventBridgeRedshiftRole",
+    "RedshiftDataParameters": {
+      "Database": "dev",
+      "DbUser": "admin",
+      "Sql": "refresh materialized view daily_totals",
+      "StatementName": "refresh-warehouse"
+    }
+  }]' \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+`Sqls` selects `BatchExecuteStatement`; otherwise the target submits `Sql` with
+`ExecuteStatement`. `SecretManagerArn` maps to the Data API's `SecretArn`. The target's ARN provides
+the region used for execution; statements run in the rule's account. The stored `RoleArn` is passed
+as the Data API principal.
+
+With IAM enforcement on (`FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED`), a delivery runs only when the role
+of the target can do what EventBridge does with it:
+
+- the role belongs to the rule's account and trusts `events.amazonaws.com`. A trust condition on
+  `aws:SourceArn` is matched against the rule's ARN, and `aws:SourceAccount` against the rule's account;
+- it is allowed `redshift-data:ExecuteStatement`, or `redshift-data:BatchExecuteStatement` with `Sqls`,
+  on the cluster or workgroup ARN of the target;
+- it is allowed the action that authenticates the statement: `secretsmanager:GetSecretValue` on the
+  secret for `SecretManagerArn`, `redshift-serverless:GetCredentials` on the workgroup for a Serverless
+  target, or `redshift:GetClusterCredentials` on the database user and the database for `DbUser`.
+
+The role's identity policies, permissions boundary and the account's service control policies all apply.
+A refused delivery fails with `AccessDeniedException`, which the dispatcher records as `NO_PERMISSIONS`
+and sends to the dead-letter queue without retrying. A target with no role is refused as well. The role is
+checked before a bad JSONPath in `Sql`, `Sqls` or `StatementName` is reported, but after the paths in
+`Database`, `DbUser` and `SecretManagerArn` are resolved, since the permissions depend on them. A
+`SecretManagerArn` that is not an ARN adds no permission to check: the Data API rejects it as an invalid
+`SecretArn`. The check
+does not cover `redshift:GetClusterCredentialsWithIAM`, and it does not assume the role: the statement
+runs as the stored `RoleArn`. With enforcement off the role is not checked.
+
+String parameters, including entries in `Sqls`, can be complete JSONPath references such as
+`$.detail.database`, `$.detail.query` or `$.detail.queries[0]`. Paths resolve against the original event, before
+`Input`, `InputPath` or `InputTransformer`; embedded paths inside SQL text are left unchanged.
+Dispatch is rejected when the `redshift-data` service is disabled.
+
 ## Target Roles
 
 `PutTargets` stores each target's optional `RoleArn`, and `ListTargetsByRule`
@@ -156,8 +216,10 @@ cross-account event-bus target with the same ID and ARN retains its previous
 role, as documented by AWS.
 
 The value must be between 1 and 1600 characters when supplied. Floci stores
-the role as configuration; target delivery does not assume it or enforce its
-IAM policies.
+the role as configuration; target delivery does not assume it. Only Redshift
+Data API targets check the role's trust and permissions (see
+[Redshift Data API Targets](#redshift-data-api-targets)); no other target
+enforces its role's IAM policies.
 
 ## API Destination Targets
 

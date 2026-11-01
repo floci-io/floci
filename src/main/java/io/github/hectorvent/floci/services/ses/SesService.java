@@ -1181,24 +1181,24 @@ public class SesService {
         if (tenant == null) {
             return;
         }
-        String arnPrefix = "arn:" + AwsRegions.partitionFor(region) + ":ses:" + region + ":" + callerAccountId()
-                + ":";
+        String accountId = callerAccountId();
         List<SesTenantService.AssociationResource> used = new ArrayList<>();
         if (source != null && !source.isBlank()) {
             String identityName = sendIdentityName(source, region);
             used.add(new SesTenantService.AssociationResource(
                     SesTenantService.RESOURCE_TYPE_IDENTITY, identityName,
-                    arnPrefix + "identity/" + identityName));
+                    AwsArnUtils.Arn.of("ses", region, accountId, "identity/" + identityName).toString()));
         }
         if (effectiveConfigSet != null && !effectiveConfigSet.isBlank()) {
             used.add(new SesTenantService.AssociationResource(
                     SesTenantService.RESOURCE_TYPE_CONFIGURATION_SET, effectiveConfigSet,
-                    arnPrefix + "configuration-set/" + effectiveConfigSet));
+                    AwsArnUtils.Arn.of("ses", region, accountId, "configuration-set/" + effectiveConfigSet)
+                            .toString()));
         }
         if (templateName != null && !templateName.isBlank()) {
             used.add(new SesTenantService.AssociationResource(
                     SesTenantService.RESOURCE_TYPE_TEMPLATE, templateName,
-                    arnPrefix + "template/" + templateName));
+                    AwsArnUtils.Arn.of("ses", region, accountId, "template/" + templateName).toString()));
         }
         tenantService.requireResourcesAssociated(tenant, used, region);
     }

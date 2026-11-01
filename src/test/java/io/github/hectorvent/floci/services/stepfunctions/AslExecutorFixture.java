@@ -300,7 +300,7 @@ final class AslExecutorFixture {
                     jsonataEvaluator != null ? jsonataEvaluator : new JsonataEvaluator(objectMapper),
                     sfnService, config, vertx, customResourceLiveness, clock, sleeper, maxWaitSeconds,
                     redshiftDataHandler, serviceRegistry, null, lambdaTaskAuthorizer, expressMaxExecutionTime,
-                    nanoTime, null, emrTaskInvoker, emrServerlessTaskInvoker, nestedWaiter);
+                    nanoTime, null, emrTaskInvoker, emrServerlessTaskInvoker, null, nestedWaiter);
         }
     }
 }

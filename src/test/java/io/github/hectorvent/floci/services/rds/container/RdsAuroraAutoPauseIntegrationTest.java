@@ -77,6 +77,11 @@ class RdsAuroraAutoPauseIntegrationTest {
         }
     }
 
+    @BeforeEach
+    void registerPostgresDriver() throws ClassNotFoundException {
+        Class.forName("org.postgresql.Driver");
+    }
+
     @Test
     void idleClusterPausesAndItsNextConnectionResumesIt() throws Exception {
         String clusterId = "auto-pause-" + Long.toString(System.nanoTime(), 36);

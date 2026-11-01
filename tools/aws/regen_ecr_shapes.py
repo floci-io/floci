@@ -23,6 +23,7 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/ecr-request-shapes.json"
 MODEL = Path("ecr/2015-09-21")
 OPERATIONS = (
     "GetAccountSetting", "PutAccountSetting",
+    "RegisterPullTimeUpdateExclusion", "DeregisterPullTimeUpdateExclusion", "ListPullTimeUpdateExclusions",
     "PutRegistryPolicy", "GetRegistryPolicy", "DeleteRegistryPolicy",
     "PutReplicationConfiguration", "DescribeRegistry",
     "PutRegistryScanningConfiguration", "GetRegistryScanningConfiguration",

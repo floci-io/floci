@@ -3,14 +3,15 @@ package io.github.hectorvent.floci.services.cloudwatch.metrics;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 
-import java.util.HashSet;
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.function.Function;
 
 /** CloudWatch's boolean alarm language, parsed completely before any alarm is stored. */
 final class CompositeAlarmRule {
     private final String input;
-    private final Set<String> references = new HashSet<>();
+    private final Set<String> references = new LinkedHashSet<>();
     private int offset;
     private int elements;
 
@@ -33,15 +34,13 @@ final class CompositeAlarmRule {
         if (parser.offset != input.length()) {
             throw invalid("Invalid AlarmRule");
         }
-        return new Rule(expression, Set.copyOf(parser.references));
+        return new Rule(expression, Collections.unmodifiableSet(parser.references));
     }
 
     private Expression or() {
         Expression left = and();
         while (word("OR")) {
-            Expression prior = left;
-            Expression right = and();
-            left = states -> prior.evaluate(states) || right.evaluate(states);
+            left = new Or(left, and());
         }
         return left;
     }
@@ -49,9 +48,7 @@ final class CompositeAlarmRule {
     private Expression and() {
         Expression left = atom();
         while (word("AND")) {
-            Expression prior = left;
-            Expression right = atom();
-            left = states -> prior.evaluate(states) && right.evaluate(states);
+            left = new And(left, atom());
         }
         return left;
     }
@@ -62,7 +59,7 @@ final class CompositeAlarmRule {
             negate = !negate;
         }
         Expression operand = primary();
-        return negate ? states -> !operand.evaluate(states) : operand;
+        return negate ? new Not(operand) : operand;
     }
 
     private Expression primary() {
@@ -74,10 +71,10 @@ final class CompositeAlarmRule {
             return nested;
         }
         if (word("TRUE")) {
-            return states -> true;
+            return new Constant(true);
         }
         if (word("FALSE")) {
-            return states -> false;
+            return new Constant(false);
         }
         String state;
         if (word("ALARM")) {
@@ -128,7 +125,7 @@ final class CompositeAlarmRule {
         }
         require(')');
         references.add(name);
-        return states -> state.equals(states.apply(name));
+        return new StateOf(state, name);
     }
 
     private void element() {
@@ -175,13 +172,91 @@ final class CompositeAlarmRule {
         return new AwsException("ValidationError", message, 400);
     }
 
+    /** A parsed rule; {@code references} holds each alarm name or ARN once, in the order the rule first names it. */
     record Rule(Expression expression, Set<String> references) {
         boolean evaluate(Function<String, String> states) {
             return expression.evaluate(states);
         }
+
+        /**
+         * The references whose state test agrees with {@code result}: under an odd number of NOTs a test
+         * agrees when it is false. CloudWatch names these, among a composite alarm's children, as the
+         * alarms that triggered its change to that result. In rule order.
+         */
+        Set<String> agreeing(Function<String, String> states, boolean result) {
+            Set<String> agreeing = new LinkedHashSet<>();
+            expression.collectAgreeing(states, result, agreeing);
+            return agreeing;
+        }
     }
 
-    interface Expression {
+    sealed interface Expression permits Constant, StateOf, Not, And, Or {
         boolean evaluate(Function<String, String> states);
+
+        void collectAgreeing(Function<String, String> states, boolean result, Set<String> agreeing);
+    }
+
+    record Constant(boolean value) implements Expression {
+        @Override
+        public boolean evaluate(Function<String, String> states) {
+            return value;
+        }
+
+        @Override
+        public void collectAgreeing(Function<String, String> states, boolean result, Set<String> agreeing) {
+            // TRUE and FALSE name no alarm.
+        }
+    }
+
+    record StateOf(String state, String reference) implements Expression {
+        @Override
+        public boolean evaluate(Function<String, String> states) {
+            return state.equals(states.apply(reference));
+        }
+
+        @Override
+        public void collectAgreeing(Function<String, String> states, boolean result, Set<String> agreeing) {
+            if (evaluate(states) == result) {
+                agreeing.add(reference);
+            }
+        }
+    }
+
+    record Not(Expression operand) implements Expression {
+        @Override
+        public boolean evaluate(Function<String, String> states) {
+            return !operand.evaluate(states);
+        }
+
+        @Override
+        public void collectAgreeing(Function<String, String> states, boolean result, Set<String> agreeing) {
+            operand.collectAgreeing(states, !result, agreeing);
+        }
+    }
+
+    record And(Expression left, Expression right) implements Expression {
+        @Override
+        public boolean evaluate(Function<String, String> states) {
+            return left.evaluate(states) && right.evaluate(states);
+        }
+
+        @Override
+        public void collectAgreeing(Function<String, String> states, boolean result, Set<String> agreeing) {
+            left.collectAgreeing(states, result, agreeing);
+            right.collectAgreeing(states, result, agreeing);
+        }
+    }
+
+    record Or(Expression left, Expression right) implements Expression {
+        @Override
+        public boolean evaluate(Function<String, String> states) {
+            return left.evaluate(states) || right.evaluate(states);
+        }
+
+        @Override
+        public void collectAgreeing(Function<String, String> states, boolean result, Set<String> agreeing) {
+            left.collectAgreeing(states, result, agreeing);
+            right.collectAgreeing(states, result, agreeing);
+        }
     }
 }

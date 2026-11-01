@@ -19,6 +19,8 @@ public final class WebFunctionRevision {
     public Instant createdAt;
     /** The stateReason of a Failed revision. */
     public String failureReason;
+    /** The object version the code was read from, also when the request named none. */
+    public String codeVersionId;
 
     @RegisterForReflection
     public static final class BuildConfig {

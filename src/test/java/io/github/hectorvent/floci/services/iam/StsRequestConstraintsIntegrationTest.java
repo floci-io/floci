@@ -73,7 +73,7 @@ class StsRequestConstraintsIntegrationTest {
             .body(MESSAGE, equalTo("2 validation errors detected: Value 'bad#serial' at"
                     + " 'serialNumber' failed to satisfy constraint: Member must satisfy regular"
                     + " expression pattern: [\\w+=/:,.@-]*; Value '12345' at 'tokenCode' failed to"
-                    + " satisfy constraint: Member must have length greater than or equal to 6"));
+                    + " satisfy constraint: Member must have length equal to 6"));
 
         sts("GetSessionToken")
             .formParam("TokenCode", "abcdef")
@@ -187,7 +187,7 @@ class StsRequestConstraintsIntegrationTest {
         .when().post("/").then().statusCode(400)
             .body(MESSAGE, equalTo("1 validation error detected: Value 'HS25' at"
                     + " 'signingAlgorithm' failed to satisfy constraint: Member must have length"
-                    + " greater than or equal to 5"))
+                    + " equal to 5"))
             .body(MESSAGE, not(containsString("enum value set")));
     }
 

@@ -82,17 +82,6 @@ class SesV2JsonTest {
     }
 
     @Test
-    void requireObjectOrAbsent_returnsChild_rejectsScalars() {
-        assertTrue(SesV2Json.requireObjectOrAbsent(json("{}"), "Options").isMissingNode());
-        assertTrue(SesV2Json.requireObjectOrAbsent(json("{\"Options\":null}"), "Options").isNull());
-        JsonNode nested = json("{\"Options\":{\"a\":\"x\"}}");
-        assertEquals("x", SesV2Json.requireObjectOrAbsent(nested, "Options").path("a").asText());
-        assertEquals("Options must be a JSON object.",
-                assertAws("BadRequestException", 400, () -> SesV2Json.requireObjectOrAbsent(
-                        json("{\"Options\":1}"), "Options")).getMessage());
-    }
-
-    @Test
     void parseTagsArray_absentIsNull_shapeErrorsAreWireErrors() {
         assertNull(SesV2Json.parseTagsArray(json("{}").path("Tags")));
         assertNull(SesV2Json.parseTagsArray(json("{\"Tags\":null}").path("Tags")));
@@ -283,22 +272,20 @@ class SesV2JsonTest {
     }
 
     @Test
-    void epochSeconds_keepsMillisecondFraction() {
-        assertEquals(1_790_312_384.592, SesV2Json.epochSeconds(Instant.ofEpochMilli(1_790_312_384_592L)));
-    }
-
-    @Test
-    void epochSeconds_dropsSubMillisecondPrecision() {
-        assertEquals(1_790_312_384.592,
-                SesV2Json.epochSeconds(Instant.ofEpochSecond(1_790_312_384L, 592_999_999L)));
-    }
-
-    @Test
     void putTimestamp_writesDecimalNumber() {
         ObjectNode node = MAPPER.createObjectNode();
         SesV2Json.putTimestamp(node, "CreatedTimestamp", Instant.ofEpochMilli(1_790_312_384_592L));
 
         assertEquals("{\"CreatedTimestamp\":1.790312384592E9}", node.toString());
+    }
+
+    @Test
+    void putTimestamp_dropsSubMillisecondPrecision() {
+        ObjectNode node = MAPPER.createObjectNode();
+        SesV2Json.putTimestamp(node, "CreatedTimestamp",
+                Instant.ofEpochSecond(1_790_312_384L, 592_999_999L));
+
+        assertEquals(1_790_312_384.592, node.get("CreatedTimestamp").doubleValue());
     }
 
     @Test

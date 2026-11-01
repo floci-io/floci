@@ -21,6 +21,7 @@ public class Guardrail {
     private Instant updatedAt;
     private Map<String, String> tags;
     private String accountId;
+    private String resourcePolicy;
 
     private JsonNode topicPolicy;
     private JsonNode contentPolicy;
@@ -124,6 +125,14 @@ public class Guardrail {
 
     public void setAccountId(String accountId) {
         this.accountId = accountId;
+    }
+
+    public String getResourcePolicy() {
+        return resourcePolicy;
+    }
+
+    public void setResourcePolicy(String resourcePolicy) {
+        this.resourcePolicy = resourcePolicy;
     }
 
     public JsonNode getTopicPolicy() {

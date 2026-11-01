@@ -6,6 +6,9 @@
   "operations": {
     "GetAccountSetting": "GetAccountSettingRequest",
     "PutAccountSetting": "PutAccountSettingRequest",
+    "RegisterPullTimeUpdateExclusion": "RegisterPullTimeUpdateExclusionRequest",
+    "DeregisterPullTimeUpdateExclusion": "DeregisterPullTimeUpdateExclusionRequest",
+    "ListPullTimeUpdateExclusions": "ListPullTimeUpdateExclusionsRequest",
     "PutRegistryPolicy": "PutRegistryPolicyRequest",
     "GetRegistryPolicy": "GetRegistryPolicyRequest",
     "DeleteRegistryPolicy": "DeleteRegistryPolicyRequest",
@@ -71,6 +74,15 @@
       ],
       "members": {
         "prefix": "Prefix"
+      }
+    },
+    "DeregisterPullTimeUpdateExclusionRequest": {
+      "type": "structure",
+      "required": [
+        "principalArn"
+      ],
+      "members": {
+        "principalArn": "PrincipalArn"
       }
     },
     "DescribeRegistryRequest": {
@@ -169,6 +181,13 @@
       "min": 0,
       "max": 30720
     },
+    "ListPullTimeUpdateExclusionsRequest": {
+      "type": "structure",
+      "members": {
+        "maxResults": "MaxResults",
+        "nextToken": "NextToken"
+      }
+    },
     "MaxResults": {
       "type": "integer",
       "min": 1,
@@ -186,6 +205,11 @@
     "PrefixList": {
       "type": "list",
       "member": "Prefix"
+    },
+    "PrincipalArn": {
+      "type": "string",
+      "max": 200,
+      "pattern": "^arn:aws(-[a-z]+)*:iam::[0-9]{12}:(role|user)/[\\w+=,.@-]+(/[\\w+=,.@-]+)*$"
     },
     "PutAccountSettingRequest": {
       "type": "structure",
@@ -240,6 +264,15 @@
       "min": 2,
       "max": 25,
       "pattern": "[0-9a-z-]{2,25}"
+    },
+    "RegisterPullTimeUpdateExclusionRequest": {
+      "type": "structure",
+      "required": [
+        "principalArn"
+      ],
+      "members": {
+        "principalArn": "PrincipalArn"
+      }
     },
     "RegistryId": {
       "type": "string",

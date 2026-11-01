@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.elbv2;
 
-import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.testing.RealElbV2DataPlaneProfile;
 import io.github.hectorvent.floci.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
@@ -9,10 +8,12 @@ import io.restassured.response.Response;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
+import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpClientRequest;
 import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
+import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.RequestOptions;
 import io.vertx.core.net.SocketAddress;
 import jakarta.inject.Inject;
@@ -29,9 +30,16 @@ import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
+import static io.github.hectorvent.floci.testing.AlbFixtures.createListener;
+import static io.github.hectorvent.floci.testing.AlbFixtures.createLoadBalancer;
+import static io.github.hectorvent.floci.testing.AlbFixtures.createTargetGroup;
+import static io.github.hectorvent.floci.testing.AlbFixtures.deleteListener;
+import static io.github.hectorvent.floci.testing.AlbFixtures.deleteLoadBalancer;
+import static io.github.hectorvent.floci.testing.AlbFixtures.deleteTargetGroup;
+import static io.github.hectorvent.floci.testing.AlbFixtures.loadBalancerDnsName;
+import static io.github.hectorvent.floci.testing.AlbFixtures.registerTarget;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
-import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -63,10 +71,10 @@ class ElbV2PreserveHostHeaderIntegrationTest {
         String targetGroupArn = null;
         String listenerArn = null;
         try {
-            loadBalancerArn = createLoadBalancer();
-            targetGroupArn = createTargetGroup(backend.actualPort());
-            registerTarget(targetGroupArn, backend.actualPort());
-            listenerArn = createListener(loadBalancerArn, targetGroupArn);
+            loadBalancerArn = createLoadBalancer("preserve-host-header-lb");
+            targetGroupArn = createTargetGroup("preserve-host-header-tg", "ip", backend.actualPort());
+            registerTarget(targetGroupArn, "127.0.0.1", backend.actualPort());
+            listenerArn = createListener(loadBalancerArn, targetGroupArn, LISTENER_PORT);
             await().atMost(Duration.ofSeconds(3)).untilAsserted(() -> {
                 Response response = given().baseUri("http://127.0.0.1").port(LISTENER_PORT).get("/headers");
                 assertEquals(200, response.statusCode());
@@ -86,7 +94,9 @@ class ElbV2PreserveHostHeaderIntegrationTest {
 
     @Test
     void preservesHostHeaderWhenLoadBalancerAttributeIsEnabled() throws Exception {
-        HttpServer backend = vertx.createHttpServer()
+        HttpServer backend = vertx.createHttpServer(new HttpServerOptions()
+                        .setMaxHeaderSize(ElbV2DataPlane.MAX_REQUEST_HEADER_SIZE)
+                        .setMaxInitialLineLength(ElbV2DataPlane.MAX_REQUEST_LINE_LENGTH))
                 .requestHandler(request -> {
                     if ("/stream".equals(request.path())) {
                         request.body().onSuccess(body -> {
@@ -97,6 +107,13 @@ class ElbV2PreserveHostHeaderIntegrationTest {
                             request.response().write("stream-");
                             request.response().end(body.toString());
                         });
+                    } else if ("/large-headers".equals(request.path())) {
+                        String cookie = request.getHeader("Cookie");
+                        request.response()
+                                .putHeader("X-Received-Cookie-Length", String.valueOf(cookie.length()))
+                                .putHeader("X-Received-Query-Length", String.valueOf(request.query().length()))
+                                .putHeader("X-Large", cookie)
+                                .end("ok");
                     } else {
                         request.response().end(request.getHeader("Host"));
                     }
@@ -110,12 +127,13 @@ class ElbV2PreserveHostHeaderIntegrationTest {
         String targetGroupArn = null;
         String listenerArn = null;
         try {
-            loadBalancerArn = createLoadBalancer();
-            targetGroupArn = createTargetGroup(backend.actualPort());
-            registerTarget(targetGroupArn, backend.actualPort());
-            listenerArn = createListener(loadBalancerArn, targetGroupArn);
+            loadBalancerArn = createLoadBalancer("preserve-host-header-lb");
+            targetGroupArn = createTargetGroup("preserve-host-header-tg", "ip", backend.actualPort());
+            registerTarget(targetGroupArn, "127.0.0.1", backend.actualPort());
+            listenerArn = createListener(loadBalancerArn, targetGroupArn, LISTENER_PORT);
 
             assertStreamsRequestAndResponse(loadBalancerArn);
+            assertForwardsLargeHeaders(loadBalancerArn);
             assertForwardedHost("127.0.0.1:" + backend.actualPort());
 
             enableHostHeaderPreservation(loadBalancerArn);
@@ -143,10 +161,11 @@ class ElbV2PreserveHostHeaderIntegrationTest {
         String listenerArn = null;
         int failedPort = FreePorts.anyInterfacePort();
         try {
-            loadBalancerArn = createLoadBalancer();
-            targetGroupArn = createTargetGroup(backend.actualPort());
-            registerTargets(targetGroupArn, failedPort, backend.actualPort());
-            listenerArn = createListener(loadBalancerArn, targetGroupArn);
+            loadBalancerArn = createLoadBalancer("preserve-host-header-lb");
+            targetGroupArn = createTargetGroup("preserve-host-header-tg", "ip", backend.actualPort());
+            registerTarget(targetGroupArn, "127.0.0.1", failedPort);
+            registerTarget(targetGroupArn, "127.0.0.1", backend.actualPort());
+            listenerArn = createListener(loadBalancerArn, targetGroupArn, LISTENER_PORT);
 
             String host = loadBalancerDnsName(loadBalancerArn);
             try (Socket socket = new Socket("127.0.0.1", LISTENER_PORT)) {
@@ -234,95 +253,40 @@ class ElbV2PreserveHostHeaderIntegrationTest {
         }
     }
 
-    private static String createLoadBalancer() {
-        return given()
-                .formParam("Action", "CreateLoadBalancer")
-                .formParam("Name", "preserve-host-header-lb")
-                .formParam("Type", "application")
-                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
-                .formParam("Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"))
-                .header("Authorization", AUTH)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200)
-                .extract()
-                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
-    }
+    private void assertForwardsLargeHeaders(String loadBalancerArn) throws Exception {
+        // Several JWT cookies on a shared parent domain exceed Vert.x's 8 KB default header block,
+        // while staying under the ALB's 16 KB single-header limit. The query passes Vert.x's 4 KB
+        // default request line.
+        String cookie = "a=" + "x".repeat(3600) + "; b=" + "y".repeat(3600) + "; c=" + "z".repeat(3600);
+        String query = "q=" + "q".repeat(10_000);
+        String dnsName = loadBalancerDnsName(loadBalancerArn);
+        HttpClient client = vertx.createHttpClient(new HttpClientOptions()
+                .setMaxHeaderSize(ElbV2DataPlane.MAX_RESPONSE_HEADER_SIZE));
+        try {
+            HttpClientRequest request = client
+                    .request(new RequestOptions()
+                            .setServer(SocketAddress.inetSocketAddress(LISTENER_PORT, "127.0.0.1"))
+                            .setHost(dnsName)
+                            .setPort(LISTENER_PORT)
+                            .setMethod(HttpMethod.GET)
+                            .setURI("/large-headers?" + query))
+                    .toCompletionStage()
+                    .toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+            request.putHeader("Cookie", cookie);
+            HttpClientResponse response = request.send()
+                    .toCompletionStage()
+                    .toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+            response.body().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
 
-    private static String loadBalancerDnsName(String loadBalancerArn) {
-        return given()
-                .formParam("Action", "DescribeLoadBalancers")
-                .formParam("LoadBalancerArns.member.1", loadBalancerArn)
-                .header("Authorization", AUTH)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200)
-                .extract()
-                .path("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.DNSName");
-    }
-
-    private static String createTargetGroup(int backendPort) {
-        return given()
-                .formParam("Action", "CreateTargetGroup")
-                .formParam("Name", "preserve-host-header-tg")
-                .formParam("Protocol", "HTTP")
-                .formParam("Port", backendPort)
-                .formParam("TargetType", "ip")
-                .formParam("HealthCheckEnabled", "false")
-                .header("Authorization", AUTH)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200)
-                .extract()
-                .path("CreateTargetGroupResponse.CreateTargetGroupResult.TargetGroups.member.TargetGroupArn");
-    }
-
-    private static void registerTarget(String targetGroupArn, int backendPort) {
-        given()
-                .formParam("Action", "RegisterTargets")
-                .formParam("TargetGroupArn", targetGroupArn)
-                .formParam("Targets.member.1.Id", "127.0.0.1")
-                .formParam("Targets.member.1.Port", backendPort)
-                .header("Authorization", AUTH)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200);
-    }
-
-    private static void registerTargets(String targetGroupArn, int failedPort, int backendPort) {
-        given()
-                .formParam("Action", "RegisterTargets")
-                .formParam("TargetGroupArn", targetGroupArn)
-                .formParam("Targets.member.1.Id", "127.0.0.1")
-                .formParam("Targets.member.1.Port", failedPort)
-                .formParam("Targets.member.2.Id", "127.0.0.1")
-                .formParam("Targets.member.2.Port", backendPort)
-                .header("Authorization", AUTH)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200);
-    }
-
-    private static String createListener(String loadBalancerArn, String targetGroupArn) {
-        return given()
-                .formParam("Action", "CreateListener")
-                .formParam("LoadBalancerArn", loadBalancerArn)
-                .formParam("Protocol", "HTTP")
-                .formParam("Port", LISTENER_PORT)
-                .formParam("DefaultActions.member.1.Type", "forward")
-                .formParam("DefaultActions.member.1.TargetGroupArn", targetGroupArn)
-                .header("Authorization", AUTH)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200)
-                .extract()
-                .path("CreateListenerResponse.CreateListenerResult.Listeners.member.ListenerArn");
+            assertEquals(200, response.statusCode());
+            assertEquals(String.valueOf(cookie.length()), response.getHeader("X-Received-Cookie-Length"));
+            assertEquals(String.valueOf(query.length()), response.getHeader("X-Received-Query-Length"));
+            assertEquals(cookie, response.getHeader("X-Large"));
+        } finally {
+            client.close();
+        }
     }
 
     private static void enableHostHeaderPreservation(String loadBalancerArn) {
@@ -350,42 +314,4 @@ class ElbV2PreserveHostHeaderIntegrationTest {
                 .body(equalTo(expectedHost)));
     }
 
-    private static void deleteListener(String listenerArn) {
-        if (listenerArn != null) {
-            given()
-                    .formParam("Action", "DeleteListener")
-                    .formParam("ListenerArn", listenerArn)
-                    .header("Authorization", AUTH)
-                .when()
-                    .post("/")
-                .then()
-                    .statusCode(anyOf(equalTo(200), equalTo(204)));
-        }
-    }
-
-    private static void deleteTargetGroup(String targetGroupArn) {
-        if (targetGroupArn != null) {
-            given()
-                    .formParam("Action", "DeleteTargetGroup")
-                    .formParam("TargetGroupArn", targetGroupArn)
-                    .header("Authorization", AUTH)
-                .when()
-                    .post("/")
-                .then()
-                    .statusCode(anyOf(equalTo(200), equalTo(204)));
-        }
-    }
-
-    private static void deleteLoadBalancer(String loadBalancerArn) {
-        if (loadBalancerArn != null) {
-            given()
-                    .formParam("Action", "DeleteLoadBalancer")
-                    .formParam("LoadBalancerArn", loadBalancerArn)
-                    .header("Authorization", AUTH)
-                .when()
-                    .post("/")
-                .then()
-                    .statusCode(anyOf(equalTo(200), equalTo(204)));
-        }
-    }
 }
