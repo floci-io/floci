@@ -1941,67 +1941,162 @@ public class Ec2QueryHandler {
 
     private Response handleDescribeVpcEndpointServices(MultivaluedMap<String, String> p, String region) {
         List<String> requested = getList(p, "ServiceName");
+        List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
         List<String> azNames = service.describeAvailabilityZones(region, List.of(), List.of(), null).stream()
                 .map(z -> z.get("zoneName")).toList();
+
+        // Build the full list of service details with all properties for filtering
+        List<ServiceDetail> services = buildServiceDetails(region, requested, azNames);
+        // Apply filters
+        services = applyVpcEndpointServiceFilters(services, filters);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeVpcEndpointServicesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("serviceNameSet");
+        for (ServiceDetail svc : services) {
+            xml.elem("item", svc.serviceName);
+        }
+        xml.end("serviceNameSet").start("serviceDetailSet");
+        for (ServiceDetail svc : services) {
+            xml.start("item")
+                    .elem("serviceName", svc.serviceName)
+                    .start("serviceType");
+            for (String serviceType : svc.serviceTypes) {
+                xml.start("item").elem("serviceType", serviceType).end("item");
+            }
+            xml.end("serviceType")
+                    .start("availabilityZoneSet");
+            for (String az : svc.availabilityZones) xml.elem("item", az);
+            xml.end("availabilityZoneSet")
+                    .elem("owner", svc.owner)
+                    .elem("acceptanceRequired", svc.acceptanceRequired)
+                    .elem("managesVpcEndpoints", svc.managesVpcEndpoints)
+                    .end("item");
+        }
+        xml.end("serviceDetailSet").end("DescribeVpcEndpointServicesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /**
+     * Service detail for VPC endpoint service, used for filtering.
+     */
+    private record ServiceDetail(
+            String serviceName,
+            List<String> serviceTypes,
+            List<String> availabilityZones,
+            String owner,
+            String acceptanceRequired,
+            String managesVpcEndpoints,
+            String baseServiceName,      // e.g., "s3", "ec2", "dynamodb"
+            String serviceRegion,
+            List<String> supportedIpAddressTypes) {
+    }
+
+    private List<ServiceDetail> buildServiceDetails(String region, List<String> requested, List<String> azNames) {
+        List<ServiceDetail> services = new ArrayList<>();
+
         // S3 is the one service with both offerings. The gateway keeps com.amazonaws in every
         // partition; the interface takes the region's prefix, so in China the two are named apart.
         String s3Gateway = "com.amazonaws." + region + ".s3";
         String s3Interface = AwsRegionFacts.vpcEndpointServiceName(region, "s3");
-        List<String> fullNames = new ArrayList<>();
-        // An explicit ServiceName filter wins: the emulator supports any
-        // interface service in every AZ, so echo exactly what was asked. CDK's
-        // InterfaceVpcEndpoint queries a specific (often custom) service name
-        // and fails if the response omits it or lists no AZs.
+
+        List<String> baseNames;
         if (!requested.isEmpty()) {
-            fullNames.addAll(requested);
+            baseNames = requested.stream()
+                    .map(name -> stripRegionPrefix(name, region))
+                    .toList();
         } else {
-            for (String name : INTERFACE_ENDPOINT_SERVICES) {
-                fullNames.add(AwsRegionFacts.vpcEndpointServiceName(region, name));
-            }
-            fullNames.add(s3Gateway);
-            if (!s3Interface.equals(s3Gateway)) {
-                fullNames.add(s3Interface);
-            }
+            baseNames = new ArrayList<>(INTERFACE_ENDPOINT_SERVICES);
+            baseNames.add("s3");
         }
-        for (String full : fullNames) {
-            xml.elem("item", full);
-        }
-        xml.end("serviceNameSet").start("serviceDetailSet");
-        for (String full : fullNames) {
-            // Where both S3 offerings share a name, AWS reports both types on that one
-            // service detail. Everything else is Interface.
+
+        for (String base : baseNames) {
+            String fullName = AwsRegionFacts.vpcEndpointServiceName(region, base);
             List<String> serviceTypes;
-            if (full.equals(s3Interface) && !s3Interface.equals(s3Gateway)) {
+            if (fullName.equals(s3Interface) && !s3Interface.equals(s3Gateway)) {
                 serviceTypes = List.of("Interface");
-            } else if (full.endsWith(".s3")) {
+            } else if (fullName.endsWith(".s3")) {
                 serviceTypes = s3Interface.equals(s3Gateway)
                         ? List.of("Gateway", "Interface")
                         : List.of("Gateway");
             } else {
                 serviceTypes = List.of("Interface");
             }
-            xml.start("item")
-                    .elem("serviceName", full)
-                    .start("serviceType");
-            for (String serviceType : serviceTypes) {
-                xml.start("item").elem("serviceType", serviceType).end("item");
-            }
-            xml.end("serviceType")
-                    .start("availabilityZoneSet");
-            for (String az : azNames) xml.elem("item", az);
-            xml.end("availabilityZoneSet")
-                    .elem("owner", "amazon")
-                    .elem("acceptanceRequired", "false")
-                    .elem("managesVpcEndpoints", "false")
-                    .end("item");
+            services.add(new ServiceDetail(
+                    fullName,
+                    serviceTypes,
+                    azNames,
+                    "amazon",
+                    "false",
+                    "false",
+                    base,
+                    region,
+                    List.of("ipv4", "ipv6")));
         }
-        xml.end("serviceDetailSet").end("DescribeVpcEndpointServicesResponse");
-        return xmlResponse(xml.build());
+
+        return services;
+    }
+
+    private String stripRegionPrefix(String fullName, String region) {
+        // Full name format: com.amazonaws.region.service or com.amazonaws.service
+        if (fullName.startsWith("com.amazonaws." + region + ".")) {
+            return fullName.substring(("com.amazonaws." + region + ".").length());
+        }
+        if (fullName.startsWith("com.amazonaws.")) {
+            return fullName.substring("com.amazonaws.".length());
+        }
+        return fullName;
+    }
+
+    private List<ServiceDetail> applyVpcEndpointServiceFilters(List<ServiceDetail> services,
+                                                                List<Map.Entry<String, List<String>>> filters) {
+        if (filters == null || filters.isEmpty()) {
+            return services;
+        }
+
+        return services.stream()
+                .filter(svc -> {
+                    for (Map.Entry<String, List<String>> filter : filters) {
+                        String name = filter.getKey();
+                        List<String> values = filter.getValue();
+                        if (values.isEmpty()) {
+                            continue; // Empty filter matches everything
+                        }
+                        if (!matchesFilter(svc, name, values)) {
+                            return false;
+                        }
+                    }
+                    return true;
+                })
+                .toList();
+    }
+
+    private boolean matchesFilter(ServiceDetail svc, String filterName, List<String> values) {
+        return switch (filterName) {
+            case "owner" -> values.contains(svc.owner);
+            case "service-name" -> values.stream().anyMatch(v -> wildcardMatch(svc.serviceName, v));
+            case "service-region" -> values.contains(svc.serviceRegion);
+            case "service-type" -> svc.serviceTypes.stream().anyMatch(t -> values.contains(t));
+            case "supported-ip-address-types" -> svc.supportedIpAddressTypes.stream()
+                    .anyMatch(t -> values.contains(t));
+            case String n when n.startsWith("tag:") -> {
+                // VPC endpoint services don't have user tags, so no tag filters match
+                yield false;
+            }
+            case "tag-key" -> false; // No tags on these services
+            default -> true; // Unknown filter: ignore (matches AWS behavior of ignoring unknown filters)
+        };
+    }
+
+    private boolean wildcardMatch(String value, String pattern) {
+        // Convert AWS wildcard pattern to regex
+        String regex = "^" + pattern
+                .replace(".", "\\.")
+                .replace("*", ".*")
+                .replace("?", ".")
+                + "$";
+        return value.matches(regex);
     }
 
     // ─── Flow Logs ────────────────────────────────────────────────────────────

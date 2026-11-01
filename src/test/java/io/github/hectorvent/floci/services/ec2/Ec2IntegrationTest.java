@@ -3091,6 +3091,149 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(52)
+    void describeVpcEndpointServicesFilterByServiceTypeGateway() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Filter.1.Name", "service-type")
+            .formParam("Filter.1.Value.1", "Gateway")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.size()", greaterThanOrEqualTo(1))
+            // S3 has both Gateway and Interface, so it's included but serviceType has both
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.serviceType.item.serviceType",
+                    hasItem(equalTo("Gateway")));
+    }
+
+    @Test
+    @Order(52)
+    void describeVpcEndpointServicesFilterByServiceTypeInterface() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Filter.1.Name", "service-type")
+            .formParam("Filter.1.Value.1", "Interface")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.size()", greaterThanOrEqualTo(1))
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.serviceType.item.serviceType",
+                    hasItem(equalTo("Interface")));
+    }
+
+    @Test
+    @Order(52)
+    void describeVpcEndpointServicesFilterByServiceName() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Filter.1.Name", "service-name")
+            .formParam("Filter.1.Value.1", "com.amazonaws.us-east-1.s3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.size()", equalTo(1))
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.serviceName", equalTo("com.amazonaws.us-east-1.s3"));
+    }
+
+    @Test
+    @Order(52)
+    void describeVpcEndpointServicesFilterByServiceNameWildcard() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Filter.1.Name", "service-name")
+            .formParam("Filter.1.Value.1", "com.amazonaws.us-east-1.s3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.size()", equalTo(1))
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.serviceName", equalTo("com.amazonaws.us-east-1.s3"));
+    }
+
+    @Test
+    @Order(52)
+    void describeVpcEndpointServicesFilterByOwner() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Filter.1.Name", "owner")
+            .formParam("Filter.1.Value.1", "amazon")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.size()", greaterThanOrEqualTo(1))
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.owner", everyItem(equalTo("amazon")));
+    }
+
+    @Test
+    @Order(52)
+    void describeVpcEndpointServicesFilterByServiceRegion() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Filter.1.Name", "service-region")
+            .formParam("Filter.1.Value.1", "us-east-1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.size()", greaterThanOrEqualTo(1));
+    }
+
+    @Test
+    @Order(52)
+    void describeVpcEndpointServicesFilterBySupportedIpAddressTypes() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Filter.1.Name", "supported-ip-address-types")
+            .formParam("Filter.1.Value.1", "ipv4")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.size()", greaterThanOrEqualTo(1));
+    }
+
+    @Test
+    @Order(52)
+    void describeVpcEndpointServicesFilterByTagKeyReturnsEmpty() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Filter.1.Name", "tag-key")
+            .formParam("Filter.1.Value.1", "any")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.size()", equalTo(0));
+    }
+
+    @Test
+    @Order(52)
+    void describeVpcEndpointServicesFilterByTagValueReturnsEmpty() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .formParam("Filter.1.Name", "tag:Environment")
+            .formParam("Filter.1.Value.1", "prod")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcEndpointServicesResponse.serviceDetailSet.item.size()", equalTo(0));
+    }
+
+    @Test
+    @Order(52)
     void describeInternetGateways() {
         given()
             .formParam("Action", "DescribeInternetGateways")
