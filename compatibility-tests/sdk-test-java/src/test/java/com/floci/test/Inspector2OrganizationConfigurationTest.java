@@ -3,6 +3,7 @@ package com.floci.test;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.inspector2.Inspector2Client;
 import software.amazon.awssdk.services.inspector2.model.AutoEnable;
 import software.amazon.awssdk.services.inspector2.model.BatchGetAccountStatusResponse;
@@ -20,6 +21,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("Amazon Inspector organization configuration")
+@ResourceLock("organizations")
 class Inspector2OrganizationConfigurationTest {
     private static final Logger LOG = Logger.getLogger(Inspector2OrganizationConfigurationTest.class);
     private static final String MANAGEMENT_ACCOUNT = "test";

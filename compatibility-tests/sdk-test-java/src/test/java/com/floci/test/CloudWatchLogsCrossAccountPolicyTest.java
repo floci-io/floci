@@ -2,6 +2,7 @@ package com.floci.test;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Isolated;
 import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
 import software.amazon.awssdk.services.cloudwatchlogs.model.DescribeAccountPoliciesResponse;
 import software.amazon.awssdk.services.cloudwatchlogs.model.InvalidParameterException;
@@ -14,6 +15,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("CloudWatch Logs cross-account management APIs")
+@Isolated
 class CloudWatchLogsCrossAccountPolicyTest {
     private static final String DESTINATION_NAME = "floci-sdk-cross-account-destination";
     private static final String POLICY_NAME = "floci-sdk-cross-account-transformer";

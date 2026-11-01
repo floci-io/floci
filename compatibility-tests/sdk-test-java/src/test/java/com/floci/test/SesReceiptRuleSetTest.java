@@ -7,6 +7,7 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.ses.model.AlreadyExistsException;
 import software.amazon.awssdk.services.ses.model.CannotDeleteException;
@@ -39,6 +40,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @DisplayName("SES V1 ReceiptRuleSet, ReceiptRule, and ReceiptFilter")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@ResourceLock("ses-account")
 class SesReceiptRuleSetTest {
 
     private static SesClient ses;
