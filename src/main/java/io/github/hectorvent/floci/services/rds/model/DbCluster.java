@@ -46,6 +46,7 @@ public class DbCluster {
     private List<DbRoleAssociation> associatedRoles = new ArrayList<>();
     private String engineMode;
     private boolean storageEncrypted;
+    private String kmsKeyId;
 
     private String dockerVolumeName;
     private String volumeId;
@@ -198,6 +199,9 @@ public class DbCluster {
 
     public boolean isStorageEncrypted() { return storageEncrypted; }
     public void setStorageEncrypted(boolean storageEncrypted) { this.storageEncrypted = storageEncrypted; }
+
+    public String getKmsKeyId() { return kmsKeyId; }
+    public void setKmsKeyId(String kmsKeyId) { this.kmsKeyId = kmsKeyId; }
 
     public String getDockerVolumeName() { return dockerVolumeName; }
     public void setDockerVolumeName(String dockerVolumeName) { this.dockerVolumeName = dockerVolumeName; }

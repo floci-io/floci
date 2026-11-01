@@ -11178,6 +11178,26 @@ public class RdsService implements Resettable, ResourceProvider {
      * step: either every role is associated or none is. The handler deletes the new cluster when
      * this refuses, so a failed create leaves nothing behind.
      */
+    /**
+     * Stores what a CreateDBCluster request carries beyond the arguments of {@code createDbCluster}: its Tags and
+     * its KmsKeyId. Tags go on the cluster as AddTagsToResource would put them, so ListTagsForResource returns them.
+     */
+    public synchronized DbCluster applyCreateDbClusterOptions(String region, String clusterId, String kmsKeyId,
+                                                              Map<String, String> tags) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
+        if (kmsKeyId != null && !kmsKeyId.isBlank()) {
+            cluster.setKmsKeyId(kmsKeyId);
+        }
+        if (tags != null && !tags.isEmpty()) {
+            Map<String, String> merged = new LinkedHashMap<>(cluster.getTags());
+            merged.putAll(tags);
+            cluster.setTags(merged);
+        }
+        putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
     public synchronized DbCluster addRolesToNewDbCluster(String region, String clusterId,
                                                          List<DbRoleAssociation> roles) {
         // The features are checked below against the cluster's own engine.
