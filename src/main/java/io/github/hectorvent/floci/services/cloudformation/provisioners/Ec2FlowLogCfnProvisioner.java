@@ -25,7 +25,6 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
     /** The defaults createFlowLog applies when the template omits these, kept in step with it. */
     private static final String DEFAULT_RESOURCE_TYPE = "VPC";
     private static final String DEFAULT_TRAFFIC_TYPE = "ALL";
-    private static final String DEFAULT_LOG_DESTINATION_TYPE = "s3";
 
     private final FlowLogService flowLogService;
 
@@ -90,7 +89,8 @@ public class Ec2FlowLogCfnProvisioner implements CfnResourceProvisioner {
         rejectIfChanged("TrafficType", existing.getTrafficType(),
                 orDefault(ctx.resolveOptional(props, "TrafficType"), DEFAULT_TRAFFIC_TYPE));
         rejectIfChanged("LogDestinationType", existing.getLogDestinationType(),
-                orDefault(ctx.resolveOptional(props, "LogDestinationType"), DEFAULT_LOG_DESTINATION_TYPE));
+                FlowLogService.effectiveLogDestinationType(ctx.resolveOptional(props, "LogDestinationType"),
+                        ctx.resolveOptional(props, "LogDestination"), null));
         rejectIfChanged("LogDestination", existing.getLogDestination(),
                 ctx.resolveOptional(props, "LogDestination"));
         rejectIfChanged("DeliverLogsPermissionArn", existing.getDeliverLogsPermissionArn(),

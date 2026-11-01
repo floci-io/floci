@@ -165,21 +165,13 @@ public class FlowLogService {
                                  String logDestination, String logGroupName,
                                  String deliverLogsPermissionArn,
                                  String logFormat, int maxAggregationInterval) {
-        String groupName = logGroupName;
-        if (groupName == null && logDestination != null && logDestination.contains(":log-group:")) {
-            groupName = logDestination.substring(logDestination.indexOf(":log-group:") + ":log-group:".length());
-            if (groupName.endsWith(":*")) {
-                groupName = groupName.substring(0, groupName.length() - 2);
-            }
-        }
+        String groupName = logGroupName != null ? logGroupName : logGroupFromArn(logDestination);
         FlowLog fl = new FlowLog();
         fl.setFlowLogId("fl-" + randomHex(17));
         fl.setResourceId(resourceId);
         fl.setResourceType(resourceType != null ? resourceType : "VPC");
         fl.setTrafficType(trafficType != null ? trafficType : "ALL");
-        // AWS defaults LogDestinationType to cloud-watch-logs; a log group (or log-group ARN) implies it.
-        fl.setLogDestinationType(logDestinationType != null ? logDestinationType
-                : groupName != null ? "cloud-watch-logs" : "s3");
+        fl.setLogDestinationType(effectiveLogDestinationType(logDestinationType, logDestination, logGroupName));
         fl.setLogGroupName(groupName);
         fl.setLogDestination(logDestination);
         fl.setDeliverLogsPermissionArn(deliverLogsPermissionArn);
@@ -586,6 +578,33 @@ public class FlowLogService {
         } catch (Exception e) {
             throw new RuntimeException("gzip failed", e);
         }
+    }
+
+    /**
+     * The LogDestinationType a flow log gets: the requested one, else cloud-watch-logs when a log
+     * group is named directly or by a CloudWatch Logs ARN, else s3. CloudFormation compares an
+     * update against this, so create and compare cannot drift apart.
+     */
+    public static String effectiveLogDestinationType(String logDestinationType, String logDestination,
+                                                     String logGroupName) {
+        if (logDestinationType != null && !logDestinationType.isBlank()) {
+            return logDestinationType;
+        }
+        return logGroupName != null || logGroupFromArn(logDestination) != null ? "cloud-watch-logs" : "s3";
+    }
+
+    /**
+     * The group named by a CloudWatch Logs ARN ({@code arn:aws:logs:r:a:log-group:name[:*]}), or
+     * null for anything else. Only a {@code logs} ARN counts: an S3 prefix may itself contain
+     * {@code :log-group:}.
+     */
+    static String logGroupFromArn(String arn) {
+        String resource = AwsArnUtils.resourceIfArnFor(arn, "logs").orElse("");
+        if (!resource.startsWith("log-group:")) {
+            return null;
+        }
+        String name = resource.substring("log-group:".length());
+        return name.endsWith(":*") ? name.substring(0, name.length() - 2) : name;
     }
 
     static String bucketFromArn(String arn) {
