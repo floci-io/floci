@@ -167,14 +167,12 @@ public class PaymentCryptographyDataPlaneHandler {
 
     /** The card validation value of a card account. */
     public Map<String, Object> generateCardValidationData(JsonNode request, String region) {
-        refused("GenerateCardValidationData");
-        return Map.of();
+        return cardValidation.generate(request, region);
     }
 
     /** The card validation value of a card account, verified. */
     public Map<String, Object> verifyCardValidationData(JsonNode request, String region) {
-        refused("VerifyCardValidationData");
-        return Map.of();
+        return cardValidation.verify(request, region);
     }
 
     /** The cryptogram of an authorization request, verified. */
