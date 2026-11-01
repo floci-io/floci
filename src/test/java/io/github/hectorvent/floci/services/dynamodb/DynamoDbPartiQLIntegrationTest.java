@@ -8,6 +8,8 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -597,6 +599,28 @@ class DynamoDbPartiQLIntegrationTest {
             .statusCode(200)
             .body("Responses[0].Error.Code", equalTo("ValidationError"))
             .body("Responses[0].Error.Message", equalTo(notWellFormed));
+    }
+
+    @ParameterizedTest
+    @Order(29)
+    @ValueSource(strings = {
+            "SELECT * FROM \"%s\" WHERE pk = 'x'",
+            "INSERT INTO \"%s\" VALUE {'pk': 'x'}",
+            "UPDATE \"%s\" SET a = 1 WHERE pk = 'x'",
+            "DELETE FROM \"%s\" WHERE pk = 'x'",
+            "FROM \"%s\" WHERE pk = 'x' SET c = 1"})
+    void aStatementOnAMissingTableIsRefusedWithoutTheTableName(String statement) {
+        String partiql = statement.formatted(TABLE + "-never-created");
+
+        statement(partiql)
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"))
+            .body("message", equalTo("Requested resource not found"));
+        request("DynamoDB_20120810.BatchExecuteStatement",
+                "{\"Statements\":[{\"Statement\":\"" + partiql.replace("\"", "\\\"") + "\"}]}")
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ResourceNotFound"))
+            .body("Responses[0].Error.Message", equalTo("Requested resource not found"));
     }
 
     private static void putItem(String pk, String attributes) {

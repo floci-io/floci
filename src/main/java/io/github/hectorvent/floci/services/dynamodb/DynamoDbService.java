@@ -4942,6 +4942,11 @@ public class DynamoDbService {
         return requireActiveTable(regionKey(region, canonicalTableName));
     }
 
+    /** Finds a table for an item call, which treats a CREATING table as absent. */
+    public Optional<TableDefinition> findTableForItemCall(String tableName, String region) {
+        return findTable(tableName, region).filter(table -> !"CREATING".equals(table.getTableStatus()));
+    }
+
     /**
      * Resolves the table for an item call and validates the key it names, without reading the
      * stored item, so a caller can report table and key errors before its own validation.

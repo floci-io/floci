@@ -16,6 +16,8 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -2531,6 +2533,39 @@ class NativeDynamoDbJsonHandlerTest {
                 () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
         assertEquals("Requested resource not found", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "SELECT * FROM \"Users\".\"TitleIndex\" WHERE userId = 'u1'",
+            "INSERT INTO \"Users\" VALUE {'userId': 1}",
+            "UPDATE \"Users\" SET a = 1 WHERE userId = 1",
+            "DELETE FROM \"Users\" WHERE nope = 'u1'"})
+    void executeStatementAnswersResourceNotFoundForACreatingTableBeforeTheKeyCheck(String statement) {
+        createUsersTable("eu-west-1").setTableStatus("CREATING");
+        ObjectNode request = mapper.createObjectNode();
+        request.put("Statement", statement);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("ExecuteStatement", request, "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("Requested resource not found", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "SELECT * FROM \"Users\" WHERE userId = 'u1'",
+            "UPDATE \"Users\" SET a = 1 WHERE userId = 'u1'"})
+    void executeTransactionCancelsOnACreatingTable(String statement) throws Exception {
+        createUsersTable("eu-west-1").setTableStatus("CREATING");
+        ObjectNode request = mapper.createObjectNode();
+        request.putArray("TransactStatements").addObject().put("Statement", statement);
+
+        Response response = handler.handle("ExecuteTransaction", request, "eu-west-1");
+        assertEquals(400, response.getStatus());
+        JsonNode reason = mapper.convertValue(response.getEntity(), JsonNode.class).get("CancellationReasons").get(0);
+        assertEquals("ResourceNotFound", reason.get("Code").asText());
+        assertEquals("Requested resource not found", reason.get("Message").asText());
     }
 
     @Test
