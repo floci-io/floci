@@ -634,7 +634,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         String block = PaymentCryptographyTr31.wrap(
                 PaymentCryptographyCrypto.fromHex(key.getKeyMaterialHex()),
                 PaymentCryptographyCrypto.fromHex(protection.getKeyMaterialHex()),
-                usage, mode, "E");
+                isAes(protection), algorithmByte(key), usage, mode, "E");
         return new KeyExport(protection.getArn(), block, key.getKeyCheckValue(),
                 key.getKeyCheckValueAlgorithm());
     }
@@ -656,6 +656,17 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                     "the key " + protection.getArn() + " does not have the mode of use Unwrap, which it needs "
                             + "to unwrap a key", 400);
         }
+        // The block type picks the derivation, and the derivation needs a key encryption key of
+        // the matching family: a type D block is derived with AES, a type B one with TDEA.
+        // Without this the right bytes under the wrong cipher would simply not unwrap, with a
+        // message that reads like a corrupt block rather than a wrong key.
+        boolean blockIsAes = PaymentCryptographyTr31.typeOf(block);
+        if (isAes(protection) != blockIsAes) {
+            throw new AwsException("ValidationException",
+                    "a type " + PaymentCryptographyTr31.typeName(block) + " key block needs "
+                            + (blockIsAes ? "an AES" : "a TDES") + " wrapping key, but "
+                            + protection.getKeyId() + " is " + protection.getKeyAlgorithm(), 400);
+        }
         byte[] material;
         try {
             material = PaymentCryptographyTr31.unwrap(block,
@@ -667,7 +678,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         String mode = PaymentCryptographyTr31.modeOf(block);
         boolean exportable = "E".equals(PaymentCryptographyTr31.exportabilityOf(block));
         Map<String, Object> attributes = new LinkedHashMap<>();
-        attributes.put("KeyAlgorithm", "AES_256");
+        attributes.put("KeyAlgorithm", algorithmOf(block, material.length));
         attributes.put("KeyClass", "SYMMETRIC_KEY");
         attributes.put("KeyUsage", usage);
         return makeKey(region, attributes, modesFor(mode), exportable, true, Map.of(),
@@ -701,6 +712,64 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         throw new AwsException("ValidationException",
                 "the usage " + usageName + " cannot leave the service: a key block carries one of "
                         + USAGE_NAMES.keySet(), 400);
+    }
+
+    /**
+     * Whether a key is an AES key rather than a TDES one.
+     *
+     * <p>The key record knows its algorithm, so the family is read from there and not guessed
+     * from the length of the material, because a 16-byte key is a two-key TDES one and an
+     * AES-128 one, and a 24-byte key is a three-key TDES one and an AES-192 one.
+     */
+    private static boolean isAes(PaymentCryptographyKey key) {
+        PaymentCryptographyKeyAlgorithm algorithm =
+                PaymentCryptographyKeyAlgorithm.from(key.getKeyAlgorithm());
+        return algorithm != null && algorithm.aes;
+    }
+
+    /**
+     * The algorithm byte of a key: {@code A} for an AES key and {@code T} for a TDES one.
+     *
+     * <p>The key record knows its algorithm, so the byte is read from there and not guessed from
+     * the length of the material, because a TDES key and an AES key of the same length are
+     * different keys.
+     */
+    private static String algorithmByte(PaymentCryptographyKey key) {
+        return "AES_256".equals(key.getKeyAlgorithm()) || "AES_192".equals(key.getKeyAlgorithm())
+                || "AES_128".equals(key.getKeyAlgorithm()) ? "A" : "T";
+    }
+
+    /**
+     * The algorithm of an imported key.
+     *
+     * <p>The block names the algorithm of the key it carries, and the length of the material
+     * says which of that family's keys it is. The algorithm is not guessed from the length
+     * alone, because a TDES key and an AES key of the same length are different keys.
+     *
+     * <p>The header's algorithm byte fixes how long the key may be, so a key of a length the
+     * algorithm does not allow is refused rather than read as a key of another length.
+     */
+    private static String algorithmOf(String block, int materialLength) {
+        String family = PaymentCryptographyTr31.algorithmInHeader(block);
+        int length = materialLength;
+        return switch (family) {
+            case "A" -> switch (length) {
+                case 16 -> "AES_128";
+                case 24 -> "AES_192";
+                case 32 -> "AES_256";
+                default -> throw new AwsException("ValidationException",
+                        "the key block carries a " + (length * 8) + "-bit key; AES needs 128/192/256", 400);
+            };
+            case "T" -> switch (length) {
+                case 16 -> "TDES_2KEY";
+                case 24 -> "TDES_3KEY";
+                default -> throw new AwsException("ValidationException",
+                        "the key block carries a " + (length * 8) + "-bit key; TDES needs 128/192", 400);
+            };
+            default -> throw new AwsException("ValidationException",
+                    "the key block's algorithm is '" + family + "', which is not one this service has a key "
+                            + "algorithm for (T for TDES, A for AES)", 400);
+        };
     }
 
     /** The usage name of a TR-31 usage code, such as {@code TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY}. */

@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.paymentcryptography;
 
+import io.github.hectorvent.floci.services.paymentcryptography.crypto.Ciphers;
+
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Arrays;
@@ -22,6 +24,9 @@ final class PaymentCryptographyTr31 {
     /** The initialization vector block of the type D key derivation. */
     private static final String AES_IV_CONST = "80000000000000000000000000000000";
 
+    /** The reduction constant of Triple DES. */
+    private static final String TDEA_RB = "000000000000001B";
+
     /** The length of the header, in characters. */
     private static final int HEADER_LENGTH = 16;
 
@@ -36,26 +41,35 @@ final class PaymentCryptographyTr31 {
      *
      * @param clearKey      the key the block carries
      * @param protectionKey the key that protects the block
+     * @param protectionAes whether the protection key is an AES key, which decides the block
+     *                      type: a type D block under an AES key and a type B one under a TDES
+     *                      key. The length alone does not say it, because a 16-byte key is
+     *                      both an AES-128 key and a two-key TDES one.
+     * @param algorithm     the algorithm byte of the key the block carries: {@code A} for an
+     *                      AES key and {@code T} for a TDES one
      * @param usage         the usage code of the key, such as {@code D0}
      * @param mode          the mode of use code of the key, such as {@code B}
      * @param exportability {@code E} when the key may leave the service again
      * @return the block, in upper-case hexadecimal
      */
-    static String wrap(byte[] clearKey, byte[] protectionKey, String usage, String mode,
-                       String exportability) {
-        byte[] lengthEncoded = lengthEncode(clearKey);
-        int blockLength = HEADER_LENGTH + lengthEncoded.length * 2 + MAC_LENGTH;
-        String header = header16(usage, mode, exportability, blockLength);
+    static String wrap(byte[] clearKey, byte[] protectionKey, boolean protectionAes,
+                       String algorithm, String usage, String mode, String exportability) {
+        String type = protectionAes ? "D" : "B";
+        byte[] lengthEncoded = lengthEncode(clearKey, protectionAes ? 16 : 8);
+        int blockLength = HEADER_LENGTH + lengthEncoded.length * 2 + macLength(protectionAes);
+        String header = header16(type, usage, mode, exportability, blockLength, algorithm);
 
-        byte[][] derived = deriveKeys(protectionKey);
+        byte[][] derived = deriveKeys(protectionKey, protectionAes);
         byte[] encryptionKey = derived[0];
         byte[] macKey = derived[1];
-        byte[] mask = PaymentCryptographyCrypto.cmacSubkeys(macKey)[0];
-        byte[] mac = computeMac(header, lengthEncoded, macKey, mask);
+        byte[][] masks = masksOf(macKey, protectionAes);
+        byte[] mac = computeMac(header, lengthEncoded, macKey, masks, protectionAes);
 
         // The block is encrypted under the derived key, and the MAC is the vector of that
         // encryption: the block is authenticated before it is read.
-        byte[] cipherText = PaymentCryptographyCrypto.aesCbcEncrypt(encryptionKey, mac, lengthEncoded);
+        byte[] cipherText = protectionAes
+                ? PaymentCryptographyCrypto.aesCbcEncrypt(encryptionKey, mac, lengthEncoded)
+                : Ciphers.tdesCbcEncrypt(lengthEncoded, Ciphers.widenTdesKey(encryptionKey), mac);
         return header + hexUpper(cipherText) + hexUpper(mac);
     }
 
@@ -73,25 +87,30 @@ final class PaymentCryptographyTr31 {
             throw new IllegalArgumentException("the key block is too short to be a key block");
         }
         String header = block.substring(0, HEADER_LENGTH);
-        if (!"D".equals(header.substring(0, 1))) {
-            throw new IllegalArgumentException("this service makes type D key blocks, and the block is type "
-                    + header.substring(0, 1));
+        String type = header.substring(0, 1);
+        if (!"D".equals(type) && !"B".equals(type)) {
+            throw new IllegalArgumentException("the key block is of type " + type
+                    + ", and this service reads type B and type D blocks");
         }
         int declared = parseInt(header.substring(1, 5), "the length of the key block");
         if (declared != block.length()) {
             throw new IllegalArgumentException("the key block says it is " + declared
                     + " characters long, and it is " + block.length());
         }
-        byte[] mac = fromHex(block.substring(block.length() - MAC_LENGTH));
-        byte[] cipherText = fromHex(block.substring(HEADER_LENGTH, block.length() - MAC_LENGTH));
+        boolean aes = "D".equals(type);
+        int macLength = macLength(aes);
+        byte[] mac = fromHex(block.substring(block.length() - macLength));
+        byte[] cipherText = fromHex(block.substring(HEADER_LENGTH, block.length() - macLength));
 
-        byte[][] derived = deriveKeys(protectionKey);
+        byte[][] derived = deriveKeys(protectionKey, aes);
         byte[] encryptionKey = derived[0];
         byte[] macKey = derived[1];
-        byte[] mask = PaymentCryptographyCrypto.cmacSubkeys(macKey)[0];
-        byte[] lengthEncoded = PaymentCryptographyCrypto.aesCbcDecrypt(encryptionKey, mac, cipherText);
+        byte[][] masks = masksOf(macKey, aes);
+        byte[] lengthEncoded = aes
+                ? PaymentCryptographyCrypto.aesCbcDecrypt(encryptionKey, mac, cipherText)
+                : Ciphers.tdesCbcDecrypt(cipherText, Ciphers.widenTdesKey(encryptionKey), mac);
 
-        byte[] recomputed = computeMac(header, lengthEncoded, macKey, mask);
+        byte[] recomputed = computeMac(header, lengthEncoded, macKey, masks, aes);
         // The MACs are compared as bytes and in constant time: a comparison that stopped at
         // the first difference would say how much of the MAC matched.
         if (!MessageDigest.isEqual(recomputed, mac)) {
@@ -110,6 +129,21 @@ final class PaymentCryptographyTr31 {
         return block.substring(5, 7);
     }
 
+    /**
+     * Whether a block is a type D one, which is derived with AES.
+     *
+     * <p>The type is in the block's own header, so it is read from there and not from the
+     * wrapping key: a type D block is protected with AES and a type B one with TDES.
+     */
+    static boolean typeOf(String block) {
+        return "D".equals(block.substring(0, 1));
+    }
+
+    /** The type of a block, {@code D} or {@code B}, for a message that names it. */
+    static String typeName(String block) {
+        return block.substring(0, 1);
+    }
+
     /** The mode of use code of a block's header, such as {@code B}. */
     static String modeOf(String block) {
         return block.substring(8, 9);
@@ -125,11 +159,12 @@ final class PaymentCryptographyTr31 {
      *
      * @param blockLength the length of the whole block, in characters
      */
-    private static String header16(String usage, String mode, String exportability, int blockLength) {
-        String header = "D"
+    private static String header16(String type, String usage, String mode, String exportability,
+                                  int blockLength, String algorithm) {
+        String header = type
                 + pad4(blockLength)
                 + usage
-                + "A"     // the algorithm of the key the block carries: AES
+                + algorithm     // the algorithm of the key the block carries
                 + mode
                 + "00"    // the version of the key
                 + exportability
@@ -141,16 +176,41 @@ final class PaymentCryptographyTr31 {
         return header;
     }
 
+    /** The algorithm the header of a block names for the key it carries. */
+    static String algorithmInHeader(String block) {
+        return block.substring(7, 8);
+    }
+
+    /** The length of the MAC of a block of that type, in characters. */
+    private static int macLength(boolean aes) {
+        return aes ? 32 : 16;
+    }
+
+    /**
+     * The two masks of the last block of the MAC: the CMAC subkeys of the MAC key.
+     *
+     * <p>A last block that needed no padding is masked with the first subkey and one that was
+     * padded with the second, which is what the reference implementation does.
+     */
+    private static byte[][] masksOf(byte[] macKey, boolean aes) {
+        if (aes) {
+            byte[][] subkeys = PaymentCryptographyCrypto.cmacSubkeys(macKey);
+            return new byte[][] {subkeys[0], subkeys[1]};
+        }
+        byte[] subkeys = cmacSubkeys(macKey, 8, TDEA_RB);
+        return new byte[][] {Arrays.copyOfRange(subkeys, 0, 8), Arrays.copyOfRange(subkeys, 8, 16)};
+    }
+
     /**
      * The key as a length encoded block: its length in bits in front of it, zero padded to the
      * block size.
      */
-    private static byte[] lengthEncode(byte[] clearKey) {
+    private static byte[] lengthEncode(byte[] clearKey, int blockSize) {
         byte[] body = new byte[2 + clearKey.length];
         body[0] = (byte) ((clearKey.length * 8) >> 8);
         body[1] = (byte) (clearKey.length * 8);
         System.arraycopy(clearKey, 0, body, 2, clearKey.length);
-        int padding = (BLOCK_SIZE - (body.length % BLOCK_SIZE)) % BLOCK_SIZE;
+        int padding = (blockSize - (body.length % blockSize)) % blockSize;
         byte[] out = new byte[body.length + padding];
         System.arraycopy(body, 0, out, 0, body.length);
         return out;
@@ -160,38 +220,62 @@ final class PaymentCryptographyTr31 {
     private static final int BLOCK_SIZE = 16;
 
     /**
-     * The MAC of a block: the CBC-MAC of the header and the length encoded key, with the last
-     * block masked by a subkey of the MAC key.
+     * The MAC of a block: the CBC-MAC of the header and the length encoded key under the MAC
+     * key, with the last block masked by a subkey of it.
+     *
+     * <p>A last block that needed no padding is masked with the first subkey and one that was
+     * padded with the second, which is what the reference implementation does.
      */
-    private static byte[] computeMac(String header, byte[] lengthEncoded, byte[] macKey, byte[] mask) {
+    private static byte[] computeMac(String header, byte[] lengthEncoded, byte[] macKey,
+                                      byte[][] masks, boolean aes) {
+        int blockSize = aes ? BLOCK_SIZE : 8;
         byte[] data = new byte[header.length() + lengthEncoded.length];
         System.arraycopy(header.getBytes(StandardCharsets.US_ASCII), 0, data, 0, header.length());
         System.arraycopy(lengthEncoded, 0, data, header.length(), lengthEncoded.length);
 
         byte[] last;
-        if (data.length % BLOCK_SIZE != 0) {
-            int padding = BLOCK_SIZE - (data.length % BLOCK_SIZE);
+        if (data.length % blockSize != 0) {
+            int padding = blockSize - (data.length % blockSize);
             data = Arrays.copyOf(data, data.length + padding);
             data[data.length - padding] = (byte) 0x80;
-            last = xor(Arrays.copyOfRange(data, data.length - BLOCK_SIZE, data.length), mask);
+            last = xor(Arrays.copyOfRange(data, data.length - blockSize, data.length), masks[1]);
         } else {
-            last = xor(Arrays.copyOfRange(data, data.length - BLOCK_SIZE, data.length), mask);
+            last = xor(Arrays.copyOfRange(data, data.length - blockSize, data.length), masks[0]);
         }
         byte[] macInput = Arrays.copyOf(data, data.length);
-        System.arraycopy(last, 0, macInput, macInput.length - BLOCK_SIZE, BLOCK_SIZE);
-        byte[] out = PaymentCryptographyCrypto.aesCbcEncrypt(macKey, new byte[BLOCK_SIZE], macInput);
-        return Arrays.copyOfRange(out, out.length - BLOCK_SIZE, out.length);
+        System.arraycopy(last, 0, macInput, macInput.length - blockSize, blockSize);
+        byte[] out = aes
+                ? PaymentCryptographyCrypto.aesCbcEncrypt(macKey, new byte[BLOCK_SIZE], macInput)
+                : Ciphers.tdesCbcEncrypt(macInput, Ciphers.widenTdesKey(macKey), new byte[8]);
+        return Arrays.copyOfRange(out, out.length - blockSize, out.length);
     }
 
     /**
      * The two keys a block is made under: the one that encrypts the key and the one that
      * authenticates it.
      *
-     * <p>The derivation is the counter mode key derivation of NIST SP800-108, seeded with the
-     * second CMAC subkey of the protection key and encrypted by the protection key itself.
+     * <p>The derivation follows the family of the protection key, because the block type does
+     * too: a type D block is derived with AES and a type B one with Triple DES.
      */
-    private static byte[][] deriveKeys(byte[] protectionKey) {
+    private static byte[][] deriveKeys(byte[] protectionKey, boolean aes) {
+        return aes ? deriveAesKeys(protectionKey) : deriveTypeBKeys(protectionKey);
+    }
+
+    /**
+     * The derived keys of a type D block.
+     *
+     * <p>The derivation is the counter mode key derivation of NIST SP800-108, seeded with the
+     * second CMAC subkey of the protection key and encrypted by the protection key itself. The
+     * derived key is as long as the protection key: a 192-bit protection key derives a 192-bit
+     * key, whose second part is truncated to eight bytes, so the cipher that uses the result is
+     * AES-192 rather than a widened AES-256.
+     */
+    private static byte[][] deriveAesKeys(byte[] protectionKey) {
         int bits = protectionKey.length * 8;
+        if (bits != 128 && bits != 192 && bits != 256) {
+            throw new IllegalArgumentException("a type D block needs a 128, 192 or 256 bit key block "
+                    + "protection key, and this one is " + bits + " bits");
+        }
         int derivedBytes = bits / 8;
         int firstPart = 16;
         int secondPart = derivedBytes - firstPart;
@@ -202,16 +286,93 @@ final class PaymentCryptographyTr31 {
         System.arraycopy(part(seed, bits, false, 1, protectionKey), 0, encryptionKey, 0, firstPart);
         System.arraycopy(part(seed, bits, true, 1, protectionKey), 0, macKey, 0, firstPart);
         if (secondPart > 0) {
-            System.arraycopy(part(seed, bits, false, 2, protectionKey), 0, encryptionKey, firstPart, secondPart);
+            System.arraycopy(part(seed, bits, false, 2, protectionKey), 0, encryptionKey, firstPart,
+                    secondPart);
             System.arraycopy(part(seed, bits, true, 2, protectionKey), 0, macKey, firstPart, secondPart);
         }
         return new byte[][] {encryptionKey, macKey};
+    }
+
+    /**
+     * The derived keys of a type B block.
+     *
+     * <p>The derivation is the counter mode key derivation of NIST SP800-108, seeded with the
+     * first CMAC subkey of the protection key, and the reduction constant of Triple DES is the
+     * whole buffer rather than the top bit alone.
+     */
+    private static byte[][] deriveTypeBKeys(byte[] protectionKey) {
+        int bits = protectionKey.length * 8;
+        if (bits != 128 && bits != 192) {
+            throw new IllegalArgumentException("a type B block needs a 128 or 192 bit key block "
+                    + "protection key, and this one is " + bits + " bits");
+        }
+        byte[] wide = Ciphers.widenTdesKey(protectionKey);
+        int parts = bits == 192 ? 3 : 2;
+        byte[] seed = Arrays.copyOfRange(cmacSubkeys(wide, 8, TDEA_RB), 0, 8);
+        byte[] encryptionKey = new byte[parts * 8];
+        byte[] macKey = new byte[parts * 8];
+        for (int counter = 1; counter <= parts; counter++) {
+            byte[] input = xor(seed, fromHex(typeBConstant(bits, false, counter)));
+            byte[] part = Ciphers.tdesEcbEncrypt(input, wide);
+            System.arraycopy(part, 0, encryptionKey, (counter - 1) * 8, 8);
+            input = xor(seed, fromHex(typeBConstant(bits, true, counter)));
+            part = Ciphers.tdesEcbEncrypt(input, wide);
+            System.arraycopy(part, 0, macKey, (counter - 1) * 8, 8);
+        }
+        return new byte[][] {encryptionKey, macKey};
+    }
+
+    /** The constant of the type B key derivation. */
+    private static String typeBConstant(int bits, boolean mac, int counter) {
+        String algorithm = bits == 192 ? "0001" : "0000";
+        String use = mac ? "0001" : "0000";
+        String keyLength = bits == 192 ? "00C0" : "0080";
+        return (counter < 10 ? "0" + counter : Integer.toString(counter))
+                + use + "00" + algorithm + keyLength;
+    }
+
+    /**
+     * The CMAC subkeys of a TDES key.
+     *
+     * <p>The reduction constant of Triple DES is the whole buffer, which is what the reference
+     * implementation does, and it is not the top bit alone.
+     */
+    private static byte[] cmacSubkeys(byte[] key, int blockSize, String rbHex) {
+        byte[] s = Ciphers.tdesEcbEncrypt(new byte[blockSize], key);
+        byte[] rb = fromHex(rbHex);
+        byte[] k1 = shiftXor(s, rb);
+        byte[] k2 = shiftXor(k1, rb);
+        byte[] out = new byte[k1.length + k2.length];
+        System.arraycopy(k1, 0, out, 0, k1.length);
+        System.arraycopy(k2, 0, out, k1.length, k2.length);
+        return out;
+    }
+
+    /** A left shift by one bit, then the reduction constant when the top bit was set. */
+    private static byte[] shiftXor(byte[] value, byte[] rb) {
+        byte[] out = new byte[value.length];
+        int carry = 0;
+        for (int i = value.length - 1; i >= 0; i--) {
+            int nextCarry = (value[i] & 0x80) != 0 ? 1 : 0;
+            out[i] = (byte) (((value[i] << 1) | carry) & 0xff);
+            carry = nextCarry;
+        }
+        if ((value[0] & 0x80) != 0) {
+            for (int i = 0; i < out.length; i++) {
+                out[i] ^= rb[i % rb.length];
+            }
+        }
+        return out;
     }
 
     /** One part of the derivation: the protection key encrypts the seeded constant. */
     private static byte[] part(byte[] seed, int bits, boolean mac, int counter, byte[] protectionKey) {
         byte[] constant = fromHex(derivationConstant(bits, mac, counter));
         byte[] input = xor(seed, constant);
+        if (System.getenv("APC_DEBUG_TR31") != null) {
+            System.err.println("DEBUG part bits=" + bits + " mac=" + mac + " counter=" + counter
+                    + " constant=" + hexUpper(constant) + " input=" + hexUpper(input));
+        }
         return PaymentCryptographyCrypto.aesEcbEncrypt(input, protectionKey);
     }
 
@@ -222,6 +383,14 @@ final class PaymentCryptographyTr31 {
         String keyLength = bits == 128 ? "0080" : bits == 192 ? "00C0" : "0100";
         return (counter < 10 ? "0" + counter : Integer.toString(counter))
                 + use + "00" + algorithm + keyLength + AES_IV_CONST;
+    }
+
+    /** Two byte arrays, one after the other. */
+    private static byte[] concat(byte[] left, byte[] right) {
+        byte[] out = new byte[left.length + right.length];
+        System.arraycopy(left, 0, out, 0, left.length);
+        System.arraycopy(right, 0, out, left.length, right.length);
+        return out;
     }
 
     private static byte[] xor(byte[] left, byte[] right) {

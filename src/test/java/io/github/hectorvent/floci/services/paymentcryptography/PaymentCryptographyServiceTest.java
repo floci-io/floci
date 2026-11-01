@@ -193,6 +193,15 @@ class PaymentCryptographyServiceTest {
         assertNull(second.nextToken(), "the last page has no token");
     }
 
+    /** The attributes of a key with that algorithm and usage. */
+    private static Map<String, Object> attributes(String algorithm, String usage) {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", algorithm);
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", usage);
+        return attributes;
+    }
+
     private PaymentCryptographyKey createReplicatedKey(String region, List<String> regions) {
         Map<String, Object> attributes = new LinkedHashMap<>();
         attributes.put("KeyAlgorithm", "AES_256");
@@ -322,6 +331,46 @@ class PaymentCryptographyServiceTest {
         assertEquals(key.getKeyCheckValue(), imported.getKeyCheckValue());
         assertEquals(key.getKeyUsage(), imported.getKeyUsage());
         assertTrue(imported.isExportable(), "the block said the key is exportable");
+    }
+
+    @Test
+    void aKeyLeavesUnderATdesProtectionKeyAsATypeBBlock() {
+        // The block type follows the protection key's family: a TDES key gives a type B block,
+        // an AES one a type D block. That is the rule the emulator follows.
+        PaymentCryptographyKey protection = service.createKey("us-east-1",
+                attributes("TDES_2KEY", "TR31_K1_KEY_BLOCK_PROTECTION_KEY"),
+                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE), true, true, Map.of());
+        PaymentCryptographyKey key = service.createKey("us-east-1",
+                attributes("TDES_2KEY", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
+                Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
+
+        PaymentCryptographyService.KeyExport export = service.exportKey("us-east-1", key.getKeyId(),
+                protection.getKeyId());
+
+        assertTrue(export.block().startsWith("B"), "a TDES protection key gives a type B block");
+        assertEquals("T", export.block().substring(7, 8), "the block carries a TDES key");
+
+        PaymentCryptographyKey imported = service.importKey("us-east-1", protection.getKeyId(),
+                export.block());
+
+        assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
+        assertEquals(key.getKeyCheckValue(), imported.getKeyCheckValue());
+    }
+
+    @Test
+    void aKeyLeavesUnderAnAesProtectionKeyAsATypeDBlock() {
+        PaymentCryptographyKey protection = service.createKey("us-east-1",
+                attributes("AES_256", "TR31_K1_KEY_BLOCK_PROTECTION_KEY"),
+                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE), true, true, Map.of());
+        PaymentCryptographyKey key = service.createKey("us-east-1",
+                attributes("AES_256", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
+                Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
+
+        PaymentCryptographyService.KeyExport export = service.exportKey("us-east-1", key.getKeyId(),
+                protection.getKeyId());
+
+        assertTrue(export.block().startsWith("D"), "an AES protection key gives a type D block");
+        assertEquals("A", export.block().substring(7, 8), "the block carries an AES key");
     }
 
     @Test

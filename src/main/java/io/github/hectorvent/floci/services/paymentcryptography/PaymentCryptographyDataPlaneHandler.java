@@ -2,14 +2,16 @@ package io.github.hectorvent.floci.services.paymentcryptography;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.paymentcryptography.crypto.DukptCrypto;
+import io.github.hectorvent.floci.services.paymentcryptography.crypto.IsoMac;
 import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryptographyKey;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
-import java.util.Locale;
 import java.util.Locale;
 import java.util.Map;
 
@@ -31,7 +33,7 @@ public class PaymentCryptographyDataPlaneHandler {
     private static final int SHORTEST_MAC = 4;
 
     /** The longest MAC the service computes, in bytes. */
-    private static final int LONGEST_MAC = 16;
+    private static final int LONGEST_MAC = 8;
 
     /** The shortest plaintext the service encrypts, in bytes. */
     private static final int SHORTEST_PLAINTEXT = 8;
@@ -113,10 +115,11 @@ public class PaymentCryptographyDataPlaneHandler {
      */
     public Map<String, Object> generateMac(JsonNode request, String region) {
         PaymentCryptographyKey key = requiredKey(request, region, "KeyIdentifier");
-        requireMode(key, "Generate", "generate a MAC with");
+        MacLeg leg = resolveMacLeg(request.get("GenerationAttributes"), key, region, "Generate",
+                "generating a MAC with");
         byte[] message = blob(request, "MessageData", 1, 2048);
         int length = macLength(request);
-        byte[] mac = PaymentCryptographyCrypto.cmac(material(key), message);
+        byte[] mac = leg.mac.apply(leg.keyBytes, message);
         byte[] answer = new byte[length];
         System.arraycopy(mac, 0, answer, 0, length);
         return answer(key, Map.of("Mac", encode(answer)));
@@ -127,15 +130,16 @@ public class PaymentCryptographyDataPlaneHandler {
      */
     public Map<String, Object> verifyMac(JsonNode request, String region) {
         PaymentCryptographyKey key = requiredKey(request, region, "KeyIdentifier");
-        requireMode(key, "Verify", "verify a MAC with");
+        MacLeg leg = resolveMacLeg(request.get("VerificationAttributes"), key, region, "Verify",
+                "verifying a MAC with");
         byte[] message = blob(request, "MessageData", 1, 2048);
-        byte[] mac = blob(request, "Mac", 2, 64);
+        byte[] mac = blob(request, "Mac", 4, 8);
         int length = request.has("MacLength") ? request.path("MacLength").asInt(mac.length) : mac.length;
         if (!isMacLength(length)) {
             throw new AwsException("ValidationException",
                     "MacLength must be between " + SHORTEST_MAC + " and " + LONGEST_MAC, 400);
         }
-        byte[] expected = PaymentCryptographyCrypto.cmac(material(key), message);
+        byte[] expected = leg.mac.apply(leg.keyBytes, message);
         byte[] cut = new byte[length];
         System.arraycopy(expected, 0, cut, 0, Math.min(length, expected.length));
         if (mac.length != length || !MessageDigest.isEqual(cut, mac)) {
@@ -248,6 +252,122 @@ public class PaymentCryptographyDataPlaneHandler {
      * <p>The data plane carries its blobs as hexadecimal, which is what the reference says it
      * does, and the length of each one is bounded.
      */
+    /**
+     * The MAC a request asks for, and the key it is computed under.
+     *
+     * <p>The attributes name the algorithm: the ISO 9797-1 algorithms 1 and 3 for the
+     * {@code Algorithm} variant, and the DUKPT derivations of the same two for the DUKPT
+     * variants. A DUKPT MAC key is derived from the base derivation key, so that is what the
+     * key has to allow.
+     */
+    private MacLeg resolveMacLeg(JsonNode attributes, PaymentCryptographyKey key, String region,
+                                 String mode, String what) {
+        String variant = soleVariant(attributes);
+        if (variant == null) {
+            throw new AwsException("ValidationException",
+                    "MacAttributes must specify exactly one variant", 400);
+        }
+        if ("Algorithm".equals(variant)) {
+            // The algorithm is a member of the attributes themselves, not of the variant.
+            String algorithm = text(attributes, "Algorithm");
+            if ("ISO9797_ALGORITHM1".equals(algorithm)) {
+                requireMode(key, mode, what);
+                return new MacLeg(IsoMac::alg1, material(key));
+            }
+            if ("ISO9797_ALGORITHM3".equals(algorithm)) {
+                requireMode(key, mode, what);
+                return new MacLeg(IsoMac::alg3, material(key));
+            }
+            throw new AwsException("ValidationException",
+                    "Algorithm '" + algorithm + "' not supported by this service "
+                            + "(ISO9797_ALGORITHM1, ISO9797_ALGORITHM3)", 400);
+        }
+        if ("DukptIso9797Algorithm1".equals(variant) || "DukptIso9797Algorithm3".equals(variant)) {
+            // A DUKPT MAC key is derived from the base derivation key, so that is what the key
+            // has to allow.
+            requireMode(key, "DeriveKey", "deriving a MAC key");
+            JsonNode variantAttributes = attributes.get(variant);
+            String ksn = text(variantAttributes, "KeySerialNumber");
+            if (!isHex(ksn)) {
+                throw new AwsException("ValidationException",
+                        variant + ".KeySerialNumber (hex) is required", 400);
+            }
+            String keyVariant = text(variantAttributes, "DukptKeyVariant");
+            if (!keyVariant.isEmpty() && !"REQUEST".equals(keyVariant)) {
+                throw new AwsException("ValidationException",
+                        variant + ".DukptKeyVariant '" + keyVariant
+                                + "' not supported by this service (REQUEST)", 400);
+            }
+            byte[] derived;
+            try {
+                derived = DukptCrypto.macKey(key.getKeyMaterialHex(), ksn);
+            } catch (RuntimeException e) {
+                throw new AwsException("ValidationException",
+                        "DUKPT derivation failed: " + e.getMessage(), 400);
+            }
+            return new MacLeg("DukptIso9797Algorithm1".equals(variant)
+                    ? IsoMac::alg1 : IsoMac::alg3, derived);
+        }
+        throw new AwsException("ValidationException",
+                "MacAttributes." + variant + " not supported by this service", 400);
+    }
+
+    /** The MAC a request asks for, and the key it is computed under. */
+    private static final class MacLeg {
+        final MacFunction mac;
+        final byte[] keyBytes;
+
+        MacLeg(MacFunction mac, byte[] keyBytes) {
+            this.mac = mac;
+            this.keyBytes = keyBytes;
+        }
+    }
+
+    /** A MAC over a message under a key. */
+    private interface MacFunction {
+        byte[] apply(byte[] key, byte[] message);
+    }
+
+    /** The one variant of an attributes structure, or null when there is not exactly one. */
+    private static String soleVariant(JsonNode attributes) {
+        if (attributes == null || !attributes.isObject()) {
+            return null;
+        }
+        String found = null;
+        Iterator<Map.Entry<String, JsonNode>> fields = attributes.fields();
+        while (fields.hasNext()) {
+            if (found != null) {
+                return null;
+            }
+            found = fields.next().getKey();
+        }
+        return found;
+    }
+
+    /** The text of a member. */
+    private static String text(JsonNode request, String member) {
+        if (request == null) {
+            return "";
+        }
+        JsonNode declared = request.get(member);
+        return declared == null || declared.isNull() ? "" : declared.asText("");
+    }
+
+    /** Whether the text is hexadecimal. */
+    private static boolean isHex(String value) {
+        if (value == null || value.isEmpty() || value.length() % 2 != 0) {
+            return false;
+        }
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            boolean hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
+            if (!hex) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static byte[] blob(JsonNode request, String member, int shortestBytes, int longestBytes) {
         JsonNode declared = request.get(member);
         if (declared == null || declared.isNull()) {

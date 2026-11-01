@@ -36,6 +36,19 @@ class PaymentCryptographyDataPlaneHandlerTest {
         handler = new PaymentCryptographyDataPlaneHandler(service);
     }
 
+    /** A TDES key, which is what the ISO 9797-1 MAC is computed under. */
+    private PaymentCryptographyKey createTdesKey(String... modes) {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "TDES_2KEY");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_M6_ISO_9797_5_CMAC_KEY");
+        Map<String, Boolean> declared = new LinkedHashMap<>();
+        for (String mode : modes) {
+            declared.put(mode, Boolean.TRUE);
+        }
+        return service.createKey("us-east-1", attributes, declared, true, true, Map.of());
+    }
+
     private PaymentCryptographyKey createKey(String... modes) {
         Map<String, Object> attributes = new LinkedHashMap<>();
         attributes.put("KeyAlgorithm", "AES_256");
@@ -52,6 +65,14 @@ class PaymentCryptographyDataPlaneHandlerTest {
         return PaymentCryptographyCrypto.fromHex(hex);
     }
 
+    /** The MAC attributes of the ISO 9797-1 algorithm 3, the retail MAC. */
+    private static JsonNode iso9797() {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode attributes = mapper.createObjectNode();
+        attributes.put("Algorithm", "ISO9797_ALGORITHM3");
+        return attributes;
+    }
+
     private static String hex(byte[] bytes) {
         return PaymentCryptographyCrypto.toHex(bytes).toUpperCase(Locale.ROOT);
     }
@@ -60,7 +81,9 @@ class PaymentCryptographyDataPlaneHandlerTest {
     private JsonNode request(Map<String, Object> members) {
         ObjectNode node = mapper.createObjectNode();
         members.forEach((name, value) -> {
-            if (value instanceof Integer number) {
+            if (value instanceof JsonNode json) {
+                node.set(name, json);
+            } else if (value instanceof Integer number) {
                 node.put(name, number);
             } else {
                 node.put(name, String.valueOf(value));
@@ -123,32 +146,35 @@ class PaymentCryptographyDataPlaneHandlerTest {
 
     @Test
     void aMacIsComputedAndVerified() {
-        PaymentCryptographyKey key = createKey("Generate", "Verify");
+        PaymentCryptographyKey key = createTdesKey("Generate", "Verify");
         String message = hex("a message".getBytes());
 
         Map<String, Object> mac = handler.generateMac(request(Map.of(
-                "KeyIdentifier", key.getArn(), "MessageData", message, "MacLength", 16)), "us-east-1");
+                "KeyIdentifier", key.getArn(), "MessageData", message, "MacLength", 8,
+                "GenerationAttributes", iso9797())), "us-east-1");
         String value = (String) mac.get("Mac");
 
-        assertEquals(16, hexBytes(value).length);
+        assertEquals(8, hexBytes(value).length);
 
         Map<String, Object> verified = handler.verifyMac(request(Map.of(
-                "KeyIdentifier", key.getArn(), "MessageData", message, "Mac", value, "MacLength", 16)),
-                "us-east-1");
+                "KeyIdentifier", key.getArn(), "MessageData", message, "Mac", value, "MacLength", 8,
+                "VerificationAttributes", iso9797())), "us-east-1");
         assertEquals(key.getArn(), verified.get("KeyArn"));
     }
 
     @Test
     void aMacOfAnotherMessageIsNotValid() {
-        PaymentCryptographyKey key = createKey("Generate", "Verify");
+        PaymentCryptographyKey key = createTdesKey("Generate", "Verify");
         String mac = (String) handler.generateMac(request(Map.of(
                 "KeyIdentifier", key.getArn(),
-                "MessageData", hex("a message".getBytes()))), "us-east-1").get("Mac");
+                "MessageData", hex("a message".getBytes()),
+                "GenerationAttributes", iso9797())), "us-east-1").get("Mac");
 
         AwsException refused = assertThrows(AwsException.class, () -> handler.verifyMac(request(Map.of(
                 "KeyIdentifier", key.getArn(),
                 "MessageData", hex("another message".getBytes()),
-                "Mac", mac)), "us-east-1"));
+                "Mac", mac,
+                "VerificationAttributes", iso9797())), "us-east-1"));
 
         assertEquals("VerificationFailedException", refused.getErrorCode());
     }
