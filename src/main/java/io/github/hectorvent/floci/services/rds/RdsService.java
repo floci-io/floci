@@ -5063,15 +5063,23 @@ public class RdsService implements Resettable, ResourceProvider {
         cluster.setStorageEncrypted(storageEncrypted);
         cluster.setContainerStorageResourceId(clusterResourceId);
         if (!mock) {
-            String image = imageForEngine(engine, engineVersion);
-            String clusterVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
-            String clusterDockerVolumeName = newVolumeName(
-                    clusterVolumeId, clusterResourceId);
-            RdsContainerHandle handle = containerManager.tryStart(
-                    clusterArn, id, clusterResourceId, clusterDockerVolumeName,
-                    engine, image,
-                    masterUsername, masterPassword, databaseName,
-                    clusterEngineParameters(currentAccountId(), effectiveRegion, paramGroupName));
+            String clusterVolumeId;
+            String clusterDockerVolumeName;
+            RdsContainerHandle handle;
+            try {
+                String image = imageForEngine(engine, engineVersion);
+                clusterVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
+                clusterDockerVolumeName = newVolumeName(
+                        clusterVolumeId, clusterResourceId);
+                handle = containerManager.tryStart(
+                        clusterArn, id, clusterResourceId, clusterDockerVolumeName,
+                        engine, image,
+                        masterUsername, masterPassword, databaseName,
+                        clusterEngineParameters(currentAccountId(), effectiveRegion, paramGroupName));
+            } catch (RuntimeException | Error e) {
+                releaseProxyPort(proxyPort);
+                throw e;
+            }
             if (handle != null) {
                 cluster.setContainerId(handle.getContainerId());
                 cluster.setContainerHost(handle.getHost());

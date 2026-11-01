@@ -1631,9 +1631,10 @@ class RdsServiceTest {
         }
     }
 
-    /** A failed create must release the identifier so a clean retry can proceed. */
+    /** A failed container start must release its identifier and reserved port for retry. */
     @Test
     void createDbClusterFailureReleasesTheIdentifierForRetry() {
+        when(rdsConfig.proxyMaxPort()).thenReturn(7000);
         when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
                 .thenThrow(new RuntimeException("image pull failed"))
                 .thenReturn(new RdsContainerHandle("cont-id", "id", "localhost", 5432));
@@ -1642,8 +1643,9 @@ class RdsServiceTest {
                 rdsService.createDbCluster("retry-cluster", "postgres", "17.5",
                         "admin", "password", "dbname", false, null, null, null, false));
 
-        assertNotNull(rdsService.createDbCluster("retry-cluster", "postgres", "17.5",
-                "admin", "password", "dbname", false, null, null, null, false));
+        DbCluster retried = rdsService.createDbCluster("retry-cluster", "postgres", "17.5",
+                "admin", "password", "dbname", false, null, null, null, false);
+        assertEquals(7000, retried.getProxyPort());
         verify(containerManager, times(2)).tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any());
     }
 
