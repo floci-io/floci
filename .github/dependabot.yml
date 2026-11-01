@@ -34,7 +34,9 @@ updates:
       - "java"
 
   - package-ecosystem: "github-actions"
-    directory: "/"
+    directories:
+      - "/"
+      - "/.github/actions/*"
     schedule:
       interval: "monthly"
     open-pull-requests-limit: 5

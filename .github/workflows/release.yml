@@ -437,14 +437,11 @@ jobs:
 
       - name: Build and push native multi-arch image
         id: native
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        env:
-          SOURCE_DATE_EPOCH: ${{ steps.source_date.outputs.epoch }}
+        uses: ./.github/actions/push-zstd-image
         with:
-          context: .
+          source-date-epoch: ${{ steps.source_date.outputs.epoch }}
           file: docker/Dockerfile.native-package
           platforms: linux/amd64,linux/arm64
-          push: true
           provenance: mode=max
           sbom: true
           tags: |
@@ -479,14 +476,11 @@ jobs:
 
       - name: Build and push ARMv8.0 baseline image
         id: baseline
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        env:
-          SOURCE_DATE_EPOCH: ${{ steps.source_date.outputs.epoch }}
+        uses: ./.github/actions/push-zstd-image
         with:
-          context: .
+          source-date-epoch: ${{ steps.source_date.outputs.epoch }}
           file: docker/Dockerfile.native-package
           platforms: linux/arm64
-          push: true
           provenance: mode=max
           sbom: true
           tags: |
@@ -508,14 +502,11 @@ jobs:
 
       - name: Build and push compat multi-arch image
         id: compat
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        env:
-          SOURCE_DATE_EPOCH: ${{ steps.source_date.outputs.epoch }}
+        uses: ./.github/actions/push-zstd-image
         with:
-          context: .
+          source-date-epoch: ${{ steps.source_date.outputs.epoch }}
           file: docker/Dockerfile.compat
           platforms: linux/amd64,linux/arm64
-          push: true
           provenance: mode=max
           sbom: true
           tags: |
