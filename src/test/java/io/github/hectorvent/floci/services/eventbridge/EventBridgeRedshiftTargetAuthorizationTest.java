@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.iam.ServiceRoleAuthorizer.Permission;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftTargetAuthorizer;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import org.junit.jupiter.api.BeforeEach;
@@ -41,14 +42,14 @@ class EventBridgeRedshiftTargetAuthorizationTest {
     private static final String EVENT = "{\"id\":\"event-1\"}";
 
     private RedshiftDataService redshiftDataService;
-    private EventBridgeRedshiftTargetAuthorizer authorizer;
+    private RedshiftTargetAuthorizer authorizer;
     private EventBridgeInvoker invoker;
 
     @BeforeEach
     void setUp() {
         redshiftDataService = mock(RedshiftDataService.class);
-        authorizer = mock(EventBridgeRedshiftTargetAuthorizer.class);
-        when(authorizer.refusal(any(), any(), any(), anyList())).thenReturn(Optional.empty());
+        authorizer = mock(RedshiftTargetAuthorizer.class);
+        when(authorizer.refusal(any(), any(), any(), any(), anyList())).thenReturn(Optional.empty());
         ServiceRegistry serviceRegistry = mock(ServiceRegistry.class);
         when(serviceRegistry.isServiceEnabled("redshift-data")).thenReturn(true);
         RegionResolver resolver = mock(RegionResolver.class);
@@ -196,7 +197,7 @@ class EventBridgeRedshiftTargetAuthorizationTest {
 
     @Test
     void refusedRoleIsAccessDeniedAndNothingIsSubmitted() {
-        when(authorizer.refusal(any(), any(), any(), anyList())).thenReturn(Optional.of("not authorized"));
+        when(authorizer.refusal(any(), any(), any(), any(), anyList())).thenReturn(Optional.of("not authorized"));
         RedshiftDataParameters parameters = parameters("dev");
         parameters.setSql("select 1");
 
@@ -211,7 +212,7 @@ class EventBridgeRedshiftTargetAuthorizationTest {
 
     @Test
     void refusedRoleIsReportedBeforeABadPathInTheSql() {
-        when(authorizer.refusal(any(), any(), any(), anyList())).thenReturn(Optional.of("not authorized"));
+        when(authorizer.refusal(any(), any(), any(), any(), anyList())).thenReturn(Optional.of("not authorized"));
         RedshiftDataParameters parameters = parameters("dev");
         parameters.setSql("$.detail.missing");
 
@@ -242,7 +243,7 @@ class EventBridgeRedshiftTargetAuthorizationTest {
 
         invoker.invokeTarget(target(CLUSTER_ARN, parameters), EVENT, "us-east-1", ruleArn);
 
-        verify(authorizer).refusal(eq(ROLE_ARN), eq(ACCOUNT), eq(ruleArn), anyList());
+        verify(authorizer).refusal(eq("events.amazonaws.com"), eq(ROLE_ARN), eq(ACCOUNT), eq(ruleArn), anyList());
     }
 
     @Test
@@ -252,13 +253,13 @@ class EventBridgeRedshiftTargetAuthorizationTest {
 
         invoker.invokeTarget(target(CLUSTER_ARN, parameters), EVENT, "us-east-1");
 
-        verify(authorizer).refusal(eq(ROLE_ARN), eq(ACCOUNT), isNull(), anyList());
+        verify(authorizer).refusal(eq("events.amazonaws.com"), eq(ROLE_ARN), eq(ACCOUNT), isNull(), anyList());
     }
 
     private List<Permission> permissions() {
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Permission>> captor = ArgumentCaptor.forClass(List.class);
-        verify(authorizer).refusal(eq(ROLE_ARN), eq(ACCOUNT), any(), captor.capture());
+        verify(authorizer).refusal(eq("events.amazonaws.com"), eq(ROLE_ARN), eq(ACCOUNT), any(), captor.capture());
         return captor.getValue();
     }
 

@@ -339,14 +339,20 @@ public class PipesService implements TagHandler, ResourceProvider {
 
     /**
      * A Redshift target runs its {@code Sqls} as one BatchExecuteStatement, which the PipeTargetRedshiftDataParameters
-     * reference makes required, with 1 to 40 statements of at most 100,000 characters each.
+     * reference makes required together with {@code Database}, with 1 to 40 statements of at most 100,000
+     * characters each.
      */
     private void validateTargetConfiguration(String target, JsonNode targetParameters) {
         if (!PipesTargetInvoker.isRedshiftTarget(target)) {
             return;
         }
-        JsonNode sqls = targetParameters == null
-                ? MissingNode.getInstance() : targetParameters.path("RedshiftDataParameters").path("Sqls");
+        JsonNode parameters = targetParameters == null
+                ? MissingNode.getInstance() : targetParameters.path("RedshiftDataParameters");
+        if (!parameters.path("Database").isTextual() || parameters.path("Database").asText().isBlank()) {
+            throw new AwsException("ValidationException",
+                    "TargetParameters.RedshiftDataParameters.Database is required for a Redshift target.", 400);
+        }
+        JsonNode sqls = parameters.path("Sqls");
         if (!sqls.isArray() || sqls.size() < MIN_REDSHIFT_SQLS || sqls.size() > MAX_REDSHIFT_SQLS) {
             throw new AwsException("ValidationException",
                     "TargetParameters.RedshiftDataParameters.Sqls must hold between " + MIN_REDSHIFT_SQLS

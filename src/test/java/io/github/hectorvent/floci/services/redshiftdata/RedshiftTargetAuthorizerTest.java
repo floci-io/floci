@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.eventbridge;
+package io.github.hectorvent.floci.services.redshiftdata;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -24,7 +24,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
-class EventBridgeRedshiftTargetAuthorizerTest {
+class RedshiftTargetAuthorizerTest {
     private static final String ACCOUNT_ID = "123456789012";
     private static final String ROLE_ARN = "arn:aws:iam::" + ACCOUNT_ID + ":role/events-redshift";
     private static final String CLUSTER = "arn:aws:redshift:us-east-1:" + ACCOUNT_ID + ":cluster:warehouse";
@@ -35,13 +35,16 @@ class EventBridgeRedshiftTargetAuthorizerTest {
     private static final String ALLOW_EXECUTE = """
             {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
             "Action":"redshift-data:ExecuteStatement","Resource":"*"}]}""";
+    private static final String EVENTS = "events.amazonaws.com";
+    private static final String PIPES = "pipes.amazonaws.com";
+    private static final String PIPE_ARN = "arn:aws:pipes:us-east-1:" + ACCOUNT_ID + ":pipe/load";
     private static final String RULE_ARN = "arn:aws:events:us-east-1:" + ACCOUNT_ID + ":rule/refresh";
     private static final Permission EXECUTE = new Permission("redshift-data:ExecuteStatement", CLUSTER);
 
     private EmulatorConfig config;
     private IamService iamService;
     private ScpProvider scps;
-    private EventBridgeRedshiftTargetAuthorizer authorizer;
+    private RedshiftTargetAuthorizer authorizer;
 
     @BeforeEach
     @SuppressWarnings("unchecked")
@@ -56,7 +59,7 @@ class EventBridgeRedshiftTargetAuthorizerTest {
         when(scpProvider.get()).thenReturn(scps);
         ServiceRoleAuthorizer serviceRoleAuthorizer = new ServiceRoleAuthorizer(config, iamService, evaluator,
                 new AssumeRolePolicyEvaluator(new ObjectMapper(), evaluator), scpProvider);
-        authorizer = new EventBridgeRedshiftTargetAuthorizer(config, serviceRoleAuthorizer);
+        authorizer = new RedshiftTargetAuthorizer(config, serviceRoleAuthorizer);
     }
 
     private void role(String trust, String... policies) {
@@ -69,14 +72,14 @@ class EventBridgeRedshiftTargetAuthorizerTest {
     void trustedRoleWithThePermissionIsAllowed() {
         role(TRUST, ALLOW_EXECUTE);
 
-        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isEmpty());
+        assertTrue(authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isEmpty());
     }
 
     @Test
     void nothingIsCheckedWhileIamEnforcementIsOff() {
         when(config.services().iam().enforcementEnabled()).thenReturn(false);
 
-        assertTrue(authorizer.refusal("not-an-arn", ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isEmpty());
+        assertTrue(authorizer.refusal(EVENTS, "not-an-arn", ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isEmpty());
         verifyNoInteractions(iamService);
     }
 
@@ -84,19 +87,19 @@ class EventBridgeRedshiftTargetAuthorizerTest {
     void missingRoleIsRefused() {
         when(iamService.findRole(ACCOUNT_ID, "events-redshift")).thenReturn(Optional.empty());
 
-        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).orElseThrow()
+        assertTrue(authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).orElseThrow()
                 .contains("does not exist"));
     }
 
     @Test
     void roleWithoutAnArnIsRefused() {
-        assertTrue(authorizer.refusal(null, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).orElseThrow()
+        assertTrue(authorizer.refusal(EVENTS, null, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).orElseThrow()
                 .contains("requires an IAM role"));
     }
 
     @Test
     void roleOfAnotherAccountIsRefused() {
-        assertTrue(authorizer.refusal("arn:aws:iam::999999999999:role/events-redshift", ACCOUNT_ID, RULE_ARN,
+        assertTrue(authorizer.refusal(EVENTS, "arn:aws:iam::999999999999:role/events-redshift", ACCOUNT_ID, RULE_ARN,
                 List.of(EXECUTE)).orElseThrow().contains("belongs to another account"));
     }
 
@@ -106,7 +109,7 @@ class EventBridgeRedshiftTargetAuthorizerTest {
                 {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
                 "Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}""", ALLOW_EXECUTE);
 
-        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).orElseThrow()
+        assertTrue(authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).orElseThrow()
                 .contains("does not trust events.amazonaws.com"));
     }
 
@@ -118,7 +121,7 @@ class EventBridgeRedshiftTargetAuthorizerTest {
 
         assertEquals("The role " + ROLE_ARN + " is not authorized to perform redshift-data:ExecuteStatement on "
                         + CLUSTER + ".",
-                authorizer.refusal(ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).orElseThrow());
+                authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).orElseThrow());
     }
 
     @Test
@@ -126,7 +129,7 @@ class EventBridgeRedshiftTargetAuthorizerTest {
         role(TRUST, ALLOW_EXECUTE);
         Permission secret = new Permission("secretsmanager:GetSecretValue", SECRET);
 
-        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE, secret)).orElseThrow()
+        assertTrue(authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE, secret)).orElseThrow()
                 .contains("secretsmanager:GetSecretValue on " + SECRET));
     }
 
@@ -136,7 +139,7 @@ class EventBridgeRedshiftTargetAuthorizerTest {
                 {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
                 "Action":"secretsmanager:GetSecretValue","Resource":"%s"}]}""".formatted(SECRET));
 
-        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, RULE_ARN,
+        assertTrue(authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, RULE_ARN,
                 List.of(EXECUTE, new Permission("secretsmanager:GetSecretValue", SECRET))).isEmpty());
     }
 
@@ -147,7 +150,7 @@ class EventBridgeRedshiftTargetAuthorizerTest {
                 "Action":"redshift-data:ExecuteStatement",
                 "Resource":"arn:aws:redshift:us-east-1:%s:cluster:other"}]}""".formatted(ACCOUNT_ID));
 
-        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isPresent());
+        assertTrue(authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isPresent());
     }
 
     @Test
@@ -156,7 +159,7 @@ class EventBridgeRedshiftTargetAuthorizerTest {
                 {"Version":"2012-10-17","Statement":[{"Effect":"Deny",
                 "Action":"redshift-data:ExecuteStatement","Resource":"*"}]}""");
 
-        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isPresent());
+        assertTrue(authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isPresent());
     }
 
     @Test
@@ -166,7 +169,7 @@ class EventBridgeRedshiftTargetAuthorizerTest {
                 {"Version":"2012-10-17","Statement":[{"Effect":"Deny",
                 "Action":"redshift-data:ExecuteStatement","Resource":"*"}]}""")));
 
-        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isPresent());
+        assertTrue(authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isPresent());
     }
 
     @Test
@@ -177,21 +180,21 @@ class EventBridgeRedshiftTargetAuthorizerTest {
                         {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
                         "Action":"s3:*","Resource":"*"}]}"""));
 
-        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isPresent());
+        assertTrue(authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isPresent());
     }
 
     @Test
     void trustPolicyNamingTheMatchedRuleInSourceArnIsAllowed() {
         role(sourceArnTrust(RULE_ARN), ALLOW_EXECUTE);
 
-        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isEmpty());
+        assertTrue(authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isEmpty());
     }
 
     @Test
     void trustPolicyNamingAnotherRuleInSourceArnIsRefused() {
         role(sourceArnTrust("arn:aws:events:us-east-1:" + ACCOUNT_ID + ":rule/other"), ALLOW_EXECUTE);
 
-        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).orElseThrow()
+        assertTrue(authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).orElseThrow()
                 .contains("does not trust events.amazonaws.com"));
     }
 
@@ -199,7 +202,7 @@ class EventBridgeRedshiftTargetAuthorizerTest {
     void sourceArnConditionDoesNotMatchWhenTheRuleIsUnknown() {
         role(sourceArnTrust(RULE_ARN), ALLOW_EXECUTE);
 
-        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, null, List.of(EXECUTE)).isPresent());
+        assertTrue(authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, null, List.of(EXECUTE)).isPresent());
     }
 
     private static String sourceArnTrust(String ruleArn) {
@@ -216,6 +219,29 @@ class EventBridgeRedshiftTargetAuthorizerTest {
                 "Principal":{"Service":"events.amazonaws.com"},"Action":"sts:AssumeRole",
                 "Condition":{"StringEquals":{"aws:SourceAccount":"999999999999"}}}]}""", ALLOW_EXECUTE);
 
-        assertTrue(authorizer.refusal(ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isPresent());
+        assertTrue(authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isPresent());
+    }
+
+    @Test
+    void theRoleHasToTrustThePrincipalOfTheServiceThatDelivers() {
+        role(TRUST, ALLOW_EXECUTE);
+
+        assertTrue(authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isEmpty());
+        assertTrue(authorizer.refusal(PIPES, ROLE_ARN, ACCOUNT_ID, PIPE_ARN, List.of(EXECUTE)).orElseThrow()
+                .contains("does not trust pipes.amazonaws.com"));
+
+        role(TRUST.replace(EVENTS, PIPES), ALLOW_EXECUTE);
+
+        assertTrue(authorizer.refusal(PIPES, ROLE_ARN, ACCOUNT_ID, PIPE_ARN, List.of(EXECUTE)).isEmpty());
+        assertTrue(authorizer.refusal(EVENTS, ROLE_ARN, ACCOUNT_ID, RULE_ARN, List.of(EXECUTE)).isPresent());
+    }
+
+    @Test
+    void trustPolicyNamingThePipeInSourceArnIsAllowedForPipes() {
+        role(sourceArnTrust(PIPE_ARN).replace(EVENTS, PIPES), ALLOW_EXECUTE);
+
+        assertTrue(authorizer.refusal(PIPES, ROLE_ARN, ACCOUNT_ID, PIPE_ARN, List.of(EXECUTE)).isEmpty());
+        assertTrue(authorizer.refusal(PIPES, ROLE_ARN, ACCOUNT_ID, PIPE_ARN + "-other", List.of(EXECUTE))
+                .isPresent());
     }
 }

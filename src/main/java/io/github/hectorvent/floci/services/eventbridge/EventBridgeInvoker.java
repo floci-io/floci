@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.services.batch.BatchService;
@@ -30,6 +31,7 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataTargetSubmitter;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftTargetAuthorizer;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
@@ -67,6 +69,7 @@ public class EventBridgeInvoker {
     // AWS can't route an event from a sender bus on to a third bus; the second hop is dropped.
     private static final int MAX_BUS_TO_BUS_DEPTH = 1;
     private static final int MAX_IDLE_RATE_WINDOWS = 256;
+    private static final String EVENTS_PRINCIPAL = ServicePrincipals.of("events");
     private static final Pattern DYNAMIC_PARAMETER_PATH =
             Pattern.compile("\\$(?:\\.[\\w*/-]+|\\[\\d+\\])+");
     // Headers the JDK HttpClient manages itself; setting them by hand throws IllegalArgumentException.
@@ -84,7 +87,7 @@ public class EventBridgeInvoker {
     private final EcsJsonHandler ecsJsonHandler;
     private final StepFunctionsService stepFunctionsService;
     private final RedshiftDataService redshiftDataService;
-    private final EventBridgeRedshiftTargetAuthorizer redshiftTargetAuthorizer;
+    private final RedshiftTargetAuthorizer redshiftTargetAuthorizer;
     private final RedshiftDataTargetSubmitter redshiftSubmitter;
     private final ServiceRegistry serviceRegistry;
     private final RegionResolver regionResolver;
@@ -104,7 +107,7 @@ public class EventBridgeInvoker {
                               EcsJsonHandler ecsJsonHandler,
                               StepFunctionsService stepFunctionsService,
                               RedshiftDataService redshiftDataService,
-                              EventBridgeRedshiftTargetAuthorizer redshiftTargetAuthorizer,
+                              RedshiftTargetAuthorizer redshiftTargetAuthorizer,
                               ServiceRegistry serviceRegistry,
                               RegionResolver regionResolver,
                               ObjectMapper objectMapper,
@@ -125,7 +128,7 @@ public class EventBridgeInvoker {
                        EcsJsonHandler ecsJsonHandler,
                        StepFunctionsService stepFunctionsService,
                        RedshiftDataService redshiftDataService,
-                       EventBridgeRedshiftTargetAuthorizer redshiftTargetAuthorizer,
+                       RedshiftTargetAuthorizer redshiftTargetAuthorizer,
                        ServiceRegistry serviceRegistry,
                        RegionResolver regionResolver,
                        ObjectMapper objectMapper,
@@ -372,7 +375,8 @@ public class EventBridgeInvoker {
         redshiftSubmitter.submit(targetArn, statement, target.getRoleArn(), ruleAccount, targetRegion,
                 value -> resolveRedshiftParameter(value, eventJson),
                 permissions -> redshiftTargetAuthorizer == null ? Optional.empty()
-                        : redshiftTargetAuthorizer.refusal(target.getRoleArn(), ruleAccount, ruleArn, permissions));
+                        : redshiftTargetAuthorizer.refusal(EVENTS_PRINCIPAL, target.getRoleArn(), ruleAccount,
+                                ruleArn, permissions));
     }
 
     private String resolveRedshiftParameter(String value, String eventJson) {

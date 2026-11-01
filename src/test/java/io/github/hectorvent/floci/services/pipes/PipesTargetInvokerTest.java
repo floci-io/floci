@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataTargetSubmitter;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftTargetAuthorizer;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
@@ -46,7 +47,7 @@ class PipesTargetInvokerTest {
     @Mock private EventBridgeService eventBridgeService;
     @Mock private StepFunctionsService stepFunctionsService;
     @Mock private RedshiftDataTargetSubmitter redshiftSubmitter;
-    @Mock private PipesRedshiftTargetAuthorizer redshiftAuthorizer;
+    @Mock private RedshiftTargetAuthorizer redshiftAuthorizer;
     @Mock private ServiceRegistry serviceRegistry;
     @Mock private EmulatorConfig config;
 
@@ -96,7 +97,7 @@ class PipesTargetInvokerTest {
         assertEquals("INSERT INTO t VALUES (1)", resolver.getValue().apply("$.body.first"));
         assertEquals("INSERT INTO t VALUES (2)", resolver.getValue().apply("INSERT INTO t VALUES (2)"));
         roleCheck.getValue().refusal(List.of());
-        verify(redshiftAuthorizer).refusal(PIPE_ROLE, "000000000000", pipe.getArn(), List.of());
+        verify(redshiftAuthorizer).refusal("pipes.amazonaws.com", PIPE_ROLE, "000000000000", pipe.getArn(), List.of());
         verifyNoInteractions(lambdaService, sqsService, snsService, eventBridgeService, stepFunctionsService);
     }
 
@@ -130,6 +131,44 @@ class PipesTargetInvokerTest {
         verify(redshiftSubmitter).submit(any(), any(), any(), any(), any(), resolver.capture(), any());
         assertEquals("INSERT INTO t VALUES (1)", resolver.getValue().apply("$.value.statement"));
         assertEquals("order-1", resolver.getValue().apply("$.key"));
+    }
+
+    @Test
+    void redshiftTarget_readsPathsFromAKinesisDataDeliveredAsBase64() throws Exception {
+        when(serviceRegistry.isServiceEnabled("redshift-data")).thenReturn(true);
+        Pipe pipe = redshiftPipe("{\"RedshiftDataParameters\":{\"Database\":\"dev\","
+                + "\"Sqls\":[\"$[0].kinesis.data.statement\",\"$[0].kinesis.data\"]}}");
+        String data = Base64.getEncoder().encodeToString(
+                "{\"statement\":\"INSERT INTO t VALUES (1)\"}".getBytes(StandardCharsets.UTF_8));
+        String event = "[{\"eventSource\":\"aws:kinesis\",\"kinesis\":{\"partitionKey\":\"p\",\"data\":\""
+                + data + "\"}}]";
+
+        invoker.invoke(pipe, event, "us-east-1");
+
+        ArgumentCaptor<UnaryOperator<String>> resolver = ArgumentCaptor.captor();
+        verify(redshiftSubmitter).submit(any(), any(), any(), any(), any(), resolver.capture(), any());
+        assertEquals("INSERT INTO t VALUES (1)", resolver.getValue().apply("$[0].kinesis.data.statement"));
+        assertEquals("{\"statement\":\"INSERT INTO t VALUES (1)\"}", resolver.getValue().apply("$[0].kinesis.data"));
+    }
+
+    @Test
+    void extractJsonPath_decodesBase64DataKeyAndValueButNotBody() {
+        String encoded = Base64.getEncoder().encodeToString("hello".getBytes(StandardCharsets.UTF_8));
+        String json = "{\"data\":\"" + encoded + "\",\"key\":\"" + encoded + "\",\"value\":\"" + encoded
+                + "\",\"body\":\"" + encoded + "\"}";
+
+        assertEquals("\"hello\"", invoker.extractJsonPath("$.data", json));
+        assertEquals("\"hello\"", invoker.extractJsonPath("$.key", json));
+        assertEquals("\"hello\"", invoker.extractJsonPath("$.value", json));
+        assertEquals("\"" + encoded + "\"", invoker.extractJsonPath("$.body", json));
+    }
+
+    @Test
+    void inputTemplate_readsAFieldOfBase64KinesisData() {
+        String data = Base64.getEncoder().encodeToString("{\"id\":7}".getBytes(StandardCharsets.UTF_8));
+        String event = "{\"kinesis\":{\"data\":\"" + data + "\"}}";
+
+        assertEquals("{\"id\": 7}", invoker.applyInputTemplate("{\"id\": <$.kinesis.data.id>}", event));
     }
 
     @Test

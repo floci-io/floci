@@ -292,9 +292,10 @@ class PipesServiceTest {
                 "null",
                 "{}",
                 "{\"RedshiftDataParameters\":{\"Database\":\"dev\"}}",
-                "{\"RedshiftDataParameters\":{\"Sqls\":[]}}",
-                "{\"RedshiftDataParameters\":{\"Sqls\":[" + "\"SELECT 1\",".repeat(40) + "\"SELECT 1\"]}}",
-                "{\"RedshiftDataParameters\":{\"Sqls\":[1]}}")) {
+                "{\"RedshiftDataParameters\":{\"Database\":\"dev\",\"Sqls\":[]}}",
+                "{\"RedshiftDataParameters\":{\"Database\":\"dev\",\"Sqls\":["
+                        + "\"SELECT 1\",".repeat(40) + "\"SELECT 1\"]}}",
+                "{\"RedshiftDataParameters\":{\"Database\":\"dev\",\"Sqls\":[1]}}")) {
             AwsException error = assertThrows(AwsException.class,
                     () -> createRedshiftPipe("bad-redshift-pipe", sourceParameters(parameters)),
                     parameters);
@@ -304,9 +305,23 @@ class PipesServiceTest {
     }
 
     @Test
+    void createPipeWithARedshiftTargetRequiresADatabase() {
+        for (String parameters : List.of(
+                "{\"RedshiftDataParameters\":{\"Sqls\":[\"SELECT 1\"]}}",
+                "{\"RedshiftDataParameters\":{\"Database\":\"\",\"Sqls\":[\"SELECT 1\"]}}",
+                "{\"RedshiftDataParameters\":{\"Database\":1,\"Sqls\":[\"SELECT 1\"]}}")) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> createRedshiftPipe("no-database-pipe", sourceParameters(parameters)),
+                    parameters);
+            assertEquals("ValidationException", error.getErrorCode());
+            assertTrue(error.getMessage().contains("Database"), parameters);
+        }
+    }
+
+    @Test
     void createPipeRefusesARedshiftSqlOverTheLengthLimit() {
-        JsonNode parameters = sourceParameters(
-                "{\"RedshiftDataParameters\":{\"Sqls\":[\"" + "x".repeat(100_001) + "\"]}}");
+        JsonNode parameters = sourceParameters("{\"RedshiftDataParameters\":{\"Database\":\"dev\",\"Sqls\":[\""
+                + "x".repeat(100_001) + "\"]}}");
 
         AwsException error = assertThrows(AwsException.class, () -> createRedshiftPipe("long-sql-pipe", parameters));
 
@@ -316,10 +331,11 @@ class PipesServiceTest {
     @Test
     void updatePipeValidatesTheRedshiftTargetItWillHave() {
         createRedshiftPipe("update-redshift-pipe", sourceParameters(
-                "{\"RedshiftDataParameters\":{\"Sqls\":[\"SELECT 1\"]}}"));
+                "{\"RedshiftDataParameters\":{\"Database\":\"dev\",\"Sqls\":[\"SELECT 1\"]}}"));
 
         AwsException error = assertThrows(AwsException.class, () -> pipesService.updatePipe("update-redshift-pipe",
-                null, null, null, null, null, null, sourceParameters("{\"RedshiftDataParameters\":{\"Sqls\":[]}}"),
+                null, null, null, null, null, null,
+                sourceParameters("{\"RedshiftDataParameters\":{\"Database\":\"dev\",\"Sqls\":[]}}"),
                 null, "us-east-1"));
         assertEquals("ValidationException", error.getErrorCode());
 

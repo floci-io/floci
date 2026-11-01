@@ -4,10 +4,10 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.MissingNode;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataTargetSubmitter;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftTargetAuthorizer;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
@@ -40,6 +41,7 @@ public class PipesTargetInvoker {
     private static final Pattern TEMPLATE_PLACEHOLDER =
             Pattern.compile("<(\\$[^>]+|aws\\.pipes\\.event\\.ingestion-time)>");
     private static final Pattern ARRAY_INDEX = Pattern.compile("^(.*?)\\[(\\d+)]$");
+    private static final String PIPES_PRINCIPAL = ServicePrincipals.of("pipes");
     private static final Pattern DYNAMIC_PARAMETER_PATH =
             Pattern.compile("\\$(?:\\.[\\w*/-]+|\\[\\d+\\])+");
 
@@ -49,7 +51,7 @@ public class PipesTargetInvoker {
     private final EventBridgeService eventBridgeService;
     private final StepFunctionsService stepFunctionsService;
     private final RedshiftDataTargetSubmitter redshiftSubmitter;
-    private final PipesRedshiftTargetAuthorizer redshiftTargetAuthorizer;
+    private final RedshiftTargetAuthorizer redshiftTargetAuthorizer;
     private final ServiceRegistry serviceRegistry;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
@@ -61,7 +63,7 @@ public class PipesTargetInvoker {
                               EventBridgeService eventBridgeService,
                               StepFunctionsService stepFunctionsService,
                               RedshiftDataTargetSubmitter redshiftSubmitter,
-                              PipesRedshiftTargetAuthorizer redshiftTargetAuthorizer,
+                              RedshiftTargetAuthorizer redshiftTargetAuthorizer,
                               ServiceRegistry serviceRegistry,
                               ObjectMapper objectMapper,
                               EmulatorConfig config) {
@@ -275,72 +277,11 @@ public class PipesTargetInvoker {
                 text(parameters, "Database"), text(parameters, "DbUser"), text(parameters, "SecretManagerArn"),
                 null, sqls, text(parameters, "StatementName"),
                 parameters.path("WithEvent").isBoolean() ? parameters.get("WithEvent").asBoolean() : null);
-        String pathSource = withDecodedKafkaFields(payload);
         redshiftSubmitter.submit(targetArn, statement, pipe.getRoleArn(), account, targetRegion,
-                value -> resolveRedshiftParameter(value, pathSource),
+                value -> resolveRedshiftParameter(value, payload),
                 permissions -> redshiftTargetAuthorizer.refusal(
-                        pipe.getRoleArn(), account, pipe.getArn(), permissions));
+                        PIPES_PRINCIPAL, pipe.getRoleArn(), account, pipe.getArn(), permissions));
         LOG.debugv("Pipe delivered to Redshift Data API: {0}", targetArn);
-    }
-
-    /**
-     * Kafka delivers {@code key} and {@code value} as base64, so a path into them would read the base64 text.
-     * Decode them first, parsing JSON when the bytes are JSON, so {@code $.value.statement} selects a field.
-     */
-    private String withDecodedKafkaFields(String payload) {
-        if (payload == null) {
-            return null;
-        }
-        try {
-            JsonNode root = objectMapper.readTree(payload);
-            if (root == null) {
-                return payload;
-            }
-            boolean changed = false;
-            if (root.isArray()) {
-                for (JsonNode element : root) {
-                    changed |= decodeKafkaRecord(element);
-                }
-            } else {
-                changed = decodeKafkaRecord(root);
-            }
-            return changed ? root.toString() : payload;
-        } catch (JsonProcessingException e) {
-            LOG.debugv("Pipe event is not JSON, Kafka fields are left as they are: {0}", e.getOriginalMessage());
-            return payload;
-        }
-    }
-
-    private boolean decodeKafkaRecord(JsonNode record) {
-        if (!record.isObject() || !isKafkaEventSource(record.path("eventSource").asText())) {
-            return false;
-        }
-        ObjectNode object = (ObjectNode) record;
-        boolean changed = false;
-        for (String field : List.of("key", "value")) {
-            JsonNode encoded = object.path(field);
-            if (!encoded.isTextual()) {
-                continue;
-            }
-            String decoded;
-            try {
-                decoded = new String(Base64.getDecoder().decode(encoded.asText()), StandardCharsets.UTF_8);
-            } catch (IllegalArgumentException e) {
-                LOG.debugv("Kafka {0} is not base64, left as it is: {1}", field, e.getMessage());
-                continue;
-            }
-            try {
-                object.set(field, objectMapper.readTree(decoded));
-            } catch (JsonProcessingException e) {
-                object.put(field, decoded);
-            }
-            changed = true;
-        }
-        return changed;
-    }
-
-    private static boolean isKafkaEventSource(String eventSource) {
-        return "aws:kafka".equals(eventSource) || "SelfManagedKafka".equals(eventSource);
     }
 
     private static String text(JsonNode parent, String field) {
@@ -442,7 +383,7 @@ public class PipesTargetInvoker {
                 // AWS Pipes parses an encoded source body when traversing into it.
                 if (!sourceFieldDecoded && isEncodedSourceField(previousSegment) && current.isTextual()) {
                     try {
-                        JsonNode decoded = objectMapper.readTree(current.asText());
+                        JsonNode decoded = objectMapper.readTree(decodedSourceText(previousSegment, current.asText()));
                         if (decoded != null && (decoded.isObject() || decoded.isArray())) {
                             current = decoded;
                         }
@@ -464,14 +405,17 @@ public class PipesTargetInvoker {
             if (!sourceFieldDecoded && isEncodedSourceField(previousSegment) && current.isTextual()) {
                 // SQS bodies commonly contain a JSON document as a string. Pipes input
                 // transformation resolves that document when the body itself is selected.
+                String text = decodedSourceText(previousSegment, current.asText());
                 try {
-                    JsonNode decoded = objectMapper.readTree(current.asText());
-                    sourceFieldDecoded = true;
+                    JsonNode decoded = objectMapper.readTree(text);
                     if (decoded != null && (decoded.isObject() || decoded.isArray())) {
                         return decoded.toString();
                     }
                 } catch (JsonProcessingException ignored) {
                     // Keep ordinary textual fields as JSON strings.
+                }
+                if (!text.equals(current.asText())) {
+                    return objectMapper.writeValueAsString(text);
                 }
             }
             if (current.isValueNode()) {
@@ -481,6 +425,22 @@ public class PipesTargetInvoker {
         } catch (Exception e) {
             LOG.warnv("Failed to extract JSONPath {0}: {1}", jsonPath, e.getMessage());
             return null;
+        }
+    }
+
+    /**
+     * Kinesis {@code data} and Kafka {@code key} and {@code value} arrive as base64, so a path into them has to
+     * read the decoded bytes. An SQS {@code body} is already text, and text that is not base64 stays as it is.
+     */
+    private static String decodedSourceText(String field, String text) {
+        if ("body".equals(field)) {
+            return text;
+        }
+        try {
+            return new String(Base64.getDecoder().decode(text), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException expected) {
+            // Not base64, so the field holds plain text such as an inline JSON document.
+            return text;
         }
     }
 
