@@ -604,7 +604,8 @@ public class FlowLogService {
             return null;
         }
         String name = resource.substring("log-group:".length());
-        return name.endsWith(":*") ? name.substring(0, name.length() - 2) : name;
+        name = name.endsWith(":*") ? name.substring(0, name.length() - 2) : name;
+        return name.isBlank() ? null : name;
     }
 
     static String bucketFromArn(String arn) {

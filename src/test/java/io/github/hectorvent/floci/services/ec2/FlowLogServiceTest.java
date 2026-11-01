@@ -286,6 +286,14 @@ class FlowLogServiceTest {
     }
 
     @Test
+    void aLogsArnWithNoGroupNameIsNotACloudWatchDestination() {
+        assertNull(FlowLogService.logGroupFromArn("arn:aws:logs:us-east-1:000000000000:log-group:"));
+        assertNull(FlowLogService.logGroupFromArn("arn:aws:logs:us-east-1:000000000000:log-group::*"));
+        assertEquals("s3", FlowLogService.effectiveLogDestinationType(null,
+                "arn:aws:logs:us-east-1:000000000000:log-group:", null));
+    }
+
+    @Test
     void bucketComesFromTheS3ArnEvenWhenThePrefixHasAColon() {
         assertEquals("bkt", FlowLogService.bucketFromArn("arn:aws:s3:::bkt/logs:2024/"));
         assertEquals("bkt", FlowLogService.bucketFromArn("arn:aws-cn:s3:::bkt"));
