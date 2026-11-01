@@ -293,6 +293,7 @@ class RedshiftServerlessRuntimeTest {
 
         assertEquals(32, first.length());
         assertTrue(first.matches("[A-Za-z0-9]+"), first);
+        assertTrue(first.matches(".*[A-Z].*") && first.matches(".*[a-z].*") && first.matches(".*[0-9].*"), first);
         assertNotEquals(first, second);
     }
 }

@@ -199,11 +199,15 @@ public class RedshiftServerlessRuntime {
     }
 
     public String generatePassword() {
-        StringBuilder password = new StringBuilder(GENERATED_PASSWORD_LENGTH);
-        for (int i = 0; i < GENERATED_PASSWORD_LENGTH; i++) {
-            password.append(PASSWORD_ALPHABET.charAt(random.nextInt(PASSWORD_ALPHABET.length())));
-        }
-        return password.toString();
+        String password;
+        do {
+            StringBuilder sb = new StringBuilder(GENERATED_PASSWORD_LENGTH);
+            for (int i = 0; i < GENERATED_PASSWORD_LENGTH; i++) {
+                sb.append(PASSWORD_ALPHABET.charAt(random.nextInt(PASSWORD_ALPHABET.length())));
+            }
+            password = sb.toString();
+        } while (!password.matches(".*[A-Z].*") || !password.matches(".*[a-z].*") || !password.matches(".*[0-9].*"));
+        return password;
     }
 
     private void rollback(String accountId, String backendId) {
