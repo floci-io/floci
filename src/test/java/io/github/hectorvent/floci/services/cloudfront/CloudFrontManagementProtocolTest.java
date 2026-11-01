@@ -483,7 +483,7 @@ class CloudFrontManagementProtocolTest {
     @ValueSource(strings = {"cache-policy", "origin-request-policy", "response-headers-policy"})
     void policyCommentRoundTripsWithSurroundingWhitespace(String endpoint) {
         String name = "padded-" + UUID.randomUUID();
-        String comment = "  padded comment  ";
+        String comment = "\n  padded comment  \n";
         String body = switch (endpoint) {
             case "cache-policy" -> cachePolicyBody(name, comment, "3600", "session");
             case "origin-request-policy" -> originRequestPolicyBody(name, comment, "X-Hdr");
@@ -501,6 +501,36 @@ class CloudFrontManagementProtocolTest {
             given().header("If-Match", created.header("ETag")).when().delete(API + endpoint + "/" + id)
                     .then().statusCode(204);
         }
+    }
+
+    @ParameterizedTest(name = "{0} keeps the Name's surrounding whitespace")
+    @ValueSource(strings = {"cache-policy", "origin-request-policy"})
+    void policyNameRoundTripsWithSurroundingWhitespace(String endpoint) {
+        String name = "  padded-" + UUID.randomUUID() + "  ";
+        String body = endpoint.equals("cache-policy")
+                ? cachePolicyBody(name, "c", "3600", "session")
+                : originRequestPolicyBody(name, "c", "X-Hdr");
+        Response created = given().contentType("application/xml").body(body)
+                .when().post(API + endpoint);
+        created.then().statusCode(201);
+        String id = XmlParser.extractFirst(created.asString(), "Id", null);
+        try {
+            given().when().get(API + endpoint + "/" + id + "/config").then().statusCode(200)
+                    .body(hasXPath("/*/*[local-name()='Name']/text()", equalTo(name)));
+        } finally {
+            given().header("If-Match", created.header("ETag")).when().delete(API + endpoint + "/" + id)
+                    .then().statusCode(204);
+        }
+    }
+
+    @Test
+    void responseHeadersPolicyRejectsNameWithSurroundingWhitespace() {
+        // Name pattern [A-Za-z0-9_-]{1,128} has no spaces; trimming would wrongly accept it.
+        given().contentType("application/xml")
+                .body("<ResponseHeadersPolicyConfig xmlns=\"http://cloudfront.amazonaws.com/doc/2020-05-31/\">"
+                        + "<Name>  padded-" + UUID.randomUUID() + "  </Name></ResponseHeadersPolicyConfig>")
+                .when().post(API + "response-headers-policy")
+                .then().statusCode(400);
     }
 
     @Test
