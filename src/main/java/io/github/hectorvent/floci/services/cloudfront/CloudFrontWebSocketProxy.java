@@ -140,7 +140,8 @@ public class CloudFrontWebSocketProxy {
         // The origin's timeouts bound its answer to the handshake, and the body of an answer that
         // refuses the upgrade. Once the tunnel is open, data flows at the pace of the two ends.
         AtomicBoolean answered = new AtomicBoolean();
-        OriginClock clock = new OriginClock(vertx, origin.responseTimeout(), origin.responseCompletionTimeout());
+        OriginClock clock = new OriginClock(vertx, origin.responseTimeout(),
+                new CloudFrontOriginHttpClient.CompletionBudget(origin.responseCompletionTimeout(), System::nanoTime));
         clock.onTimeout(() -> {
             if (answered.compareAndSet(false, true)) {
                 originRequest.reset();
@@ -236,26 +237,24 @@ public class CloudFrontWebSocketProxy {
     /**
      * The time the origin takes, bounded as CloudFront bounds it: no longer than the origin's response
      * timeout between one packet and the next, and no longer than its response completion timeout in
-     * all, when it has one. Only armed time counts, so a viewer that reads slowly does not use up the
-     * origin's time. Every method runs on the request's event loop.
+     * all, when it has one. Only armed time is spent from the
+     * {@link CloudFrontOriginHttpClient.CompletionBudget}, so a viewer that reads slowly does not use
+     * up the origin's time. Every method runs on the request's event loop.
      */
     static final class OriginClock {
 
         private final Vertx vertx;
         private final long readTimeoutMillis;
-        private final boolean completionLimited;
-        private long completionRemainingNanos;
+        private final CloudFrontOriginHttpClient.CompletionBudget budget;
         private Runnable onTimeout = () -> { };
         private long timerId = -1;
         private long armedAt;
         private boolean stopped;
 
-        OriginClock(Vertx vertx, Duration readTimeout, Duration completionTimeout) {
+        OriginClock(Vertx vertx, Duration readTimeout, CloudFrontOriginHttpClient.CompletionBudget budget) {
             this.vertx = vertx;
             this.readTimeoutMillis = Math.max(1, readTimeout.toMillis());
-            this.completionLimited = completionTimeout != null && !completionTimeout.isZero()
-                    && !completionTimeout.isNegative();
-            this.completionRemainingNanos = completionLimited ? completionTimeout.toNanos() : Long.MAX_VALUE;
+            this.budget = budget;
         }
 
         void onTimeout(Runnable onTimeout) {
@@ -269,10 +268,10 @@ public class CloudFrontWebSocketProxy {
             }
             suspend();
             long delayMillis = readTimeoutMillis;
-            if (completionLimited) {
-                delayMillis = Math.min(delayMillis, Math.max(1, completionRemainingNanos / 1_000_000));
+            if (!budget.unlimited()) {
+                delayMillis = Math.min(delayMillis, Math.max(1, budget.remainingNanos() / 1_000_000));
             }
-            armedAt = System.nanoTime();
+            armedAt = budget.now();
             timerId = vertx.setTimer(delayMillis, ignored -> {
                 timerId = -1;
                 stopped = true;
@@ -287,9 +286,7 @@ public class CloudFrontWebSocketProxy {
             }
             vertx.cancelTimer(timerId);
             timerId = -1;
-            if (completionLimited) {
-                completionRemainingNanos -= System.nanoTime() - armedAt;
-            }
+            budget.spend(budget.now() - armedAt);
         }
 
         void stop() {

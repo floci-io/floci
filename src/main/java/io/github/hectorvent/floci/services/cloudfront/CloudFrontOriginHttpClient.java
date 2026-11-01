@@ -288,7 +288,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
      * viewer that reads slowly never expires a response the origin finished on time. A budget with
      * no limit is the origin's own pace.
      */
-    private static final class CompletionBudget {
+    static final class CompletionBudget {
 
         /** The time the origin may take, in nanoseconds, or 0 when it may take as long as it wants. */
         private final long limitNanos;
