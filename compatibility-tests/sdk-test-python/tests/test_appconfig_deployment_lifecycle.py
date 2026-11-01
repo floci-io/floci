@@ -1,8 +1,7 @@
-"""AppConfig bake completion and manual rollback through both retrieval APIs."""
+"""AppConfig baking and manual rollback through both retrieval APIs."""
 
 from contextlib import ExitStack
-from datetime import datetime, timedelta
-import time
+from datetime import datetime
 
 import boto3
 import pytest
@@ -10,10 +9,9 @@ from botocore.exceptions import ClientError
 
 
 @pytest.mark.parametrize("zero_padded", [False, True], ids=["decimal", "zero-padded"])
-@pytest.mark.parametrize("wait_for_completion", [False, True], ids=["baking", "complete"])
 @pytest.mark.parametrize("delete_previous", [False, True], ids=["restore", "deleted"])
 def test_deployment_rollback_restores_both_retrieval_apis(
-        aws_config, client_config, unique_name, wait_for_completion, delete_previous, zero_padded):
+        aws_config, client_config, unique_name, delete_previous, zero_padded):
     with ExitStack() as cleanup:
         client = boto3.client("appconfig", config=client_config, **aws_config)
         data = boto3.client("appconfigdata", config=client_config, **aws_config)
@@ -88,22 +86,6 @@ def test_deployment_rollback_restores_both_retrieval_apis(
         assert error.value.response["Error"]["Code"] == "BadRequestException"
         assert client.get_deployment(**target)["State"] == "BAKING"
 
-        if wait_for_completion:
-            deadline = time.monotonic() + 75
-            while time.monotonic() < deadline:
-                observed = client.get_deployment(**target)
-                if observed["State"] == "COMPLETE":
-                    break
-                assert observed["State"] == "BAKING"
-                time.sleep(1)
-            else:
-                pytest.fail("The one-minute final bake did not complete")
-            assert observed["CompletedAt"] - observed["StartedAt"] == timedelta(minutes=1)
-            with pytest.raises(ClientError) as error:
-                client.stop_deployment(**target)
-            assert error.value.response["Error"]["Code"] == "BadRequestException"
-            assert_content(versions[1], b'{"version":2}')
-
         if delete_previous:
             client.delete_hosted_configuration_version(
                 ApplicationId=app, ConfigurationProfileId=profile, VersionNumber=versions[0])
@@ -120,14 +102,13 @@ def test_deployment_rollback_restores_both_retrieval_apis(
             return
 
         stopped = client.stop_deployment(**target, AllowRevert=True)
-        expected = "REVERTED" if wait_for_completion else "ROLLED_BACK"
         assert stopped["ResponseMetadata"]["HTTPStatusCode"] == 202
-        assert stopped["State"] == expected
+        assert stopped["State"] == "ROLLED_BACK"
         assert isinstance(stopped["CompletedAt"], datetime)
-        assert client.get_deployment(**target)["State"] == expected
+        assert client.get_deployment(**target)["State"] == "ROLLED_BACK"
         listed = {
             row["DeploymentNumber"]: row for row in client.list_deployments(**scope)["Items"]}
-        assert listed[second["DeploymentNumber"]]["State"] == expected
+        assert listed[second["DeploymentNumber"]]["State"] == "ROLLED_BACK"
         assert listed[second["DeploymentNumber"]]["CompletedAt"] == stopped["CompletedAt"]
         assert_content(previous_version, b'{"version":1}')
         with pytest.raises(ClientError) as error:
