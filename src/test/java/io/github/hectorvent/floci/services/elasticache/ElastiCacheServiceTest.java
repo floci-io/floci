@@ -2054,6 +2054,22 @@ class ElastiCacheServiceTest {
     }
 
     @Test
+    void createCacheClusterWithAuthTokenAndTransitEncryptionDisabledIsRefused() {
+        ElastiCacheService.CreateCacheClusterRequest req = new ElastiCacheService.CreateCacheClusterRequest(
+                "no-tls-auth", "redis", null, null,
+                1, null, AuthMode.PASSWORD, "secret-auth-token", null, null,
+                null, null, null, null, null, null, null, null, "us-east-1", Map.of(), false);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createCacheCluster(req));
+
+        assertEquals("InvalidParameterCombination", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("Transit encryption must be enabled to use an auth token.", ex.getMessage());
+        verify(containerManager, never()).tryStart(eq("no-tls-auth"), anyString(), any());
+        assertTrue(service.findCacheClusters("no-tls-auth").isEmpty());
+    }
+
+    @Test
     void duplicateCacheClusterIdIsRefused() {
         service.createCacheCluster(cacheClusterRequest("dupe", "redis", 1));
 
