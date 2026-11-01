@@ -213,6 +213,7 @@ public class AslExecutor {
      */
     private static final DateTimeFormatter SDK_TIMESTAMP =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
+    private static final Set<String> REDSHIFT_DATA_TIMESTAMPS = Set.of("CreatedAt", "UpdatedAt", "SessionTtl");
 
     private static final Set<String> HTTP_ALLOWED_METHODS = Set.of(
             "GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD");
@@ -261,8 +262,6 @@ public class AslExecutor {
     private final S3Service s3Service;
     private final EcsService ecsService;
     private final EcsJsonHandler ecsJsonHandler;
-    @Inject
-    Instance<SdkManagementTaskInvoker> sdkManagementTaskInvoker;
     private final EventBridgeHandler eventBridgeHandler;
     private final SchedulerService schedulerService;
     private final SchedulerController schedulerController;
@@ -278,6 +277,7 @@ public class AslExecutor {
     private final ApiGatewayTaskInvoker apiGatewayTaskInvoker;
     private final EmrTaskInvoker emrTaskInvoker;
     private final EmrServerlessTaskInvoker emrServerlessTaskInvoker;
+    private final SdkManagementTaskInvoker sdkManagementTaskInvoker;
     private final EmulatorConfig config;
     private final NestedTaskCredentials nestedTaskCredentials;
     private final CustomResourceLiveness customResourceLiveness;
@@ -312,7 +312,8 @@ public class AslExecutor {
                        CustomResourceLiveness customResourceLiveness, RedshiftDataJsonHandler redshiftDataHandler,
                        ServiceRegistry serviceRegistry, NestedTaskCredentials nestedTaskCredentials,
                        LambdaTaskAuthorizer lambdaTaskAuthorizer, ApiGatewayTaskInvoker apiGatewayTaskInvoker,
-                       EmrTaskInvoker emrTaskInvoker, EmrServerlessTaskInvoker emrServerlessTaskInvoker) {
+                       EmrTaskInvoker emrTaskInvoker, EmrServerlessTaskInvoker emrServerlessTaskInvoker,
+                       SdkManagementTaskInvoker sdkManagementTaskInvoker) {
         this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
@@ -320,7 +321,7 @@ public class AslExecutor {
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, redshiftDataHandler, serviceRegistry,
                 nestedTaskCredentials, lambdaTaskAuthorizer, null, null, apiGatewayTaskInvoker, emrTaskInvoker,
-                emrServerlessTaskInvoker, null);
+                emrServerlessTaskInvoker, sdkManagementTaskInvoker, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
@@ -339,10 +340,12 @@ public class AslExecutor {
                 NestedTaskCredentials nestedTaskCredentials, LambdaTaskAuthorizer lambdaTaskAuthorizer,
                 Duration expressMaxExecutionTimeOverride, LongSupplier nanoTimeOverride,
                 ApiGatewayTaskInvoker apiGatewayTaskInvoker, EmrTaskInvoker emrTaskInvoker,
-                EmrServerlessTaskInvoker emrServerlessTaskInvoker, NestedWaiter nestedWaiter) {
+                EmrServerlessTaskInvoker emrServerlessTaskInvoker, SdkManagementTaskInvoker sdkManagementTaskInvoker,
+                NestedWaiter nestedWaiter) {
         this.apiGatewayTaskInvoker = apiGatewayTaskInvoker;
         this.emrTaskInvoker = emrTaskInvoker;
         this.emrServerlessTaskInvoker = emrServerlessTaskInvoker;
+        this.sdkManagementTaskInvoker = sdkManagementTaskInvoker;
         this.nestedTaskCredentials = nestedTaskCredentials;
         this.serviceRegistry = serviceRegistry;
         this.lambdaTaskAuthorizer = lambdaTaskAuthorizer;
@@ -407,7 +410,7 @@ public class AslExecutor {
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null, null, null, null, null, null,
-                null, null);
+                null, null, null);
     }
 
     // Kept for tests that do not exercise the Redshift Data API integration.
@@ -428,7 +431,8 @@ public class AslExecutor {
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
-                clock, sleeper, maxWaitSecondsOverride, null, null, null, null, null, null, null, null, null, null);
+                clock, sleeper, maxWaitSecondsOverride, null, null, null, null, null, null, null, null, null, null,
+                null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
@@ -1462,7 +1466,7 @@ public class AslExecutor {
         }
 
         if (SdkManagementTaskInvoker.supports(integration)) {
-            return sdkManagementTaskInvoker.get().invoke(integration, input, extractRegionFromArn(sm.getStateMachineArn()));
+            return sdkManagementTaskInvoker.invoke(integration, input, extractRegionFromArn(sm.getStateMachineArn()));
         }
 
         // ECS optimized integration: arn:<partition>:states:::ecs:runTask (request-response, .sync, .waitForTaskToken).
@@ -1652,7 +1656,7 @@ public class AslExecutor {
         }
     }
 
-    private static String capitalizeFirst(String s) {
+    static String capitalizeFirst(String s) {
         return s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 
@@ -1696,7 +1700,7 @@ public class AslExecutor {
         return sdkExceptionName("StepFunctions", errorCode);
     }
 
-    static String sdkTimestamp(double epochSeconds) {
+    private static String sdkTimestamp(double epochSeconds) {
         return SDK_TIMESTAMP.format(Instant.ofEpochMilli(Math.round(epochSeconds * 1000)));
     }
 
@@ -2470,6 +2474,16 @@ public class AslExecutor {
      *                   handed to the ECS handlers).
      */
     static JsonNode recaseKeys(ObjectMapper mapper, JsonNode node, boolean upperFirst) {
+        return recaseKeys(mapper, node, upperFirst, Set.of());
+    }
+
+    /**
+     * {@link #recaseKeys(ObjectMapper, JsonNode, boolean)} that copies the value of each member named in
+     * {@code verbatim} unchanged, for maps whose keys are user data rather than model members. The
+     * member's own key is still recased and is matched as it arrives, so list it in each casing it can
+     * arrive in.
+     */
+    static JsonNode recaseKeys(ObjectMapper mapper, JsonNode node, boolean upperFirst, Set<String> verbatim) {
         if (node == null) {
             return null;
         }
@@ -2478,14 +2492,15 @@ public class AslExecutor {
             Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
             while (fields.hasNext()) {
                 Map.Entry<String, JsonNode> e = fields.next();
-                out.set(recaseKey(e.getKey(), upperFirst), recaseKeys(mapper, e.getValue(), upperFirst));
+                out.set(recaseKey(e.getKey(), upperFirst), verbatim.contains(e.getKey())
+                        ? e.getValue().deepCopy() : recaseKeys(mapper, e.getValue(), upperFirst, verbatim));
             }
             return out;
         }
         if (node.isArray()) {
             ArrayNode out = mapper.createArrayNode();
             for (JsonNode item : node) {
-                out.add(recaseKeys(mapper, item, upperFirst));
+                out.add(recaseKeys(mapper, item, upperFirst, verbatim));
             }
             return out;
         }
@@ -2654,21 +2669,28 @@ public class AslExecutor {
             return objectMapper.createObjectNode();
         }
         JsonNode rendered = body.deepCopy();
-        renderRedshiftDataTimestamps(rendered);
+        renderSdkTimestamps(rendered, REDSHIFT_DATA_TIMESTAMPS, Set.of());
         return rendered;
     }
 
-    private static void renderRedshiftDataTimestamps(JsonNode node) {
+    /**
+     * Rewrites in place every numeric member named in {@code timestamps}, at any depth, as the SDK's
+     * ISO-8601 rendering. The walk does not descend into members named in {@code verbatim}, maps
+     * whose keys are user data rather than model members.
+     */
+    static void renderSdkTimestamps(JsonNode node, Set<String> timestamps, Set<String> verbatim) {
         if (node instanceof ObjectNode object) {
-            for (String field : List.of("CreatedAt", "UpdatedAt", "SessionTtl")) {
-                JsonNode value = object.get(field);
-                if (value != null && value.isNumber()) {
-                    object.put(field, sdkTimestamp(value.asDouble()));
+            Iterator<Map.Entry<String, JsonNode>> fields = object.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                if (timestamps.contains(field.getKey()) && field.getValue().isNumber()) {
+                    object.put(field.getKey(), sdkTimestamp(field.getValue().asDouble()));
+                } else if (!verbatim.contains(field.getKey())) {
+                    renderSdkTimestamps(field.getValue(), timestamps, verbatim);
                 }
             }
-            object.elements().forEachRemaining(AslExecutor::renderRedshiftDataTimestamps);
         } else if (node instanceof ArrayNode array) {
-            array.elements().forEachRemaining(AslExecutor::renderRedshiftDataTimestamps);
+            array.forEach(item -> renderSdkTimestamps(item, timestamps, verbatim));
         }
     }
 

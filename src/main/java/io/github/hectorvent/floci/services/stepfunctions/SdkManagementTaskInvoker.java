@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.stepfunctions;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestScopes;
@@ -14,8 +13,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
-import java.util.Iterator;
-import java.util.Map;
 import java.util.Set;
 
 import static io.github.hectorvent.floci.services.stepfunctions.AslExecutor.FailStateException;
@@ -81,8 +78,9 @@ public class SdkManagementTaskInvoker {
                         throw new AwsException(code, body.path("message").asText(
                                 body.path("Message").asText("Service request failed")), response.getStatus());
                     }
-                    JsonNode result = "ecs".equals(integration.service()) ? recaseEcs(body, true) : body;
-                    renderTimestamps(result);
+                    JsonNode result = "ecs".equals(integration.service())
+                            ? AslExecutor.recaseKeys(mapper, body, true, DICTIONARIES) : body;
+                    AslExecutor.renderSdkTimestamps(result, TIMESTAMPS, DICTIONARIES);
                     return result;
                 }
             });
@@ -93,7 +91,8 @@ public class SdkManagementTaskInvoker {
 
     private Response dispatch(StatesIntegration integration, JsonNode input, String region) {
         return switch (integration.service()) {
-            case "ecs" -> ecs.handle(upperFirst(integration.api()), recaseEcs(input, false), region);
+            case "ecs" -> ecs.handle(AslExecutor.capitalizeFirst(integration.api()),
+                    AslExecutor.recaseKeys(mapper, input, false, DICTIONARIES), region);
             case "secretsmanager" -> secrets.handle("DescribeSecret", input, region);
             case "lambda" -> switch (integration.api()) {
                 case "listEventSourceMappings" -> {
@@ -117,46 +116,5 @@ public class SdkManagementTaskInvoker {
             };
             default -> throw new IllegalStateException("Unsupported SDK management service");
         };
-    }
-
-    private JsonNode recaseEcs(JsonNode node, boolean upper) {
-        if (node instanceof ObjectNode object) {
-            ObjectNode result = mapper.createObjectNode();
-            Iterator<Map.Entry<String, JsonNode>> fields = object.fields();
-            while (fields.hasNext()) {
-                Map.Entry<String, JsonNode> field = fields.next();
-                String key = field.getKey();
-                String wireKey = key.isEmpty() ? key : Character.toLowerCase(key.charAt(0)) + key.substring(1);
-                result.set(upper ? upperFirst(key) : wireKey, DICTIONARIES.contains(wireKey)
-                        ? field.getValue().deepCopy() : recaseEcs(field.getValue(), upper));
-            }
-            return result;
-        }
-        if (node instanceof ArrayNode array) {
-            ArrayNode result = mapper.createArrayNode();
-            array.forEach(item -> result.add(recaseEcs(item, upper)));
-            return result;
-        }
-        return node.deepCopy();
-    }
-
-    private void renderTimestamps(JsonNode node) {
-        if (node instanceof ObjectNode object) {
-            Iterator<Map.Entry<String, JsonNode>> fields = object.fields();
-            while (fields.hasNext()) {
-                Map.Entry<String, JsonNode> field = fields.next();
-                if (TIMESTAMPS.contains(field.getKey()) && field.getValue().isNumber()) {
-                    object.put(field.getKey(), AslExecutor.sdkTimestamp(field.getValue().asDouble()));
-                } else if (!DICTIONARIES.contains(field.getKey())) {
-                    renderTimestamps(field.getValue());
-                }
-            }
-        } else if (node instanceof ArrayNode array) {
-            array.forEach(this::renderTimestamps);
-        }
-    }
-
-    private static String upperFirst(String key) {
-        return key.isEmpty() ? key : Character.toUpperCase(key.charAt(0)) + key.substring(1);
     }
 }
