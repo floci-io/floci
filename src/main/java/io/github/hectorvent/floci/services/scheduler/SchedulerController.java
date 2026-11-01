@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.scheduler.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.scheduler.model.DeadLetterConfig;
@@ -109,13 +111,19 @@ public class SchedulerController {
     @GET
     @Path("/schedule-groups")
     public Response listScheduleGroups(@Context HttpHeaders headers,
-                                       @QueryParam("NamePrefix") String namePrefix) {
+                                       @QueryParam("NamePrefix") String namePrefix,
+                                       @QueryParam("MaxResults") String maxResults,
+                                       @QueryParam("NextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
-        List<ScheduleGroup> groups = schedulerService.listScheduleGroups(namePrefix, region);
+        PaginatedResult<ScheduleGroup> page = schedulerService.listScheduleGroups(namePrefix,
+                Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken, region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("ScheduleGroups");
-        for (ScheduleGroup group : groups) {
+        for (ScheduleGroup group : page.items()) {
             items.add(objectMapper.valueToTree(buildGroupResponse(group)));
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }
@@ -197,13 +205,19 @@ public class SchedulerController {
     public Response listSchedules(@Context HttpHeaders headers,
                                   @QueryParam("ScheduleGroup") String groupName,
                                   @QueryParam("NamePrefix") String namePrefix,
-                                  @QueryParam("State") String state) {
+                                  @QueryParam("State") String state,
+                                  @QueryParam("MaxResults") String maxResults,
+                                  @QueryParam("NextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
-        List<Schedule> schedules = schedulerService.listSchedules(groupName, namePrefix, state, region);
+        PaginatedResult<Schedule> page = schedulerService.listSchedules(groupName, namePrefix, state,
+                Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken, region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("Schedules");
-        for (Schedule schedule : schedules) {
+        for (Schedule schedule : page.items()) {
             items.add(objectMapper.valueToTree(buildScheduleSummary(schedule)));
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.scheduler;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.scheduler.model.DeadLetterConfig;
@@ -724,6 +725,86 @@ class SchedulerServiceTest {
         List<Schedule> result = service.listSchedules(null, null, "DISABLED", REGION);
         assertEquals(1, result.size());
         assertEquals("disabled-1", result.get(0).getName());
+    }
+
+    @Test
+    void listScheduleGroupsPagesWithNextToken() {
+        service.createScheduleGroup("page-a", null, REGION);
+        service.createScheduleGroup("page-b", null, REGION);
+
+        PaginatedResult<ScheduleGroup> first = service.listScheduleGroups("page-", 1, null, REGION);
+        assertEquals(List.of("page-a"), first.items().stream().map(ScheduleGroup::getName).toList());
+        assertNotNull(first.nextToken());
+
+        PaginatedResult<ScheduleGroup> second = service.listScheduleGroups("page-", 1, first.nextToken(), REGION);
+        assertEquals(List.of("page-b"), second.items().stream().map(ScheduleGroup::getName).toList());
+        assertNull(second.nextToken());
+    }
+
+    @Test
+    void listSchedulesPagesWithinGroupAndState() {
+        service.createScheduleGroup("paged", null, REGION);
+        for (String name : List.of("p-1", "p-2", "p-3")) {
+            ScheduleRequest req = newRequest(name, "paged", "rate(1 hour)",
+                    new FlexibleTimeWindow("OFF", null),
+                    new Target("arn:t", "arn:aws:iam::000000000000:role/r", null, null));
+            req.setState("p-2".equals(name) ? "DISABLED" : "ENABLED");
+            service.createSchedule(req, REGION);
+        }
+
+        PaginatedResult<Schedule> first = service.listSchedules("paged", "p-", "ENABLED", 1, null, REGION);
+        assertEquals(List.of("p-1"), first.items().stream().map(Schedule::getName).toList());
+        assertNotNull(first.nextToken());
+
+        PaginatedResult<Schedule> second = service.listSchedules("paged", "p-", "ENABLED", 1,
+                first.nextToken(), REGION);
+        assertEquals(List.of("p-3"), second.items().stream().map(Schedule::getName).toList());
+        assertNull(second.nextToken());
+    }
+
+    @Test
+    void listSchedulesPagesAcrossGroups() {
+        service.createScheduleGroup("g-a", null, REGION);
+        service.createScheduleGroup("g-b", null, REGION);
+        for (String group : List.of("g-a", "g-b")) {
+            service.createSchedule(newRequest("same", group, "rate(1 hour)",
+                    new FlexibleTimeWindow("OFF", null),
+                    new Target("arn:t", "arn:aws:iam::000000000000:role/r", null, null)), REGION);
+        }
+
+        PaginatedResult<Schedule> first = service.listSchedules(null, null, null, 1, null, REGION);
+        PaginatedResult<Schedule> second = service.listSchedules(null, null, null, 1, first.nextToken(), REGION);
+        assertEquals("g-a", first.items().get(0).getGroupName());
+        assertEquals("g-b", second.items().get(0).getGroupName());
+        assertNull(second.nextToken());
+    }
+
+    @Test
+    void listOperationsRejectOutOfRangeMaxResults() {
+        for (Integer maxResults : List.of(0, 101)) {
+            AwsException groups = assertThrows(AwsException.class, () ->
+                    service.listScheduleGroups(null, maxResults, null, REGION));
+            assertEquals("ValidationException", groups.getErrorCode());
+            assertEquals(400, groups.getHttpStatus());
+            AwsException schedules = assertThrows(AwsException.class, () ->
+                    service.listSchedules(null, null, null, maxResults, null, REGION));
+            assertEquals("ValidationException", schedules.getErrorCode());
+        }
+    }
+
+    @Test
+    void listOperationsRejectForeignOrBogusNextToken() {
+        service.createScheduleGroup("tok-a", null, REGION);
+        service.createScheduleGroup("tok-b", null, REGION);
+        String groupToken = service.listScheduleGroups(null, 1, null, REGION).nextToken();
+
+        AwsException bogus = assertThrows(AwsException.class, () ->
+                service.listScheduleGroups(null, 1, "not-a-token", REGION));
+        assertEquals("ValidationException", bogus.getErrorCode());
+        assertEquals(400, bogus.getHttpStatus());
+        AwsException foreign = assertThrows(AwsException.class, () ->
+                service.listSchedules(null, null, null, 1, groupToken, REGION));
+        assertEquals("ValidationException", foreign.getErrorCode());
     }
 
     @Test

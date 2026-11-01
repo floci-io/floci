@@ -8,6 +8,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -37,6 +39,9 @@ public class SchedulerService {
             "arn:(?:" + AwsArnUtils.PARTITION_REGEX + "):iam::\\d{12}:role/[\\w+=,.@/-]+");
     private static final String ROLE_ARN_MODEL_PATTERN = "^arn:aws(-[a-z]+)?:iam::\\d{12}:role\\/[\\w+=,.@\\/-]+$"; // partition-literal: the Scheduler model's RoleArn pattern, quoted verbatim in the error message
     private static final String DEFAULT_GROUP = "default";
+    // ListScheduleGroups and ListSchedules model MaxResults as 1-100 and NextToken as 1-2048 chars.
+    private static final int MAX_PAGE_SIZE = 100;
+    private static final int MAX_TOKEN_LENGTH = 2048;
     // FAIL_ON_TRAILING_TOKENS matters here: without it an Input of "{} garbage" parses as the
     // leading object and the rest is silently dropped, so a value AWS rejects would be stored.
     private static final ObjectReader JSON = new ObjectMapper()
@@ -185,6 +190,13 @@ public class SchedulerService {
         });
     }
 
+    public PaginatedResult<ScheduleGroup> listScheduleGroups(String namePrefix, Integer maxResults,
+                                                             String nextToken, String region) {
+        return Pagination.paginate(listScheduleGroups(namePrefix, region), ScheduleGroup::getName,
+                maxResults, nextToken, MAX_PAGE_SIZE, MAX_PAGE_SIZE, MAX_TOKEN_LENGTH,
+                "ValidationException", pageNamespace("ListScheduleGroups", region));
+    }
+
     // ──────────────────────────── Schedules ────────────────────────────
 
     public Schedule createSchedule(ScheduleRequest req, String region) {
@@ -322,6 +334,18 @@ public class SchedulerService {
             }
             return true;
         }).toList();
+    }
+
+    public PaginatedResult<Schedule> listSchedules(String groupName, String namePrefix, String state,
+                                                   Integer maxResults, String nextToken, String region) {
+        return Pagination.paginate(listSchedules(groupName, namePrefix, state, region),
+                schedule -> schedule.getGroupName() + ":" + schedule.getName(),
+                maxResults, nextToken, MAX_PAGE_SIZE, MAX_PAGE_SIZE, MAX_TOKEN_LENGTH,
+                "ValidationException", pageNamespace("ListSchedules", region));
+    }
+
+    private String pageNamespace(String operation, String region) {
+        return "scheduler:" + operation + ":" + regionResolver.getAccountId() + ":" + region;
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
