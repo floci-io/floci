@@ -96,13 +96,31 @@ public class BedrockService implements ResourceProvider {
     /** {@code ResourcePolicyDocument} from the AWS model: min 1, max 20480. */
     private static final int RESOURCE_POLICY_MAX = 20480;
 
-    private static final String GUARDRAIL_RESOURCE_PREFIX = "guardrail/";
+    /** {@code GuardrailCrossRegionGuardrailProfileId} from the AWS model, e.g. {@code us.guardrail.v1:0}. */
+    private static final Pattern GUARDRAIL_PROFILE_ID_PATTERN =
+            Pattern.compile("[a-z0-9-]+[.]guardrail[.]v[0-9:]+");
 
-    /** The actions the Bedrock user guide lets a guardrail resource-based policy grant. */
+    private static final String GUARDRAIL_RESOURCE_PREFIX = "guardrail/";
+    private static final String GUARDRAIL_PROFILE_RESOURCE_PREFIX = "guardrail-profile/";
+
+    /**
+     * The actions the Bedrock user guide lets a guardrail resource-based policy grant. A guardrail
+     * profile's policy may grant only {@code bedrock:ApplyGuardrail}.
+     */
     private static final Set<String> GUARDRAIL_POLICY_ACTIONS =
             Set.of("bedrock:ApplyGuardrail", "bedrock:GetGuardrail");
+    private static final Set<String> GUARDRAIL_PROFILE_POLICY_ACTIONS = Set.of("bedrock:ApplyGuardrail");
+
+    /** What {@code GetResourcePolicy} answers for a guardrail profile holding no policy under the called Region. */
+    private static final String EMPTY_POLICY = "{}";
 
     private final StorageBackend<String, Guardrail> guardrails;
+    /**
+     * Guardrail-profile policies, keyed by the Region whose endpoint stored them and the profile ARN. A
+     * system-defined profile has one ARN per destination Region, and AWS keeps each policy under the
+     * Region that received {@code PutResourcePolicy}, so one ARN can hold a different policy per Region.
+     */
+    private final StorageBackend<String, String> guardrailProfilePolicies;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private final KmsService kmsService;
@@ -111,12 +129,17 @@ public class BedrockService implements ResourceProvider {
     public BedrockService(StorageFactory storageFactory, RegionResolver regionResolver,
                           ObjectMapper objectMapper, KmsService kmsService) {
         this(storageFactory.create("bedrock", "bedrock-guardrails.json",
-                new TypeReference<Map<String, Guardrail>>() {}), regionResolver, objectMapper, kmsService);
+                        new TypeReference<Map<String, Guardrail>>() {}),
+                storageFactory.create("bedrock", "bedrock-guardrail-profile-policies.json",
+                        new TypeReference<Map<String, String>>() {}),
+                regionResolver, objectMapper, kmsService);
     }
 
-    BedrockService(StorageBackend<String, Guardrail> guardrails, RegionResolver regionResolver,
+    BedrockService(StorageBackend<String, Guardrail> guardrails,
+                   StorageBackend<String, String> guardrailProfilePolicies, RegionResolver regionResolver,
                    ObjectMapper objectMapper, KmsService kmsService) {
         this.guardrails = guardrails;
+        this.guardrailProfilePolicies = guardrailProfilePolicies;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
         this.kmsService = kmsService;
@@ -261,9 +284,16 @@ public class BedrockService implements ResourceProvider {
 
     // Resource policies
 
-    /** The policy attached to a guardrail, or null when it holds none. */
+    /**
+     * The policy attached to a guardrail, or null when it holds none. A guardrail profile that holds
+     * none under {@code region} reads as the empty policy {@code {}}.
+     */
     public String getResourcePolicy(String resourceArn, String region) {
         requireResourcePolicyArn(resourceArn);
+        if (isGuardrailProfileArn(resourceArn)) {
+            requireOwnGuardrailProfile(resourceArn);
+            return guardrailProfilePolicies.get(profilePolicyKey(region, resourceArn)).orElse(EMPTY_POLICY);
+        }
         return findGuardrailForPolicy(resourceArn, region).getResourcePolicy();
     }
 
@@ -273,7 +303,14 @@ public class BedrockService implements ResourceProvider {
             throw new AwsException("ValidationException",
                     "resourcePolicy must be between 1 and " + RESOURCE_POLICY_MAX + " characters.", 400);
         }
-        validateResourcePolicy(policy, resourceArn);
+        boolean profile = isGuardrailProfileArn(resourceArn);
+        validateResourcePolicy(policy, resourceArn,
+                profile ? GUARDRAIL_PROFILE_POLICY_ACTIONS : GUARDRAIL_POLICY_ACTIONS);
+        if (profile) {
+            requireOwnGuardrailProfile(resourceArn);
+            guardrailProfilePolicies.put(profilePolicyKey(region, resourceArn), policy);
+            return;
+        }
         Guardrail guardrail = findGuardrailForPolicy(resourceArn, region);
         guardrail.setResourcePolicy(policy);
         guardrails.put(storageKey(region, guardrail.getGuardrailId(), DRAFT_VERSION), guardrail);
@@ -282,6 +319,11 @@ public class BedrockService implements ResourceProvider {
 
     public synchronized void deleteResourcePolicy(String resourceArn, String region) {
         requireResourcePolicyArn(resourceArn);
+        if (isGuardrailProfileArn(resourceArn)) {
+            requireOwnGuardrailProfile(resourceArn);
+            guardrailProfilePolicies.delete(profilePolicyKey(region, resourceArn));
+            return;
+        }
         Guardrail guardrail = findGuardrailForPolicy(resourceArn, region);
         guardrail.setResourcePolicy(null);
         guardrails.put(storageKey(region, guardrail.getGuardrailId(), DRAFT_VERSION), guardrail);
@@ -477,13 +519,35 @@ public class BedrockService implements ResourceProvider {
         return findByArn(resourceArn, region);
     }
 
+    private static boolean isGuardrailProfileArn(String resourceArn) {
+        return AwsArnUtils.isArnFor(resourceArn, "bedrock")
+                && AwsArnUtils.parse(resourceArn).resource().startsWith(GUARDRAIL_PROFILE_RESOURCE_PREFIX);
+    }
+
+    /**
+     * A guardrail profile is system-defined, so any well-formed profile ARN in the caller's own account and
+     * partition names one. Whether its Region is a destination of the calling Region is not checked.
+     */
+    private void requireOwnGuardrailProfile(String resourceArn) {
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(resourceArn);
+        String profileId = parsed.resource().substring(GUARDRAIL_PROFILE_RESOURCE_PREFIX.length());
+        if (parsed.region().isEmpty() || !GUARDRAIL_PROFILE_ID_PATTERN.matcher(profileId).matches()
+                || !resourceArn.equals(regionResolver.buildArn("bedrock", parsed.region(), parsed.resource()))) {
+            throw new AwsException("ResourceNotFoundException", "Resource " + resourceArn + " does not exist.", 404);
+        }
+    }
+
+    private static String profilePolicyKey(String region, String resourceArn) {
+        return region + "::" + resourceArn;
+    }
+
     /**
      * Holds a policy to the restricted language the Bedrock user guide gives guardrail resource-based
      * policies: Allow statements on the resource the policy is attached to, granting only the supported
      * actions, either to the account's root or to {@code *} under an {@code aws:PrincipalOrgID} condition,
      * with no condition but that one and {@code aws:PrincipalOrgPaths}.
      */
-    private void validateResourcePolicy(String policy, String resourceArn) {
+    private void validateResourcePolicy(String policy, String resourceArn, Set<String> allowedActions) {
         JsonNode document;
         try {
             document = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(policy);
@@ -509,9 +573,9 @@ public class BedrockService implements ResourceProvider {
             }
             List<JsonNode> actions = elements(statement.path("Action"));
             if (actions.isEmpty()
-                    || actions.stream().anyMatch(action -> !GUARDRAIL_POLICY_ACTIONS.contains(action.asText()))) {
+                    || actions.stream().anyMatch(action -> !allowedActions.contains(action.asText()))) {
                 throw invalidResourcePolicy("Every statement's Action must be among "
-                        + String.join(", ", GUARDRAIL_POLICY_ACTIONS.stream().sorted().toList()) + ".");
+                        + String.join(", ", allowedActions.stream().sorted().toList()) + ".");
             }
             validatePrincipalAndCondition(statement.path("Principal"), statement.path("Condition"), accountRoot);
         }

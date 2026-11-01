@@ -107,9 +107,6 @@ class BedrockResourcePolicyIntegrationTest {
                     () -> client.putResourcePolicy(r -> r.resourceArn(unknown).resourcePolicy(policy)));
             assertEquals(404, put.statusCode());
             assertEquals("ResourceNotFoundException", put.awsErrorDetails().errorCode());
-            String profile = "arn:aws:bedrock:us-east-1:" + ACCOUNT + ":guardrail-profile/us.guardrail.v1:0";
-            assertEquals(404, assertThrows(ResourceNotFoundException.class,
-                    () -> client.getResourcePolicy(r -> r.resourceArn(profile))).statusCode());
 
             CreateGuardrailResponse created = create(client);
             try {
@@ -138,6 +135,33 @@ class BedrockResourcePolicyIntegrationTest {
                 assertNull(client.getResourcePolicy(r -> r.resourceArn(recreated.guardrailArn())).resourcePolicy());
             } finally {
                 client.deleteGuardrail(r -> r.guardrailIdentifier(recreated.guardrailId()));
+            }
+        }
+    }
+
+    @Test
+    void aGuardrailProfilePolicyIsKeptUnderTheCallingRegion() {
+        String profile = "arn:aws:bedrock:us-west-2:" + ACCOUNT + ":guardrail-profile/us.guardrail.v1:0";
+        try (BedrockClient source = client(ACCOUNT, Region.US_EAST_1);
+             BedrockClient destination = client(ACCOUNT, Region.US_WEST_2);
+             BedrockClient otherAccount = client(OTHER_ACCOUNT, Region.US_EAST_1)) {
+            String policy = rootPolicy(profile, "\"bedrock:ApplyGuardrail\"");
+            try {
+                assertEquals("{}", source.getResourcePolicy(r -> r.resourceArn(profile)).resourcePolicy());
+
+                source.putResourcePolicy(r -> r.resourceArn(profile).resourcePolicy(policy));
+
+                assertEquals(policy, source.getResourcePolicy(r -> r.resourceArn(profile)).resourcePolicy());
+                assertEquals("{}", destination.getResourcePolicy(r -> r.resourceArn(profile)).resourcePolicy());
+                assertThrows(ValidationException.class, () -> source.putResourcePolicy(r -> r.resourceArn(profile)
+                        .resourcePolicy(rootPolicy(profile, "\"bedrock:GetGuardrail\""))));
+                assertThrows(ResourceNotFoundException.class,
+                        () -> otherAccount.getResourcePolicy(r -> r.resourceArn(profile)));
+
+                source.deleteResourcePolicy(r -> r.resourceArn(profile));
+                assertEquals("{}", source.getResourcePolicy(r -> r.resourceArn(profile)).resourcePolicy());
+            } finally {
+                source.deleteResourcePolicy(r -> r.resourceArn(profile));
             }
         }
     }
