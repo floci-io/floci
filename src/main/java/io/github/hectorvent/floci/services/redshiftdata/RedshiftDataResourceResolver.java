@@ -6,12 +6,14 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.DatabaseSecretCredentials;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.services.redshift.RedshiftCredentialBroker;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.spectrum.SpectrumSession;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessRuntime;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
+import io.github.hectorvent.floci.services.redshiftserverless.model.Workgroup;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
@@ -19,8 +21,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.List;
+import java.util.Optional;
+
 @ApplicationScoped
-class RedshiftDataResourceResolver {
+class RedshiftDataResourceResolver implements StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(RedshiftDataResourceResolver.class);
 
@@ -44,6 +49,20 @@ class RedshiftDataResourceResolver {
         this.credentialBroker = credentialBroker;
         this.regionResolver = regionResolver;
         this.serverlessService = serverlessService;
+    }
+
+    @Override
+    public String namespace() {
+        return "redshift-data";
+    }
+
+    /** The ARN of the serverless workgroup a request names by its name or ARN, as {@link #resolve} reads it. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        if (!"workgroup".equals(type) || names.size() != 1) {
+            return Optional.empty();
+        }
+        return serverlessService.findWorkgroupByNameOrArn(names.getFirst(), region).map(Workgroup::getWorkgroupArn);
     }
 
     DatabaseTarget resolve(JsonNode request, String region) {
