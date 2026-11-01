@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescript
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Processor;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessorParameter;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
+import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
@@ -78,6 +79,22 @@ class FirehoseLambdaTransformerTest {
         s3.setErrorOutputPrefix("errors/!{firehose:error-output-type}/");
         s3.setProcessingConfiguration(processing);
         return new DeliveryStreamDescription("stream", "arn:aws:firehose:us-west-2:000000000000:deliverystream/stream", s3);
+    }
+
+    /** A stream whose Lambda is configured on its Redshift destination, as AWS models it, not on its S3 location. */
+    private DeliveryStreamDescription redshiftStream() throws Exception {
+        RedshiftDestination redshift = mapper.readValue("""
+                {"RoleARN": "arn:aws:iam::000000000000:role/firehose",
+                 "ClusterJDBCURL": "jdbc:redshift://c1.abc.us-east-1.redshift.amazonaws.com:5439/dev",
+                 "CopyCommand": {"DataTableName": "events"},
+                 "S3Configuration": {"RoleARN": "arn:aws:iam::000000000000:role/firehose",
+                                     "BucketARN": "arn:aws:s3:::results",
+                                     "ErrorOutputPrefix": "errors/!{firehose:error-output-type}/"},
+                 "ProcessingConfiguration": {"Enabled": true, "Processors": [{"Type": "Lambda",
+                   "Parameters": [{"ParameterName": "LambdaArn", "ParameterValue": "%s"}]}]}}
+                """.formatted(FUNCTION_ARN), RedshiftDestination.class);
+        return new DeliveryStreamDescription("stream",
+                "arn:aws:firehose:us-west-2:000000000000:deliverystream/stream", null, redshift, null);
     }
 
     private static Processor lambdaProcessor(String... parameters) {
@@ -199,6 +216,38 @@ class FirehoseLambdaTransformerTest {
 
         transform(stream, record("a"));
 
+        verifyNoInteractions(lambdaService);
+    }
+
+    @Test
+    void aRedshiftStreamIsTransformedByTheLambdaOfItsDestination() throws Exception {
+        replyWith(ids -> records(ok(ids.get(0), "one"), outcome(ids.get(1), "Dropped")));
+
+        FirehoseLambdaTransformer.Outcome outcome = transform(redshiftStream(), record("a"), record("b"));
+
+        assertEquals(List.of("one"), delivered(outcome));
+        assertEquals(1, outcome.droppedRecords());
+        verify(lambdaService).invokeArn(eq(FUNCTION_ARN), any(), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void aRedshiftStreamsFailedRecordsGoToTheErrorOutputOfItsIntermediateS3Location() throws Exception {
+        replyWith(ids -> records(outcome(ids.get(0), "ProcessingFailed")));
+
+        FirehoseLambdaTransformer.Outcome outcome = transform(redshiftStream(), record("a"));
+
+        assertEquals(1, outcome.failedRecords());
+        assertEquals(1, errorLines().size());
+    }
+
+    @Test
+    void aRedshiftStreamWithADisabledProcessingConfigurationIsNotTransformed() throws Exception {
+        DeliveryStreamDescription stream = redshiftStream();
+        stream.processingConfiguration().setEnabled(false);
+
+        FirehoseLambdaTransformer.Outcome outcome = transform(stream, record("a"));
+
+        assertEquals(List.of("a"), delivered(outcome));
         verifyNoInteractions(lambdaService);
     }
 

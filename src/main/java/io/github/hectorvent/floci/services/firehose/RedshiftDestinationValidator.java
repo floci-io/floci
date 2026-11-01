@@ -161,6 +161,7 @@ final class RedshiftDestinationValidator {
                         "secretsManagerConfiguration.secretARN", violations);
             }
         }
+        S3DestinationValidator.collectProcessingViolations(dest.getProcessingConfiguration(), shape, violations);
         S3Destination s3 = dest.getS3();
         if (s3 != null && s3.getPrefix() != null && UNREADABLE_KEY_CHARS.matcher(s3.getPrefix()).find()) {
             violations.add(violation(shape, "s3Configuration.prefix",

@@ -185,7 +185,13 @@ Floci does not write the `redshift_failed` manifest objects that AWS creates aft
   host label is the cluster identifier, and the host suffix and port are ignored. The database name is ignored
   too, because the emulated database is always `dev`. The cluster is looked up at delivery time, so a stream can
   be created before its cluster.
-- `ProcessingConfiguration` on a Redshift destination is accepted and returned but not executed.
+- A Lambda processor in the `ProcessingConfiguration` of a Redshift destination runs before the batch is staged,
+  as it does for an S3 destination: records the function drops are not loaded, and records it fails are written to
+  the error output of the intermediate S3 configuration. The configuration is validated on create and update
+  like an S3 destination's, and a Lambda processor is described with the same default parameters (`NumberOfRetries`,
+  `RoleArn`, buffer hints). Those defaults are carried over from the probed S3 behavior and not probed for Redshift
+  specifically. With `S3BackupMode` enabled, the backup object holds the records after the transform, the same bytes
+  that are staged and loaded; whether AWS backs up the source records instead has not been probed.
 - A `ClusterJDBCURL` with a `redshift-serverless` host is accepted, but delivery looks the name up as a provisioned
   cluster, so a serverless workgroup is not a delivery target yet.
 - The `COPY` carries no credentials, so the proxy reads the staged object as an anonymous client. With S3
