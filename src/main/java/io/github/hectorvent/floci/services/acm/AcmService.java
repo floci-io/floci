@@ -211,16 +211,7 @@ public class AcmService implements ResourceProvider {
         cert.setValidationMethod(method);
         cert.setCreatedAt(now);
         cert.setIssuedAt(status == CertificateStatus.ISSUED ? now : null);
-        cert.setNotBefore(generated.notBefore());
-        cert.setNotAfter(generated.notAfter());
-        cert.setSerial(generated.serial());
-        cert.setSubject(generated.subject());
-        cert.setIssuer(generated.issuer());
-        cert.setKeyAlgorithm(alg);
-        cert.setSignatureAlgorithm(generated.signatureAlgorithm());
-        cert.setCertificateBody(generated.certificatePem());
-        cert.setPrivateKey(generated.privateKeyPem());
-        cert.setCertificateChain(certificateAuthority.caPem());
+        applyIssuedMaterial(cert, alg, generated);
         cert.setCertOptions(options != null ? options : CertificateOptions.defaultOptions());
         cert.setCertAuthorityArn(certAuthorityArn);
         cert.setIdempotencyToken(idempotencyToken);
@@ -495,16 +486,8 @@ public class AcmService implements ResourceProvider {
             }
             store.put(storageKey, cert);
         }
-        // A consumer may acquire IAM before ACM; never invoke it while holding this guard.
-        if (existingArn != null && !existingArn.isEmpty() && referenceProviders != null) {
-            for (AcmCertificateReferenceProvider provider : referenceProviders) {
-                try {
-                    provider.certificateReimported(cert.getArn(), region);
-                } catch (RuntimeException failure) {
-                    LOG.warnv("ACM consumer refresh failed for {0} ({1}: {2}); an identical update can retry",
-                            cert.getArn(), failure.getClass().getSimpleName(), failure.getMessage());
-                }
-            }
+        if (existingArn != null && !existingArn.isEmpty()) {
+            notifyCertificateReimported(cert.getArn(), region);
         }
         LOG.infov("Imported certificate: {0}", cert.getArn());
         return cert;
@@ -642,39 +625,83 @@ public class AcmService implements ResourceProvider {
         return cert;
     }
 
-    public synchronized Certificate renewCertificate(String certificateArn, String region) {
-        Certificate cert = getCertificateByArn(certificateArn, region);
-        if (cert.getStatus() == CertificateStatus.PENDING_VALIDATION) {
-            throw new AwsException("RequestInProgressException", "Certificate is pending validation", 400);
-        }
-        if (cert.getType() != CertificateType.PRIVATE || cert.getStatus() != CertificateStatus.ISSUED) {
-            throw new AwsException("InvalidArnException", "Certificate is not a private issued certificate", 400);
-        }
-        // A renewed private certificate is new material under the same ARN: a fresh key pair of the
-        // same algorithm, which ExportCertificate then returns alongside the renewed body.
-        KeyAlgorithm alg = cert.getKeyAlgorithm() != null ? cert.getKeyAlgorithm() : KeyAlgorithm.RSA_2048;
-        List<String> sans = new ArrayList<>();
-        if (cert.getSubjectAlternativeNames() != null) {
-            for (String san : cert.getSubjectAlternativeNames()) {
-                if (!san.equals(cert.getDomainName())) {
-                    sans.add(san);
+    public Certificate renewCertificate(String certificateArn, String region) {
+        Certificate renewed;
+        synchronized (this) {
+            Certificate cert = getCertificateByArn(certificateArn, region);
+            if (cert.getStatus() == CertificateStatus.PENDING_VALIDATION) {
+                throw new AwsException("RequestInProgressException", "Certificate is pending validation", 400);
+            }
+            if (cert.getType() != CertificateType.PRIVATE || cert.getStatus() != CertificateStatus.ISSUED) {
+                throw new AwsException("InvalidArnException", "Certificate is not a private issued certificate", 400);
+            }
+            // A renewed private certificate is new material under the same ARN: a fresh key pair of the
+            // same algorithm, stored as a new record so a concurrent export never pairs old and new material.
+            KeyAlgorithm alg = cert.getKeyAlgorithm() != null ? cert.getKeyAlgorithm() : KeyAlgorithm.RSA_2048;
+            List<String> sans = new ArrayList<>();
+            if (cert.getSubjectAlternativeNames() != null) {
+                for (String san : cert.getSubjectAlternativeNames()) {
+                    if (!san.equals(cert.getDomainName())) {
+                        sans.add(san);
+                    }
                 }
             }
+            CertificateGenerator.GeneratedCertificate generated = certificateAuthority.issueServerCertificate(
+                cert.getDomainName(), sans, alg, null);
+
+            renewed = new Certificate();
+            renewed.setArn(cert.getArn());
+            renewed.setDomainName(cert.getDomainName());
+            renewed.setSubjectAlternativeNames(cert.getSubjectAlternativeNames());
+            renewed.setStatus(cert.getStatus());
+            renewed.setType(cert.getType());
+            renewed.setValidationMethod(cert.getValidationMethod());
+            renewed.setCreatedAt(cert.getCreatedAt());
+            renewed.setImportedAt(cert.getImportedAt());
+            renewed.setIssuedAt(Instant.now());
+            applyIssuedMaterial(renewed, alg, generated);
+            renewed.setCertOptions(cert.getCertOptions());
+            renewed.setCertAuthorityArn(cert.getCertAuthorityArn());
+            renewed.setIdempotencyToken(cert.getIdempotencyToken());
+            renewed.setTags(cert.getTags() != null ? new HashMap<>(cert.getTags()) : new HashMap<>());
+            renewed.setInUseBy(cert.getInUseBy() != null ? new ArrayList<>(cert.getInUseBy()) : new ArrayList<>());
+            renewed.setDomainValidationOptions(cert.getDomainValidationOptions() != null
+                ? new ArrayList<>(cert.getDomainValidationOptions()) : new ArrayList<>());
+            store.put(regionKey(region, cert.extractCertificateId()), renewed);
         }
-        CertificateGenerator.GeneratedCertificate generated = certificateAuthority.issueServerCertificate(
-            cert.getDomainName(), sans, alg, null);
-        cert.setIssuedAt(Instant.now());
+        notifyCertificateReimported(renewed.getArn(), region);
+        LOG.infov("Renewed certificate: {0}", renewed.getArn());
+        return renewed;
+    }
+
+    /** The validity, identity and key material of a leaf issued by the local CA. */
+    private void applyIssuedMaterial(Certificate cert, KeyAlgorithm alg,
+                                     CertificateGenerator.GeneratedCertificate generated) {
         cert.setNotBefore(generated.notBefore());
         cert.setNotAfter(generated.notAfter());
         cert.setSerial(generated.serial());
         cert.setSubject(generated.subject());
         cert.setIssuer(generated.issuer());
+        cert.setKeyAlgorithm(alg);
         cert.setSignatureAlgorithm(generated.signatureAlgorithm());
         cert.setCertificateBody(generated.certificatePem());
         cert.setPrivateKey(generated.privateKeyPem());
         cert.setCertificateChain(certificateAuthority.caPem());
-        store.put(regionKey(region, cert.extractCertificateId()), cert);
-        return cert;
+    }
+
+    /** A consumer may acquire IAM before ACM; never invoke it while holding this guard. */
+    private void notifyCertificateReimported(String certificateArn, String region) {
+        if (referenceProviders == null) {
+            return;
+        }
+        for (AcmCertificateReferenceProvider provider : referenceProviders) {
+            try {
+                provider.certificateReimported(certificateArn, region);
+            } catch (RuntimeException failure) {
+                LOG.warnv("ACM consumer refresh failed for {0} ({1}: {2}); an identical update can retry",
+                        certificateArn, failure.getClass().getSimpleName(), failure.getMessage());
+            }
+        }
     }
 
     public synchronized void updateCertificateOptions(String certificateArn, CertificateOptions options, String region) {

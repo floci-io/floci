@@ -538,6 +538,58 @@ class AcmServiceTest {
     }
 
     @Test
+    void renewStoresANewRecordAndLeavesTheOldMaterialPaired() {
+        Certificate requested = service.requestCertificate("renew-record.example.test", List.of(),
+                ValidationMethod.DNS, null, KeyAlgorithm.RSA_2048, PCA_ARN, new CertificateOptions(null, "ENABLED"),
+                Map.of(), null, REGION);
+        String originalBody = requested.getCertificateBody();
+        String originalKey = requested.getPrivateKey();
+        service.addInUseBy(requested.getArn(), "arn:aws:elasticloadbalancing:us-east-1:000000000000:listener/app/a/b/c",
+                REGION);
+
+        Certificate renewed = service.renewCertificate(requested.getArn(), REGION);
+
+        assertTrue(renewed != requested, "renewal replaces the stored record instead of mutating it");
+        assertTrue(service.getCertificate(requested.getArn(), REGION) == renewed);
+        assertEquals(originalBody, requested.getCertificateBody(), "a reader holding the old record keeps its body");
+        assertEquals(originalKey, requested.getPrivateKey(), "and the key that pairs with it");
+        assertEquals(requested.getInUseBy(), renewed.getInUseBy());
+        assertEquals(requested.getCreatedAt(), renewed.getCreatedAt());
+        Certificate described = service.describeCertificate(requested.getArn(), REGION);
+        assertEquals(renewed.getCertificateBody(), described.getCertificateBody());
+        assertEquals(renewed.getNotAfter(), described.getNotAfter());
+        String passphrase = Base64.getEncoder().encodeToString("abcd1234".getBytes(StandardCharsets.US_ASCII));
+        assertEquals(renewed.getCertificateBody(),
+                service.exportCertificate(requested.getArn(), passphrase, REGION).getCertificateBody());
+    }
+
+    @Test
+    void renewNotifiesAttachedConsumersOutsideTheGuard() {
+        Certificate requested = service.requestCertificate("renew-consumer.example.test", List.of(),
+                ValidationMethod.DNS, null, KeyAlgorithm.RSA_2048, PCA_ARN, null, Map.of(), null, REGION);
+        List<String> material = new CopyOnWriteArrayList<>();
+        AtomicBoolean heldGuard = new AtomicBoolean();
+        AcmCertificateReferenceProvider consumer = new AcmCertificateReferenceProvider() {
+            @Override
+            public List<CertificateReference> acmCertificateReferences() { return List.of(); }
+
+            @Override
+            public void certificateReimported(String arn, String region) {
+                heldGuard.set(Thread.holdsLock(service));
+                material.add(service.getCertificate(arn, region).getCertificateBody());
+            }
+        };
+        Instance<AcmCertificateReferenceProvider> providers = mock();
+        when(providers.iterator()).thenAnswer(call -> List.of(consumer).iterator());
+        service.referenceProviders = providers;
+
+        Certificate renewed = service.renewCertificate(requested.getArn(), REGION);
+
+        assertEquals(List.of(renewed.getCertificateBody()), material, "the consumer reloads the renewed material");
+        assertTrue(!heldGuard.get(), "consumers are notified after the ACM guard is released");
+    }
+
+    @Test
     void concurrentRequestsEachGetTheirOwnCertificateChainedToTheCa() throws Exception {
         int threads = 16;
         ExecutorService pool = Executors.newFixedThreadPool(threads);
