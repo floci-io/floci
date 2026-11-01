@@ -40,6 +40,7 @@ public class PaymentCryptographyDataPlaneHandler {
     private static final int LONGEST_PLAINTEXT = 2032;
 
     private final PaymentCryptographyService service;
+    private final PaymentCryptographyPinOperations pinOperations;
     private final SecureRandom random;
 
     @Inject
@@ -49,6 +50,7 @@ public class PaymentCryptographyDataPlaneHandler {
 
     PaymentCryptographyDataPlaneHandler(PaymentCryptographyService service, SecureRandom random) {
         this.service = service;
+        this.pinOperations = new PaymentCryptographyPinOperations(service);
         this.random = random;
     }
 
@@ -142,26 +144,21 @@ public class PaymentCryptographyDataPlaneHandler {
     }
 
     /**
-     * The PIN data of a card account.
-     *
-     * <p>The PIN block formats are the schemes' own, so the operation is refused rather than
-     * answered with a block this service made up.
+     * The PIN data of a card account: a PIN block and the verification value that goes with
+     * it.
      */
     public Map<String, Object> generatePinData(JsonNode request, String region) {
-        refused("GeneratePinData");
-        return Map.of();
+        return pinOperations.generatePinData(request, region);
     }
 
     /** The PIN data of a card account, verified against a generation key. */
     public Map<String, Object> verifyPinData(JsonNode request, String region) {
-        refused("VerifyPinData");
-        return Map.of();
+        return pinOperations.verifyPinData(request, region);
     }
 
     /** The PIN data of one scheme translated into another. */
     public Map<String, Object> translatePinData(JsonNode request, String region) {
-        refused("TranslatePinData");
-        return Map.of();
+        return pinOperations.translatePinData(request, region);
     }
 
     /** The card validation value of a card account. */
