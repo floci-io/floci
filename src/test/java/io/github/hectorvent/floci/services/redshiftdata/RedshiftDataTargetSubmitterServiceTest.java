@@ -22,7 +22,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
-class RedshiftDataTargetSubmitterTest {
+class RedshiftDataTargetSubmitterServiceTest {
 
     private static final String ACCOUNT = "000000000000";
     private static final String REGION = "us-east-1";
