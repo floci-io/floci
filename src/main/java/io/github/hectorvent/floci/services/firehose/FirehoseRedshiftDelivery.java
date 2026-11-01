@@ -2,10 +2,13 @@ package io.github.hectorvent.floci.services.firehose;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.DatabaseSecretCredentials;
+import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -18,9 +21,9 @@ import java.sql.Statement;
 import java.util.Properties;
 
 /**
- * Loads a delivered S3 object into a Floci Redshift cluster. The {@code COPY} runs over a JDBC
- * connection to the cluster's wire proxy in simple query mode, so the proxy's S3 COPY emulation
- * does the work exactly as it does for any other client.
+ * Loads a delivered S3 object into a Floci Redshift cluster or Redshift Serverless workgroup. The
+ * {@code COPY} runs over a JDBC connection to the cluster's wire proxy, or to the workgroup's runtime,
+ * in simple query mode, so the S3 COPY emulation does the work exactly as it does for any other client.
  */
 @ApplicationScoped
 public class FirehoseRedshiftDelivery {
@@ -34,20 +37,30 @@ public class FirehoseRedshiftDelivery {
         void execute(String jdbcUrl, String user, String password, String sql) throws SQLException;
     }
 
+    /**
+     * Where a delivery connects. {@code defaultUser} signs in when the destination names none, and
+     * {@code managedSecretArn} is the secret Redshift manages for the admin, whose user name is {@code defaultUser}.
+     */
+    private record Backend(String description, String host, int port, String database, String defaultUser,
+                           String managedSecretArn) {
+    }
+
     private final RedshiftService redshiftService;
+    private final RedshiftServerlessService serverlessService;
     private final SecretsManagerService secretsManagerService;
     private final ObjectMapper mapper;
     private final SqlRunner runner;
 
     @Inject
-    public FirehoseRedshiftDelivery(RedshiftService redshiftService, SecretsManagerService secretsManagerService,
-                                    ObjectMapper mapper) {
-        this(redshiftService, secretsManagerService, mapper, FirehoseRedshiftDelivery::runJdbc);
+    public FirehoseRedshiftDelivery(RedshiftService redshiftService, RedshiftServerlessService serverlessService,
+                                    SecretsManagerService secretsManagerService, ObjectMapper mapper) {
+        this(redshiftService, serverlessService, secretsManagerService, mapper, FirehoseRedshiftDelivery::runJdbc);
     }
 
-    FirehoseRedshiftDelivery(RedshiftService redshiftService, SecretsManagerService secretsManagerService,
-                             ObjectMapper mapper, SqlRunner runner) {
+    FirehoseRedshiftDelivery(RedshiftService redshiftService, RedshiftServerlessService serverlessService,
+                             SecretsManagerService secretsManagerService, ObjectMapper mapper, SqlRunner runner) {
         this.redshiftService = redshiftService;
+        this.serverlessService = serverlessService;
         this.secretsManagerService = secretsManagerService;
         this.mapper = mapper;
         this.runner = runner;
@@ -56,45 +69,82 @@ public class FirehoseRedshiftDelivery {
     /**
      * Runs the destination's COPY for the object at {@code s3://bucket/key}.
      *
-     * Throws {@code AwsException} when the cluster or the secret cannot be resolved.
+     * Throws {@code AwsException} when the cluster, the workgroup or the secret cannot be resolved.
      *
      * @throws IllegalStateException when the statement itself fails; the message carries the table and SQL state
      */
     public void copy(String accountId, String region, RedshiftDestination destination, String bucket, String key) {
         RedshiftJdbcUrl target = RedshiftJdbcUrl.parse(destination.getClusterJdbcUrl());
-        Cluster cluster = redshiftService.describeClustersForAccount(accountId, target.clusterIdentifier()).get(0);
-        String[] credentials = credentials(destination, cluster, region);
+        Backend backend = target.serverless()
+                ? workgroupBackend(accountId, region, target)
+                : clusterBackend(accountId, target);
+        String[] credentials = credentials(destination, backend, region);
         RedshiftDestination.CopyCommand command = destination.getCopyCommand();
         String sql = RedshiftCopySql.build(command.getDataTableName(), command.getDataTableColumns(), bucket, key,
                 command.getCopyOptions());
-        // The database name in the URL is ignored: the emulated container database is always "dev".
-        String jdbcUrl = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort()
-                + "/dev?preferQueryMode=simple";
+        String jdbcUrl = "jdbc:postgresql://" + backend.host() + ":" + backend.port() + "/" + backend.database()
+                + "?preferQueryMode=simple";
         try {
             runner.execute(jdbcUrl, credentials[0], credentials[1], sql);
         } catch (SQLException e) {
-            throw new IllegalStateException("COPY into " + command.getDataTableName() + " on cluster "
-                    + target.clusterIdentifier() + " failed (SQLSTATE " + e.getSQLState() + "): " + e.getMessage(), e);
+            throw new IllegalStateException("COPY into " + command.getDataTableName() + " on "
+                    + backend.description() + " failed (SQLSTATE " + e.getSQLState() + "): " + e.getMessage(), e);
         }
-        LOG.debugv("Firehose copied s3://{0}/{1} into {2} on cluster {3}", bucket, key,
-                command.getDataTableName(), target.clusterIdentifier());
+        LOG.debugv("Firehose copied s3://{0}/{1} into {2} on {3}", bucket, key,
+                command.getDataTableName(), backend.description());
     }
 
-    private String[] credentials(RedshiftDestination destination, Cluster cluster, String region) {
+    private Backend clusterBackend(String accountId, RedshiftJdbcUrl target) {
+        Cluster cluster = redshiftService.describeClustersForAccount(accountId, target.clusterIdentifier()).get(0);
+        // The database name in the URL is ignored: the emulated container database is always "dev".
+        return new Backend("cluster " + target.clusterIdentifier(), "127.0.0.1", cluster.getEndpoint().getPort(),
+                "dev", cluster.getMasterUsername(), null);
+    }
+
+    /**
+     * A workgroup has one database, so a URL that names another one cannot load anything: the same
+     * refusal the Data API gives, here a failed delivery that goes through the retry path.
+     */
+    private Backend workgroupBackend(String accountId, String region, RedshiftJdbcUrl target) {
+        RedshiftServerlessService.WorkgroupTarget workgroup = RequestScopes.callAs(accountId, region,
+                () -> serverlessService.getWorkgroupTarget(target.clusterIdentifier(), region));
+        if (!target.database().equals(workgroup.database())) {
+            throw new IllegalStateException("Database " + target.database() + " does not exist in workgroup "
+                    + workgroup.workgroupName() + "; the only database is " + workgroup.database() + ".");
+        }
+        return new Backend("workgroup " + workgroup.workgroupName(), workgroup.host(), workgroup.port(),
+                workgroup.database(), workgroup.masterUsername(), workgroup.adminPasswordSecretArn());
+    }
+
+    private String[] credentials(RedshiftDestination destination, Backend backend, String region) {
         RedshiftDestination.SecretsManagerConfiguration secrets = destination.getSecretsManagerConfiguration();
         if (secrets != null && Boolean.TRUE.equals(secrets.getEnabled())) {
             SecretVersion secret = secretsManagerService.getSecretValue(secrets.getSecretArn(), null, null, region);
             DatabaseSecretCredentials credentials = DatabaseSecretCredentials.parse(mapper, secret.getSecretString())
                     .orElseThrow(() -> new IllegalStateException("Secret " + secrets.getSecretArn()
                             + " does not contain username and password fields."));
-            return new String[] {credentials.username(), credentials.password()};
+            String user = isManagedAdminSecret(secrets.getSecretArn(), backend.managedSecretArn(), region)
+                    ? backend.defaultUser() : credentials.username();
+            return new String[] {user, credentials.password()};
         }
         if (destination.getPassword() == null) {
-            throw new IllegalStateException("The Redshift destination for cluster " + cluster.getClusterIdentifier()
+            throw new IllegalStateException("The Redshift destination for " + backend.description()
                     + " has no Password and no enabled SecretsManagerConfiguration, so Firehose cannot sign in.");
         }
-        String user = destination.getUsername() != null ? destination.getUsername() : cluster.getMasterUsername();
+        String user = destination.getUsername() != null ? destination.getUsername() : backend.defaultUser();
         return new String[] {user, destination.getPassword()};
+    }
+
+    /** Whether the secret is the one Redshift manages for the admin, named by ARN or by a name that resolves to it. */
+    private boolean isManagedAdminSecret(String secretArn, String managedSecretArn, String region) {
+        if (managedSecretArn == null) {
+            return false;
+        }
+        if (managedSecretArn.equals(secretArn)) {
+            return true;
+        }
+        Secret resolved = secretsManagerService.describeSecret(secretArn, region);
+        return resolved != null && managedSecretArn.equals(resolved.getArn());
     }
 
     /**

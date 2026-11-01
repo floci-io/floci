@@ -182,12 +182,15 @@ Floci does not write the `redshift_failed` manifest objects that AWS creates aft
 
 - `ClusterJDBCURL` must match the AWS pattern, so it needs a host such as
   `mycluster.abc123.us-east-1.redshift.amazonaws.com`. Floci treats the URL as a logical address: the first
-  host label is the cluster identifier, and the host suffix and port are ignored. The database name is ignored
-  too, because the emulated database is always `dev`. The cluster is looked up at delivery time, so a stream can
-  be created before its cluster.
+  host label is the cluster identifier or workgroup name, and the host suffix and port are ignored. For a
+  provisioned cluster the database name is ignored too, because the emulated database is always `dev`. The cluster
+  or workgroup is looked up at delivery time, so a stream can be created before it exists.
+- A `ClusterJDBCURL` with a `redshift-serverless` host delivers to the Serverless workgroup of that name in the
+  stream's account and region, through the workgroup's runtime. A workgroup has one database, so a URL that names
+  another database fails the delivery, which then follows the usual retry path. Without a `Username` the workgroup's
+  admin user signs in, and a Secrets Manager secret that is the namespace's managed admin secret signs in as that
+  admin user.
 - `ProcessingConfiguration` on a Redshift destination is accepted and returned but not executed.
-- A `ClusterJDBCURL` with a `redshift-serverless` host is accepted, but delivery looks the name up as a provisioned
-  cluster, so a serverless workgroup is not a delivery target yet.
 - The `COPY` carries no credentials, so the proxy reads the staged object as an anonymous client. With S3
   authorization enforced and a private intermediate bucket the load fails and the staged object stays in S3; use a
   bucket the anonymous principal can read, or leave enforcement off.
