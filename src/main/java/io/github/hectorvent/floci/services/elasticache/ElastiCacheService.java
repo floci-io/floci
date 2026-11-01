@@ -225,7 +225,15 @@ public class ElastiCacheService implements ResourceProvider {
         ReplicationGroupSettings settings = request.settings() != null
                 ? request.settings() : ReplicationGroupSettings.defaults();
         settings.validate();
-        settings.validateTransitEncryption(isTransitEncryptionRequested(request));
+        // In AWS ElastiCache, auth tokens require in-transit encryption.
+        // Issue #4502: Reject upfront before provisioning rather than creating plaintext cache.
+        boolean hasAuthToken = (request.authToken() != null && !request.authToken().isBlank())
+                || request.authMode() == AuthMode.PASSWORD;
+        if (hasAuthToken && Boolean.FALSE.equals(settings.transitEncryptionEnabled())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Transit encryption must be enabled to use an auth token.", 400);
+        }
+        settings.validateTransitEncryption(effectiveTransitEncryption(request));
         // resolved with the other validations, before a port is taken or a container started
         ReplicationGroupSettings resolvedSettings =
                 settings.withKmsKeyId(resolveKmsKeyArn(settings.kmsKeyId(), request.region()));
@@ -271,7 +279,7 @@ public class ElastiCacheService implements ResourceProvider {
         }
         String engine = engineFor(request);
         String engineVersion = request.engineVersion() != null ? request.engineVersion() : defaultEngineVersion(engine);
-        boolean transitEncrypted = isTransitEncryptionRequested(request);
+        boolean transitEncrypted = effectiveTransitEncryption(request);
         synchronized (userGroupLock) {
             List<String> reserved = new ArrayList<>();
             for (String userGroupId : request.userGroupIds()) {
@@ -571,6 +579,14 @@ public class ElastiCacheService implements ResourceProvider {
 
     private static boolean isTransitEncryptionRequested(CreateReplicationGroupRequest request) {
         return request.settings() != null && Boolean.TRUE.equals(request.settings().transitEncryptionEnabled());
+    }
+
+    private static boolean effectiveTransitEncryption(CreateReplicationGroupRequest request) {
+        if (request.settings() != null && request.settings().transitEncryptionEnabled() != null) {
+            return request.settings().transitEncryptionEnabled();
+        }
+        return request.authMode() == AuthMode.PASSWORD
+                || (request.authToken() != null && !request.authToken().isBlank());
     }
 
     private String engineFor(CreateReplicationGroupRequest request) {
