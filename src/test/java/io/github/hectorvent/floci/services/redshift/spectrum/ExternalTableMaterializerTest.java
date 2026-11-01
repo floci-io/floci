@@ -303,6 +303,45 @@ class ExternalTableMaterializerTest {
     }
 
     @Test
+    void conversionErrorCarrying403InScratchPathReturns58030() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(iam.resolvePrincipalContext(BINDING.iamRoleArn())).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:ListBucket","s3:GetObject"],"Resource":"*"}
+                ]}""")));
+        doThrow(new RuntimeException("floci-duck execute returned HTTP 500: Failed to write to "
+                + "'s3://floci-internal-redshift-spectrum-scratch/spectrum-e403d511-1234.csv': "
+                + "Conversion Error: Could not convert string 'foo' to INT32"))
+                .when(duck).execute(anyString(), any(), anyString(), anyString(), anyString(), anyString());
+
+        SpectrumReadException exception = assertThrows(SpectrumReadException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("58030"));
+        verify(iam).clearSpectrumScratchResource(startsWith("ASIA"));
+    }
+
+    @Test
+    void conversionErrorOnFailedValueContaining403Returns58030() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(iam.resolvePrincipalContext(BINDING.iamRoleArn())).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:ListBucket","s3:GetObject"],"Resource":"*"}
+                ]}""")));
+        doThrow(new RuntimeException("floci-duck execute returned HTTP 500: "
+                + "Conversion Error: Could not convert string '403' to INT32"))
+                .when(duck).execute(anyString(), any(), anyString(), anyString(), anyString(), anyString());
+
+        SpectrumReadException exception = assertThrows(SpectrumReadException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("58030"));
+        verify(iam).clearSpectrumScratchResource(startsWith("ASIA"));
+    }
+
+    @Test
     void deniesIcebergManifestBeforeTheMetadataScanReadsIt() {
         Table table = icebergTable("s3://bucket/events/metadata/v1.json");
         when(glue.getTable("lake", "events")).thenReturn(table);

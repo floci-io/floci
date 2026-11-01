@@ -39,6 +39,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -48,6 +49,8 @@ public class ExternalTableMaterializer {
     public static final String SCRATCH_BUCKET = S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET;
     private static final String SQLSTATE_LOAD_FAILED = "58030";
     private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
+    private static final Pattern DUCKDB_HTTP_403 = Pattern.compile(
+            "\\bHTTP(?:/[0-9.]+)?\\s+(?:Error:\\s+)?(?:HTTP(?:/[0-9.]+)?\\s+)?403\\b|\\b403\\s*\\(Forbidden\\)|\\b403\\s+Forbidden\\b");
     private static final long LOCK_TIMEOUT_SECONDS = 30;
     private static final String SCRATCH_KEY_PREFIX = "spectrum-";
     private static final Duration STALE_SCRATCH_AGE = Duration.ofHours(1);
@@ -763,16 +766,20 @@ public class ExternalTableMaterializer {
     }
 
     /**
-     * Whether an exception represents an S3 or IAM access denial (e.g. HTTP 403, AccessDenied).
+     * Whether an exception represents an S3 or IAM access denial (e.g. HTTP 403 from S3/IAM,
+     * DuckDB's HTTP 403 error, or an AccessDenied error response).
      */
     private static boolean isAccessDenied(Throwable throwable) {
         Throwable current = throwable;
         while (current != null) {
+            if (current instanceof AwsException aws && (aws.getHttpStatus() == 403
+                    || "AccessDenied".equalsIgnoreCase(aws.getErrorCode()))) {
+                return true;
+            }
             String message = current.getMessage();
-            if (message != null && (message.contains("403")
+            if (message != null && (DUCKDB_HTTP_403.matcher(message).find()
                     || message.contains("AccessDenied")
-                    || message.contains("Access Denied")
-                    || message.contains("Forbidden"))) {
+                    || message.contains("Access Denied"))) {
                 return true;
             }
             current = current.getCause();
