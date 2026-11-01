@@ -114,7 +114,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [CodePipeline](codepipeline.md) | `POST /` + `X-Amz-Target: CodePipeline_20150709.*` | JSON 1.1 | 44 |
 | [AWS Network Firewall](network-firewall.md) | `POST /` + `X-Amz-Target: NetworkFirewall_20201112.*` | JSON 1.0 | 27 |
 | [AWS Service Catalog](service-catalog.md) | `POST /` + `X-Amz-Target: AWS242ServiceCatalogService.*` | JSON 1.1 | 89 |
-| [Service Quotas](servicequotas.md) | `POST /` + `X-Amz-Target: ServiceQuotasV20190624.*` | JSON 1.1 | 7 |
+| [Service Quotas](servicequotas.md) | `POST /` + `X-Amz-Target: ServiceQuotasV20190624.*` | JSON 1.1 | 8 |
 | [AWS Budgets](budgets.md) | `POST /` + `X-Amz-Target: AWSBudgetServiceGateway.*` | JSON 1.1 | 26 |
 | [AWS RAM](ram.md) | `POST /{operationname}` (lowercase), `DELETE /deleteresourceshare` | REST JSON | 16 |
 | [Control Catalog](controlcatalog.md) | `/get-control`, `/list-controls` | REST JSON | 2 |
