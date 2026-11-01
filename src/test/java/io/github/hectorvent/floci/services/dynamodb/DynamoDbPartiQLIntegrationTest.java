@@ -647,6 +647,8 @@ class DynamoDbPartiQLIntegrationTest {
             [{},{"N":"abc"}]                                  | Supplied AttributeValue is empty, must contain exactly one of the supported datatypes
             [{"S":"a","N":"1"},{"N":"abc"}]                   | Supplied AttributeValue has more than one datatypes set, must contain exactly one of the supported datatypes
             [{"S":"a","N":"abc"}]                             | The parameter cannot be converted to a numeric value: abc
+            [{"N":null},{"N":"abc"}]                          | Supplied AttributeValue is empty, must contain exactly one of the supported datatypes
+            [{"S":"a","N":null},{"N":"abc"}]                  | The parameter cannot be converted to a numeric value: abc
             """)
     void aParameterIsRefusedAtTheFirstValueThatCannotBeRead(String parameters, String message) {
         String deep = "{\"M\":{\"n\":".repeat(40) + "{\"S\":\"leaf\"}" + "}}".repeat(40);
@@ -706,6 +708,30 @@ class DynamoDbPartiQLIntegrationTest {
                 """.formatted(update))
             .statusCode(400)
             .body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
+    @Order(33)
+    void aParameterMemberSetToNullIsAbsent() {
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":"SELECT * FROM \\"%s\\" WHERE pk = ?","Parameters":[{"N":null}]}]}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message",
+                    equalTo("Supplied AttributeValue is empty, must contain exactly one of the supported datatypes"));
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"INSERT INTO \\"%s\\" VALUE {'pk': 'null-member', 'v': ?}",
+                 "Parameters":[{"M":{"x":{"S":"a"}},"N":null}]}
+                """.formatted(TABLE))
+            .statusCode(200);
+
+        request("DynamoDB_20120810.GetItem", """
+                {"TableName":"%s","Key":{"pk":{"S":"null-member"}}}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Item.v.M.x.S", equalTo("a"))
+            .body("Item.v.containsKey('N')", equalTo(false));
     }
 
     private static void putItem(String pk, String attributes) {

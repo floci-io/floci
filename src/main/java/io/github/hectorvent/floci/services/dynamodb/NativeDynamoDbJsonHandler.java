@@ -3613,7 +3613,7 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleExecuteStatement(JsonNode request, String region) {
-        requirePartiQLParameterBase64(request.path("Parameters"));
+        decodePartiQLParameters(request.path("Parameters"));
         List<String> validationErrors = new ArrayList<>();
         addPartiQLReturnValuesError(request, "returnValuesOnConditionCheckFailure", validationErrors);
         addLengthError(request, "NextToken", "nextToken", MAX_NEXT_TOKEN_LENGTH, validationErrors);
@@ -3643,7 +3643,7 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleExecuteTransaction(JsonNode request, String region) {
         JsonNode stmts = request.path("TransactStatements");
-        stmts.forEach(s -> requirePartiQLParameterBase64(s.path("Parameters")));
+        stmts.forEach(s -> decodePartiQLParameters(s.path("Parameters")));
         List<String> validationErrors = new ArrayList<>();
         addLengthError(request, "ClientRequestToken", "clientRequestToken", MAX_CLIENT_REQUEST_TOKEN_LENGTH,
                 validationErrors);
@@ -3773,7 +3773,7 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleBatchExecuteStatement(JsonNode request, String region) {
         JsonNode stmts = request.path("Statements");
-        stmts.forEach(s -> requirePartiQLParameterBase64(s.path("Parameters")));
+        stmts.forEach(s -> decodePartiQLParameters(s.path("Parameters")));
         List<String> validationErrors = new ArrayList<>();
         addReturnConsumedCapacityError(request, validationErrors);
         addStatementListErrors(stmts, "statements", validationErrors);
@@ -3876,18 +3876,30 @@ public class NativeDynamoDbJsonHandler {
         return params;
     }
 
-    // DynamoDB decodes the binary values of every statement before it checks anything else.
-    private static void requirePartiQLParameterBase64(JsonNode parameters) {
-        parameters.forEach(DynamoDbAttributeValueValidator::requireBase64);
+    // DynamoDB takes a member set to null as absent, and it decodes the binary values of every
+    // statement before it checks anything else.
+    private static void decodePartiQLParameters(JsonNode parameters) {
+        for (JsonNode parameter : parameters) {
+            dropNullMembers(parameter);
+            DynamoDbAttributeValueValidator.requireBase64(parameter);
+        }
+    }
+
+    private static void dropNullMembers(JsonNode value) {
+        if (value instanceof ObjectNode object) {
+            object.properties().removeIf(member -> member.getValue().isNull());
+            object.path("M").forEach(NativeDynamoDbJsonHandler::dropNullMembers);
+            object.path("L").forEach(NativeDynamoDbJsonHandler::dropNullMembers);
+        }
     }
 
     // DynamoDB reads the parameters in order and refuses the first value it cannot take. It reads the
     // members of a map in the order of a HashMap sized for them, and a number before the type count.
     private void requirePartiQLParameter(JsonNode value, int level) {
         DynamoDbAttributeValueValidator.requireParameterLevelWithinLimit(level);
-        if (value.hasNonNull("N")) {
+        if (value.has("N")) {
             DynamoDbNumberUtils.requirePartiQLParameterNumber(value.get("N").asText());
-        } else if (value.hasNonNull("NS")) {
+        } else if (value.has("NS")) {
             DynamoDbNumberUtils.requirePartiQLParameterNumberSet(value.get("NS"));
         }
         switch (DynamoDbAttributeValueValidator.typeOf(value)) {
