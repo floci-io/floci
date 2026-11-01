@@ -115,12 +115,14 @@ class LocallyBuiltHelperImageTest {
 
     @ParameterizedTest
     @CsvSource({"x86_64,arm64,linux/amd64", "aarch64,amd64,linux/arm64"})
-    void replacesForeignCachedHelperWithTheDaemonPlatform(String host, String cached, String expected) {
+    void replacesForeignCachedHelperWithTheDaemonPlatform(String host, String cached, String expected) throws Exception {
         daemon.withArchitecture(host);
         stubResolvedImage();
         InspectImageResponse image = mock(InspectImageResponse.class);
         when(image.getOs()).thenReturn("linux");
         when(image.getArch()).thenReturn(cached);
+        when(image.getConfig()).thenReturn(new ContainerConfig()
+                .withLabels(Map.of(LocallyBuiltHelperImage.RECIPE_LABEL, recipe())));
         InspectImageCmd inspect = mock(InspectImageCmd.class);
         when(inspect.exec()).thenReturn(image);
         when(dockerClient.inspectImageCmd(DEFAULT_IMAGE)).thenReturn(inspect);
