@@ -14,6 +14,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * The Payment Cryptography control plane.
@@ -48,9 +49,8 @@ public class PaymentCryptographyJsonHandler {
             case "TagResource" -> Response.ok(tagResource(request, region)).build();
             case "UntagResource" -> Response.ok(untagResource(request, region)).build();
             case "ListTagsForResource" -> Response.ok(listTagsForResource(request, region)).build();
-            default -> throw new AwsException("ValidationException",
-                    "Operation " + action + " is not supported by the Floci Payment Cryptography API.",
-                    400);
+            default -> throw new AwsException("UnknownOperationException",
+                    "Operation " + action + " is not supported by floci", 400);
         };
     }
 
@@ -60,6 +60,14 @@ public class PaymentCryptographyJsonHandler {
         JsonNode attributes = request.get("KeyAttributes");
         if (attributes == null || !attributes.isObject()) {
             throw new AwsException("ValidationException", "KeyAttributes is required", 400);
+        }
+        // The service requires the usage and the modes of use of a key, as the
+        // reference does: a key without them says nothing about what it is for.
+        if (!attributes.hasNonNull("KeyUsage")) {
+            throw new AwsException("ValidationException", "KeyAttributes.KeyUsage is required", 400);
+        }
+        if (!attributes.hasNonNull("KeyModesOfUse")) {
+            throw new AwsException("ValidationException", "KeyAttributes.KeyModesOfUse is required", 400);
         }
         Map<String, Object> declared = new LinkedHashMap<>();
         attributes.fields().forEachRemaining(entry -> {
@@ -85,13 +93,17 @@ public class PaymentCryptographyJsonHandler {
     /** The tagging operations name their key in {@code ResourceArn}. */
     private static final String RESOURCE_ARN = "ResourceArn";
 
+    /** The states a key is in, as the reference names them. */
+    private static final Set<String> KEY_STATES =
+            Set.of("CREATE_IN_PROGRESS", "CREATE_COMPLETE", "DELETE_PENDING", "DELETE_COMPLETE");
+
     private Map<String, Object> getKey(JsonNode request, String region) {
         PaymentCryptographyKey key = requiredKey(request, region, KEY_IDENTIFIER);
         return Map.of("Key", keyObject(key));
     }
 
     private Map<String, Object> listKeys(JsonNode request, String region) {
-        PaginatedResult<PaymentCryptographyKey> page = service.listKeys(region,
+        PaginatedResult<PaymentCryptographyKey> page = service.listKeys(region, keyState(request),
                 Pagination.parseMaxResults(request, "MaxResults", PAGINATION_ERROR),
                 Pagination.parseNextToken(request, "NextToken", PAGINATION_ERROR));
         List<Map<String, Object>> keys = new ArrayList<>();
@@ -106,9 +118,50 @@ public class PaymentCryptographyJsonHandler {
         return out;
     }
 
+    /**
+     * The state the request names the keys by, or none when it names no state.
+     *
+     * <p>The service knows four states, and a request naming another one is
+     * refused rather than answered with every key.
+     */
+    private static String keyState(JsonNode request) {
+        if (!request.hasNonNull("KeyState")) {
+            return null;
+        }
+        String state = request.get("KeyState").asText();
+        if (!KEY_STATES.contains(state)) {
+            throw new AwsException("ValidationException",
+                    "KeyState '" + state + "' is not a state of a key", 400);
+        }
+        return state;
+    }
+
+    /**
+     * Deletes a key and answers with the key, as the reference does.
+     *
+     * <p>The waiting period the reference offers is read and checked, and the
+     * key is deleted at once all the same: the service deletes a key the
+     * moment it is asked to.
+     */
     private Map<String, Object> deleteKey(JsonNode request, String region) {
-        service.deleteKey(requiredKey(request, region, KEY_IDENTIFIER));
-        return Map.of();
+        deleteInDays(request);
+        PaymentCryptographyKey key = service.deleteKey(requiredKey(request, region, KEY_IDENTIFIER));
+        return Map.of("Key", keyObject(key));
+    }
+
+    /**
+     * The waiting period the request names, which the reference reads between
+     * three and a hundred and eighty days.
+     */
+    private static void deleteInDays(JsonNode request) {
+        if (!request.hasNonNull("DeleteKeyInDays")) {
+            return;
+        }
+        int days = request.get("DeleteKeyInDays").asInt();
+        if (days < 3 || days > 180) {
+            throw new AwsException("ValidationException",
+                    "DeleteKeyInDays must be between 3 and 180", 400);
+        }
     }
 
     // ---- aliases ------------------------------------------------------------
@@ -147,8 +200,15 @@ public class PaymentCryptographyJsonHandler {
         return out;
     }
 
+    /**
+     * Points an alias at a key, or removes the key it names when the request
+     * names no key, as the reference does: the key of an alias is optional.
+     */
     private Map<String, Object> updateAlias(JsonNode request, String region) {
         String aliasName = aliasName(request);
+        if (!request.hasNonNull(KEY_ARN)) {
+            return Map.of("Alias", aliasObject(service.detachAlias(region, aliasName)));
+        }
         PaymentCryptographyKey key = requiredKey(request, region, KEY_ARN);
         PaymentCryptographyAlias alias = service.updateAlias(aliasName, key);
         return Map.of("Alias", aliasObject(alias));
@@ -285,13 +345,21 @@ public class PaymentCryptographyJsonHandler {
         out.put("Exportable", key.isExportable());
         out.put("CreateTimestamp", key.getCreateTimestamp());
         out.put("UsageStartTimestamp", key.getUsageStartTimestamp());
+        if (key.getDeletePendingTimestamp() > 0) {
+            out.put("DeletePendingTimestamp", key.getDeletePendingTimestamp());
+        }
+        if (key.getDeleteTimestamp() > 0) {
+            out.put("DeleteTimestamp", key.getDeleteTimestamp());
+        }
         return out;
     }
 
     private static Map<String, Object> aliasObject(PaymentCryptographyAlias alias) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("AliasName", alias.getAliasName());
-        out.put("KeyArn", alias.getKeyArn());
+        if (alias.getKeyArn() != null) {
+            out.put("KeyArn", alias.getKeyArn());
+        }
         return out;
     }
 }
