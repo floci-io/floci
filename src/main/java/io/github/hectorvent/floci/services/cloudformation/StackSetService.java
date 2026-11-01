@@ -286,8 +286,33 @@ public class StackSetService implements PassedRoleLookup {
             throw new AwsException("StackSetNotEmptyException",
                     "StackSet is not empty. Delete all stack instances first.", 409);
         }
+        deleteAutoDeploymentTargets(name);
         stackSets.delete(name);
         LOG.infov("Deleted StackSet: {0}", name);
+    }
+
+    /**
+     * Deletes every stack instance with its stack, then the stack set, as deleting an
+     * {@code AWS::CloudFormation::StackSet} resource does. A stack set already gone is left alone.
+     */
+    public synchronized void deleteStackSetWithInstances(String name) {
+        if (stackSets.get(name).isEmpty()) {
+            return;
+        }
+        for (StackInstance instance : listStackInstances(name, null, null)) {
+            if (!await(cfnService.deleteStack(instance.getStackName(), instance.getRegion(), instance.getAccount()))) {
+                throw new AwsException("ValidationError", "Stack instance deletion failed for account "
+                        + instance.getAccount() + " in " + instance.getRegion(), 400);
+            }
+            instances.delete(instanceKey(name, instance.getAccount(), instance.getRegion()));
+        }
+        deleteStackSet(name);
+    }
+
+    private void deleteAutoDeploymentTargets(String name) {
+        for (StackSetAutoDeploymentTarget target : listStackSetAutoDeploymentTargets(name)) {
+            autoDeploymentTargets.delete(name + "::" + target.getOrganizationalUnitId());
+        }
     }
 
     // ── Instances ──────────────────────────────────────────────────────────────
