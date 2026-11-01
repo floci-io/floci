@@ -2,11 +2,15 @@ package io.github.hectorvent.floci.services.apigateway;
 
 import io.github.hectorvent.floci.testutil.ExecuteApiRequestSigner;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.QuarkusTestProfile;
+import io.quarkus.test.junit.TestProfile;
 import io.restassured.http.ContentType;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Instant;
 import java.util.Map;
@@ -22,8 +26,16 @@ import static org.hamcrest.Matchers.notNullValue;
  * against the signed form, so the rewritten path must not leak into the canonical request.
  */
 @QuarkusTest
+@TestProfile(ApiGatewayCustomDomainIamAuthIntegrationTest.IotDisabled.class)
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ApiGatewayCustomDomainIamAuthIntegrationTest {
+
+    public static class IotDisabled implements QuarkusTestProfile {
+        @Override
+        public Map<String, String> getConfigOverrides() {
+            return Map.of("floci.services.iot.enabled", "false");
+        }
+    }
 
     private static final String REGION = "us-east-1";
     private static final String ACCESS_KEY = "test";
@@ -48,6 +60,7 @@ class ApiGatewayCustomDomainIamAuthIntegrationTest {
                 .then().statusCode(200)
                 .extract().path("item[0].id");
         createMockMethod(rootId, "iam", "AWS_IAM");
+        createMockMethod(rootId, "public", "NONE");
 
         String deploymentId = given().contentType(ContentType.JSON)
                 .body("{\"description\":\"v1\"}")
@@ -148,6 +161,18 @@ class ApiGatewayCustomDomainIamAuthIntegrationTest {
                 .when().get(customDomainPath())
                 .then().statusCode(403)
                 .header("x-amzn-ErrorType", "InvalidSignatureException");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/execute-api/%s/prod/", "/_aws/execute-api/%s/prod/",
+            "/restapis/%s/prod/_user_request_/"})
+    @Order(15)
+    void invocationControllersHonorMethodAuthenticationWithIotDisabled(String template) throws Exception {
+        String path = template.formatted(apiId);
+        given().header("Host", "localhost").headers(signedHeaders(path + "iam", "localhost"))
+                .get(path + "iam").then().statusCode(200).body("reached", equalTo("integration"));
+        given().get(path + "iam").then().statusCode(403);
+        given().get(path + "public").then().statusCode(200).body("reached", equalTo("integration"));
     }
 
     @Test

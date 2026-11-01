@@ -37,6 +37,14 @@ final class EmrSparkSteps {
     private static final Set<String> SWITCHES = Set.of("--help", "-h", "--supervise", "--usage-error", "--verbose",
             "-v", "--version");
     private static final String SPARK_DEFAULTS = "spark-defaults";
+    // The Release Guide's Spark classifications: spark-env "Sets values in the spark-env.sh file", through its
+    // export classification ("If any classification ends in env, use the export sub-classification"), and
+    // spark-hive-site "Sets values in the hive-site.xml for Spark".
+    private static final String SPARK_ENV = "spark-env";
+    private static final String EXPORT = "export";
+    private static final String SPARK_HIVE_SITE = "spark-hive-site";
+    // Spark puts a spark.hadoop. setting in the Hadoop configuration its Hive client reads, ahead of hive-site.xml.
+    private static final String SPARK_HADOOP_PREFIX = "spark.hadoop.";
     // The Release Guide's command-runner.jar tools that the EMR Serverless image does not have; its hadoop
     // has no HDFS to run streaming or the LZO indexer against.
     private static final Set<String> UNAVAILABLE_TOOLS = Set.of("hive-script", "pig-script", "hadoop-streaming",
@@ -128,26 +136,60 @@ final class EmrSparkSteps {
     }
 
     /**
-     * The {@code spark-defaults} properties of a cluster's {@code Configurations}, the JSON array
-     * {@code RunJobFlow} was given, or none.
+     * The Spark properties of a cluster's {@code Configurations}, the JSON array {@code RunJobFlow} was given,
+     * that a step's {@code spark-submit} gets as defaults: {@code spark-defaults}'s, and {@code spark-hive-site}'s
+     * as {@code spark.hadoop.} settings, which Spark's Hive client reads as it would {@code hive-site.xml}. A
+     * {@code spark.hadoop.} setting in {@code spark-defaults} wins over the same one in {@code spark-hive-site},
+     * as it would over {@code hive-site.xml}.
      */
     static Map<String, String> sparkDefaults(String configurations, ObjectMapper objectMapper) {
         Map<String, String> properties = new LinkedHashMap<>();
+        for (JsonNode configuration : classified(configurations, objectMapper, SPARK_HIVE_SITE)) {
+            configuration.path("Properties").properties().forEach(property ->
+                    properties.put(SPARK_HADOOP_PREFIX + property.getKey(), property.getValue().asText()));
+        }
+        for (JsonNode configuration : classified(configurations, objectMapper, SPARK_DEFAULTS)) {
+            configuration.path("Properties").properties()
+                    .forEach(property -> properties.put(property.getKey(), property.getValue().asText()));
+        }
+        return properties;
+    }
+
+    /**
+     * The environment variables a cluster's {@code spark-env} exports, its nested {@code export}
+     * classification's properties, or none.
+     */
+    static Map<String, String> sparkEnvironment(String configurations, ObjectMapper objectMapper) {
+        Map<String, String> variables = new LinkedHashMap<>();
+        for (JsonNode configuration : classified(configurations, objectMapper, SPARK_ENV)) {
+            for (JsonNode nested : configuration.path("Configurations")) {
+                if (EXPORT.equals(nested.path("Classification").asText())) {
+                    nested.path("Properties").properties()
+                            .forEach(property -> variables.put(property.getKey(), property.getValue().asText()));
+                }
+            }
+        }
+        return variables;
+    }
+
+    // The configurations of one classification in a cluster's Configurations, in their order.
+    private static List<JsonNode> classified(String configurations, ObjectMapper objectMapper,
+                                             String classification) {
+        List<JsonNode> matching = new ArrayList<>();
         if (configurations == null) {
-            return properties;
+            return matching;
         }
         try {
             for (JsonNode configuration : objectMapper.readTree(configurations)) {
-                if (SPARK_DEFAULTS.equals(configuration.path("Classification").asText())) {
-                    configuration.path("Properties").properties()
-                            .forEach(property -> properties.put(property.getKey(), property.getValue().asText()));
+                if (classification.equals(configuration.path("Classification").asText())) {
+                    matching.add(configuration);
                 }
             }
         } catch (JsonProcessingException ignored) {
             // RunJobFlow stored the array as it came; one that does not parse holds no properties to apply.
-            return properties;
+            return matching;
         }
-        return properties;
+        return matching;
     }
 
     private static List<String> withoutMasterOrDeployMode(List<String> arguments) {

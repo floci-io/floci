@@ -486,8 +486,13 @@ public class CodeArtifactController {
             node.put("revision", summary.revision());
             node.put("status", summary.status());
             ObjectNode origin = node.putObject("origin");
-            origin.put("originType", "INTERNAL");
-            origin.putObject("domainEntryPoint").put("repositoryName", repository);
+            origin.put("originType", summary.originType());
+            ObjectNode domainEntryPoint = origin.putObject("domainEntryPoint");
+            if (summary.externalConnectionName() != null) {
+                domainEntryPoint.put("externalConnectionName", summary.externalConnectionName());
+            } else {
+                domainEntryPoint.put("repositoryName", repository);
+            }
         });
         if (result.nextToken() != null) {
             response.put("nextToken", result.nextToken());
@@ -818,7 +823,7 @@ public class CodeArtifactController {
             node.put("publishedTime", pv.getPublishedTime());
         }
         ObjectNode origin = node.putObject("origin");
-        origin.put("originType", "INTERNAL");
+        origin.put("originType", pv.getOriginType());
         node.putArray("licenses");
         return node;
     }

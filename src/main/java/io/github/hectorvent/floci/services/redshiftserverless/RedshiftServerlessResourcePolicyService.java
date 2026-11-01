@@ -17,6 +17,7 @@ import java.io.IOException;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Resource policies for Redshift Serverless snapshots. A policy is stored and echoed, not
@@ -47,6 +48,9 @@ public class RedshiftServerlessResourcePolicyService implements Resettable {
         requireJsonObject(policy);
         RedshiftServerlessSnapshot snapshot = findSnapshot(resourceArn, region)
                 .orElseThrow(() -> ServerlessSupport.notFound("The resource " + resourceArn + " was not found."));
+        if (!"AVAILABLE".equals(snapshot.getStatus())) {
+            throw ServerlessSupport.conflict("The snapshot is not available.");
+        }
         ResourcePolicy stored = new ResourcePolicy(resourceArn, policy);
         stored.setSnapshotCreateTime(snapshot.getSnapshotCreateTime());
         policies.put(storageKey(region, resourceArn), stored);
@@ -61,6 +65,17 @@ public class RedshiftServerlessResourcePolicyService implements Resettable {
     public synchronized void deleteResourcePolicy(String resourceArn, String region) {
         require(resourceArn, region);
         policies.delete(storageKey(region, resourceArn));
+    }
+
+    synchronized void deleteExpiredSnapshotPolicy(
+            AccountAwareStorageBackend.AccountEntry<RedshiftServerlessSnapshot> entry) {
+        RedshiftServerlessSnapshot snapshot = entry.value();
+        String region = entry.key().substring(0, entry.key().indexOf("::"));
+        String key = storageKey(region, snapshot.getSnapshotArn());
+        policies.getForAccountMigratingLegacy(entry.accountId(), key,
+                        legacy -> policies.getLegacyForAccount(entry.accountId(), key).isPresent())
+                .filter(policy -> Objects.equals(policy.getSnapshotCreateTime(), snapshot.getSnapshotCreateTime()))
+                .ifPresent(policy -> policies.deleteAllAtomicallyForAccounts(Map.of(entry.accountId(), Set.of(key))));
     }
 
     @Override

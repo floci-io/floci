@@ -253,7 +253,7 @@ public class AppIntegrationsService implements TagHandler {
         if (identifier == null || identifier.isBlank()) {
             throw new AwsException("InvalidRequestException", "Identifier is required", 400);
         }
-        if (!identifier.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(identifier)) {
             return identifier;
         }
         String resource;

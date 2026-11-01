@@ -10,7 +10,7 @@ Floci implements the EC2 Auto Scaling API — stored-state management for launch
 - `arn:aws:autoscaling:<region>:<account>:launchConfiguration:<uuid>:launchConfigurationName/<name>`
 - `arn:aws:autoscaling:<region>:<account>:scalingPolicy:<uuid>:autoScalingGroupName/<group>/policyName/<name>`
 
-## Supported Operations (53 total)
+## Supported Operations (55 total)
 
 ### Launch Configurations
 
@@ -56,8 +56,22 @@ scale-in behavior, and do not complete an instance refresh. Unexpected runtime
 failures in ordinary scale-out, and save and cleanup failures, still propagate.
 Refresh launch failures retain the original replacement attempt and appear as
 failed scaling activities while other replacements can continue. Refresh and
-ordinary launches share the same launch settings, including template block-device
-mappings; accepted refresh launches keep their recorded source identity.
+ordinary launches share the same launch settings, including the block device mappings
+of the launch template or launch configuration; accepted refresh launches keep their
+recorded source identity. A launch template or launch configuration a CloudFormation
+stack creates carries no block device mappings yet, so its instances get the AMI's
+devices alone. `CreateLaunchConfiguration` refuses a block device mapping without a
+`DeviceName`, or with a Boolean or integer member it cannot parse, and stores the rest as
+given; the mappings are otherwise checked only when a group launches from the
+configuration, by the checks `RunInstances` applies. Neither step applies the ranges the
+Auto Scaling model sets for `VolumeSize`, `Iops` and `Throughput`, and the volume types a
+launch accepts are EC2's, `io2` included. A mapping EC2 refuses, such as an invalid device
+name or a snapshot that does not exist, fails that launch and is recorded as a failed
+scaling activity.
+
+An EBS mapping supplied by a launch configuration defaults `DeleteOnTermination` to
+`true`, even when the AMI's mapping sets it to `false`. An explicit `false` in the
+launch configuration keeps the volume after termination.
 
 For groups configured only with Availability Zones, Floci preserves its unpinned
 EC2 launch behavior and counts each member under the requested zone. This permits
@@ -68,13 +82,15 @@ EC2 instance can use a default subnet in a different zone.
 
 | Operation | Notes |
 |---|---|
-| `DescribeAutoScalingInstances` | Returns all ASG-tracked instances with lifecycle state and health status |
+| `DescribeAutoScalingInstances` | Returns all ASG-tracked instances with their group name, lifecycle state and health status. Health is in capitals here: `HEALTHY`, as the AWS samples show, and `UNHEALTHY` by the same rule. `DescribeAutoScalingGroups` reports `Healthy` or `Unhealthy` |
 | `SetInstanceHealth` | Updates an instance's health status immediately; accepts but does not enforce the grace-period flag |
 | `SetInstanceProtection` | Enables or disables scale-in protection for named instances in a group |
 | `SetDesiredCapacity` | Updates desired count; reconciler handles scale-out / scale-in within 10 s |
 | `AttachInstances` | Attaches existing EC2 instances to a group; sets lifecycle state to `InService`. Refuses the whole batch with `ValidationError` when an instance already belongs to a group |
 | `DetachInstances` | Detaches instances from a group; optionally decrements desired capacity |
 | `TerminateInstanceInAutoScalingGroup` | Terminates a specific instance; optionally decrements desired capacity |
+| `EnterStandby` | Moves `InService` instances to `EnteringStandby` and returns one `InProgress` activity (progress 50) per instance; the reconciler deregisters them from the group's target groups and Classic Load Balancers and sets `Standby` within 10 s. `ShouldDecrementDesiredCapacity=true` lowers desired capacity by the number of instances, refused with `ValidationError` below `MinSize`; `false` keeps it, so the group launches replacements |
+| `ExitStandby` | Moves `Standby` instances to `Pending`, raises desired capacity by the number of instances (refused with `ValidationError` above `MaxSize`) and returns one `PreInService` activity (progress 30) per instance; the reconciler registers them with the group's load balancers and sets `InService` within 10 s |
 | `SuspendProcesses` | Records suspended scaling processes (empty list suspends all); reported back by `DescribeAutoScalingGroups` |
 | `ResumeProcesses` | Clears suspended processes (empty list resumes all) |
 
@@ -89,6 +105,26 @@ overwriting existing tags with the same keys. `DetachInstances` removes only
 `AttachInstances` does not yet refuse what AWS refuses for the instance's state or zone or for
 the group's `MaxSize`, and does not grow desired capacity by the number of instances attached.
 An ID EC2 has no instance for joins the group without tags.
+
+Standby follows the
+[user guide](https://docs.aws.amazon.com/autoscaling/ec2/userguide/as-enter-exit-standby.html).
+A member in `EnteringStandby` or `Standby` does not count toward desired capacity, including when
+`AttachInstances` raises desired capacity to the group's size, and is never chosen for scale-in or
+instance refresh. `StartInstanceRefresh` leaves such members alone whatever its `StandbyInstances`
+preference says, as AWS does for `Ignore`; AWS's default, `Wait`, and `Terminate` are not
+implemented. A member keeps its health status in standby and when it returns to service, and stays
+in the group even when its EC2 instance stops or terminates. If it did, the member fails the health
+check AWS runs when it exits standby: Floci terminates the instance if EC2 still has it, records
+AWS's `Terminating EC2 instance` activity, and the group launches a replacement.
+
+Each move's activity carries the description and cause AWS writes and completes as `Successful` in
+`DescribeScalingActivities` when the instance reaches `Standby` or `InService`. It completes as
+`Cancelled` when the instance is terminated first, fails that health check, is replaced by an
+instance refresh on its way back to service, or when the group is deleted. `DetachInstances` refuses
+an instance whose move is still in progress, such as one in `EnteringStandby` or `Pending` on its way
+back, with `The instance <id> is not in InService or Standby.`, AWS's answer for a state it does not
+detach; Floci does not refuse the other such states yet. Floci does not wait for connection draining and
+does not write the activity's `Details` member.
 
 ### Instance Refresh
 

@@ -60,7 +60,7 @@ final class ElbV2TargetResolver {
     }
 
     private static String extractAccountId(String targetGroupArn) {
-        if (targetGroupArn == null || !targetGroupArn.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(targetGroupArn)) {
             return null;
         }
         try {

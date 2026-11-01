@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.hamcrest.Matcher;
 import org.junit.jupiter.api.Test;
 
@@ -13,6 +14,7 @@ import java.util.zip.ZipOutputStream;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.equalTo;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Invoke ignored the {@code Qualifier} query parameter, so {@code ?Qualifier=} ran {@code $LATEST}
@@ -190,5 +192,17 @@ class LambdaInvokeQualifierIntegrationTest {
         given().header("X-Amz-Invocation-Type", "DryRun").queryParam("Qualifier", " ").body("{}")
         .when().post("/2015-03-31/functions/" + fn + "/invocations")
         .then().statusCode(400).body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void anInvokeAnswersWithTheInvocationRequestIdInEveryHeader() throws Exception {
+        // Invoke sets X-Amz-Request-Id; the SDKs read x-amzn-RequestId first
+        String fn = createFunction("v1");
+
+        Response response = given().header("X-Amz-Invocation-Type", "DryRun").body("{}")
+        .when().post("/2015-03-31/functions/" + fn + "/invocations");
+
+        response.then().statusCode(204);
+        assertEquals(response.header("x-amz-request-id"), response.header("x-amzn-RequestId"));
     }
 }

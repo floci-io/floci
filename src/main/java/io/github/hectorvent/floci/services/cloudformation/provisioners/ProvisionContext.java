@@ -7,8 +7,10 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 
@@ -71,6 +73,31 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
     public boolean previouslyDeclared(String name) {
         return isUpdate() && priorProperties != null && priorProperties.has(name)
                 && !priorProperties.get(name).isNull();
+    }
+
+    /**
+     * The top-level properties the previous template declared and {@code props}, the properties
+     * this update applies, no longer has: the ones an update that removes a property has to clear.
+     * A property the stack never declared is not in the set, so a value set outside the stack
+     * survives, and a property whose {@code Fn::If} chose {@code AWS::NoValue} on either template
+     * counts as not declared there, as in {@link #previouslyDeclared}. Empty for a create, and for
+     * a resource whose previous template did not declare it.
+     *
+     * <p>The rule only says which names went; what clearing one means is the service's own. A
+     * provisioner clears each by the call its service offers and leaves out the ones AWS keeps
+     * (a create-only property is a replacement question, not a clear).
+     */
+    public Set<String> droppedProperties(JsonNode props) {
+        Set<String> dropped = new LinkedHashSet<>();
+        if (!isUpdate() || priorProperties == null) {
+            return dropped;
+        }
+        priorProperties.fieldNames().forEachRemaining(name -> {
+            if (previouslyDeclared(name) && (props == null || !props.has(name))) {
+                dropped.add(name);
+            }
+        });
+        return dropped;
     }
 
     /**

@@ -456,18 +456,16 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     @Test
-    void aMicrovmImageTaggedThroughATargetWithoutTheArnPrefixIsCheckedAsTheImage() {
-        // Lambda tags the image any target holding :microvm-image: names, read by its fourth field and
-        // its last, so a Deny on the image applies however the target is spelled.
+    void aMicrovmImageTagTargetWithoutTheArnPrefixIsRefusedAndTagsNothing() {
+        // TagResource takes only an ARN, so a target without arn: names no image, whatever it holds.
         String user = user("route-image-tags");
         String image = microvmImage("route-tagged-image-" + suffix());
         String target = "/2017-03-31/tags/x:y:z:us-east-1:microvm-image:" + image.substring(image.lastIndexOf(':') + 1);
-        String body = "{\"Tags\":{\"team\":\"a\"}}";
 
-        policy(user, allow("lambda:TagResource", "*") + "," + deny("lambda:TagResource", image));
-        refused(as(user, "lambda").body(body).post(target).then(), "lambda:TagResource");
         policy(user, allow("lambda:TagResource", "*"));
-        as(user, "lambda").body(body).post(target).then().statusCode(204);
+        as(user, "lambda").body("{\"Tags\":{\"team\":\"a\"}}").post(target).then()
+                .statusCode(400).body(containsString("InvalidParameterValueException"));
+        admin().get("/2017-03-31/tags/" + image).then().statusCode(200).body("Tags.size()", equalTo(0));
     }
 
     /** Creates a MicroVM image as the account's admin, removed afterwards, and returns its ARN. */

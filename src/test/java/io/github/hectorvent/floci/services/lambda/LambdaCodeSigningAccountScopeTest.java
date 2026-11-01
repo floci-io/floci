@@ -165,6 +165,38 @@ class LambdaCodeSigningAccountScopeTest {
     }
 
     @Test
+    void unpublishedRegionFunctionArnUsesDeploymentPartition(@TempDir Path codePath) {
+        String region = "xx-nowhere-9";
+        String functionArn = "arn:aws-cn:lambda:" + region + ":" + CALLER_ACCOUNT
+                + ":function:" + FUNCTION_NAME;
+        String configArn = "arn:aws-cn:lambda:" + region + ":" + CALLER_ACCOUNT
+                + ":code-signing-config:csc-0123456789abcdef0";
+        LambdaFunctionStore store = new LambdaFunctionStore(
+                AccountAwareStorageBackend.inMemory(CALLER_ACCOUNT));
+        LambdaFunction function = function(CALLER_ACCOUNT);
+        function.setFunctionArn(functionArn);
+        store.saveForAccount(CALLER_ACCOUNT, region, function);
+        RegionResolver regions = new RegionResolver("cn-north-1", CALLER_ACCOUNT);
+        LambdaService service = new LambdaService(store, new WarmPool(), new CodeStore(codePath),
+                new ZipExtractor(), regions);
+
+        service.putFunctionCodeSigningConfig(region, functionArn, configArn);
+        assertEquals(configArn, service.getFunctionForCodeSigningConfig(region, functionArn)
+                .getCodeSigningConfigArn());
+
+        String foreignArn = functionArn.replace("arn:aws-cn:", "arn:aws:");
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putFunctionCodeSigningConfig(region, foreignArn, configArn));
+        assertEquals("ResourceNotFoundException", error.getErrorCode());
+        assertEquals(configArn, store.getForAccount(CALLER_ACCOUNT, region, FUNCTION_NAME)
+                .orElseThrow().getCodeSigningConfigArn());
+
+        service.deleteFunctionCodeSigningConfig(region, functionArn);
+        assertNull(store.getForAccount(CALLER_ACCOUNT, region, FUNCTION_NAME)
+                .orElseThrow().getCodeSigningConfigArn());
+    }
+
+    @Test
     void foreignPartialRegionAndAccountReferencesCannotMutateCallerFunction(@TempDir Path codePath) {
         LambdaFunctionStore store = new LambdaFunctionStore(
                 AccountAwareStorageBackend.inMemory(CALLER_ACCOUNT));

@@ -24,16 +24,21 @@ public record SigV4AuthorizationHeader(String credential, String signedHeaders, 
      * {@code X-Amz-Date} it reads from a different source than this header).
      */
     public static SigV4AuthorizationHeader parse(String authorization) {
+        return parse(authorization, ALGORITHM);
+    }
+
+    /** The same parameters from a header of {@code algorithm}, such as SigV4a's. */
+    public static SigV4AuthorizationHeader parse(String authorization, String algorithm) {
         if (authorization == null) {
             return null;
         }
         String trimmed = authorization.trim();
-        if (!trimmed.regionMatches(true, 0, ALGORITHM, 0, ALGORITHM.length())) {
+        if (!trimmed.regionMatches(true, 0, algorithm, 0, algorithm.length())) {
             return null;
         }
         Map<String, String> parameters = new LinkedHashMap<>();
         boolean missingEqualSign = false;
-        for (String part : trimmed.substring(ALGORITHM.length()).split(",")) {
+        for (String part : trimmed.substring(algorithm.length()).split(",")) {
             int equals = part.indexOf('=');
             if (equals > 0) {
                 parameters.put(part.substring(0, equals).trim(), part.substring(equals + 1).trim());

@@ -6,6 +6,7 @@ class PartiQLExecuteContext {
     private String nextToken;
     private String tokenBinding;
     private boolean consistentRead;
+    private String returnValuesOnConditionCheckFailure;
 
     private PartiQLExecuteContext() {
     }
@@ -34,6 +35,11 @@ class PartiQLExecuteContext {
         return this;
     }
 
+    PartiQLExecuteContext returnValuesOnConditionCheckFailure(String returnValuesOnConditionCheckFailure) {
+        this.returnValuesOnConditionCheckFailure = returnValuesOnConditionCheckFailure;
+        return this;
+    }
+
     boolean consistentRead() {
         return consistentRead;
     }
@@ -48,5 +54,9 @@ class PartiQLExecuteContext {
 
     String tokenBinding() {
         return tokenBinding;
+    }
+
+    String returnValuesOnConditionCheckFailure() {
+        return returnValuesOnConditionCheckFailure;
     }
 }

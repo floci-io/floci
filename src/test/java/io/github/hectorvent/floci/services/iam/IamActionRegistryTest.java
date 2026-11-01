@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.iam;
 import io.github.hectorvent.floci.core.common.AwsProtocolClaimFilter;
 import io.github.hectorvent.floci.core.common.ProtocolClaim;
 import io.github.hectorvent.floci.core.common.WireProtocol;
+import io.github.hectorvent.floci.services.route53.Route53Controller;
 import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.container.ResourceInfo;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -18,6 +20,7 @@ import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -37,6 +40,20 @@ import static org.mockito.Mockito.when;
 class IamActionRegistryTest {
 
     private final IamActionRegistry registry = new IamActionRegistry();
+
+    @ParameterizedTest
+    @CsvSource({"createReusableDelegationSet,CreateReusableDelegationSet",
+            "getReusableDelegationSet,GetReusableDelegationSet",
+            "listReusableDelegationSets,ListReusableDelegationSets",
+            "deleteReusableDelegationSet,DeleteReusableDelegationSet"})
+    void matchedDelegationSetMethodsResolveTheirOwnActions(String method, String operation) {
+        ResourceInfo info = Mockito.mock(ResourceInfo.class);
+        Mockito.doReturn(Route53Controller.class).when(info).getResourceClass();
+        when(info.getResourceMethod()).thenReturn(Arrays.stream(Route53Controller.class.getMethods())
+                .filter(candidate -> candidate.getName().equals(method)).findFirst().orElseThrow());
+        assertEquals("route53:" + operation, registry.resolveMatchedRoute("route53", info));
+        assertNull(registry.resolveMatchedRoute("s3", info));
+    }
 
     @ParameterizedTest
     @CsvSource({"PUT,PutProvisionedConcurrencyConfig", "GET,GetProvisionedConcurrencyConfig",

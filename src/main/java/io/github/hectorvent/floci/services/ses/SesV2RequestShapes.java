@@ -12,11 +12,13 @@ import java.util.Set;
  * {@code aws/sesv2-request-shapes.json}, generated from botocore's SES v2 model by
  * {@code tools/aws/regen_sesv2_shapes.py}, and are walked by {@link RequestShapeCheck}.
  *
- * <p>An operation calls this when its body nests a structure in a structure or holds a list of
- * structures, where member-by-member checks drift apart. A flat body, a {@code Tags}-only body and
- * a list operation's map {@code Filter} keep the {@link SesV2Json} member helpers, except in the
- * reputation entity operations, which were added after this check and call it although their
- * bodies are flat.
+ * <p>An operation calls this when a structure member of its body holds another structure, or the
+ * body holds a list of structures, where member-by-member checks drift apart. A flat body, a
+ * {@code Tags}-only body and a list operation's map {@code Filter} keep the {@link SesV2Json}
+ * member helpers, except in the reputation entity operations, {@code GetEmailAddressInsights} and
+ * {@code ListRecommendations}, which were added after this check, and
+ * {@code PutEmailIdentityDkimSigningAttributes}, whose hand-written object check this replaced.
+ * Those call it although their bodies are flat.
  *
  * <p>AWS reads the body in order and reports the first bad member, without naming it. A map
  * container answers like a structure, except that a scalar for it is "Expected map or null". Only

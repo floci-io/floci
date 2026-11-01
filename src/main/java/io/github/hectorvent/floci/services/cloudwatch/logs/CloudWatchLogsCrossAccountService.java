@@ -319,7 +319,7 @@ public class CloudWatchLogsCrossAccountService {
         }
     }
     private static void requireArn(String value, String field) {
-        if (value == null || !value.startsWith("arn:") || value.length() < 10) {
+        if (!AwsArnUtils.looksLikeArn(value) || value.length() < 10) {
             throw invalid(field + " must be a valid ARN.");
         }
     }

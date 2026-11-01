@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.glue;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.storage.WriteProfile;
@@ -608,9 +609,9 @@ public class GlueTriggerService {
                         if (name.equals(crawl.crawlerName())) {
                             Map<String, Object> entry = new LinkedHashMap<>();
                             entry.put("State", crawl.state());
-                            entry.put("StartedOn", epochSeconds(crawl.startedOn()));
+                            entry.put("StartedOn", EpochSeconds.fromInstant(crawl.startedOn()));
                             if (crawl.completedOn() != null) {
-                                entry.put("CompletedOn", epochSeconds(crawl.completedOn()));
+                                entry.put("CompletedOn", EpochSeconds.fromInstant(crawl.completedOn()));
                             }
                             entry.put("LogGroup", "/aws-glue/crawlers");
                             entry.put("LogStream", name);
@@ -670,10 +671,6 @@ public class GlueTriggerService {
     private static String nodeId(String workflowName, String type, String name) {
         return "wnode_" + UUID.nameUUIDFromBytes((workflowName + "\u0000" + type + "\u0000" + name)
                 .getBytes(StandardCharsets.UTF_8)).toString().replace("-", "");
-    }
-
-    private static double epochSeconds(Instant instant) {
-        return instant.toEpochMilli() / 1000.0;
     }
 
     /**

@@ -72,7 +72,25 @@ TargetTracking-<resourceId>-AlarmLow-<uuid>
 ```
 
 They are visible through `DescribeAlarms` and are deleted when the policy is deleted or
-its scalable target is deregistered.
+its scalable target is deregistered, exactly as on AWS.
+
+Each alarm watches the CloudWatch metric it scales on, as real AWS's alarms do:
+
+- A `CustomizedMetricSpecification` passes the caller's `Namespace`, `MetricName`,
+  `Dimensions`, `Statistic` (defaulting to `Average`) and `Unit` straight onto the
+  alarms, so data published under the identity the policy named is what the alarms
+  read.
+- `ECSServiceAverageCPUUtilization` maps onto the documented AWS/ECS service-level
+  metric: `CPUUtilization` with the `ClusterName`/`ServiceName` dimensions taken from
+  the resource ID, and `ECSServiceAverageMemoryUtilization` maps to `MemoryUtilization`
+  the same way.
+- `ALBRequestCountPerTarget` maps onto AWS/ApplicationELB `RequestCountPerTarget` with
+  the `LoadBalancer`/`TargetGroup` dimensions encoded in the policy's `ResourceLabel`.
+  The alarm reads the `Sum` statistic, the only valid one for that metric on CloudWatch
+  (its data points are already the per-minute average across the group's targets).
+- Any other predefined type keeps the service namespace's CloudWatch namespace under the
+  type's own name, since that type's metric identity is not one Floci derives; push the
+  metric under that name to exercise such a policy.
 
 For `ecs` targets, the alarm is created with the same `ClusterName`/`ServiceName`
 dimensions real AWS attaches to the metric, so a metric you push with

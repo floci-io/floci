@@ -684,12 +684,16 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         List<Listener> result = new ArrayList<>(regionListeners.values());
 
         if (lbArn != null && !lbArn.isEmpty()) {
+            requireLoadBalancer(region, lbArn);
             result = result.stream()
                     .filter(l -> l.getLoadBalancerArn().equals(lbArn))
                     .collect(Collectors.toList());
         }
         if (listenerArns != null && !listenerArns.isEmpty()) {
             Set<String> arnSet = new HashSet<>(listenerArns);
+            for (String arn : arnSet) {
+                requireListener(region, arn);
+            }
             result = result.stream().filter(l -> arnSet.contains(l.getListenerArn())).collect(Collectors.toList());
         }
         return result;

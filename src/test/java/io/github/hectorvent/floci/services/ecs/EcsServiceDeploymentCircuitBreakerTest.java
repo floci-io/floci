@@ -23,12 +23,14 @@ import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.UpdateServiceRequest;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -381,6 +383,9 @@ class EcsServiceDeploymentCircuitBreakerTest {
                 "rollback remains active while a task from its failed revision is still draining");
         assertEquals(2, runningTasks(service).size());
 
+        // The drained task's Docker stop runs off the reconciler thread; the rollback ends once it lands.
+        await().atMost(Duration.ofSeconds(5)).until(() -> stoppedTasks(service).stream()
+                .noneMatch(task -> "STOPPING".equals(task.getLastStatus())));
         service.reconcile();
         service.reconcileServices();
         assertEquals("ROLLBACK_SUCCESSFUL", deploymentOf(service, "cb-drain", failedId).getStatus());

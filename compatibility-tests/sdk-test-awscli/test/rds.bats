@@ -504,3 +504,45 @@ teardown() {
     assert_failure
     assert_output --partial 'DBProxyEndpointNotFoundFault'
 }
+
+@test "rds: a deleted instance keeps its automated backup, which replicates and is deleted" {
+    aws_west() { aws --endpoint-url "$FLOCI_ENDPOINT" --region us-west-2 --output json "$@" 2>&1; }
+    run aws_cmd rds create-db-instance --db-instance-identifier "$DB_ID" --engine postgres \
+        --db-instance-class db.t3.micro --allocated-storage 10 --backup-retention-period 2
+    assert_success
+    dbi="$(json_get "$output" '.DBInstance.DbiResourceId')"
+    source_arn="$(json_get "$output" '.DBInstance.DBInstanceArn')"
+
+    run aws_cmd rds describe-db-instance-automated-backups --dbi-resource-id "$dbi"
+    assert_success
+    [ "$(json_get "$output" '.DBInstanceAutomatedBackups[0].Status')" = "active" ]
+
+    run aws_west rds start-db-instance-automated-backups-replication --source-db-instance-arn "$source_arn"
+    assert_success
+    [ "$(json_get "$output" '.DBInstanceAutomatedBackup.Status')" = "replicating" ]
+    replica_arn="$(json_get "$output" '.DBInstanceAutomatedBackup.DBInstanceAutomatedBackupsArn')"
+    run aws_cmd rds describe-db-instances --db-instance-identifier "$DB_ID" \
+        --query 'DBInstances[0].DBInstanceAutomatedBackupsReplications[0].DBInstanceAutomatedBackupsArn' --output text
+    assert_success
+    assert_output "$replica_arn"
+    run aws_west rds stop-db-instance-automated-backups-replication --source-db-instance-arn "$source_arn"
+    assert_success
+    [ "$(json_get "$output" '.DBInstanceAutomatedBackup.Status')" = "retained" ]
+    run aws_west rds delete-db-instance-automated-backup --db-instance-automated-backups-arn "$replica_arn"
+    assert_success
+
+    run aws_cmd rds delete-db-instance --db-instance-identifier "$DB_ID" --skip-final-snapshot \
+        --no-delete-automated-backups
+    assert_success
+    run aws_cmd rds describe-db-instance-automated-backups --dbi-resource-id "$dbi" \
+        --query 'DBInstanceAutomatedBackups[0].Status' --output text
+    assert_success
+    assert_output 'retained'
+
+    run aws_cmd rds delete-db-instance-automated-backup --dbi-resource-id "$dbi"
+    assert_success
+    [ "$(json_get "$output" '.DBInstanceAutomatedBackup.Status')" = "deleting" ]
+    run aws_cmd rds describe-db-instance-automated-backups --dbi-resource-id "$dbi"
+    assert_failure
+    assert_output --partial 'DBInstanceAutomatedBackupNotFound'
+}

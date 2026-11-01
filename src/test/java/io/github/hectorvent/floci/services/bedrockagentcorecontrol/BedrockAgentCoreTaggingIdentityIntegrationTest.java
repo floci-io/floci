@@ -13,6 +13,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -74,6 +75,35 @@ class BedrockAgentCoreTaggingIdentityIntegrationTest {
         given().contentType("application/json").body("{\"tags\":{\"env\":\"stolen\"}}")
                 .when().post("/tags/" + foreignAccount)
                 .then().statusCode(404);
+    }
+
+    @Test
+    void aClientTokenReplayKeepsTheTagsOfTheOriginalCreate() {
+        String clientToken = "replay-create-runtime-tags-token-0001";
+        String firstArn = createRuntimeWithTags(clientToken, "{\"team\":\"ml\"}");
+        String replayArn = createRuntimeWithTags(clientToken, "{\"env\":\"dev\"}");
+
+        assertEquals(firstArn, replayArn);
+        given().when().get("/tags/" + firstArn)
+                .then().statusCode(200)
+                .body("tags.team", equalTo("ml"))
+                .body("tags.env", nullValue());
+    }
+
+    private static String createRuntimeWithTags(String clientToken, String tags) {
+        return given().contentType("application/json")
+                .body("""
+                        {
+                          "agentRuntimeName": "replayTagAgent",
+                          "agentRuntimeArtifact": {"containerConfiguration": {"containerUri": "x:latest"}},
+                          "networkConfiguration": {"networkMode": "PUBLIC"},
+                          "roleArn": "arn:aws:iam::000000000000:role/agent",
+                          "clientToken": "%s",
+                          "tags": %s
+                        }""".formatted(clientToken, tags))
+                .when().put("/runtimes/")
+                .then().statusCode(202)
+                .extract().path("agentRuntimeArn");
     }
 
     @Test

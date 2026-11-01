@@ -20,6 +20,9 @@ import static org.hamcrest.Matchers.startsWith;
 @TestProfile(IamEnforcementProfile.class)
 class AssumeRoleTrustPolicyIntegrationTest {
 
+    /** The session name every request here opens, which the ARN assertions read rather than respell. */
+    private static final String SESSION = "sx";
+
     private static final String ACCOUNT_A = "111111111111";
     private static final String ACCOUNT_B = "222222222222";
     private static final String ACCOUNT_C = "333333333333";
@@ -57,7 +60,7 @@ class AssumeRoleTrustPolicyIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "AssumeRole")
             .formParam("RoleArn", "arn:aws:iam::" + ACCOUNT_B + ":role/" + role)
-            .formParam("RoleSessionName", "s")
+            .formParam("RoleSessionName", SESSION)
             .header("Authorization", auth(ACCOUNT_A, "sts"))
         .when().post("/")
         .then().statusCode(200)
@@ -73,13 +76,13 @@ class AssumeRoleTrustPolicyIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "AssumeRole")
             .formParam("RoleArn", "arn:aws-cn:iam::" + ACCOUNT_B + ":role/" + role)
-            .formParam("RoleSessionName", "s")
+            .formParam("RoleSessionName", SESSION)
             .header("Authorization", auth(ACCOUNT_A, "sts"))
         .when().post("/")
         .then().statusCode(200)
             .body("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId", startsWith("ASIA"))
             .body("AssumeRoleResponse.AssumeRoleResult.AssumedRoleUser.Arn",
-                    containsString("arn:aws:sts::" + ACCOUNT_B + ":assumed-role/" + role + "/s"))
+                    containsString("arn:aws:sts::" + ACCOUNT_B + ":assumed-role/" + role + "/" + SESSION))
             .extract().path("AssumeRoleResponse.AssumeRoleResult.Credentials.AccessKeyId");
 
         given()
@@ -89,7 +92,7 @@ class AssumeRoleTrustPolicyIntegrationTest {
         .when().post("/")
         .then().statusCode(200)
             .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn",
-                    containsString("arn:aws:sts::" + ACCOUNT_B + ":assumed-role/" + role + "/s"));
+                    containsString("arn:aws:sts::" + ACCOUNT_B + ":assumed-role/" + role + "/" + SESSION));
     }
 
     @Test
@@ -137,7 +140,7 @@ class AssumeRoleTrustPolicyIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "AssumeRole")
             .formParam("RoleArn", "arn:aws:iam::" + ACCOUNT_B + ":role/" + role)
-            .formParam("RoleSessionName", "s")
+            .formParam("RoleSessionName", SESSION)
             .header("Authorization", auth(ACCOUNT_C, "sts"))
         .when().post("/")
         .then().statusCode(403)
@@ -156,7 +159,7 @@ class AssumeRoleTrustPolicyIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "AssumeRole")
             .formParam("RoleArn", roleArn)
-            .formParam("RoleSessionName", "s")
+            .formParam("RoleSessionName", SESSION)
             .header("Authorization", auth(ACCOUNT_C, "sts"))
         .when().post("/")
         .then().statusCode(403)

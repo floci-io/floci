@@ -1506,7 +1506,8 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                     "Parameter EventSourceArn is not valid. Reason: Creating cross-region archive is not permitted.",
                     400);
         }
-        String busName = eventSourceArn.substring(eventSourceArn.indexOf('/') + 1);
+        String busName = source != null && source.resource().startsWith("event-bus/")
+                ? source.resource().substring("event-bus/".length()) : eventSourceArn;
         EventBus bus = "default".equals(busName)
                 ? getOrCreateDefaultBus(region)
                 : busStore.get(busKey(region, busName)).orElse(null);
@@ -2167,9 +2168,13 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     }
 
     private static String archiveNameFromArn(String arn) {
-        if (arn == null) return null;
-        int idx = arn.lastIndexOf("archive/");
-        return idx >= 0 ? arn.substring(idx + "archive/".length()) : arn;
+        if (arn == null) {
+            return null;
+        }
+        return AwsArnUtils.resourceIfArnFor(arn, "events")
+                .filter(resource -> resource.startsWith("archive/"))
+                .map(resource -> resource.substring("archive/".length()))
+                .orElse(arn);
     }
 
     private void startSchedulerIfNeeded(Rule rule) {

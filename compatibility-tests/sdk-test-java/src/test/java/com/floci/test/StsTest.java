@@ -350,11 +350,16 @@ class StsTest {
 
     @Test
     void getSessionTokenDefaultDuration() {
+        Instant beforeRequest = Instant.now();
         GetSessionTokenResponse response = sts.getSessionToken(
                 GetSessionTokenRequest.builder().build());
+        Instant afterResponse = Instant.now();
 
         assertThat(response.credentials()).isNotNull();
-        assertThat(response.credentials().expiration()).isAfter(Instant.now().plusSeconds(3600));
+        // Root credentials default to one hour; wire timestamps have millisecond precision.
+        assertThat(response.credentials().expiration()).isBetween(
+                beforeRequest.plusSeconds(3600).minusMillis(1),
+                afterResponse.plusSeconds(3600).plusMillis(1));
     }
 
     @Test

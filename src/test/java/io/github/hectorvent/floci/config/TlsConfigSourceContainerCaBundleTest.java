@@ -47,6 +47,21 @@ class TlsConfigSourceContainerCaBundleTest {
         assertTrue(pem.endsWith(caPem), "the local CA is the last entry");
         assertTrue(pem.indexOf("-----BEGIN CERTIFICATE-----") < pem.lastIndexOf("-----BEGIN CERTIFICATE-----"),
                 "public roots precede the CA");
+        assertTrue(Files.isRegularFile(tempDir.resolve("tls/floci-ca-bundle.p12")), "Java trust store written at boot");
+    }
+
+    @Test
+    void aJavaTrustStoreThatCannotBeWrittenLeavesTheBundleAndTheBoot() throws Exception {
+        // A directory where the trust store goes, with something in it, so it cannot be replaced.
+        Files.writeString(Files.createDirectories(tempDir.resolve("tls/floci-ca-bundle.p12")).resolve("x"), "x");
+        System.setProperty("floci.tls.enabled", "true");
+        System.setProperty("floci.tls.self-signed", "true");
+        System.setProperty("floci.storage.persistent-path", tempDir.toString());
+
+        new TlsConfigSource();
+
+        assertTrue(Files.isRegularFile(tempDir.resolve("tls/floci-ca-bundle.pem")), "bundle written at boot");
+        assertTrue(Files.isDirectory(tempDir.resolve("tls/floci-ca-bundle.p12")), "the boot left the obstacle alone");
     }
 
     @Test

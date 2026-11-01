@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.efs.model;
 
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
+import io.github.hectorvent.floci.core.common.AvailabilityZoneIds;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.List;
@@ -31,8 +33,16 @@ public class FileSystem {
 
 
 
+    /**
+     * Derived from the zone name and the region of the file system's ARN rather than read back
+     * as stored: a file system persisted before zone ids took AWS's shape carries the old id.
+     */
     public String getAvailabilityZoneId() {
-        return availabilityZoneId;
+        String region = AwsArnUtils.regionOrDefault(fileSystemArn, null);
+        if (region == null || availabilityZoneName == null) {
+            return availabilityZoneId;
+        }
+        return AvailabilityZoneIds.forZoneName(region, availabilityZoneName);
     }
 
     public void setAvailabilityZoneId(String availabilityZoneId) {

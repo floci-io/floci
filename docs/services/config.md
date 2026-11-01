@@ -38,7 +38,7 @@
 | `DeleteConfigurationRecorder` | Delete a configuration recorder |
 | `StartConfigurationRecorder` | Start recording configuration changes |
 | `StopConfigurationRecorder` | Stop recording configuration changes |
-| `DescribeConfigurationRecorderStatus` | Get the status of configuration recorders |
+| `DescribeConfigurationRecorderStatus` | Get the status of configuration recorders. Whether a recorder is recording, and when it last started and stopped, persist with the recorder, so a started recorder is still recording after a restart |
 
 ### Delivery Channel
 

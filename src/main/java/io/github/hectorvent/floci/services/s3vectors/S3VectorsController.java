@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.s3vectors;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.s3vectors.model.VectorBucket;
 import io.github.hectorvent.floci.services.s3vectors.model.VectorData;
@@ -291,7 +292,7 @@ public class S3VectorsController {
         String region = regionResolver.resolveRegion(headers);
         VectorBucket bucket = service.getVectorBucket(request.vectorBucketName(), region);
         VectorBucketRepresentation rep = new VectorBucketRepresentation(bucket.getVectorBucketName(),
-                bucket.getVectorBucketArn(), bucket.getCreationTime().toEpochMilli() / 1000.0, bucket.getEncryptionConfiguration());
+                bucket.getVectorBucketArn(), EpochSeconds.fromInstant(bucket.getCreationTime()), bucket.getEncryptionConfiguration());
         return Response.ok(new GetVectorBucketResponse(rep)).build();
     }
 
@@ -302,7 +303,7 @@ public class S3VectorsController {
         List<VectorBucket> buckets = service.listVectorBuckets(region);
         List<VectorBucketSummary> reps = buckets.stream()
                 .map(b -> new VectorBucketSummary(b.getVectorBucketName(), b.getVectorBucketArn(),
-                        b.getCreationTime().toEpochMilli() / 1000.0))
+                        EpochSeconds.fromInstant(b.getCreationTime())))
                 .toList();
         return Response.ok(new ListVectorBucketsResponse(reps, null)).build();
     }
@@ -340,7 +341,7 @@ public class S3VectorsController {
         String region = regionResolver.resolveRegion(headers);
         VectorIndex index = service.getIndex(request.vectorBucketName(), request.indexName(), region);
         IndexRepresentation rep = new IndexRepresentation(
-                index.getCreationTime().toEpochMilli() / 1000.0,
+                EpochSeconds.fromInstant(index.getCreationTime()),
                 index.getVectorBucketName(),
                 index.getIndexName(),
                 index.getIndexArn(),
@@ -361,7 +362,7 @@ public class S3VectorsController {
         List<VectorIndex> indexes = service.listIndexes(request.vectorBucketName(), region);
         List<IndexSummary> reps = indexes.stream()
                 .map(i -> new IndexSummary(
-                        i.getCreationTime().toEpochMilli() / 1000.0,
+                        EpochSeconds.fromInstant(i.getCreationTime()),
                         i.getVectorBucketName(),
                         i.getIndexName(),
                         i.getIndexArn()

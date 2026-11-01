@@ -248,7 +248,7 @@ public class PipesPoller implements Resettable {
 
     void pollKinesis(Pipe pipe, String region) {
         String pipeKey = pipeKey(pipe);
-        String streamName = extractResourceName(pipe.getSource());
+        String streamName = kinesisStreamName(pipe.getSource());
         String pipeAccountId = pipe.getAccountId();
         int batchSize = getBatchSize(pipe, "KinesisStreamParameters");
         String iterator = kinesisIterators.get(pipeKey);
@@ -922,12 +922,14 @@ public class PipesPoller implements Resettable {
         return AwsArnUtils.regionOrDefault(arn, defaultRegion);
     }
 
-    private static String extractResourceName(String arn) {
-        int slashIdx = arn.lastIndexOf('/');
-        if (slashIdx >= 0) {
-            return arn.substring(slashIdx + 1);
-        }
-        int colonIdx = arn.lastIndexOf(':');
-        return colonIdx >= 0 ? arn.substring(colonIdx + 1) : arn;
+    /**
+     * The stream a Kinesis source names: the segment after {@code stream/}, so a stream-consumer ARN
+     * ({@code stream/S/consumer/C:123}) still names stream {@code S}.
+     */
+    static String kinesisStreamName(String source) {
+        String resource = AwsArnUtils.resourceIfArnFor(source, "kinesis").orElse(source);
+        String name = resource.startsWith("stream/") ? resource.substring("stream/".length()) : resource;
+        int slash = name.indexOf('/');
+        return slash >= 0 ? name.substring(0, slash) : name;
     }
 }

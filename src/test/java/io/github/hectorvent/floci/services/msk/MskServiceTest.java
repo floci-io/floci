@@ -81,7 +81,7 @@ class MskServiceTest {
         config = Mockito.mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.MskServiceConfig mskConfig = Mockito.mock(EmulatorConfig.MskServiceConfig.class);
-        
+
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.msk()).thenReturn(mskConfig);
         when(mskConfig.mock()).thenReturn(true);
@@ -373,8 +373,36 @@ class MskServiceTest {
         MskCluster cluster = mskService.createCluster(request);
 
         assertEquals("DEFAULT", cluster.getEnhancedMonitoring());
-        assertEquals("TLS_PLAINTEXT", cluster.getEncryptionInfo().getEncryptionInTransit().getClientBroker());
+        assertEquals("TLS", cluster.getEncryptionInfo().getEncryptionInTransit().getClientBroker());
         assertTrue(cluster.getEncryptionInfo().getEncryptionInTransit().getInCluster());
+    }
+
+    @Test
+    void createClusterDefaultsClientBrokerWhenOnlySomeEncryptionMembersAreAbsent() {
+        EncryptionInfo onlyEncryptionInfo = new EncryptionInfo();
+        CreateClusterRequest withoutTransit = new CreateClusterRequest();
+        withoutTransit.setClusterName("partial-encryption-no-transit-cluster");
+        withoutTransit.setKafkaVersion("3.6.0");
+        withoutTransit.setEncryptionInfo(onlyEncryptionInfo);
+
+        MskCluster withoutTransitCluster = mskService.createCluster(withoutTransit);
+
+        assertEquals("TLS", withoutTransitCluster.getEncryptionInfo().getEncryptionInTransit().getClientBroker());
+        assertTrue(withoutTransitCluster.getEncryptionInfo().getEncryptionInTransit().getInCluster());
+
+        EncryptionInTransit onlyInCluster = new EncryptionInTransit();
+        onlyInCluster.setInCluster(false);
+        EncryptionInfo withoutClientBroker = new EncryptionInfo();
+        withoutClientBroker.setEncryptionInTransit(onlyInCluster);
+        CreateClusterRequest noClientBroker = new CreateClusterRequest();
+        noClientBroker.setClusterName("partial-encryption-no-client-broker-cluster");
+        noClientBroker.setKafkaVersion("3.6.0");
+        noClientBroker.setEncryptionInfo(withoutClientBroker);
+
+        MskCluster withoutClientBrokerCluster = mskService.createCluster(noClientBroker);
+
+        assertEquals("TLS", withoutClientBrokerCluster.getEncryptionInfo().getEncryptionInTransit().getClientBroker());
+        assertFalse(withoutClientBrokerCluster.getEncryptionInfo().getEncryptionInTransit().getInCluster());
     }
 
     @Test

@@ -172,6 +172,19 @@ instanceTypes:
       - networkCardIndex: 0
         maximumNetworkInterfaces: 3
 
+  - instanceType: r5.large
+    vcpu: 2
+    memoryMib: 16384
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: false
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 10
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
+
   - instanceType: t4g.micro
     vcpu: 2
     memoryMib: 1024

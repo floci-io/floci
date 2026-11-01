@@ -16,6 +16,8 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -588,6 +590,98 @@ class NativeDynamoDbJsonHandlerTest {
         JsonNode describedGsi = describeBody.get("Table").get("GlobalSecondaryIndexes").get(0);
         assertEquals(20, describedGsi.get("ProvisionedThroughput").get("ReadCapacityUnits").asInt());
         assertEquals(30, describedGsi.get("ProvisionedThroughput").get("WriteCapacityUnits").asInt());
+    }
+
+    @Test
+    void describeTableReportsProvisionedGsiCapacityAsWarmThroughput() throws Exception {
+        createProvisionedTableWithGsi("gsi-warm-provisioned", "eu-west-1");
+
+        JsonNode warmThroughput = warmThroughputOf(describedGsi("gsi-warm-provisioned", "TitleIndex"));
+
+        assertEquals(5, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(5, warmThroughput.get("WriteUnitsPerSecond").asLong());
+        assertEquals("ACTIVE", warmThroughput.get("Status").asText());
+    }
+
+    @Test
+    void describeTableReportsOnDemandGsiWarmThroughput() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "gsi-warm-on-demand",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "ALL"}
+                    }]
+                }
+                """), "eu-west-1");
+
+        JsonNode warmThroughput = warmThroughputOf(describedGsi("gsi-warm-on-demand", "gsi1"));
+
+        assertEquals(12000, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(4000, warmThroughput.get("WriteUnitsPerSecond").asLong());
+        assertEquals("ACTIVE", warmThroughput.get("Status").asText());
+    }
+
+    @Test
+    void updateTableCreatedGsiReportsItsWarmThroughput() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "gsi-warm-created",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PROVISIONED",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5}
+                }
+                """), "eu-west-1");
+
+        Response response = handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "gsi-warm-created",
+                    "AttributeDefinitions": [{"AttributeName": "g", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "ALL"},
+                        "ProvisionedThroughput": {"ReadCapacityUnits": 2, "WriteCapacityUnits": 3}
+                    }}]
+                }
+                """), "eu-west-1");
+
+        assertEquals(200, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        JsonNode updatedWarmThroughput = warmThroughputOf(
+                body.get("TableDescription").get("GlobalSecondaryIndexes").get(0));
+        assertEquals(2, updatedWarmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(3, updatedWarmThroughput.get("WriteUnitsPerSecond").asLong());
+        JsonNode describedWarmThroughput = warmThroughputOf(describedGsi("gsi-warm-created", "gsi1"));
+        assertEquals(2, describedWarmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(3, describedWarmThroughput.get("WriteUnitsPerSecond").asLong());
+        assertEquals("ACTIVE", describedWarmThroughput.get("Status").asText());
+    }
+
+    private JsonNode describedGsi(String tableName, String indexName) throws Exception {
+        Response response = handler.handle("DescribeTable",
+                mapper.createObjectNode().put("TableName", tableName), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        for (JsonNode gsi : body.get("Table").get("GlobalSecondaryIndexes")) {
+            if (indexName.equals(gsi.get("IndexName").asText())) {
+                return gsi;
+            }
+        }
+        throw new AssertionError("DescribeTable lists no GSI named " + indexName);
+    }
+
+    private static JsonNode warmThroughputOf(JsonNode gsi) {
+        assertTrue(gsi.has("WarmThroughput"), "The GSI description must report its WarmThroughput");
+        return gsi.get("WarmThroughput");
     }
 
     @Test
@@ -2439,6 +2533,39 @@ class NativeDynamoDbJsonHandlerTest {
                 () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
         assertEquals("Requested resource not found", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "SELECT * FROM \"Users\".\"TitleIndex\" WHERE userId = 'u1'",
+            "INSERT INTO \"Users\" VALUE {'userId': 1}",
+            "UPDATE \"Users\" SET a = 1 WHERE userId = 1",
+            "DELETE FROM \"Users\" WHERE nope = 'u1'"})
+    void executeStatementAnswersResourceNotFoundForACreatingTableBeforeTheKeyCheck(String statement) {
+        createUsersTable("eu-west-1").setTableStatus("CREATING");
+        ObjectNode request = mapper.createObjectNode();
+        request.put("Statement", statement);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("ExecuteStatement", request, "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("Requested resource not found", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "SELECT * FROM \"Users\" WHERE userId = 'u1'",
+            "UPDATE \"Users\" SET a = 1 WHERE userId = 'u1'"})
+    void executeTransactionCancelsOnACreatingTable(String statement) throws Exception {
+        createUsersTable("eu-west-1").setTableStatus("CREATING");
+        ObjectNode request = mapper.createObjectNode();
+        request.putArray("TransactStatements").addObject().put("Statement", statement);
+
+        Response response = handler.handle("ExecuteTransaction", request, "eu-west-1");
+        assertEquals(400, response.getStatus());
+        JsonNode reason = mapper.convertValue(response.getEntity(), JsonNode.class).get("CancellationReasons").get(0);
+        assertEquals("ResourceNotFound", reason.get("Code").asText());
+        assertEquals("Requested resource not found", reason.get("Message").asText());
     }
 
     @Test

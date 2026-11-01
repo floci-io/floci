@@ -95,7 +95,8 @@ public record CloudTrailEntry(
                 trail.name(), trail.trailArn(), trail.s3BucketName(), trail.s3KeyPrefix(),
                 trail.snsTopicArn(), trail.includeGlobalServiceEvents(), trail.isMultiRegionTrail(),
                 trail.homeRegion(), trail.logFileValidationEnabled(), hasCustomSelectors,
-                trail.hasInsightSelectors(), trail.isOrganizationTrail());
+                trail.hasInsightSelectors(), trail.isOrganizationTrail(), trail.kmsKeyId(),
+                trail.cloudWatchLogsLogGroupArn(), trail.cloudWatchLogsRoleArn());
     }
 
     /** Returns a mutable copy suitable for merging in new tags. */

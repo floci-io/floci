@@ -27,7 +27,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -56,6 +63,7 @@ class RedshiftServerlessServiceTest {
     private RedshiftServerlessService service;
     private AccountAwareStorageBackend<Namespace> store;
     private AccountAwareStorageBackend<Workgroup> workgroupStore;
+    private AccountAwareStorageBackend<RedshiftServerlessSnapshot> snapshotStore;
     private RedshiftServerlessEndpoints endpoints;
     private RedshiftServerlessRuntime runtime;
     private int nextPort;
@@ -78,8 +86,9 @@ class RedshiftServerlessServiceTest {
         when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-workgroups.json"),
                 any(TypeReference.class))).thenReturn((AccountAwareStorageBackend) workgroupStore);
 
+        snapshotStore = spy(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
         when(storageFactory.create(eq("redshiftserverless"), eq("redshiftserverless-snapshots.json"),
-                any(TypeReference.class))).thenReturn(AccountAwareStorageBackend.inMemory(ACCOUNT_ID));
+                any(TypeReference.class))).thenReturn((AccountAwareStorageBackend) snapshotStore);
 
         RegionResolver regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
@@ -102,6 +111,180 @@ class RedshiftServerlessServiceTest {
         EmulatorConfig config = mock(EmulatorConfig.class, Mockito.RETURNS_DEEP_STUBS);
         when(config.storage().persistentPath()).thenReturn(dumpDir.toString());
         service = new RedshiftServerlessService(storageFactory, regionResolver, endpoints, runtime, config);
+    }
+
+    @Test
+    void expirationHonorsTheExactBoundaryAndIndefiniteRetention() {
+        create("expiry-ns");
+        RedshiftServerlessSnapshot finite = service.createSnapshot("finite-snap", "expiry-ns", 1, null, REGION);
+        service.createSnapshot("default-snap", "expiry-ns", null, null, REGION);
+        service.createSnapshot("indefinite-snap", "expiry-ns", -1, null, REGION);
+        Instant deadline = finite.getSnapshotCreateTime().plusSeconds(86400);
+
+        service.expireSnapshots(deadline.minusNanos(1), entry -> { });
+        assertTrue(service.findSnapshot("finite-snap", REGION).isPresent());
+        service.expireSnapshots(deadline, entry -> { });
+        assertTrue(service.findSnapshot("finite-snap", REGION).isEmpty());
+        service.expireSnapshots(deadline.plusSeconds(86400 * 4000L), entry -> { });
+        assertTrue(service.findSnapshot("default-snap", REGION).isPresent());
+        assertTrue(service.findSnapshot("indefinite-snap", REGION).isPresent());
+    }
+
+    @Test
+    void expirationUsesUpdatedRetentionFromTheOriginalCreationTime() {
+        create("expiry-ns");
+        RedshiftServerlessSnapshot snapshot = service.createSnapshot("extend-snap", "expiry-ns", 1, null, REGION);
+        Instant created = snapshot.getSnapshotCreateTime();
+        service.updateSnapshot("extend-snap", 3, REGION);
+        service.expireSnapshots(created.plusSeconds(86400), entry -> { });
+        assertTrue(service.findSnapshot("extend-snap", REGION).isPresent());
+        service.updateSnapshot("extend-snap", 1, REGION);
+        service.expireSnapshots(created.plusSeconds(86400), entry -> { });
+        assertTrue(service.findSnapshot("extend-snap", REGION).isEmpty());
+    }
+
+    @Test
+    void expirationDeletesDumpsAcrossAccountsAndRegionsAndIsIdempotent() throws Exception {
+        Instant created = Instant.parse("2030-01-01T00:00:00Z");
+        for (String account : List.of(ACCOUNT_ID, "999999999999")) {
+            for (String region : List.of(REGION, "cn-north-1")) {
+                RedshiftServerlessSnapshot snapshot = new RedshiftServerlessSnapshot();
+                snapshot.setSnapshotName("same-snap");
+                snapshot.setSnapshotCreateTime(created);
+                snapshot.setRetentionPeriod(1);
+                Path dump = dumpDir.resolve("redshift-serverless-dumps").resolve(account).resolve(region)
+                        .resolve("same-snap.sql");
+                Files.createDirectories(dump.getParent());
+                Files.writeString(dump, "data");
+                snapshot.setSqlDump(dump.toString());
+                snapshotStore.putForAccount(account, region + "::same-snap", snapshot);
+            }
+        }
+        service.expireSnapshots(created.plusSeconds(86400), entry -> { });
+        service.expireSnapshots(created.plusSeconds(86400), entry -> { });
+        assertTrue(snapshotStore.scanAllAccounts().isEmpty());
+        try (Stream<Path> files = Files.walk(dumpDir)) {
+            assertEquals(0, files.filter(Files::isRegularFile).count());
+        }
+    }
+
+    @Test
+    void expirationRetriesAFailedDumpAndContinuesOtherSnapshots() throws Exception {
+        create("expiry-ns");
+        RedshiftServerlessSnapshot failed = service.createSnapshot("failed-snap", "expiry-ns", 1, null, REGION);
+        RedshiftServerlessSnapshot other = service.createSnapshot("other-snap", "expiry-ns", 1, null, REGION);
+        Path dump = dumpDir.resolve("redshift-serverless-dumps").resolve(ACCOUNT_ID).resolve(REGION)
+                .resolve("failed-snap.sql");
+        Files.createDirectories(dump);
+        Path blocker = Files.writeString(dump.resolve("blocker"), "not an empty directory");
+        failed.setSqlDump(dump.toString());
+        Instant now = other.getSnapshotCreateTime().plusSeconds(86400);
+
+        service.expireSnapshots(now, entry -> { });
+        assertEquals("DELETED", service.getSnapshot("failed-snap", REGION).getStatus());
+        assertTrue(service.findSnapshot("other-snap", REGION).isEmpty());
+        assertEquals("ConflictException", assertThrows(AwsException.class,
+                () -> service.updateSnapshot("failed-snap", -1, REGION)).getErrorCode());
+        assertEquals("ConflictException", assertThrows(AwsException.class,
+                () -> service.restoreFromSnapshot("expiry-ns", "any-workgroup", "failed-snap", null, REGION))
+                .getErrorCode());
+
+        Files.delete(blocker);
+        service.expireSnapshots(now, entry -> { });
+        assertTrue(service.findSnapshot("failed-snap", REGION).isEmpty());
+        assertFalse(Files.exists(dump));
+    }
+
+    @Test
+    void expirationRetriesPersistedDeletionAndPolicyFailures() {
+        create("expiry-ns");
+        RedshiftServerlessSnapshot snapshot = service.createSnapshot("retry-snap", "expiry-ns", null, null, REGION);
+        snapshot.setStatus("DELETED");
+        service.expireSnapshots(Instant.EPOCH, entry -> {
+            throw new IllegalStateException("policy store unavailable");
+        });
+        assertTrue(service.findSnapshot("retry-snap", REGION).isPresent());
+        service.expireSnapshots(Instant.EPOCH, entry -> { });
+        assertTrue(service.findSnapshot("retry-snap", REGION).isEmpty());
+    }
+
+    @Test
+    void expirationNeverDeletesAnUntrustedDump() throws Exception {
+        create("expiry-ns");
+        RedshiftServerlessSnapshot snapshot = service.createSnapshot("untrusted-snap", "expiry-ns", 1, null, REGION);
+        Path outside = Files.writeString(dumpDir.resolve("outside.sql"), "unrelated");
+        snapshot.setSqlDump(outside.toString());
+        service.expireSnapshots(snapshot.getSnapshotCreateTime().plusSeconds(86400), entry -> { });
+        assertTrue(Files.exists(outside));
+        assertTrue(service.findSnapshot("untrusted-snap", REGION).isPresent());
+    }
+
+    @Test
+    void expirationWaitsForAnInProgressRestore() throws Exception {
+        create("restore-expiry-ns");
+        createWorkgroup("restore-expiry-wg", "restore-expiry-ns");
+        doAnswer(invocation -> {
+            Files.writeString(invocation.getArgument(5, Path.class), "snapshot data");
+            return null;
+        }).when(runtime).takeSnapshot(any(), any(), any(), any(), any(), any());
+        RedshiftServerlessSnapshot snapshot = service.createSnapshot(
+                "restore-expiry-snap", "restore-expiry-ns", 1, null, REGION);
+        CountDownLatch restoring = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            restoring.countDown();
+            assertTrue(release.await(10, TimeUnit.SECONDS));
+            assertTrue(Files.exists(invocation.getArgument(5, Path.class)));
+            return null;
+        }).when(runtime).restoreSnapshot(any(), any(), any(), any(), any(), any(), any());
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> restore = executor.submit(() -> service.restoreFromSnapshot(
+                    "restore-expiry-ns", "restore-expiry-wg", "restore-expiry-snap", null, REGION));
+            assertTrue(restoring.await(5, TimeUnit.SECONDS));
+            Future<?> sweep = executor.submit(() -> service.expireSnapshots(
+                    snapshot.getSnapshotCreateTime().plusSeconds(86400), entry -> { }));
+            assertThrows(TimeoutException.class, () -> sweep.get(200, TimeUnit.MILLISECONDS));
+            release.countDown();
+            restore.get(5, TimeUnit.SECONDS);
+            sweep.get(5, TimeUnit.SECONDS);
+            assertTrue(service.findSnapshot("restore-expiry-snap", REGION).isEmpty());
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void expirationRetainsMetadataWhenTheFinalStorageDeleteFails() {
+        create("expiry-ns");
+        RedshiftServerlessSnapshot snapshot = service.createSnapshot("store-fail-snap", "expiry-ns", 1, null, REGION);
+        doThrow(new IllegalStateException("storage unavailable")).doCallRealMethod()
+                .when(snapshotStore).deleteAllAtomicallyForAccounts(any());
+        Instant deadline = snapshot.getSnapshotCreateTime().plusSeconds(86400);
+        service.expireSnapshots(deadline, entry -> { });
+        assertEquals("DELETED", service.getSnapshot("store-fail-snap", REGION).getStatus());
+        service.expireSnapshots(deadline, entry -> { });
+        assertTrue(service.findSnapshot("store-fail-snap", REGION).isEmpty());
+    }
+
+    @Test
+    void expirationNeverDeletesDataWhenTheDeletionMarkerCannotBeStored() throws Exception {
+        create("expiry-ns");
+        RedshiftServerlessSnapshot snapshot = service.createSnapshot("marker-fail-snap", "expiry-ns", 1, null, REGION);
+        Path dump = dumpDir.resolve("redshift-serverless-dumps").resolve(ACCOUNT_ID).resolve(REGION)
+                .resolve("marker-fail-snap.sql");
+        Files.createDirectories(dump.getParent());
+        Files.writeString(dump, "data");
+        snapshot.setSqlDump(dump.toString());
+        doThrow(new IllegalStateException("storage unavailable")).when(snapshotStore)
+                .putAllAtomicallyForAccount(any(), any());
+
+        service.expireSnapshots(snapshot.getSnapshotCreateTime().plusSeconds(86400), entry -> {
+            throw new AssertionError("Policy cleanup must not run before the deletion marker is stored");
+        });
+        assertEquals("AVAILABLE", service.getSnapshot("marker-fail-snap", REGION).getStatus());
+        assertTrue(Files.exists(dump));
     }
 
     @Test

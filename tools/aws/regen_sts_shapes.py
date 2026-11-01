@@ -22,23 +22,26 @@ from request_shapes import REPO_ROOT
 OUTPUT = REPO_ROOT / "src/main/resources/aws/sts-request-shapes.json"
 MODEL = Path("sts/2011-06-15")
 
-# One wave per group, each chosen so that no operation in it answers a declared constraint in a
-# wording of its own, which is what keeps the vendored shapes adding the refusals AWS answers
-# rather than rewording an answer already given.
+# Every operation STS models with a constraint of its own, which is all eleven but
+# `GetCallerIdentity`, whose request carries no member at all.
 #
-# `GetAccessKeyInfo` is the parity case: its hand-written check already answered `accessKeyId` in
+# `GetAccessKeyInfo` was the parity case: its hand-written check already answered `accessKeyId` in
 # Smithy's form, from the same bounds and the same pattern. `GetSessionToken` and
-# `GetWebIdentityToken` are the first read through the list walk. `SerialNumber`, `TokenCode` and
-# `MinimumSessionTokenSize` are read by nothing at all today, and the audience and tag checks the
-# token operation carried by hand named their members the way this file's walk does.
-#
-# The seven that are left all answer an absent member through `validateRequired`, which names the
-# parameter as the request writes it rather than as a constraint message spells it, so taking one
-# over rewords an answer already merged.
+# `GetWebIdentityToken` came next, for members read by nothing at all. The seven below answered an
+# absent member through `validateRequired`, which named the parameter as the request writes it and
+# read a blank value as an absent one, so taking them over rewords those answers onto the form the
+# model and the rest of this package give, which is what `docs/services/sts.md` records.
 OPERATIONS = (
     "GetAccessKeyInfo",
     "GetSessionToken",
     "GetWebIdentityToken",
+    "AssumeRole",
+    "AssumeRoleWithSAML",
+    "AssumeRoleWithWebIdentity",
+    "AssumeRoot",
+    "DecodeAuthorizationMessage",
+    "GetDelegatedAccessToken",
+    "GetFederationToken",
 )
 
 

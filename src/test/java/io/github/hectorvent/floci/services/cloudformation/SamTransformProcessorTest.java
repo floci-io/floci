@@ -154,6 +154,77 @@ class SamTransformProcessorTest {
                 aliasProps.path("FunctionVersion").path("Fn::GetAtt"));
     }
 
+    @Test
+    void expandSamTemplate_autoPublishAliasResolvesReferenceableProperty() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "FnPermission": {
+                  "Type": "AWS::Lambda::Permission",
+                  "Properties": {
+                    "Action": "lambda:InvokeFunction",
+                    "FunctionName": {"Ref": "Fn.Alias"},
+                    "Principal": "events.amazonaws.com"
+                  }
+                },
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs22.x",
+                    "AutoPublishAlias": "live",
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                }
+              },
+              "Outputs": {
+                "AliasArn": {"Value": {"Ref": "Fn.Alias"}},
+                "FunctionName": {"Value": {"Ref": "Fn"}}
+              }
+            }
+            """);
+
+        JsonNode expanded = processor.expandSamTemplate(template);
+        assertEquals("FnAliasLive", expanded.path("Resources").path("FnPermission")
+                .path("Properties").path("FunctionName").path("Ref").asText());
+        assertEquals("FnAliasLive", expanded.path("Outputs").path("AliasArn")
+                .path("Value").path("Ref").asText());
+        assertEquals("Fn", expanded.path("Outputs").path("FunctionName")
+                .path("Value").path("Ref").asText());
+    }
+
+    @Test
+    void expandSamTemplate_autoPublishAliasReferenceUsesGeneratedIdAfterCollision() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "FnAliasLive": {"Type": "AWS::S3::Bucket"},
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "nodejs22.x",
+                    "AutoPublishAlias": "live",
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                },
+                "FnPermission": {
+                  "Type": "AWS::Lambda::Permission",
+                  "Properties": {"FunctionName": {"Ref": "Fn.Alias"}}
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+        assertEquals("AWS::S3::Bucket", resources.path("FnAliasLive").path("Type").asText());
+        assertEquals("AWS::Lambda::Alias", resources.path("FnAliasLive2").path("Type").asText());
+        assertEquals("FnAliasLive2", resources.path("FnPermission").path("Properties")
+                .path("FunctionName").path("Ref").asText());
+    }
+
     /** The ids are the ones SAM gives the same function. */
     @Test
     void expandSamTemplate_autoPublishAliasVersionIdFollowsSamsHashInput() throws Exception {
@@ -2049,6 +2120,67 @@ class SamTransformProcessorTest {
     }
 
     @Test
+    void expandSamTemplate_prependsGlobalFunctionLayers() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {"Function": {"Layers": ["arn:aws:lambda:us-east-1:123456789012:layer:shared:1"]}},
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "InlineCode": "exports.handler = async () => ({});",
+                    "Layers": ["arn:aws:lambda:us-east-1:123456789012:layer:local:1"]
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode layers = processor.expandSamTemplate(template)
+                .path("Resources").path("MyFunc").path("Properties").path("Layers");
+        assertEquals(2, layers.size());
+        assertEquals("arn:aws:lambda:us-east-1:123456789012:layer:shared:1", layers.get(0).asText());
+        assertEquals("arn:aws:lambda:us-east-1:123456789012:layer:local:1", layers.get(1).asText());
+    }
+
+    @Test
+    void expandSamTemplate_functionArchitecturesReplaceGlobals() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {"Function": {"Architectures": ["x86_64"]}},
+              "Resources": {"MyFunc": {
+                "Type": "AWS::Serverless::Function",
+                "Properties": {
+                  "Runtime": "nodejs20.x",
+                  "Handler": "index.handler",
+                  "InlineCode": "exports.handler = async () => ({});",
+                  "Architectures": ["arm64"]
+                }
+              }, "InheritedFunc": {
+                "Type": "AWS::Serverless::Function",
+                "Properties": {
+                  "Runtime": "nodejs20.x",
+                  "Handler": "index.handler",
+                  "InlineCode": "exports.handler = async () => ({});"
+                }
+              }}
+            }
+            """);
+
+        JsonNode expanded = processor.expandSamTemplate(template);
+        JsonNode architectures = expanded
+                .path("Resources").path("MyFunc").path("Properties").path("Architectures");
+        assertEquals(objectMapper.readTree("[\"arm64\"]"), architectures);
+        JsonNode inheritedArchitectures = expanded
+                .path("Resources").path("InheritedFunc").path("Properties").path("Architectures");
+        assertEquals(objectMapper.readTree("[\"x86_64\"]"), inheritedArchitectures);
+    }
+
+    @Test
     void expandSamTemplate_mergesNestedMapsFromGlobals() throws Exception {
         // Environment.Variables must merge key-wise: globals-only keys preserved, function keys win on clash
         JsonNode template = objectMapper.readTree("""
@@ -2080,6 +2212,50 @@ class SamTransformProcessorTest {
         assertEquals("g", vars.path("GLOBAL_VAR").asText());          // globals-only key preserved
         assertEquals("l", vars.path("LOCAL_VAR").asText());           // function-only key added
         assertEquals("from-function", vars.path("SHARED").asText());  // clash resolved in favor of function
+    }
+
+    @Test
+    void expandSamTemplate_replacesIntrinsicValuesWithinGlobalsMaps() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {"Function": {"Environment": {"Variables": {
+                "GLOBAL": "global",
+                "URL": {"Fn::Join": ["", ["https://global.example", "/old"]]},
+                "SCALAR": {"Fn::Sub": "global-${AWS::Region}"},
+                "REFERENCE": {"Ref": "GlobalParam"}
+              }}}},
+              "Resources": {"MyFunc": {
+                "Type": "AWS::Serverless::Function",
+                "Properties": {
+                  "Runtime": "nodejs20.x",
+                  "Handler": "index.handler",
+                  "InlineCode": "exports.handler = async () => ({});",
+                  "Environment": {"Variables": {
+                    "LOCAL": "local",
+                    "URL": {"Fn::Join": ["", ["https://local.example", "/v1"]]},
+                    "SCALAR": {"Fn::Base64": "local"},
+                    "REFERENCE": {"Fn::Sub": "local-${AWS::Region}"}
+                  }}
+                }
+              }}
+            }
+            """);
+
+        JsonNode variables = processor.expandSamTemplate(template)
+                .path("Resources").path("MyFunc").path("Properties")
+                .path("Environment").path("Variables");
+        assertEquals("global", variables.path("GLOBAL").asText());
+        assertEquals("local", variables.path("LOCAL").asText());
+        assertEquals(objectMapper.readTree("""
+                {"Fn::Join": ["", ["https://local.example", "/v1"]]}
+                """), variables.path("URL"));
+        assertEquals(objectMapper.readTree("""
+                {"Fn::Base64": "local"}
+                """), variables.path("SCALAR"));
+        assertEquals(objectMapper.readTree("""
+                {"Fn::Sub": "local-${AWS::Region}"}
+                """), variables.path("REFERENCE"));
     }
 
     @Test

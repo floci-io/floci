@@ -51,6 +51,9 @@ public class EmrCluster {
     // its steps run in; Floci's own, as the API has neither.
     private boolean bootstrapInContainer;
     private String bootstrapImage;
+    // Whether the docker runner mode has made the cluster's storage, which goes once the cluster has ended; Floci's
+    // own, as the API has none.
+    private boolean storageCreated;
     // The cluster's ManagedScalingPolicy and AutoTerminationPolicy as given, raw JSON; null when none.
     private String managedScalingPolicy;
     private String autoTerminationPolicy;
@@ -176,6 +179,9 @@ public class EmrCluster {
 
     public String getBootstrapImage() { return bootstrapImage; }
     public void setBootstrapImage(String bootstrapImage) { this.bootstrapImage = bootstrapImage; }
+
+    public boolean isStorageCreated() { return storageCreated; }
+    public void setStorageCreated(boolean storageCreated) { this.storageCreated = storageCreated; }
 
     public String getManagedScalingPolicy() { return managedScalingPolicy; }
     public void setManagedScalingPolicy(String managedScalingPolicy) { this.managedScalingPolicy = managedScalingPolicy; }

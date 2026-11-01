@@ -14,6 +14,7 @@ Compatibility tests for [Floci](https://github.com/hectorvent/floci) using the *
 | `s3-notifications`      | S3 → SQS and S3 → SNS event notifications                                                          |
 | `dynamodb`              | Tables, CRUD, batch, TTL, tags                                                                     |
 | `lambda`                | Create/invoke/update/delete functions                                                              |
+| `lambda-web`            | Web functions, revisions, endpoints, waiters, tags, resource policy                                |
 | `iam`                   | Users, roles, policies, access keys                                                                |
 | `sts`                   | GetCallerIdentity, AssumeRole, GetSessionToken                                                     |
 | `secretsmanager`        | Create/get/put/list/delete secrets, versioning, tags                                               |

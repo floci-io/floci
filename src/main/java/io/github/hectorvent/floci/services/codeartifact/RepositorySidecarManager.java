@@ -68,6 +68,23 @@ public interface RepositorySidecarManager {
             String packageName);
 
     /**
+     * {@code true} when this sidecar has written anything at all under this package, even content
+     * that would not count as "holding a version" for {@link #packageExists}: a Maven
+     * group/artifact directory that only ever got a {@code maven-metadata.xml} merged into it to
+     * advertise a public repository's release list, with no version ever actually retained, is
+     * real content a {@code DeletePackage} still has to clear, even though {@link #packageExists}
+     * correctly answers {@code false} for it. Defaults to exactly {@link #packageExists}, since no
+     * other format currently has an equivalent metadata-but-no-version state; {@code
+     * ReposiliteSidecarClient} is the only implementation that overrides this, so a package left
+     * in that state is still actually deleted rather than {@code DeletePackage} reporting success
+     * while leaving it fetchable.
+     */
+    default boolean hasAnyContentToDelete(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName) {
+        return packageExists(repositoryContainerId, domain, repository, namespace, packageName);
+    }
+
+    /**
      * {@code true} when this sidecar holds exactly the named version of the named package, for
      * bridging {@code DescribePackageVersion} when there is no generic-format record to describe:
      * Maven, npm, and pypi are metadata-free passthroughs straight to their sidecar, so nothing in

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.services.kinesisanalytics.model.FlinkApplication;
@@ -238,7 +239,7 @@ public class KinesisAnalyticsV2JsonHandler {
         node.put("SnapshotStatus", snapshot.getSnapshotStatus().name());
         node.put("ApplicationVersionId", snapshot.getApplicationVersionId());
         if (snapshot.getSnapshotCreationTimestamp() != null) {
-            node.put("SnapshotCreationTimestamp", snapshot.getSnapshotCreationTimestamp().toEpochMilli() / 1000.0);
+            node.put("SnapshotCreationTimestamp", EpochSeconds.fromInstant(snapshot.getSnapshotCreationTimestamp()));
         }
         if (snapshot.getRuntimeEnvironment() != null) {
             node.put("RuntimeEnvironment", snapshot.getRuntimeEnvironment());
@@ -319,10 +320,10 @@ public class KinesisAnalyticsV2JsonHandler {
             detail.put("ApplicationMode", app.getApplicationMode());
         }
         if (app.getCreateTimestamp() != null) {
-            detail.put("CreateTimestamp", app.getCreateTimestamp().toEpochMilli() / 1000.0);
+            detail.put("CreateTimestamp", EpochSeconds.fromInstant(app.getCreateTimestamp()));
         }
         if (app.getLastUpdateTimestamp() != null) {
-            detail.put("LastUpdateTimestamp", app.getLastUpdateTimestamp().toEpochMilli() / 1000.0);
+            detail.put("LastUpdateTimestamp", EpochSeconds.fromInstant(app.getLastUpdateTimestamp()));
         }
         if (app.hasCode()) {
             detail.set("ApplicationConfigurationDescription", applicationConfigurationNode(app));

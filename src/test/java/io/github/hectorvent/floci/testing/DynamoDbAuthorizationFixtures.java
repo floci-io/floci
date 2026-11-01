@@ -64,7 +64,9 @@ public final class DynamoDbAuthorizationFixtures {
     }
 
     public String user(String policy) {
-        return userNamed(prefix + UUID.randomUUID(), policy);
+        // Eight characters of a UUID rather than a whole one: a user name is held to the 64
+        // characters its shape declares, which a prefix plus a whole UUID can break.
+        return userNamed(prefix + UUID.randomUUID().toString().substring(0, 8), policy);
     }
 
     /** A user whose name the caller chooses, for a policy that has to name it. */

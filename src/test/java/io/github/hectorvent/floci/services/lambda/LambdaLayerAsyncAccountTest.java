@@ -49,6 +49,20 @@ class LambdaLayerAsyncAccountTest {
     }
 
     @Test
+    void backgroundLookupInUnpublishedRegionUsesDeploymentPartition() {
+        String region = "xx-nowhere-9";
+        AccountAwareStorageBackend<LambdaLayerVersion> storage = AccountAwareStorageBackend.inMemory(DEFAULT_ACCOUNT);
+        LambdaLayerService service = new LambdaLayerService(new LambdaLayerStore(storage), null, null,
+                new RegionResolver("cn-north-1", DEFAULT_ACCOUNT), null);
+        LambdaLayerVersion ownerLayer = layer("arn:aws-cn:lambda:" + region + ":" + OWNER + ":layer:shared:1");
+        storage.putForAccount(OWNER, "layer::" + region + "::shared::1", ownerLayer);
+
+        assertSame(ownerLayer, service.resolveLayerByArnForAccount(ownerLayer.getLayerVersionArn(), OWNER, region));
+        assertNull(service.resolveLayerByArnForAccount(
+                "arn:aws:lambda:" + region + ":" + OWNER + ":layer:shared:1", OWNER, region));
+    }
+
+    @Test
     void absentLayerOrInvalidOwnerNeverFallsBackToAmbientStorage() {
         AccountAwareStorageBackend<LambdaLayerVersion> storage = AccountAwareStorageBackend.inMemory(DEFAULT_ACCOUNT);
         LambdaLayerService service = service(storage);
