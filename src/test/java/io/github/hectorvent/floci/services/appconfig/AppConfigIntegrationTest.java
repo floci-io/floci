@@ -1186,6 +1186,40 @@ class AppConfigIntegrationTest {
                 .then().statusCode(204);
     }
 
+    @Test @Order(57)
+    void updateApplicationRejectsNonStringFieldsWithoutChangingTheApplication() {
+        String applicationId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"validation-app\",\"Description\":\"original\"}")
+                .when().post("/applications")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":123}")
+                .when().patch("/applications/" + applicationId)
+                .then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"should-not-stick\",\"Description\":false}")
+                .when().patch("/applications/" + applicationId)
+                .then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+
+        given()
+                .when().get("/applications/" + applicationId)
+                .then().statusCode(200)
+                .body("Name", equalTo("validation-app"))
+                .body("Description", equalTo("original"));
+
+        given()
+                .when().delete("/applications/" + applicationId)
+                .then().statusCode(204);
+    }
+
     /** Polls a new session on a feature flag profile with variants, deployed on first use. */
     private static ValidatableResponse getLatestVariantFlagsAccepting(String accept) {
         if (variantFlagsSessionBody == null) {
