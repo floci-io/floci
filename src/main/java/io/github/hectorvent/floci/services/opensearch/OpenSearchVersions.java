@@ -85,7 +85,8 @@ public final class OpenSearchVersions {
         // first upgrade to OpenSearch_2.19 before they can hop to the 3.x
         // line, so non-2.19 2.x sources do NOT list any 3.x targets directly.
         // https://docs.aws.amazon.com/opensearch-service/latest/developerguide/version-migration.html
-        COMPAT_MATRIX.put("Elasticsearch_7.10", List.of("OpenSearch_1.3", "OpenSearch_2.19"));
+        COMPAT_MATRIX.put("Elasticsearch_7.10", List.of("OpenSearch_1.0", "OpenSearch_1.1",
+                "OpenSearch_1.2", "OpenSearch_1.3"));
         COMPAT_MATRIX.put("Elasticsearch_7.8", List.of("Elasticsearch_7.9", "Elasticsearch_7.10",
                 "OpenSearch_1.0", "OpenSearch_1.1", "OpenSearch_1.2", "OpenSearch_1.3"));
         COMPAT_MATRIX.put("Elasticsearch_7.9", List.of("Elasticsearch_7.10",

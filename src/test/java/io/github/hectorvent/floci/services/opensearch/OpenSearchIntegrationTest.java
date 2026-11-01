@@ -307,7 +307,8 @@ class OpenSearchIntegrationTest {
                 {"OpenSearch_2.19", "OpenSearch_3.7"},
                 {"OpenSearch_3.6", "OpenSearch_3.7"},
                 {"Elasticsearch_7.8", "Elasticsearch_7.9"},
-                {"Elasticsearch_7.9", "OpenSearch_1.3"}
+                {"Elasticsearch_7.9", "OpenSearch_1.3"},
+                {"Elasticsearch_7.10", "OpenSearch_1.0"}
         }) {
             String source = path[0];
             String target = path[1];

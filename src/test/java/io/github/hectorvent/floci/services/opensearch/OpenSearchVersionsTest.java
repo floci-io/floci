@@ -139,6 +139,12 @@ class OpenSearchVersionsTest {
     }
 
     @Test
+    void compatibleTargetsCoverOnlyOpenSearch1xFromElasticsearch710() {
+        assertEquals(List.of("OpenSearch_1.0", "OpenSearch_1.1", "OpenSearch_1.2", "OpenSearch_1.3"),
+                OpenSearchVersions.compatibleTargets("Elasticsearch_7.10"));
+    }
+
+    @Test
     void compatibleTargetsCoverLaterSupportedOpenSearch2xVersions() {
         List<String> versions = List.of("OpenSearch_2.3", "OpenSearch_2.5", "OpenSearch_2.7",
                 "OpenSearch_2.9", "OpenSearch_2.11", "OpenSearch_2.13", "OpenSearch_2.15",
@@ -204,13 +210,15 @@ class OpenSearchVersionsTest {
                 () -> OpenSearchVersions.validateUpgrade("OpenSearch_1.3", "OpenSearch_3.0"));
         assertThrows(AwsException.class,
                 () -> OpenSearchVersions.validateUpgrade("Elasticsearch_7.8", "OpenSearch_2.19"));
+        assertThrows(AwsException.class,
+                () -> OpenSearchVersions.validateUpgrade("Elasticsearch_7.10", "OpenSearch_2.19"));
     }
 
     @Test
     void validateUpgradeAcceptsDocumentedHop() {
         assertDoesNotThrow(() -> OpenSearchVersions.validateUpgrade("OpenSearch_2.11", "OpenSearch_2.13"));
         assertDoesNotThrow(() -> OpenSearchVersions.validateUpgrade("OpenSearch_2.19", "OpenSearch_3.0"));
-        assertDoesNotThrow(() -> OpenSearchVersions.validateUpgrade("Elasticsearch_7.10", "OpenSearch_2.19"));
+        assertDoesNotThrow(() -> OpenSearchVersions.validateUpgrade("Elasticsearch_7.10", "OpenSearch_1.0"));
     }
 
     @Test
