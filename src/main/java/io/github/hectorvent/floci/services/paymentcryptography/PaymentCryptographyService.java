@@ -52,9 +52,6 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     /** The error a bad page size or a bad token is refused with. */
     private static final String PAGINATION_ERROR = "ValidationException";
 
-    /** The only algorithm this service makes material for. */
-    private static final String SUPPORTED_ALGORITHM = "AES_256";
-
     /** The only class this service makes material for. */
     private static final String SUPPORTED_CLASS = "SYMMETRIC_KEY";
 
@@ -194,14 +191,16 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                            Map<String, Boolean> modesOfUse, boolean exportable,
                                            boolean enabled, Map<String, String> tags,
                                            String materialHex) {
-        String algorithm = string(attributes, "KeyAlgorithm", "AES_256");
+        String algorithmName = string(attributes, "KeyAlgorithm", "AES_256");
         String keyClass = string(attributes, "KeyClass", "SYMMETRIC_KEY");
-        // The material is AES-256 and symmetric, so a key that says otherwise would be a key
+        // The material has to be the algorithm's, so a key that says otherwise would be a key
         // whose attributes do not describe it.
-        if (!SUPPORTED_ALGORITHM.equals(algorithm)) {
+        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.from(algorithmName);
+        if (algorithm == null) {
             throw new AwsException("ValidationException",
-                    "KeyAlgorithm '" + algorithm + "' is not supported, this service makes "
-                            + SUPPORTED_ALGORITHM + " keys", 400);
+                    "KeyAlgorithm '" + algorithmName + "' is not supported, this service makes "
+                            + PaymentCryptographyKeyAlgorithm.supportedOf(true) + " and "
+                            + PaymentCryptographyKeyAlgorithm.supportedOf(false) + " keys", 400);
         }
         if (!SUPPORTED_CLASS.equals(keyClass)) {
             throw new AwsException("ValidationException",
@@ -212,7 +211,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         key.setKeyId(UUID.randomUUID().toString().replace("-", ""));
         key.setRegion(region);
         key.setArn(regionResolver.buildArn(SERVICE, region, "key/" + key.getKeyId()));
-        key.setKeyAlgorithm(algorithm);
+        key.setKeyAlgorithm(algorithm.name());
         key.setKeyClass(keyClass);
         key.setKeyUsage(usage(attributes));
         key.setKeyModesOfUse(modesOfUse);
@@ -222,8 +221,9 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         key.setKeyState("CREATE_COMPLETE");
         key.setKeyMaterialHex(materialHex != null
                 ? materialHex
-                : PaymentCryptographyCrypto.randomAes256Hex(secureRandom));
-        key.setKeyCheckValue(PaymentCryptographyCrypto.checkValue(key.getKeyMaterialHex()));
+                : PaymentCryptographyCrypto.randomMaterialHex(algorithm, secureRandom));
+        key.setKeyCheckValue(
+                PaymentCryptographyCrypto.checkValue(key.getKeyMaterialHex(), algorithm));
         key.setKeyCheckValueAlgorithm("CMAC");
         long now = Instant.now().getEpochSecond();
         key.setCreateTimestamp(now);

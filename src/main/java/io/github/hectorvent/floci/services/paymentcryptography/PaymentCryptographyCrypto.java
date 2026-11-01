@@ -4,6 +4,7 @@ import javax.crypto.Cipher;
 import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.security.GeneralSecurityException;
+import io.github.hectorvent.floci.services.paymentcryptography.crypto.Ciphers;
 import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.Locale;
@@ -40,11 +41,33 @@ final class PaymentCryptographyCrypto {
     private PaymentCryptographyCrypto() {
     }
 
-    /** Fresh AES-256 material, as hexadecimal. */
-    static String randomAes256Hex(SecureRandom random) {
-        byte[] material = new byte[32];
+    /** Fresh material of the algorithm's length, as hexadecimal. */
+    static String randomMaterialHex(PaymentCryptographyKeyAlgorithm algorithm, SecureRandom random) {
+        byte[] material = new byte[algorithm.bytes];
         random.nextBytes(material);
         return toHex(material);
+    }
+
+    /** Fresh AES-256 material, as hexadecimal. */
+    static String randomAes256Hex(SecureRandom random) {
+        return randomMaterialHex(PaymentCryptographyKeyAlgorithm.AES_256, random);
+    }
+
+    /**
+     * The check value of a key of that algorithm.
+     *
+     * <p>A TDES key's value is the ANSI X9.24 one: the leftmost three bytes of encrypting
+     * eight zero bytes with the key. An AES key's value is the leftmost three bytes of the
+     * CMAC of sixteen zero bytes under it.
+     */
+    static String checkValue(String keyHex, PaymentCryptographyKeyAlgorithm algorithm) {
+        byte[] key = fromHex(keyHex);
+        byte[] mac = algorithm.aes
+                ? cmac(key, ZERO_BLOCK)
+                : Ciphers.tdesEcbEncrypt(new byte[8], key);
+        byte[] value = new byte[3];
+        System.arraycopy(mac, 0, value, 0, 3);
+        return toHex(value).toUpperCase(Locale.ROOT);
     }
 
     /** The check value of an AES key: the leftmost three bytes of the CMAC of sixteen zero bytes. */

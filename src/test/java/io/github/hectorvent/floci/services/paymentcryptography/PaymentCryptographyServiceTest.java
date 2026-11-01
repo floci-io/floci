@@ -356,13 +356,47 @@ class PaymentCryptographyServiceTest {
     @Test
     void aKeyThatAsksForMaterialTheServiceDoesNotMakeIsRefused() {
         Map<String, Object> attributes = new LinkedHashMap<>();
-        attributes.put("KeyAlgorithm", "AES_128");
+        attributes.put("KeyAlgorithm", "RSA_2048");
         attributes.put("KeyClass", "SYMMETRIC_KEY");
         attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
 
         AwsException bad = assertThrows(AwsException.class,
                 () -> service.createKey("us-east-1", attributes, Map.of(), true, true, Map.of()));
         assertEquals("ValidationException", bad.getErrorCode());
+    }
+
+    @Test
+    void aKeyHoldsTheMaterialItsAlgorithmCallsFor() {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+
+        attributes.put("KeyAlgorithm", "TDES_2KEY");
+        PaymentCryptographyKey tdes = service.createKey("us-east-1", attributes, Map.of(), true, true, Map.of());
+        assertEquals(32, tdes.getKeyMaterialHex().length(), "a TDES key is 16 bytes");
+
+        attributes.put("KeyAlgorithm", "AES_256");
+        PaymentCryptographyKey aes = service.createKey("us-east-1", attributes, Map.of(), true, true, Map.of());
+        assertEquals(64, aes.getKeyMaterialHex().length(), "an AES-256 key is 32 bytes");
+    }
+
+    @Test
+    void theCheckValueFollowsTheAlgorithmOfTheKey() {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+
+        // The check value of a TDES key is the ANSI X9.24 one, and of an AES key the CMAC.
+        attributes.put("KeyAlgorithm", "TDES_2KEY");
+        PaymentCryptographyKey tdes = service.createKey("us-east-1", attributes, Map.of(), true, true, Map.of());
+        String expected = PaymentCryptographyCrypto.checkValue(tdes.getKeyMaterialHex(),
+                PaymentCryptographyKeyAlgorithm.TDES_2KEY);
+        assertEquals(expected, tdes.getKeyCheckValue());
+
+        attributes.put("KeyAlgorithm", "AES_256");
+        PaymentCryptographyKey aes = service.createKey("us-east-1", attributes, Map.of(), true, true, Map.of());
+        assertEquals(PaymentCryptographyCrypto.checkValue(aes.getKeyMaterialHex(),
+                PaymentCryptographyKeyAlgorithm.AES_256), aes.getKeyCheckValue());
     }
 
     @Test
