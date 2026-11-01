@@ -199,6 +199,11 @@ final class DynamoDbNumberUtils {
             return attr;
         }
 
+        // DynamoDB stores a NULL flag written as a string as true.
+        if (attr.path("NULL").isTextual()) {
+            return JsonNodeFactory.instance.objectNode().put("NULL", true);
+        }
+
         if (attr.has("N")) {
             String raw = attr.get("N").asText();
             String normalized = validateAndNormalize(raw);

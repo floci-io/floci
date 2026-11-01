@@ -1033,7 +1033,8 @@ final class ExpressionEvaluator {
         if (a == null || b == null) return a == b;
         for (String type : new String[]{"S", "B", "BOOL", "NULL"}) {
             if (a.has(type) && b.has(type)) {
-                return a.get(type).asText().equals(b.get(type).asText());
+                // A NULL flag can be written as a string in any case, and it is always true.
+                return "NULL".equals(type) || a.get(type).asText().equals(b.get(type).asText());
             }
             if (a.has(type) || b.has(type)) return false;
         }

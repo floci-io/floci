@@ -2292,6 +2292,27 @@ class NativeDynamoDbJsonHandlerTest {
         }
     }
 
+    @Test
+    void aNullFlagWrittenAsAStringIsStoredAndComparedAsTrue() throws Exception {
+        createUsersTable("eu-west-1");
+        handler.handle("PutItem", mapper.readTree("""
+                {"TableName":"Users","Item":{"userId":{"S":"u1"},"n":{"NULL":"TRUE"},"l":{"L":[{"NULL":"True"}]}}}
+                """), "eu-west-1");
+        handler.handle("UpdateItem", mapper.readTree("""
+                {"TableName":"Users","Key":{"userId":{"S":"u1"}},"UpdateExpression":"SET m = :m",
+                 "ConditionExpression":"n = :v AND contains(l, :v)",
+                 "ExpressionAttributeValues":{":m":{"M":{"x":{"NULL":"tRuE"}}},":v":{"NULL":true}}}
+                """), "eu-west-1");
+
+        Response response = handler.handle("GetItem", mapper.readTree("""
+                {"TableName":"Users","Key":{"userId":{"S":"u1"}}}
+                """), "eu-west-1");
+        JsonNode item = mapper.convertValue(response.getEntity(), JsonNode.class).get("Item");
+        assertEquals(mapper.readTree("""
+                {"userId":{"S":"u1"},"n":{"NULL":true},"l":{"L":[{"NULL":true}]},"m":{"M":{"x":{"NULL":true}}}}
+                """), item);
+    }
+
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
             [{"userId":{"N":"abc"}},{"userId":{"NULL":true}}]                    | The supplied Item contains a null AttributeValue
