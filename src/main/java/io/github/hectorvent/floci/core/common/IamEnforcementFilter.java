@@ -721,7 +721,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             Set.of("s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload");
 
     private static final Pattern SPECTRUM_SCRATCH_OBJECT = Pattern.compile(
-            "arn:[^:]+:s3:::" + Pattern.quote(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET)
+            "arn:" + AwsArnUtils.PARTITION_REGEX + ":s3:::"
+                    + Pattern.quote(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET)
                     + "/spectrum-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\\.csv");
 
     private static final Set<String> GOVERNANCE_BYPASS_ACTIONS =
