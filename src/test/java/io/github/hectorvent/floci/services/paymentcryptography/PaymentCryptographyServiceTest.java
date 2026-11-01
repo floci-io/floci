@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -229,5 +230,38 @@ class PaymentCryptographyServiceTest {
         AwsException bad = assertThrows(AwsException.class,
                 () -> service.listKeys("us-east-1", 2, "not a token"));
         assertEquals("ValidationException", bad.getErrorCode());
+    }
+
+    /** The namespace of the resource types the service finds, as the request-resources table names it. */
+    @Test
+    void theNamespaceIsTheOneTheTableNames() {
+        assertEquals("payment-cryptography", service.namespace());
+    }
+
+    /**
+     * A key is named by its id or by an alias, and an alias names the key it points at, so a request naming a key by
+     * an alias is checked on the key the alias names, as the handler resolves it.
+     */
+    @Test
+    void aKeyIsFoundUnderItsIdAndUnderTheAliasThatNamesIt() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+        service.createAlias("alias/team/card-key", key);
+
+        assertEquals(Optional.of(key.getArn()), service.find("key", key.getKeyId(), "us-east-1"));
+        assertEquals(Optional.of(key.getArn()), service.find("key", "alias/team/card-key", "us-east-1"));
+        assertEquals(Optional.of(key.getArn()), service.find("key", key.getArn(), "us-east-1"));
+        assertEquals(Optional.empty(), service.find("key", "alias/team/no-such-key", "us-east-1"));
+        assertEquals(Optional.empty(), service.find("key", "no-such-key", "us-east-1"));
+    }
+
+    /**
+     * An alias's ARN is the name it was given, which carries the {@code alias/} its own resource part carries too,
+     * so it is that name without the prefix.
+     */
+    @Test
+    void anAliasIsFoundUnderItsName() {
+        assertEquals(Optional.of("arn:aws:payment-cryptography:us-east-1:000000000000:alias/team/card-key"),
+                service.find("alias", "alias/team/card-key", "us-east-1"));
+        assertEquals(Optional.empty(), service.find("approval-team", "whatever", "us-east-1"));
     }
 }

@@ -103,8 +103,6 @@ public class ResourceArnBuilder {
      * its service follows with a minted id is stored under.
      */
     private final Instance<StoredResourceArns> storedResourceArns;
-    /** Looked up lazily for the same reason, to resolve a key named by an id, an alias or an ARN to its stored ARN. */
-    private final Instance<PaymentCryptographyService> paymentCryptographyService;
 
     @Inject
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
@@ -112,8 +110,7 @@ public class ResourceArnBuilder {
                               Instance<LambdaMicrovmsService> microvmsService,
                               Instance<EksService> eksService,
                               Instance<KmsService> kmsService,
-                              Instance<StoredResourceArns> storedResourceArns,
-                              Instance<PaymentCryptographyService> paymentCryptographyService) {
+                              Instance<StoredResourceArns> storedResourceArns) {
         this.objectMapper = objectMapper;
         this.iamService = iamService;
         this.secretsManagerService = secretsManagerService;
@@ -121,7 +118,6 @@ public class ResourceArnBuilder {
         this.eksService = eksService;
         this.kmsService = kmsService;
         this.storedResourceArns = storedResourceArns;
-        this.paymentCryptographyService = paymentCryptographyService;
     }
 
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
@@ -129,7 +125,7 @@ public class ResourceArnBuilder {
                               Instance<LambdaMicrovmsService> microvmsService,
                               Instance<EksService> eksService,
                               Instance<KmsService> kmsService) {
-        this(objectMapper, iamService, secretsManagerService, microvmsService, eksService, kmsService, null, null);
+        this(objectMapper, iamService, secretsManagerService, microvmsService, eksService, kmsService, null);
     }
 
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
@@ -209,8 +205,6 @@ public class ResourceArnBuilder {
             case "dsql"           -> List.of(buildDsqlArn(path, ctx, region, accountId, partition));
             case "eks"            -> List.of(buildEksArn(path, ctx, region, accountId));
             case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
-            case "payment-cryptography" -> buildPaymentCryptographyResources(operation, ctx, region,
-                    accountId, partition);
             case "route53"        -> "route53:GetReusableDelegationSet".equals(operation)
                     || "route53:DeleteReusableDelegationSet".equals(operation)
                     ? List.of(buildRoute53DelegationSetArn(ctx, partition))
@@ -1802,99 +1796,6 @@ public class ResourceArnBuilder {
             }
         }
         return AwsArnUtils.Arn.of("ssm", region, accountId, "parameter/*").toString();
-    }
-
-    // ── Payment Cryptography ────────────────────────────────────────────────────
-
-    /**
-     * The resources a Payment Cryptography request is evaluated against, as its permissions
-     * reference gives them. A key-scoped operation is evaluated against the key its
-     * {@code KeyIdentifier} names, and an alias name is resolved to the key it points at, exactly
-     * as the handler resolves it: an {@code Allow} scoped to the key must match, and an
-     * {@code Deny} scoped to the key must fire, whichever of the two names the request used.
-     *
-     * <p>The tagging operations name their key in {@code ResourceArn}, and the alias operations
-     * name the alias they act on and, where they name one, the key the alias points at. The
-     * operations that act on no particular resource stay at {@code *}, the element the reference
-     * itself requires a policy to name for them.
-     */
-    public List<String> buildPaymentCryptographyResources(String operation, ContainerRequestContext ctx,
-                                                           String region, String accountId, String partition) {
-        JsonNode body = readJsonBody(ctx);
-        if (body == null) {
-            body = MissingNode.getInstance();
-        }
-        return switch (operation) {
-            case "payment-cryptography:CreateKey", "payment-cryptography:ImportKey",
-                    "payment-cryptography:ListKeys", "payment-cryptography:ListAliases",
-                    "payment-cryptography:GetParametersForImport",
-                    "payment-cryptography:GetParametersForExport" -> List.of("*");
-            case "payment-cryptography:CreateAlias", "payment-cryptography:UpdateAlias" ->
-                    List.of(paymentCryptographyKeyArn(body.path("KeyArn").asText(null), region, accountId,
-                                    partition),
-                            paymentCryptographyAliasArn(body.path("AliasName").asText(null), region, accountId,
-                                    partition));
-            case "payment-cryptography:GetAlias", "payment-cryptography:DeleteAlias" ->
-                    List.of(paymentCryptographyAliasArn(body.path("AliasName").asText(null), region, accountId,
-                            partition));
-            case "payment-cryptography:TagResource", "payment-cryptography:UntagResource",
-                    "payment-cryptography:ListTagsForResource" ->
-                    List.of(paymentCryptographyKeyArn(body.path("ResourceArn").asText(null), region, accountId,
-                            partition));
-            default -> List.of(paymentCryptographyKeyArn(body.path("KeyIdentifier").asText(null), region,
-                    accountId, partition));
-        };
-    }
-
-    /**
-     * The key ARN a request's identifier names: the stored key's own ARN when the account holds
-     * it, in the partition it was created in; a key ARN the account holds nothing of as given,
-     * which is the caller's own naming of the key the operation will refuse; an alias that names
-     * no key as every key, since the operation then fails before a policy can name one; and a
-     * bare key id minted in the request's partition, the partition the create mints in.
-     */
-    private String paymentCryptographyKeyArn(String identifier, String region, String accountId,
-                                             String partition) {
-        if (identifier == null || identifier.isBlank()) {
-            return paymentCryptographyKeyWildcard(region, accountId, partition);
-        }
-        if (paymentCryptographyService != null) {
-            PaymentCryptographyKey key = paymentCryptographyService.get().findKey(region, identifier);
-            if (key != null) {
-                return key.getArn();
-            }
-        }
-        if (AwsArnUtils.isArnFor(identifier, "payment-cryptography")) {
-            return identifier;
-        }
-        if (identifier.startsWith("alias/")) {
-            return paymentCryptographyKeyWildcard(region, accountId, partition);
-        }
-        return new AwsArnUtils.Arn(partition, "payment-cryptography", region, accountId,
-                "key/" + identifier).toString();
-    }
-
-    /**
-     * The alias ARN a request's name names: the name in the request's partition. The name of an
-     * alias starts with {@code alias/}, and the ARN carries that as its own segment, so the name
-     * without it is what follows.
-     */
-    private String paymentCryptographyAliasArn(String aliasName, String region, String accountId,
-                                               String partition) {
-        if (aliasName == null || aliasName.isBlank()) {
-            return "*";
-        }
-        if (AwsArnUtils.isArnFor(aliasName, "payment-cryptography")) {
-            return aliasName;
-        }
-        String name = aliasName.startsWith("alias/") ? aliasName.substring("alias/".length()) : aliasName;
-        return new AwsArnUtils.Arn(partition, "payment-cryptography", region, accountId,
-                "alias/" + name).toString();
-    }
-
-    /** Every key the account holds, which is what a request naming no key is evaluated against. */
-    private String paymentCryptographyKeyWildcard(String region, String accountId, String partition) {
-        return new AwsArnUtils.Arn(partition, "payment-cryptography", region, accountId, "key/*").toString();
     }
 
     // ── KMS ──────────────────────────────────────────────────────────────────────

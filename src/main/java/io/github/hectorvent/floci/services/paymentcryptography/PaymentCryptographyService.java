@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryptographyAlias;
@@ -33,7 +34,7 @@ import java.util.UUID;
  * and the two are two aliases.
  */
 @ApplicationScoped
-public class PaymentCryptographyService implements Resettable {
+public class PaymentCryptographyService implements Resettable, StoredResourceArns {
 
     /** The storage key, which is the one the catalog's descriptor names. */
     private static final String STORAGE_KEY = "paymentcryptography";
@@ -327,6 +328,47 @@ public class PaymentCryptographyService implements Resettable {
     }
 
     // ---- helpers ------------------------------------------------------------
+
+    /**
+     * The namespace of the resource types this service finds, as the request-resources table names it.
+     */
+    @Override
+    public String namespace() {
+        return "payment-cryptography";
+    }
+
+    /**
+     * The ARN the caller's key or alias of the name in the Region is stored under.
+     *
+     * <p>A key is named by its id or by an alias, and an alias names the key it points at, so a
+     * request naming a key by an alias is checked on the key the alias names, as the handler
+     * resolves it: an {@code Allow} scoped to that key passes and a {@code Deny} scoped to it
+     * holds, whichever of the two names the request used.
+     *
+     * <p>An alias's ARN is the name it was given, which the request carries with the
+     * {@code alias/} its own name starts with, so the ARN is that name without the prefix the
+     * alias's own resource part carries.
+     */
+    @Override
+    public Optional<String> find(String type, String name, String region) {
+        if (name == null || name.isBlank()) {
+            return Optional.empty();
+        }
+        return switch (type) {
+            case "key" -> Optional.ofNullable(findKey(region, name)).map(PaymentCryptographyKey::getArn);
+            case "alias" -> Optional.of(aliasArn(region, name));
+            default -> Optional.empty();
+        };
+    }
+
+    /**
+     * The ARN of the alias of the name in the Region, which the name gives whether or not the
+     * alias exists yet, as a create names the alias it makes.
+     */
+    private String aliasArn(String region, String name) {
+        String alias = name.startsWith("alias/") ? name.substring("alias/".length()) : name;
+        return regionResolver.buildArn(SERVICE, region, "alias/" + alias);
+    }
 
     /**
      * The storage key of an alias.

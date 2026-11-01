@@ -21,14 +21,15 @@ import java.util.regex.Pattern;
  *
  * <p>A request names a resource by a member holding its ARN, which counts when it matches the ARN format of a
  * resource type the action acts on, or by members filling the variables of a type's format, the others open as
- * {@code *} (a resource a request creates has the id its service mints). A type whose service follows the name a
- * request gives with an id it mints ({@code connection/<name>/<id>}) is the resource its service stores under that
- * name, or else has that id open. An ARN with a qualifier its service drops
- * to check it is checked without one (a state machine's version or alias, on the state machine). An ARN naming
- * another account or Region than the request's is checked as given and as each resource of that name a handler may
- * act on instead, in the ARN's account or the caller's and in the ARN's Region or the request's, and the request is
- * refused if any is denied, as handlers mix them (ECR's tag handlers keep the ARN's account in the request's
- * Region).
+ * {@code *} (a resource a request creates has the id its service mints). A type whose ARN only its service knows is
+ * the resource that service stores under the name a request gives ({@code connection/<name>/<id>}, which follows
+ * the name with an id the service mints, and a key an alias names), and a type whose service follows the name a
+ * request gives with an id it mints has that id open when the service stores none. An ARN with a qualifier its
+ * service drops to check it is checked without one (a state machine's version or alias, on the state machine). An
+ * ARN naming another account or Region than the request's is checked as given and as each resource of that name a
+ * handler may act on instead, in the ARN's account or the caller's and in the ARN's Region or the request's, and the
+ * request is refused if any is denied, as handlers mix them (ECR's tag handlers keep the ARN's account in the
+ * request's Region).
  */
 public final class RequestResources {
 
@@ -60,9 +61,9 @@ public final class RequestResources {
     }
 
     /**
-     * As {@link #of(String, ContainerRequestContext, String, String, String)}, a resource of a type whose service
-     * mints an id after its name being the one {@code stored} finds for the caller under the name the request gives,
-     * or else its ARN with that id open, as it is with no {@code stored}.
+     * As {@link #of(String, ContainerRequestContext, String, String, String)}, a resource of a type whose ARN only
+     * its service knows being the one {@code stored} finds for the caller under the name the request gives, and a
+     * type whose service mints an id after its name having that id open when the service stores none.
      */
     public static List<String> of(String operation, ContainerRequestContext ctx, String partition, String region,
                                   String accountId, StoredResourceArns stored) {
@@ -311,11 +312,11 @@ public final class RequestResources {
         for (Filling filling : fillings) {
             AwsArnUtils.Arn from = filling.from();
             if (from == null) {
-                arns.add(withId(render(format.format(), filling.variables(), partition, region, account), format,
+                arns.add(resolved(render(format.format(), filling.variables(), partition, region, account), format,
                         resource.types().getFirst(), filling.variables(), account.equals(accountId) ? stored : null,
                         region));
             } else {
-                addNamed(arns, withId(render(format.format(), filling.variables(), from.partition(),
+                addNamed(arns, resolved(render(format.format(), filling.variables(), from.partition(),
                         from.region().isEmpty() ? region : from.region(),
                         from.accountId().isEmpty() ? accountId : from.accountId()), format,
                         resource.types().getFirst(), filling.variables(), null, region), partition, region, accountId);
@@ -329,22 +330,19 @@ public final class RequestResources {
     }
 
     /**
-     * The ARN of a resource of a type whose service follows its name with an id it mints: the one {@code stored}
-     * finds the caller's resource of that name under in the Region, or else the ARN with that id open; any other
-     * type's as rendered.
+     * The ARN of a resource the namespace's service stores under the name the request gives: the one {@code stored}
+     * finds the caller's resource of that name under in the Region, or, for a type whose service follows its name
+     * with an id it mints, the ARN with that id open; any other type's as rendered.
      */
-    private static String withId(String arn, RequestResourceMembers.ArnFormat format, String type,
+    private static String resolved(String arn, RequestResourceMembers.ArnFormat format, String type,
                                  Map<String, String> filling, StoredResourceArns stored, String region) {
-        if (!format.minted()) {
-            return arn;
-        }
         if (stored != null && filling.size() == 1) {
             Optional<String> found = stored.find(type, filling.values().iterator().next(), region);
             if (found.isPresent()) {
                 return found.get();
             }
         }
-        return arn + "/*";
+        return format.minted() ? arn + "/*" : arn;
     }
 
     /**
