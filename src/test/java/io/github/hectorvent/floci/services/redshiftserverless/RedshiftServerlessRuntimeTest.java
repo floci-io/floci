@@ -14,6 +14,7 @@ import org.mockito.InOrder;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
@@ -284,6 +285,20 @@ class RedshiftServerlessRuntimeTest {
     void theBackendIdCannotCollideWithAClusterIdentifier() {
         assertEquals(BACKEND_ID, RedshiftServerlessRuntime.backendId(REGION, "my-wg"));
         assertTrue(BACKEND_ID.contains("_"), "cluster identifiers cannot contain an underscore");
+    }
+
+    @Test
+    void generatePasswordRetriesUntilAllRequiredCharacterClassesArePresent() {
+        Iterator<String> candidates = List.of(
+                "abcdefghijklmnopqrstuvwxyz123456",
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef",
+                "AdminPassword123WithAllClassesOk"
+        ).iterator();
+
+        String password = runtime.generatePassword(candidates::next);
+
+        assertEquals("AdminPassword123WithAllClassesOk", password);
     }
 
     @Test
