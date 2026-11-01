@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.paymentcryptography;
 
 import javax.crypto.Cipher;
+import javax.crypto.spec.IvParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
@@ -143,7 +144,7 @@ final class PaymentCryptographyCrypto {
             byte[] iv = new byte[IV_LENGTH];
             random.nextBytes(iv);
             Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new javax.crypto.spec.IvParameterSpec(iv));
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
             byte[] encrypted = cipher.doFinal(plaintext);
             byte[] out = new byte[iv.length + encrypted.length];
             System.arraycopy(iv, 0, out, 0, iv.length);
@@ -169,7 +170,7 @@ final class PaymentCryptographyCrypto {
             byte[] iv = Arrays.copyOfRange(blob, 0, IV_LENGTH);
             byte[] encrypted = Arrays.copyOfRange(blob, IV_LENGTH, blob.length);
             Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new javax.crypto.spec.IvParameterSpec(iv));
+            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
             return cipher.doFinal(encrypted);
         } catch (GeneralSecurityException e) {
             throw new IllegalArgumentException("the ciphertext did not open under the key", e);
@@ -276,7 +277,7 @@ final class PaymentCryptographyCrypto {
     static byte[] aesCbcEncrypt(byte[] key, byte[] iv, byte[] data) {
         try {
             Cipher cipher = Cipher.getInstance("AES/CBC/NoPadding");
-            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new javax.crypto.spec.IvParameterSpec(iv));
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
             return cipher.doFinal(data);
         } catch (GeneralSecurityException e) {
             throw new IllegalStateException("the AES key could not be used", e);
@@ -287,7 +288,7 @@ final class PaymentCryptographyCrypto {
     static byte[] aesCbcDecrypt(byte[] key, byte[] iv, byte[] data) {
         try {
             Cipher cipher = Cipher.getInstance("AES/CBC/NoPadding");
-            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new javax.crypto.spec.IvParameterSpec(iv));
+            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
             return cipher.doFinal(data);
         } catch (GeneralSecurityException e) {
             throw new IllegalArgumentException("the data did not decrypt under the key", e);

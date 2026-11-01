@@ -6,8 +6,10 @@ import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryp
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Locale;
 import java.util.Map;
 
@@ -130,7 +132,7 @@ public class PaymentCryptographyDataPlaneHandler {
         byte[] expected = PaymentCryptographyCrypto.cmac(material(key), message);
         byte[] cut = new byte[length];
         System.arraycopy(expected, 0, cut, 0, Math.min(length, expected.length));
-        if (mac.length != length || !java.security.MessageDigest.isEqual(cut, mac)) {
+        if (mac.length != length || !MessageDigest.isEqual(cut, mac)) {
             // The service does not answer that a MAC is not valid: it fails, because a caller
             // that asks whether a MAC is good gets an error rather than a false.
             throw new AwsException("VerificationFailedException",
@@ -283,6 +285,6 @@ public class PaymentCryptographyDataPlaneHandler {
 
     /** A blob as the protocol carries it: hexadecimal. */
     private static String encode(byte[] bytes) {
-        return PaymentCryptographyCrypto.toHex(bytes).toUpperCase(java.util.Locale.ROOT);
+        return PaymentCryptographyCrypto.toHex(bytes).toUpperCase(Locale.ROOT);
     }
 }

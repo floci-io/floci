@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Locale;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -52,7 +53,7 @@ class PaymentCryptographyDataPlaneHandlerTest {
     }
 
     private static String hex(byte[] bytes) {
-        return PaymentCryptographyCrypto.toHex(bytes).toUpperCase(java.util.Locale.ROOT);
+        return PaymentCryptographyCrypto.toHex(bytes).toUpperCase(Locale.ROOT);
     }
 
     /** A request body, built as a map so the test says what it means. */

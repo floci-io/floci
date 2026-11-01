@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.paymentcryptography;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Arrays;
+import java.util.Locale;
 
 /**
  * The TR-31 key block, the form a key takes when it leaves the service.
@@ -259,7 +260,7 @@ final class PaymentCryptographyTr31 {
     }
 
     private static String hexUpper(byte[] bytes) {
-        return PaymentCryptographyCrypto.toHex(bytes).toUpperCase(java.util.Locale.ROOT);
+        return PaymentCryptographyCrypto.toHex(bytes).toUpperCase(Locale.ROOT);
     }
 
     private static byte[] fromHex(String hex) {

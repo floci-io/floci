@@ -4,6 +4,9 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.services.paymentcryptography.model.KeyAlgorithm;
+import software.amazon.awssdk.services.paymentcryptography.model.KeyClass;
+import software.amazon.awssdk.services.paymentcryptography.model.KeyUsage;
 import software.amazon.awssdk.services.paymentcryptographydata.PaymentCryptographyDataClient;
 import software.amazon.awssdk.services.paymentcryptographydata.model.EncryptionDecryptionAttributes;
 import software.amazon.awssdk.services.paymentcryptographydata.model.EncryptionMode;
@@ -17,12 +20,6 @@ import java.nio.charset.StandardCharsets;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-/**
- * The Payment Cryptography data plane through the AWS SDK.
- *
- * <p>The data plane is a rest-json service of its own, so a real client is the only way to
- * prove that the paths, the request shapes and the answers all agree.
- */
 @DisplayName("Payment Cryptography data plane")
 class PaymentCryptographyDataPlaneTest {
 
@@ -40,10 +37,9 @@ class PaymentCryptographyDataPlaneTest {
         client = TestFixtures.paymentCryptographyDataClient();
         keyArn = TestFixtures.paymentCryptographyClient().createKey(r -> r
                 .keyAttributes(a -> a
-                        .keyAlgorithm(software.amazon.awssdk.services.paymentcryptography.model.KeyAlgorithm.AES_256)
-                        .keyClass(software.amazon.awssdk.services.paymentcryptography.model.KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(software.amazon.awssdk.services.paymentcryptography.model.KeyUsage
-                                .TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
                         .keyModesOfUse(m -> m.encrypt(true).decrypt(true).generate(true).verify(true)))
                 .exportable(true))
                 .key().keyArn();
@@ -142,7 +138,7 @@ class PaymentCryptographyDataPlaneTest {
     /** Bytes as the data plane carries them: hexadecimal. */
     private static String hex(String text) {
         StringBuilder sb = new StringBuilder();
-        for (byte b : text.getBytes(java.nio.charset.StandardCharsets.UTF_8)) {
+        for (byte b : text.getBytes(StandardCharsets.UTF_8)) {
             sb.append(String.format("%02X", b));
         }
         return sb.toString();

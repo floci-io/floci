@@ -8,6 +8,10 @@ import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.paymentcryptography.PaymentCryptographyClient;
 import software.amazon.awssdk.services.paymentcryptography.model.Alias;
+import software.amazon.awssdk.services.paymentcryptography.model.ExportKeyMaterial;
+import software.amazon.awssdk.services.paymentcryptography.model.ExportTr31KeyBlock;
+import software.amazon.awssdk.services.paymentcryptography.model.ImportKeyMaterial;
+import software.amazon.awssdk.services.paymentcryptography.model.ImportTr31KeyBlock;
 import software.amazon.awssdk.services.paymentcryptography.model.Key;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyAlgorithm;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyAttributes;
@@ -16,7 +20,10 @@ import software.amazon.awssdk.services.paymentcryptography.model.KeyClass;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyState;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyUsage;
 import software.amazon.awssdk.services.paymentcryptography.model.ListKeysResponse;
+import software.amazon.awssdk.services.paymentcryptography.model.MultiRegionKeyType;
 import software.amazon.awssdk.services.paymentcryptography.model.Tag;
+import software.amazon.awssdk.services.paymentcryptography.model.WrappedKey;
+import software.amazon.awssdk.services.paymentcryptography.model.WrappedKeyMaterialFormat;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -245,6 +252,95 @@ class PaymentCryptographyTest {
                     ? Region.of("cn-north-1") : Region.of("cn-northwest-1");
         }
         return Region.US_WEST_2.equals(region) ? Region.US_EAST_1 : Region.US_WEST_2;
+    }
+
+    @Test
+    void aKeyLeavesTheServiceAndComesBack() {
+        Key protection = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_K1_KEY_BLOCK_PROTECTION_KEY)
+                        .keyModesOfUse(m -> m.wrap(true).unwrap(true)))
+                .exportable(true))
+                .key();
+        keyArns.add(protection.keyArn());
+        Key key = createAesKey();
+
+        WrappedKey wrapped = client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(ExportKeyMaterial.builder()
+                        .tr31KeyBlock(ExportTr31KeyBlock.builder()
+                                .wrappingKeyIdentifier(protection.keyArn())
+                                .build())
+                        .build()))
+                .wrappedKey();
+
+        assertThat(wrapped.wrappedKeyMaterialFormat()).isEqualTo(WrappedKeyMaterialFormat.TR31_KEY_BLOCK);
+        assertThat(wrapped.wrappingKeyArn()).isEqualTo(protection.keyArn());
+        assertThat(wrapped.keyMaterial()).isNotBlank();
+        assertThat(wrapped.keyCheckValue()).isEqualTo(key.keyCheckValue());
+
+        Key imported = client.importKey(r -> r
+                .keyMaterial(ImportKeyMaterial.builder()
+                        .tr31KeyBlock(ImportTr31KeyBlock.builder()
+                                .wrappingKeyIdentifier(protection.keyArn())
+                                .wrappedKeyBlock(wrapped.keyMaterial())
+                                .build())
+                        .build()))
+                .key();
+        keyArns.add(imported.keyArn());
+
+        assertThat(imported.keyCheckValue()).isEqualTo(key.keyCheckValue());
+        assertThat(imported.keyAttributes().keyUsage()).isEqualTo(key.keyAttributes().keyUsage());
+    }
+
+    @Test
+    void aKeyIsReplicatedToAnotherRegion() {
+        Key key = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
+                .exportable(true)
+                .replicationRegions("us-west-2"))
+                .key();
+        keyArns.add(key.keyArn());
+
+        assertThat(key.multiRegionKeyType()).isEqualTo(MultiRegionKeyType.PRIMARY);
+        assertThat(key.primaryRegion()).isEqualTo("us-east-1");
+        assertThat(key.replicationStatus()).containsKey("us-west-2");
+
+        // The same key is in the other region, under the same identifier.
+        Key replica = TestFixtures.paymentCryptographyClient(Region.US_WEST_2)
+                .getKey(k -> k.keyIdentifier(key.keyArn().substring(key.keyArn().lastIndexOf('/') + 1)))
+                .key();
+        assertThat(replica.keyArn()).isNotEqualTo(key.keyArn());
+    }
+
+    @Test
+    void theAccountHasDefaultReplicationRegions() {
+        client.enableDefaultKeyReplicationRegions(r -> r.replicationRegions("us-west-2"));
+        try {
+            assertThat(client.getDefaultKeyReplicationRegions(r -> { }).enabledReplicationRegions())
+                    .contains("us-west-2");
+
+            Key key = client.createKey(r -> r
+                    .keyAttributes(a -> a
+                            .keyAlgorithm(KeyAlgorithm.AES_256)
+                            .keyClass(KeyClass.SYMMETRIC_KEY)
+                            .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                            .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
+                    .exportable(true))
+                    .key();
+            keyArns.add(key.keyArn());
+
+            assertThat(key.usingDefaultReplicationRegions()).isTrue();
+            assertThat(key.replicationStatus()).containsKey("us-west-2");
+        } finally {
+            client.disableDefaultKeyReplicationRegions(r -> r.replicationRegions("us-west-2"));
+        }
     }
 
     @Test
