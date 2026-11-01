@@ -2191,16 +2191,14 @@ class IamServiceTest {
                 () -> iamService.updateAccessKey("alice", "AKIANOSUCHKEY00000", "Disabled"));
 
         assertEquals("ValidationError", error.getErrorCode());
-        // The rendering the three sibling operations already answer with, taken from a recording
-        // of UpdateServiceSpecificCredential: AWS names neither the value nor the permitted set.
+        // AWS lists the allowed values in its error message, even when the key is unknown.
         assertEquals("1 validation error detected: Value at 'status' failed to satisfy "
-                + "constraint: Member must satisfy enum value set", error.getMessage());
+                + "constraint: Member must satisfy enum value set: [Expired, Active, Inactive]",
+                error.getMessage());
     }
 
     @Test
-    void anAbsentAccessKeyStatusIsAnsweredLikeAnInvalidOne() {
-        // The shared helper reads a null as a value outside the enum, which is how the other three
-        // statusType operations answer one. Changing that would change all four, so it stays.
+    void anAbsentAccessKeyStatusNamesTheMissingMember() {
         iamService.createUser("alice", "/");
         AccessKey key = iamService.createAccessKey("alice");
 
@@ -2209,7 +2207,7 @@ class IamServiceTest {
 
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals("1 validation error detected: Value at 'status' failed to satisfy "
-                + "constraint: Member must satisfy enum value set", error.getMessage());
+                + "constraint: Member must not be null", error.getMessage());
         // And the key is as it was: the status is read before the lookup, so nothing is written.
         assertEquals("Active", iamService.listAccessKeys("alice").getFirst().getStatus());
     }

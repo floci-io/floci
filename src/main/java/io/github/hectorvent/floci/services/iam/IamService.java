@@ -1274,9 +1274,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * five entities and passes everything else through, which would make the {@code Role} this
      * action and {@code GetRole} answer unparsable.
      *
-     * <p>The rendering names neither the offending value nor the set, the way
-     * {@link #requireStatusFromEnum} does, which is the one IAM constraint rendering a recording
-     * covers. It also keeps the refused description out of the error body, where a control
+     * <p>The rendering keeps the refused description out of the error body, where a control
      * character would break the answer it is being refused for.
      */
     private static void validateRoleDescription(String description) {
@@ -3452,17 +3450,19 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     // =========================================================================
 
     /**
-     * {@code statusType}, shared by UpdateAccessKey, UpdateSigningCertificate, UpdateSSHPublicKey
-     * and UpdateServiceSpecificCredential. One rendering serves all four because one front end
-     * validates one shape: the recording is of UpdateServiceSpecificCredential, and AWS names
-     * neither the offending value nor the permitted set, unlike this message elsewhere in the
-     * tree. Matched rather than made uniform.
+     * {@code statusType} is shared by four credential updates. AWS distinguishes a missing member
+     * from an invalid value and lists the permitted values in its recorded error-message order.
      */
     private void requireStatusFromEnum(String status) {
-        if (status == null || !CREDENTIAL_STATUSES.contains(status)) {
+        if (status == null) {
+            throw SmithyValidationErrors.validationError(
+                    "Value at 'status' failed to satisfy constraint: Member must not be null");
+        }
+        if (!CREDENTIAL_STATUSES.contains(status)) {
             throw SmithyValidationErrors.validationError(
                     "Value at 'status' failed to satisfy "
-                            + "constraint: Member must satisfy enum value set");
+                            + "constraint: Member must satisfy enum value set: "
+                            + "[Expired, Active, Inactive]");
         }
     }
 

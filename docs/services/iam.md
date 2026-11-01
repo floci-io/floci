@@ -294,9 +294,10 @@ Some refusals stay as this service answers them, and the members behind them are
 vendored shapes so the walk cannot reword them. A service-linked role's principal and suffix answer
 `InvalidInput` rather than a validation error at all, and so does an empty `ServiceNamespaces` on
 `ListPoliciesGrantingServiceAccess`. An account alias carries AWS's own sentence about its own
-bounds, which is why neither alias operation is read at all. `statusType`, on all four operations
-that take it, is answered without the offending value and without the permitted set, which is what
-the recorded refusal carries and what the walk would spell out. `Encoding` on `GetSSHPublicKey`
+bounds, which is why neither alias operation is read at all. For `statusType` on the four credential
+updates, a missing `Status` answers `Member must not be null`; an invalid value answers `Member must
+satisfy enum value set: [Expired, Active, Inactive]` without echoing that value. These wordings
+follow the newer AWS capture. `Encoding` on `GetSSHPublicKey`
 answers the modelled `UnrecognizedPublicKeyEncoding` rather than a constraint violation. And
 `TagKeys` on the eight untag operations is answered against the list as a whole, `Value at
 'tagKeys' failed to satisfy constraint: Member must satisfy constraint: [...]`, where the walk
