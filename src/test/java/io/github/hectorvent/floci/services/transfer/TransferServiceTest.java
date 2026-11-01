@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.transfer;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -11,10 +10,10 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.transfer.model.Server;
 import io.github.hectorvent.floci.services.transfer.model.SshPublicKey;
 import io.github.hectorvent.floci.services.transfer.model.User;
+import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
@@ -64,21 +63,10 @@ class TransferServiceTest {
         tagStore = new AccountAwareStorageBackend<>(
                 tagDelegate, requestContextInstance, "111111111111");
         tagStore = Mockito.spy(tagStore);
-        StorageFactory factory = new StorageFactory(null, null) {
-            @Override
-            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
-                    TypeReference<Map<String, V>> typeReference) {
-                AccountAwareStorageBackend<?> store = switch (fileName) {
-                    case "transfer-servers.json" -> serverStore;
-                    case "transfer-users.json" -> userStore;
-                    case "transfer-tags.json" -> tagStore;
-                    default -> throw new IllegalArgumentException(fileName);
-                };
-                @SuppressWarnings("unchecked")
-                AccountAwareStorageBackend<V> typed = (AccountAwareStorageBackend<V>) store;
-                return typed;
-            }
-        };
+        InMemoryStorageFactory factory = new InMemoryStorageFactory("111111111111")
+                .withStore("transfer-servers.json", serverStore)
+                .withStore("transfer-users.json", userStore)
+                .withStore("transfer-tags.json", tagStore);
         regionResolver = Mockito.mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenAnswer(invocation -> requestContext.getAccountId());
         when(regionResolver.getRegion()).thenAnswer(invocation -> requestContext.getRegion());
