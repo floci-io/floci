@@ -25,6 +25,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -97,6 +98,38 @@ class PipesTargetInvokerTest {
         roleCheck.getValue().refusal(List.of());
         verify(redshiftAuthorizer).refusal(PIPE_ROLE, "000000000000", pipe.getArn(), List.of());
         verifyNoInteractions(lambdaService, sqsService, snsService, eventBridgeService, stepFunctionsService);
+    }
+
+    @Test
+    void redshiftTarget_readsPathsFromAnArrayEnrichmentResponse() throws Exception {
+        when(serviceRegistry.isServiceEnabled("redshift-data")).thenReturn(true);
+        Pipe pipe = redshiftPipe("{\"RedshiftDataParameters\":{\"Database\":\"dev\",\"Sqls\":[\"$[0].statement\"]}}");
+
+        invoker.invoke(pipe, "[{\"statement\":\"INSERT INTO t VALUES (1)\"}]", "us-east-1");
+
+        ArgumentCaptor<UnaryOperator<String>> resolver = ArgumentCaptor.captor();
+        verify(redshiftSubmitter).submit(any(), any(), any(), any(), any(), resolver.capture(), any());
+        assertEquals("INSERT INTO t VALUES (1)", resolver.getValue().apply("$[0].statement"));
+    }
+
+    @Test
+    void redshiftTarget_readsPathsFromAKafkaValueDeliveredAsBase64() throws Exception {
+        when(serviceRegistry.isServiceEnabled("redshift-data")).thenReturn(true);
+        Pipe pipe = redshiftPipe("{\"RedshiftDataParameters\":{\"Database\":\"dev\","
+                + "\"Sqls\":[\"$.value.statement\",\"$.key\"]}}");
+        String value = Base64.getEncoder().encodeToString(
+                "{\"statement\":\"INSERT INTO t VALUES (1)\"}".getBytes(StandardCharsets.UTF_8));
+        String key = Base64.getEncoder().encodeToString(
+                "order-1".getBytes(StandardCharsets.UTF_8));
+        String event = "{\"eventSource\":\"SelfManagedKafka\",\"topic\":\"orders\",\"key\":\"" + key
+                + "\",\"value\":\"" + value + "\"}";
+
+        invoker.invoke(pipe, event, "us-east-1");
+
+        ArgumentCaptor<UnaryOperator<String>> resolver = ArgumentCaptor.captor();
+        verify(redshiftSubmitter).submit(any(), any(), any(), any(), any(), resolver.capture(), any());
+        assertEquals("INSERT INTO t VALUES (1)", resolver.getValue().apply("$.value.statement"));
+        assertEquals("order-1", resolver.getValue().apply("$.key"));
     }
 
     @Test

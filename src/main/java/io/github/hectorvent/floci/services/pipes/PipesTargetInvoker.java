@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.MissingNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -24,6 +25,7 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -37,7 +39,7 @@ public class PipesTargetInvoker {
     private static final Logger LOG = Logger.getLogger(PipesTargetInvoker.class);
     private static final Pattern TEMPLATE_PLACEHOLDER =
             Pattern.compile("<(\\$[^>]+|aws\\.pipes\\.event\\.ingestion-time)>");
-    private static final Pattern ARRAY_INDEX = Pattern.compile("^(.+?)\\[(\\d+)]$");
+    private static final Pattern ARRAY_INDEX = Pattern.compile("^(.*?)\\[(\\d+)]$");
     private static final Pattern DYNAMIC_PARAMETER_PATH =
             Pattern.compile("\\$(?:\\.[\\w*/-]+|\\[\\d+\\])+");
 
@@ -273,11 +275,72 @@ public class PipesTargetInvoker {
                 text(parameters, "Database"), text(parameters, "DbUser"), text(parameters, "SecretManagerArn"),
                 null, sqls, text(parameters, "StatementName"),
                 parameters.path("WithEvent").isBoolean() ? parameters.get("WithEvent").asBoolean() : null);
+        String pathSource = withDecodedKafkaFields(payload);
         redshiftSubmitter.submit(targetArn, statement, pipe.getRoleArn(), account, targetRegion,
-                value -> resolveRedshiftParameter(value, payload),
+                value -> resolveRedshiftParameter(value, pathSource),
                 permissions -> redshiftTargetAuthorizer.refusal(
                         pipe.getRoleArn(), account, pipe.getArn(), permissions));
         LOG.debugv("Pipe delivered to Redshift Data API: {0}", targetArn);
+    }
+
+    /**
+     * Kafka delivers {@code key} and {@code value} as base64, so a path into them would read the base64 text.
+     * Decode them first, parsing JSON when the bytes are JSON, so {@code $.value.statement} selects a field.
+     */
+    private String withDecodedKafkaFields(String payload) {
+        if (payload == null) {
+            return null;
+        }
+        try {
+            JsonNode root = objectMapper.readTree(payload);
+            if (root == null) {
+                return payload;
+            }
+            boolean changed = false;
+            if (root.isArray()) {
+                for (JsonNode element : root) {
+                    changed |= decodeKafkaRecord(element);
+                }
+            } else {
+                changed = decodeKafkaRecord(root);
+            }
+            return changed ? root.toString() : payload;
+        } catch (JsonProcessingException e) {
+            LOG.debugv("Pipe event is not JSON, Kafka fields are left as they are: {0}", e.getOriginalMessage());
+            return payload;
+        }
+    }
+
+    private boolean decodeKafkaRecord(JsonNode record) {
+        if (!record.isObject() || !isKafkaEventSource(record.path("eventSource").asText())) {
+            return false;
+        }
+        ObjectNode object = (ObjectNode) record;
+        boolean changed = false;
+        for (String field : List.of("key", "value")) {
+            JsonNode encoded = object.path(field);
+            if (!encoded.isTextual()) {
+                continue;
+            }
+            String decoded;
+            try {
+                decoded = new String(Base64.getDecoder().decode(encoded.asText()), StandardCharsets.UTF_8);
+            } catch (IllegalArgumentException e) {
+                LOG.debugv("Kafka {0} is not base64, left as it is: {1}", field, e.getMessage());
+                continue;
+            }
+            try {
+                object.set(field, objectMapper.readTree(decoded));
+            } catch (JsonProcessingException e) {
+                object.put(field, decoded);
+            }
+            changed = true;
+        }
+        return changed;
+    }
+
+    private static boolean isKafkaEventSource(String eventSource) {
+        return "aws:kafka".equals(eventSource) || "SelfManagedKafka".equals(eventSource);
     }
 
     private static String text(JsonNode parent, String field) {
@@ -362,7 +425,10 @@ public class PipesTargetInvoker {
             for (String seg : rawSegments) {
                 Matcher am = ARRAY_INDEX.matcher(seg);
                 if (am.matches()) {
-                    segments.add(am.group(1));
+                    // A leading index such as "$[0].x" has no name before the bracket
+                    if (!am.group(1).isEmpty()) {
+                        segments.add(am.group(1));
+                    }
                     segments.add(am.group(2));
                 } else if (!seg.isEmpty()) {
                     segments.add(seg);
