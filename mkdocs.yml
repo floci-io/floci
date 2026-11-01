@@ -169,6 +169,7 @@ nav:
     - AppIntegrations: services/appintegrations.md
     - Amazon Data Lifecycle Manager: services/dlm.md
     - ACM: services/acm.md
+    - Payment Cryptography: services/payment-cryptography.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md
     - AWS Resource Groups: services/resource-groups.md

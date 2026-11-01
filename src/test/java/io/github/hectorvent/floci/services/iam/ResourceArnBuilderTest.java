@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.eks.EksService;
@@ -1167,6 +1168,29 @@ class ResourceArnBuilderTest {
         return new ResourceArnBuilder(new ObjectMapper(), null, null, null, null, instance);
     }
 
+    /** A builder reading the stored ARNs of a namespace, for a request of that namespace. */
+    private static ResourceArnBuilder reading(StoredResourceArns stored) {
+        @SuppressWarnings("unchecked")
+        Instance<StoredResourceArns> instance = mock(Instance.class);
+        when(instance.iterator()).thenReturn(List.of(stored).iterator());
+        return new ResourceArnBuilder(new ObjectMapper(), null, null, null, null, null, instance);
+    }
+
+    /** The finder of the stored ARNs of a namespace, answering one name of one type with one ARN. */
+    private static StoredResourceArns stored(String namespace, String type, String name, String arn) {
+        return new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return namespace;
+            }
+
+            @Override
+            public Optional<String> find(String found, String wanted, String region) {
+                return type.equals(found) && name.equals(wanted) ? Optional.of(arn) : Optional.empty();
+            }
+        };
+    }
+
     /**
      * The gap issue 6256 describes. KMS is a JSON protocol on {@code /} with the key in the body,
      * so reading a {@code /keys/<id>} path segment named nothing and every call was evaluated
@@ -1194,6 +1218,24 @@ class ResourceArnBuilderTest {
             assertEquals(List.of(KMS_KEY_ARN),
                     backed.buildKmsResources(action, ctx, "us-east-1", ACCOUNT, "aws"), action);
         }
+    }
+
+    private static final String PC_KEY_ARN =
+            "arn:aws:payment-cryptography:us-east-1:000000000000:key/abc123";
+
+    /**
+     * A key named by an alias is authorized against the key it points at, as the handler resolves
+     * it. Otherwise an {@code Allow} scoped to {@code key/*} passes while an {@code Deny} scoped
+     * to the key the alias names is missed, and the caller reads or deletes a key it was denied.
+     */
+    @Test
+    void paymentCryptographyResolvesAnAliasToTheKeyItPointsAt() {
+        ResourceArnBuilder reading = reading(stored("payment-cryptography", "key", "alias/team/card-key", PC_KEY_ARN));
+
+        setJsonBody("{\"KeyIdentifier\":\"alias/team/card-key\"}");
+        assertEquals(List.of(PC_KEY_ARN),
+                reading.buildResources("payment-cryptography", "payment-cryptography:GetKey", ctx,
+                        "us-east-1", ACCOUNT, "aws"));
     }
 
     /** A key named by an alias is authorized against the key it points at, as the handler resolves it. */
