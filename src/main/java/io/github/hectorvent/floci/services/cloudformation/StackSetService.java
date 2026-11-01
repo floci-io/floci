@@ -379,6 +379,17 @@ public class StackSetService implements PassedRoleLookup {
                 .toList();
     }
 
+    /**
+     * The organization root and OU ids a service-managed stack set targets, as DescribeStackSet's
+     * {@code OrganizationalUnitIds} lists them: every target {@code CreateStackInstances} named that still
+     * has a Region.
+     */
+    public List<String> organizationalUnitIds(String name) {
+        return listStackSetAutoDeploymentTargets(name).stream()
+                .map(StackSetAutoDeploymentTarget::getOrganizationalUnitId)
+                .toList();
+    }
+
     public List<StackInstance> listStackInstances(String name, String accountFilter, String regionFilter) {
         getStackSetOrThrow(name);
         String prefix = name + ":";

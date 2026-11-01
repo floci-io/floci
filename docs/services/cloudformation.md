@@ -48,7 +48,7 @@
 
 ## StackSets compatibility
 
-StackSets support both `SELF_MANAGED` and the Cloud Launchpad `SERVICE_MANAGED` workflow. `ActivateOrganizationsAccess` requires an Organizations management account with all features enabled and enables trusted access for `stacksets.cloudformation.amazonaws.com`. Service-managed organizational-unit deployment targets are resolved from the caller's actual Organizations state rather than converted into synthetic account IDs. Targeting an OU includes eligible accounts directly in that OU and in all descendant OUs, while excluding the organization management account, matching AWS StackSets targeting semantics.
+StackSets support both `SELF_MANAGED` and the Cloud Launchpad `SERVICE_MANAGED` workflow. `ActivateOrganizationsAccess` requires an Organizations management account with all features enabled and enables trusted access for `stacksets.cloudformation.amazonaws.com`. Service-managed organizational-unit deployment targets are resolved from the caller's actual Organizations state rather than converted into synthetic account IDs. Targeting an OU includes eligible accounts directly in that OU and in all descendant OUs, while excluding the organization management account, matching AWS StackSets targeting semantics. `DescribeStackSet` returns the stack set's `Tags` and, for a service-managed stack set, the root and OU ids its instances were created for as `OrganizationalUnitIds`.
 
 `CreateStackInstances` and `UpdateStackSet` execute the backing CloudFormation stacks in each target account. A failed resource can therefore drive the backing stack through rollback and leave the stack instance `INOPERABLE` with detailed status `FAILED`; the StackSet operation is reported as `FAILED` instead of being forced to success.
 
