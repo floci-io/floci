@@ -439,7 +439,7 @@ public class RedshiftQueryHandler {
             }
             String description = params.getFirst("Description");
             List<String> subnetIds = memberList(params, "SubnetIds");
-            ClusterSubnetGroup group = service.createClusterSubnetGroup(name, description, null, subnetIds);
+            ClusterSubnetGroup group = service.createClusterSubnetGroup(name, description, null, subnetIds, parseTags(params));
             String xml = new XmlBuilder()
                     .start("CreateClusterSubnetGroupResponse")
                       .start("CreateClusterSubnetGroupResult")
@@ -1367,11 +1367,21 @@ public class RedshiftQueryHandler {
             .elem("ClusterSubnetGroupName", group.getClusterSubnetGroupName())
             .elem("Description", group.getDescription())
             .elem("VpcId", group.getVpcId())
+            .elem("SubnetGroupStatus", "Complete")
             .start("Subnets");
+        Map<String, String> zones = group.getSubnetZones() == null ? Map.of() : group.getSubnetZones();
         for (String subnetId : group.getSubnetIds()) {
-            builder.start("Subnet").elem("SubnetIdentifier", subnetId).end("Subnet");
+            builder.start("Subnet").elem("SubnetIdentifier", subnetId);
+            if (zones.get(subnetId) != null) {
+                builder.start("SubnetAvailabilityZone").elem("Name", zones.get(subnetId)).end("SubnetAvailabilityZone");
+            }
+            builder.elem("SubnetStatus", "Active").end("Subnet");
         }
-        return builder.end("Subnets").end("ClusterSubnetGroup").build();
+        builder.end("Subnets").start("Tags");
+        for (Map.Entry<String, String> tag : group.getTags().entrySet()) {
+            builder.start("Tag").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("Tag");
+        }
+        return builder.end("Tags").end("ClusterSubnetGroup").build();
     }
 
     private Response eventSubscriptionResponse(String operation, EventSubscription subscription) {

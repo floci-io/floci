@@ -792,14 +792,14 @@ class RedshiftQueryHandlerTest {
         params.putSingle("SubnetIds.SubnetIdentifier.2", "subnet-bbb");
 
         ClusterSubnetGroup group = new ClusterSubnetGroup("test-sng", "desc", null, List.of("subnet-aaa", "subnet-bbb"));
-        when(service.createClusterSubnetGroup(any(), any(), any(), any())).thenReturn(group);
+        when(service.createClusterSubnetGroup(any(), any(), any(), any(), any())).thenReturn(group);
 
         Response response = handler.handle("CreateClusterSubnetGroup", params);
         assertEquals(200, response.getStatus());
 
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<String>> captor = ArgumentCaptor.forClass(List.class);
-        verify(service).createClusterSubnetGroup(eq("test-sng"), eq("desc"), any(), captor.capture());
+        verify(service).createClusterSubnetGroup(eq("test-sng"), eq("desc"), any(), captor.capture(), any());
         assertEquals(List.of("subnet-aaa", "subnet-bbb"), captor.getValue());
     }
 

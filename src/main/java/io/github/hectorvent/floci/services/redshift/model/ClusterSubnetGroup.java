@@ -14,6 +14,8 @@ public class ClusterSubnetGroup {
     private String vpcId;
     private List<String> subnetIds = new ArrayList<>();
     private Map<String, String> tags = new LinkedHashMap<>();
+    /** Subnet id to availability zone; null on groups persisted before zones were resolved. */
+    private Map<String, String> subnetZones;
 
     public ClusterSubnetGroup() {}
 
@@ -34,4 +36,6 @@ public class ClusterSubnetGroup {
     public void setSubnetIds(List<String> subnetIds) { this.subnetIds = subnetIds; }
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
+    public Map<String, String> getSubnetZones() { return subnetZones; }
+    public void setSubnetZones(Map<String, String> subnetZones) { this.subnetZones = subnetZones; }
 }

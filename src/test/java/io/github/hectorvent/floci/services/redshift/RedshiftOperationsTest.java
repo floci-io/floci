@@ -523,6 +523,58 @@ public class RedshiftOperationsTest {
             .body(containsString("<ClusterIdentifier>cluster-restored</ClusterIdentifier>"));
     }
 
+    private String ec2Id(String path, String... params) {
+        RequestSpecification req = given().contentType("application/x-www-form-urlencoded")
+                .header("Authorization", AUTH_HEADER.replace("/redshift/", "/ec2/"));
+        for (int i = 0; i < params.length; i += 2) {
+            req = req.formParam(params[i], params[i + 1]);
+        }
+        return req.post("/").then().statusCode(200).extract().path(path);
+    }
+
+    private XmlPath describeSubnetGroup(String name) {
+        return XmlPath.from(redshift("DescribeClusterSubnetGroups", "ClusterSubnetGroupName", name).asString())
+                .setRootPath("DescribeClusterSubnetGroupsResponse.DescribeClusterSubnetGroupsResult.ClusterSubnetGroups.ClusterSubnetGroup");
+    }
+
+    @Test
+    @Order(4)
+    void clusterSubnetGroupKeepsTagsVpcAndSubnetDetail() {
+        String vpc = ec2Id("CreateVpcResponse.vpc.vpcId", "Action", "CreateVpc", "CidrBlock", "10.77.0.0/16");
+        String subnet = ec2Id("CreateSubnetResponse.subnet.subnetId", "Action", "CreateSubnet", "VpcId", vpc,
+                "CidrBlock", "10.77.1.0/24", "AvailabilityZone", "us-east-1b");
+
+        assertEquals(200, redshift("CreateClusterSubnetGroup", "ClusterSubnetGroupName", "sng-tagged",
+                "Description", "d", "SubnetIds.SubnetIdentifier.1", subnet,
+                "Tags.Tag.1.Key", "env", "Tags.Tag.1.Value", "dev").statusCode());
+
+        // Read back through a separate call, not the create response.
+        XmlPath group = describeSubnetGroup("sng-tagged");
+        assertEquals(vpc, group.getString("VpcId"));
+        assertEquals("Complete", group.getString("SubnetGroupStatus"));
+        assertEquals(subnet, group.getString("Subnets.Subnet.SubnetIdentifier"));
+        assertEquals("us-east-1b", group.getString("Subnets.Subnet.SubnetAvailabilityZone.Name"));
+        assertEquals("Active", group.getString("Subnets.Subnet.SubnetStatus"));
+        assertEquals("env", group.getString("Tags.Tag.Key"));
+        assertEquals("dev", group.getString("Tags.Tag.Value"));
+
+        XmlPath tagged = XmlPath.from(redshift("DescribeTags", "ResourceName",
+                "arn:aws:redshift:us-east-1:000000000000:subnetgroup:sng-tagged").asString())
+                .setRootPath("DescribeTagsResponse.DescribeTagsResult.TaggedResources");
+        assertEquals("dev", tagged.getString("TaggedResource.Tag.Value"));
+
+        // Modify keeps tags and recomputes the VPC from the new subnet list.
+        String vpc2 = ec2Id("CreateVpcResponse.vpc.vpcId", "Action", "CreateVpc", "CidrBlock", "10.78.0.0/16");
+        String subnet2 = ec2Id("CreateSubnetResponse.subnet.subnetId", "Action", "CreateSubnet", "VpcId", vpc2,
+                "CidrBlock", "10.78.1.0/24", "AvailabilityZone", "us-east-1c");
+        assertEquals(200, redshift("ModifyClusterSubnetGroup", "ClusterSubnetGroupName", "sng-tagged",
+                "SubnetIds.SubnetIdentifier.1", subnet2).statusCode());
+        group = describeSubnetGroup("sng-tagged");
+        assertEquals(vpc2, group.getString("VpcId"));
+        assertEquals("us-east-1c", group.getString("Subnets.Subnet.SubnetAvailabilityZone.Name"));
+        assertEquals("dev", group.getString("Tags.Tag.Value"));
+    }
+
     @Test
     @Order(4)
     void clusterSubnetGroupLifecycle() {
