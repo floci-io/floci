@@ -140,7 +140,7 @@ class AwsConfigServicePersistenceTest {
     void aStartedRecorderIsStillRecordingAfterRestart() {
         AwsConfigService first = restartedService();
         first.putConfigurationRecorder(REGION, new ConfigurationRecorder("default",
-                "arn:aws:iam::000000000000:role/config", new RecordingGroup(true, false, null)));
+                "arn:aws:iam::000000000000:role/config", new RecordingGroup(true, false, null, null, null), null));
         first.putDeliveryChannel(REGION,
                 new DeliveryChannel("default", "config-bucket", null, null, null, null));
         first.startConfigurationRecorder(REGION, "default");
@@ -169,7 +169,7 @@ class AwsConfigServicePersistenceTest {
     void aDeletedRecorderDoesNotComeBackRecordingAfterRestart() {
         AwsConfigService first = restartedService();
         ConfigurationRecorder recorder = new ConfigurationRecorder("default",
-                "arn:aws:iam::000000000000:role/config", new RecordingGroup(true, false, null));
+                "arn:aws:iam::000000000000:role/config", new RecordingGroup(true, false, null, null, null), null);
         first.putConfigurationRecorder(REGION, recorder);
         first.putDeliveryChannel(REGION,
                 new DeliveryChannel("default", "config-bucket", null, null, null, null));
