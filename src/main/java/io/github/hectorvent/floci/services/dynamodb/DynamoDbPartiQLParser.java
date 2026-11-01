@@ -1639,27 +1639,11 @@ public class DynamoDbPartiQLParser {
             value = value.round(DECIMAL_LITERAL);
             number = new PVal.Num(value.toString());
         }
-        String problem = numberLiteralProblem(value);
+        String problem = DynamoDbNumberUtils.partiQLNumberProblem(value);
         if (problem != null) {
             defer(problem + " under " + literalPath);
         }
         return number;
-    }
-
-    // DynamoDB measures a literal in 32-bit arithmetic, so an exponent near the limit wraps around
-    // and reads as an underflow.
-    private static String numberLiteralProblem(BigDecimal number) {
-        int magnitude = number.precision() - number.scale() + 1;
-        if (127 < magnitude) {
-            return DynamoDbNumberUtils.NUMBER_OVERFLOW;
-        }
-        if (magnitude < -128) {
-            return DynamoDbNumberUtils.NUMBER_UNDERFLOW;
-        }
-        if (38 < number.stripTrailingZeros().precision()) {
-            return DynamoDbNumberUtils.TOO_MANY_DIGITS;
-        }
-        return null;
     }
 
     private PVal.Num parseSignedNumber(Token sign) {

@@ -55,8 +55,8 @@ final class DynamoDbAttributeValueValidator {
 
     static final String NESTING_EXCEEDED = "Nesting Levels have exceeded supported limits";
 
-    static void requireParameterNestingWithinLimit(JsonNode value) {
-        if (depthOf(value) > MAX_NESTING_LEVELS + 1) {
+    static void requireParameterLevelWithinLimit(int level) {
+        if (MAX_NESTING_LEVELS + 1 < level) {
             throw validationEx(NESTING_EXCEEDED + ": Attributes in the item have nested levels beyond supported limit");
         }
     }

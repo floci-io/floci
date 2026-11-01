@@ -7,6 +7,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.math.BigDecimal;
+import java.util.Set;
+import java.util.TreeSet;
 
 /**
  * DynamoDB number validation and normalization.
@@ -22,8 +24,58 @@ final class DynamoDbNumberUtils {
     static final String NUMBER_UNDERFLOW =
             "Number underflow. Attempting to store a number with magnitude smaller than supported range";
     static final String TOO_MANY_DIGITS = "Attempting to store more than 38 significant digits in a Number";
+    static final String PARAMETER_NOT_NUMERIC = "The parameter cannot be converted to a numeric value";
 
     private DynamoDbNumberUtils() {}
+
+    // DynamoDB measures a PartiQL number in 32-bit arithmetic, so an exponent near the limit wraps
+    // around and reads as an underflow.
+    static String partiQLNumberProblem(BigDecimal number) {
+        int magnitude = number.precision() - number.scale() + 1;
+        if (127 < magnitude) {
+            return NUMBER_OVERFLOW;
+        }
+        if (magnitude < -128) {
+            return NUMBER_UNDERFLOW;
+        }
+        if (38 < number.stripTrailingZeros().precision()) {
+            return TOO_MANY_DIGITS;
+        }
+        return null;
+    }
+
+    // DynamoDB reads a PartiQL parameter as BigDecimal does, but only with an exponent that fits in
+    // an int. Unlike a literal, the parameter is not rounded to 38 digits.
+    static BigDecimal requirePartiQLParameterNumber(String text) {
+        if (text.isEmpty()) {
+            throw new AwsException("ValidationException", PARAMETER_NOT_NUMERIC, 400);
+        }
+        BigDecimal number;
+        try {
+            int exponent = Math.max(text.indexOf('e'), text.indexOf('E'));
+            if (0 <= exponent) {
+                Integer.parseInt(text.substring(exponent + 1));
+            }
+            number = new BigDecimal(text);
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationException", PARAMETER_NOT_NUMERIC + ": " + text, 400);
+        }
+        String problem = partiQLNumberProblem(number);
+        if (problem != null) {
+            throw new AwsException("ValidationException", problem, 400);
+        }
+        return number;
+    }
+
+    // Members are equal by value here, so 1 and 1.0 are duplicates.
+    static void requirePartiQLParameterNumberSet(JsonNode members) {
+        Set<BigDecimal> seen = new TreeSet<>();
+        for (JsonNode member : members) {
+            if (!seen.add(requirePartiQLParameterNumber(member.asText()))) {
+                throw new AwsException("ValidationException", "Input collection contains duplicates", 400);
+            }
+        }
+    }
 
     /**
      * Validates and normalizes a DynamoDB number string.

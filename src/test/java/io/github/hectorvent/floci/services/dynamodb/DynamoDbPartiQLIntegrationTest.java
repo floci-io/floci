@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.stream.Collectors;
@@ -622,6 +623,62 @@ class DynamoDbPartiQLIntegrationTest {
             .statusCode(200)
             .body("Responses[0].Error.Code", equalTo("ResourceNotFound"))
             .body("Responses[0].Error.Message", equalTo("Requested resource not found"));
+    }
+
+    @ParameterizedTest
+    @Order(30)
+    @CsvSource(delimiter = '|', textBlock = """
+            [{"N":"abc"}]                                     | The parameter cannot be converted to a numeric value: abc
+            [{"N":""}]                                        | The parameter cannot be converted to a numeric value
+            [{"N":"1e2147483648"}]                            | The parameter cannot be converted to a numeric value: 1e2147483648
+            [{"N":"0.1e2147483648"}]                          | The parameter cannot be converted to a numeric value: 0.1e2147483648
+            [{"N":"1e-2147483648"}]                           | The parameter cannot be converted to a numeric value: 1e-2147483648
+            [{"N":"1e2147483645"}]                            | Number overflow. Attempting to store a number with magnitude larger than supported range
+            [{"N":"1e2147483647"}]                            | Number underflow. Attempting to store a number with magnitude smaller than supported range
+            [{"N":"0e-131"}]                                  | Number underflow. Attempting to store a number with magnitude smaller than supported range
+            [{"N":"1.23456789012345678901234567890123456789"}] | Attempting to store more than 38 significant digits in a Number
+            [{"NS":["1","1.0"]}]                              | Input collection contains duplicates
+            [{"N":"abc"},%1$s]                                | The parameter cannot be converted to a numeric value: abc
+            [%1$s,{"N":"abc"}]                                | Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit
+            [{"M":{"a":{"N":"abc"},"z":%1$s}}]                | The parameter cannot be converted to a numeric value: abc
+            [{"M":{"a":{"N":"abc"},"d":%1$s}}]                | Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit
+            [{"L":[{"N":"1e126"},{"N":"abc"}]}]               | Number overflow. Attempting to store a number with magnitude larger than supported range
+            [{"NS":["1","1"]},{"N":"abc"}]                    | Input collection contains duplicates
+            """)
+    void aParameterIsRefusedAtTheFirstValueThatCannotBeRead(String parameters, String message) {
+        String deep = "{\"M\":{\"n\":".repeat(40) + "{\"S\":\"leaf\"}" + "}}".repeat(40);
+
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = 'x' AND x = ? AND y = ?","Parameters":%s}
+                """.formatted(TABLE, parameters.formatted(deep)))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(message));
+    }
+
+    @Test
+    @Order(31)
+    void aParameterIsReadBeforeTheStatementIsParsed() {
+        String unconvertible = "The parameter cannot be converted to a numeric value: abc";
+
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = ? #","Parameters":[{"N":"abc"}]}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(unconvertible));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"UPDATE \\"%1$s\\" SET n = ? WHERE pk = 'x'","Parameters":[{"N":"abc"}]},
+                 {"Statement":"UPDATE \\"%1$s\\" SET n = 1 WHERE pk = 'y' #"}]}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("message", equalTo(unconvertible));
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":"SELECT * FROM \\"%s\\" WHERE pk = ? #","Parameters":[{"N":"abc"}]}]}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(unconvertible));
     }
 
     private static void putItem(String pk, String attributes) {

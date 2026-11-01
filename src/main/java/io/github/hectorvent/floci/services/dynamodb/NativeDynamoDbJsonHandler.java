@@ -3867,10 +3867,35 @@ public class NativeDynamoDbJsonHandler {
         }
         List<JsonNode> params = new ArrayList<>();
         for (JsonNode parameter : node) {
-            DynamoDbAttributeValueValidator.requireParameterNestingWithinLimit(parameter);
-            checkAttrSets(parameter);
+            requirePartiQLParameter(parameter, 1);
             params.add(parameter);
         }
         return params;
+    }
+
+    // DynamoDB reads the parameters in order and refuses the first value it cannot take. It reads the
+    // members of a map in the order of a HashMap sized for them.
+    private void requirePartiQLParameter(JsonNode value, int level) {
+        DynamoDbAttributeValueValidator.requireParameterLevelWithinLimit(level);
+        if (value.has("M")) {
+            Map<String, JsonNode> members = HashMap.newHashMap(value.get("M").size());
+            value.get("M").properties().forEach(member -> members.put(member.getKey(), member.getValue()));
+            for (JsonNode member : members.values()) {
+                requirePartiQLParameter(member, level + 1);
+            }
+            return;
+        }
+        if (value.has("L")) {
+            for (JsonNode member : value.get("L")) {
+                requirePartiQLParameter(member, level + 1);
+            }
+            return;
+        }
+        if (value.has("N")) {
+            DynamoDbNumberUtils.requirePartiQLParameterNumber(value.get("N").asText());
+        } else if (value.has("NS")) {
+            DynamoDbNumberUtils.requirePartiQLParameterNumberSet(value.get("NS"));
+        }
+        checkAttrSets(value);
     }
 }
