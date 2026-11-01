@@ -76,8 +76,17 @@ public class PaymentCryptographyJsonHandler {
         return Map.of("Key", keyObject(key));
     }
 
+    /** The key operations name their key in {@code KeyIdentifier}. */
+    private static final String KEY_IDENTIFIER = "KeyIdentifier";
+
+    /** The alias operations name the key they point at in {@code KeyArn}. */
+    private static final String KEY_ARN = "KeyArn";
+
+    /** The tagging operations name their key in {@code ResourceArn}. */
+    private static final String RESOURCE_ARN = "ResourceArn";
+
     private Map<String, Object> getKey(JsonNode request, String region) {
-        PaymentCryptographyKey key = requiredKey(request, region);
+        PaymentCryptographyKey key = requiredKey(request, region, KEY_IDENTIFIER);
         return Map.of("Key", keyObject(key));
     }
 
@@ -98,7 +107,7 @@ public class PaymentCryptographyJsonHandler {
     }
 
     private Map<String, Object> deleteKey(JsonNode request, String region) {
-        service.deleteKey(requiredKey(request, region));
+        service.deleteKey(requiredKey(request, region, KEY_IDENTIFIER));
         return Map.of();
     }
 
@@ -106,7 +115,7 @@ public class PaymentCryptographyJsonHandler {
 
     private Map<String, Object> createAlias(JsonNode request, String region) {
         String aliasName = aliasName(request);
-        PaymentCryptographyKey key = requiredKey(request, region);
+        PaymentCryptographyKey key = requiredKey(request, region, KEY_ARN);
         PaymentCryptographyAlias alias = service.createAlias(aliasName, key);
         return Map.of("Alias", aliasObject(alias));
     }
@@ -140,7 +149,7 @@ public class PaymentCryptographyJsonHandler {
 
     private Map<String, Object> updateAlias(JsonNode request, String region) {
         String aliasName = aliasName(request);
-        PaymentCryptographyKey key = requiredKey(request, region);
+        PaymentCryptographyKey key = requiredKey(request, region, KEY_ARN);
         PaymentCryptographyAlias alias = service.updateAlias(aliasName, key);
         return Map.of("Alias", aliasObject(alias));
     }
@@ -153,13 +162,13 @@ public class PaymentCryptographyJsonHandler {
     // ---- tags ---------------------------------------------------------------
 
     private Map<String, Object> tagResource(JsonNode request, String region) {
-        PaymentCryptographyKey key = requiredKey(request, region);
+        PaymentCryptographyKey key = requiredKey(request, region, RESOURCE_ARN);
         service.tag(key, tagsOf(request));
         return Map.of();
     }
 
     private Map<String, Object> untagResource(JsonNode request, String region) {
-        PaymentCryptographyKey key = requiredKey(request, region);
+        PaymentCryptographyKey key = requiredKey(request, region, RESOURCE_ARN);
         List<String> tagKeys = new ArrayList<>();
         JsonNode declared = request.get("TagKeys");
         if (declared != null && declared.isArray()) {
@@ -172,7 +181,7 @@ public class PaymentCryptographyJsonHandler {
     }
 
     private Map<String, Object> listTagsForResource(JsonNode request, String region) {
-        PaymentCryptographyKey key = requiredKey(request, region);
+        PaymentCryptographyKey key = requiredKey(request, region, RESOURCE_ARN);
         PaginatedResult<Map.Entry<String, String>> page = service.listTags(key,
                 Pagination.parseMaxResults(request, "MaxResults", PAGINATION_ERROR),
                 Pagination.parseNextToken(request, "NextToken", PAGINATION_ERROR));
@@ -224,19 +233,19 @@ public class PaymentCryptographyJsonHandler {
         return modes;
     }
 
-    private PaymentCryptographyKey requiredKey(JsonNode request, String region) {
-        // The key is named in a different member by each operation:
-        // KeyIdentifier by the key operations, KeyArn by the alias ones, and
-        // ResourceArn by the tagging ones.
-        String identifier = request.path("KeyIdentifier").asText();
+    /**
+     * The key an operation names, in the member that operation names it in.
+     *
+     * <p>The key is named in a different member by each operation:
+     * {@code KeyIdentifier} by the key operations, {@code KeyArn} by the alias ones, and
+     * {@code ResourceArn} by the tagging ones. Only that member is read, so a request cannot
+     * name one key for the permission check and another for the change: the IAM check reads
+     * the same member this reads.
+     */
+    private PaymentCryptographyKey requiredKey(JsonNode request, String region, String member) {
+        String identifier = request.path(member).asText();
         if (identifier.isEmpty()) {
-            identifier = request.path("KeyArn").asText();
-        }
-        if (identifier.isEmpty()) {
-            identifier = request.path("ResourceArn").asText();
-        }
-        if (identifier.isEmpty()) {
-            throw new AwsException("ValidationException", "KeyIdentifier is required", 400);
+            throw new AwsException("ValidationException", member + " is required", 400);
         }
         PaymentCryptographyKey key = service.findKey(region, identifier);
         if (key == null) {

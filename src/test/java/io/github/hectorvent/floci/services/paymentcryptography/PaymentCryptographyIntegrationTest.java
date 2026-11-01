@@ -172,6 +172,34 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void aTaggingRequestNamesItsKeyInResourceArnOnly() {
+        String named = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        String other = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+
+        // The request names one key and another besides it. The change follows the member
+        // the operation names its key in, which is the member the permission check reads.
+        call("TagResource", "{\"ResourceArn\":\"" + other + "\",\"KeyIdentifier\":\"" + named + "\","
+                + "\"Tags\":[{\"Key\":\"owner\",\"Value\":\"team\"}]}")
+                .then().statusCode(200);
+
+        call("ListTagsForResource", "{\"ResourceArn\":\"" + other + "\"}")
+                .then().statusCode(200)
+                    .body("Tags", hasSize(1));
+        call("ListTagsForResource", "{\"ResourceArn\":\"" + named + "\"}")
+                .then().statusCode(200)
+                    .body("Tags", hasSize(0));
+    }
+
+    @Test
+    void aTaggingRequestWithoutItsKeyIsRefused() {
+        call("TagResource", "{\"KeyIdentifier\":\"abc\"}")
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
+    @Test
     void theKeysAreListedAPageAtATime() {
         call("CreateKey", CREATE_KEY).then().statusCode(200);
         call("CreateKey", CREATE_KEY).then().statusCode(200);
