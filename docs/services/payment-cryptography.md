@@ -20,6 +20,16 @@
 | `TagResource` | Add tags to a key |
 | `UntagResource` | Remove tags from a key |
 | `ListTagsForResource` | List the tags of a key |
+| `ExportKey` | - |
+| `ImportKey` | - |
+| `GetParametersForExport` | - |
+| `GetParametersForImport` | - |
+| `GetPublicKeyCertificate` | - |
+| `AddKeyReplicationRegions` | - |
+| `RemoveKeyReplicationRegions` | - |
+| `GetDefaultKeyReplicationRegions` | - |
+| `EnableDefaultKeyReplicationRegions` | - |
+| `DisableDefaultKeyReplicationRegions` | - |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior
@@ -59,8 +69,19 @@
   only the name.
 - **Paging:** `ListKeys`, `ListAliases` and `ListTagsForResource` take `MaxResults`
   and `NextToken`, and answer with one page and the token that asks for the next.
-- **Not yet emulated:** the data plane (`POST /encrypt` and the rest), the import and
-  export formats, and the multi-region replication operations.
+- **The key leaves the service under a key block protection key.** `ExportKey` answers with
+  a TR-31 key block of type D, which is the form the service uses, and `ImportKey` takes one
+  back. A key that is not exportable does not leave.
+- **A key can be replicated.** `CreateKey` takes the regions the key is replicated to, and
+  the account has default regions that a key is replicated to when the request names none.
+  A replicated key is one key with one identifier in several regions, and each region has
+  its own ARN of it. A replica is read-only: it cannot be deleted on its own and it cannot
+  be replicated further.
+- **The data plane is a service of its own,** with its own page.
+- **Not yet emulated:** the operations that answer with a certificate, which are
+  `GetParametersForExport`, `GetParametersForImport` and `GetPublicKeyCertificate`, because
+  this service does not mint certificates yet. They are refused, so nobody builds against
+  them expecting them.
 
 ## Configuration
 

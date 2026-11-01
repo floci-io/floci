@@ -29,6 +29,10 @@ services:
     doc: docs/services/payment-cryptography.md
     sources:
       - { path: services/paymentcryptography/PaymentCryptographyJsonHandler.java, mode: switch }
+  - service: paymentcryptographydata
+    doc: docs/services/payment-cryptography-data.md
+    sources:
+      - { path: services/paymentcryptography/PaymentCryptographyDataPlaneController.java, mode: rest }
   - service: applicationautoscaling
     doc: docs/services/applicationautoscaling.md
     sources:
