@@ -18,6 +18,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -63,19 +64,19 @@ public class ServiceQuotasService {
 
     private static final Map<String, List<QuotaDefinition>> CURATED_QUOTAS = Map.of(
             "codebuild", List.of(
-                    new QuotaDefinition("L-2DC20C30", "Concurrently running builds", GENERIC_QUOTA_VALUE, false)),
+                    new QuotaDefinition("L-2DC20C30", "Concurrently running builds", GENERIC_QUOTA_VALUE, false, "ACCOUNT")),
             "lambda", List.of(
-                    new QuotaDefinition("L-B99A9384", "Concurrent executions", GENERIC_QUOTA_VALUE, false)),
+                    new QuotaDefinition("L-B99A9384", "Concurrent executions", GENERIC_QUOTA_VALUE, false, "ACCOUNT")),
             "organizations", List.of(
-                    new QuotaDefinition("L-E619E033", "Maximum number of accounts", 50.0, true)),
+                    new QuotaDefinition("L-E619E033", "Maximum number of accounts", 50.0, true, "ACCOUNT")),
             "ec2", List.of(
                     new QuotaDefinition("L-1216C47A",
-                            "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances", 5.0, false)),
+                            "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances", 5.0, false, "ACCOUNT")),
             // AWS default values: tooling such as Terraform's aws_servicequotas_service_quota
             // compares its desired value against these before requesting an increase.
             "vpc", List.of(
-                    new QuotaDefinition("L-FE5A380F", "NAT gateways per Availability Zone", 5.0, false),
-                    new QuotaDefinition("L-2AEEBF1A", "Rules per network ACL", 20.0, false)));
+                    new QuotaDefinition("L-FE5A380F", "NAT gateways per Availability Zone", 5.0, false, "ACCOUNT"),
+                    new QuotaDefinition("L-2AEEBF1A", "Rules per network ACL", 20.0, false, "ACCOUNT")));
 
     private static final List<String> GENERIC_QUOTA_NAMES = List.of(
             "Resources per Region",
@@ -97,22 +98,31 @@ public class ServiceQuotasService {
                 new TypeReference<Map<String, ObjectNode>>() {});
     }
 
-    public ObjectNode listServiceQuotas(String serviceCode, String quotaCodeFilter, String nextToken,
-                                        Integer maxResults, String region, String accountId) {
-        return listQuotas(serviceCode, quotaCodeFilter, nextToken, maxResults, region, accountId, true);
+    public ObjectNode listServiceQuotas(String serviceCode, String quotaCodeFilter, String appliedAtLevel,
+                                        String nextToken, Integer maxResults, String region, String accountId) {
+        return listQuotas(serviceCode, quotaCodeFilter, appliedAtLevel, nextToken, maxResults, region, accountId, true);
     }
 
-    public ObjectNode listAwsDefaultServiceQuotas(String serviceCode, String quotaCodeFilter, String nextToken,
-                                                  Integer maxResults, String region, String accountId) {
-        return listQuotas(serviceCode, quotaCodeFilter, nextToken, maxResults, region, accountId, false);
+    public ObjectNode listAwsDefaultServiceQuotas(String serviceCode, String quotaCodeFilter, String appliedAtLevel,
+                                                  String nextToken, Integer maxResults, String region, String accountId) {
+        return listQuotas(serviceCode, quotaCodeFilter, appliedAtLevel, nextToken, maxResults, region, accountId, false);
     }
 
-    private ObjectNode listQuotas(String serviceCode, String quotaCodeFilter, String nextToken,
-                                  Integer maxResults, String region, String accountId, boolean applied) {
+    private ObjectNode listQuotas(String serviceCode, String quotaCodeFilter, String appliedAtLevel,
+                                  String nextToken, Integer maxResults, String region, String accountId, boolean applied) {
         requireServiceCode(serviceCode);
         List<QuotaDefinition> quotas = quotasFor(serviceCode);
         if (quotaCodeFilter != null && !quotaCodeFilter.isEmpty()) {
             quotas = quotas.stream().filter(q -> q.quotaCode().equals(quotaCodeFilter)).toList();
+        }
+        // Filter by QuotaAppliedAtLevel: ACCOUNT, RESOURCE, or ALL (case-insensitive)
+        if (appliedAtLevel != null && !appliedAtLevel.isBlank()) {
+            String level = appliedAtLevel.toUpperCase(Locale.ROOT);
+            if (!"ALL".equals(level)) {
+                quotas = quotas.stream()
+                        .filter(q -> level.equalsIgnoreCase(q.appliedAtLevel()))
+                        .toList();
+            }
         }
         Page<QuotaDefinition> page = paginate(quotas, nextToken, maxResults);
 
@@ -156,7 +166,7 @@ public class ServiceQuotasService {
         for (String name : GENERIC_QUOTA_NAMES) {
             quotas.add(new QuotaDefinition(
                     syntheticQuotaCode(serviceCode, name), name, GENERIC_QUOTA_VALUE,
-                    "organizations".equals(serviceCode)));
+                    "organizations".equals(serviceCode), "ACCOUNT"));
         }
         return quotas;
     }
@@ -186,7 +196,7 @@ public class ServiceQuotasService {
         node.put("Unit", "None");
         node.put("Adjustable", true);
         node.put("GlobalQuota", quota.globalQuota());
-        node.put("QuotaAppliedAtLevel", "ACCOUNT");
+        node.put("QuotaAppliedAtLevel", quota.appliedAtLevel());
         return node;
     }
 
@@ -269,7 +279,7 @@ public class ServiceQuotasService {
         return response;
     }
 
-    record QuotaDefinition(String quotaCode, String quotaName, double value, boolean globalQuota) {
+    record QuotaDefinition(String quotaCode, String quotaName, double value, boolean globalQuota, String appliedAtLevel) {
     }
 
     private record Page<T>(List<T> items, String nextToken) {
