@@ -64,8 +64,7 @@ public class Inspector2Service implements Resettable {
             delegated.setResourceStatus(resourceType, "ENABLED");
         }
         delegated.setStatus("ENABLED");
-        delegated.setEnablingPollsRemaining(0);
-        delegated.setDisablingPollsRemaining(0);
+        resetTransitionPolls(delegated);
         states.putForAccount(accountId, region, delegated);
     }
 
@@ -89,44 +88,30 @@ public class Inspector2Service implements Resettable {
         requireAccountId(accountId);
         authorizeAccountAccess(region, callerAccountId, accountId);
         InspectorState state = stateForAccount(accountId, region);
-        if ("ENABLING".equals(state.getStatus()) && state.getEnablingPollsRemaining() > 0) {
-            InspectorState response = copyState(state);
-            state.setEnablingPollsRemaining(state.getEnablingPollsRemaining() - 1);
-            states.putForAccount(accountId, region, state);
-            return response;
-        }
         if ("ENABLING".equals(state.getStatus())) {
-            for (String resourceType : RESOURCE_TYPES) {
-                if ("ENABLING".equals(state.resourceStatus(resourceType))) {
-                    state.setResourceStatus(resourceType, "ENABLED");
-                }
-            }
-            state.setStatus(overallStatus(state));
-            states.putForAccount(accountId, region, state);
-        }
-        if ("DISABLING".equals(state.getStatus()) && state.getDisablingPollsRemaining() > 0) {
-            InspectorState response = copyState(state);
-            state.setDisablingPollsRemaining(state.getDisablingPollsRemaining() - 1);
-            states.putForAccount(accountId, region, state);
-            return response;
+            return advanceTransition(region, accountId, state, "ENABLING", "ENABLED");
         }
         if ("DISABLING".equals(state.getStatus())) {
-            for (String resourceType : RESOURCE_TYPES) {
-                if ("DISABLING".equals(state.resourceStatus(resourceType))) {
-                    state.setResourceStatus(resourceType, "DISABLED");
-                }
-            }
-            state.setStatus(overallStatus(state));
-            states.putForAccount(accountId, region, state);
+            return advanceTransition(region, accountId, state, "DISABLING", "DISABLED");
         }
         return copyState(state);
     }
 
     public synchronized Map<String, InspectorState> enable(
             String region, String callerAccountId, JsonNode request) {
-        List<String> resourceTypes = resourceTypes(request);
-        List<String> accountIds = accountIds(request, callerAccountId);
+        return updateResourceStatus(region, callerAccountId, accountIds(request, callerAccountId),
+                resourceTypes(request, false), "ENABLING", "ENABLED");
+    }
 
+    public synchronized Map<String, InspectorState> disable(
+            String region, String callerAccountId, JsonNode request) {
+        return updateResourceStatus(region, callerAccountId, accountIds(request, callerAccountId),
+                resourceTypes(request, true), "DISABLING", "DISABLED");
+    }
+
+    private Map<String, InspectorState> updateResourceStatus(
+            String region, String callerAccountId, List<String> accountIds, List<String> resourceTypes,
+            String transitionalStatus, String finalStatus) {
         for (String accountId : accountIds) {
             authorizeAccountAccess(region, callerAccountId, accountId);
         }
@@ -137,15 +122,15 @@ public class Inspector2Service implements Resettable {
             boolean changed = false;
             for (String resourceType : resourceTypes) {
                 String current = state.resourceStatus(resourceType);
-                if (!"ENABLED".equals(current) && !"ENABLING".equals(current)) {
-                    state.setResourceStatus(resourceType, "ENABLING");
+                if (!finalStatus.equals(current) && !transitionalStatus.equals(current)) {
+                    state.setResourceStatus(resourceType, transitionalStatus);
                     changed = true;
                 }
             }
             if (changed) {
-                state.setStatus("ENABLING");
-                state.setEnablingPollsRemaining(1);
-                state.setDisablingPollsRemaining(0);
+                state.setStatus(transitionalStatus);
+                resetTransitionPolls(state);
+                setTransitionPollsRemaining(state, transitionalStatus, 1);
                 states.putForAccount(accountId, region, state);
             }
             result.put(accountId, copyState(state));
@@ -153,35 +138,23 @@ public class Inspector2Service implements Resettable {
         return result;
     }
 
-    public synchronized Map<String, InspectorState> disable(
-            String region, String callerAccountId, JsonNode request) {
-        List<String> resourceTypes = resourceTypes(request);
-        List<String> accountIds = accountIds(request, callerAccountId);
-
-        for (String accountId : accountIds) {
-            authorizeAccountAccess(region, callerAccountId, accountId);
+    private InspectorState advanceTransition(String region, String accountId, InspectorState state,
+                                             String transitionalStatus, String finalStatus) {
+        int pollsRemaining = transitionPollsRemaining(state, transitionalStatus);
+        if (pollsRemaining > 0) {
+            InspectorState response = copyState(state);
+            setTransitionPollsRemaining(state, transitionalStatus, pollsRemaining - 1);
+            states.putForAccount(accountId, region, state);
+            return response;
         }
-
-        Map<String, InspectorState> result = new LinkedHashMap<>();
-        for (String accountId : accountIds) {
-            InspectorState state = stateForAccount(accountId, region);
-            boolean changed = false;
-            for (String resourceType : resourceTypes) {
-                String current = state.resourceStatus(resourceType);
-                if (!"DISABLED".equals(current) && !"DISABLING".equals(current)) {
-                    state.setResourceStatus(resourceType, "DISABLING");
-                    changed = true;
-                }
+        for (String resourceType : RESOURCE_TYPES) {
+            if (transitionalStatus.equals(state.resourceStatus(resourceType))) {
+                state.setResourceStatus(resourceType, finalStatus);
             }
-            if (changed) {
-                state.setStatus("DISABLING");
-                state.setEnablingPollsRemaining(0);
-                state.setDisablingPollsRemaining(1);
-                states.putForAccount(accountId, region, state);
-            }
-            result.put(accountId, copyState(state));
         }
-        return result;
+        state.setStatus(overallStatus(state));
+        states.putForAccount(accountId, region, state);
+        return copyState(state);
     }
 
     public synchronized InspectorState updateOrganizationConfiguration(
@@ -263,11 +236,19 @@ public class Inspector2Service implements Resettable {
         return states.getForAccount(accountId, region).orElseGet(InspectorState::new);
     }
 
-    private static List<String> resourceTypes(JsonNode request) {
+    private static List<String> resourceTypes(JsonNode request, boolean allowEmpty) {
         JsonNode resourceTypes = request.get("resourceTypes");
-        if (resourceTypes == null || !resourceTypes.isArray() || resourceTypes.isEmpty() || resourceTypes.size() > 5) {
-            throw new AwsException("ValidationException",
-                    "resourceTypes must contain between 1 and 5 resource types.", 400);
+        if (resourceTypes == null) {
+            if (allowEmpty) {
+                return List.of();
+            }
+            throw invalidResourceTypes(false);
+        }
+        if (!resourceTypes.isArray() || resourceTypes.size() > 5 || (!allowEmpty && resourceTypes.isEmpty())) {
+            throw invalidResourceTypes(allowEmpty);
+        }
+        if (resourceTypes.isEmpty()) {
+            return List.of();
         }
         List<String> result = new ArrayList<>(resourceTypes.size());
         for (JsonNode resourceType : resourceTypes) {
@@ -279,6 +260,15 @@ public class Inspector2Service implements Resettable {
             }
         }
         return result;
+    }
+
+    private static AwsException invalidResourceTypes(boolean allowEmpty) {
+        if (allowEmpty) {
+            return new AwsException("ValidationException",
+                    "resourceTypes must contain between 0 and 5 resource types.", 400);
+        }
+        return new AwsException("ValidationException",
+                "resourceTypes must contain between 1 and 5 resource types.", 400);
     }
 
     private static List<String> accountIds(JsonNode request, String callerAccountId) {
@@ -308,6 +298,28 @@ public class Inspector2Service implements Resettable {
         }
         boolean enabled = RESOURCE_TYPES.stream().anyMatch(type -> "ENABLED".equals(state.resourceStatus(type)));
         return enabled ? "ENABLED" : "DISABLED";
+    }
+
+    private static int transitionPollsRemaining(InspectorState state, String transitionalStatus) {
+        return switch (transitionalStatus) {
+            case "ENABLING" -> state.getEnablingPollsRemaining();
+            case "DISABLING" -> state.getDisablingPollsRemaining();
+            default -> throw new IllegalArgumentException("Unsupported transition status: " + transitionalStatus);
+        };
+    }
+
+    private static void setTransitionPollsRemaining(
+            InspectorState state, String transitionalStatus, int pollsRemaining) {
+        switch (transitionalStatus) {
+            case "ENABLING" -> state.setEnablingPollsRemaining(pollsRemaining);
+            case "DISABLING" -> state.setDisablingPollsRemaining(pollsRemaining);
+            default -> throw new IllegalArgumentException("Unsupported transition status: " + transitionalStatus);
+        }
+    }
+
+    private static void resetTransitionPolls(InspectorState state) {
+        state.setEnablingPollsRemaining(0);
+        state.setDisablingPollsRemaining(0);
     }
 
     private static InspectorState copyState(InspectorState source) {

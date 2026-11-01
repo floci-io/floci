@@ -134,11 +134,14 @@ class Inspector2ServiceTest {
     }
 
     @Test
-    void disableRejectsOmittedResourceTypes() throws Exception {
-        AwsException error = assertThrows(AwsException.class,
-                () -> service.disable(REGION, MEMBER_ACCOUNT, objectMapper.readTree("{}")));
+    void disableAcceptsOmittedOrEmptyResourceTypes() throws Exception {
+        InspectorState omitted = service.disable(REGION, MEMBER_ACCOUNT,
+                objectMapper.readTree("{}")).get(MEMBER_ACCOUNT);
+        InspectorState empty = service.disable(REGION, MEMBER_ACCOUNT,
+                objectMapper.readTree("{\"resourceTypes\":[]}")).get(MEMBER_ACCOUNT);
 
-        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("DISABLED", omitted.getStatus());
+        assertEquals("DISABLED", empty.getStatus());
     }
 
     @Test

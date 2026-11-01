@@ -136,6 +136,14 @@ class Inspector2IntegrationTest {
                 .body("accounts[0].state.status", equalTo("ENABLED"))
                 .body("accounts[0].resourceState.ec2.status", equalTo("DISABLED"))
                 .body("accounts[0].resourceState.ecr.status", equalTo("ENABLED"));
+
+        given().contentType("application/json").header("Authorization", auth(member)).body("{}")
+                .post("/disable").then().statusCode(200)
+                .body("accounts[0].status", equalTo("ENABLED"));
+        given().contentType("application/json").header("Authorization", auth(member))
+                .body("{\"resourceTypes\":[]}")
+                .post("/disable").then().statusCode(200)
+                .body("accounts[0].status", equalTo("ENABLED"));
     }
 
     @Test

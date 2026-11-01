@@ -25,7 +25,7 @@ Floci implements the Amazon Inspector organization operations used by local secu
 
 The supported surface includes delegated administrator management, `BatchGetAccountStatus`, Inspector enablement and disablement, and organization auto-enable configuration. Delegation is reflected into the delegated account so organization configuration can be managed through credentials for that administrator account.
 
-`BatchGetAccountStatus` accepts an omitted or empty `accountIds` list and resolves it to the caller account. Explicit enablement and disablement support `EC2`, `ECR`, `LAMBDA`, `LAMBDA_CODE`, and `CODE_REPOSITORY`, with the documented request-size limits. State changes use `ENABLING`, `ENABLED`, `DISABLING`, and `DISABLED` so SDK and deployment waiters can converge. Disabling selected scan types leaves the others enabled.
+`BatchGetAccountStatus` accepts an omitted or empty `accountIds` list and resolves it to the caller account. Explicit enablement and disablement support `EC2`, `ECR`, `LAMBDA`, `LAMBDA_CODE`, and `CODE_REPOSITORY`, with the documented request-size limits. `Disable` also accepts an omitted or empty `resourceTypes` list. State changes use `ENABLING`, `ENABLED`, `DISABLING`, and `DISABLED` so SDK and deployment waiters can converge. Disabling selected scan types leaves the others enabled.
 
 Organization auto-enable supports `ec2`, `ecr`, `lambda`, `lambdaCode`, and `codeRepository`. Only the delegated administrator account can update or describe organization configuration.
 

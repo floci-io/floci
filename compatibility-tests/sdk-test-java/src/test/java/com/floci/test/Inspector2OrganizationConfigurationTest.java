@@ -96,6 +96,11 @@ class Inspector2OrganizationConfigurationTest {
                                 assertThat(account.state().statusAsString()).isEqualTo("DISABLED");
                                 assertThat(account.resourceState().ec2().statusAsString()).isEqualTo("DISABLED");
                             });
+                    assertThat(administrator.disable(request -> request.accountIds(inspectedMemberAccount)).accounts())
+                            .singleElement().satisfies(account -> {
+                                assertThat(account.accountId()).isEqualTo(inspectedMemberAccount);
+                                assertThat(account.statusAsString()).isEqualTo("DISABLED");
+                            });
 
                     UpdateOrganizationConfigurationResponse updated = administrator.updateOrganizationConfiguration(request -> request
                             .autoEnable(AutoEnable.builder()
