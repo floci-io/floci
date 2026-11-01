@@ -58,6 +58,11 @@ public class PaymentCryptographyJsonHandler {
             case "TagResource" -> Response.ok(tagResource(request, region)).build();
             case "UntagResource" -> Response.ok(untagResource(request, region)).build();
             case "ListTagsForResource" -> Response.ok(listTagsForResource(request, region)).build();
+            case "ExportKey" -> Response.ok(exportKey(request, region)).build();
+            case "ImportKey" -> Response.ok(importKey(request, region)).build();
+            case "GetParametersForExport" -> Response.ok(getParametersForExport(request, region)).build();
+            case "GetParametersForImport" -> Response.ok(getParametersForImport(request, region)).build();
+            case "GetPublicKeyCertificate" -> Response.ok(getPublicKeyCertificate(request, region)).build();
             default -> throw new AwsException("UnknownOperationException",
                     "Operation " + action + " is not supported by floci", 400);
         };
@@ -207,6 +212,81 @@ public class PaymentCryptographyJsonHandler {
     private Map<String, Object> deleteAlias(JsonNode request, String region) {
         service.deleteAlias(region, aliasName(request));
         return Map.of();
+    }
+
+    // ---- the key exchange ----------------------------------------------------
+
+    /**
+     * The key as it leaves the service, in a TR-31 key block under a key block protection key.
+     */
+    private Map<String, Object> exportKey(JsonNode request, String region) {
+        String keyIdentifier = request.path("ExportKeyIdentifier").asText();
+        if (keyIdentifier.isEmpty()) {
+            throw new AwsException("ValidationException", "ExportKeyIdentifier is required", 400);
+        }
+        JsonNode material = request.path("KeyMaterial").path("Tr31KeyBlock");
+        String wrappingKey = material.path("WrappingKeyIdentifier").asText();
+        if (wrappingKey.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "KeyMaterial.Tr31KeyBlock.WrappingKeyIdentifier is required", 400);
+        }
+        PaymentCryptographyService.KeyExport export = service.exportKey(region, keyIdentifier, wrappingKey);
+        Map<String, Object> wrapped = new LinkedHashMap<>();
+        wrapped.put("WrappingKeyArn", export.wrappingKeyArn());
+        wrapped.put("WrappedKeyMaterialFormat", "TR31_KEY_BLOCK");
+        wrapped.put("KeyMaterial", export.block());
+        wrapped.put("KeyCheckValue", export.keyCheckValue());
+        wrapped.put("KeyCheckValueAlgorithm", export.keyCheckValueAlgorithm());
+        return Map.of("WrappedKey", wrapped);
+    }
+
+    /**
+     * The key that comes into the service out of a TR-31 key block.
+     */
+    private Map<String, Object> importKey(JsonNode request, String region) {
+        JsonNode material = request.path("KeyMaterial").path("Tr31KeyBlock");
+        String wrappingKey = material.path("WrappingKeyIdentifier").asText();
+        if (wrappingKey.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "KeyMaterial.Tr31KeyBlock.WrappingKeyIdentifier is required", 400);
+        }
+        String block = material.path("WrappedKeyBlock").asText();
+        if (block.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "KeyMaterial.Tr31KeyBlock.WrappedKeyBlock is required", 400);
+        }
+        PaymentCryptographyKey key = service.importKey(region, wrappingKey, block);
+        return Map.of("Key", keyObject(key));
+    }
+
+    /**
+     * The parameters of an export, which are a signing key and a certificate.
+     *
+     * <p>They are the certificates of the key the service mints for the export, and this
+     * service does not mint certificates yet, so the operation says so.
+     */
+    private Map<String, Object> getParametersForExport(JsonNode request, String region) {
+        throw new AwsException("ValidationException",
+                "GetParametersForExport is not served: it answers with a certificate, and this service does "
+                        + "not mint certificates yet", 400);
+    }
+
+    /** The parameters of an import, which are a wrapping key and a certificate. */
+    private Map<String, Object> getParametersForImport(JsonNode request, String region) {
+        throw new AwsException("ValidationException",
+                "GetParametersForImport is not served: it answers with a certificate, and this service does "
+                        + "not mint certificates yet", 400);
+    }
+
+    /**
+     * The certificate of an asymmetric key.
+     *
+     * <p>This service makes symmetric keys only, so there is no key to certify.
+     */
+    private Map<String, Object> getPublicKeyCertificate(JsonNode request, String region) {
+        throw new AwsException("ValidationException",
+                "GetPublicKeyCertificate is not served: this service makes symmetric keys only, and there is "
+                        + "no asymmetric key to certify", 400);
     }
 
     // ---- tags ---------------------------------------------------------------

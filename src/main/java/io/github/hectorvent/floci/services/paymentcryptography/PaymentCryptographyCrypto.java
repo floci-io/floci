@@ -104,6 +104,17 @@ final class PaymentCryptographyCrypto {
     }
 
     /**
+     * The two CMAC subkeys of a key: the first and the second.
+     *
+     * <p>The key derivation of a TR-31 block is seeded with one of them, so they are
+     * wanted on their own.
+     */
+    static byte[][] cmacSubkeys(byte[] key) {
+        byte[] k1 = subkeyOne(key);
+        return new byte[][] {k1, shiftLeft(k1)};
+    }
+
+    /**
      * A block shifted left by one bit, with Rijndael's Rb exclusive-ored in when the shift
      * carried out of the top.
      */
@@ -256,6 +267,40 @@ final class PaymentCryptographyCrypto {
             out[i] = (byte) (left[i] ^ right[i % right.length]);
         }
         return out;
+    }
+
+    /**
+     * The AES-CBC encryption of data under a key and an initialization vector, without
+     * padding: the vector is the length of the data's block size already.
+     */
+    static byte[] aesCbcEncrypt(byte[] key, byte[] iv, byte[] data) {
+        try {
+            Cipher cipher = Cipher.getInstance("AES/CBC/NoPadding");
+            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new javax.crypto.spec.IvParameterSpec(iv));
+            return cipher.doFinal(data);
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("the AES key could not be used", e);
+        }
+    }
+
+    /** The AES-CBC decryption of data under a key and an initialization vector, without padding. */
+    static byte[] aesCbcDecrypt(byte[] key, byte[] iv, byte[] data) {
+        try {
+            Cipher cipher = Cipher.getInstance("AES/CBC/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new javax.crypto.spec.IvParameterSpec(iv));
+            return cipher.doFinal(data);
+        } catch (GeneralSecurityException e) {
+            throw new IllegalArgumentException("the data did not decrypt under the key", e);
+        }
+    }
+
+    /** One block of AES in ECB mode. */
+    static byte[] aesEcbEncrypt(byte[] input, byte[] key) {
+        try {
+            return encrypt(input, key);
+        } catch (GeneralSecurityException e) {
+            throw new IllegalStateException("the AES key could not be used", e);
+        }
     }
 
     /** One block of AES in ECB mode. */

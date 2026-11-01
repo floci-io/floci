@@ -194,6 +194,56 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void aKeyLeavesTheServiceAndComesBack() {
+        PaymentCryptographyKey protection = createKey("us-east-1");
+        PaymentCryptographyKey key = createKey("us-east-1");
+
+        PaymentCryptographyService.KeyExport export = service.exportKey("us-east-1", key.getKeyId(),
+                protection.getKeyId());
+
+        assertEquals(protection.getArn(), export.wrappingKeyArn());
+        assertEquals(key.getKeyCheckValue(), export.keyCheckValue());
+        assertTrue(export.block().length() > 32, "the block is only its header");
+
+        PaymentCryptographyKey imported = service.importKey("us-east-1", protection.getKeyId(),
+                export.block());
+
+        assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
+        assertEquals(key.getKeyCheckValue(), imported.getKeyCheckValue());
+        assertEquals(key.getKeyUsage(), imported.getKeyUsage());
+        assertTrue(imported.isExportable(), "the block said the key is exportable");
+    }
+
+    @Test
+    void aKeyThatIsNotExportableDoesNotLeaveTheService() {
+        PaymentCryptographyKey protection = createKey("us-east-1");
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "AES_256");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = service.createKey("us-east-1", attributes, Map.of(), false, true, Map.of());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), protection.getKeyId()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aBlockThatIsNotTheKeysDoesNotOpen() {
+        PaymentCryptographyKey protection = createKey("us-east-1");
+        PaymentCryptographyKey other = createKey("us-east-1");
+        PaymentCryptographyKey key = createKey("us-east-1");
+        PaymentCryptographyService.KeyExport export = service.exportKey("us-east-1", key.getKeyId(),
+                protection.getKeyId());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", other.getKeyId(), export.block()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
     void aKeyThatAsksForMaterialTheServiceDoesNotMakeIsRefused() {
         Map<String, Object> attributes = new LinkedHashMap<>();
         attributes.put("KeyAlgorithm", "AES_128");

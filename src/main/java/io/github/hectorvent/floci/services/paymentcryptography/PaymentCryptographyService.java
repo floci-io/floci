@@ -99,6 +99,19 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public PaymentCryptographyKey createKey(String region, Map<String, Object> attributes,
                                             Map<String, Boolean> modesOfUse, boolean exportable,
                                             boolean enabled, Map<String, String> tags) {
+        return makeKey(region, attributes, modesOfUse, exportable, enabled, tags, null);
+    }
+
+    /**
+     * Makes a key, with the material it is given rather than with fresh material.
+     *
+     * <p>An imported key holds the material that came in with it, so the material is a
+     * parameter of the key that is made.
+     */
+    private PaymentCryptographyKey makeKey(String region, Map<String, Object> attributes,
+                                           Map<String, Boolean> modesOfUse, boolean exportable,
+                                           boolean enabled, Map<String, String> tags,
+                                           String materialHex) {
         String algorithm = string(attributes, "KeyAlgorithm", "AES_256");
         String keyClass = string(attributes, "KeyClass", "SYMMETRIC_KEY");
         // The material is AES-256 and symmetric, so a key that says otherwise would be a key
@@ -125,7 +138,9 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         key.setEnabled(enabled);
         key.setTags(new LinkedHashMap<>(tags));
         key.setKeyState("CREATE_COMPLETE");
-        key.setKeyMaterialHex(PaymentCryptographyCrypto.randomAes256Hex(secureRandom));
+        key.setKeyMaterialHex(materialHex != null
+                ? materialHex
+                : PaymentCryptographyCrypto.randomAes256Hex(secureRandom));
         key.setKeyCheckValue(PaymentCryptographyCrypto.checkValue(key.getKeyMaterialHex()));
         key.setKeyCheckValueAlgorithm("CMAC");
         long now = Instant.now().getEpochSecond();
@@ -391,6 +406,153 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                                                 Integer maxResults, String nextToken) {
         return Pagination.paginate(new ArrayList<>(listTags(key).entrySet()), Map.Entry::getKey,
                 maxResults, nextToken, DEFAULT_PAGE_SIZE, MAX_RESULTS, PAGINATION_ERROR);
+    }
+
+    // ---- the key exchange ----------------------------------------------------
+
+    /**
+     * The key as it leaves the service: a TR-31 key block under a key block protection key.
+     *
+     * <p>A key that is not exportable does not leave, and a protection key that may not wrap
+     * does not wrap.
+     */
+    public KeyExport exportKey(String region, String keyIdentifier, String wrappingKeyIdentifier) {
+        PaymentCryptographyKey key = findKey(region, keyIdentifier);
+        if (key == null) {
+            throw new AwsException("ResourceNotFoundException", "Key not found: " + keyIdentifier, 400);
+        }
+        if (!key.isExportable()) {
+            throw new AwsException("ValidationException",
+                    "the key " + key.getArn() + " is not exportable", 400);
+        }
+        PaymentCryptographyKey protection = findKey(region, wrappingKeyIdentifier);
+        if (protection == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Key not found: " + wrappingKeyIdentifier, 400);
+        }
+        if (!mayWrap(protection)) {
+            throw new AwsException("InvalidKeyUsageException",
+                    "the key " + protection.getArn() + " does not have the mode of use Wrap, which it needs "
+                            + "to wrap a key", 400);
+        }
+        String usage = usageCode(key.getKeyUsage());
+        String mode = modeCode(key.getKeyUsage());
+        String block = PaymentCryptographyTr31.wrap(
+                PaymentCryptographyCrypto.fromHex(key.getKeyMaterialHex()),
+                PaymentCryptographyCrypto.fromHex(protection.getKeyMaterialHex()),
+                usage, mode, "E");
+        return new KeyExport(protection.getArn(), block, key.getKeyCheckValue(),
+                key.getKeyCheckValueAlgorithm());
+    }
+
+    /**
+     * The key that comes into the service out of a TR-31 key block.
+     *
+     * <p>The block carries the usage, the mode and the exportability of the key, and the
+     * material is what is inside it.
+     */
+    public PaymentCryptographyKey importKey(String region, String wrappingKeyIdentifier, String block) {
+        PaymentCryptographyKey protection = findKey(region, wrappingKeyIdentifier);
+        if (protection == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Key not found: " + wrappingKeyIdentifier, 400);
+        }
+        if (!mayUnwrap(protection)) {
+            throw new AwsException("InvalidKeyUsageException",
+                    "the key " + protection.getArn() + " does not have the mode of use Unwrap, which it needs "
+                            + "to unwrap a key", 400);
+        }
+        byte[] material;
+        try {
+            material = PaymentCryptographyTr31.unwrap(block,
+                    PaymentCryptographyCrypto.fromHex(protection.getKeyMaterialHex()));
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ValidationException", e.getMessage(), 400);
+        }
+        String usage = usageName(PaymentCryptographyTr31.usageOf(block));
+        String mode = PaymentCryptographyTr31.modeOf(block);
+        boolean exportable = "E".equals(PaymentCryptographyTr31.exportabilityOf(block));
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "AES_256");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", usage);
+        return makeKey(region, attributes, modesFor(mode), exportable, true, Map.of(),
+                PaymentCryptographyCrypto.toHex(material));
+    }
+
+    /** The key as it leaves the service. */
+    public record KeyExport(String wrappingKeyArn, String block, String keyCheckValue,
+                             String keyCheckValueAlgorithm) {
+    }
+
+    /** The usages a key block may carry, and the modes of use each of them has. */
+    private static final Map<String, String> USAGE_NAMES = Map.of(
+            "D0", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+            "M6", "TR31_M6_ISO_9797_5_CMAC_KEY",
+            "S0", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE");
+
+    /** The mode of use code each usage has in a key block. */
+    private static final Map<String, String> USAGE_MODES = Map.of(
+            "D0", "B",
+            "M6", "C",
+            "S0", "D");
+
+    /** The TR-31 usage code of a usage name, such as {@code D0}. */
+    private static String usageCode(String usageName) {
+        for (Map.Entry<String, String> entry : USAGE_NAMES.entrySet()) {
+            if (entry.getValue().equals(usageName)) {
+                return entry.getKey();
+            }
+        }
+        throw new AwsException("ValidationException",
+                "the usage " + usageName + " cannot leave the service: a key block carries one of "
+                        + USAGE_NAMES.keySet(), 400);
+    }
+
+    /** The usage name of a TR-31 usage code, such as {@code TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY}. */
+    private static String usageName(String usageCode) {
+        String usage = USAGE_NAMES.get(usageCode);
+        if (usage == null) {
+            throw new AwsException("ValidationException",
+                    "the usage " + usageCode + " of the key block is not one this service serves: "
+                            + USAGE_NAMES.keySet(), 400);
+        }
+        return usage;
+    }
+
+    /** The modes of use a mode of use code of a key block stands for. */
+    private static Map<String, Boolean> modesFor(String mode) {
+        return switch (mode) {
+            case "B" -> Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE);
+            case "C" -> Map.of("Generate", Boolean.TRUE, "Verify", Boolean.TRUE);
+            case "D" -> Map.of("Sign", Boolean.TRUE, "Verify", Boolean.TRUE);
+            default -> throw new AwsException("ValidationException",
+                    "the mode of use " + mode + " of the key block is not one this service serves", 400);
+        };
+    }
+
+    /** The mode of use code of a usage name. */
+    private static String modeCode(String usageName) {
+        for (Map.Entry<String, String> entry : USAGE_MODES.entrySet()) {
+            if (USAGE_NAMES.get(entry.getKey()).equals(usageName)) {
+                return entry.getValue();
+            }
+        }
+        return "B";
+    }
+
+    /** Whether a key may wrap another key. */
+    private static boolean mayWrap(PaymentCryptographyKey key) {
+        Map<String, Boolean> modes = key.getKeyModesOfUse();
+        return modes == null || Boolean.TRUE.equals(modes.get("Wrap"))
+                || Boolean.TRUE.equals(modes.get("Encrypt"));
+    }
+
+    /** Whether a key may unwrap another key. */
+    private static boolean mayUnwrap(PaymentCryptographyKey key) {
+        Map<String, Boolean> modes = key.getKeyModesOfUse();
+        return modes == null || Boolean.TRUE.equals(modes.get("Unwrap"))
+                || Boolean.TRUE.equals(modes.get("Decrypt"));
     }
 
     // ---- helpers ------------------------------------------------------------
