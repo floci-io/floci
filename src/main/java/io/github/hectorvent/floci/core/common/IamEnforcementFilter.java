@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.s3.S3ObjectActions;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.ext.web.RoutingContext;
@@ -53,6 +54,7 @@ import java.util.UUID;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 /**
  * JAX-RS filter that enforces IAM policies on every incoming request when
@@ -506,6 +508,12 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
             callerArns.get().putPrincipalKeys(conditionContext);
         }
+        // The Spectrum transfer writes its CSV to Floci's own scratch bucket under the role session, and no
+        // user policy names that bucket. An Allow for exactly those objects is added to the session's own
+        // policies, so an explicit Deny, a boundary or an SCP still decides the request.
+        if (isSpectrumScratchTransfer(credentialScope, action, resources, callerArns.orElse(null))) {
+            caller = caller.withIdentityPolicy(spectrumScratchAllow(action, resources));
+        }
         // A create that carries tags is checked with them where its own action takes them, as the tagging
         // action it also needs is (see TagOnCreate); keys the service's own resolver gives are kept.
         Optional<TagOnCreate.Tagging> tagOnCreate = TagOnCreate.of(resolvedAuthorization.operation(), ctx);
@@ -658,6 +666,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     // presigned URLs add, is a DeleteObject.
     private static final Set<String> NON_DELETE_OBJECT_SUBRESOURCES = Set.of("uploadId", "tagging", "annotation");
 
+    private static final Set<String> SPECTRUM_SCRATCH_ACTIONS =
+            Set.of("s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload");
+
+    private static final Pattern SPECTRUM_SCRATCH_OBJECT = Pattern.compile(
+            "arn:[^:]+:s3:::" + Pattern.quote(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET)
+                    + "/spectrum-[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}\\.csv");
+
     private static final Set<String> GOVERNANCE_BYPASS_ACTIONS =
             Set.of("s3:PutObjectRetention", "s3:DeleteObject", "s3:DeleteObjectVersion");
 
@@ -696,6 +711,29 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             return !(namesUpload && params.containsKey("partNumber"));
         }
         return "POST".equalsIgnoreCase(ctx.getMethod()) && namesUpload && !params.containsKey("uploads");
+    }
+
+    /** An identity policy allowing {@code action} on exactly the scratch objects the request names. */
+    private static String spectrumScratchAllow(String action, List<String> resources) {
+        String resourceList = resources.stream().map(resource -> "\"" + resource + "\"")
+                .collect(Collectors.joining(","));
+        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"" + action
+                + "\",\"Resource\":[" + resourceList + "]}]}";
+    }
+
+    /**
+     * A write or delete of an object in the Spectrum scratch bucket by an assumed-role session. The
+     * transfer is Floci's own, so the role needs no policy naming the bucket; any other action, bucket
+     * or kind of principal stays under the normal evaluation.
+     */
+    private static boolean isSpectrumScratchTransfer(String credentialScope, String action,
+                                                     List<String> resources, CallerArns callerArns) {
+        if (!"s3".equals(credentialScope) || callerArns == null
+                || !CallerArns.TYPE_ASSUMED_ROLE.equals(callerArns.principalType())
+                || !SPECTRUM_SCRATCH_ACTIONS.contains(action) || resources.isEmpty()) {
+            return false;
+        }
+        return resources.stream().allMatch(resource -> SPECTRUM_SCRATCH_OBJECT.matcher(resource).matches());
     }
 
     /**

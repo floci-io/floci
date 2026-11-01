@@ -52,7 +52,12 @@ public final class RedshiftRoleAccess {
     private RedshiftRoleAccess() {
     }
 
-    public record RoleSession(String accessKeyId, String sessionToken) {
+    public record RoleSession(String accessKeyId, String secretAccessKey, String sessionToken) {
+        // Không để record in secret và token ra log qua toString mặc định
+        @Override
+        public String toString() {
+            return "RoleSession[accessKeyId=" + accessKeyId + "]";
+        }
     }
 
     /**
@@ -109,10 +114,11 @@ public final class RedshiftRoleAccess {
         // null token on either side as a non-match, so a tokenless session can never be recognised
         // as a known access key and every signed authorization call would fail closed.
         String sessionToken = randomString(SECRET_CHARACTERS, 200);
+        String secretAccessKey = randomString(SECRET_CHARACTERS, 40);
         iamService.registerSessionForAccount(parsed.accountId(), accessKeyId,
-                randomString(SECRET_CHARACTERS, 40), sessionToken, iamRoleArn,
+                secretAccessKey, sessionToken, iamRoleArn,
                 Instant.now().plus(sessionTtl), null);
-        return new RoleSession(accessKeyId, sessionToken);
+        return new RoleSession(accessKeyId, secretAccessKey, sessionToken);
     }
 
     public static void releaseRoleSession(RoleSession roleSession, String iamRoleArn, IamService iamService) {

@@ -1591,6 +1591,100 @@ class IamEnforcementFilterTest {
         verify(containerRequest).abortWith(any(Response.class));
     }
 
+    private static final String SCRATCH_OBJECT = "arn:aws:s3:::floci-internal-redshift-spectrum-scratch/"
+            + "spectrum-123e4567-e89b-12d3-a456-426614174000.csv";
+
+    private IamEnforcementFilter newFilterWithRealEvaluator() {
+        @SuppressWarnings("unchecked")
+        Instance<ScpProvider> scpProvider = mock(Instance.class);
+        when(scpProvider.isResolvable()).thenReturn(false);
+        return new IamEnforcementFilter(
+                config, accountResolver, iamService, new IamPolicyEvaluator(new ObjectMapper()),
+                actionRegistry, arnBuilder, requestContext, conditionContextResolver,
+                mock(CloudTrailService.class),
+                mock(CurrentVertxRequest.class),
+                catalog, scpProvider, sessionAccountLookup);
+    }
+
+    private void stubSignedS3Request(ContainerRequestContext containerRequest, String action, String resource,
+                                     IamService.CallerArns callerArns, String identityPolicy) {
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASESSION/20260726/us-east-1/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("222233334444");
+        requestContext.setRegion("us-east-1");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASESSION");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(actionRegistry.resolve("s3", containerRequest)).thenReturn(action);
+        when(iamService.resolveCallerContext(eq("ASIASESSION"), any()))
+                .thenReturn(CallerContext.of(List.of(identityPolicy)));
+        when(iamService.resolveCallerArns("ASIASESSION")).thenReturn(Optional.of(callerArns));
+        when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), anyString(), anyString(), anyString()))
+                .thenReturn(List.of(resource));
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
+        when(containerRequest.getUriInfo()).thenReturn(uriInfo);
+        when(containerRequest.getMethod()).thenReturn("PUT");
+    }
+
+    private static IamService.CallerArns assumedRoleArns() {
+        return new IamService.CallerArns("arn:aws:sts::222233334444:assumed-role/SpectrumRole/session",
+                "arn:aws:iam::222233334444:role/SpectrumRole", IamService.CallerArns.TYPE_ASSUMED_ROLE, null, null,
+                false);
+    }
+
+    private static final String NO_STATEMENTS = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+
+    @Test
+    void anAssumedRoleSessionMayWriteTheSpectrumScratchBucketWithoutAPolicyNamingIt() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        stubSignedS3Request(containerRequest, "s3:PutObject", SCRATCH_OBJECT, assumedRoleArns(), NO_STATEMENTS);
+
+        newFilterWithRealEvaluator().filter(containerRequest);
+
+        verify(containerRequest, never()).abortWith(any());
+    }
+
+    @Test
+    void anExplicitDenyStillBlocksTheSpectrumScratchWrite() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        stubSignedS3Request(containerRequest, "s3:PutObject", SCRATCH_OBJECT, assumedRoleArns(),
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Action\":\"s3:*\","
+                        + "\"Resource\":\"*\"}]}");
+
+        newFilterWithRealEvaluator().filter(containerRequest);
+
+        verify(containerRequest).abortWith(any(Response.class));
+    }
+
+    @Test
+    void theScratchBucketAllowDoesNotCoverReadsOtherBucketsOrOtherKeys() {
+        String bucket = "arn:aws:s3:::floci-internal-redshift-spectrum-scratch/";
+        for (String[] attempt : new String[][] {
+                {"s3:GetObject", SCRATCH_OBJECT},
+                {"s3:PutObject", "arn:aws:s3:::user-bucket/spectrum-123e4567-e89b-12d3-a456-426614174000.csv"},
+                {"s3:PutObject", bucket + "nested/other.csv"}}) {
+            ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+            stubSignedS3Request(containerRequest, attempt[0], attempt[1], assumedRoleArns(), NO_STATEMENTS);
+
+            newFilterWithRealEvaluator().filter(containerRequest);
+
+            verify(containerRequest).abortWith(any(Response.class));
+        }
+    }
+
+    @Test
+    void theScratchBucketAllowDoesNotCoverAnIamUser() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        stubSignedS3Request(containerRequest, "s3:PutObject", SCRATCH_OBJECT,
+                new IamService.CallerArns("arn:aws:iam::222233334444:user/alice",
+                        "arn:aws:iam::222233334444:user/alice", IamService.CallerArns.TYPE_USER, null, "alice",
+                        false), NO_STATEMENTS);
+
+        newFilterWithRealEvaluator().filter(containerRequest);
+
+        verify(containerRequest).abortWith(any(Response.class));
+    }
+
     // FullAWSAccess baseline auto-attached to every OU/account when SCP enforcement is on.
     private static final String FULL_AWS_ACCESS =
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"*\",\"Resource\":\"*\"}]}";

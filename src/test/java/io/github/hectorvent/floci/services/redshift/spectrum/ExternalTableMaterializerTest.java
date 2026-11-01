@@ -50,6 +50,8 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.ArgumentMatchers.notNull;
+import static org.mockito.ArgumentMatchers.startsWith;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -200,7 +202,7 @@ class ExternalTableMaterializerTest {
         Table table = icebergTable("s3://bucket/events/metadata/v[1].json");
         when(glue.getTable("lake", "events")).thenReturn(table);
         when(s3.isAuthEnforced()).thenReturn(true);
-        when(duck.query(anyString(), any(), eq(ACCOUNT))).thenAnswer(invocation -> {
+        when(duck.query(anyString(), any(), startsWith("ASIA"), anyString(), anyString())).thenAnswer(invocation -> {
             String sql = invocation.getArgument(0);
             if (!sql.contains("status IN ('ADDED', 'EXISTING')") || sql.contains("content = 'DATA'")) {
                 return List.of();
@@ -222,8 +224,25 @@ class ExternalTableMaterializerTest {
 
         assertThat(exception.sqlState(), equalTo("42501"));
         verify(duck).query(argThat(sql -> sql.contains("iceberg_metadata('s3://bucket/events/metadata/v[[]1].json')")),
-                any(), eq(ACCOUNT));
+                any(), startsWith("ASIA"), anyString(), anyString());
         verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void coldLoadWithAuthEnforcedTransfersWithTheRoleSessionCredentials() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(iam.resolvePrincipalContext(BINDING.iamRoleArn())).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:ListBucket","s3:GetObject"],"Resource":"*"}
+                ]}""")));
+
+        assertThat(materializer.ensureCurrent(backend, session(false), BINDING, "events"),
+                equalTo(ExternalTableMaterializer.Outcome.LOADED));
+
+        verify(duck).execute(argThat(sql -> sql.contains("LIMIT 1001")), isNull(), anyString(),
+                startsWith("ASIA"), anyString(), notNull());
+        verify(duck, never()).execute(anyString(), any(), anyString(), eq(ACCOUNT));
     }
 
     @Test
@@ -231,7 +250,7 @@ class ExternalTableMaterializerTest {
         Table table = icebergTable("s3://bucket/events/metadata/v1.json");
         when(glue.getTable("lake", "events")).thenReturn(table);
         when(s3.isAuthEnforced()).thenReturn(true);
-        when(duck.query(anyString(), any(), eq(ACCOUNT))).thenAnswer(invocation -> {
+        when(duck.query(anyString(), any(), startsWith("ASIA"), anyString(), anyString())).thenAnswer(invocation -> {
             String sql = invocation.getArgument(0);
             if (sql.contains("read_avro")) {
                 return List.of(Map.of("manifest_path", "s3://bucket/private/manifest.avro"));
@@ -249,8 +268,8 @@ class ExternalTableMaterializerTest {
 
         assertThat(exception.sqlState(), equalTo("42501"));
         verify(duck).query(argThat(sql -> sql.contains("read_avro('s3://bucket/events/metadata/snap[*].avro')")),
-                any(), eq(ACCOUNT));
-        verify(duck, never()).query(argThat(sql -> sql.contains("iceberg_metadata")), any(), eq(ACCOUNT));
+                any(), startsWith("ASIA"), anyString(), anyString());
+        verify(duck, never()).query(argThat(sql -> sql.contains("iceberg_metadata")), any(), anyString(), anyString(), anyString());
         verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
     }
 

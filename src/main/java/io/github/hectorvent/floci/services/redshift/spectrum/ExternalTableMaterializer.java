@@ -168,7 +168,7 @@ public class ExternalTableMaterializer {
                 }
                 String previousSignature = local == null ? schemaSignatures.get(cacheKey) : local.definitions();
                 latestLoads.remove(cacheKey);
-                String definitions = load(backend, session, binding, table, sources, previousSignature);
+                String definitions = load(backend, session, binding, roleSession, table, sources, previousSignature);
                 if (!backend.permitsCachePublication()) {
                     fingerprints.remove(cacheKey);
                     PendingLoad loaded = new PendingLoad(fingerprint, definitions);
@@ -287,7 +287,7 @@ public class ExternalTableMaterializer {
     private RedshiftRoleAccess.RoleSession openRoleSession(ExternalSchemaBinding binding, SpectrumSession session) {
         try {
             return RedshiftRoleAccess.resolveRoleSession(binding.iamRoleArn(), iamService, session.accountId(),
-                    session.iamRoleArns());
+                    session.iamRoleArns(), RedshiftRoleAccess.STREAMING_ROLE_SESSION_TTL);
         } catch (S3CopySimulator.S3TransferException exception) {
             throw new SpectrumSqlException(exception.sqlState(), exception.getMessage());
         }
@@ -368,7 +368,7 @@ public class ExternalTableMaterializer {
                     + "\" has no supported metadata_location");
         }
         String sql = ICEBERG_DATA_FILES.formatted(sqlPathLiteral(metadata));
-        List<Map<String, Object>> rows = duckClient.query(sql, ICEBERG_SETUP, accountId);
+        List<Map<String, Object>> rows = duckQuery(accountId, roleSession, sql);
         for (Map<String, Object> row : rows) {
             Object value = row.get("file_path");
             if (!(value instanceof String filePath) || filePath.isBlank()) {
@@ -431,8 +431,8 @@ public class ExternalTableMaterializer {
         S3Location manifestList = icebergFileLocation(manifestListPath, location);
         authorizeIcebergObject(accountId, binding, roleSession, manifestList);
         String manifestListUri = "s3://" + manifestList.bucket() + "/" + manifestList.key();
-        List<Map<String, Object>> manifests = duckClient.query(
-                ICEBERG_MANIFESTS.formatted(sqlPathLiteral(manifestListUri)), ICEBERG_SETUP, accountId);
+        List<Map<String, Object>> manifests = duckQuery(accountId, roleSession,
+                ICEBERG_MANIFESTS.formatted(sqlPathLiteral(manifestListUri)));
         for (Map<String, Object> manifest : manifests) {
             Object manifestValue = manifest.get("manifest_path");
             if (!(manifestValue instanceof String manifestPath) || manifestPath.isBlank()) {
@@ -623,7 +623,8 @@ public class ExternalTableMaterializer {
      * match {@code loadedDefinitions} the target table is refilled in place, so views and grants that
      * depend on it survive; a schema change replaces the table instead.
      */
-    private String load(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding, Table table,
+    private String load(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
+                        RedshiftRoleAccess.RoleSession roleSession, Table table,
                         List<ReadSource> sources, String loadedDefinitions) {
         GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(table);
         if (plan.columns().isEmpty()) {
@@ -644,7 +645,7 @@ public class ExternalTableMaterializer {
                 // before a key exists: a scratch bucket that is not ours must see no write and no delete
                 prepareScratchBucket(session.accountId());
                 scratchKey = SCRATCH_KEY_PREFIX + UUID.randomUUID() + ".csv";
-                readWithDuckDb(session.accountId(), table, sources,
+                readWithDuckDb(session.accountId(), roleSession, table, sources,
                         config.services().redshift().spectrumMaxRows(), scratchKey);
                 long rows;
                 String resultKey = scratchKey;
@@ -698,7 +699,8 @@ public class ExternalTableMaterializer {
         });
     }
 
-    private void readWithDuckDb(String accountId, Table table, List<ReadSource> sources, long maxRows,
+    private void readWithDuckDb(String accountId, RedshiftRoleAccess.RoleSession roleSession,
+                                Table table, List<ReadSource> sources, long maxRows,
                                 String scratchKey) {
         List<String> selects = sources.stream().filter(source -> source.partition() == null || !source.objects().isEmpty())
                 .map(this::readSelect).toList();
@@ -709,8 +711,32 @@ public class ExternalTableMaterializer {
         String query = selects.size() == 1 ? selects.getFirst()
                 : "SELECT * FROM (" + String.join(" UNION ALL ", selects) + ") AS spectrum_partitions";
         String setup = GlueTableResolver.isIcebergTable(table) ? ICEBERG_SETUP : null;
-        duckClient.execute(query + " LIMIT " + (maxRows + 1), setup,
-                "s3://" + SCRATCH_BUCKET + "/" + scratchKey, accountId);
+        String outputPath = "s3://" + SCRATCH_BUCKET + "/" + scratchKey;
+        if (s3Service.isAuthEnforced()) {
+            requireSignedSession(roleSession);
+            duckClient.execute(query + " LIMIT " + (maxRows + 1), setup, outputPath,
+                    roleSession.accessKeyId(), roleSession.secretAccessKey(), roleSession.sessionToken());
+        } else {
+            duckClient.execute(query + " LIMIT " + (maxRows + 1), setup, outputPath, accountId);
+        }
+    }
+
+    private List<Map<String, Object>> duckQuery(String accountId, RedshiftRoleAccess.RoleSession roleSession,
+                                                String sql) {
+        if (!s3Service.isAuthEnforced()) {
+            return duckClient.query(sql, ICEBERG_SETUP, accountId);
+        }
+        requireSignedSession(roleSession);
+        return duckClient.query(sql, ICEBERG_SETUP,
+                roleSession.accessKeyId(), roleSession.secretAccessKey(), roleSession.sessionToken());
+    }
+
+    /** Under S3 auth enforcement a transfer never falls back to the account-scoped development credentials. */
+    private static void requireSignedSession(RedshiftRoleAccess.RoleSession roleSession) {
+        if (roleSession == null || roleSession.accessKeyId() == null || roleSession.secretAccessKey() == null) {
+            throw new SpectrumReadException(SQLSTATE_LOAD_FAILED,
+                    "Unable to load external table: no signed role session for the S3 transfer");
+        }
     }
 
     /**
