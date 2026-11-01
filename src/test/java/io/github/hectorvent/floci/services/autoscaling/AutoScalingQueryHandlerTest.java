@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -13,6 +12,8 @@ import org.w3c.dom.NodeList;
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.services.autoscaling.AutoScalingXmlAssertions.XML_NAMESPACE;
+import static io.github.hectorvent.floci.services.autoscaling.AutoScalingXmlAssertions.assertModeledNamespace;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -20,7 +21,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class AutoScalingQueryHandlerTest {
 
     private static final String REGION = "us-east-1";
-    private static final String XML_NAMESPACE = "http://autoscaling.amazonaws.com/doc/2011-01-01/";
 
     @Test
     void describeAutoScalingInstancesEmptyUsesModeledNamespace() throws Exception {
@@ -511,16 +511,5 @@ class AutoScalingQueryHandlerTest {
         assertFalse(xml.contains("<CapacityRebalance>"));
         assertFalse(xml.contains("<MaxInstanceLifetime>"));
         assertFalse(xml.contains("<DefaultInstanceWarmup>"));
-    }
-
-    private static Element assertModeledNamespace(String xml) throws Exception {
-        Element root = XmlParser.parseDocument(xml).getDocumentElement();
-        assertEquals(XML_NAMESPACE, root.getNamespaceURI());
-        NodeList descendants = root.getElementsByTagName("*");
-        for (int i = 0; i < descendants.getLength(); i++) {
-            assertEquals(XML_NAMESPACE, descendants.item(i).getNamespaceURI(),
-                    descendants.item(i).getNodeName());
-        }
-        return root;
     }
 }
