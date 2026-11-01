@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackSet;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSetAutoDeploymentTarget;
 import io.github.hectorvent.floci.services.cloudformation.model.StackSetOperation;
 import io.github.hectorvent.floci.services.iam.PassedRoleLookup;
+import io.github.hectorvent.floci.services.organizations.AccountPlacementListener;
 import io.github.hectorvent.floci.services.organizations.OrganizationsService;
 import io.github.hectorvent.floci.services.organizations.model.Organization;
 import io.github.hectorvent.floci.services.organizations.model.OrganizationAccount;
@@ -26,6 +27,7 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -45,9 +47,13 @@ import java.util.regex.Pattern;
  * single-stack engine ({@link CloudFormationService}) once per target {@code (account, region)},
  * provisioning the resources into each target account's namespace. The StackSet, instance and
  * operation records themselves live in the administration (caller) account's namespace.
+ *
+ * <p>A service-managed stack set with automatic deployment follows the accounts of the organization: an
+ * account created in, invited into or moved under one of its targets gets an instance in every Region
+ * that target was given, and one no target covers any more loses its instances.
  */
 @ApplicationScoped
-public class StackSetService implements PassedRoleLookup {
+public class StackSetService implements PassedRoleLookup, AccountPlacementListener {
 
     private static final Logger LOG = Logger.getLogger(StackSetService.class);
     private static final String STACKSETS_SERVICE_PRINCIPAL = ServicePrincipals.of("stacksets.cloudformation");
@@ -379,6 +385,83 @@ public class StackSetService implements PassedRoleLookup {
                 .toList();
     }
 
+    /**
+     * Automatic deployment: deploys each auto-deploying service-managed stack set to the account in every
+     * Region of the targets that now cover it, and removes its instances from Regions no target covers,
+     * keeping their stacks when the stack set retains stacks on account removal.
+     */
+    @Override
+    public synchronized void accountPlacementChanged(String managementAccountId, String accountId) {
+        RequestScopes.runAs(managementAccountId, () -> {
+            Set<String> ancestors = ancestorsOf(managementAccountId, accountId);
+            for (StackSet stackSet : stackSets.scan(key -> true)) {
+                if ("SERVICE_MANAGED".equals(stackSet.getPermissionModel()) && stackSet.isAutoDeploymentEnabled()) {
+                    autoDeploy(stackSet, accountId, ancestors);
+                }
+            }
+        });
+    }
+
+    /** The root and OUs above an active member account, empty for the management account or one outside the organization. */
+    private Set<String> ancestorsOf(String managementAccountId, String accountId) {
+        if (managementAccountId.equals(accountId)) {
+            return Set.of();
+        }
+        try {
+            if (!"ACTIVE".equals(organizationsService.describeAccount(managementAccountId, accountId).getStatus())) {
+                return Set.of();
+            }
+            Set<String> ancestors = new LinkedHashSet<>(Arrays.asList(
+                    organizationsService.organizationPath(managementAccountId, accountId).split("/")));
+            ancestors.remove(accountId);
+            return ancestors;
+        } catch (AwsException e) {
+            if ("AccountNotFoundException".equals(e.getErrorCode())) {
+                return Set.of();
+            }
+            throw e;
+        }
+    }
+
+    private void autoDeploy(StackSet stackSet, String accountId, Set<String> ancestors) {
+        String name = stackSet.getStackSetName();
+        Map<String, Set<String>> targetsByRegion = new LinkedHashMap<>();
+        for (StackSetAutoDeploymentTarget target : listStackSetAutoDeploymentTargets(name)) {
+            if (ancestors.contains(target.getOrganizationalUnitId())) {
+                for (String region : target.getRegions()) {
+                    targetsByRegion.computeIfAbsent(region, ignored -> new LinkedHashSet<>())
+                            .add(target.getOrganizationalUnitId());
+                }
+            }
+        }
+        for (StackInstance instance : listStackInstances(name, accountId, null)) {
+            if (!targetsByRegion.containsKey(instance.getRegion())) {
+                removeInstance(stackSet, instance);
+            }
+        }
+        targetsByRegion.forEach((region, targets) -> {
+            String key = instanceKey(name, accountId, region);
+            StackInstance existing = instances.get(key).orElse(null);
+            StackInstance instance = existing != null && !"OUTDATED".equals(existing.getStatus())
+                    ? existing : deployInstance(stackSet, accountId, region, INSTANCE_CHANGE_SET, "CREATE");
+            applyDeploymentTargets(instance, targets);
+            instances.put(key, instance);
+        });
+    }
+
+    private void removeInstance(StackSet stackSet, StackInstance instance) {
+        String key = instanceKey(stackSet.getStackSetName(), instance.getAccount(), instance.getRegion());
+        if (!stackSet.isRetainStacksOnAccountRemoval()
+                && !await(cfnService.deleteStack(instance.getStackName(), instance.getRegion(), instance.getAccount()))) {
+            instance.setStatus("INOPERABLE");
+            instance.setDetailedStatus("FAILED");
+            instance.setStatusReason("Stack instance deletion failed");
+            instances.put(key, instance);
+            return;
+        }
+        instances.delete(key);
+    }
+
     public List<StackInstance> listStackInstances(String name, String accountFilter, String regionFilter) {
         getStackSetOrThrow(name);
         String prefix = name + ":";
@@ -544,8 +627,12 @@ public class StackSetService implements PassedRoleLookup {
         for (String ou : organizationalUnits) {
             collectOrganizationTargets(caller, organization, ou, ou, targets);
             if (persistTargets) {
-                autoDeploymentTargets.put(stackSetName + "::" + ou,
-                        new StackSetAutoDeploymentTarget(stackSetName, ou, regions));
+                String key = stackSetName + "::" + ou;
+                LinkedHashSet<String> targetRegions = new LinkedHashSet<>(autoDeploymentTargets.get(key)
+                        .map(StackSetAutoDeploymentTarget::getRegions).orElse(List.of()));
+                targetRegions.addAll(regions);
+                autoDeploymentTargets.put(key,
+                        new StackSetAutoDeploymentTarget(stackSetName, ou, List.copyOf(targetRegions)));
             }
         }
         return new ArrayList<>(targets.values());

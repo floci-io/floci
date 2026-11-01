@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.services.organizations.model.OrganizationalUni
 import io.github.hectorvent.floci.services.organizations.model.PolicyTypeSummary;
 import io.github.hectorvent.floci.services.organizations.model.Root;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -172,11 +173,13 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
     private final boolean scpEnforcementEnabled;
     private final String managementAccountEmail;
     private final AccountAccessRoleProvisioner accountAccessRoleProvisioner;
+    private final Iterable<AccountPlacementListener> placementListeners;
 
     @Inject
     public OrganizationsService(StorageFactory storageFactory, ObjectMapper objectMapper,
                                 EmulatorConfig config, RegionResolver regionResolver,
-                                AccountAccessRoleProvisioner accountAccessRoleProvisioner) {
+                                AccountAccessRoleProvisioner accountAccessRoleProvisioner,
+                                Instance<AccountPlacementListener> placementListeners) {
         EmulatorConfig.OrganizationsServiceConfig organizationsConfig = config.services().organizations();
         this.scpEnforcementEnabled = organizationsConfig.scpEnforcementEnabled();
         this.managementAccountEmail = organizationsConfig.managementAccountEmail()
@@ -185,6 +188,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         this.objectMapper = objectMapper;
         this.regionResolver = regionResolver;
         this.accountAccessRoleProvisioner = accountAccessRoleProvisioner;
+        this.placementListeners = placementListeners;
         this.organizations = storageFactory.create("organizations", "organizations-organizations.json",
                 new TypeReference<Map<String, Organization>>() {});
         this.accounts = storageFactory.create("organizations", "organizations-accounts.json",
@@ -263,6 +267,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
                 ? null
                 : requireValidConfiguredEmail(managementAccountEmail);
         this.accountAccessRoleProvisioner = accountAccessRoleProvisioner;
+        this.placementListeners = List.of();
     }
 
     /** A parent reference as returned by {@code ListParents}. */
@@ -652,7 +657,14 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         createAccountStatuses.putForAccount(organization.getMasterAccountId(), status.getId(), status);
 
         LOG.infov("Created account {0} ({1}) in organization {2}", newAccountId, accountName, organization.getId());
+        placementChanged(organization, newAccountId);
         return status;
+    }
+
+    private void placementChanged(Organization organization, String accountId) {
+        for (AccountPlacementListener listener : placementListeners) {
+            listener.accountPlacementChanged(organization.getMasterAccountId(), accountId);
+        }
     }
 
     public CreateAccountStatus describeCreateAccountStatus(String callerAccountId, String requestId) {
@@ -719,6 +731,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         }
         account.setParentId(destinationParentId);
         accounts.putForAccount(organization.getMasterAccountId(), accountId, account);
+        placementChanged(organization, accountId);
     }
 
     public void removeAccountFromOrganization(String callerAccountId, String accountId) {
@@ -730,6 +743,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         }
         detachAllPoliciesFrom(organization, account.getId());
         accounts.deleteForAccount(organization.getMasterAccountId(), account.getId());
+        placementChanged(organization, account.getId());
     }
 
     public void leaveOrganization(String callerAccountId) {
@@ -741,6 +755,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         OrganizationAccount account = requireAccount(organization, callerAccountId);
         detachAllPoliciesFrom(organization, account.getId());
         accounts.deleteForAccount(organization.getMasterAccountId(), account.getId());
+        placementChanged(organization, account.getId());
     }
 
     public OrganizationAccount closeAccount(String callerAccountId, String accountId) {
@@ -1363,6 +1378,9 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
 
         handshake.setState(HANDSHAKE_ACCEPTED);
         handshakes.putForAccount(organization.getMasterAccountId(), handshakeId, handshake);
+        if (!HANDSHAKE_ENABLE_ALL_FEATURES.equals(handshake.getAction())) {
+            placementChanged(organization, callerAccountId);
+        }
         return handshake;
     }
 
