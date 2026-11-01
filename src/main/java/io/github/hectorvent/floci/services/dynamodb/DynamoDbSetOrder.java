@@ -11,6 +11,8 @@ import java.util.Arrays;
 import java.util.Base64;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.function.Function;
 
 /**
@@ -21,6 +23,12 @@ final class DynamoDbSetOrder {
 
     private record Keyed<K>(JsonNode member, K key) {}
 
+    private record Order<K>(Function<String, K> key, Comparator<K> compare) {}
+
+    private static final Order<BigDecimal> BY_VALUE = new Order<>(DynamoDbSetOrder::numberOf, Comparator.naturalOrder());
+    private static final Order<byte[]> BY_BYTE = new Order<>(DynamoDbSetOrder::bytesOf, Arrays::compareUnsigned);
+    private static final Order<byte[]> BY_CODE_POINT = new Order<>(DynamoDbSetOrder::utf8Of, Arrays::compareUnsigned);
+
     private DynamoDbSetOrder() {}
 
     /** Returns the members in DynamoDB's order, or the input itself when it is not an array. */
@@ -28,19 +36,43 @@ final class DynamoDbSetOrder {
         if (!members.isArray()) {
             return members;
         }
+        return sortedBy(members, orderOf(setType));
+    }
+
+    /** Returns the members as DynamoDB holds them at the first repeat, or null when none repeats. */
+    static List<JsonNode> orderAtFirstRepeat(String setType, JsonNode members) {
+        return orderAtFirstRepeat(members, orderOf(setType));
+    }
+
+    private static Order<?> orderOf(String setType) {
         return switch (setType) {
-            case "NS" -> sortedBy(members, DynamoDbSetOrder::numberOf, Comparator.naturalOrder());
-            case "BS" -> sortedBy(members, DynamoDbSetOrder::bytesOf, Arrays::compareUnsigned);
-            default -> sortedBy(members, DynamoDbSetOrder::utf8Of, Arrays::compareUnsigned);
+            case "NS" -> BY_VALUE;
+            case "BS" -> BY_BYTE;
+            default -> BY_CODE_POINT;
         };
     }
 
-    private static <K> ArrayNode sortedBy(JsonNode members, Function<String, K> key, Comparator<K> order) {
+    // The members before the repeat are sorted. The repeat and the rest stay as sent.
+    private static <K> List<JsonNode> orderAtFirstRepeat(JsonNode members, Order<K> order) {
+        List<JsonNode> sent = new ArrayList<>(members.size());
+        members.forEach(sent::add);
+        Map<K, JsonNode> sorted = new TreeMap<>(order.compare());
+        for (int i = 0; i < sent.size(); i++) {
+            if (sorted.putIfAbsent(order.key().apply(sent.get(i).asText()), sent.get(i)) != null) {
+                List<JsonNode> held = new ArrayList<>(sorted.values());
+                held.addAll(sent.subList(i, sent.size()));
+                return held;
+            }
+        }
+        return null;
+    }
+
+    private static <K> ArrayNode sortedBy(JsonNode members, Order<K> order) {
         List<Keyed<K>> keyed = new ArrayList<>(members.size());
         for (JsonNode member : members) {
-            keyed.add(new Keyed<>(member, key.apply(member.asText())));
+            keyed.add(new Keyed<>(member, order.key().apply(member.asText())));
         }
-        keyed.sort(Comparator.comparing(Keyed::key, order));
+        keyed.sort(Comparator.comparing(Keyed::key, order.compare()));
         ArrayNode result = JsonNodeFactory.instance.arrayNode(keyed.size());
         for (Keyed<K> entry : keyed) {
             result.add(entry.member());

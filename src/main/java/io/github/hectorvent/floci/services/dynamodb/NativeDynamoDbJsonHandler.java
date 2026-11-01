@@ -629,8 +629,6 @@ public class NativeDynamoDbJsonHandler {
         checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression));
         checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression));
 
-        validateItemSets(item);
-
         Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, item, false, expected,
                 conditionalOperator, returnValuesOnConditionCheckFailure);
         JsonNode previousItem = dynamoDbService.putItem(tableName, item, conditionExpression,
@@ -1073,10 +1071,10 @@ public class NativeDynamoDbJsonHandler {
 
     private static final String VALIDATION_ENVELOPE = "1 validation error detected: ";
 
-    // DynamoDB reads the numbers of each request member at its own stage.
+    // DynamoDB reads the values of each request member at its own stage.
     private static void requireReadableValues(JsonNode values, String prefix) {
         if (values != null) {
-            DynamoDbNumberUtils.forEachNumber(values, text -> DynamoDbNumberUtils.requireItemNumber(text, prefix));
+            DynamoDbAttributeValueValidator.requireStorable(values, prefix);
         }
     }
 
@@ -1531,13 +1529,15 @@ public class NativeDynamoDbJsonHandler {
         }
 
         requireValidReturnConsumedCapacity(request);
-        // BatchWriteItem still reads a number the way a PartiQL parameter is read.
+        // BatchWriteItem still reads a value the way a PartiQL parameter is read.
         for (List<JsonNode> writes : items.values()) {
             for (JsonNode writeReq : writes) {
-                DynamoDbNumberUtils.forEachNumber(writeReq.path("PutRequest").path("Item"),
-                        DynamoDbNumberUtils::requirePartiQLParameterNumber);
-                DynamoDbNumberUtils.forEachNumber(writeReq.path("DeleteRequest").path("Key"),
-                        DynamoDbNumberUtils::requirePartiQLParameterNumber);
+                for (JsonNode value : writeReq.path("PutRequest").path("Item")) {
+                    requirePartiQLParameter(value, 1);
+                }
+                for (JsonNode value : writeReq.path("DeleteRequest").path("Key")) {
+                    requirePartiQLParameter(value, 1);
+                }
             }
         }
 
@@ -1646,10 +1646,16 @@ public class NativeDynamoDbJsonHandler {
             }
         }
 
-        // DynamoDB compares the keys as sent before it reads their numbers.
+        // DynamoDB looks at each key as sent before it reads the values in the keys.
         for (JsonNode tableRequest : items.values()) {
             Set<JsonNode> sent = new HashSet<>();
             for (JsonNode key : tableRequest.path("Keys")) {
+                for (JsonNode value : key) {
+                    if (value.has("NULL")) {
+                        throw new AwsException("ValidationException",
+                                "The supplied Item contains a null AttributeValue", 400);
+                    }
+                }
                 if (!sent.add(key)) {
                     throw new AwsException("ValidationException",
                             "Provided list of item keys contains duplicates", 400);
@@ -2841,18 +2847,6 @@ public class NativeDynamoDbJsonHandler {
         }
         response.set("KinesisDataStreamDestinations", destinations);
         return Response.ok(response).build();
-    }
-
-    /**
-     * Builds a ConsumedCapacity node if the request includes ReturnConsumedCapacity.
-     * Uses simple estimates: 0.5 RCU per item read, 1.0 WCU per item written.
-     */
-    private void validateItemSets(JsonNode item) {
-        if (item == null || !item.isObject()) return;
-        item.fields().forEachRemaining(entry -> {
-            JsonNode attr = entry.getValue();
-            checkAttrSets(attr);
-        });
     }
 
     private void checkAttrSets(JsonNode attr) {
