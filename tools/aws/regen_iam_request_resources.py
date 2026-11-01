@@ -121,8 +121,8 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 # are the ones its handlers mint.
 NAMESPACES = ("acm", "athena", "bcm-data-exports", "bcm-pricing-calculator", "budgets", "ce", "cloudtrail",
               "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "cur", "ecr", "elasticloadbalancing",
-              "events", "firehose", "globalaccelerator", "kinesisanalytics", "payment-cryptography",
-              "servicediscovery", "servicequotas",
+              "events", "firehose", "globalaccelerator", "kinesisanalytics", "servicediscovery",
+              "servicequotas",
               "states", "textract", "timestream-influxdb", "translate")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
@@ -138,7 +138,8 @@ CLIENTS_NOT_READ: dict[str, str] = {
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
 HAND_BUILT = ("apigateway", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes",
-              "resource-groups", "s3", "scheduler", "secretsmanager", "sns", "sqs", "ssm", "sts")
+              "payment-cryptography", "resource-groups", "s3", "scheduler", "secretsmanager", "sns", "sqs",
+              "ssm", "sts")
 
 _LATER = "not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
 _REST = "REST: its requests name their resources in the path, which RequestResources does not read yet"

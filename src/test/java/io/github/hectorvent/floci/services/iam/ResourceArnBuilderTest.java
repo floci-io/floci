@@ -15,6 +15,8 @@ import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.ServerCertificate;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
+import io.github.hectorvent.floci.services.paymentcryptography.PaymentCryptographyService;
+import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryptographyKey;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -1167,6 +1169,14 @@ class ResourceArnBuilderTest {
         return new ResourceArnBuilder(new ObjectMapper(), null, null, null, null, instance);
     }
 
+    /** A builder reading {@code payment-cryptography}, for a key named by an id, an alias or an ARN. */
+    private static ResourceArnBuilder backedBy(PaymentCryptographyService service) {
+        @SuppressWarnings("unchecked")
+        Instance<PaymentCryptographyService> instance = mock(Instance.class);
+        when(instance.get()).thenReturn(service);
+        return new ResourceArnBuilder(new ObjectMapper(), null, null, null, null, null, null, instance);
+    }
+
     /**
      * The gap issue 6256 describes. KMS is a JSON protocol on {@code /} with the key in the body,
      * so reading a {@code /keys/<id>} path segment named nothing and every call was evaluated
@@ -1193,6 +1203,98 @@ class ResourceArnBuilderTest {
             setJsonBody("{\"KeyId\":\"" + KMS_KEY_ID + "\"}");
             assertEquals(List.of(KMS_KEY_ARN),
                     backed.buildKmsResources(action, ctx, "us-east-1", ACCOUNT, "aws"), action);
+        }
+    }
+
+    private static final String PC_KEY_ARN =
+            "arn:aws:payment-cryptography:us-east-1:000000000000:key/abc123";
+    private static final String PC_KEY_ID = "abc123";
+
+    /**
+     * A key named by an alias is authorized against the key it points at, as the handler resolves
+     * it. Otherwise an {@code Allow} scoped to {@code key/*} passes while an {@code Deny} scoped
+     * to the key the alias names is missed, and the caller reads or deletes a key it was denied.
+     */
+    @Test
+    void paymentCryptographyResolvesAnAliasToTheKeyItPointsAt() {
+        PaymentCryptographyService service = mock(PaymentCryptographyService.class);
+        PaymentCryptographyKey key = new PaymentCryptographyKey();
+        key.setKeyId(PC_KEY_ID);
+        key.setArn(PC_KEY_ARN);
+        when(service.findKey("us-east-1", "alias/team/card-key")).thenReturn(key);
+        ResourceArnBuilder backed = backedBy(service);
+
+        setJsonBody("{\"KeyIdentifier\":\"alias/team/card-key\"}");
+        assertEquals(List.of(PC_KEY_ARN),
+                backed.buildPaymentCryptographyResources("payment-cryptography:GetKey", ctx,
+                        "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /** A key named by its id is authorized against that key. */
+    @Test
+    void paymentCryptographyNamesTheKeyAKeyScopedOperationActsOn() {
+        PaymentCryptographyService service = mock(PaymentCryptographyService.class);
+        PaymentCryptographyKey key = new PaymentCryptographyKey();
+        key.setKeyId(PC_KEY_ID);
+        key.setArn(PC_KEY_ARN);
+        when(service.findKey("us-east-1", PC_KEY_ID)).thenReturn(key);
+        ResourceArnBuilder backed = backedBy(service);
+
+        for (String operation : List.of("payment-cryptography:GetKey", "payment-cryptography:DeleteKey",
+                "payment-cryptography:StartKeyUsage", "payment-cryptography:StopKeyUsage",
+                "payment-cryptography:RestoreKey",
+                "payment-cryptography:GetPublicKeyCertificate")) {
+            setJsonBody("{\"KeyIdentifier\":\"" + PC_KEY_ID + "\"}");
+            assertEquals(List.of(PC_KEY_ARN),
+                    backed.buildPaymentCryptographyResources(operation, ctx, "us-east-1", ACCOUNT, "aws"),
+                    operation);
+        }
+    }
+
+    /** The tagging operations name their key in {@code ResourceArn}. */
+    @Test
+    void paymentCryptographyNamesTheKeyTheTaggingOperationsActOn() {
+        ResourceArnBuilder backed = backedBy(mock(PaymentCryptographyService.class));
+
+        for (String operation : List.of("payment-cryptography:TagResource",
+                "payment-cryptography:UntagResource", "payment-cryptography:ListTagsForResource")) {
+            setJsonBody("{\"ResourceArn\":\"" + PC_KEY_ARN + "\"}");
+            assertEquals(List.of(PC_KEY_ARN),
+                    backed.buildPaymentCryptographyResources(operation, ctx, "us-east-1", ACCOUNT, "aws"),
+                    operation);
+        }
+    }
+
+    /** The alias operations name the alias, and the key the alias points at where they name one. */
+    @Test
+    void paymentCryptographyNamesTheAliasAndTheKeyItPointsAt() {
+        ResourceArnBuilder backed = backedBy(mock(PaymentCryptographyService.class));
+
+        setJsonBody("{\"AliasName\":\"alias/team/card-key\"}");
+        assertEquals(List.of("arn:aws:payment-cryptography:us-east-1:000000000000:alias/team/card-key"),
+                backed.buildPaymentCryptographyResources("payment-cryptography:GetAlias", ctx,
+                        "us-east-1", ACCOUNT, "aws"));
+
+        setJsonBody("{\"AliasName\":\"alias/team/card-key\",\"KeyArn\":\"" + PC_KEY_ARN + "\"}");
+        assertEquals(List.of(PC_KEY_ARN,
+                        "arn:aws:payment-cryptography:us-east-1:000000000000:alias/team/card-key"),
+                backed.buildPaymentCryptographyResources("payment-cryptography:CreateAlias", ctx,
+                        "us-east-1", ACCOUNT, "aws"));
+    }
+
+    /** The operations that act on no particular resource are checked against every resource. */
+    @Test
+    void paymentCryptographyLeavesTheOperationsWithoutAResourceAlone() {
+        ResourceArnBuilder backed = backedBy(mock(PaymentCryptographyService.class));
+
+        for (String operation : List.of("payment-cryptography:CreateKey", "payment-cryptography:ImportKey",
+                "payment-cryptography:ListKeys", "payment-cryptography:ListAliases",
+                "payment-cryptography:GetParametersForImport",
+                "payment-cryptography:GetParametersForExport")) {
+            setJsonBody("{}");
+            assertEquals(List.of("*"),
+                    backed.buildPaymentCryptographyResources(operation, ctx, "us-east-1", ACCOUNT, "aws"),
+                    operation);
         }
     }
 
