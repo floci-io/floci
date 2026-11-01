@@ -2096,18 +2096,22 @@ class NativeDynamoDbJsonHandlerTest {
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("PutItem", request, "eu-west-1"));
-        String expected = switch (problem) {
+        String expected = numberProblem(problem, number);
+        if (expected == null) {
+            assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        } else {
+            assertEquals("1 validation error detected: " + expected, ex.getMessage());
+        }
+    }
+
+    private static String numberProblem(String problem, String number) {
+        return switch (problem) {
             case "NOT_NUMERIC" -> DynamoDbNumberUtils.PARAMETER_NOT_NUMERIC + ": " + number;
             case "OVERFLOW" -> DynamoDbNumberUtils.NUMBER_OVERFLOW;
             case "UNDERFLOW" -> DynamoDbNumberUtils.NUMBER_UNDERFLOW;
             case "DIGITS" -> DynamoDbNumberUtils.TOO_MANY_DIGITS;
             default -> null;
         };
-        if (expected == null) {
-            assertEquals("ResourceNotFoundException", ex.getErrorCode());
-        } else {
-            assertEquals("1 validation error detected: " + expected, ex.getMessage());
-        }
     }
 
     @ParameterizedTest
@@ -2131,11 +2135,12 @@ class NativeDynamoDbJsonHandlerTest {
     void everyNumberInARequestIsReadBeforeTheOtherChecks(String operation, boolean enveloped, String problem,
             String template) throws Exception {
         createUsersTable("eu-west-1");
-        JsonNode request = mapper.readTree(template.formatted("1e2147483647"));
+        String number = "1e2147483647";
+        JsonNode request = mapper.readTree(template.formatted(number));
 
         AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, request, "eu-west-1"));
-        String message = "OVERFLOW".equals(problem) ? DynamoDbNumberUtils.NUMBER_OVERFLOW : DynamoDbNumberUtils.NUMBER_UNDERFLOW;
-        assertEquals((enveloped ? "1 validation error detected: " : "") + message, ex.getMessage());
+        assertEquals((enveloped ? "1 validation error detected: " : "") + numberProblem(problem, number),
+                ex.getMessage());
     }
 
     @ParameterizedTest

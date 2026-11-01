@@ -122,20 +122,20 @@ final class DynamoDbNumberUtils {
         return toNormalizedString(stripped);
     }
 
-    static void forEachNumber(JsonNode value, Consumer<String> check) {
-        if (!value.isObject()) {
-            return;
-        }
-        if (value.path("N").isTextual()) {
-            check.accept(value.get("N").asText());
-        }
-        for (JsonNode member : value.path("NS")) {
-            if (member.isTextual()) {
-                check.accept(member.asText());
+    static void forEachNumber(JsonNode values, Consumer<String> check) {
+        for (JsonNode value : values) {
+            JsonNode number = value.get("N");
+            if (number != null && number.isTextual()) {
+                check.accept(number.asText());
             }
+            for (JsonNode member : value.path("NS")) {
+                if (member.isTextual()) {
+                    check.accept(member.asText());
+                }
+            }
+            forEachNumber(value.path("L"), check);
+            forEachNumber(value.path("M"), check);
         }
-        value.path("L").forEach(element -> forEachNumber(element, check));
-        value.path("M").forEach(element -> forEachNumber(element, check));
     }
 
     static void requireItemNumber(String text, String prefix) {

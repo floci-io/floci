@@ -599,7 +599,7 @@ public class NativeDynamoDbJsonHandler {
         if (!validationErrors.isEmpty()) {
             throw SmithyValidationErrors.validationException(validationErrors);
         }
-        requireReadableNumbers(request, VALIDATION_ENVELOPE, "Item");
+        requireReadableValues(item, VALIDATION_ENVELOPE);
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(item);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
@@ -614,7 +614,7 @@ public class NativeDynamoDbJsonHandler {
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}", 400);
         }
-        requireReadableNumbers(request, VALIDATION_ENVELOPE, "ExpressionAttributeValues");
+        requireReadableValues(exprAttrValues, VALIDATION_ENVELOPE);
 
         // EAN/EAV with no expression to reference them: AWS reports "can only be specified
         // when using expressions", not the "unused in expressions" wording (#2893).
@@ -656,7 +656,7 @@ public class NativeDynamoDbJsonHandler {
 
         DynamoDbAccessPathValidator.validateAttributesToGet(attributesToGet);
         requireValidReturnConsumedCapacity(request);
-        requireReadableNumbers(request, "", "Key");
+        requireReadableValues(key, "");
         if (attributesToGet != null && projectionExpression != null) {
             throw new AwsException("ValidationException",
                     "Can not use both expression and non-expression parameters in the same request: "
@@ -717,7 +717,7 @@ public class NativeDynamoDbJsonHandler {
         if (!delValidationErrors.isEmpty()) {
             throw SmithyValidationErrors.validationException(delValidationErrors);
         }
-        requireReadableNumbers(request, VALIDATION_ENVELOPE, "Key");
+        requireReadableValues(key, VALIDATION_ENVELOPE);
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
         JsonNode expectedDel = request.has("Expected") ? request.get("Expected") : null;
@@ -728,7 +728,7 @@ public class NativeDynamoDbJsonHandler {
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}", 400);
         }
-        requireReadableNumbers(request, VALIDATION_ENVELOPE, "ExpressionAttributeValues");
+        requireReadableValues(exprAttrValues, VALIDATION_ENVELOPE);
 
         // EAN/EAV with no expression to reference them: AWS reports "can only be specified
         // when using expressions", not the "unused in expressions" wording (#2893).
@@ -784,7 +784,7 @@ public class NativeDynamoDbJsonHandler {
                     + "Member must satisfy enum value set: [NONE, ALL_OLD, ALL_NEW, UPDATED_OLD, UPDATED_NEW]");
         }
         requireValidReturnConsumedCapacity(request);
-        requireReadableNumbers(request, VALIDATION_ENVELOPE, "Key");
+        requireReadableValues(key, VALIDATION_ENVELOPE);
         DynamoDbExpressionSize.checkWrite(updateExpression, "UpdateExpression");
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
@@ -803,13 +803,13 @@ public class NativeDynamoDbJsonHandler {
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}", 400);
         }
-        requireReadableNumbers(request, VALIDATION_ENVELOPE, "ExpressionAttributeValues");
+        requireReadableValues(exprAttrValues, VALIDATION_ENVELOPE);
 
         // EAN/EAV with no expression to reference them, mirroring the PutItem guard.
         rejectExprAttrsWithoutExpression(exprAttrNames, exprAttrValues,
                 updateExpression != null || conditionExpression != null,
                 "UpdateExpression is null, ConditionExpression is null");
-        requireReadableNumbers(request, VALIDATION_ENVELOPE, "AttributeUpdates");
+        requireReadableValues(attributeUpdateValues, VALIDATION_ENVELOPE);
 
         ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
 
@@ -1072,21 +1072,12 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private static final String VALIDATION_ENVELOPE = "1 validation error detected: ";
-    private static final Set<String> LEGACY_CONDITIONS =
-            Set.of("Expected", "AttributeUpdates", "KeyConditions", "QueryFilter", "ScanFilter");
 
-    // DynamoDB reads the numbers of each member at its own stage, and ignores a member that the
-    // operation does not have.
-    private void requireReadableNumbers(JsonNode request, String prefix, String... members) {
-        for (String member : members) {
-            requireReadableValues(LEGACY_CONDITIONS.contains(member)
-                    ? legacyValues(request.get(member)) : request.path(member), prefix);
-        }
-    }
-
+    // DynamoDB reads the numbers of each request member at its own stage.
     private static void requireReadableValues(JsonNode values, String prefix) {
-        values.forEach(value ->
-                DynamoDbNumberUtils.forEachNumber(value, text -> DynamoDbNumberUtils.requireItemNumber(text, prefix)));
+        if (values != null) {
+            DynamoDbNumberUtils.forEachNumber(values, text -> DynamoDbNumberUtils.requireItemNumber(text, prefix));
+        }
     }
 
     private static final Set<String> VALID_SELECT = Set.of(
@@ -1138,8 +1129,10 @@ public class NativeDynamoDbJsonHandler {
                         ? List.of("AttributesToGet", "QueryFilter", "ConditionalOperator")
                         : List.of("AttributesToGet", "QueryFilter", "ConditionalOperator", "KeyConditions"),
                 List.of("ProjectionExpression", "FilterExpression", "KeyConditionExpression"));
-        requireReadableNumbers(request, "",
-                "ExpressionAttributeValues", "ExclusiveStartKey", "KeyConditions", "QueryFilter");
+        requireReadableValues(exprAttrValues, "");
+        requireReadableValues(exclusiveStartKey, "");
+        requireReadableValues(legacyValues(keyConditions), "");
+        requireReadableValues(legacyValues(queryFilter), "");
 
         if (keyConditionExpr == null && keyConditions == null) {
             throw new AwsException("ValidationException",
@@ -1304,7 +1297,9 @@ public class NativeDynamoDbJsonHandler {
         rejectMixedParameters(request,
                 List.of("AttributesToGet", "ScanFilter", "ConditionalOperator"),
                 List.of("ProjectionExpression", "FilterExpression"));
-        requireReadableNumbers(request, "", "ExpressionAttributeValues", "ExclusiveStartKey", "ScanFilter");
+        requireReadableValues(exprAttrValues, "");
+        requireReadableValues(exclusiveStartKey, "");
+        requireReadableValues(legacyValues(scanFilter), "");
 
         DynamoDbExpressionSize.checkReadWithSize(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpressionScan, "ProjectionExpression");
@@ -1535,15 +1530,14 @@ public class NativeDynamoDbJsonHandler {
             }
         }
 
-        String returnCCBatch = request.path("ReturnConsumedCapacity").asText("NONE");
         requireValidReturnConsumedCapacity(request);
         // BatchWriteItem still reads a number the way a PartiQL parameter is read.
-        Consumer<JsonNode> read = value ->
-                DynamoDbNumberUtils.forEachNumber(value, DynamoDbNumberUtils::requirePartiQLParameterNumber);
         for (List<JsonNode> writes : items.values()) {
             for (JsonNode writeReq : writes) {
-                writeReq.path("PutRequest").path("Item").forEach(read);
-                writeReq.path("DeleteRequest").path("Key").forEach(read);
+                DynamoDbNumberUtils.forEachNumber(writeReq.path("PutRequest").path("Item"),
+                        DynamoDbNumberUtils::requirePartiQLParameterNumber);
+                DynamoDbNumberUtils.forEachNumber(writeReq.path("DeleteRequest").path("Key"),
+                        DynamoDbNumberUtils::requirePartiQLParameterNumber);
             }
         }
 
@@ -1564,6 +1558,7 @@ public class NativeDynamoDbJsonHandler {
         }
 
         // The per-table write cost needs the stored images from before the batch runs.
+        String returnCCBatch = request.path("ReturnConsumedCapacity").asText("NONE");
         Map<String, DynamoDbWriteCapacity.Cost> costs = null;
         if (!"NONE".equals(returnCCBatch)) {
             costs = new LinkedHashMap<>();
@@ -2433,10 +2428,10 @@ public class NativeDynamoDbJsonHandler {
                 DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
                 DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Key"), false);
                 DynamoDbAttributeValueValidator.requireNestingWithinLimit(opExprAttrValues, false);
-                requireReadableNumbers(op, "", "Put".equals(action.getKey()) ? "Item" : "Key");
+                requireReadableValues(op.get("Put".equals(action.getKey()) ? "Item" : "Key"), "");
                 // An action without an expression ignores its ExpressionAttributeValues.
                 if (conditionExpression != null || updateExpression != null) {
-                    requireReadableNumbers(op, "", "ExpressionAttributeValues");
+                    requireReadableValues(opExprAttrValues, "");
                 }
                 DynamoDbExpressionSize.checkRead(op.path("UpdateExpression").textValue(), "UpdateExpression");
                 DynamoDbExpressionSize.checkReadWithSize(conditionExpression, "ConditionExpression");
@@ -2585,7 +2580,7 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleTransactGetItems(JsonNode request, String region) {
         JsonNode transactItemsNode = requireValidTransactRequest(request);
-        transactItemsNode.forEach(txItem -> requireReadableNumbers(txItem.path("Get"), "", "Key"));
+        transactItemsNode.forEach(txItem -> requireReadableValues(txItem.path("Get").path("Key"), ""));
 
         for (JsonNode txItem : transactItemsNode) {
             DynamoDbExpressionSize.checkRead(txItem.path("Get").path("ProjectionExpression").textValue(),
