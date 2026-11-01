@@ -345,4 +345,42 @@ class ElasticsearchIntegrationTest {
         .then()
             .statusCode(409);
     }
+
+    @Test
+    @Order(14)
+    void createElasticsearch71Domain() {
+        // AWS still creates 7.1-7.8 domains while they are in Extended Support.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"DomainName\":\"legacy-es-71\",\"ElasticsearchVersion\":\"7.1\"}")
+        .when()
+            .post("/2015-01-01/es/domain")
+        .then()
+            .statusCode(200)
+            .body("DomainStatus.ElasticsearchVersion", equalTo("7.1"));
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/2021-01-01/opensearch/domain/legacy-es-71")
+        .then()
+            .statusCode(200)
+            .body("DomainStatus.EngineVersion", equalTo("Elasticsearch_7.1"));
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/2021-01-01/opensearch/versions")
+        .then()
+            .statusCode(200)
+            .body("Versions", hasItems("Elasticsearch_7.7", "Elasticsearch_7.4", "Elasticsearch_7.1"));
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .delete("/2015-01-01/es/domain/legacy-es-71")
+        .then()
+            .statusCode(200);
+    }
 }

@@ -132,6 +132,26 @@ class OpenSearchVersionsTest {
     }
 
     @Test
+    void elasticsearch71To77AreSupportedWithLaterSevenXAndOpenSearch1xTargets() {
+        assertEquals("docker.elastic.co/elasticsearch/elasticsearch-oss:7.1.1",
+                OpenSearchVersions.imageFor("Elasticsearch_7.1"));
+        assertEquals("docker.elastic.co/elasticsearch/elasticsearch-oss:7.4.2",
+                OpenSearchVersions.imageFor("Elasticsearch_7.4"));
+        assertEquals("docker.elastic.co/elasticsearch/elasticsearch-oss:7.7.1",
+                OpenSearchVersions.imageFor("Elasticsearch_7.7"));
+        assertEquals(List.of("Elasticsearch_7.4", "Elasticsearch_7.7", "Elasticsearch_7.8",
+                "Elasticsearch_7.9", "Elasticsearch_7.10", "OpenSearch_1.0", "OpenSearch_1.1",
+                "OpenSearch_1.2", "OpenSearch_1.3"),
+                OpenSearchVersions.compatibleTargets("Elasticsearch_7.1"));
+        assertEquals(List.of("Elasticsearch_7.7", "Elasticsearch_7.8", "Elasticsearch_7.9",
+                "Elasticsearch_7.10", "OpenSearch_1.0", "OpenSearch_1.1", "OpenSearch_1.2",
+                "OpenSearch_1.3"), OpenSearchVersions.compatibleTargets("Elasticsearch_7.4"));
+        assertEquals(List.of("Elasticsearch_7.8", "Elasticsearch_7.9", "Elasticsearch_7.10",
+                "OpenSearch_1.0", "OpenSearch_1.1", "OpenSearch_1.2", "OpenSearch_1.3"),
+                OpenSearchVersions.compatibleTargets("Elasticsearch_7.7"));
+    }
+
+    @Test
     void compatibleTargetsCoverElasticsearch79Upgrades() {
         assertEquals(List.of("Elasticsearch_7.10", "OpenSearch_1.0", "OpenSearch_1.1",
                 "OpenSearch_1.2", "OpenSearch_1.3"),
