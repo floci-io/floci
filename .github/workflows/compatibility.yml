@@ -345,7 +345,11 @@ jobs:
             public.ecr.aws/lambda/nodejs:20 public.ecr.aws/lambda/provided:al2023 \
             floci/floci-duck:latest floci/floci-sidecar-cedar:1.1.0 floci/floci-sidecar-graphql:0.2.0 \
             nginx:alpine nginx:latest alpine:3 alpine:latest busybox:stable busybox:latest; do
-            nohup docker pull -q "$image" > /dev/null 2>&1 &
+            nohup bash -c '
+              start=$SECONDS
+              if err=$(docker pull -q "$1" 2>&1 >/dev/null); then result=ok; else result=FAILED; fi
+              echo "$result $((SECONDS - start))s $1 $err" >> "$RUNNER_TEMP/pre-pull.log"
+            ' _ "$image" > /dev/null 2>&1 &
           done
 
       - name: Create Docker network
@@ -465,6 +469,19 @@ jobs:
         # Measurement-only: a reporting bug must never fail an otherwise-green leg.
         continue-on-error: true
         run: python3 .github/ci/compat-timing-report.py test-results
+
+      # An image missing from the list was still pulling when the tests ended. A failed pull falls
+      # back to Floci pulling it during the tests, so it costs time, not the leg.
+      - name: Report pre-pull results
+        if: always() && matrix.test == 'sdk-test-java' && steps.tests.outcome != 'skipped'
+        continue-on-error: true
+        run: |
+          log="$RUNNER_TEMP/pre-pull.log"
+          touch "$log"
+          { echo '```'; sort "$log"; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY"
+          if grep -q '^FAILED' "$log"; then
+            echo "::warning::$(grep -c '^FAILED' "$log") pre-pulled images failed, see the job summary"
+          fi
 
       - name: Upload test results
         if: always() && steps.tests.outcome != 'skipped'
