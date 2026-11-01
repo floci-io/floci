@@ -2357,12 +2357,14 @@ final class CognitoAuthFlowHandler {
      * users of such a pool choose only which one is preferred. An SMS factor needs a pool that offers SMS
      * MFA and the user's phone number; an email factor needs the pool's EmailMfaConfiguration and the
      * user's email address.
+     * Neither counts when its attribute is the pool's primary account-recovery destination, as in AWS.
      */
     private List<String> mfaFactors(UserPool pool, CognitoUser user) {
         boolean required = "ON".equals(pool.getMfaConfiguration());
         boolean messaging = service.verificationServicesConfigured();
         List<String> factors = new ArrayList<>();
         if (messaging && smsMfaOffered(pool) && user.getAttributes().get("phone_number") != null
+                && service.isNotPrimaryRecoveryAttribute(pool, "phone_number")
                 && (required || (user.getSmsMfaSettings() != null && user.getSmsMfaSettings().isEnabled()))) {
             factors.add("SMS_MFA");
         }
@@ -2370,6 +2372,7 @@ final class CognitoAuthFlowHandler {
             factors.add("SOFTWARE_TOKEN_MFA");
         }
         if (messaging && pool.getEmailMfaConfiguration() != null && user.getAttributes().get("email") != null
+                && service.isNotPrimaryRecoveryAttribute(pool, "email")
                 && (required || (user.getEmailMfaSettings() != null && user.getEmailMfaSettings().isEnabled()))) {
             factors.add("EMAIL_OTP");
         }

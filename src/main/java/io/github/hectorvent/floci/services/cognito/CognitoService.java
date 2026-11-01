@@ -6593,6 +6593,22 @@ public class CognitoService implements ResourceProvider {
                 .orElse(null);
     }
 
+    /**
+     * Whether {@code attribute} ({@code email} or {@code phone_number}) is the pool's primary self-service
+     * account-recovery destination, i.e. the highest-priority mechanism of its AccountRecoverySetting.
+     * A pool with no AccountRecoverySetting has no primary destination here. AWS does not offer that
+     * attribute as an email or SMS MFA factor, since a recovery code sent there would bypass the factor.
+     */
+    boolean isNotPrimaryRecoveryAttribute(UserPool pool, String attribute) {
+        List<String> mechanisms = accountRecoveryMechanisms(pool);
+        if (mechanisms.isEmpty()) {
+            return true;
+        }
+        String primary = mechanisms.get(0);
+        return (!"email".equals(attribute) || !"verified_email".equals(primary))
+                && (!"phone_number".equals(attribute) || !"verified_phone_number".equals(primary));
+    }
+
     private List<String> accountRecoveryMechanisms(UserPool pool) {
         Map<String, Object> setting = pool.getAccountRecoverySetting();
         if (setting == null) {
