@@ -12,6 +12,8 @@ import software.amazon.awssdk.services.paymentcryptographydata.model.MacAlgorith
 import software.amazon.awssdk.services.paymentcryptographydata.model.MacAttributes;
 import software.amazon.awssdk.services.paymentcryptographydata.model.SymmetricEncryptionAttributes;
 
+import java.nio.charset.StandardCharsets;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
