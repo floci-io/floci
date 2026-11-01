@@ -30,10 +30,13 @@ import static io.github.hectorvent.floci.services.emr.EmrServiceFixture.ACCOUNT;
 import static io.github.hectorvent.floci.services.emr.EmrServiceFixture.REGION;
 import static io.github.hectorvent.floci.services.emr.EmrServiceFixture.cluster;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -63,7 +66,10 @@ class EmrServiceContainerStepsTest {
     void aStepRunsInAContainerFromWhenItStartsUntilItsDriverExits() {
         EmrCluster requested = cluster("real", true, sparkStep("report", "CONTINUE"));
         requested.setConfigurations("""
-                [{"Classification": "spark-defaults", "Properties": {"spark.executor.cores": "2"}}]""");
+                [{"Classification": "spark-defaults", "Properties": {"spark.executor.cores": "2"}},
+                 {"Classification": "spark-hive-site", "Properties": {"hive.metastore.glue.catalogid": "111122223333"}},
+                 {"Classification": "spark-env", "Configurations": [
+                   {"Classification": "export", "Properties": {"PYSPARK_PYTHON": "/usr/bin/python3.11"}}]}]""");
         EmrCluster cluster = service.runJobFlow(requested, REGION);
         String stepId = cluster.getSteps().get(0).getId();
 
@@ -88,10 +94,14 @@ class EmrServiceContainerStepsTest {
         assertNull(job.dockerNetwork());
         assertEquals(List.of(REPORT, "s3://bucket/out/"), job.application());
         assertNull(job.command());
-        assertEquals(Map.of("spark.executor.cores", "2"), job.sparkDefaults());
+        assertEquals(Map.of("spark.executor.cores", "2", "spark.hadoop.hive.metastore.glue.catalogid", "111122223333"),
+                job.sparkDefaults());
         assertEquals(Duration.ZERO, job.timeout());
         assertNull(job.logFolder());
         assertNull(job.cloudWatchLogs());
+        assertEquals(Map.of("PYSPARK_PYTHON", "/usr/bin/python3.11"), job.environment());
+        assertEquals(new SparkJobRunner.Storage(cluster.getId() + "-home", cluster.getId() + "-mnt"), job.storage());
+        assertEquals(List.of(cluster.getId()), fixture.clusterStorage.created);
     }
 
     @Test
@@ -441,21 +451,23 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
-    void leftoverDriversAndBootstrapImagesAreRemovedWhenTheServiceStartsUnlessReconcilingIsOff() {
+    void leftoverDriversBootstrapImagesAndStorageAreRemovedWhenTheServiceStartsUnlessReconcilingIsOff() {
         for (boolean reconcile : List.of(true, false)) {
             EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
             when(config.services().emr().runnerMode()).thenReturn("docker");
             when(config.services().emr().reconcileContainersOnStartup()).thenReturn(reconcile);
             EmrServerlessSparkRunner sparkRunner = mock(EmrServerlessSparkRunner.class);
             EmrBootstrapRunner bootstrapRunner = mock(EmrBootstrapRunner.class);
+            EmrClusterStorage clusterStorage = mock(EmrClusterStorage.class);
             RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
 
             new EmrService(new InMemoryStorageFactory(ACCOUNT), config, regionResolver,
                     new EmrEventPublisher(mock(EventBridgeService.class), new ObjectMapper(), regionResolver),
-                    sparkRunner, bootstrapRunner, mock(IamService.class)).shutdown();
+                    sparkRunner, bootstrapRunner, clusterStorage, mock(IamService.class)).shutdown();
 
             verify(sparkRunner, times(reconcile ? 1 : 0)).removeLeftoverDrivers("emr");
             verify(bootstrapRunner, times(reconcile ? 1 : 0)).removeImages(Set.of());
+            verify(clusterStorage, times(reconcile ? 1 : 0)).removeAllBut(Set.of());
         }
     }
 
@@ -614,6 +626,122 @@ class EmrServiceContainerStepsTest {
         assertEquals(List.of(IMAGE, IMAGE), bootstrap.removed);
         assertNull(bootstrapping.service.describeCluster(cluster.getId()).getBootstrapImage());
         assertEquals(0, bootstrapping.stepThreadsWaiting());
+    }
+
+    @Test
+    void aClustersStepsShareItsStorageWhichGoesOnceItHasEndedAndItsLastStepIsDone() {
+        EmrCluster cluster = service.runJobFlow(cluster("shared", false, sparkStep("load", "CONTINUE"),
+                sparkStep("report", "CONTINUE")), REGION);
+        fixture.runStepThread();
+        // The second step's driver, still running as its cluster ends, still needs the storage, however often
+        // the cluster is read meanwhile.
+        List<Integer> threadsAsTheClusterEnded = new ArrayList<>();
+        runner.whileRunning = () -> {
+            service.terminateJobFlows(List.of(cluster.getId()));
+            service.describeCluster(cluster.getId());
+            threadsAsTheClusterEnded.add(fixture.stepThreadsWaiting());
+        };
+
+        fixture.runStepThread();
+        assertEquals(List.of(0), threadsAsTheClusterEnded);
+        assertTrue(service.describeCluster(cluster.getId()).isStorageCreated());
+        fixture.runStepThread();
+
+        SparkJobRunner.Storage storage = new SparkJobRunner.Storage(cluster.getId() + "-home",
+                cluster.getId() + "-mnt");
+        assertEquals(List.of(storage, storage), runner.jobs.stream().map(SparkJobRunner.Job::storage).toList());
+        assertEquals(List.of(cluster.getId()), fixture.clusterStorage.removed);
+        assertFalse(service.describeCluster(cluster.getId()).isStorageCreated());
+        assertEquals(0, fixture.stepThreadsWaiting());
+    }
+
+    @Test
+    void theStorageOfAClusterItsLastStepEndedGoesWithoutTheClusterBeingReadAgain() {
+        EmrCluster cluster = service.runJobFlow(cluster("finished", false, sparkStep("report", "CONTINUE")), REGION);
+
+        fixture.runStepThread();
+        // The step's end ended the cluster, and its storage's removal is on a thread of its own already.
+        assertEquals(1, fixture.stepThreadsWaiting());
+        fixture.runStepThread();
+
+        assertEquals(List.of(cluster.getId()), fixture.clusterStorage.removed);
+        EmrCluster ended = service.describeCluster(cluster.getId());
+        assertEquals("TERMINATED", ended.getState());
+        assertFalse(ended.isStorageCreated());
+    }
+
+    @Test
+    void storageMadeAsAResetSweptGoesOnceItsStepsThreadIsDone() {
+        EmrCluster cluster = service.runJobFlow(cluster("reset", true, sparkStep("load", "CONTINUE")), REGION);
+        // The reset sweeps every cluster's storage while the step's thread is making it.
+        fixture.clusterStorage.whileCreating = service::beforeReset;
+
+        fixture.runStepThread();
+
+        assertEquals(List.of(Set.of()), fixture.clusterStorage.kept);
+        assertEquals(List.of(cluster.getId()), fixture.clusterStorage.removed);
+        assertEquals(List.of(), runner.driversStarted);
+    }
+
+    @Test
+    void storageDockerRefusesToRemoveIsTriedAgainTheNextTimeItsClusterIsRead() {
+        EmrCluster cluster = service.runJobFlow(cluster("refused", true, sparkStep("load", "CONTINUE")), REGION);
+        fixture.runStepThread();
+        fixture.clusterStorage.refuse = true;
+        service.terminateJobFlows(List.of(cluster.getId()));
+
+        // One removal at a time, however often the cluster is read meanwhile.
+        service.describeCluster(cluster.getId());
+        assertEquals(1, fixture.stepThreadsWaiting());
+        fixture.runStepThread();
+        // Refused: the cluster still keeps its storage, and reading it tries again.
+        assertTrue(service.describeCluster(cluster.getId()).isStorageCreated());
+        fixture.clusterStorage.refuse = false;
+        fixture.runStepThread();
+
+        assertEquals(List.of(cluster.getId(), cluster.getId()), fixture.clusterStorage.removed);
+        assertFalse(service.describeCluster(cluster.getId()).isStorageCreated());
+        assertEquals(0, fixture.stepThreadsWaiting());
+    }
+
+    @Test
+    void aClusterWhoseStepsNoContainerRanHasNoStorage() {
+        EmrStep copy = sparkStep("copy", "CONTINUE");
+        copy.setArgs(new ArrayList<>(List.of("s3-dist-cp", "--src=s3://bucket/in/", "--dest=hdfs:///in/")));
+        EmrCluster cluster = service.runJobFlow(cluster("unrun", true, copy), REGION);
+        fixture.runStepThread();
+
+        service.terminateJobFlows(List.of(cluster.getId()));
+
+        assertFalse(service.describeCluster(cluster.getId()).isStorageCreated());
+        assertEquals(List.of(), fixture.clusterStorage.created);
+        assertEquals(List.of(), fixture.clusterStorage.removed);
+        assertEquals(0, fixture.stepThreadsWaiting());
+    }
+
+    @Test
+    void theStorageOfClustersThatAreGoneOrHaveEndedIsRemovedBeforeARestartedClusterCanMoveOn() {
+        // Its step was running as Floci stopped: the wakeup that fails it could start another step.
+        EmrCluster up = service.runJobFlow(cluster("up", true, sparkStep("cut", "CONTINUE")), REGION);
+        EmrCluster ended = service.runJobFlow(cluster("ended", true), REGION);
+        service.terminateJobFlows(List.of(ended.getId()));
+        EmrService.Wakeups wakeups = mock(EmrService.Wakeups.class);
+        doAnswer(invocation -> {
+            assertEquals(List.of(Set.of(up.getId())), fixture.clusterStorage.kept);
+            return null;
+        }).when(wakeups).at(any(), any());
+
+        fixture.restartReconciling(mock(SparkJobRunner.class), wakeups);
+
+        verify(wakeups, atLeastOnce()).at(any(), any());
+        assertEquals(List.of(Set.of(up.getId())), fixture.clusterStorage.kept);
+    }
+
+    @Test
+    void aResetRemovesTheStorageOfEveryCluster() {
+        service.beforeReset();
+
+        assertEquals(List.of(Set.of()), fixture.clusterStorage.kept);
     }
 
     @Test

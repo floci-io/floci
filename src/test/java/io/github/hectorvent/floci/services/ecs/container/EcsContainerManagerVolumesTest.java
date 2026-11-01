@@ -139,10 +139,10 @@ class EcsContainerManagerVolumesTest {
     @ValueSource(booleans = {false, true})
     void failedLaunchRemovesItsEphemeralVolume(boolean firstContainerStarted) {
         if (firstContainerStarted) {
-            when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerInfo("docker-id", Map.of()))
+            when(lifecycleManager.createAndStartEphemeral(any(), any())).thenReturn(new ContainerInfo("docker-id", Map.of()))
                     .thenThrow(new IllegalStateException("launch failed"));
         } else {
-            when(lifecycleManager.createAndStartEphemeral(any())).thenThrow(new IllegalStateException("launch failed"));
+            when(lifecycleManager.createAndStartEphemeral(any(), any())).thenThrow(new IllegalStateException("launch failed"));
         }
         assertThrows(IllegalStateException.class, () -> manager.startTask(task("000000000000", "us-east-1"),
                 ephemeralDefinition(new Volume("shared", null)), List.of(), "us-east-1"));
@@ -192,7 +192,7 @@ class EcsContainerManagerVolumesTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void failedLaunchPreservesResourcesWhenCleanupFails(boolean containerRemovalFails) {
-        when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerInfo("docker-id", Map.of()))
+        when(lifecycleManager.createAndStartEphemeral(any(), any())).thenReturn(new ContainerInfo("docker-id", Map.of()))
                 .thenThrow(new IllegalStateException("launch failed"));
         if (containerRemovalFails) {
             doThrow(new IllegalStateException("remove failed")).when(lifecycleManager)
@@ -260,9 +260,9 @@ class EcsContainerManagerVolumesTest {
 
         lifecycleManager = mock(ContainerLifecycleManager.class);
         when(lifecycleManager.removeVolume(anyString())).thenReturn(true);
-        when(lifecycleManager.resolveImageForLaunch(any(), any()))
+        when(lifecycleManager.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(lifecycleManager.createAndStartEphemeral(any()))
+        when(lifecycleManager.createAndStartEphemeral(any(), any()))
                 .thenReturn(new ContainerInfo("docker-id", Map.of()));
 
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
@@ -470,7 +470,7 @@ class EcsContainerManagerVolumesTest {
                 () -> managerWithEfs(efsFallbackConfig()).startTask(task("000000000000", "us-east-1"),
                         accessPointDefinition("fsap-test"), List.of(), "us-east-1"));
         assertEquals("ClientException", failure.getErrorCode());
-        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
     }
 
     @Test

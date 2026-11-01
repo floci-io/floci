@@ -117,6 +117,41 @@ class EmrSparkStepsTest {
         assertEquals(Map.of(), EmrSparkSteps.sparkDefaults("[{", objectMapper));
     }
 
+    @Test
+    void sparkHiveSitePropertiesReachSparkAsHadoopSettingsThatSparkDefaultsOverride() {
+        // The Management Guide's Glue Data Catalog setting for Spark, and one spark-defaults overrides.
+        String configurations = """
+                [{"Classification": "spark-hive-site", "Properties": {
+                  "hive.metastore.client.factory.class":
+                    "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory",
+                  "hive.metastore.glue.catalogid": "111122223333"}},
+                 {"Classification": "spark-defaults", "Properties": {
+                  "spark.hadoop.hive.metastore.glue.catalogid": "444455556666"}}]
+                """;
+
+        assertEquals(Map.of("spark.hadoop.hive.metastore.client.factory.class",
+                        "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory",
+                        "spark.hadoop.hive.metastore.glue.catalogid", "444455556666"),
+                EmrSparkSteps.sparkDefaults(configurations, objectMapper));
+    }
+
+    @Test
+    void theClustersSparkEnvExportsAreItsStepsEnvironment() {
+        // The Release Guide's spark-env example, with a property outside export, which sets nothing.
+        String configurations = """
+                [{"Classification": "spark-env", "Properties": {"IGNORED": "1"}, "Configurations": [
+                   {"Classification": "export", "Properties": {"JAVA_HOME": "/usr/lib/jvm/java-1.8.0",
+                    "PYSPARK_PYTHON": "/usr/bin/python3.11"}, "Configurations": []}]},
+                 {"Classification": "hadoop-env", "Properties": {}, "Configurations": [
+                   {"Classification": "export", "Properties": {"HADOOP_HEAPSIZE": "2048"}}]}]
+                """;
+
+        assertEquals(Map.of("JAVA_HOME", "/usr/lib/jvm/java-1.8.0", "PYSPARK_PYTHON", "/usr/bin/python3.11"),
+                EmrSparkSteps.sparkEnvironment(configurations, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.sparkEnvironment(null, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.sparkEnvironment("[{", objectMapper));
+    }
+
     private static EmrStep step(String jar, String mainClass, String... args) {
         EmrStep step = new EmrStep();
         step.setJar(jar);

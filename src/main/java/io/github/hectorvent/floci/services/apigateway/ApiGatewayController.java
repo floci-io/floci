@@ -2800,6 +2800,9 @@ public class ApiGatewayController {
         if (i.getConnectionType() != null) node.put("connectionType", i.getConnectionType());
         if (i.getConnectionId() != null) node.put("connectionId", i.getConnectionId());
         node.put("payloadFormatVersion", i.getPayloadFormatVersion());
+        if (i.getCredentialsArn() != null) {
+            node.put("credentialsArn", i.getCredentialsArn());
+        }
         if (i.getIntegrationUri() != null) node.put("integrationUri", i.getIntegrationUri());
         if (i.getRequestTemplates() != null) {
             ObjectNode requestTemplates = node.putObject("requestTemplates");
@@ -2932,6 +2935,9 @@ public class ApiGatewayController {
             if (a.getJwtConfiguration().issuer() != null) {
                 jwt.put("issuer", a.getJwtConfiguration().issuer());
             }
+        }
+        if (a.getAuthorizerCredentialsArn() != null) {
+            node.put("authorizerCredentialsArn", a.getAuthorizerCredentialsArn());
         }
         if (a.getAuthorizerUri() != null) {
             node.put("authorizerUri", a.getAuthorizerUri());

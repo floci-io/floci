@@ -18,7 +18,12 @@ public class Authorizer {
     private Integer authorizerResultTtlInSeconds;
     private Boolean enableSimpleResponses;
 
+    private String authorizerCredentialsArn;
+
     public Authorizer() {}
+
+    public String getAuthorizerCredentialsArn() { return authorizerCredentialsArn; }
+    public void setAuthorizerCredentialsArn(String authorizerCredentialsArn) { this.authorizerCredentialsArn = authorizerCredentialsArn; }
 
     public String getAuthorizerId() { return authorizerId; }
     public void setAuthorizerId(String authorizerId) { this.authorizerId = authorizerId; }

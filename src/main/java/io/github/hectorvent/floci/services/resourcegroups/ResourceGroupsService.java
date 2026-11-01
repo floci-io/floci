@@ -90,7 +90,7 @@ public class ResourceGroupsService implements Resettable {
     public List<String> capacityReservationMembers(String region, String account, String groupArn) {
         // EC2 holds its capacity lock; GroupResources calls EC2 while holding this service's monitor.
         // Read the immutable storage snapshot without acquiring that monitor in the reverse order.
-        if (groupArn == null || !groupArn.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(groupArn)) {
             throw bad("A capacity reservation group ARN is required.");
         }
         return selected(region, account, JsonNodeFactory.instance.objectNode().put("Group", groupArn)).members();
@@ -222,7 +222,7 @@ public class ResourceGroupsService implements Resettable {
         }
         String selected = text(request, request.has("Group") ? "Group" : "GroupName", true);
         String name = selected;
-        if (selected.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(selected)) {
             if (!AwsArnUtils.isArn(selected)) {
                 throw bad("Invalid group ARN.");
             }

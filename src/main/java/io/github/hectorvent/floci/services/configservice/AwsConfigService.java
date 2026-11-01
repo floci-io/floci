@@ -98,10 +98,13 @@ public class AwsConfigService {
     private Map<String, DeliveryChannel> deliveryChannels = new ConcurrentHashMap<>();
     private Map<String, RetentionConfiguration> retentionConfigurations = new ConcurrentHashMap<>();
 
-    // Transient runtime state is scoped by account and region, like the durable stores.
-    private final ConcurrentHashMap<String, Boolean> recorderRunning = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Long> recorderLastStartTime = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Long> recorderLastStopTime = new ConcurrentHashMap<>();
+    // Recorder runtime state is scoped by account and region, like the other stores.
+    // Whether each recorder is recording, and when it last started and stopped: persisted with the
+    // recorders themselves, so a restart does not silently stop recording (which Terraform's
+    // aws_config_configuration_recorder_status then plans to restart on every refresh).
+    private Map<String, Boolean> recorderRunning = new ConcurrentHashMap<>();
+    private Map<String, Long> recorderLastStartTime = new ConcurrentHashMap<>();
+    private Map<String, Long> recorderLastStopTime = new ConcurrentHashMap<>();
 
     // per-rule evaluation timing is transient runtime state, keyed account + region + ruleName
     private final ConcurrentHashMap<String, Long> ruleFirstActivatedTime = new ConcurrentHashMap<>();
@@ -136,6 +139,12 @@ public class AwsConfigService {
                 new TypeReference<Map<String, Map<String, Map<String, ConfigEvaluation>>>>() {});
         this.configurationRecorders = storageBacked("config-recorders.json",
                 new TypeReference<Map<String, ConfigurationRecorder>>() {});
+        this.recorderRunning = storageBacked("config-recorder-running.json",
+                new TypeReference<Map<String, Boolean>>() {});
+        this.recorderLastStartTime = storageBacked("config-recorder-last-start.json",
+                new TypeReference<Map<String, Long>>() {});
+        this.recorderLastStopTime = storageBacked("config-recorder-last-stop.json",
+                new TypeReference<Map<String, Long>>() {});
         this.deliveryChannels = storageBacked("config-delivery-channels.json",
                 new TypeReference<Map<String, DeliveryChannel>>() {});
         this.retentionConfigurations = storageBacked("config-retention.json",

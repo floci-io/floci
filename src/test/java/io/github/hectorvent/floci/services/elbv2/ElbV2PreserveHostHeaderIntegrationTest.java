@@ -9,10 +9,12 @@ import io.restassured.response.Response;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.http.HttpClient;
+import io.vertx.core.http.HttpClientOptions;
 import io.vertx.core.http.HttpClientRequest;
 import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
+import io.vertx.core.http.HttpServerOptions;
 import io.vertx.core.http.RequestOptions;
 import io.vertx.core.net.SocketAddress;
 import jakarta.inject.Inject;
@@ -86,7 +88,9 @@ class ElbV2PreserveHostHeaderIntegrationTest {
 
     @Test
     void preservesHostHeaderWhenLoadBalancerAttributeIsEnabled() throws Exception {
-        HttpServer backend = vertx.createHttpServer()
+        HttpServer backend = vertx.createHttpServer(new HttpServerOptions()
+                        .setMaxHeaderSize(ElbV2DataPlane.MAX_REQUEST_HEADER_SIZE)
+                        .setMaxInitialLineLength(ElbV2DataPlane.MAX_REQUEST_LINE_LENGTH))
                 .requestHandler(request -> {
                     if ("/stream".equals(request.path())) {
                         request.body().onSuccess(body -> {
@@ -97,6 +101,13 @@ class ElbV2PreserveHostHeaderIntegrationTest {
                             request.response().write("stream-");
                             request.response().end(body.toString());
                         });
+                    } else if ("/large-headers".equals(request.path())) {
+                        String cookie = request.getHeader("Cookie");
+                        request.response()
+                                .putHeader("X-Received-Cookie-Length", String.valueOf(cookie.length()))
+                                .putHeader("X-Received-Query-Length", String.valueOf(request.query().length()))
+                                .putHeader("X-Large", cookie)
+                                .end("ok");
                     } else {
                         request.response().end(request.getHeader("Host"));
                     }
@@ -116,6 +127,7 @@ class ElbV2PreserveHostHeaderIntegrationTest {
             listenerArn = createListener(loadBalancerArn, targetGroupArn);
 
             assertStreamsRequestAndResponse(loadBalancerArn);
+            assertForwardsLargeHeaders(loadBalancerArn);
             assertForwardedHost("127.0.0.1:" + backend.actualPort());
 
             enableHostHeaderPreservation(loadBalancerArn);
@@ -230,6 +242,42 @@ class ElbV2PreserveHostHeaderIntegrationTest {
             assertEquals("stream-hello world", bodyFuture.get(2, TimeUnit.SECONDS).toString());
         } finally {
             // Not awaited, so a slow close cannot replace the failure raised above.
+            client.close();
+        }
+    }
+
+    private void assertForwardsLargeHeaders(String loadBalancerArn) throws Exception {
+        // Several JWT cookies on a shared parent domain exceed Vert.x's 8 KB default header block,
+        // while staying under the ALB's 16 KB single-header limit. The query passes Vert.x's 4 KB
+        // default request line.
+        String cookie = "a=" + "x".repeat(3600) + "; b=" + "y".repeat(3600) + "; c=" + "z".repeat(3600);
+        String query = "q=" + "q".repeat(10_000);
+        String dnsName = loadBalancerDnsName(loadBalancerArn);
+        HttpClient client = vertx.createHttpClient(new HttpClientOptions()
+                .setMaxHeaderSize(ElbV2DataPlane.MAX_RESPONSE_HEADER_SIZE));
+        try {
+            HttpClientRequest request = client
+                    .request(new RequestOptions()
+                            .setServer(SocketAddress.inetSocketAddress(LISTENER_PORT, "127.0.0.1"))
+                            .setHost(dnsName)
+                            .setPort(LISTENER_PORT)
+                            .setMethod(HttpMethod.GET)
+                            .setURI("/large-headers?" + query))
+                    .toCompletionStage()
+                    .toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+            request.putHeader("Cookie", cookie);
+            HttpClientResponse response = request.send()
+                    .toCompletionStage()
+                    .toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+            response.body().toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+            assertEquals(200, response.statusCode());
+            assertEquals(String.valueOf(cookie.length()), response.getHeader("X-Received-Cookie-Length"));
+            assertEquals(String.valueOf(query.length()), response.getHeader("X-Received-Query-Length"));
+            assertEquals(cookie, response.getHeader("X-Large"));
+        } finally {
             client.close();
         }
     }

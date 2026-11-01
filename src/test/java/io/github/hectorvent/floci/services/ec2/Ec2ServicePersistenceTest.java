@@ -218,6 +218,37 @@ class Ec2ServicePersistenceTest {
         assertEquals("10.0.1.0/24", subnets.get(0).getCidrBlock());
     }
 
+    /**
+     * Issue #5580: a subnet persisted before zone ids took AWS's shape stored
+     * {@code ap-southeast-1-az1}, which DescribeAvailabilityZones no longer publishes.
+     */
+    @Test
+    void legacySubnetZoneIdReadsBackAsTheIdDescribeAvailabilityZonesPublishes(@TempDir Path dir)
+            throws IOException {
+        Files.writeString(dir.resolve("ec2-subnets.json"), """
+                {
+                  "ap-southeast-1::subnet-legacy": {
+                    "subnetId": "subnet-legacy",
+                    "vpcId": "vpc-legacy",
+                    "cidrBlock": "172.31.0.0/20",
+                    "state": "available",
+                    "availabilityZone": "ap-southeast-1b",
+                    "availabilityZoneId": "ap-southeast-1-az2",
+                    "region": "ap-southeast-1"
+                  }
+                }
+                """);
+
+        Ec2Service restarted = newService(dir);
+
+        Subnet subnet = restarted.describeSubnets("ap-southeast-1", List.of("subnet-legacy"), Map.of())
+                .getFirst();
+        assertEquals("apse1-az2", subnet.getAvailabilityZoneId());
+        List<Map<String, String>> zones = restarted.describeAvailabilityZones("ap-southeast-1", List.of(),
+                List.of(subnet.getAvailabilityZoneId()), List.of());
+        assertEquals("ap-southeast-1b", zones.getFirst().get("zoneName"));
+    }
+
     @Test
     void registeredImageAndSnapshotSurviveRestart(@TempDir Path dir) {
         Ec2Service first = newService(dir);
@@ -247,7 +278,8 @@ class Ec2ServicePersistenceTest {
         String instanceId = first.runInstances(REGION, "ami-0abcdef1234567890", "t3.micro", 1, 1, null,
                 List.of(), null, null, List.of(), null, null).getInstances().getFirst().getInstanceId();
         Image captured = first.createImage(REGION, instanceId, "provenance-capture", null, true);
-        Image copied = first.copyImage("us-west-2", REGION, captured.getImageId(), "provenance-copy", null);
+        Image copied = first.copyImage("us-west-2", REGION, captured.getImageId(),
+                "provenance-copy", null, false, List.of());
 
         Ec2Service restarted = newService(dir);
 
@@ -354,7 +386,8 @@ class Ec2ServicePersistenceTest {
         assertTrue(restarted.describeImages("us-west-2", List.of(), List.of(),
                 Map.of("source-image-id", List.of("*"))).isEmpty());
 
-        Image copiedNow = restarted.copyImage("us-west-2", REGION, capture, "copied-after-upgrade", null);
+        Image copiedNow = restarted.copyImage("us-west-2", REGION, capture,
+                "copied-after-upgrade", null, false, List.of());
         assertEquals(capture, copiedNow.getCreationSourceImageId());
         assertEquals(REGION, copiedNow.getCreationSourceImageRegion());
         assertEquals("ami-0abcdef1234567890", copiedNow.getSourceImageId());
@@ -688,7 +721,7 @@ class Ec2ServicePersistenceTest {
                 .map(KeyPair::getKeyName).toList());
 
         String xml = (String) new Ec2QueryHandler(restarted, mock(EmulatorConfig.class), mock(FlowLogService.class),
-                mock(Ec2EbsEncryptionService.class), mock(Ec2SnapshotBlockPublicAccessService.class),
+                mock(Ec2EbsEncryptionService.class), mock(Ec2BlockPublicAccessService.class),
                 mock(Ec2IpamService.class), new RegionResolver(REGION, "000000000000"))
                 .handle("DescribeKeyPairs", new MultivaluedHashMap<>(), REGION).getEntity();
         assertTrue(xml.contains("<keyType>rsa</keyType>"), xml);
@@ -795,7 +828,7 @@ class Ec2ServicePersistenceTest {
         }
         Response response = new Ec2QueryHandler(service, mock(EmulatorConfig.class),
                 mock(FlowLogService.class), mock(Ec2EbsEncryptionService.class),
-                mock(Ec2SnapshotBlockPublicAccessService.class), mock(Ec2IpamService.class),
+                mock(Ec2BlockPublicAccessService.class), mock(Ec2IpamService.class),
                 new RegionResolver(REGION, "000000000000"))
                 .handle(action, form, REGION);
         String body = String.valueOf(response.getEntity());

@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.LongNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
@@ -29,10 +31,22 @@ public interface CfnResourceProvisioner {
         return Map.of();
     }
 
+    /** GetAtt attributes the registry schema types as objects or arrays, stored as JSON text, by resource type. */
+    default Map<String, Set<String>> jsonAttributes() {
+        return Map.of();
+    }
+
     /** The JSON type of a stored GetAtt value; most resource attributes are strings. */
     default JsonNode attributeValue(String resourceType, String attributeName, String value) {
         if (integerAttributes().getOrDefault(resourceType, Set.of()).contains(attributeName)) {
             return LongNode.valueOf(Long.parseLong(value));
+        }
+        if (jsonAttributes().getOrDefault(resourceType, Set.of()).contains(attributeName)) {
+            try {
+                return StoredJson.MAPPER.readTree(value);
+            } catch (JsonProcessingException e) {
+                throw new IllegalStateException("Invalid stored " + resourceType + " attribute " + attributeName, e);
+            }
         }
         return TextNode.valueOf(value);
     }
@@ -176,5 +190,13 @@ public interface CfnResourceProvisioner {
     default void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
         // no-op by default: only a provisioner with tracking of its own to carry (generated
         // sub-resources, cleanup entries, an undo snapshot) needs this
+    }
+
+    /** Keeps the mapper private, which an interface field cannot be. */
+    final class StoredJson {
+        private static final ObjectMapper MAPPER = new ObjectMapper();
+
+        private StoredJson() {
+        }
     }
 }

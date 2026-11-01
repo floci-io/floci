@@ -93,6 +93,30 @@ class IamServiceTest {
     }
 
     @Test
+    void roleChainingRequiresALiveTokenMatchedRoleSession() {
+        MutableClock clock = new MutableClock();
+        IamService service = new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("cn-north-1", "000000000000"), false, clock);
+        IamRole role = service.createRole("ChainRole", "/teams/chain/", "{}", null, 7200, null);
+        service.registerSession("ASIACHAIN", "secret", "token", role.getArn(), clock.instant().plusSeconds(60),
+                null, "000000000000");
+        service.registerSession("ASIAUSER", "secret", "user-token", null, clock.instant().plusSeconds(60),
+                null, "000000000000");
+        service.registerSession("ASIAFEDERATED", "secret", "federated-token",
+                "arn:aws-cn:sts::000000000000:federated-user/example", clock.instant().plusSeconds(60),
+                null, "000000000000");
+        assertTrue(service.isRoleSession("ASIACHAIN", "token"));
+        assertFalse(service.isRoleSession("ASIACHAIN", "wrong"));
+        assertFalse(service.isRoleSession("ASIACHAIN", null));
+        assertFalse(service.isRoleSession("ASIAUSER", "user-token"));
+        assertFalse(service.isRoleSession("ASIAFEDERATED", "federated-token"));
+        assertFalse(service.isRoleSession("ASIAUNKNOWN", "token"));
+        clock.advance(Duration.ofSeconds(60));
+        assertFalse(service.isRoleSession("ASIACHAIN", "token"));
+    }
+
+    @Test
     void aPrincipalArnNamesTheRootOrTheRoleOrUserIamHoldsAtItsOwnPath() {
         iamService.createRole("reader", "/team/", "{}", null, 3600, null);
         iamService.createUser("writer", "/team/");

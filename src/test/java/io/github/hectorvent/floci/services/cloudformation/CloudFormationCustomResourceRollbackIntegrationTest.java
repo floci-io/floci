@@ -5,8 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
-import io.github.hectorvent.floci.services.lambda.model.InvocationType;
-import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
@@ -14,20 +12,14 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.when;
 
 /**
  * A stack update that changes a custom resource and then fails on a later resource rolls the custom
@@ -45,9 +37,7 @@ class CloudFormationCustomResourceRollbackIntegrationTest {
             "arn:aws:lambda:us-east-1:000000000000:function:rollback-probe";
 
     private final ObjectMapper mapper = new ObjectMapper();
-    private final List<JsonNode> events = new CopyOnWriteArrayList<>();
-    private volatile String failingRequest;
-    private volatile String failureReason;
+    private CustomResourceProbe probe;
 
     @InjectMock
     LambdaService lambdaService;
@@ -59,13 +49,7 @@ class CloudFormationCustomResourceRollbackIntegrationTest {
 
     @BeforeEach
     void stubHandler() {
-        when(lambdaService.invoke(any(), eq(SERVICE_TOKEN), any(), eq(InvocationType.RequestResponse)))
-                .thenAnswer(inv -> {
-                    JsonNode event = mapper.readTree((byte[]) inv.getArgument(2));
-                    events.add(event);
-                    putResponse(event);
-                    return new InvokeResult(200, null, "null".getBytes(StandardCharsets.UTF_8), null, "req-1");
-                });
+        probe = CustomResourceProbe.stub(lambdaService, SERVICE_TOKEN, "rollback-probe");
     }
 
     @Test
@@ -79,10 +63,10 @@ class CloudFormationCustomResourceRollbackIntegrationTest {
         awaitStackStatus(stackId, "UPDATE_ROLLBACK_COMPLETE");
 
         assertEquals(List.of("Create:1", "Update:2", "Update:1"), requests());
-        assertProperties(events.get(0), "1", null);
-        assertProperties(events.get(1), "2", "1");
-        assertProperties(events.get(2), "1", "2");
-        assertEquals(physicalId, events.get(2).get("PhysicalResourceId").asText());
+        assertProperties(probe.events().get(0), "1", null);
+        assertProperties(probe.events().get(1), "2", "1");
+        assertProperties(probe.events().get(2), "1", "2");
+        assertEquals(physicalId, probe.events().get(2).get("PhysicalResourceId").asText());
         assertEquals(physicalId, probePhysicalId(stackName));
         assertFalse(describeStackEvents(stackId).contains("Rollback is not implemented"));
     }
@@ -120,10 +104,10 @@ class CloudFormationCustomResourceRollbackIntegrationTest {
         awaitStackStatus(stackId, "UPDATE_ROLLBACK_COMPLETE");
 
         assertEquals(List.of("Create:1", "Update:3", "Update:1"), requests());
-        assertProperties(events.get(0), "1", null);
-        assertProperties(events.get(1), "3", "1");
-        assertProperties(events.get(2), "1", "3");
-        assertEquals(physicalId, events.get(2).get("PhysicalResourceId").asText());
+        assertProperties(probe.events().get(0), "1", null);
+        assertProperties(probe.events().get(1), "3", "1");
+        assertProperties(probe.events().get(2), "1", "3");
+        assertEquals(physicalId, probe.events().get(2).get("PhysicalResourceId").asText());
         assertEquals(physicalId, probePhysicalId(stackName));
         List<String> probeStatuses = XmlParser.extractGroups(describeStackEvents(stackId), "member")
                 .reversed()
@@ -149,8 +133,8 @@ class CloudFormationCustomResourceRollbackIntegrationTest {
         awaitStackStatus(stackId, "DELETE_COMPLETE");
 
         assertEquals(List.of("Create:1", "Update:2", "Update:1", "Delete:1"), requests());
-        assertProperties(events.get(3), "1", null);
-        assertEquals(physicalId, events.get(3).get("PhysicalResourceId").asText());
+        assertProperties(probe.events().get(3), "1", null);
+        assertEquals(physicalId, probe.events().get(3).get("PhysicalResourceId").asText());
     }
 
     /**
@@ -174,8 +158,7 @@ class CloudFormationCustomResourceRollbackIntegrationTest {
     }
 
     private void failOn(String request, String reason) {
-        failingRequest = request;
-        failureReason = reason;
+        probe.failOn(event -> request(event).equals(request), reason);
     }
 
     private static String template(String revision, boolean withFailingBucket) {
@@ -206,31 +189,11 @@ class CloudFormationCustomResourceRollbackIntegrationTest {
 
     /** Each request the handler saw, as its RequestType and the Revision it was asked to apply. */
     private List<String> requests() {
-        return events.stream().map(CloudFormationCustomResourceRollbackIntegrationTest::request).toList();
+        return probe.events().stream().map(CloudFormationCustomResourceRollbackIntegrationTest::request).toList();
     }
 
     private static String request(JsonNode event) {
         return event.get("RequestType").asText() + ":" + event.get("ResourceProperties").get("Revision").asText();
-    }
-
-    /**
-     * Answers the request the way a handler does: a PUT of its result document to ResponseURL. The
-     * request the test named with {@link #failOn} is answered FAILED.
-     */
-    private void putResponse(JsonNode event) {
-        ObjectNode response = mapper.createObjectNode();
-        if (request(event).equals(failingRequest)) {
-            response.put("Status", "FAILED");
-            response.put("Reason", failureReason);
-        } else {
-            response.put("Status", "SUCCESS");
-        }
-        response.put("RequestId", event.get("RequestId").asText());
-        response.put("StackId", event.get("StackId").asText());
-        response.put("LogicalResourceId", event.get("LogicalResourceId").asText());
-        response.put("PhysicalResourceId", "rollback-probe");
-        String path = URI.create(event.get("ResponseURL").asText()).getPath();
-        given().body(response.toString()).when().put(path).then().statusCode(200);
     }
 
     private static String createStack(String stackName, String template) {

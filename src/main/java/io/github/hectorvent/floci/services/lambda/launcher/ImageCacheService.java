@@ -105,19 +105,26 @@ public class ImageCacheService {
      * one or anyone else's) is what the next launch runs. The launch creates its container from the
      * returned image id rather than from the reference, so a pull by an overlapping launch that
      * moves the tag again cannot change what this one runs.
+     *
+     * @param platform the Docker platform the launch runs, such as {@code linux/amd64}, or null for
+     *        the daemon's own. A local image of another platform is never reused for it.
      */
-    public LaunchImage resolveForLaunch(String imageUri, ImagePullBehavior behavior) {
+    public LaunchImage resolveForLaunch(String imageUri, ImagePullBehavior behavior, String platform) {
         if (isImageId(imageUri)) {
             return new LaunchImage(existingImageId(imageUri), null);
         }
-        ImageKey imageKey = new ImageKey(imageUri, daemonPlatform());
+        boolean explicitPlatform = platform != null && !platform.isBlank();
+        ImageKey imageKey = new ImageKey(imageUri, explicitPlatform ? platform.trim() : daemonPlatform());
+        String pullPlatform = explicitPlatform ? imageKey.platform() : null;
         Object lock = locks.computeIfAbsent(imageUri, k -> new Object());
         synchronized (lock) {
             LocalImage image = switch (behavior) {
-                case DEFAULT -> pullOrUseCached(imageKey);
-                case ALWAYS -> pull(imageKey, null);
-                case ONCE -> pulledImages.contains(imageKey) ? cachedOrPull(imageKey) : pull(imageKey, null);
-                case PREFER_CACHED -> cachedOrPull(imageKey);
+                case DEFAULT -> pullOrUseCached(imageKey, pullPlatform);
+                case ALWAYS -> pull(imageKey, pullPlatform);
+                case ONCE -> pulledImages.contains(imageKey)
+                        ? cachedOrPull(imageKey, pullPlatform)
+                        : pull(imageKey, pullPlatform);
+                case PREFER_CACHED -> cachedOrPull(imageKey, pullPlatform);
             };
             String imageId = resolvedImageReference(imageUri, image.image());
             resolvedImages.put(imageKey, imageId);
@@ -150,9 +157,9 @@ public class ImageCacheService {
         return resolvedImageReference(imageId, image);
     }
 
-    private LocalImage pullOrUseCached(ImageKey imageKey) {
+    private LocalImage pullOrUseCached(ImageKey imageKey, String platform) {
         try {
-            return pull(imageKey, null);
+            return pull(imageKey, platform);
         } catch (RuntimeException e) {
             InspectImageResponse cached = Thread.currentThread().isInterrupted() ? null : cachedImage(imageKey);
             if (cached == null) {
@@ -164,9 +171,9 @@ public class ImageCacheService {
         }
     }
 
-    private LocalImage cachedOrPull(ImageKey imageKey) {
+    private LocalImage cachedOrPull(ImageKey imageKey, String platform) {
         InspectImageResponse cached = cachedImage(imageKey);
-        return cached != null ? new LocalImage(cached, null) : pull(imageKey, null);
+        return cached != null ? new LocalImage(cached, null) : pull(imageKey, platform);
     }
 
     private InspectImageResponse cachedImage(ImageKey imageKey) {

@@ -111,7 +111,7 @@ final class AwsManagedPolicies {
 
     /** {@code arn:<partition>:iam::aws:policy}, without the trailing slash of the path. */
     static String arnPrefix(String partition) {
-        return "arn:" + partition + ":iam::aws:policy";
+        return AwsArnUtils.Arn.global(partition, "iam", "aws", "policy").toString();
     }
 
     /** True for an AWS managed policy ARN in any partition ({@code arn:aws-cn:iam::aws:policy/...}). */
@@ -136,7 +136,7 @@ final class AwsManagedPolicies {
 
     private static List<ManagedPolicyDef> derive(AwsPartition partition) {
         long started = System.nanoTime();
-        String arnPrefix = "arn:" + partition.id() + ":";
+        String arnPrefix = "arn:" + partition.id() + ":"; // partition-literal: the text that replaces "arn:aws:" in a bundled policy document, not an ARN
         List<ManagedPolicyDef> derived = new ArrayList<>(POLICIES.size());
         for (ManagedPolicyDef def : POLICIES) {
             derived.add(new ManagedPolicyDef(partition.id(), def.name(), def.path(), def.description(),

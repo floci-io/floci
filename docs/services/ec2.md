@@ -25,6 +25,11 @@ By default, Docker containers launched for EC2 instances are bounded to the CPU 
 - **Types outside the full catalog**: Docker CPU and memory limits are not applied when the full catalog lacks a type. When opted in, Standard On-Demand admission requires a known default vCPU count, as described below.
 - **Configuration knob**: To disable container resource limits (for example, running a large instance type on a developer machine with limited resources), set `floci.services.ec2.instance-resource-limits: false` (or environment variable `FLOCI_SERVICES_EC2_INSTANCE_RESOURCE_LIMITS=false`).
 
+The full catalog includes `r5.large` with 2 vCPUs, 16 GiB of memory, x86_64 processors,
+EBS-only storage, and one network card supporting 3 interfaces and 10 IPv4 addresses per
+interface, following the [AWS R5 specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/mo.html).
+`DescribeInstanceTypes` and `DescribeInstanceTypeOfferings` use this same entry.
+
 ## Standard On-Demand admission
 
 Quota admission is opt-in. Set `FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS=true` to
@@ -236,7 +241,7 @@ Guests with an instance profile receive endpoint and region settings without Flo
 
 ### IMDS and SSM managed instances
 
-IMDS only knows about containers that Floci itself launched through `RunInstances`. That launch is what installs the link-local `169.254.169.254` proxy inside the container and maps the container's IP to its instance record.
+IMDS only knows about containers that Floci itself launched through `RunInstances`. That launch is what installs the link-local `169.254.169.254` proxy inside the container and maps the container's IP to its instance record. A restarted container (`StopInstances` then `StartInstances`) has a new network namespace, so once the instance is `running` `StartInstances` sets the proxy up again; an instance under security-group enforcement keeps its helper container's namespace, and the proxy with it.
 
 Registering a container with SSM is independent of this: an SSM agent that calls `UpdateInstanceInformation` becomes a managed instance, but that does not create an EC2 instance record, does not install the IMDS proxy, and does not register the container with IMDS. From such a container, `curl http://169.254.169.254/...` fails outright (no proxy), and a request sent straight to the host IMDS port returns `404` with a message explaining that no EC2 instance is registered for the source IP. Floci also logs a warning when an SSM agent registers from a container that is not backed by a Floci EC2 instance.
 
@@ -277,7 +282,7 @@ naming different VPCs find nothing.
 
 | Action | Description |
 |--------|-------------|
-| RunInstances | Creates one or more local EC2 instances, starting Docker-backed runtime when not in mock mode. |
+| RunInstances | Creates one or more local EC2 instances, starting Docker-backed runtime when not in mock mode. Security groups come from `SecurityGroupId.N` or, as Terraform sends them with an interface spec, from the primary interface's `NetworkInterface.1.SecurityGroupId.N`; both in one request is `InvalidParameterCombination`. |
 | CreateFleet | Creates an instant local fleet from launch-template configurations and on-demand or spot overrides. DryRun returns the AWS-compatible `DryRunOperation` error without launching instances. |
 | DescribeInstances | Lists or returns stored EC2 instances. |
 | TerminateInstances | Terminates instances and updates their stored lifecycle state. |
@@ -403,7 +408,7 @@ with `DryRunOperation` before any of these checks, and creates nothing either.
 | DescribeImages | Returns AMI metadata known to the local EC2 service. |
 | CreateImage | Captures an instance as a new AMI. Reboots the source unless `NoReboot=true`. Applies `image` and `snapshot` tags from `TagSpecification` to the AMI and its new snapshots. |
 | RegisterImage | Registers an AMI from supplied metadata and block device mappings, with `image` tags from `TagSpecification`. |
-| CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns, applying `image` and `snapshot` tags from `TagSpecification` to the copy and its new snapshots. |
+| CopyImage | Copies an AMI from `SourceRegion` into the request's region as a new AMI the caller owns, applying `image` and `snapshot` tags from `TagSpecification` to the copy and its new snapshots. By default the source's tags are not copied. With `CopyImageTags=true` the copy also gets the caller's tags on the source AMI's own id, without its `aws:` system tags; tags put on a catalog alias such as `ami-amazonlinux2` stay behind. When a `TagSpecification` tag has the same key as a copied one, Floci keeps the `TagSpecification` value, and the copied and specified tags together may not exceed 50 (`TagLimitExceeded`, and nothing is created). |
 | DeregisterImage | Deregisters an AMI. Its snapshots are kept unless `DeleteAssociatedSnapshots=true`, and a snapshot another AMI still uses is kept either way. |
 
 Every resource EC2 creates is owned by the account the request resolves to, the same account
@@ -720,6 +725,8 @@ returns `Resource.AlreadyAssociated` rather than moving it — disassociate firs
 recorded on the attachment itself, which is why `GetTransitGatewayRouteTableAssociations` reports
 the attachment's VPC as the associated resource.
 
+A VPC attachment is propagated into the gateway's default propagation route table on creation when the gateway has `DefaultRouteTablePropagation` enabled, and leaves it when the attachment is deleted.
+
 Propagation is separate: one attachment may propagate into several route tables. Enabling twice
 returns `TransitGatewayRouteTablePropagation.Duplicate`. Unlike association, which reports
 `associating` and `disassociating`, propagation reports the settled `enabled` or `disabled` at
@@ -748,6 +755,21 @@ Route table ids follow the live API's own inconsistency: an id that does not exi
 | CreateNatGateway | Creates a NAT gateway record. |
 | DescribeNatGateways | Lists or returns stored NAT gateways. |
 | DeleteNatGateway | Deletes a NAT gateway record. |
+
+Every NAT gateway Floci creates is zonal: it sits in the subnet it was created in, and responses
+report `availabilityMode` as `zonal`. Regional NAT gateways are not supported: `CreateNatGateway` with
+`AvailabilityMode=regional` fails with `UnsupportedOperation`, and an `AWS::EC2::NatGateway` whose
+`AvailabilityMode` is `regional` fails with the reason `NAT gateways with AvailabilityMode regional
+are not supported.`
+
+`PrivateIpAddress` gives the gateway's interface that address instead of the next free one, on
+`CreateNatGateway` and on `AWS::EC2::NatGateway`, and `DescribeNetworkInterfaces` and
+`DescribeAddresses` report the same address. It follows the `RunInstances` rules: an address outside
+the subnet's CIDR, or one of the five AWS reserves, fails with `InvalidParameterValue`, and one that
+an instance, network interface, NAT gateway or interface endpoint already holds fails with
+`InvalidIPAddress.InUse`. A gateway has its primary address only, so the secondary-address
+parameters (`SecondaryAllocationIds`, `SecondaryPrivateIpAddresses` and
+`SecondaryPrivateIpAddressCount`) fail with `UnsupportedOperation` before anything is created.
 
 ### Capacity Reservations
 
@@ -948,10 +970,9 @@ request's, field by field: a request entry for a `DeviceName` the template maps,
 only one side maps apply as given. A request entry that makes the device something else, an EBS
 volume (`Ebs`), an instance store volume (`VirtualName`) or nothing (`NoDevice`), replaces the
 template's choice for it, an `Ebs` block still merging member by member into the template's. An
-Auto Scaling group launching from a template gets its mappings the same way; one launching from a
-launch configuration does not pass the configuration's mappings yet. CloudFormation does not pass
-them yet: an `AWS::EC2::Instance` launches without the `BlockDeviceMappings` it or its launch
-template declares, and an `AWS::EC2::LaunchTemplate` or
+Auto Scaling group launching from a template or a launch configuration gets its mappings the same
+way. CloudFormation does not pass them yet: an `AWS::EC2::Instance` launches without the
+`BlockDeviceMappings` it or its launch template declares, and an `AWS::EC2::LaunchTemplate` or
 `AWS::AutoScaling::LaunchConfiguration` stores none, so instances launched from what a stack
 creates get the AMI's devices alone. A mapping naming a `VolumeType` outside the service model's
 enum fails with `InvalidParameterValue`, as `ModifyVolume` does; one with `NoDevice` set creates no
@@ -1192,6 +1213,18 @@ These are account-level settings scoped per region, not per volume, and nothing 
 
 An account that has never set a key reports `alias/aws/ebs`, the AWS-managed EBS key every account starts with, rather than an empty value — the module runner fails hard on a missing `KmsKeyId`, so the fallback is what keeps it running. `ResetEbsDefaultKmsKeyId` returns to that same alias. `ModifyEbsDefaultKmsKeyId` requires `KmsKeyId` and rejects a blank one with `MissingParameter`; the key is stored as given and is not checked against KMS.
 
+### AMI Block Public Access
+
+| Action | Description |
+|--------|-------------|
+| EnableImageBlockPublicAccess | Sets the region's AMI sharing block to `block-new-sharing`. |
+| DisableImageBlockPublicAccess | Returns the region to `unblocked`. |
+| GetImageBlockPublicAccessState | Reads the region's current state and manager. |
+
+This is an account-level setting scoped per region. A region that was never configured reports `unblocked`. Enable accepts only `block-new-sharing`; callers use Disable to return to `unblocked`. Get reports `managedBy` as `account` because Floci has no declarative-policy layer.
+
+All three actions support `DryRun`. A successful dry run returns `DryRunOperation` and does not change the stored state. Enable validates `ImageBlockPublicAccessState` before checking `DryRun`, so missing and invalid values keep their normal errors. The state applies immediately, and existing public AMIs remain public.
+
 ### Snapshot Block Public Access
 
 | Action | Description |
@@ -1264,7 +1297,7 @@ State is reported settled rather than transitional, as elsewhere in this service
 | `FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED` | `true` | Back each VPC with a real Docker network (see [VPC Docker networks](#vpc-docker-networks)) |
 | `FLOCI_SERVICES_EC2_VPC_NETWORKS_FALLBACK_POOL` | `10.240.0.0/12` | RFC 1918 pool that substituted CIDRs are drawn from |
 | `FLOCI_SERVICES_EC2_VPC_NETWORKS_FALLBACK_PREFIX_LENGTH` | `16` | Prefix length of each block handed out of that pool |
-| `FLOCI_SERVICES_EC2_VPC_NETWORKS_RECONCILE_ON_STARTUP` | `true` | Remove VPC networks left behind by a previous run of this same emulator |
+| `FLOCI_SERVICES_EC2_VPC_NETWORKS_RECONCILE_ON_STARTUP` | `true` | Remove VPC networks left behind by a previous run of this same emulator. Whatever its value, the network a previous run created for a VPC that still exists is kept, and goes when that VPC is deleted |
 | `FLOCI_SERVICES_EC2_VPC_NETWORKS_DRIVER` | `bridge` | Docker network driver used for VPC networks |
 
 ## VPC Docker networks

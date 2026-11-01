@@ -264,7 +264,7 @@ class S3BucketPolicyEnforcementIntegrationTest {
                         {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}""")
                 .header("Authorization", auth("000000000000", "iam")).when().post("/").then().statusCode(200);
         ExtractableResponse<Response> assumed = given().formParam("Action", "AssumeRole")
-                .formParam("RoleArn", roleArn).formParam("RoleSessionName", "s")
+                .formParam("RoleArn", roleArn).formParam("RoleSessionName", "sx")
                 .header("Authorization", auth("000000000000", "sts")).when().post("/")
                 .then().statusCode(200).extract();
         String sessionArn = assumed.path("AssumeRoleResponse.AssumeRoleResult.AssumedRoleUser.Arn");
@@ -310,7 +310,7 @@ class S3BucketPolicyEnforcementIntegrationTest {
         putBucketPolicy(bucket, """
                 {"Version":"2012-10-17","Statement":[
                   {"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/userid/*",
-                   "Condition":{"StringNotLike":{"aws:userid":"AROA*:s"}}},
+                   "Condition":{"StringNotLike":{"aws:userid":"AROA*:sx"}}},
                   {"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/type/*",
                    "Condition":{"StringNotEquals":{"aws:PrincipalType":"AssumedRole"}}},
                   {"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::%1$s/username/*",
@@ -417,7 +417,7 @@ class S3BucketPolicyEnforcementIntegrationTest {
                 .header("Authorization", auth(accountId, "iam")).when().post("/").then().statusCode(200);
         ExtractableResponse<Response> assumed = given().formParam("Action", "AssumeRole")
                 .formParam("RoleArn", "arn:aws:iam::" + accountId + ":role/team/" + role)
-                .formParam("RoleSessionName", "s")
+                .formParam("RoleSessionName", "sx")
                 .header("Authorization", auth(accountId, "sts")).when().post("/")
                 .then().statusCode(200).extract();
         return S3RequestSigner.signedAs(

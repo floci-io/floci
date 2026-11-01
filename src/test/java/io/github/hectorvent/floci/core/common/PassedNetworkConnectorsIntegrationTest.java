@@ -56,7 +56,8 @@ class PassedNetworkConnectorsIntegrationTest {
         String roleArn = EnforcementFixtures.createRole(cleanup, port, ACCOUNT, "/", name,
                 policy("lambda:CreateWebFunctionRevision", ""));
         Session session = EnforcementFixtures.assumeRole(port, ACCOUNT, roleArn);
-        String denied = "User: arn:aws:sts::" + ACCOUNT + ":assumed-role/" + name + "/s is not authorized to perform:"
+        String denied = "User: arn:aws:sts::" + ACCOUNT + ":assumed-role/" + name + "/"
+                + EnforcementFixtures.SESSION_NAME + " is not authorized to perform:"
                 + " lambda:PassNetworkConnector on resource: " + CONNECTOR + ":1 ";
 
         revision(session, CONNECTOR + ":1").statusCode(403)
@@ -105,7 +106,8 @@ class PassedNetworkConnectorsIntegrationTest {
         String roleArn = EnforcementFixtures.createRole(cleanup, port, ACCOUNT, "/", name,
                 policy("lambda:RunMicrovm", ""));
         Session session = EnforcementFixtures.assumeRole(port, ACCOUNT, roleArn);
-        String denied = "User: arn:aws:sts::" + ACCOUNT + ":assumed-role/" + name + "/s is not authorized to perform:"
+        String denied = "User: arn:aws:sts::" + ACCOUNT + ":assumed-role/" + name + "/"
+                + EnforcementFixtures.SESSION_NAME + " is not authorized to perform:"
                 + " lambda:PassNetworkConnector on resource: ";
         String noAllow = " because no identity-based policy allows the lambda:PassNetworkConnector action";
 

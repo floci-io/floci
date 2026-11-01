@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.PassedRoleLookup;
@@ -16,12 +17,16 @@ import io.github.hectorvent.floci.services.organizations.model.OrganizationAccou
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 import java.util.stream.StreamSupport;
@@ -44,10 +49,11 @@ public class ServiceCatalogService implements PassedRoleLookup {
     private final StorageBackend<String, ObjectNode> provisionedProductStore;
     private final ObjectMapper objectMapper;
     private final OrganizationsService organizationsService;
+    private final Clock clock;
 
     @Inject
     public ServiceCatalogService(StorageFactory storageFactory, ObjectMapper objectMapper,
-                                 OrganizationsService organizationsService) {
+                                 OrganizationsService organizationsService, Clock clock) {
         this.portfolioStore = storageFactory.create("servicecatalog", "servicecatalog-portfolios.json",
                 new TypeReference<Map<String, ObjectNode>>() {});
         this.productStore = storageFactory.create("servicecatalog", "servicecatalog-products.json",
@@ -62,6 +68,11 @@ public class ServiceCatalogService implements PassedRoleLookup {
                 new TypeReference<Map<String, ObjectNode>>() {});
         this.objectMapper = objectMapper;
         this.organizationsService = organizationsService;
+        this.clock = clock;
+    }
+
+    private double nowEpochSeconds() {
+        return EpochSeconds.fromInstant(Instant.now(clock));
     }
 
     public ObjectNode createPortfolio(JsonNode request, String region, String accountId) {
@@ -71,7 +82,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         ObjectNode portfolio = copy(request);
         portfolio.put("Id", id);
         portfolio.put("ARN", AwsArnUtils.Arn.of("catalog", region, accountId, "portfolio/" + id).toString());
-        portfolio.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        portfolio.put("CreatedTime", nowEpochSeconds());
         portfolioStore.put(id, portfolio);
         return portfolio.deepCopy();
     }
@@ -104,7 +115,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
             portfolio.put("DisplayName", CONTROL_TOWER_PORTFOLIO_NAME);
             portfolio.put("ProviderName", CONTROL_TOWER_PROVIDER_NAME);
             portfolio.put("Description", "AWS Control Tower Account Factory Portfolio");
-            portfolio.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+            portfolio.put("CreatedTime", nowEpochSeconds());
             portfolioStore.put(CONTROL_TOWER_PORTFOLIO_ID, portfolio);
         }
         if (productStore.get(CONTROL_TOWER_PRODUCT_ID).isEmpty()) {
@@ -115,7 +126,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
             product.put("Name", CONTROL_TOWER_PRODUCT_NAME);
             product.put("Owner", CONTROL_TOWER_PROVIDER_NAME);
             product.put("Type", "CLOUD_FORMATION_TEMPLATE");
-            product.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+            product.put("CreatedTime", nowEpochSeconds());
             product.putArray("ProvisioningArtifactIds").add(CONTROL_TOWER_ARTIFACT_ID);
             product.putArray("ProvisioningArtifactNames").add("AWS Control Tower Account Factory");
             productStore.put(CONTROL_TOWER_PRODUCT_ID, product);
@@ -156,7 +167,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         ObjectNode product = copy(request);
         product.put("Id", id);
         product.put("ARN", AwsArnUtils.Arn.of("catalog", region, accountId, "product/" + id).toString());
-        product.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        product.put("CreatedTime", nowEpochSeconds());
         ArrayNode artifactIds = product.putArray("ProvisioningArtifactIds");
         ArrayNode artifactNames = product.putArray("ProvisioningArtifactNames");
         JsonNode artifacts = request.path("ProvisioningArtifactParameters");
@@ -211,7 +222,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
                 .filter(candidate -> name.equals(text(candidate, "Name")))
                 .findFirst().orElse(null);
         if (existing != null) {
-            return existing.deepCopy();
+            return provisionedProductWithRecord(existing);
         }
         String provisionedId = id("pp");
         ObjectNode provisioned = objectMapper.createObjectNode();
@@ -228,9 +239,43 @@ public class ServiceCatalogService implements PassedRoleLookup {
         provisioned.put("Status", "AVAILABLE");
         provisioned.put("ProductId", productId);
         provisioned.put("ProvisioningArtifactId", artifactId);
-        provisioned.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        provisioned.put("CreatedTime", nowEpochSeconds());
         provisionedProductStore.put(provisionedId, provisioned);
-        return provisioned.deepCopy();
+        return provisionedProductWithRecord(provisioned);
+    }
+
+    private synchronized ObjectNode provisionedProductWithRecord(ObjectNode product) {
+        String provisionedId = text(product, "Id");
+        String recordType = "IMPORTED".equals(text(product, "Type")) ? "IMPORT" : "PROVISION_PRODUCT";
+        ObjectNode record = associationStore.scan(key -> true).stream()
+                .filter(candidate -> "RECORD".equals(text(candidate, "Type"))
+                        && recordType.equals(text(candidate, "RecordType"))
+                        && provisionedId.equals(text(candidate, "ProvisionedProductId")))
+                .findFirst().orElse(null);
+        if (record == null) {
+            String recordId = id("rec");
+            record = newProvisionedProductRecord(product, recordId, recordType,
+                    product.path("CreatedTime").asDouble());
+            associationStore.put(recordId, record);
+        }
+        ObjectNode result = product.deepCopy();
+        result.put("RecordId", text(record, "RecordId"));
+        return result;
+    }
+
+    private ObjectNode newProvisionedProductRecord(
+            ObjectNode product, String recordId, String recordType, double createdTime) {
+        ObjectNode record = objectMapper.createObjectNode();
+        record.put("Type", "RECORD");
+        record.put("RecordId", recordId);
+        record.put("ProvisionedProductId", text(product, "Id"));
+        record.put("ProvisionedProductName", text(product, "Name"));
+        record.put("ProductId", text(product, "ProductId"));
+        record.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
+        record.put("RecordType", recordType);
+        record.put("Status", "SUCCEEDED");
+        record.put("CreatedTime", createdTime);
+        return record;
     }
 
     /**
@@ -664,7 +709,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         ObjectNode product = source.deepCopy();
         product.put("Id", newId);
         product.put("ARN", AwsArnUtils.Arn.of("catalog", region, accountId, "product/" + newId).toString());
-        product.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        product.put("CreatedTime", nowEpochSeconds());
         String targetName = text(request, "TargetProductName");
         if (targetName != null && !targetName.isBlank()) {
             product.put("Name", targetName);
@@ -918,7 +963,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         plan.put("ProvisionProductId", productId);
         plan.put("ProvisionedProductName", text(request, "ProvisionedProductName"));
         plan.put("ProvisioningArtifactId", artifactId);
-        plan.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        plan.put("CreatedTime", nowEpochSeconds());
         associationStore.put(planId, plan);
         return plan.deepCopy();
     }
@@ -1041,7 +1086,11 @@ public class ServiceCatalogService implements PassedRoleLookup {
         }
         return associationStore.scan(key -> true).stream()
                 .filter(record -> "RECORD".equals(text(record, "Type")) && id.equals(text(record, "RecordId")))
-                .findFirst().map(ObjectNode::deepCopy)
+                .findFirst().map(record -> {
+                    ObjectNode detail = record.deepCopy();
+                    detail.remove("Type");
+                    return detail;
+                })
                 .orElseThrow(() -> notFound("record", id));
     }
 
@@ -1108,7 +1157,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         ObjectNode record = objectMapper.createObjectNode();
         record.put("RecordId", "rec-" + UUID.randomUUID().toString().replace("-", "").substring(0, 16));
         record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", System.currentTimeMillis() / 1000.0);
+        record.put("CreatedTime", nowEpochSeconds());
         return record;
     }
 
@@ -1120,17 +1169,9 @@ public class ServiceCatalogService implements PassedRoleLookup {
                 .orElseThrow(() -> notFound("provisioned product", provisionedProductId));
 
         String recordId = id("rec");
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("Type", "RECORD");
-        record.put("RecordId", recordId);
-        record.put("ProvisionedProductId", provisionedProductId);
-        record.put("ProvisionedProductName", text(product, "Name"));
+        ObjectNode record = newProvisionedProductRecord(product, recordId,
+                "UPDATE_PROVISIONED_PRODUCT", nowEpochSeconds());
         record.put("ProvisionedProductType", text(product, "Type"));
-        record.put("ProductId", text(product, "ProductId"));
-        record.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
-        record.put("RecordType", "UPDATE_PROVISIONED_PRODUCT");
-        record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
         associationStore.put(recordId, record);
 
         ObjectNode result = product.deepCopy();
@@ -1173,20 +1214,12 @@ public class ServiceCatalogService implements PassedRoleLookup {
         provisioned.put("PhysicalId", physicalId);
         provisioned.put("ProductId", productId);
         provisioned.put("ProvisioningArtifactId", provisioningArtifactId);
-        provisioned.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        provisioned.put("CreatedTime", nowEpochSeconds());
         provisionedProductStore.put(provisionedId, provisioned);
 
         String recordId = id("rec");
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("Type", "RECORD");
-        record.put("RecordId", recordId);
-        record.put("ProvisionedProductId", provisionedId);
-        record.put("ProvisionedProductName", provisionedProductName);
-        record.put("ProductId", productId);
-        record.put("ProvisioningArtifactId", provisioningArtifactId);
-        record.put("RecordType", "IMPORT");
-        record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", provisioned.get("CreatedTime").asDouble());
+        ObjectNode record = newProvisionedProductRecord(provisioned, recordId, "IMPORT",
+                provisioned.get("CreatedTime").asDouble());
         associationStore.put(recordId, record);
 
         ObjectNode result = provisioned.deepCopy();
@@ -1269,7 +1302,32 @@ public class ServiceCatalogService implements PassedRoleLookup {
     }
 
     public List<ObjectNode> listRecordHistory() {
-        return provisionedProductStore.scan(key -> true).stream().map(ObjectNode::deepCopy).toList();
+        List<ObjectNode> history = new ArrayList<>();
+        Set<String> productsWithCreationRecord = new HashSet<>();
+        for (ObjectNode stored : associationStore.scan(key -> true)) {
+            if (!"RECORD".equals(text(stored, "Type"))) {
+                continue;
+            }
+            ObjectNode record = stored.deepCopy();
+            String provisionedId = text(record, "ProvisionedProductId");
+            if ("IMPORT".equals(text(record, "RecordType"))
+                    || "PROVISION_PRODUCT".equals(text(record, "RecordType"))) {
+                productsWithCreationRecord.add(provisionedId);
+            }
+            provisionedProductStore.get(provisionedId).ifPresent(product ->
+                    record.put("ProvisionedProductType", text(product, "Type")));
+            history.add(record);
+        }
+        provisionedProductStore.scan(key -> true).stream()
+                .filter(product -> !productsWithCreationRecord.contains(text(product, "Id")))
+                .map(ObjectNode::deepCopy)
+                .forEach(history::add);
+        history.sort(Comparator
+                .comparingDouble((ObjectNode entry) -> Math.max(entry.path("CreatedTime").asDouble(),
+                        entry.path("UpdatedTime").asDouble()))
+                .reversed()
+                .thenComparing(entry -> entry.path("RecordId").asText(entry.path("Id").asText())));
+        return history;
     }
 
     public List<ObjectNode> listResourcesForTagOption(String tagOptionId, String resourceType) {
@@ -1326,11 +1384,8 @@ public class ServiceCatalogService implements PassedRoleLookup {
         ObjectNode instance = objectMapper.createObjectNode();
         instance.put("Account", text(product, "PhysicalId"));
         String arn = text(product, "Arn");
-        if (arn != null) {
-            String[] parts = arn.split(":");
-            if (parts.length >= 4) {
-                instance.put("Region", parts[3]);
-            }
+        if (AwsArnUtils.isArn(arn)) {
+            instance.put("Region", AwsArnUtils.parse(arn).region());
         }
         instance.put("StackInstanceStatus", "CURRENT");
         return List.of(instance);
@@ -1406,16 +1461,8 @@ public class ServiceCatalogService implements PassedRoleLookup {
         }
 
         String recordId = id("rec");
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("Type", "RECORD");
-        record.put("RecordId", recordId);
-        record.put("ProvisionedProductId", text(product, "Id"));
-        record.put("ProvisionedProductName", text(product, "Name"));
-        record.put("ProductId", text(product, "ProductId"));
-        record.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
-        record.put("RecordType", "UPDATE_PROVISIONED_PRODUCT");
-        record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        ObjectNode record = newProvisionedProductRecord(product, recordId,
+                "UPDATE_PROVISIONED_PRODUCT", nowEpochSeconds());
         associationStore.put(recordId, record);
 
         ObjectNode result = product.deepCopy();
@@ -1437,16 +1484,8 @@ public class ServiceCatalogService implements PassedRoleLookup {
         provisionedProductStore.put(provisionedProductId, product);
 
         String recordId = id("rec");
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("Type", "RECORD");
-        record.put("RecordId", recordId);
-        record.put("ProvisionedProductId", provisionedProductId);
-        record.put("ProvisionedProductName", text(product, "Name"));
-        record.put("ProductId", text(product, "ProductId"));
-        record.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
-        record.put("RecordType", "UPDATE_PROVISIONED_PRODUCT");
-        record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        ObjectNode record = newProvisionedProductRecord(product, recordId,
+                "UPDATE_PROVISIONED_PRODUCT", nowEpochSeconds());
         associationStore.put(recordId, record);
 
         ObjectNode result = product.deepCopy();
@@ -1497,7 +1536,7 @@ public class ServiceCatalogService implements PassedRoleLookup {
         detail.put("Id", artifactId);
         detail.put("Name", name);
         detail.put("Type", type);
-        detail.put("CreatedTime", Instant.now().toEpochMilli() / 1000.0);
+        detail.put("CreatedTime", nowEpochSeconds());
         detail.put("Active", true);
         String description = text(parameters, "Description");
         if (description != null && !description.isBlank()) {
@@ -1538,21 +1577,14 @@ public class ServiceCatalogService implements PassedRoleLookup {
         }
         String id = text(product, "Id");
         product.put("Status", "TERMINATED");
-        product.put("UpdatedTime", Instant.now().toEpochMilli() / 1000.0);
+        product.put("UpdatedTime", nowEpochSeconds());
         provisionedProductStore.put(id, product);
 
         String recordId = id("rec");
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("Type", "RECORD");
-        record.put("RecordId", recordId);
-        record.put("ProvisionedProductId", id);
-        record.put("ProvisionedProductName", text(product, "Name"));
-        record.put("ProductId", text(product, "ProductId"));
-        record.put("ProvisioningArtifactId", text(product, "ProvisioningArtifactId"));
-        record.put("RecordType", "TERMINATE_PROVISIONED_PRODUCT");
-        record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", product.get("CreatedTime").asDouble());
-        record.put("UpdatedTime", product.get("UpdatedTime").asDouble());
+        double updatedTime = product.get("UpdatedTime").asDouble();
+        ObjectNode record = newProvisionedProductRecord(product, recordId,
+                "TERMINATE_PROVISIONED_PRODUCT", updatedTime);
+        record.put("UpdatedTime", updatedTime);
         associationStore.put(recordId, record);
 
         ObjectNode result = product.deepCopy();

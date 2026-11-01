@@ -8,9 +8,12 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.allOf;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItems;
+import static org.hamcrest.Matchers.startsWith;
 
 /**
  * Control-plane coverage for CreateUserGroup, DescribeUserGroups, ModifyUserGroup and
@@ -30,9 +33,13 @@ class ElastiCacheUserGroupIntegrationTest {
     private static final String DESCRIBE = "DescribeUserGroupsResponse.DescribeUserGroupsResult.UserGroups.member.";
 
     private static RequestSpecification request(String action) {
+        return request(action, AUTH_HEADER);
+    }
+
+    private static RequestSpecification request(String action, String authorization) {
         return given()
             .formParam("Action", action)
-            .header("Authorization", AUTH_HEADER);
+            .header("Authorization", authorization);
     }
 
     private static void createUser(String userId, String userName) {
@@ -213,6 +220,86 @@ class ElastiCacheUserGroupIntegrationTest {
 
         request("DeleteUser")
             .formParam("UserId", DEFAULT_USER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(10)
+    void theBuiltInDefaultUserExistsAndJoinsAUserGroup() {
+        request("DescribeUsers")
+            .formParam("UserId", "default")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.UserId", equalTo("default"))
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.UserName", equalTo("default"))
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.Status", equalTo("active"))
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.Engine", equalTo("redis"))
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.AccessString", equalTo("on ~* +@all"))
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.MinimumEngineVersion", equalTo("6.0"))
+            // users are stored per account, not per region, so the ARN keeps the first region that read it
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.ARN",
+                    allOf(startsWith("arn:aws:elasticache:"), endsWith(":000000000000:user:default")));
+
+        request("DescribeUsers")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.findAll { it.UserId == 'default' }.size()",
+                    equalTo(1));
+
+        request("CreateUserGroup")
+            .formParam("UserGroupId", "ug-it-builtin-default")
+            .formParam("Engine", "redis")
+            .formParam("UserIds.member.1", "default")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(CREATE + "UserIds.member", equalTo("default"));
+
+        request("DeleteUser")
+            .formParam("UserId", "default")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"));
+
+        request("ModifyUser")
+            .formParam("UserId", "default")
+            .formParam("AccessString", "off -@all")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"));
+
+        request("DescribeUsers")
+            .formParam("UserId", "default")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.AccessString", equalTo("on ~* +@all"));
+
+        // another account has its own default user
+        request("DescribeUsers", "AWS4-HMAC-SHA256 Credential=111111111111/20260412/us-east-1/elasticache/aws4_request")
+            .formParam("UserId", "default")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.ARN",
+                    endsWith(":111111111111:user:default"));
+
+        request("DeleteUserGroup")
+            .formParam("UserGroupId", "ug-it-builtin-default")
         .when()
             .post("/")
         .then()

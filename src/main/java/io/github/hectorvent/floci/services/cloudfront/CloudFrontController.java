@@ -14,7 +14,9 @@ import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -862,11 +864,37 @@ public class CloudFrontController {
                                 @QueryParam("Stage") String stage) {
         try {
             CloudFrontFunction fn = service.describeFunction(name, stage);
-            return Response.ok(fn.getFunctionCode() != null ? fn.getFunctionCode() : "", OCTET_STREAM)
+            return Response.ok(functionCodeBytes(fn), OCTET_STREAM)
                     .header("ETag", fn.getEtag())
                     .build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
+        }
+    }
+
+    /**
+     * GetFunction serves the function code as the response body. The code reached this emulator
+     * as the base64 text of the CreateFunction or UpdateFunction FunctionCode element, so it is
+     * decoded back to the bytes the caller originally encoded. The ETag header carries the
+     * function's version identifier, and the media type is application/octet-stream, matching
+     * the GetFunction response contract in the CloudFront API reference.
+     *
+     * <p>Records persisted by older Floci versions may hold plain code instead: the
+     * CloudFormation provisioner once wrote the template's raw body. Those still read back
+     * as their stored bytes rather than failing, and the next UpdateFunction rewrites them
+     * into the uniform base64 form.
+     */
+    private byte[] functionCodeBytes(CloudFrontFunction fn) {
+        String encoded = fn.getFunctionCode();
+        if (encoded == null || encoded.isBlank()) {
+            return new byte[0];
+        }
+        try {
+            return Base64.getDecoder().decode(encoded.trim());
+        } catch (IllegalArgumentException e) {
+            LOG.warnv("Function {0} holds non-base64 code persisted by an older Floci version; serving it as stored",
+                    fn.getName());
+            return encoded.getBytes(StandardCharsets.UTF_8);
         }
     }
 

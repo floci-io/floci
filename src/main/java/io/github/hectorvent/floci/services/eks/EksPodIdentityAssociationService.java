@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -26,6 +27,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.UnaryOperator;
 
 /**
  * Manages EKS Pod Identity association metadata.
@@ -128,7 +130,7 @@ public class EksPodIdentityAssociationService {
                 cluster.getAccountId() != null ? cluster.getAccountId() : regionResolver.getDefaultAccountId());
         String associationArn = AwsArnUtils.Arn.of("eks", region, accountId,
                 "podidentityassociation/" + cluster.getName() + "/" + associationId).toString();
-        double now = Instant.now().toEpochMilli() / 1000.0;
+        double now = EpochSeconds.fromInstant(Instant.now());
         String externalId = UUID.randomUUID().toString();
 
         PodIdentityAssociation association = new PodIdentityAssociation(
@@ -205,7 +207,7 @@ public class EksPodIdentityAssociationService {
                 ? request.disableSessionTags() : current.disableSessionTags();
         String newPolicy = request.policy() != null ? request.policy() : current.policy();
 
-        double now = Instant.now().toEpochMilli() / 1000.0;
+        double now = EpochSeconds.fromInstant(Instant.now());
         PodIdentityAssociation updated = new PodIdentityAssociation(
                 current.clusterName(),
                 current.namespace(),
@@ -295,6 +297,31 @@ public class EksPodIdentityAssociationService {
                 .map(StoredAssociation::association)
                 .filter(a -> a.namespace().equals(namespace) && a.serviceAccount().equals(serviceAccount))
                 .findFirst();
+    }
+
+    /**
+     * Applies {@code change} to the tags of the association {@code associationArn} names on
+     * {@code cluster} and returns them, or empty when the cluster has no association with that ARN.
+     * This is how TagResource, UntagResource and ListTagsForResource reach an association.
+     */
+    public synchronized Optional<Map<String, String>> retag(Cluster cluster, String associationId, String associationArn,
+                                                            UnaryOperator<Map<String, String>> change) {
+        String key = prefix(cluster) + associationId;
+        Optional<StoredAssociation> found = associations.get(key)
+                .filter(stored -> associationArn.equals(stored.association().associationArn()));
+        if (found.isEmpty()) {
+            return Optional.empty();
+        }
+        PodIdentityAssociation current = found.get().association();
+        Map<String, String> tags = Map.copyOf(change.apply(current.tags() == null ? Map.of() : current.tags()));
+        if (!tags.equals(current.tags())) {
+            PodIdentityAssociation retagged = new PodIdentityAssociation(current.clusterName(), current.namespace(),
+                    current.serviceAccount(), current.roleArn(), current.associationArn(), current.associationId(),
+                    tags, current.createdAt(), current.modifiedAt(), current.ownerArn(), current.targetRoleArn(),
+                    current.disableSessionTags(), current.externalId(), current.policy());
+            associations.put(key, new StoredAssociation(retagged, found.get().clientRequestToken()));
+        }
+        return Optional.of(tags);
     }
 
     private static String prefix(Cluster cluster) {

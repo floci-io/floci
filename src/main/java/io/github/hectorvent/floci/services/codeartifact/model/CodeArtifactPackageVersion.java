@@ -21,6 +21,11 @@ public class CodeArtifactPackageVersion {
     private String status;
     private String revision;
     private Long publishedTime;
+    // Every real version here was either published directly (generic's own publishPackageVersion
+    // never sets this, so the default here stays correct for it) or synthesized for a
+    // container-backed format whose own describe path sets it explicitly once it knows better
+    // (currently only Maven's real external-connection retention ever reports EXTERNAL).
+    private String originType = "INTERNAL";
     private Map<String, PackageAsset> assets = new LinkedHashMap<>();
 
     public String getDomainName() {
@@ -109,6 +114,14 @@ public class CodeArtifactPackageVersion {
 
     public void setPublishedTime(Long publishedTime) {
         this.publishedTime = publishedTime;
+    }
+
+    public String getOriginType() {
+        return originType;
+    }
+
+    public void setOriginType(String originType) {
+        this.originType = originType;
     }
 
     public Map<String, PackageAsset> getAssets() {

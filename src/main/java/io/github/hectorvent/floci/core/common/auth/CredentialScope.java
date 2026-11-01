@@ -14,8 +14,11 @@ public record CredentialScope(String accessKeyId, String date, String region, St
 
     private static final String TERMINATOR = "aws4_request";
 
+    /** The scope as it is signed. A SigV4a scope has no region segment. */
     public String credentialScope() {
-        return date + "/" + region + "/" + service + "/" + TERMINATOR;
+        return region == null
+                ? date + "/" + service + "/" + TERMINATOR
+                : date + "/" + region + "/" + service + "/" + TERMINATOR;
     }
 
     /**
@@ -34,5 +37,23 @@ public record CredentialScope(String accessKeyId, String date, String region, St
             return null;
         }
         return new CredentialScope(parts[0], parts[1], parts[2], parts[3].toLowerCase(Locale.ROOT));
+    }
+
+    /**
+     * A SigV4a scope, {@code accessKeyId/date/service/aws4_request}, whose region is null: the
+     * regions the signature is good for travel in its region set instead.
+     */
+    public static CredentialScope parseSigV4a(String credential) {
+        if (credential == null) {
+            return null;
+        }
+        String[] parts = credential.split("/");
+        if (parts.length != 4 || !TERMINATOR.equals(parts[3])) {
+            return null;
+        }
+        if (parts[0].isBlank() || parts[1].length() != 8 || parts[2].isBlank()) {
+            return null;
+        }
+        return new CredentialScope(parts[0], parts[1], null, parts[2].toLowerCase(Locale.ROOT));
     }
 }

@@ -1334,7 +1334,7 @@ public class BatchService {
             return byArn;
         }
         String logical = ref;
-        if (ref.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(ref)) {
             try {
                 String resource = AwsArnUtils.parse(ref).resource();
                 if (resource.startsWith("job-definition/")) {
@@ -1372,7 +1372,7 @@ public class BatchService {
             return true;
         }
         String logical = ref;
-        if (ref.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(ref)) {
             try {
                 String resource = AwsArnUtils.parse(ref).resource();
                 if (!resource.startsWith("job-definition/")) {
@@ -1458,7 +1458,7 @@ public class BatchService {
 
     private void validateDeregisterJobDefinitionRef(String ref) {
         String logical = ref;
-        if (ref.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(ref)) {
             try {
                 String resource = AwsArnUtils.parse(ref).resource();
                 if (!resource.startsWith("job-definition/")) {
@@ -2019,7 +2019,7 @@ public class BatchService {
         if (value == null || value.isBlank()) {
             return false;
         }
-        if (value.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(value)) {
             return value.equals(job.getJobDefinition());
         }
         if (value.endsWith("*")) {

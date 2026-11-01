@@ -454,7 +454,7 @@ class RedshiftServerlessTest {
 
     @Test
     void snapshotCopyDestinationCanChangeOnlyAfterDeletion() {
-        assumeFalse(TestFixtures.isRealAws(), "Asserts metadata-only snapshot copying");
+        assumeFalse(TestFixtures.isRealAws(), "Asserts emulator-local snapshot copy configuration rules");
         try (RedshiftServerlessClient client = TestFixtures.redshiftServerlessClient()) {
             String namespaceName = "floci-compat-copy-ns";
             try {

@@ -1065,7 +1065,7 @@ class AutoScalingServiceTest {
 
         assertDoesNotThrow(() -> service.setInstanceHealth(REGION, "i-health", "Unhealthy", true));
         assertEquals("Unhealthy", service.describeAutoScalingInstances(REGION, List.of("i-health"))
-                .getFirst().getHealthStatus());
+                .getFirst().instance().getHealthStatus());
     }
 
     @Test

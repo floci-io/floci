@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.emr;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.model.Image;
+import io.github.hectorvent.floci.config.ContainerCaBundle;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -23,6 +24,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -143,6 +145,26 @@ class EmrBootstrapRunnerTest {
     }
 
     @Test
+    void theActionsJvmsTrustFlocisCaWhoseTrustStoreIsNotKeptInTheImage() {
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, 0, "", "");
+        List<Integer> execsBeforeTheCopy = new ArrayList<>();
+        when(lifecycle.copyJavaTrustStore(CONTAINER)).thenAnswer(copy -> {
+            execsBeforeTheCopy.add(commands.size());
+            return true;
+        });
+
+        runner.run(bootstrap(null, action("s3://bucket/bootstrap/install.sh")), () -> false);
+
+        // In once the container is up, before the first action runs, which points its JVMs at it.
+        assertEquals(List.of(0), execsBeforeTheCopy);
+        assertTrue(commands.get(0).get(2).startsWith(ContainerCaBundle.JAVA_TRUST_SHELL_LINE + "\n"));
+        // Each step's container gets its own, so the image goes without it.
+        assertEquals(2, commands.size());
+        assertTrue(commands.get(1).get(2).contains("rm -f ") && commands.get(1).get(2).contains(
+                " " + ContainerCaBundle.JAVA_TRUST_STORE_PATH + ";"), commands.get(1).get(2));
+    }
+
+    @Test
     void aFailingActionEndsTheBootstrapThereAndNothingIsKept() {
         List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, List.of(0L, 3L), "", "");
 
@@ -200,6 +222,24 @@ class EmrBootstrapRunnerTest {
         assertEquals(BootstrapRunner.Outcome.halted(), outcome);
         assertEquals(1, commands.size());
         verify(lifecycle, never()).commit(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aClusterThatEndsWhileTheTrustStoreIsCopiedRunsNoAction() {
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, 0, "", "");
+        AtomicBoolean ended = new AtomicBoolean();
+        when(lifecycle.copyJavaTrustStore(CONTAINER)).thenAnswer(copy -> {
+            ended.set(true);
+            return true;
+        });
+
+        BootstrapRunner.Outcome outcome = runner.run(bootstrap(null, action("s3://bucket/bootstrap/install.sh")),
+                ended::get);
+
+        assertEquals(BootstrapRunner.Outcome.halted(), outcome);
+        assertTrue(commands.isEmpty());
+        verify(lifecycle, never()).commit(any(), any(), any(), any(), any());
+        verify(lifecycle).stopAndRemove(CONTAINER, null, 0);
     }
 
     @Test

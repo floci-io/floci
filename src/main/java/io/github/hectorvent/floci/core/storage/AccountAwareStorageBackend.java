@@ -449,6 +449,11 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         delegate.deleteAllAtomically(rawKeys);
     }
 
+    /** Whether the delegate only retains values in memory, without persistence or serialization. */
+    public boolean isInMemory() {
+        return delegate instanceof InMemoryStorage<?, ?>;
+    }
+
     // --- Entry writes, for map-valued stores whose backend persists one entry at a time ---
 
     /** Whether the backend persists one map entry at a time; the entry methods require it. */

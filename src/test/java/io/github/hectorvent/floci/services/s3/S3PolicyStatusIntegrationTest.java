@@ -84,6 +84,7 @@ class S3PolicyStatusIntegrationTest {
         String bucket = "policy-status-" + UUID.randomUUID();
         cleanup.register(() -> EnforcementFixtures.removeBucket(baseUri.getPort(), auth("test", "s3"), bucket));
         admin.createBucket(request -> request.bucket(bucket));
+        admin.deletePublicAccessBlock(request -> request.bucket(bucket));
         return bucket;
     }
 

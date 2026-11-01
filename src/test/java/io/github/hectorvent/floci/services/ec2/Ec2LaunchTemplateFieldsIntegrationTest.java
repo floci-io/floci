@@ -12,6 +12,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Regression tests for CreateLaunchTemplate discarding nearly all of RequestLaunchTemplateData.
@@ -199,8 +200,12 @@ class Ec2LaunchTemplateFieldsIntegrationTest {
             .body(DATA + "networkInterfaceSet.item.subnetId", equalTo("subnet-0123456789abcdef0"))
             .body(DATA + "networkInterfaceSet.item.associatePublicIpAddress", equalTo("true"))
             .body(DATA + "networkInterfaceSet.item.deleteOnTermination", equalTo("true"))
-            .body(DATA + "networkInterfaceSet.item.groupSet.item",
+            .body(DATA + "networkInterfaceSet.item.groupSet.groupId",
                     contains("sg-1111111111111111a", "sg-2222222222222222b"));
+        // GroupIdStringList members are named groupId on the wire; aws-sdk-go-v2 reads only that tag.
+        String raw = describeBody(name);
+        assertTrue(raw.contains("<groupSet><groupId>sg-1111111111111111a</groupId>"), raw);
+        assertFalse(raw.contains("<groupSet><item>"), raw);
         // Not promoted to the top level: that promotion is what made the block disappear.
         assertFalse(describeBody(name).contains("securityGroupIdSet"),
                 "interface groups must not be hoisted into top-level SecurityGroupIds");

@@ -9,12 +9,14 @@ import io.github.hectorvent.floci.services.applicationautoscaling.model.Scalable
 import io.github.hectorvent.floci.services.applicationautoscaling.model.ScalingPolicy;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.TargetTrackingConfiguration;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -39,20 +41,26 @@ class ApplicationAutoScalingServiceTest {
     private static final String DIMENSION = "ecs:service:DesiredCount";
 
     private ApplicationAutoScalingService service;
+    private CloudWatchMetricsService cloudWatch;
 
     /** Alarm names currently registered in the stubbed CloudWatch. */
     private final Set<String> alarmsInCloudWatch = new LinkedHashSet<>();
+
+    /** Alarm objects currently registered in the stubbed CloudWatch, in creation order. */
+    private final List<MetricAlarm> createdAlarms = new ArrayList<>();
 
     @BeforeEach
     void setUp() {
         RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
         alarmsInCloudWatch.clear();
+        createdAlarms.clear();
 
-        CloudWatchMetricsService cloudWatch = mock(CloudWatchMetricsService.class);
+        cloudWatch = mock(CloudWatchMetricsService.class);
         doAnswer(invocation -> {
             MetricAlarm alarm = invocation.getArgument(0);
             alarm.setAlarmArn("arn:aws:cloudwatch:" + REGION + ":000000000000:alarm:" + alarm.getAlarmName());
             alarmsInCloudWatch.add(alarm.getAlarmName());
+            createdAlarms.add(alarm);
             return null;
         }).when(cloudWatch).putMetricAlarm(any(MetricAlarm.class), anyString());
         doAnswer(invocation -> {
@@ -406,6 +414,100 @@ class ApplicationAutoScalingServiceTest {
     }
 
     @Test
+    void customizedMetricAlarmsWatchTheMetricIdentityTheCallerGave() {
+        register();
+        TargetTrackingConfiguration config = new TargetTrackingConfiguration();
+        config.setTargetValue(10.0d);
+        config.setCustomizedMetricSpecification(Map.of(
+                "Namespace", "App/Workers",
+                "MetricName", "JobsPerTask",
+                "Statistic", "Maximum",
+                "Unit", "Count",
+                "Dimensions", List.of(
+                        Map.of("Name", "ServiceName", "Value", "web"),
+                        Map.of("Name", "Queue", "Value", "jobs"))));
+        service.putScalingPolicy("custom", "TargetTrackingScaling",
+                NAMESPACE, RESOURCE_ID, DIMENSION, config, null, REGION);
+
+        assertEquals(2, createdAlarms.size());
+        for (MetricAlarm alarm : createdAlarms) {
+            assertEquals("App/Workers", alarm.getNamespace(), "the caller's namespace must reach the alarm");
+            assertEquals("JobsPerTask", alarm.getMetricName(), "the caller's metric name must reach the alarm");
+            assertEquals("Maximum", alarm.getStatistic(), "the caller's statistic must reach the alarm");
+            assertEquals("Count", alarm.getUnit(), "the caller's unit must reach the alarm");
+            assertEquals(List.of(new Dimension("ServiceName", "web"), new Dimension("Queue", "jobs")),
+                    alarm.getDimensions(), "the caller's dimensions must reach the alarm");
+        }
+    }
+
+    @Test
+    void customizedMetricWithoutAStatisticKeepsTheAlarmDefaultAverage() {
+        register();
+        TargetTrackingConfiguration config = new TargetTrackingConfiguration();
+        config.setTargetValue(10.0d);
+        config.setCustomizedMetricSpecification(Map.of(
+                "Namespace", "App/Workers",
+                "MetricName", "JobsPerTask"));
+        service.putScalingPolicy("custom", "TargetTrackingScaling",
+                NAMESPACE, RESOURCE_ID, DIMENSION, config, null, REGION);
+
+        assertEquals("Average", createdAlarms.get(0).getStatistic());
+        assertNull(createdAlarms.get(0).getUnit());
+    }
+
+    @Test
+    void ecsCpuPredefinedAlarmsWatchTheRealAwsEcsMetricIdentity() {
+        register();
+        service.putScalingPolicy("cpu", "TargetTrackingScaling",
+                NAMESPACE, RESOURCE_ID, DIMENSION,
+                targetTracking(65.0, "ECSServiceAverageCPUUtilization", null), null, REGION);
+
+        for (MetricAlarm alarm : createdAlarms) {
+            assertEquals("AWS/ECS", alarm.getNamespace());
+            assertEquals("CPUUtilization", alarm.getMetricName(),
+                    "the alarm must watch the metric ECS publishes, not the policy type name");
+            assertEquals(List.of(new Dimension("ClusterName", "my-cluster"), new Dimension("ServiceName", "my-service")),
+                    alarm.getDimensions());
+            assertEquals("Average", alarm.getStatistic());
+        }
+    }
+
+    @Test
+    void ecsMemoryPredefinedAlarmsWatchTheRealAwsEcsMetricIdentity() {
+        register();
+        service.putScalingPolicy("memory", "TargetTrackingScaling",
+                NAMESPACE, RESOURCE_ID, DIMENSION,
+                targetTracking(70.0, "ECSServiceAverageMemoryUtilization", null), null, REGION);
+
+        for (MetricAlarm alarm : createdAlarms) {
+            assertEquals("AWS/ECS", alarm.getNamespace());
+            assertEquals("MemoryUtilization", alarm.getMetricName(),
+                    "the alarm must watch the metric ECS publishes, not the policy type name");
+            assertEquals(List.of(new Dimension("ClusterName", "my-cluster"), new Dimension("ServiceName", "my-service")),
+                    alarm.getDimensions());
+        }
+    }
+
+    @Test
+    void albPredefinedAlarmsWatchThePerTargetMetricInsideTheResourceLabel() {
+        register();
+        service.putScalingPolicy("alb", "TargetTrackingScaling", NAMESPACE, RESOURCE_ID, DIMENSION,
+                targetTracking(1000.0, "ALBRequestCountPerTarget", "app/my-lb/abc123/targetgroup/my-tg/def456"),
+                null, REGION);
+
+        for (MetricAlarm alarm : createdAlarms) {
+            assertEquals("AWS/ApplicationELB", alarm.getNamespace());
+            assertEquals("RequestCountPerTarget", alarm.getMetricName());
+            assertEquals(List.of(
+                    new Dimension("LoadBalancer", "app/my-lb/abc123"),
+                    new Dimension("TargetGroup", "targetgroup/my-tg/def456")),
+                    alarm.getDimensions());
+            assertEquals("Sum", alarm.getStatistic(),
+                    "RequestCountPerTarget's only valid CloudWatch statistic is Sum");
+        }
+    }
+
+    @Test
     void deregisterCascadesToPoliciesAndAlarms() {
         register();
         service.putScalingPolicy("cpu", "TargetTrackingScaling", NAMESPACE, RESOURCE_ID, DIMENSION,
@@ -425,6 +527,32 @@ class ApplicationAutoScalingServiceTest {
         AwsException e = assertThrows(AwsException.class,
                 () -> service.deregisterScalableTarget(NAMESPACE, RESOURCE_ID, DIMENSION, REGION));
         assertEquals("ObjectNotFoundException", e.getErrorCode());
+    }
+
+    /**
+     * CloudWatch refuses a whole DeleteAlarms request that names an alarm a composite alarm still
+     * names, so the cleanup deletes the policy's alarms one by one and only the named one stays.
+     */
+    @Test
+    void policyCleanupKeepsOnlyTheAlarmACompositeAlarmNames() {
+        register();
+        ScalingPolicy policy = service.putScalingPolicy("cpu", "TargetTrackingScaling", NAMESPACE, RESOURCE_ID,
+                DIMENSION, targetTracking(65.0, "ECSServiceAverageCPUUtilization", null), null, REGION);
+        String referenced = policy.getAlarms().getFirst().getAlarmName();
+        doAnswer(invocation -> {
+            List<String> names = invocation.getArgument(0);
+            if (names.contains(referenced)) {
+                throw new AwsException("ValidationError",
+                        "Cannot delete " + referenced + " as there are composite alarm(s) depending on it.", 400);
+            }
+            alarmsInCloudWatch.removeAll(names);
+            return null;
+        }).when(cloudWatch).deleteAlarms(any(), anyString());
+
+        service.deleteScalingPolicy("cpu", NAMESPACE, RESOURCE_ID, DIMENSION, REGION);
+
+        assertEquals(0, service.describeScalingPolicies(NAMESPACE, null, null, null, REGION).size());
+        assertEquals(Set.of(referenced), alarmsInCloudWatch);
     }
 
     @Test

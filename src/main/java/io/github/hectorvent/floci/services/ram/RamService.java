@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
+import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
@@ -31,6 +32,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 /**
@@ -178,6 +181,19 @@ public class RamService {
         return result;
     }
 
+    public PaginatedResult<ResourceShare> getResourceSharesPage(String callerAccountId, String resourceOwner,
+                                                                 String name, List<String> resourceShareArns,
+                                                                 String resourceShareStatus, String region,
+                                                                 Integer maxResults, String nextToken) {
+        return paginateRamResults(
+                () -> getResourceShares(callerAccountId, resourceOwner, name,
+                        resourceShareArns, resourceShareStatus, region),
+                ResourceShare::getResourceShareArn, maxResults, nextToken,
+                () -> "ram-resource-shares|" + callerAccountId + "|" + region + "|" + resourceOwner
+                        + "|" + (name == null ? "~" : Base64Url.encode(name)) + "|" + resourceShareStatus + "|"
+                        + resourceShareArns.stream().distinct().sorted().map(Base64Url::encode).toList());
+    }
+
     /**
      * @param resourceShareArns restrict to invitations for these shares, or empty for any
      * @param resourceShareInvitationArns restrict to these invitation ARNs, or empty for any
@@ -313,8 +329,7 @@ public class RamService {
 
     /** {@code arn:aws:ram:<region>:<account>:resource-share/<id>} → {@code <region>}. */
     private static String extractRegion(String resourceShareArn) {
-        String[] parts = resourceShareArn.split(":", 6);
-        return parts.length < 4 ? "" : parts[3];
+        return AwsArnUtils.regionOrDefault(resourceShareArn, "");
     }
 
     private void putInvitation(ResourceShareInvitation invitation) {
@@ -438,41 +453,49 @@ public class RamService {
         if (resourceArn != null && !isValidArn(resourceArn)) {
             throw new AwsException("MalformedArnException", "Invalid resourceArn: " + resourceArn, 400);
         }
+        return paginateRamResults(() -> {
+            List<ResourceShareAssociation> associations = new ArrayList<>();
+            if (associationStatus == null || "ASSOCIATED".equals(associationStatus)) {
+                for (ResourceShare share : sharesIn(region)) {
+                    if (!isConsumableShare(share, callerAccountId, "SELF", resourceShareArns)) {
+                        continue;
+                    }
+                    if ("RESOURCE".equals(associationType)) {
+                        for (String entity : new LinkedHashSet<>(share.getResourceArns())) {
+                            if (resourceArn == null || resourceArn.equals(entity)) {
+                                associations.add(association(share, entity, "RESOURCE"));
+                            }
+                        }
+                    } else if ("PRINCIPAL".equals(associationType)) {
+                        for (String entity : new LinkedHashSet<>(share.getPrincipals())) {
+                            if (principal == null || principal.equals(entity)) {
+                                associations.add(association(share, entity, "PRINCIPAL"));
+                            }
+                        }
+                    }
+                }
+            }
+            return associations;
+        },
+                association -> association.resourceShareArn() + "\u0000" + association.associatedEntity(),
+                maxResults, nextToken,
+                () -> "ram-associations|" + callerAccountId + "|" + region + "|" + associationType
+                        + "|" + associationStatus + "|" + resourceShareArns.stream().sorted().toList()
+                        + "|" + resourceArn + "|" + principal);
+    }
+
+    private static <T> PaginatedResult<T> paginateRamResults(Supplier<List<T>> items,
+                                                               Function<T, String> cursorOf,
+                                                               Integer maxResults, String nextToken,
+                                                               Supplier<String> namespace) {
         if (maxResults != null && (maxResults < 1 || maxResults > 500)) {
             throw new AwsException("InvalidParameterException", "maxResults must be between 1 and 500.", 400);
         }
         if (nextToken != null && nextToken.isEmpty()) {
             throw new AwsException("InvalidNextTokenException", "Invalid nextToken.", 400);
         }
-
-        List<ResourceShareAssociation> associations = new ArrayList<>();
-        if (associationStatus == null || "ASSOCIATED".equals(associationStatus)) {
-            for (ResourceShare share : sharesIn(region)) {
-                if (!isConsumableShare(share, callerAccountId, "SELF", resourceShareArns)) {
-                    continue;
-                }
-                if ("RESOURCE".equals(associationType)) {
-                    for (String entity : new LinkedHashSet<>(share.getResourceArns())) {
-                        if (resourceArn == null || resourceArn.equals(entity)) {
-                            associations.add(association(share, entity, "RESOURCE"));
-                        }
-                    }
-                } else if ("PRINCIPAL".equals(associationType)) {
-                    for (String entity : new LinkedHashSet<>(share.getPrincipals())) {
-                        if (principal == null || principal.equals(entity)) {
-                            associations.add(association(share, entity, "PRINCIPAL"));
-                        }
-                    }
-                }
-            }
-        }
-
-        String namespace = "ram-associations|" + callerAccountId + "|" + region + "|" + associationType
-                + "|" + associationStatus + "|" + resourceShareArns.stream().sorted().toList()
-                + "|" + resourceArn + "|" + principal;
-        return Pagination.paginate(associations,
-                association -> association.resourceShareArn() + "\u0000" + association.associatedEntity(),
-                maxResults != null ? maxResults : 100, nextToken, namespace,
+        return Pagination.paginate(items.get(), cursorOf,
+                maxResults != null ? maxResults : 100, nextToken, namespace.get(),
                 ignored -> new AwsException("InvalidNextTokenException", "Invalid nextToken.", 400));
     }
 
@@ -761,12 +784,12 @@ public class RamService {
 
     /** {@code arn:aws:ec2:...:transit-gateway/tgw-1} → {@code ec2:TransitGateway}. */
     private static String ramResourceType(String resourceArn) {
-        String[] parts = resourceArn.split(":", 6);
-        if (parts.length < 6) {
+        if (!AwsArnUtils.isArn(resourceArn)) {
             return "";
         }
-        String service = parts[2];
-        String resource = parts[5];
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(resourceArn);
+        String service = parsed.service();
+        String resource = parsed.resource();
         int separator = indexOfTypeSeparator(resource);
         String typeSegment = separator >= 0 ? resource.substring(0, separator) : resource;
         StringBuilder camel = new StringBuilder();

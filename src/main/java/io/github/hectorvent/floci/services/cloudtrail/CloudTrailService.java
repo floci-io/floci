@@ -33,9 +33,11 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -98,7 +100,23 @@ public class CloudTrailService {
                              String snsTopicArn, boolean includeGlobalServiceEvents,
                              boolean isMultiRegionTrail, boolean enableLogFileValidation,
                              boolean isOrganizationTrail, Map<String, String> tags) {
+        return createTrail(region, name, s3BucketName, s3KeyPrefix, snsTopicArn, includeGlobalServiceEvents,
+                isMultiRegionTrail, enableLogFileValidation, isOrganizationTrail, tags, null, null, null);
+    }
+
+    /**
+     * @param kmsKeyId                  the key the trail's log files are encrypted with, recorded and
+     *                                  reported back; Floci writes the files unencrypted
+     * @param cloudWatchLogsLogGroupArn the log group events are also delivered to, recorded only
+     * @param cloudWatchLogsRoleArn     the role CloudTrail assumes for that delivery
+     */
+    public Trail createTrail(String region, String name, String s3BucketName, String s3KeyPrefix,
+                             String snsTopicArn, boolean includeGlobalServiceEvents,
+                             boolean isMultiRegionTrail, boolean enableLogFileValidation,
+                             boolean isOrganizationTrail, Map<String, String> tags, String kmsKeyId,
+                             String cloudWatchLogsLogGroupArn, String cloudWatchLogsRoleArn) {
         validateTrailName(name);
+        validateCloudWatchLogs(cloudWatchLogsLogGroupArn, cloudWatchLogsRoleArn);
         if (s3BucketName == null || s3BucketName.isEmpty()) {
             throw new AwsException("S3BucketDoesNotExistException", "S3 bucket name is required.", 400);
         }
@@ -118,10 +136,29 @@ public class CloudTrailService {
         Trail trail = new Trail(
                 name, arn, s3BucketName, s3KeyPrefix, snsTopicArn,
                 includeGlobalServiceEvents, isMultiRegionTrail, region,
-                enableLogFileValidation, false, false, isOrganizationTrail);
+                enableLogFileValidation, false, false, isOrganizationTrail,
+                blankToNull(kmsKeyId), blankToNull(cloudWatchLogsLogGroupArn), blankToNull(cloudWatchLogsRoleArn));
         store.put(key, new CloudTrailEntry(trail, List.of(), List.of(), false, null, null,
                 initialTags, null, null));
         return trail;
+    }
+
+    /** CloudTrail needs both halves of CloudWatch Logs delivery, or neither. */
+    private static void validateCloudWatchLogs(String logGroupArn, String roleArn) {
+        boolean group = logGroupArn != null && !logGroupArn.isBlank();
+        boolean role = roleArn != null && !roleArn.isBlank();
+        if (group && !role) {
+            throw new AwsException("InvalidCloudWatchLogsRoleArnException",
+                    "You must specify a role ARN when you specify a CloudWatch Logs log group.", 400);
+        }
+        if (role && !group) {
+            throw new AwsException("InvalidCloudWatchLogsLogGroupArnException",
+                    "You must specify a log group ARN when you specify a CloudWatch Logs role.", 400);
+        }
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
     }
 
     public void deleteTrail(String region, String trailNameOrArn) {
@@ -136,6 +173,20 @@ public class CloudTrailService {
                              String s3BucketName, String s3KeyPrefix, String snsTopicArn,
                              Boolean includeGlobalServiceEvents, Boolean isMultiRegionTrail,
                              Boolean enableLogFileValidation, Boolean isOrganizationTrail) {
+        return updateTrail(region, trailNameOrArn, s3BucketName, s3KeyPrefix, snsTopicArn,
+                includeGlobalServiceEvents, isMultiRegionTrail, enableLogFileValidation, isOrganizationTrail,
+                null, null, null);
+    }
+
+    /**
+     * A null KMS or CloudWatch Logs argument leaves the setting as it is; an empty one removes it,
+     * as UpdateTrail does on AWS.
+     */
+    public Trail updateTrail(String region, String trailNameOrArn,
+                             String s3BucketName, String s3KeyPrefix, String snsTopicArn,
+                             Boolean includeGlobalServiceEvents, Boolean isMultiRegionTrail,
+                             Boolean enableLogFileValidation, Boolean isOrganizationTrail,
+                             String kmsKeyId, String cloudWatchLogsLogGroupArn, String cloudWatchLogsRoleArn) {
         Trail resolved = findTrailOrThrow(region, trailNameOrArn);
         String key = regionKey(resolved.homeRegion(), resolved.name());
         return withTrailLock(key, () -> {
@@ -154,7 +205,12 @@ public class CloudTrailService {
                     enableLogFileValidation != null ? enableLogFileValidation : existing.logFileValidationEnabled(),
                     existing.hasCustomEventSelectors(),
                     existing.hasInsightSelectors(),
-                    isOrganizationTrail != null ? isOrganizationTrail : existing.isOrganizationTrail());
+                    isOrganizationTrail != null ? isOrganizationTrail : existing.isOrganizationTrail(),
+                    kmsKeyId != null ? blankToNull(kmsKeyId) : existing.kmsKeyId(),
+                    cloudWatchLogsLogGroupArn != null
+                            ? blankToNull(cloudWatchLogsLogGroupArn) : existing.cloudWatchLogsLogGroupArn(),
+                    cloudWatchLogsRoleArn != null ? blankToNull(cloudWatchLogsRoleArn) : existing.cloudWatchLogsRoleArn());
+            validateCloudWatchLogs(updated.cloudWatchLogsLogGroupArn(), updated.cloudWatchLogsRoleArn());
             store.put(key, entry.withTrail(updated));
             return updated;
         });
@@ -352,6 +408,43 @@ public class CloudTrailService {
     }
 
     // --- Data plane: called by S3 (and other services) when an op happens ---
+
+    public record ManagementEventInput(String eventSource, String eventName, String region, String accessKeyId,
+                                       ObjectNode requestParameters, ObjectNode responseElements) {}
+
+    /** Records one management write and returns the event only when a logging trail selects it. */
+    public Optional<ObjectNode> emitManagementEvent(ManagementEventInput in) {
+        try {
+            String region = in.region() != null ? in.region() : regionResolver.getDefaultRegion();
+            ObjectNode record = mapper.createObjectNode();
+            record.put("eventVersion", EVENT_VERSION);
+            record.put("eventTime", Instant.now().toString());
+            record.put("eventSource", in.eventSource());
+            record.put("eventName", in.eventName());
+            record.put("awsRegion", region);
+            record.put("recipientAccountId", regionResolver.getAccountId());
+            record.put("eventType", "AwsApiCall");
+            record.put("eventCategory", "Management");
+            record.put("managementEvent", true);
+            record.put("readOnly", false);
+            record.put("eventID", UUID.randomUUID().toString());
+            record.put("requestID", UUID.randomUUID().toString());
+            record.set("userIdentity", buildUserIdentity(in.accessKeyId()));
+            record.set("requestParameters", in.requestParameters().deepCopy());
+            record.set("responseElements", in.responseElements().deepCopy());
+            List<MatchedTrail> matched = trailsMatching(region, entry -> matchesManagementEvent(entry, record));
+            if (matched.isEmpty()) {
+                return Optional.empty();
+            }
+            for (MatchedTrail trail : matched) {
+                append(new TrailKey(trail.region(), trail.trail().name(), region), record.deepCopy());
+            }
+            return Optional.of(record);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Failed to record CloudTrail management event {0}", in.eventName());
+            return Optional.empty();
+        }
+    }
 
     public void emitS3DataEvent(S3EventInput in) {
         try {
@@ -626,6 +719,15 @@ public class CloudTrailService {
     // --- Helpers ---
 
     private List<MatchedTrail> trailsMatching(String region, S3EventInput in) {
+        return trailsMatching(region, entry -> {
+            List<AdvancedEventSelector> advanced = entry.advancedSelectors();
+            return advanced != null && !advanced.isEmpty()
+                    ? matchesAnyAdvancedSelector(advanced, in)
+                    : matchesAnySelector(entry.selectors() != null ? entry.selectors() : List.of(), in);
+        });
+    }
+
+    private List<MatchedTrail> trailsMatching(String region, Predicate<CloudTrailEntry> matches) {
         List<MatchedTrail> result = new ArrayList<>();
         for (String k : store.keys()) {
             String trailRegion = regionFromKey(k);
@@ -644,20 +746,39 @@ public class CloudTrailService {
             if (!entry.logging()) {
                 continue;
             }
-            List<AdvancedEventSelector> advancedSelectors =
-                    entry.advancedSelectors() != null ? entry.advancedSelectors() : List.of();
-            boolean matched;
-            if (!advancedSelectors.isEmpty()) {
-                matched = matchesAnyAdvancedSelector(advancedSelectors, in);
-            } else {
-                List<EventSelector> selectors = entry.selectors() != null ? entry.selectors() : List.of();
-                matched = matchesAnySelector(selectors, in);
-            }
-            if (matched) {
+            if (matches.test(entry)) {
                 result.add(new MatchedTrail(trail, trailRegion));
             }
         }
         return result;
+    }
+
+    private boolean matchesManagementEvent(CloudTrailEntry entry, ObjectNode record) {
+        List<AdvancedEventSelector> advanced = entry.advancedSelectors();
+        if (advanced != null && !advanced.isEmpty()) {
+            return advanced.stream().anyMatch(selector -> selector.fieldSelectors() != null
+                    && !selector.fieldSelectors().isEmpty()
+                    && selector.fieldSelectors().stream().allMatch(field -> matchesManagementField(field, record)));
+        }
+        List<EventSelector> selectors = entry.selectors();
+        if (selectors == null || selectors.isEmpty()) {
+            return !entry.trail().hasCustomEventSelectors();
+        }
+        return selectors.stream().anyMatch(selector -> !Boolean.FALSE.equals(selector.includeManagementEvents())
+                && (selector.readWriteType() == null || "All".equalsIgnoreCase(selector.readWriteType())
+                    || "WriteOnly".equalsIgnoreCase(selector.readWriteType()))
+                && (selector.excludeManagementEventSources() == null
+                    || !selector.excludeManagementEventSources().contains(record.path("eventSource").asText())));
+    }
+
+    private static boolean matchesManagementField(AdvancedFieldSelector field, ObjectNode record) {
+        String value = switch (field.field()) {
+            case "eventCategory", "eventSource", "eventName", "readOnly", "eventType" ->
+                    record.path(field.field()).asText();
+            case "userIdentity.arn" -> record.path("userIdentity").path("arn").asText();
+            default -> null;
+        };
+        return matchesFieldValue(field, value);
     }
 
     private boolean matchesAnySelector(List<EventSelector> selectors, S3EventInput in) {
@@ -723,6 +844,10 @@ public class CloudTrailService {
             case "resources.ARN" -> s3ObjectArn;
             default -> null;
         };
+        return matchesFieldValue(fs, value);
+    }
+
+    private static boolean matchesFieldValue(AdvancedFieldSelector fs, String value) {
         if (value == null) {
             return false;
         }
@@ -922,7 +1047,7 @@ public class CloudTrailService {
 
     private Trail findTrail(String region, String nameOrArn) {
         // ARN → cross-region scan is valid (callers use ARN to target another Region)
-        if (nameOrArn != null && nameOrArn.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(nameOrArn)) {
             for (String k : store.keys()) {
                 CloudTrailEntry entry = store.get(k).orElse(null);
                 if (entry == null) continue;

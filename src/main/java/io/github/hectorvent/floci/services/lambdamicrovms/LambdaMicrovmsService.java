@@ -53,6 +53,10 @@ public class LambdaMicrovmsService {
     private static final Pattern CONNECTOR_VERSION = Pattern.compile("[1-9][0-9]{0,17}");
     /** The one AWS-managed base image the catalog serves. */
     private static final String MANAGED_IMAGE = "al2023-1";
+    private static final String IMAGE_RESOURCE = "microvm-image:";
+    private static final String CONNECTOR_RESOURCE = "network-connector:";
+    /** The name or id a tag target's image or connector resource carries: no version qualifier. */
+    private static final Pattern TAGGED_NAME = Pattern.compile("[a-zA-Z0-9-_]+");
 
     private final RegionResolver regionResolver;
     private final StorageFactory storageFactory;
@@ -708,9 +712,36 @@ public class LambdaMicrovmsService {
 
     /** True when the ARN names a MicroVM-family resource this service owns. */
     public static boolean ownsArn(String arn) {
-        return arn != null && (arn.contains(":microvm-image:")
-                || arn.contains(":microvm:")
-                || arn.contains(":network-connector:"));
+        String resource = AwsArnUtils.resourceIfArnFor(arn, "lambda").orElse("");
+        return resource.startsWith(IMAGE_RESOURCE) || resource.startsWith("microvm:")
+                || resource.startsWith(CONNECTOR_RESOURCE);
+    }
+
+    /**
+     * The image or connector a tag target names, {@code microvm-image:<name>} or
+     * {@code network-connector:<id>}, read from a Lambda ARN. Empty for anything else, a
+     * version-qualified connector included, which the TagResource pattern does not take.
+     */
+    public static Optional<String> taggedResource(String arn) {
+        return AwsArnUtils.resourceIfArnFor(arn, "lambda").filter(LambdaMicrovmsService::isTaggedResource);
+    }
+
+    private static boolean isTaggedResource(String resource) {
+        String name = resource.startsWith(IMAGE_RESOURCE) ? resource.substring(IMAGE_RESOURCE.length())
+                : resource.startsWith(CONNECTOR_RESOURCE) ? resource.substring(CONNECTOR_RESOURCE.length())
+                : null;
+        return name != null && TAGGED_NAME.matcher(name).matches();
+    }
+
+    /** The tag target's resource, refusing an image or connector the TagResource pattern does not take. */
+    private static String tagTargetResource(String arn) {
+        String resource = AwsArnUtils.resourceIfArnFor(arn, "lambda").orElse("");
+        if ((resource.startsWith(IMAGE_RESOURCE) || resource.startsWith(CONNECTOR_RESOURCE))
+                && !isTaggedResource(resource)) {
+            throw new AwsException("ValidationException",
+                    "Resource must name an image or a network connector without a version: " + arn, 400);
+        }
+        return resource;
     }
 
     public Map<String, String> listTags(String region, String arn) {
@@ -734,14 +765,15 @@ public class LambdaMicrovmsService {
      * stored object, so mutating it alone would never reach the backend.
      */
     private void mutateTags(String region, String arn, Consumer<Map<String, String>> mutation) {
-        if (arn.contains(":microvm-image:")) {
-            MicrovmImage image = getImage(region, arn.substring(arn.lastIndexOf(':') + 1));
+        String resource = tagTargetResource(arn);
+        if (resource.startsWith(IMAGE_RESOURCE)) {
+            MicrovmImage image = getImage(region, resource.substring(IMAGE_RESOURCE.length()));
             mutation.accept(image.tags);
             persist(images, region, image.name, image);
             return;
         }
-        if (arn.contains(":network-connector:")) {
-            NetworkConnector connector = getConnector(region, arn.substring(arn.lastIndexOf(':') + 1));
+        if (resource.startsWith(CONNECTOR_RESOURCE)) {
+            NetworkConnector connector = getConnector(region, resource.substring(CONNECTOR_RESOURCE.length()));
             mutation.accept(connector.tags);
             persist(connectors, region, connector.id, connector);
             return;
@@ -751,13 +783,12 @@ public class LambdaMicrovmsService {
     }
 
     private Map<String, String> taggable(String region, String arn) {
-        if (arn.contains(":microvm-image:")) {
-            String name = arn.substring(arn.lastIndexOf(':') + 1);
-            return getImage(region, name).tags;
+        String resource = tagTargetResource(arn);
+        if (resource.startsWith(IMAGE_RESOURCE)) {
+            return getImage(region, resource.substring(IMAGE_RESOURCE.length())).tags;
         }
-        if (arn.contains(":network-connector:")) {
-            String id = arn.substring(arn.lastIndexOf(':') + 1);
-            return getConnector(region, id).tags;
+        if (resource.startsWith(CONNECTOR_RESOURCE)) {
+            return getConnector(region, resource.substring(CONNECTOR_RESOURCE.length())).tags;
         }
         throw new AwsException("ResourceNotFoundException",
                 "Resource not found: " + arn, 404);

@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -307,7 +308,7 @@ public class SsoAdminService implements Resettable {
     }
 
     public double regionAddedDateEpochSeconds(RegionMetadata region) {
-        return Instant.parse(region.addedDate()).toEpochMilli() / 1000.0d;
+        return EpochSeconds.fromInstant(Instant.parse(region.addedDate()));
     }
 
     public synchronized TrustedTokenIssuer createTrustedTokenIssuer(JsonNode request, String callerAccountId) {
@@ -739,7 +740,7 @@ public class SsoAdminService implements Resettable {
                 if (!kmsArnMatcher.matches() || !instance.primaryRegion().equals(kmsArnMatcher.group(1))) {
                     throw validation("The customer managed KMS key must be in the IAM Identity Center primary Region.");
                 }
-                String kmsAccountId = kmsKeyArn.split(":", 6)[4];
+                String kmsAccountId = AwsArnUtils.parse(kmsKeyArn).accountId();
                 if (!instance.ownerAccountId().equals(kmsAccountId)) {
                     throw validation("The customer managed KMS key must be owned by the IAM Identity Center instance account.");
                 }

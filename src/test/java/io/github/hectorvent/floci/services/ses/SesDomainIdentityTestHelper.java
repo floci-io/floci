@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.ses;
 
+import io.github.hectorvent.floci.services.route53.Route53HostedZoneTestSupport;
+
 import java.util.List;
 import java.util.UUID;
 
@@ -33,21 +35,7 @@ final class SesDomainIdentityTestHelper {
     }
 
     static String publishDkimRecords(String domain, List<String> tokens) {
-        String location = given()
-            .contentType("application/xml")
-            .body("""
-                <?xml version="1.0" encoding="UTF-8"?>
-                <CreateHostedZoneRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
-                  <Name>%s</Name>
-                  <CallerReference>%s</CallerReference>
-                </CreateHostedZoneRequest>
-                """.formatted(domain, UUID.randomUUID()))
-        .when()
-            .post("/2013-04-01/hostedzone")
-        .then()
-            .statusCode(201)
-            .extract()
-            .header("Location");
+        String zoneId = Route53HostedZoneTestSupport.createZone(domain, UUID.randomUUID().toString());
 
         StringBuilder changes = new StringBuilder();
         for (String token : tokens) {
@@ -65,7 +53,6 @@ final class SesDomainIdentityTestHelper {
                       </Change>
                     """.formatted(token, domain, token));
         }
-        String zoneId = location.substring(location.lastIndexOf('/') + 1);
         given()
             .contentType("application/xml")
             .body("""

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.config;
 import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import io.github.hectorvent.floci.services.lambda.launcher.BootstrapProcess;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -12,6 +13,8 @@ import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
@@ -21,8 +24,12 @@ import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -258,6 +265,163 @@ class ContainerCaBundleTest {
     void appendEnvOfNothingIsTheTrustEnv() {
         assertEquals(ContainerCaBundle.env(), ContainerCaBundle.appendEnv(null));
         assertEquals(ContainerCaBundle.env(), ContainerCaBundle.appendEnv(List.of()));
+    }
+
+    // Options after Floci's win, so a trust store they name replaces it, as the JVM test below shows.
+    @Test
+    void appendJavaTrustEnvPutsFlocisOptionAheadOfTheContainersOwnWhichReplacesTheImages() {
+        assertEquals(List.of("FOO=bar", "JAVA_TOOL_OPTIONS=" + ContainerCaBundle.JAVA_TRUST_OPTIONS + " -Xss2m"),
+                ContainerCaBundle.appendJavaTrustEnv(List.of("FOO=bar", "JAVA_TOOL_OPTIONS=-Xss2m"),
+                        List.of("JAVA_TOOL_OPTIONS=-Dimage=1")));
+    }
+
+    @Test
+    void appendJavaTrustEnvPutsFlocisOptionAheadOfTheImagesLastWhenTheContainerSetsNone() {
+        assertEquals(List.of("FOO=bar", "JAVA_TOOL_OPTIONS=" + ContainerCaBundle.JAVA_TRUST_OPTIONS + " -Dimage=2"),
+                ContainerCaBundle.appendJavaTrustEnv(List.of("FOO=bar"),
+                        List.of("PATH=/bin", "JAVA_TOOL_OPTIONS=-Dimage=1", "JAVA_TOOL_OPTIONS=-Dimage=2")));
+    }
+
+    @Test
+    void appendJavaTrustEnvGivesFlocisOptionAloneWhenNothingElseIsSet() {
+        List<String> alone = List.of("JAVA_TOOL_OPTIONS=" + ContainerCaBundle.JAVA_TRUST_OPTIONS);
+
+        assertEquals(alone, ContainerCaBundle.appendJavaTrustEnv(List.of(), List.of("PATH=/bin")));
+        assertEquals(alone, ContainerCaBundle.appendJavaTrustEnv(List.of("JAVA_TOOL_OPTIONS="), List.of()));
+        // A bare key unsets the image's value, so none is kept.
+        assertEquals(alone, ContainerCaBundle.appendJavaTrustEnv(List.of("JAVA_TOOL_OPTIONS"),
+                List.of("JAVA_TOOL_OPTIONS=-Dimage=1")));
+    }
+
+    @Test
+    void theJavaTrustStoreHoldsEveryCertificateOfTheBundleAsATrustedEntry() throws Exception {
+        Path tlsDir = tempDir.resolve("tls");
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tlsDir);
+        Path bundle = ContainerCaBundle.write(tlsDir, ca.certificatePath());
+
+        Path trustStore = ContainerCaBundle.writeJavaTrustStore(bundle);
+
+        assertEquals(tlsDir.resolve("floci-ca-bundle.p12"), trustStore);
+        // Loaded as a JVM given only its path loads it: the default store type, and no password.
+        assertEquals("-Djavax.net.ssl.trustStore=/etc/floci-ca-bundle.p12", ContainerCaBundle.JAVA_TRUST_OPTIONS);
+        KeyStore loaded = KeyStore.getInstance(KeyStore.getDefaultType());
+        try (InputStream in = Files.newInputStream(trustStore)) {
+            loaded.load(in, null);
+        }
+        List<X509Certificate> held = new ArrayList<>();
+        for (String alias : Collections.list(loaded.aliases())) {
+            assertTrue(loaded.isCertificateEntry(alias), alias + " is a trusted certificate");
+            held.add((X509Certificate) loaded.getCertificate(alias));
+        }
+        assertEquals(Set.copyOf(parseAll(Files.readAllBytes(bundle))), Set.copyOf(held));
+        assertTrue(held.contains(ca.certificate()), "Floci's anchor");
+        try (Stream<Path> files = Files.list(tlsDir)) {
+            assertTrue(files.noneMatch(file -> file.getFileName().toString().endsWith(".tmp")),
+                    "no temp file left behind");
+        }
+    }
+
+    @Test
+    void javaTrustStoreHostPathIsEmptyUntilTheBootWritesIt() throws Exception {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.tls().enabled()).thenReturn(true);
+        when(config.storage().persistentPath()).thenReturn(tempDir.toString());
+        Path tlsDir = tempDir.resolve("tls");
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tlsDir);
+        Path bundle = ContainerCaBundle.write(tlsDir, ca.certificatePath());
+
+        assertEquals(Optional.empty(), ContainerCaBundle.javaTrustStoreHostPath(config));
+        Path trustStore = ContainerCaBundle.writeJavaTrustStore(bundle);
+        assertEquals(Optional.of(trustStore), ContainerCaBundle.javaTrustStoreHostPath(config));
+        when(config.tls().enabled()).thenReturn(false);
+        assertEquals(Optional.empty(), ContainerCaBundle.javaTrustStoreHostPath(config));
+    }
+
+    @Test
+    void theShellLinePointsTheJvmsAtTheTrustStoreOnlyWhenItIsThere() throws Exception {
+        Path trustStore = Files.writeString(tempDir.resolve("floci-ca-bundle.p12"), "trust store");
+        String line = ContainerCaBundle.JAVA_TRUST_SHELL_LINE
+                .replace(ContainerCaBundle.JAVA_TRUST_STORE_PATH, trustStore.toString());
+        String options = ContainerCaBundle.JAVA_TRUST_OPTIONS
+                .replace(ContainerCaBundle.JAVA_TRUST_STORE_PATH, trustStore.toString());
+
+        assertEquals(options, javaToolOptionsAfter(line, null));
+        // Options already there come after Floci's, so a trust store of their own wins.
+        assertEquals(options + " -Djavax.net.ssl.trustStore=/own.p12",
+                javaToolOptionsAfter(line, "-Djavax.net.ssl.trustStore=/own.p12"));
+        Files.delete(trustStore);
+        assertEquals("unset", javaToolOptionsAfter(line, null));
+        assertEquals("-Xss2m", javaToolOptionsAfter(line, "-Xss2m"));
+    }
+
+    @Test
+    void aJvmTrustsTheStoreByItsPathAloneAndAStoreAJobNamesReplacesItWhole() throws Exception {
+        Path tlsDir = tempDir.resolve("tls");
+        FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tlsDir);
+        Path bundle = ContainerCaBundle.write(tlsDir, ca.certificatePath());
+        String line = ContainerCaBundle.JAVA_TRUST_SHELL_LINE.replace(ContainerCaBundle.JAVA_TRUST_STORE_PATH,
+                ContainerCaBundle.writeJavaTrustStore(bundle).toString());
+        int bundled = Set.copyOf(parseAll(Files.readAllBytes(bundle))).size();
+        // A job's own store, under a password of its own, which it names by its path alone.
+        Path own = tempDir.resolve("own.jks");
+        KeyStore ownStore = KeyStore.getInstance("JKS");
+        ownStore.load(null, null);
+        ownStore.setCertificateEntry("own", ca.certificate());
+        try (OutputStream out = Files.newOutputStream(own)) {
+            ownStore.store(out, "s3cret".toCharArray());
+        }
+
+        assertEquals(bundled, anchorsTrustedAfter(line, null));
+        assertEquals(1, anchorsTrustedAfter(line, "-Djavax.net.ssl.trustStore=" + own));
+        // A password or a type a job gives for the JDK's own store still reads Floci's.
+        assertEquals(bundled, anchorsTrustedAfter(line, "-Djavax.net.ssl.trustStorePassword=changeit"));
+        assertEquals(bundled, anchorsTrustedAfter(line, "-Djavax.net.ssl.trustStoreType=JKS"));
+    }
+
+    /** Run in a JVM of its own: prints how many anchors that JVM trusts by default, as its options say. */
+    public static final class TrustedAnchors {
+        public static void main(String[] args) throws GeneralSecurityException {
+            TrustManagerFactory factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            factory.init((KeyStore) null);
+            int anchors = 0;
+            for (TrustManager manager : factory.getTrustManagers()) {
+                if (manager instanceof X509TrustManager x509) {
+                    anchors += x509.getAcceptedIssuers().length;
+                }
+            }
+            System.out.println("trusted anchors " + anchors);
+        }
+    }
+
+    // JAVA_TOOL_OPTIONS as a shell that ran line leaves it, starting from existing, or from none when null.
+    private static String javaToolOptionsAfter(String line, String existing) throws Exception {
+        return runAfter(line, existing, "printf %s \"${JAVA_TOOL_OPTIONS-unset}\"");
+    }
+
+    // How many anchors a JVM a shell starts after line trusts, JAVA_TOOL_OPTIONS starting as javaToolOptionsAfter's.
+    private static int anchorsTrustedAfter(String line, String existing) throws Exception {
+        String java = Path.of(System.getProperty("java.home"), "bin", "java").toString();
+        String classes = Path.of(TrustedAnchors.class.getProtectionDomain().getCodeSource().getLocation().toURI())
+                .toString();
+        String output = runAfter(line, existing, "exec \"$@\"", java, "-cp", classes, TrustedAnchors.class.getName());
+        Matcher anchors = Pattern.compile("trusted anchors (\\d+)").matcher(output);
+        assertTrue(anchors.find(), output);
+        return Integer.parseInt(anchors.group(1));
+    }
+
+    // What script, run by a shell after line with arguments as "$@", prints, JAVA_TOOL_OPTIONS starting from
+    // existing, or from none when null.
+    private static String runAfter(String line, String existing, String script, String... arguments) throws Exception {
+        List<String> command = new ArrayList<>(List.of("bash", "-c", line + "\n" + script, "floci"));
+        command.addAll(List.of(arguments));
+        ProcessBuilder shell = new ProcessBuilder(command);
+        shell.environment().remove("JAVA_TOOL_OPTIONS");
+        if (existing != null) {
+            shell.environment().put("JAVA_TOOL_OPTIONS", existing);
+        }
+        BootstrapProcess.Result ended = BootstrapProcess.run(shell);
+        assertEquals(0, ended.exit(), ended.output());
+        return ended.output();
     }
 
     private static List<X509Certificate> parseAll(byte[] pem) throws Exception {

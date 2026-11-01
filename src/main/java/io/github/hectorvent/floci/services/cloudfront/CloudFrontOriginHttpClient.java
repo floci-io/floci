@@ -84,6 +84,8 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
     private static final ThreadLocal<Duration> HANDSHAKE_TIMEOUT = new ThreadLocal<>();
 
     private final CloseableHttpClient client;
+    /** Resolves origin hosts, refusing a private address unless the host is allowed. */
+    private final DnsResolver resolver;
     /** The clock the completion budget reads, {@link System#nanoTime} unless a test supplies one. */
     private final LongSupplier nanoClock;
 
@@ -129,6 +131,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
     private CloudFrontOriginHttpClient(
             DnsResolver resolver, SSLContext sslContext, LongSupplier nanoClock) {
         this.nanoClock = nanoClock;
+        this.resolver = resolver;
 
         ConnectionConfig connectionConfig = ConnectionConfig.custom()
                 .setConnectTimeout(Timeout.of(CONNECT_TIMEOUT))
@@ -285,7 +288,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
      * viewer that reads slowly never expires a response the origin finished on time. A budget with
      * no limit is the origin's own pace.
      */
-    private static final class CompletionBudget {
+    static final class CompletionBudget {
 
         /** The time the origin may take, in nanoseconds, or 0 when it may take as long as it wants. */
         private final long limitNanos;
@@ -594,16 +597,39 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
                 values.forEach(value -> builder.addHeader(name, value));
             }
         });
-        for (CloudFrontOriginRequestBuilder.Header header : forwardedHeaders) {
-            if (!replaced.contains(header.name())) {
-                builder.addHeader(header.name(), header.value());
-            }
+        for (CloudFrontOriginRequestBuilder.Header header : originRequestHeaders(forwardedHeaders, originHeaders)) {
+            builder.addHeader(header.name(), header.value());
         }
-        originHeaders.forEach(builder::addHeader);
         if (entity != null) {
             builder.setEntity(entity);
         }
         return builder;
+    }
+
+    /**
+     * The headers an origin request carries: the forwarded headers, then the origin headers, each of
+     * which replaces every same-named forwarded header.
+     */
+    static List<CloudFrontOriginRequestBuilder.Header> originRequestHeaders(
+            List<CloudFrontOriginRequestBuilder.Header> forwardedHeaders, Map<String, String> originHeaders) {
+        Set<String> replaced = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        replaced.addAll(originHeaders.keySet());
+        List<CloudFrontOriginRequestBuilder.Header> headers = new ArrayList<>();
+        for (CloudFrontOriginRequestBuilder.Header header : forwardedHeaders) {
+            if (!replaced.contains(header.name())) {
+                headers.add(header);
+            }
+        }
+        originHeaders.forEach((name, value) -> headers.add(new CloudFrontOriginRequestBuilder.Header(name, value)));
+        return headers;
+    }
+
+    /**
+     * Resolves an origin host to the address a connection made outside this client uses, with the
+     * same private-address guard as the requests this client sends.
+     */
+    InetAddress resolve(String host) throws UnknownHostException {
+        return resolver.resolve(CloudFrontServingController.normalizeHost(host))[0];
     }
 
     /**
@@ -674,6 +700,14 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
         client.close();
     }
 
+    /** The origin host resolves to an address the private-address guard refuses. */
+    static final class BlockedOriginHostException extends UnknownHostException {
+
+        BlockedOriginHostException(String host) {
+            super("CloudFront origin host resolves to a blocked address: " + host);
+        }
+    }
+
     private record ValidatingDnsResolver(DnsResolver delegate, Set<String> allowedHosts)
             implements DnsResolver {
 
@@ -687,8 +721,7 @@ final class CloudFrontOriginHttpClient implements AutoCloseable {
             if (!allowedHosts.contains(normalizedHost)) {
                 for (InetAddress address : addresses) {
                     if (SsrfProtection.isBlockedAddress(address)) {
-                        throw new UnknownHostException(
-                                "CloudFront origin host resolves to a blocked address: " + normalizedHost);
+                        throw new BlockedOriginHostException(normalizedHost);
                     }
                 }
             }

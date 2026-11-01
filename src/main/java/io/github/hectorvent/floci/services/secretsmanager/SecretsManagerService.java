@@ -479,7 +479,7 @@ public class SecretsManagerService implements ResourceProvider {
      * included, however the request names the secret.
      */
     public Optional<String> findArn(String accountId, String secretId, String region) {
-        if (!secretId.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(secretId)) {
             return findArnByName(accountId, secretId, region);
         }
         AwsArnUtils.Arn arn = parseOrNull(secretId);
@@ -513,7 +513,7 @@ public class SecretsManagerService implements ResourceProvider {
      * addresses. Passing a name instead of an ARN would read the wrong account.
      */
     public void markOwnedByService(String secretArn, String owningService) {
-        if (secretArn == null || !secretArn.startsWith("arn:")) {
+        if (!AwsArnUtils.looksLikeArn(secretArn)) {
             return;
         }
         AwsArnUtils.Arn arn;
@@ -790,6 +790,65 @@ public class SecretsManagerService implements ResourceProvider {
                 if (credentialsChanged && secretExists) {
                     deleteSecret(secretArn, null, true, region);
                 }
+            }
+        }
+    }
+
+    /** Publishes a service-owned credential only after its backend accepts it, with rollback on publication failure. */
+    public void rotateManagedSecretAfter(String secretArn, String owningService, String region,
+                                          Supplier<String> changeCredentials, Runnable rollbackCredentials) {
+        Secret secret;
+        Map<String, SecretVersion> previousVersions = new HashMap<>();
+        String previousCurrent;
+        Instant previousChanged;
+        Instant previousRotated;
+        synchronized (lockFor(secretArn)) {
+            secret = resolveSecret(secretArn, region);
+            throwIfManagedRelease(secretArn);
+            throwIfPendingDeletion(secret);
+            throwIfReplica(secret);
+            if (!owningService.equals(secret.getOwningService()) || managedRotationTokens.containsKey(secretArn)) {
+                throw new AwsException("InvalidRequestException", "The managed secret cannot be rotated now.", 400);
+            }
+            secret.getVersions().forEach((id, version) -> previousVersions.put(id, copyVersion(version)));
+            previousCurrent = secret.getCurrentVersionId();
+            previousChanged = secret.getLastChangedDate();
+            previousRotated = secret.getLastRotatedDate();
+            managedReleases.add(secretArn);
+        }
+        boolean credentialsChanged = false;
+        try {
+            String value = changeCredentials.get();
+            credentialsChanged = true;
+            synchronized (lockFor(secretArn)) {
+                putManagedRotationVersion(secret, UUID.randomUUID().toString(), previousCurrent, value);
+                secret.setLastChangedDate(Instant.now());
+                secret.setLastRotatedDate(Instant.now());
+                persist(secret, region);
+            }
+        } catch (RuntimeException failure) {
+            if (credentialsChanged) {
+                try {
+                    rollbackCredentials.run();
+                } catch (RuntimeException rollbackFailure) {
+                    failure.addSuppressed(rollbackFailure);
+                }
+                synchronized (lockFor(secretArn)) {
+                    secret.setVersions(previousVersions);
+                    secret.setCurrentVersionId(previousCurrent);
+                    secret.setLastChangedDate(previousChanged);
+                    secret.setLastRotatedDate(previousRotated);
+                    try {
+                        persist(secret, region);
+                    } catch (RuntimeException rollbackFailure) {
+                        failure.addSuppressed(rollbackFailure);
+                    }
+                }
+            }
+            throw failure;
+        } finally {
+            synchronized (lockFor(secretArn)) {
+                managedReleases.remove(secretArn);
             }
         }
     }
@@ -2021,7 +2080,7 @@ public class SecretsManagerService implements ResourceProvider {
     }
 
     private Secret resolveSecret(String secretId, String region) {
-        if (secretId.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(secretId)) {
             // 1. Exact full-ARN match
             List<Secret> found = store.scan(key -> {
                 Secret s = store.get(key).orElse(null);

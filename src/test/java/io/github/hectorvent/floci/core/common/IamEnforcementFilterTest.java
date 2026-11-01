@@ -149,6 +149,31 @@ class IamEnforcementFilterTest {
                 catalog, scpProvider, sessionAccountLookup, null, null, clock, resourceInfo);
     }
 
+    @ParameterizedTest
+    @CsvSource({"aws-cn,GetReusableDelegationSet", "aws-cn,DeleteReusableDelegationSet",
+            "aws-us-gov,GetReusableDelegationSet", "aws-us-gov,DeleteReusableDelegationSet"})
+    void delegationSetAuthorizationKeepsTheRequestPartitionForAnUnknownRegion(String partition, String operation) {
+        ContainerRequestContext request = mock(ContainerRequestContext.class);
+        String action = "route53:" + operation;
+        String auth = "AWS4-HMAC-SHA256 Credential=ASIASESSION/20260629/future-1/route53/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("222233334444");
+        requestContext.setRegion("future-1");
+        requestContext.setPartition(partition);
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("ASIASESSION");
+        when(request.getHeaderString("Authorization")).thenReturn(auth);
+        when(actionRegistry.resolve("route53", request)).thenReturn(action);
+        when(iamService.resolveCallerContext(eq("ASIASESSION"), any())).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"route53:*","Resource":"*"}]}
+                """)));
+        when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), eq(action), any(), isNull()))
+                .thenReturn(IamPolicyEvaluator.Decision.ALLOW);
+
+        newFilter().filter(request);
+
+        verify(arnBuilder).buildResources("route53", action, request, "future-1", "222233334444", partition);
+    }
+
     @Test
     void filterBuildsResourceArnWithRequestContextAccount() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
@@ -402,6 +427,7 @@ class IamEnforcementFilterTest {
                 + "SignedHeaders=host, Signature=abc";
         requestContext.setAccountId("000000000000");
         requestContext.setRegion("us-east-1");
+        requestContext.setPartition("aws");
         when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
         when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
         when(containerRequest.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
@@ -417,7 +443,7 @@ class IamEnforcementFilterTest {
 
         verify(actionRegistry).resolveRoute("apigateway", containerRequest);
         verify(actionRegistry, never()).resolveRoute("iam", containerRequest);
-        verify(arnBuilder).buildResources(eq("apigateway"), any(), eq(containerRequest), eq("us-east-1"), eq("000000000000"), eq("aws"));
+        verify(arnBuilder).buildResources("apigateway", containerRequest, "us-east-1", "000000000000", "aws");
         verify(conditionContextResolver).resolve("apigateway", "apigateway:POST", containerRequest);
     }
 
@@ -444,6 +470,31 @@ class IamEnforcementFilterTest {
         newFilter(resourceInfo(SchedulerController.class)).filter(containerRequest);
 
         verify(arnBuilder).buildResources("scheduler", containerRequest, "xx-local-1", "000000000000", "aws-cn");
+    }
+
+    @Test
+    void apiGatewayResourcesAreBuiltInTheRequestsPartition() {
+        // A Region no partition publishes takes the deployment's partition, the one its path ARNs are in.
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20260924/xx-local-1/apigateway/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        requestContext.setAccountId("000000000000");
+        requestContext.setRegion("xx-local-1");
+        requestContext.setPartition("aws-cn");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(containerRequest.getHeaderString("Authorization")).thenReturn(auth);
+        when(containerRequest.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
+                .thenReturn(ProtocolClaim.rest());
+        when(catalog.byResourceClass(ApiGatewayController.class))
+                .thenReturn(Optional.of(descriptor("apigateway", ServiceProtocol.REST_JSON,
+                        Set.of("apigateway", "execute-api"), ApiGatewayController.class)));
+        when(actionRegistry.resolveRoute("apigateway", containerRequest)).thenReturn("apigateway:GET");
+        when(arnBuilder.buildResources(any(), any(), any(), any(), any())).thenReturn(List.of("*"));
+        when(iamService.resolveCallerContext(eq("AKIAUSER"), any())).thenReturn(CallerContext.of(List.of()));
+
+        newFilter(resourceInfo(ApiGatewayController.class)).filter(containerRequest);
+
+        verify(arnBuilder).buildResources("apigateway", containerRequest, "xx-local-1", "000000000000", "aws-cn");
     }
 
     @Test
@@ -2022,6 +2073,31 @@ class IamEnforcementFilterTest {
         assertTrue(body.contains("<Type>Sender</Type>"), body);
         assertTrue(body.contains("User is not authorized to perform: iam:ListUsers"), body);
         assertTrue(body.contains("<RequestId>"), body);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"REST_XML, application/xml", "REST_JSON, application/json"})
+    void restDenialUsesTheServiceCatalogProtocol(ServiceProtocol serviceProtocol, String expectedContentType) {
+        ContainerRequestContext request = mock(ContainerRequestContext.class);
+        String auth = "AWS4-HMAC-SHA256 Credential=AKIAUSER/20261030/us-east-1/catalog-service/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        ServiceDescriptor descriptor = descriptor("catalog-service", serviceProtocol, Set.of("catalog-service"), null);
+        requestContext.setAccountId("000000000000");
+        when(accountResolver.extractAccessKeyId(auth)).thenReturn("AKIAUSER");
+        when(request.getHeaderString("Authorization")).thenReturn(auth);
+        stubClaim(request, WireProtocol.REST, descriptor);
+        when(catalog.byCredentialScope("catalog-service")).thenReturn(Optional.of(descriptor));
+        when(actionRegistry.resolveRoute("catalog-service", request)).thenReturn("catalog-service:Read");
+        when(iamService.resolveCallerContext(eq("AKIAUSER"), any())).thenReturn(CallerContext.of(List.of()));
+        when(evaluator.evaluateResolvedResourcePolicy(any(), any(), any(), eq("catalog-service:Read"), any(), any()))
+                .thenReturn(IamPolicyEvaluator.Decision.DENY);
+
+        newFilter().filter(request);
+
+        ArgumentCaptor<Response> response = ArgumentCaptor.captor();
+        verify(request).abortWith(response.capture());
+        assertEquals(403, response.getValue().getStatus());
+        assertEquals(MediaType.valueOf(expectedContentType), response.getValue().getMediaType());
     }
 
     /**

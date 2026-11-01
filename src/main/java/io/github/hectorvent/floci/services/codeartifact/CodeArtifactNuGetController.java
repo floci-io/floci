@@ -65,16 +65,21 @@ public class CodeArtifactNuGetController {
 
     private final CodeArtifactService service;
     private final BagetterSidecarClient bagetter;
+    private final CodeArtifactNuGetExternalConnectionImporter externalConnectionImporter;
     private final HttpClient httpClient;
 
     @Inject
-    public CodeArtifactNuGetController(CodeArtifactService service, BagetterSidecarClient bagetter) {
-        this(service, bagetter, HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
+    public CodeArtifactNuGetController(CodeArtifactService service, BagetterSidecarClient bagetter,
+            CodeArtifactNuGetExternalConnectionImporter externalConnectionImporter) {
+        this(service, bagetter, externalConnectionImporter,
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
     }
 
-    CodeArtifactNuGetController(CodeArtifactService service, BagetterSidecarClient bagetter, HttpClient httpClient) {
+    CodeArtifactNuGetController(CodeArtifactService service, BagetterSidecarClient bagetter,
+            CodeArtifactNuGetExternalConnectionImporter externalConnectionImporter, HttpClient httpClient) {
         this.service = service;
         this.bagetter = bagetter;
+        this.externalConnectionImporter = externalConnectionImporter;
         this.httpClient = httpClient;
     }
 
@@ -150,6 +155,15 @@ public class CodeArtifactNuGetController {
                     + lowerId + ".nuspec", "text/xml");
         }
         if (lowerFilename.endsWith(".nupkg")) {
+            // A cache miss on this emulator's own BaGetter is exactly the trigger AWS's own docs
+            // describe for an external connection: fetch the real asset from the public repository
+            // and retain it, then let the proxy below find it there, the same as any other
+            // request. Not attempted at all when BaGetter already has it: the only extra cost on
+            // every other request is this one cheap local existence check.
+            if (!bagetter.packageVersionExists(handle.repoId(), domain, repository, null, id, version)) {
+                externalConnectionImporter.tryImport(handle.region(), domain, handle.owner(), repository,
+                        handle.repoId(), id, version);
+            }
             return proxyGet(baseUrl, "/v3/package/" + lowerId + "/" + encodedVersion + "/"
                     + lowerId + "." + SidecarUriUtils.encodeSegment(version.toLowerCase(Locale.ROOT)) + ".nupkg",
                     MediaType.APPLICATION_OCTET_STREAM);

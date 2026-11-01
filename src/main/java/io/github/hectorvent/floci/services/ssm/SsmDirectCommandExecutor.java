@@ -110,7 +110,8 @@ public class SsmDirectCommandExecutor {
 
     private ExecutionResult executeInContainer(String containerId, String script, String workingDirectory, int timeoutSeconds)
             throws InterruptedException {
-        String[] cmd = {"sh", "-c", timeoutWrappedScript(script, timeoutSeconds)};
+        SsmCommandTimeout timeout = new SsmCommandTimeout(SsmCommandService.MAX_STDERR_CHARS);
+        String[] cmd = {"sh", "-c", timeout.wrap(script, timeoutSeconds)};
         ExecCreateCmd create = dockerClient.execCreateCmd(containerId)
                 .withCmd(cmd)
                 .withAttachStdout(true)
@@ -122,7 +123,6 @@ public class SsmDirectCommandExecutor {
         String execId = create.exec().getId();
         CountDownLatch latch = new CountDownLatch(1);
         BoundedOutputCollector stdout = new BoundedOutputCollector(SsmCommandService.MAX_STDOUT_CHARS);
-        BoundedOutputCollector stderr = new BoundedOutputCollector(SsmCommandService.MAX_STDERR_CHARS);
         Instant start = Instant.now();
 
         ResultCallback<Frame> callback = dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
@@ -132,8 +132,11 @@ public class SsmDirectCommandExecutor {
                 if (payload == null) {
                     return;
                 }
-                BoundedOutputCollector target = frame.getStreamType() == StreamType.STDERR ? stderr : stdout;
-                target.write(payload);
+                if (frame.getStreamType() == StreamType.STDERR) {
+                    timeout.writeError(payload);
+                } else {
+                    stdout.write(payload);
+                }
             }
 
             @Override
@@ -143,7 +146,7 @@ public class SsmDirectCommandExecutor {
 
             @Override
             public void onError(Throwable throwable) {
-                stderr.write((throwable.getMessage() != null ? throwable.getMessage() : throwable.toString())
+                timeout.writeError((throwable.getMessage() != null ? throwable.getMessage() : throwable.toString())
                         .getBytes(StandardCharsets.UTF_8));
                 latch.countDown();
             }
@@ -161,8 +164,8 @@ public class SsmDirectCommandExecutor {
         Long exitCode = dockerClient.inspectExecCmd(execId).exec().getExitCodeLong();
         int responseCode = exitCode != null ? exitCode.intValue() : 1;
         String standardOutput = stdout.content();
-        String standardError = stderr.content();
-        if (isTimeoutExitCode(responseCode)) {
+        String standardError = timeout.standardError();
+        if (timeout.timedOut()) {
             logFailureDiagnostics(containerId);
             return ExecutionResult.timedOut(standardOutput, standardError, start);
         }
@@ -174,22 +177,11 @@ public class SsmDirectCommandExecutor {
     }
 
     static String timeoutWrappedScript(String script, int timeoutSeconds) {
-        return userScriptCommand(script, timeoutSeconds);
-    }
-
-    private static String userScriptCommand(String script, int timeoutSeconds) {
-        String command = "sh -c " + shellSingleQuote(script);
-        if (timeoutSeconds < 1) {
-            return command;
-        }
-        String timeout = timeoutSeconds + "s";
-        return "if command -v timeout >/dev/null 2>&1; then "
-                + "timeout --kill-after=1s " + shellSingleQuote(timeout) + " " + command + "; "
-                + "else " + command + "; fi";
+        return new SsmCommandTimeout(SsmCommandService.MAX_STDERR_CHARS).wrap(script, timeoutSeconds);
     }
 
     static String diagnosticWrappedScript(String script) {
-        return "sh -c " + shellSingleQuote(script);
+        return "sh -c " + SsmCommandTimeout.quote(script);
     }
 
     private void logFailureDiagnostics(String containerId) {
@@ -266,14 +258,6 @@ public class SsmDirectCommandExecutor {
             return 0;
         }
         return timeoutSeconds + 2L;
-    }
-
-    private static boolean isTimeoutExitCode(int responseCode) {
-        return responseCode == 124 || responseCode == 137 || responseCode == 143;
-    }
-
-    private static String shellSingleQuote(String value) {
-        return "'" + value.replace("'", "'\"'\"'") + "'";
     }
 
     private static void closeQuietly(Closeable closeable) {

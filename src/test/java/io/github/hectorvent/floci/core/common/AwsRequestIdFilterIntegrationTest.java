@@ -2,11 +2,13 @@ package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Verifies that {@link AwsRequestIdFilter} injects {@code x-amz-request-id} and
@@ -130,6 +132,25 @@ class AwsRequestIdFilterIntegrationTest {
             .statusCode(200)
             .header("x-amz-request-id", notNullValue())
             .header("x-amzn-RequestId", notNullValue());
+    }
+
+    // --- An ID the controller set ---
+
+    @Test
+    void aRequestIdTheControllerSetIsRepeatedInTheOtherHeaders() {
+        // Lake Formation sets only x-amzn-RequestId
+        Response response = given()
+            .contentType("application/json")
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20201022/us-east-1/"
+                    + "lakeformation/aws4_request, SignedHeaders=host;x-amz-date, Signature=dummy")
+            .body("{}")
+        .when()
+            .post("/GetDataLakeSettings");
+
+        response.then().statusCode(200);
+        String requestId = response.header("x-amzn-RequestId");
+        assertEquals(requestId, response.header("x-amz-request-id"));
+        assertEquals(requestId, response.header("x-amz-id-2"));
     }
 
     // --- JSON 1.1 protocol (SSM) ---

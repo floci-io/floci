@@ -11,6 +11,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.condition.EnabledOnOs;
 import org.junit.jupiter.api.condition.OS;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.IOException;
 import java.net.BindException;
@@ -337,7 +339,52 @@ class RuntimeApiServerTest {
         assertErrorEndpointReportsUnhandled("req-plain-header", "ValueError");
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {8192, 1024 * 1024 - 1})
+    @Timeout(15)
+    void errorEndpoint_acceptsGoRuntimeXrayCauseHeaders(int headerBytes) throws Exception {
+        String cause = "{\"message\":\"" + "x".repeat(headerBytes - 14) + "\"}";
+        assertEquals(headerBytes, cause.length());
+        assertErrorEndpointReportsUnhandled("req-xray-header", "Runtime.UserException", cause);
+    }
+
+    @Test
+    @Timeout(15)
+    void errorEndpoint_rejectsHeadersBeyondItsBudgetWithoutConsumingInvocation() throws Exception {
+        String requestId = "req-oversized-header";
+        String payload = "{\"errorMessage\":\"original failure\",\"errorType\":\"X\"}";
+        CompletableFuture<InvokeResult> resultFuture = new CompletableFuture<>();
+        server.enqueue(new PendingInvocation(requestId, "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test", resultFuture));
+        HttpResponse<String> next = httpClient.send(HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .GET().build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(200, next.statusCode());
+        URI error = URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/" + requestId + "/error");
+
+        HttpResponse<String> rejected = httpClient.send(HttpRequest.newBuilder(error)
+                .header("Lambda-Runtime-Function-Xray-Error-Cause", "x".repeat(1024 * 1024 + 16 * 1024 + 1))
+                .POST(HttpRequest.BodyPublishers.ofString(payload)).build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(431, rejected.statusCode());
+        assertFalse(resultFuture.isDone());
+
+        // The decoder closes the rejected connection; retry independently of when its EOF arrives.
+        try (HttpClient retryClient = HttpClient.newHttpClient()) {
+            HttpResponse<String> retry = retryClient.send(HttpRequest.newBuilder(error)
+                    .POST(HttpRequest.BodyPublishers.ofString(payload)).build(), HttpResponse.BodyHandlers.ofString());
+            assertEquals(202, retry.statusCode());
+        }
+        InvokeResult result = resultFuture.get(2, TimeUnit.SECONDS);
+        assertEquals("Unhandled", result.getFunctionError());
+        assertEquals(payload, new String(result.getPayload()));
+    }
+
     private void assertErrorEndpointReportsUnhandled(String requestId, String errorTypeHeader) throws Exception {
+        assertErrorEndpointReportsUnhandled(requestId, errorTypeHeader, null);
+    }
+
+    private void assertErrorEndpointReportsUnhandled(String requestId, String errorTypeHeader,
+                                                     String xrayCause) throws Exception {
         CompletableFuture<InvokeResult> resultFuture = new CompletableFuture<>();
         PendingInvocation invocation = new PendingInvocation(
                 requestId, "{}".getBytes(), System.currentTimeMillis() + 60_000,
@@ -355,11 +402,16 @@ class RuntimeApiServerTest {
         if (errorTypeHeader != null) {
             errorRequest.header("Lambda-Runtime-Function-Error-Type", errorTypeHeader);
         }
-        httpClient.send(errorRequest.build(), HttpResponse.BodyHandlers.ofString());
+        if (xrayCause != null) {
+            errorRequest.header("Lambda-Runtime-Function-Xray-Error-Cause", xrayCause);
+        }
+        HttpResponse<String> ack = httpClient.send(errorRequest.build(), HttpResponse.BodyHandlers.ofString());
+        assertEquals(202, ack.statusCode());
+        assertEquals("OK", new JsonObject(ack.body()).getString("status"));
 
         InvokeResult result = resultFuture.get(2, TimeUnit.SECONDS);
         assertEquals("Unhandled", result.getFunctionError());
-        assertTrue(new String(result.getPayload()).contains("boom"));
+        assertEquals("{\"errorMessage\":\"boom\",\"errorType\":\"X\"}", new String(result.getPayload()));
     }
 
     /**

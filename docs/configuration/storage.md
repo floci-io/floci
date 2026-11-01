@@ -268,3 +268,26 @@ FLOCI_STORAGE_HOST_PERSISTENT_PATH=/absolute/host/path/data
     `FLOCI_STORAGE_HOST_PERSISTENT_PATH` must be an absolute path (starting with `/`). Volume
     names and relative paths are not supported and will be silently ignored, falling back to
     named-volume mode.
+
+### WAL write failures
+
+Ordinary WAL puts, batches of puts, and deletions encode their records, then append and
+flush through the buffered WAL writer before publishing the changed mappings in memory.
+They do not force the log to disk on each change. A missing writer, encoding error, or
+log write/flush failure is reported to the caller. A failed append is rolled back to its
+previous log length. If rollback or the buffered writer cannot be trusted, further writes
+are rejected until recovery rather than acknowledged only in memory.
+Writes after a WAL backend has shut down are rejected as well; they cannot change the
+acknowledged in-memory state or the closed log. Create a fresh `StorageFactory` to load
+persisted state and resume writes.
+
+The PUT and DELETE record formats are unchanged. `putAll` still writes separate PUT
+records and is not a crash-atomic replacement operation; use `putAllAtomically` when the
+whole replacement must replay together. Atomic batches retain their forced-log commit
+boundary. Values already stored must not be mutated in place before a write, as with the
+existing atomic-batch contract.
+
+Flushing the writer does not establish a host-power-loss guarantee: snapshot replacement,
+directory metadata and retiring the old log require their own durability protocol. Hybrid
+storage retains its asynchronous flush policy, and DynamoDB uses a separate per-table
+journal.
