@@ -9,7 +9,6 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
-import software.amazon.awssdk.services.ec2.model.DescribeSubnetsResponse;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.Certificate;
 import software.amazon.awssdk.services.rds.model.CertificateNotFoundException;
@@ -94,6 +93,8 @@ class RdsControlPlaneTest {
 
     private static final Logger LOG = Logger.getLogger(RdsControlPlaneTest.class.getName());
     private static RdsClient rds;
+    private static Ec2Client ec2;
+    private static Ec2TestNetwork network;
     private static String subnetGroupName;
     private static String proxyName;
     private static String serverlessClusterName;
@@ -105,39 +106,39 @@ class RdsControlPlaneTest {
         subnetGroupName = TestFixtures.uniqueName("rds-subnets");
         proxyName = TestFixtures.uniqueName("rds-proxy");
         serverlessClusterName = TestFixtures.uniqueName("rds-serverless");
-        try (Ec2Client ec2 = TestFixtures.ec2Client()) {
-            DescribeSubnetsResponse response = ec2.describeSubnets();
-            subnetIds = response.subnets().stream()
-                    .map(subnet -> subnet.subnetId())
-                    .sorted()
-                    .limit(2)
-                    .toList();
-        }
+        network = null;
+        ec2 = TestFixtures.ec2Client();
+        network = Ec2TestNetwork.create(ec2, List.of(
+                TestFixtures.region().id() + "a", TestFixtures.region().id() + "b"));
+        subnetIds = network.subnetIds();
         assertThat(subnetIds).hasSizeGreaterThanOrEqualTo(2);
     }
 
     @AfterAll
     static void cleanup() {
-        if (rds != null) {
-            try {
-                rds.deleteDBCluster(b -> b
-                        .dbClusterIdentifier(serverlessClusterName)
-                        .skipFinalSnapshot(true));
-            } catch (Exception e) {
-                LOG.log(Level.FINE, "RDS Serverless v2 cluster already absent during cleanup "
-                        + serverlessClusterName, e);
+        try (Ec2Client ownedClient = ec2;
+             Ec2TestNetwork ownedNetwork = network;
+             RdsClient ownedRds = rds) {
+            if (rds != null) {
+                try {
+                    rds.deleteDBCluster(b -> b
+                            .dbClusterIdentifier(serverlessClusterName)
+                            .skipFinalSnapshot(true));
+                } catch (Exception e) {
+                    LOG.log(Level.FINE, "RDS Serverless v2 cluster already absent during cleanup "
+                            + serverlessClusterName, e);
+                }
+                try {
+                    rds.deleteDBProxy(b -> b.dbProxyName(proxyName));
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Failed to clean up RDS DB proxy " + proxyName, e);
+                }
+                try {
+                    rds.deleteDBSubnetGroup(b -> b.dbSubnetGroupName(subnetGroupName));
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Failed to clean up RDS subnet group " + subnetGroupName, e);
+                }
             }
-            try {
-                rds.deleteDBProxy(b -> b.dbProxyName(proxyName));
-            } catch (Exception e) {
-                LOG.log(Level.WARNING, "Failed to clean up RDS DB proxy " + proxyName, e);
-            }
-            try {
-                rds.deleteDBSubnetGroup(b -> b.dbSubnetGroupName(subnetGroupName));
-            } catch (Exception e) {
-                LOG.log(Level.WARNING, "Failed to clean up RDS subnet group " + subnetGroupName, e);
-            }
-            rds.close();
         }
     }
 
@@ -388,25 +389,30 @@ class RdsControlPlaneTest {
     void sdkScopesTheSameDbProxyNameBySignedRegion() {
         String regionalProxyName = TestFixtures.uniqueName("rds-proxy-regional");
         try (RdsClient east = rdsClient(Region.US_EAST_1);
-             RdsClient west = rdsClient(Region.US_WEST_2)) {
-            // Subnet ids are region-scoped on real AWS (and on floci, since #21), so each proxy
-            // needs subnets from its own signed region rather than the shared us-east-1 subnetIds.
-            CreateDbProxyResponse eastProxy = createIamProxy(east, regionalProxyName, subnetIdsFor(Region.US_EAST_1));
-            CreateDbProxyResponse westProxy = createIamProxy(west, regionalProxyName, subnetIdsFor(Region.US_WEST_2));
+             RdsClient west = rdsClient(Region.US_WEST_2);
+             Ec2Client eastEc2 = ec2Client(Region.US_EAST_1);
+             Ec2Client westEc2 = ec2Client(Region.US_WEST_2);
+             Ec2TestNetwork eastNetwork = Ec2TestNetwork.create(eastEc2,
+                     List.of("us-east-1a", "us-east-1b"));
+             Ec2TestNetwork westNetwork = Ec2TestNetwork.create(westEc2,
+                     List.of("us-west-2a", "us-west-2b"))) {
+            try {
+                assertThat(eastNetwork.subnetIds()).hasSizeGreaterThanOrEqualTo(2);
+                assertThat(westNetwork.subnetIds()).hasSizeGreaterThanOrEqualTo(2);
+                CreateDbProxyResponse eastProxy = createIamProxy(east, regionalProxyName, eastNetwork.subnetIds());
+                CreateDbProxyResponse westProxy = createIamProxy(west, regionalProxyName, westNetwork.subnetIds());
 
-            assertThat(eastProxy.dbProxy().dbProxyArn()).contains(":rds:us-east-1:");
-            assertThat(westProxy.dbProxy().dbProxyArn()).contains(":rds:us-west-2:");
-            assertThat(westProxy.dbProxy().dbProxyArn()).isNotEqualTo(eastProxy.dbProxy().dbProxyArn());
+                assertThat(eastProxy.dbProxy().dbProxyArn()).contains(":rds:us-east-1:");
+                assertThat(westProxy.dbProxy().dbProxyArn()).contains(":rds:us-west-2:");
+                assertThat(westProxy.dbProxy().dbProxyArn()).isNotEqualTo(eastProxy.dbProxy().dbProxyArn());
 
-            assertThat(east.describeDBProxies(b -> b.dbProxyName(regionalProxyName)).dbProxies())
-                    .singleElement()
-                    .satisfies(proxy -> assertThat(proxy.dbProxyArn()).contains(":rds:us-east-1:"));
-            assertThat(west.describeDBProxies(b -> b.dbProxyName(regionalProxyName)).dbProxies())
-                    .singleElement()
-                    .satisfies(proxy -> assertThat(proxy.dbProxyArn()).contains(":rds:us-west-2:"));
-        } finally {
-            try (RdsClient east = rdsClient(Region.US_EAST_1);
-                 RdsClient west = rdsClient(Region.US_WEST_2)) {
+                assertThat(east.describeDBProxies(b -> b.dbProxyName(regionalProxyName)).dbProxies())
+                        .singleElement()
+                        .satisfies(proxy -> assertThat(proxy.dbProxyArn()).contains(":rds:us-east-1:"));
+                assertThat(west.describeDBProxies(b -> b.dbProxyName(regionalProxyName)).dbProxies())
+                        .singleElement()
+                        .satisfies(proxy -> assertThat(proxy.dbProxyArn()).contains(":rds:us-west-2:"));
+            } finally {
                 deleteProxy(east, regionalProxyName);
                 deleteProxy(west, regionalProxyName);
             }
@@ -1090,16 +1096,6 @@ class RdsControlPlaneTest {
                 .roleArn("arn:aws:iam::000000000000:role/rds-proxy-regional")
                 .vpcSubnetIds(vpcSubnetIds)
                 .defaultAuthScheme("IAM_AUTH"));
-    }
-
-    private static List<String> subnetIdsFor(Region region) {
-        try (Ec2Client ec2 = ec2Client(region)) {
-            return ec2.describeSubnets().subnets().stream()
-                    .map(subnet -> subnet.subnetId())
-                    .sorted()
-                    .limit(2)
-                    .toList();
-        }
     }
 
     private static Ec2Client ec2Client(Region region) {

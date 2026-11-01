@@ -66,8 +66,53 @@ class Ec2TestNetworkCleanupTest {
         assertThat(failure.getSuppressed()).containsExactly(ec2.vpcFailure);
     }
 
+    @Test
+    void ownsTwoSubnetsInOneVpcAndClosesThemInReverseOrder() {
+        RecordingEc2 ec2 = new RecordingEc2();
+        ec2.numberSubnets = true;
+        try (Ec2TestNetwork network = Ec2TestNetwork.create(ec2, List.of("us-west-2a", "us-west-2b"))) {
+            assertThat(network.subnetIds()).containsExactly("subnet-owned-1", "subnet-owned-2");
+            assertThat(ec2.zones).containsExactly("us-west-2a", "us-west-2b");
+            assertThat(ec2.cidrs).containsExactly("10.254.1.0/24", "10.254.2.0/24");
+        }
+        assertThat(ec2.calls).containsExactly("createVpc", "createSubnet:vpc-owned", "createSubnet:vpc-owned",
+                "deleteSubnet:subnet-owned-2", "deleteSubnet:subnet-owned-1", "deleteVpc:vpc-owned");
+    }
+
+    @Test
+    void failedSecondAllocationCleansFirstSubnetAndVpcWithoutClosingBorrowedClient() {
+        RecordingEc2 ec2 = new RecordingEc2();
+        ec2.numberSubnets = true;
+        ec2.failAt = 2;
+        ec2.createFailure = new IllegalStateException("second subnet allocation failed");
+        Throwable failure = catchThrowable(() -> Ec2TestNetwork.create(ec2, List.of("us-east-1a", "us-east-1b")));
+        assertThat(failure).isSameAs(ec2.createFailure);
+        assertThat(ec2.calls).containsExactly("createVpc", "createSubnet:vpc-owned", "createSubnet:vpc-owned",
+                "deleteSubnet:subnet-owned-1", "deleteVpc:vpc-owned");
+    }
+
+    @Test
+    void failedSecondAllocationRetainsAllRollbackFailures() {
+        RecordingEc2 ec2 = new RecordingEc2();
+        ec2.numberSubnets = true;
+        ec2.failAt = 2;
+        ec2.createFailure = new IllegalStateException("second subnet allocation failed");
+        ec2.subnetFailure = new IllegalStateException("subnet cleanup failed");
+        ec2.vpcFailure = new IllegalStateException("VPC cleanup failed");
+        Throwable failure = catchThrowable(() -> Ec2TestNetwork.create(ec2, List.of("us-east-1a", "us-east-1b")));
+        assertThat(failure).isSameAs(ec2.createFailure);
+        assertThat(failure.getSuppressed()).containsExactly(ec2.subnetFailure);
+        assertThat(ec2.subnetFailure.getSuppressed()).containsExactly(ec2.vpcFailure);
+        assertThat(ec2.calls).endsWith("deleteSubnet:subnet-owned-1", "deleteVpc:vpc-owned");
+    }
+
     private static final class RecordingEc2 implements Ec2Client {
         private final List<String> calls = new ArrayList<>();
+        private final List<String> zones = new ArrayList<>();
+        private final List<String> cidrs = new ArrayList<>();
+        private boolean numberSubnets;
+        private int failAt = 1;
+        private int allocations;
         private RuntimeException createFailure;
         private RuntimeException subnetFailure;
         private RuntimeException vpcFailure;
@@ -81,10 +126,13 @@ class Ec2TestNetworkCleanupTest {
         @Override
         public CreateSubnetResponse createSubnet(CreateSubnetRequest request) {
             calls.add("createSubnet:" + request.vpcId());
-            if (createFailure != null) {
+            zones.add(request.availabilityZone());
+            cidrs.add(request.cidrBlock());
+            allocations++;
+            if (createFailure != null && allocations == failAt) {
                 throw createFailure;
             }
-            return CreateSubnetResponse.builder().subnet(subnet -> subnet.subnetId("subnet-owned")).build();
+            return CreateSubnetResponse.builder().subnet(subnet -> subnet.subnetId(numberSubnets ? "subnet-owned-" + allocations : "subnet-owned")).build();
         }
 
         @Override
