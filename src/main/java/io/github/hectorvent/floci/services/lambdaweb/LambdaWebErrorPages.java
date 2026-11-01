@@ -56,6 +56,9 @@ final class LambdaWebErrorPages {
     /** The edge writes a two-digit year in its Date header. */
     private static final DateTimeFormatter EDGE_DATE =
             DateTimeFormatter.ofPattern("EEE, dd MMM yy HH:mm:ss 'GMT'", Locale.ROOT).withZone(ZoneOffset.UTC);
+    /** The platform writes a two-digit day, which RFC_1123_DATE_TIME leaves out. */
+    private static final DateTimeFormatter PLATFORM_DATE =
+            DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.ROOT).withZone(ZoneOffset.UTC);
 
     private LambdaWebErrorPages() {
     }
@@ -69,5 +72,9 @@ final class LambdaWebErrorPages {
 
     static String edgeDate(Instant now) {
         return EDGE_DATE.format(now);
+    }
+
+    static String platformDate(Instant now) {
+        return PLATFORM_DATE.format(now);
     }
 }

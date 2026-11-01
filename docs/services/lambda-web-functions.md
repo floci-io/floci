@@ -103,6 +103,8 @@ The platform answers these cases itself, with the AWS HTML pages and `lambda-web
 | 504 | `Runtime.RequestTimeout` | No response within the revision's `timeoutSeconds` |
 | 505 | `Platform.UnsupportedHttpVersion` | HTTP/1.0 |
 
+The `date` header of these pages writes the day with two digits, as on AWS: `Sun, 01 Nov 2026 02:33:33 GMT`. The `400` and `431` pages write a two-digit year as well: `Sun, 01 Nov 26 02:33:34 GMT`.
+
 A URI of 65,535 bytes or more gets an empty `414`, as on AWS. Headers or a request line past 256 KiB get the HTTP server's empty `431` or `414` instead of the AWS answer. A request without a `Host` header cannot be told apart from one for another Floci service, so it does not get `Platform.MissingHostHeader`.
 
 ## Logs
