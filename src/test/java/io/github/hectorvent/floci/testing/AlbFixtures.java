@@ -38,6 +38,19 @@ public final class AlbFixtures {
                 .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
     }
 
+    public static String loadBalancerDnsName(String loadBalancerArn) {
+        return given()
+                .formParam("Action", "DescribeLoadBalancers")
+                .formParam("LoadBalancerArns.member.1", loadBalancerArn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.DNSName");
+    }
+
     /** An HTTP target group with health checks off, so a target serves as soon as it is registered. */
     public static String createTargetGroup(String name, String targetType, int targetPort) {
         return given()
