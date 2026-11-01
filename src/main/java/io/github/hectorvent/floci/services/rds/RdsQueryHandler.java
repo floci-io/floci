@@ -1310,6 +1310,14 @@ public class RdsQueryHandler {
         String engineMode = params.getFirst("EngineMode");
         boolean storageEncrypted = "true".equalsIgnoreCase(params.getFirst("StorageEncrypted"));
 
+        Integer backupRetentionPeriodParam = parseIntegerParam(params, "BackupRetentionPeriod");
+        int backupRetentionPeriod = backupRetentionPeriodParam != null ? backupRetentionPeriodParam : 1;
+        if (backupRetentionPeriod < 1 || backupRetentionPeriod > 35) {
+            throw new AwsException("InvalidParameterValue",
+                    "BackupRetentionPeriod must be between 1 and 35.", 400);
+        }
+        Map<String, String> createTags = parseTags(params);
+
         if (engineVersion == null) {
             engineVersion = defaultEngineVersion(engine);
         }
@@ -1367,6 +1375,13 @@ public class RdsQueryHandler {
             }
             if (enableHttpEndpoint) {
                 cluster = service.setHttpEndpoint(region, id, true);
+            }
+            if (backupRetentionPeriodParam != null) {
+                cluster = service.setBackupRetentionPeriod(region, id, backupRetentionPeriod);
+            }
+            if (!createTags.isEmpty()) {
+                service.addTagsToResource(cluster.getDbClusterArn(), createTags, region);
+                cluster = service.getDbCluster(id, region);
             }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
@@ -1478,6 +1493,11 @@ public class RdsQueryHandler {
             Integer serverlessV2SecondsUntilAutoPause = parseIntegerParam(
                     params, "ServerlessV2ScalingConfiguration.SecondsUntilAutoPause");
             Boolean enableHttpEndpoint = parseOptionalBoolean(params, "EnableHttpEndpoint");
+            Integer modifyBackupRetentionPeriod = parseIntegerParam(params, "BackupRetentionPeriod");
+            if (modifyBackupRetentionPeriod != null && (modifyBackupRetentionPeriod < 1 || modifyBackupRetentionPeriod > 35)) {
+                throw new AwsException("InvalidParameterValue",
+                        "BackupRetentionPeriod must be between 1 and 35.", 400);
+            }
             if (Boolean.TRUE.equals(enableHttpEndpoint)) {
                 RdsService.requireDataApiEngine(service.getDbCluster(id, region).getEngineIdentifier());
             }
@@ -1489,6 +1509,9 @@ public class RdsQueryHandler {
                     Boolean.TRUE.equals(parseOptionalBoolean(params, "ApplyImmediately")), region);
             if (enableHttpEndpoint != null) {
                 cluster = service.setHttpEndpoint(region, id, enableHttpEndpoint);
+            }
+            if (modifyBackupRetentionPeriod != null) {
+                cluster = service.setBackupRetentionPeriod(region, id, modifyBackupRetentionPeriod);
             }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS, result)).build();
@@ -3464,6 +3487,7 @@ public class RdsQueryHandler {
            .elem("HttpEndpointEnabled", c.isHttpEndpointEnabled())
            .elem("MultiAZ", c.isMultiAz())
            .elem("StorageEncrypted", c.isStorageEncrypted())
+           .elem("BackupRetentionPeriod", c.getBackupRetentionPeriod())
            .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
            .elem("PreferredBackupWindow", "04:00-06:00")
@@ -3502,6 +3526,9 @@ public class RdsQueryHandler {
             }
             xml.end("ServerlessV2ScalingConfiguration");
         }
+        xml.start("TagList");
+        writeTags(xml, c.getTags());
+        xml.end("TagList");
         if (c.getGlobalClusterIdentifier() != null && !c.getGlobalClusterIdentifier().isBlank()) {
             xml.elem("GlobalClusterIdentifier", c.getGlobalClusterIdentifier());
         }

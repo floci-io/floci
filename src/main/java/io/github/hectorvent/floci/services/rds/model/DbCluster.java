@@ -199,6 +199,11 @@ public class DbCluster {
     public boolean isStorageEncrypted() { return storageEncrypted; }
     public void setStorageEncrypted(boolean storageEncrypted) { this.storageEncrypted = storageEncrypted; }
 
+    private int backupRetentionPeriod = 1;
+
+    public int getBackupRetentionPeriod() { return backupRetentionPeriod; }
+    public void setBackupRetentionPeriod(int backupRetentionPeriod) { this.backupRetentionPeriod = backupRetentionPeriod; }
+
     public String getDockerVolumeName() { return dockerVolumeName; }
     public void setDockerVolumeName(String dockerVolumeName) { this.dockerVolumeName = dockerVolumeName; }
 
