@@ -24,21 +24,27 @@ class S3NoSuchVersionIntegrationTest {
         given().body("2").when().put(PATH).then().statusCode(200);
         given().when().delete(PATH + "?versionId=" + gone).then().statusCode(204);
 
-        for (String versionId : List.of(gone, "null")) {
-            String version = "versionId=" + versionId;
-            missing(given().when().get(PATH + "?" + version), KEY, versionId);
-            missing(given().when().get(PATH + "?acl&" + version), KEY, versionId);
-            missing(given().header("x-amz-object-attributes", "ETag").when().get(PATH + "?attributes&" + version),
-                    KEY, versionId);
-            missing(given().body("<Tagging><TagSet></TagSet></Tagging>").when().put(PATH + "?tagging&" + version),
-                    KEY, versionId);
-            missing(given().when().delete(PATH + "?tagging&" + version), KEY, versionId);
-            missing(given().when().get(PATH + "?annotation&annotationName=labels&" + version), KEY, versionId);
-            missing(given().when().get(PATH + "?annotation&" + version), KEY, versionId);
-            missing(given().header("x-amz-copy-source", PATH + "?" + version).when().put("/" + BUCKET + "/copy"),
-                    KEY, versionId);
-            // GetObjectTagging names the key with its bucket.
-            missing(given().when().get(PATH + "?tagging&" + version), BUCKET + "/" + KEY, versionId);
+        for (String key : List.of(KEY, "missing")) {
+            String path = "/" + BUCKET + "/" + key;
+            for (String versionId : List.of(gone, "null")) {
+                String version = "versionId=" + versionId;
+                missing(given().when().get(path + "?" + version), key, versionId);
+                missing(given().when().get(path + "?acl&" + version), key, versionId);
+                missing(given().header("x-amz-object-attributes", "ETag").when().get(path + "?attributes&" + version),
+                        key, versionId);
+                missing(given().body("<Tagging><TagSet></TagSet></Tagging>").when().put(path + "?tagging&" + version),
+                        key, versionId);
+                missing(given().when().delete(path + "?tagging&" + version), key, versionId);
+                missing(given().when().get(path + "?annotation&annotationName=labels&" + version), key, versionId);
+                missing(given().when().get(path + "?annotation&" + version), key, versionId);
+                missing(given().body("x").when().put(path + "?annotation&annotationName=labels&" + version),
+                        key, versionId);
+                missing(given().when().delete(path + "?annotation&annotationName=labels&" + version), key, versionId);
+                missing(given().header("x-amz-copy-source", path + "?" + version).when().put("/" + BUCKET + "/copy"),
+                        key, versionId);
+                // GetObjectTagging names the key with its bucket.
+                missing(given().when().get(path + "?tagging&" + version), BUCKET + "/" + key, versionId);
+            }
         }
     }
 
