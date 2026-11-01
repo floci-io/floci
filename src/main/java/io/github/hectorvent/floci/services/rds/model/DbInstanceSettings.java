@@ -28,7 +28,22 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                                  LogExportChanges logExportChanges,
                                  Integer maxAllocatedStorage,
                                  String storageType,
-                                 String caCertificateIdentifier) {
+                                 String caCertificateIdentifier,
+                                 String licenseModel) {
+    public DbInstanceSettings(Boolean storageEncrypted, String kmsKeyId, Integer backupRetentionPeriod,
+                              String preferredBackupWindow, String preferredMaintenanceWindow,
+                              Boolean copyTagsToSnapshot, Integer monitoringInterval, String monitoringRoleArn,
+                              Boolean performanceInsightsEnabled, Integer performanceInsightsRetentionPeriod,
+                              String engineLifecycleSupport, List<String> enabledCloudwatchLogsExports,
+                              LogExportChanges logExportChanges, Integer maxAllocatedStorage, String storageType,
+                              String caCertificateIdentifier) {
+        this(storageEncrypted, kmsKeyId, backupRetentionPeriod, preferredBackupWindow,
+                preferredMaintenanceWindow, copyTagsToSnapshot, monitoringInterval, monitoringRoleArn,
+                performanceInsightsEnabled, performanceInsightsRetentionPeriod, engineLifecycleSupport,
+                enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
+                caCertificateIdentifier, null);
+    }
+
     public DbInstanceSettings(Boolean storageEncrypted, String kmsKeyId, Integer backupRetentionPeriod,
                               String preferredBackupWindow, String preferredMaintenanceWindow,
                               Boolean copyTagsToSnapshot, Integer monitoringInterval, String monitoringRoleArn,
@@ -201,7 +216,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
                 enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
-                caCertificateIdentifier);
+                caCertificateIdentifier, licenseModel);
     }
 
     public DbInstanceSettings withKmsKeyId(String resolvedKmsKeyId) {
@@ -210,7 +225,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
                 enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
-                caCertificateIdentifier);
+                caCertificateIdentifier, licenseModel);
     }
 
     public DbInstanceSettings withStorageType(String resolvedStorageType) {
@@ -219,7 +234,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
                 enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, resolvedStorageType,
-                caCertificateIdentifier);
+                caCertificateIdentifier, licenseModel);
     }
 
     /** The same settings with the CA certificate the service resolved. */
@@ -229,7 +244,7 @@ public record DbInstanceSettings(Boolean storageEncrypted,
                 monitoringInterval, monitoringRoleArn, performanceInsightsEnabled,
                 performanceInsightsRetentionPeriod, engineLifecycleSupport,
                 enabledCloudwatchLogsExports, logExportChanges, maxAllocatedStorage, storageType,
-                resolvedCaCertificateIdentifier);
+                resolvedCaCertificateIdentifier, licenseModel);
     }
 
     public void validateStorageType() {
@@ -289,6 +304,9 @@ public record DbInstanceSettings(Boolean storageEncrypted,
         }
         if (caCertificateIdentifier != null && !caCertificateIdentifier.isBlank()) {
             instance.setCaCertificateIdentifier(caCertificateIdentifier);
+        }
+        if (licenseModel != null && !licenseModel.isBlank()) {
+            instance.setLicenseModel(licenseModel);
         }
     }
 }
