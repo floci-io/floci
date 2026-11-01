@@ -60,31 +60,37 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     private final StorageBackend<String, PaymentCryptographyAlias> aliasStore;
     private final RegionResolver regionResolver;
     private final SecureRandom secureRandom;
+    private final PaymentCryptographyRequestContext requestContext;
 
     @Inject
-    public PaymentCryptographyService(StorageFactory storageFactory, RegionResolver regionResolver) {
+    public PaymentCryptographyService(StorageFactory storageFactory, RegionResolver regionResolver,
+                                      PaymentCryptographyRequestContext requestContext) {
         this(storageFactory.create(STORAGE_KEY, "payment-cryptography-keys.json",
                         new TypeReference<>() {}),
                 storageFactory.create(STORAGE_KEY, "payment-cryptography-aliases.json",
                         new TypeReference<>() {}),
                 regionResolver,
-                new SecureRandom());
-    }
-
-    PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
-                                StorageBackend<String, PaymentCryptographyAlias> aliasStore,
-                                RegionResolver regionResolver) {
-        this(keyStore, aliasStore, regionResolver, new SecureRandom());
+                new SecureRandom(),
+                requestContext);
     }
 
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
                                 StorageBackend<String, PaymentCryptographyAlias> aliasStore,
                                 RegionResolver regionResolver,
-                                SecureRandom secureRandom) {
+                                PaymentCryptographyRequestContext requestContext) {
+        this(keyStore, aliasStore, regionResolver, new SecureRandom(), requestContext);
+    }
+
+    PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
+                                StorageBackend<String, PaymentCryptographyAlias> aliasStore,
+                                RegionResolver regionResolver,
+                                SecureRandom secureRandom,
+                                PaymentCryptographyRequestContext requestContext) {
         this.keyStore = keyStore;
         this.aliasStore = aliasStore;
         this.regionResolver = regionResolver;
         this.secureRandom = secureRandom;
+        this.requestContext = requestContext;
     }
 
     // ---- keys ---------------------------------------------------------------
@@ -135,11 +141,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             return null;
         }
         if (identifier.startsWith("alias/")) {
-            PaymentCryptographyAlias alias = findAlias(region, identifier);
-            if (alias == null || alias.getKeyId() == null) {
-                return null;
-            }
-            return keyStore.get(alias.getKeyId()).orElse(null);
+            return keyOfAlias(region, identifier);
         }
         if (AwsArnUtils.looksLikeArn(identifier)) {
             for (PaymentCryptographyKey key : keyStore.scan(k -> true)) {
@@ -218,6 +220,24 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      */
     public PaymentCryptographyAlias findAlias(String region, String aliasName) {
         return aliasStore.get(aliasKey(aliasName, region)).orElse(null);
+    }
+
+    /**
+     * The key an alias names, as this request resolved it.
+     *
+     * <p>The alias is resolved once for the request, and the resolution is kept: the
+     * permission check resolves the alias to the key it names, and the request must act on
+     * that key. Another request may move the alias in between, and a key resolved again
+     * afterwards could be one no policy was checked against.
+     */
+    private PaymentCryptographyKey keyOfAlias(String region, String aliasName) {
+        String keyId = requestContext.aliasKeyId(region, aliasName);
+        if (keyId == null) {
+            PaymentCryptographyAlias alias = findAlias(region, aliasName);
+            keyId = alias == null || alias.getKeyId() == null ? "" : alias.getKeyId();
+            requestContext.pinAliasKeyId(region, aliasName, keyId);
+        }
+        return keyId.isEmpty() ? null : keyStore.get(keyId).orElse(null);
     }
 
     /** Points a name at a key. The name must be free in the key's region. */

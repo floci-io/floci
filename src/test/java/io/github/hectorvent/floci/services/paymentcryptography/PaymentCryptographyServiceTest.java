@@ -30,7 +30,8 @@ class PaymentCryptographyServiceTest {
         service = new PaymentCryptographyService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
-                new RegionResolver("us-east-1", "000000000000"));
+                new RegionResolver("us-east-1", "000000000000"),
+                new PaymentCryptographyRequestContext());
     }
 
     private PaymentCryptographyKey createKey(String region) {
@@ -303,6 +304,27 @@ class PaymentCryptographyServiceTest {
         assertEquals(Optional.of(key.getArn()), service.find("key", key.getArn(), "us-east-1"));
         assertEquals(Optional.empty(), service.find("key", "alias/team/no-such-key", "us-east-1"));
         assertEquals(Optional.empty(), service.find("key", "no-such-key", "us-east-1"));
+    }
+
+    /**
+     * An alias is resolved once for the request, so that the request acts on the key the permission check was
+     * made on: an alias moved to another key in between would otherwise let the request act on a key no policy
+     * was checked against.
+     */
+    @Test
+    void anAliasIsResolvedOnceForTheRequest() {
+        PaymentCryptographyKey allowed = createKey("us-east-1");
+        PaymentCryptographyKey denied = createKey("us-east-1");
+        service.createAlias("alias/team/card-key", allowed);
+
+        // The permission check resolves the alias, which is the key the request is checked on.
+        assertEquals(Optional.of(allowed.getArn()), service.find("key", "alias/team/card-key", "us-east-1"));
+
+        // The alias is moved to another key while the request runs.
+        service.updateAlias("alias/team/card-key", denied);
+
+        assertEquals(allowed, service.findKey("us-east-1", "alias/team/card-key"),
+                "the request did not act on the key the permission check was made on");
     }
 
     /**

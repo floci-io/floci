@@ -65,7 +65,7 @@ export AWS_ENDPOINT_URL=http://localhost:4566
 
 # Create a key
 KEY_ARN=$(aws payment-cryptography create-key \
-  --key-attributes KeyAlgorithm=AES_256,KeyClass=SYMMETRIC_KEY,KeyUsage=TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY \
+  --key-attributes 'KeyAlgorithm=AES_256,KeyClass=SYMMETRIC_KEY,KeyUsage=TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY,KeyModesOfUse={Encrypt=true,Decrypt=true}' \
   --exportable \
   --query Key.KeyArn --output text)
 
