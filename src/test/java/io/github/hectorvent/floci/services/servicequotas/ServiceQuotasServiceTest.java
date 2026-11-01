@@ -60,11 +60,11 @@ class ServiceQuotasServiceTest {
         String code = "L-1216C47A";
         assertEquals((double) value, configured.getServiceQuota("ec2", code, "us-east-1", ACCOUNT_ID)
                 .path("Quota").path("Value").asDouble());
-        assertEquals((double) value, configured.listServiceQuotas("ec2", code, null, null, "us-east-1", ACCOUNT_ID)
+        assertEquals((double) value, configured.listServiceQuotas("ec2", code, null, null, null, "us-east-1", ACCOUNT_ID)
                 .path("Quotas").get(0).path("Value").asDouble());
         assertEquals(5.0, configured.getAwsDefaultServiceQuota("ec2", code, "us-east-1", ACCOUNT_ID)
                 .path("Quota").path("Value").asDouble());
-        assertEquals(5.0, configured.listAwsDefaultServiceQuotas("ec2", code, null, null, "us-east-1", ACCOUNT_ID)
+        assertEquals(5.0, configured.listAwsDefaultServiceQuotas("ec2", code, null, null, null, "us-east-1", ACCOUNT_ID)
                 .path("Quotas").get(0).path("Value").asDouble());
     }
 
@@ -102,7 +102,7 @@ class ServiceQuotasServiceTest {
         assertEquals("ACCOUNT", quota.path("QuotaAppliedAtLevel").asText());
         assertEquals("arn:aws:servicequotas:us-east-1:" + ACCOUNT_ID + ":ec2/" + code,
                 quota.path("QuotaArn").asText());
-        JsonNode listed = service.listServiceQuotas("ec2", null, null, 100, "us-east-1", ACCOUNT_ID).path("Quotas");
+        JsonNode listed = service.listServiceQuotas("ec2", null, null, null, 100, "us-east-1", ACCOUNT_ID).path("Quotas");
         assertEquals(4, listed.size());
         int matching = 0;
         for (JsonNode entry : listed) {
@@ -136,7 +136,7 @@ class ServiceQuotasServiceTest {
             assertEquals("Amazon Virtual Private Cloud (Amazon VPC)", quota.path("ServiceName").asText());
         }
         Map<String, String> listed = new HashMap<>();
-        service.listServiceQuotas("vpc", null, null, 100, "us-east-1", "000000000000").withArray("Quotas")
+        service.listServiceQuotas("vpc", null, null, null, 100, "us-east-1", "000000000000").withArray("Quotas")
                 .forEach(q -> listed.put(q.path("QuotaCode").asText(), q.path("QuotaName").asText()));
         want.forEach((code, name) -> assertEquals(name, listed.get(code), listed.toString()));
         assertEquals(want.size() + 3, listed.size(), "synthetic quotas still appended: " + listed);
@@ -166,7 +166,7 @@ class ServiceQuotasServiceTest {
     void malformedServiceCodeIsRejected() {
         for (String bad : List.of("!!!", "1codebuild", "-codebuild", "code build", "c", "a".repeat(64))) {
             AwsException listing = assertThrows(AwsException.class,
-                    () -> service.listServiceQuotas(bad, null, null, null, "us-east-1", "000000000000"),
+                    () -> service.listServiceQuotas(bad, null, null, null, null, "us-east-1", "000000000000"),
                     "expected ListServiceQuotas to reject " + bad);
             assertEquals("IllegalArgumentException", listing.getErrorCode(), bad);
             assertEquals(400, listing.getHttpStatus(), bad);
@@ -182,7 +182,7 @@ class ServiceQuotasServiceTest {
     void wellFormedServiceCodesAreStillAccepted() {
         // Including an unknown-but-valid code: generating a catalog for those is deliberate.
         for (String good : List.of("codebuild", "widgetfactory", "elasticloadbalancing", "AWS-Thing", "ec")) {
-            assertTrue(service.listServiceQuotas(good, null, null, null, "us-east-1", ACCOUNT_ID)
+            assertTrue(service.listServiceQuotas(good, null, null, null, null, "us-east-1", ACCOUNT_ID)
                     .withArray("Quotas").size() > 0, good);
         }
     }
