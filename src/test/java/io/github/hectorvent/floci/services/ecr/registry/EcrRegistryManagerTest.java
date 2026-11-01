@@ -325,6 +325,49 @@ class EcrRegistryManagerTest {
     }
 
     @Test
+    void httpClient_usesTheStartedRegistrysAddressInsideDocker() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(lifecycleManager.createAndStart(any())).thenReturn(containerAt("container-id", "172.18.0.3"));
+
+        manager.ensureStarted();
+
+        assertEquals("http://172.18.0.3:5000", manager.httpClient().baseUrl());
+    }
+
+    @Test
+    void httpClient_followsTheRegistryWhenDeletingTheLastRepositoryReplacesIt() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(storage.pruneVolumesOnDelete()).thenReturn(true);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                containerAt("old-container", "172.18.0.3"), containerAt("new-container", "172.18.0.9"));
+        manager.ensureStarted();
+
+        manager.pruneStorage();
+        assertEquals("http://" + REGISTRY_NAME + ":5000", manager.httpClient().baseUrl());
+
+        manager.ensureStarted();
+        assertEquals("http://172.18.0.9:5000", manager.httpClient().baseUrl());
+    }
+
+    @Test
+    void httpClient_forgetsTheAddressOfARegistryThatDisappeared() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                containerAt("old-container", "172.18.0.3"), containerAt("new-container", "172.18.0.9"));
+        manager.ensureStarted();
+        when(lifecycleManager.presenceOf("old-container")).thenReturn(ContainerPresence.ABSENT);
+
+        manager.ensureStarted();
+
+        assertEquals("http://172.18.0.9:5000", manager.httpClient().baseUrl());
+    }
+
+    private static ContainerLifecycleManager.ContainerInfo containerAt(String containerId, String ip) {
+        return new ContainerLifecycleManager.ContainerInfo(containerId,
+                Map.of(5000, new ContainerLifecycleManager.EndpointInfo(ip, 5000)));
+    }
+
+    @Test
     void freshlyCreatedRegistryStreamsItsCompleteLog() {
         when(lifecycleManager.createAndStart(any())).thenReturn(
                 new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
