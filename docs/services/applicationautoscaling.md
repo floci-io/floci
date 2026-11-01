@@ -61,6 +61,9 @@ PolicyARN          arn:aws:autoscaling:<region>:<account>:scalingPolicy:<uuid>:r
 `DescribeScalableTargets` into the resource's `arn` attribute and then passes it to
 `ListTagsForResource` on every read, so it is always populated.
 
+Under IAM enforcement, a request naming a target by its triple is checked on that ARN, and a
+`RegisterScalableTarget` registering a new one on `scalable-target/*`, as its id is not assigned yet.
+
 ## CloudWatch alarms
 
 A `TargetTrackingScaling` policy creates a real pair of CloudWatch alarms, exactly as AWS

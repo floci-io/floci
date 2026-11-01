@@ -4,6 +4,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.Contact;
 import software.amazon.awssdk.services.sesv2.model.CreateContactListRequest;
@@ -23,6 +24,7 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 // Runs as its own account, so the one contact list it needs leaves every other test's list alone.
 @DisplayName("SES v2 ListContacts filter")
+@ResourceLock("ses-account")
 class SesContactFilterTest {
 
     private static final String ACCOUNT_ID = "777788880000";

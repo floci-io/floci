@@ -120,9 +120,9 @@ but for its bootstrap actions and its storage.
   `spark-submit`, with the JAR and the step's `Args`. Any other `command-runner.jar` step runs its
   command, its first argument, with the rest, and a `script-runner.jar` step (by name, or by its
   `s3://<region>.elasticmapreduce/libs/script-runner/script-runner.jar` URI) its script, as the Release
-  Guide's "Run commands and scripts on an Amazon EMR cluster" describes them. `hive-script`,
-  `pig-script`, `hadoop-streaming`, `hadoop-lzo` and `s3-dist-cp`, which the image does not have, are
-  `FAILED` without running.
+  Guide's "Run commands and scripts on an Amazon EMR cluster" describes them. An `s3-dist-cp` step runs
+  Floci's own S3DistCp (see **S3DistCp**). `hive-script`, `pig-script`, `hadoop-streaming` and
+  `hadoop-lzo`, which the image does not have, are `FAILED` without running.
 * **Commands and scripts**: they run as the image's `hadoop` user in `/home/hadoop`, with `bash`, Python
   3, Java, `curl` and the AWS CLI v2, which reaches Floci through `AWS_ENDPOINT_URL`. A
   `script-runner.jar` step's script is fetched from S3 with the AWS CLI and the step's credentials, then
@@ -151,6 +151,42 @@ but for its bootstrap actions and its storage.
   `hdfs://` path naming a host is not served, `hadoop fs -ls /` fails ("URI scheme is not "file""), where
   `-ls -d /` and a folder below it do not, and `hadoop fs` does not reach S3, as its classpath has no AWS
   SDK v2 and the image's EMRFS is not pointed at Floci (`aws s3 cp` does). `/tmp` is each container's own.
+* **S3DistCp**: the image has neither `s3-dist-cp` nor MapReduce, so a `command-runner.jar` step whose
+  first argument is `s3-dist-cp`, the Release Guide's form, runs Floci's own program instead, through
+  `spark-submit` in the step's container, copying through Hadoop's file systems: `--src` and `--dest` take
+  S3 paths in Floci's S3, the cluster's HDFS (`hdfs:///output`, or a path without a scheme) or a file of
+  the container, a source folder's files keeping their folders under `--dest`. It takes the Release
+  Guide's options, `--name=value` or `--name value`, and `-D property=value`. `--srcPattern` and
+  `--groupBy` match the whole source path, as Python regular expressions, which share Java's common
+  syntax. `--groupBy` concatenates the files whose groups give the same name, which is the groups' text,
+  into the folder of the first of them, and refuses a regular expression with no group, as S3DistCp does;
+  `--targetSize` breaks a group larger than it into parts named with a number before the extension.
+  `--outputCodec` (`gzip`, `gz`, `lzo`, `lzop`, `snappy`, or `none` to decompress) decompresses each
+  source by its own extension and replaces that extension with the codec's; without it a file's
+  compression stays as it is, and a group keeps the compression its files share, named with that codec's
+  extension, or has none when they differ, each file decompressed so that the group is one stream.
+  `--deleteOnSuccess` deletes the copied files, but not their folders, once
+  all are copied. `--outputManifest` writes gzipped JSON lines (`path`, `baseName`, `srcDir`, `size`) to
+  `--dest`; `--previousManifest` leaves out the files it names by `baseName`, and fails the step when it
+  is not there unless `--requirePreviousManifest` is `false` (`=false` or `false` after it);
+  `--copyFromManifest` copies the files it names. `--srcPrefixesFile` copies the files under each of its
+  lines instead of listing `--src`, a line ending in `/` naming that folder alone and any other a prefix as
+  S3 lists one (`logs/day` takes in `logs/day-old/`).
+  `--s3ServerSideEncryption`, `--storageClass`, `--disableMultipartUpload` and
+  `--multipartUploadChunkSize` set S3A's matching settings; `--s3Endpoint` is ignored, as S3 is Floci's. A
+  bucket name with an underscore fails the step, as S3DistCp "does not support" one, and so does a copy
+  Hadoop fails, leaving what was copied, as S3DistCp does. `--appendToLastFile` puts the new data after
+  what a destination file holds, through a copy renamed over it, as neither S3 nor the cluster's HDFS, a
+  folder, appends in place. The copy has a name of its own and goes if the writing fails; the file steps
+  aside, under a name of its own too, until the copy has taken its place, and comes back if it cannot, so a
+  failed append leaves it as it was. A copy that would write two files to the same path, the manifest included
+  (`a.log` and `a.log.gz` with `--outputCodec=gzip`, say), a file over one of its own sources, as with the
+  same `--src` and `--dest`, a file outside `--dest`, through a `..` in a manifest's `baseName` or in
+  `--outputManifest`, or a file with no name, from a `--groupBy` whose groups matched nothing, say, fails
+  before it writes anything. A step's log has one line saying what was copied.
+  Floci's own readings, as no source says: the grouped file's folder, `--numberFiles` putting the number
+  straight before the file's name, a group's compression without `--outputCodec`, and failing a copy that
+  would write over its own output or source, or outside `--dest`.
 * **HTTPS**: with [TLS](../configuration/tls.md) on, each step's container, and the bootstrap actions'
   one, also gets Floci's CA bundle as a Java trust store, which every JVM in it uses, as an
   [EMR Serverless job run](emr-serverless.md#running-spark-job-runs)'s do, so Java code reaches Floci

@@ -82,7 +82,12 @@ past its format, and whose service checks it without one: Step Functions checks 
 on its state machine's ARN. `MINTED_IDS` are the resource types whose service follows the name their
 format ends in with an id it mints, `/<id>`, which the format leaves out and a request naming one by
 its name does not give: EventBridge's connections and API destinations, whose stored ARN the reader
-asks the service for, or else checks with that id open.
+asks the service for, or else checks with that id open. `FOUND_BY` are the resource types whose ARN is
+all an id their service mints, which a request names by members the ARN does not hold, with those
+members: each operation whose request has them all names the type by them (`find`), and the reader
+asks the service for the ARN they find, or else checks the ARN with its id open, as for a create; an
+Application Auto Scaling scalable target, `scalable-target/<id>`, is named by its service namespace,
+resource id and scalable dimension.
 
 The Service Reference is live rather than a pinned dependency, so a fresh generation is not
 byte-identical. The two gates split along the sources:
@@ -119,7 +124,7 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 
 # The namespaces read, in batches: each moves here from NOT_COVERED with the tests that show its ARNs
 # are the ones its handlers mint.
-NAMESPACES = ("acm", "athena", "bcm-data-exports", "bcm-pricing-calculator", "budgets", "ce", "cloudtrail",
+NAMESPACES = ("acm", "application-autoscaling", "athena", "bcm-data-exports", "bcm-pricing-calculator", "budgets", "ce", "cloudtrail",
               "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "cur", "ecr", "elasticloadbalancing",
               "events", "firehose", "globalaccelerator", "kinesisanalytics", "servicediscovery", "servicequotas",
               "states", "textract", "timestream-influxdb", "translate")
@@ -149,11 +154,6 @@ NOT_COVERED: dict[str, str] = {
     "airflow": _REST,
     "app-integrations": _REST,
     "appconfig": _REST,
-    "application-autoscaling": "not read yet: a scalable target's ARN ends in an id the service mints, "
-                               "`scalable-target/<id>`, while its requests name the target by ServiceNamespace, "
-                               "ResourceId and ScalableDimension, so its resource is the stored ARN those three "
-                               "find, which RequestResources has no lookup for yet; read as a member, ResourceId "
-                               "would fill that id",
     "appsync": _REST,
     "aps": _REST,
     "autoscaling": "not read yet: AWS's group and launch configuration ARNs carry an id the service mints, "
@@ -214,7 +214,7 @@ NOT_COVERED: dict[str, str] = {
     "redshift": _LATER,
     "redshift-data": "not read yet: a serverless workgroup's ARN ends in an id the service mints, `workgroup/<id>`, "
                      "while its requests name the workgroup by WorkgroupName, a name or an ARN, so its resource is the "
-                     "stored ARN that name finds, which RequestResources has no lookup for yet",
+                     "stored ARN that name finds, a FOUND_BY type its service does not look up yet",
     "redshift-serverless": _LATER,
     "rekognition": _LATER,
     "resource-explorer-2": _REST,
@@ -409,6 +409,19 @@ MINTED_IDS: dict[str, str] = {
     "events:api-destination": "EventBridge mints an API destination's ARN as api-destination/<name>/<id> "
                               "(botocore's ApiDestinationArn pattern ends in api-destination/<name>/<id>), "
                               "as it does a connection's",
+}
+
+# Resource types whose ARN is all an id their service mints, which a request names by members the ARN does not
+# hold, the members in the order the service reads them, and why: an operation whose request has them all names the
+# type by them, and the reader asks the service for the ARN they find.
+FOUND_BY: dict[str, tuple[list[str], str]] = {
+    "application-autoscaling:ScalableTarget": (
+        ["ServiceNamespace", "ResourceId", "ScalableDimension"],
+        "a scalable target's ARN ends in its unique id, scalable-target/<id> ('The unique ID "
+        "(1234abcd56ab78cd901ef1234567890ab123) is a value assigned by Application Auto Scaling to the scalable "
+        "target', Application Auto Scaling User Guide), which the reference names ${ResourceId}, while its requests "
+        "name the target by ServiceNamespace, ResourceId and ScalableDimension; ResourceId is the target's "
+        "resource (service/<cluster>/<service>), not that id"),
 }
 
 # The variables of an ARN format the account, partition and Region fill.
@@ -761,7 +774,7 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     if operation in CORRECTIONS:
         resources = CORRECTIONS[operation][0]
     else:
-        resources = resources_for(operation, types, formats, members)
+        resources = with_found(resources_for(operation, types, formats, members), namespace_of(operation), members)
     resources = with_account(resources, formats, account_members(models, operation.split(":", 1)[1]))
     resources = with_arn_of(resources, formats, name_or_arn_members(models, operation.split(":", 1)[1]))
     resources = with_made(resources, operation, formats)
@@ -770,6 +783,19 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     if creates:
         entry["creates"] = creates
     return entry
+
+
+def with_found(resources: list[dict], namespace: str, members: dict[str, str]) -> list[dict]:
+    """The resources, each a `FOUND_BY` type fills named by the members its service finds it by instead, when the
+    request has them all, and left out when it does not: its variables are an id the request does not give."""
+    found = []
+    for resource in resources:
+        key = f"{namespace}:{resource.get('type')}"
+        if "fill" not in resource or key not in FOUND_BY:
+            found.append(resource)
+        elif all(members.get(member) == member for member in FOUND_BY[key][0]):
+            found.append({"type": resource["type"], "fill": {}, "find": list(FOUND_BY[key][0])})
+    return found
 
 
 def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> dict:
@@ -789,6 +815,8 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
     missing += [f"MINTED_IDS names {namespace}:{kind}, whose ARN format does not end in its one variable"
                 for namespace, kinds in minted.items() for kind in kinds
                 if kind in formats.get(namespace, {}) and not ONE_VARIABLE_RE.match(_resource(formats[namespace][kind]))]
+    missing += [f"FOUND_BY names {key}, no resource type with an ARN format of a namespace the file reads"
+                for key in sorted(FOUND_BY) if key.split(":", 1)[1] not in formats.get(key.split(":", 1)[0], {})]
     if missing:
         raise ValueError("; ".join(missing))
     operations = {}
@@ -885,6 +913,8 @@ FILL_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|\[]\.[A-Za-z][A-Za-z0-9_]
 ARN_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_]*(\[])?)?$")
 # A format's resource that is a literal and one variable, at its end.
 ONE_VARIABLE_RE = re.compile(r"^[^$]*\$\{\w+}$")
+# The keys a resource found by members does not take: it is read no other way, in the caller's account.
+FOUND_ONLY = {"absent", "arnOf", "account", "fixed", "before"}
 
 
 def validate(document: dict) -> list[str]:
@@ -948,7 +978,7 @@ def validate(document: dict) -> list[str]:
 def _resource_problems(operation: str, resource: object, types: set[str], formats: dict[str, str]) -> list[str]:
     if not isinstance(resource, dict) or not ({"types", "arn"} <= set(resource) <= {"types", "arn", "before", "made"}
                                               or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "absent", "arnOf", "account",
-                                                                                       "fixed", "made", "before"}):
+                                                                                       "fixed", "made", "before", "find"}):
         return [f"{operation} names {resource!r}, which is neither an ARN member nor a type's variables"]
     if resource.get("made", True) is not True:
         return [f"{operation} marks {resource!r} made by {resource['made']!r}, which is not true"]
@@ -963,6 +993,11 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
             return [f"{operation} reads an ARN at {resource['arn']!r}, which is no member"]
         return []
     fill = resource["fill"]
+    find = resource.get("find", [])
+    if not isinstance(find, list) or ("find" in resource and (not find or fill or set(resource) & FOUND_ONLY)) \
+            or not all(isinstance(path, str) and PATH_RE.match(path) and not path.endswith("[]") for path in find):
+        return [f"{operation} finds {kinds[0]} by {find!r}, which are no members of one value each, or beside a fill "
+                f"or members reading it otherwise"]
     variables = set(VARIABLE_RE.findall(formats[kinds[0]])) - KNOWN_VARIABLES
     if not isinstance(fill, dict) or set(fill) - variables or not all(
             isinstance(path, str) and FILL_PATH_RE.match(path) for path in fill.values()):

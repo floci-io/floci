@@ -338,9 +338,9 @@ class RequestResourcesTest {
             }
 
             @Override
-            public Optional<String> find(String type, String name, String region) {
-                return "web".equals(name) && "us-east-1".equals(region) ? Optional.of(events + type + "/web/1234")
-                        : Optional.empty();
+            public Optional<String> find(String type, List<String> names, String region) {
+                return List.of("web").equals(names) && "us-east-1".equals(region)
+                        ? Optional.of(events + type + "/web/1234") : Optional.empty();
             }
         };
         assertEquals(List.of(events + "connection/web/1234"), RequestResources.of("events:DescribeConnection",
@@ -354,6 +354,44 @@ class RequestResourcesTest {
         assertEquals(List.of(events + "connection/web/1234", events + "api-destination/new/*"), RequestResources.of(
                 "events:CreateApiDestination", json("{\"Name\":\"new\",\"ConnectionArn\":\"" + events
                 + "connection/web/1234\"}"), "aws", "us-east-1", "000000000000", stored));
+    }
+
+    /**
+     * A scalable target's ARN is all the id Application Auto Scaling mints, while its requests name it by its service
+     * namespace, resource id and scalable dimension: it is the one stored under those, or else has its id open, as a
+     * new one has; a request leaving one out names none, and one naming it by its ARN names it as given.
+     */
+    @Test
+    void aResourceWhoseArnIsAllAMintedIdIsTheOneStoredUnderTheMembersNamingIt() {
+        String targets = "arn:aws:application-autoscaling:us-east-1:000000000000:scalable-target/";
+        StoredResourceArns stored = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "application-autoscaling";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return "ScalableTarget".equals(type) && "us-east-1".equals(region)
+                        && List.of("ecs", "service/default/web", "ecs:service:DesiredCount").equals(names)
+                        ? Optional.of(targets + "0123abcd") : Optional.empty();
+            }
+        };
+        String web = "\"ServiceNamespace\":\"ecs\",\"ResourceId\":\"service/default/web\","
+                + "\"ScalableDimension\":\"ecs:service:DesiredCount\"";
+        assertEquals(List.of(targets + "0123abcd"), RequestResources.of("application-autoscaling:PutScalingPolicy",
+                json("{\"PolicyName\":\"p\"," + web + "}"), "aws", "us-east-1", "000000000000", stored));
+        assertEquals(List.of(targets + "*"), RequestResources.of("application-autoscaling:RegisterScalableTarget",
+                json("{" + web.replace("/web", "/api") + "}"), "aws", "us-east-1", "000000000000", stored));
+        assertEquals(List.of(targets + "*"), of("application-autoscaling:DeregisterScalableTarget", json("{" + web + "}")));
+        assertEquals(List.of(), RequestResources.of("application-autoscaling:DeregisterScalableTarget",
+                json("{\"ServiceNamespace\":\"ecs\",\"ResourceId\":\"service/default/web\"}"), "aws", "us-east-1",
+                "000000000000", stored));
+        assertEquals(List.of(), RequestResources.of("application-autoscaling:DeregisterScalableTarget",
+                json("{" + web.replace("\"ecs\",", "null,") + "}"), "aws", "us-east-1", "000000000000", stored));
+        assertEquals(List.of(targets + "0123abcd"), RequestResources.of("application-autoscaling:TagResource",
+                json("{\"ResourceARN\":\"" + targets + "0123abcd\",\"Tags\":{}}"), "aws", "us-east-1", "000000000000",
+                stored));
     }
 
     /** A request value is a name, so a {@code ${...}} in it is kept, not read as a variable of the format. */

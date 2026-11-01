@@ -23,7 +23,9 @@ import java.util.regex.Pattern;
  * resource type the action acts on, or by members filling the variables of a type's format, the others open as
  * {@code *} (a resource a request creates has the id its service mints). A type whose service follows the name a
  * request gives with an id it mints ({@code connection/<name>/<id>}) is the resource its service stores under that
- * name, or else has that id open. An ARN with a qualifier its service drops
+ * name, or else has that id open, and so is a type whose ARN is all an id its service mints, which a request names
+ * by members its ARN does not hold (a scalable target, {@code scalable-target/<id>}, by its service namespace,
+ * resource id and scalable dimension), under those members' values. An ARN with a qualifier its service drops
  * to check it is checked without one (a state machine's version or alias, on the state machine). An ARN naming
  * another account or Region than the request's is checked as given and as each resource of that name a handler may
  * act on instead, in the ARN's account or the caller's and in the ARN's Region or the request's, and the request is
@@ -61,8 +63,8 @@ public final class RequestResources {
 
     /**
      * As {@link #of(String, ContainerRequestContext, String, String, String)}, a resource of a type whose service
-     * mints an id after its name being the one {@code stored} finds for the caller under the name the request gives,
-     * or else its ARN with that id open, as it is with no {@code stored}.
+     * mints an id after its name, or as all of its ARN, being the one {@code stored} finds for the caller under the
+     * name or the members the request gives, or else its ARN with that id open, as it is with no {@code stored}.
      */
     public static List<String> of(String operation, ContainerRequestContext ctx, String partition, String region,
                                   String accountId, StoredResourceArns stored) {
@@ -93,6 +95,8 @@ public final class RequestResources {
                             .findFirst().ifPresent(format -> addNamed(arns, format.checked(named), partition, region,
                                     accountId));
                 }
+            } else if (!resource.find().isEmpty()) {
+                found(arns, resource, formats, form, body, partition, region, accountId, stored);
             } else {
                 fill(arns, resource, formats, form, body, partition, region, accountId, stored);
             }
@@ -323,6 +327,29 @@ public final class RequestResources {
         }
     }
 
+    /**
+     * The resource of a type whose ARN is all an id its service mints, named by the members the table gives it
+     * ({@code find}), when the request gives each one value: the caller's resource {@code stored} finds under those
+     * values in the Region, or else its ARN with that id open, as for a create; none when it leaves one out or gives
+     * it a JSON null, which its handler reads as none.
+     */
+    private static void found(Set<String> arns, RequestResourceMembers.Resource resource,
+                              Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
+                              JsonNode body, String partition, String region, String accountId,
+                              StoredResourceArns stored) {
+        List<String> names = new ArrayList<>();
+        for (RequestResourceMembers.Member member : resource.find()) {
+            List<String> values = values(form, body, member);
+            if (isNull(body, member) || values.size() != 1) {
+                return;
+            }
+            names.add(values.getFirst());
+        }
+        String type = resource.types().getFirst();
+        Optional<String> found = stored == null ? Optional.empty() : stored.find(type, names, region);
+        arns.add(found.orElseGet(() -> render(formats.get(type).format(), Map.of(), partition, region, accountId)));
+    }
+
     /** Whether a member that may give an ARN of a type instead of its name gives one. */
     private static boolean isArnOf(RequestResourceMembers.ArnFormat named, String value) {
         return named != null && named.pattern().matcher(value).matches();
@@ -339,7 +366,7 @@ public final class RequestResources {
             return arn;
         }
         if (stored != null && filling.size() == 1) {
-            Optional<String> found = stored.find(type, filling.values().iterator().next(), region);
+            Optional<String> found = stored.find(type, List.of(filling.values().iterator().next()), region);
             if (found.isPresent()) {
                 return found.get();
             }

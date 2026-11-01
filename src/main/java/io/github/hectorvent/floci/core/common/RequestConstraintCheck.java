@@ -51,7 +51,7 @@ public final class RequestConstraintCheck {
         this.messages = messages;
         for (Map.Entry<String, JsonNode> shape : model.path("shapes").properties()) {
             if (shape.getValue().has("pattern")) {
-                patterns.put(shape.getKey(), Pattern.compile(shape.getValue().get("pattern").asText()));
+                patterns.put(shape.getKey(), VendoredPatterns.compile(shape.getValue().get("pattern").asText()));
             }
         }
     }

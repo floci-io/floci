@@ -281,6 +281,23 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void anS3DistCpStepRunsFlocisS3DistCpOnTheClustersStorage() {
+        EmrStep copy = sparkStep("copy", "CONTINUE");
+        copy.setArgs(new ArrayList<>(List.of("s3-dist-cp", "--src=s3://bucket/logs/", "--dest=hdfs:///output")));
+        EmrCluster cluster = service.runJobFlow(cluster("copying", true, copy), REGION);
+
+        fixture.runStepThread();
+
+        assertEquals("COMPLETED", service.describeStep(cluster.getId(), cluster.getSteps().get(0).getId()).getState());
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(List.of("bash", "-c"), job.command().subList(0, 2));
+        assertEquals(List.of("s3-dist-cp", "--src=s3://bucket/logs/", "--dest=hdfs:///output"),
+                job.command().subList(3, job.command().size()));
+        assertEquals(List.of(), job.application());
+        assertEquals(new SparkJobRunner.Storage(cluster.getId() + "-home", cluster.getId() + "-mnt"), job.storage());
+    }
+
+    @Test
     void describeStepAnswersAFailedStepsFailureDetails() {
         EmrCluster cluster = service.runJobFlow(cluster("described", true, sparkStep("breaks", "CONTINUE")), REGION);
         runner.outcome = SparkJobRunner.Outcome.couldNotStart("Could not pull image: Downloading");
@@ -706,9 +723,9 @@ class EmrServiceContainerStepsTest {
 
     @Test
     void aClusterWhoseStepsNoContainerRanHasNoStorage() {
-        EmrStep copy = sparkStep("copy", "CONTINUE");
-        copy.setArgs(new ArrayList<>(List.of("s3-dist-cp", "--src=s3://bucket/in/", "--dest=hdfs:///in/")));
-        EmrCluster cluster = service.runJobFlow(cluster("unrun", true, copy), REGION);
+        EmrStep query = sparkStep("query", "CONTINUE");
+        query.setArgs(new ArrayList<>(List.of("hive-script", "--run-hive-script", "--args", "-f", "s3://bucket/q.q")));
+        EmrCluster cluster = service.runJobFlow(cluster("unrun", true, query), REGION);
         fixture.runStepThread();
 
         service.terminateJobFlows(List.of(cluster.getId()));

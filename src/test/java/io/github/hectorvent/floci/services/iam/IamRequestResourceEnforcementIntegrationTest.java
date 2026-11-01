@@ -47,6 +47,7 @@ class IamRequestResourceEnforcementIntegrationTest {
     private static final String REGION = "us-east-1";
     private static final String ELB = "arn:aws:elasticloadbalancing:" + REGION + ":" + ACCOUNT + ":";
     private static final String EVENTS = "arn:aws:events:" + REGION + ":" + ACCOUNT + ":";
+    private static final String TARGETS = "arn:aws:application-autoscaling:" + REGION + ":" + ACCOUNT + ":scalable-target/";
     /** The AWS Load Balancer Controller's create, tag-on-create and listener statements (its policy v2.14.0). */
     private static final String CONTROLLER_CREATE = "{\"Effect\":\"Allow\",\"Action\":[\"elasticloadbalancing:CreateLoadBalancer\","
             + "\"elasticloadbalancing:CreateTargetGroup\"],\"Resource\":\"*\","
@@ -1126,6 +1127,72 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .statusCode(200);
         refusedJson(translate(user, "TranslateDocument", "{" + document + ",\"TerminologyNames\":[\"" + name
                 + "-other\"]}"), "translate:TranslateDocument");
+    }
+
+    /**
+     * A scalable target, named by its service namespace, resource id and scalable dimension, is checked on the ARN
+     * Application Auto Scaling registered it under, which ends in the id it assigned, so a grant on that ARN allows
+     * it, one on another target's does not, and a deny on it holds; registering a new one is checked with its id
+     * open, and its tags by its ARN. Before, these were checked on {@code *}.
+     */
+    @Test
+    void aScalableTargetIsCheckedOnTheArnItWasRegisteredUnder() {
+        String target = scalableTarget("service/res-" + suffix() + "/web");
+        String arn = registerScalableTarget(target);
+        assertTrue(arn.startsWith(TARGETS), arn);
+
+        User user = user("res-target");
+        user.policy(allowOn("application-autoscaling:RegisterScalableTarget", arn));
+        scaling(user, "RegisterScalableTarget", target + ",\"MaxCapacity\":3}").statusCode(200);
+        user.policy(allowOn("application-autoscaling:RegisterScalableTarget", TARGETS + "other"));
+        refusedJson(scaling(user, "RegisterScalableTarget", target + ",\"MaxCapacity\":3}"),
+                "application-autoscaling:RegisterScalableTarget");
+        // Its tags on an update are checked on the target too.
+        user.policy(allowOn("application-autoscaling:RegisterScalableTarget", arn) + ","
+                + allowOn("application-autoscaling:TagResource", TARGETS + "other"));
+        refusedJson(scaling(user, "RegisterScalableTarget", target + ",\"Tags\":{\"team\":\"a\"}}"),
+                "application-autoscaling:TagResource");
+        user.policy(allowOn("application-autoscaling:RegisterScalableTarget", arn) + ","
+                + allowOn("application-autoscaling:TagResource", arn));
+        scaling(user, "RegisterScalableTarget", target + ",\"Tags\":{\"team\":\"a\"}}").statusCode(200);
+        // A new target has no id yet, so it is checked on scalable-target/*, which a grant on another does not cover.
+        String other = scalableTarget("service/res-" + suffix() + "/api");
+        refusedJson(scaling(user, "RegisterScalableTarget", other + ",\"MinCapacity\":1,\"MaxCapacity\":2}"),
+                "application-autoscaling:RegisterScalableTarget");
+        user.policy(allowOn("application-autoscaling:RegisterScalableTarget", TARGETS + "*"));
+        cleanup.register(() -> adminJson("application-autoscaling", "AnyScaleFrontendService.DeregisterScalableTarget")
+                .body(other + "}").post("/"));
+        scaling(user, "RegisterScalableTarget", other + ",\"MinCapacity\":1,\"MaxCapacity\":2}").statusCode(200);
+        // A deny on the target holds, on a policy put on it and on its tags read by its ARN, and on no other target.
+        user.policy(allowOn("application-autoscaling:*", "*") + ",{\"Effect\":\"Deny\",\"Action\":["
+                + "\"application-autoscaling:PutScalingPolicy\",\"application-autoscaling:ListTagsForResource\"],"
+                + "\"Resource\":\"" + arn + "\"}");
+        refusedJson(scaling(user, "PutScalingPolicy", target.replace("{", "{\"PolicyName\":\"p\","
+                + "\"PolicyType\":\"StepScaling\",") + "}"), "application-autoscaling:PutScalingPolicy");
+        refusedJson(scaling(user, "ListTagsForResource", "{\"ResourceARN\":\"" + arn + "\"}"),
+                "application-autoscaling:ListTagsForResource");
+        scaling(user, "DeregisterScalableTarget", other + "}").statusCode(200);
+    }
+
+    /** The members naming an ECS service's desired count as a scalable target, an open JSON object. */
+    private static String scalableTarget(String resourceId) {
+        return "{\"ServiceNamespace\":\"ecs\",\"ResourceId\":\"" + resourceId + "\","
+                + "\"ScalableDimension\":\"ecs:service:DesiredCount\"";
+    }
+
+    /** Registers the scalable target as the admin and gives its ARN. */
+    private String registerScalableTarget(String target) {
+        String arn = adminJson("application-autoscaling", "AnyScaleFrontendService.RegisterScalableTarget")
+                .body(target + ",\"MinCapacity\":1,\"MaxCapacity\":2}").post("/").then().statusCode(200)
+                .extract().path("ScalableTargetARN");
+        cleanup.register(() -> adminJson("application-autoscaling", "AnyScaleFrontendService.DeregisterScalableTarget")
+                .body(target + "}").post("/"));
+        return arn;
+    }
+
+    private static ValidatableResponse scaling(User user, String operation, String body) {
+        return user.json("application-autoscaling", "AnyScaleFrontendService." + operation, "1.1").body(body).post("/")
+                .then();
     }
 
     /** A monthly cost budget of the name, with a billing view ARN when one is given. */

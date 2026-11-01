@@ -47,6 +47,8 @@ final class RequestResourceMembers {
     private static final Pattern ONE_VARIABLE = Pattern.compile("[^$]*\\$\\{\\w+}");
     /** The one id a child type's format appends to its parent's. */
     private static final Pattern APPENDED_ID = Pattern.compile("[/:]\\$\\{\\w+}");
+    /** The keys a resource found by members does not take: it is read no other way, in the caller's account. */
+    private static final List<String> FOUND_ONLY = List.of("absent", "arnOf", "account", "fixed", "before");
 
     /**
      * A top-level request member that holds a string, or a list of them when {@code list}, or, with a
@@ -124,11 +126,20 @@ final class RequestResourceMembers {
      * {@code before}, when there is one: Step Functions Local's handler drops a test case after {@code #}, and a
      * CodeBuild build id is {@code <project>:<id>}, a build being checked on its project. A create naming other
      * resources beside the one it makes marks that one {@code made}, where its tags go (a webhook, not the pipeline
-     * it connects to).
+     * it connects to). A type whose ARN is all an id its service mints is named instead by the members its service
+     * finds it by, {@code find}, each one value, in the order its service reads them, filling none of its variables
+     * and read no other way, in the caller's account (a scalable target by its service namespace, resource id and
+     * scalable dimension).
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
-                    Member account, String before, Map<String, String> fixed, boolean made) {
+                    Member account, String before, Map<String, String> fixed, boolean made, List<Member> find) {
+
+        Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
+                 Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
+                 Member account, String before, Map<String, String> fixed, boolean made) {
+            this(types, arn, fill, when, unless, absent, arnOf, account, before, fixed, made, List.of());
+        }
     }
 
     /**
@@ -247,6 +258,10 @@ final class RequestResourceMembers {
                 throw new IllegalStateException(RESOURCE_NAME + " reads an ARN for " + operation
                         + " of types with no format: " + types);
             }
+            if (resource.has("find")) {
+                throw new IllegalStateException(RESOURCE_NAME + " reads an ARN for " + operation
+                        + " and finds its resource by " + resource.path("find") + " too");
+            }
             return new Resource(types, arnMember(operation, resource.path("arn").asText("")), Map.of(), Map.of(),
                     Map.of(), Map.of(), Map.of(), null, before, Map.of(), made);
         }
@@ -274,6 +289,15 @@ final class RequestResourceMembers {
             }
             fixed.put(variable.getKey(), variable.getValue().asText());
         });
+        List<Member> find = new ArrayList<>();
+        for (JsonNode member : resource.path("find")) {
+            find.add(member(operation, member.asText("")));
+        }
+        if (resource.has("find") && (!resource.path("find").isArray() || find.isEmpty() || !fill.isEmpty()
+                || find.stream().anyMatch(Member::list) || FOUND_ONLY.stream().anyMatch(resource::has))) {
+            throw new IllegalStateException(RESOURCE_NAME + " finds a " + type + " for " + operation + " by "
+                    + resource.path("find") + ", no members of one value each, or beside members reading it otherwise");
+        }
         if (fill.values().stream().filter(Member::list).count() > 1) {
             throw new IllegalStateException(RESOURCE_NAME + " fills " + type + " for " + operation
                     + " from more than one list");
@@ -306,7 +330,7 @@ final class RequestResourceMembers {
                     + " from " + account.name() + ", no member of one account or a type of none");
         }
         return new Resource(List.of(type), null, Map.copyOf(fill), when, unless, Map.copyOf(absent), Map.copyOf(arnOf),
-                account, before, Map.copyOf(fixed), made);
+                account, before, Map.copyOf(fixed), made, List.copyOf(find));
     }
 
     /** The values each member named in {@code when} or {@code unless} may have, an empty one for the member absent. */

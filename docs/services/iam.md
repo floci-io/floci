@@ -1602,7 +1602,7 @@ SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge Schedul
 Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs, Secrets Manager and STS. For Elastic Load Balancing, ECR,
 Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
-AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
+Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
 AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator and Amazon
 Timestream for InfluxDB they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
@@ -1666,7 +1666,11 @@ so one entry for a bus the caller may not publish to refuses the whole request, 
 User Guide gives it for every entry. A connection or an API destination, whose ARN
 EventBridge follows with an id it mints after the name, `connection/<name>/<id>`, is checked on
 the ARN it is stored under when the request names it, and on `connection/<name>/*` when there is
-none yet, as for its create. EventBridge V2's API, which Floci does not serve, is not read. A
+none yet, as for its create. An Application Auto Scaling scalable target, whose ARN ends in the id
+Application Auto Scaling assigns it, `scalable-target/<id>`, while its requests name it by
+`ServiceNamespace`, `ResourceId` and `ScalableDimension`, is checked on the ARN it is stored under, and
+on `scalable-target/*` when there is none yet, as for a `RegisterScalableTarget` registering a new one;
+its tag operations name it by its ARN. EventBridge V2's API, which Floci does not serve, is not read. A
 state machine's version or alias
 (`stateMachine:<name>:<qualifier>`) is checked on the state machine's ARN, as Step Functions
 authorizes it, so a grant or a deny on `stateMachine:<name>` covers its versions and aliases, and
