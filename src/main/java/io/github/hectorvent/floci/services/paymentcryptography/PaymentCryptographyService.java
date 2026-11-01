@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.paymentcryptography;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -12,11 +14,9 @@ import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryp
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -40,6 +40,15 @@ public class PaymentCryptographyService implements Resettable {
 
     /** The service in the ARN, which is the service's own name. */
     private static final String SERVICE = "payment-cryptography";
+
+    /** The number of results a listing returns when the caller asks for none. */
+    private static final int DEFAULT_PAGE_SIZE = 50;
+
+    /** The most results a listing returns when the caller asks for a number. */
+    private static final int MAX_RESULTS = 100;
+
+    /** The error a bad page size or a bad token is refused with. */
+    private static final String PAGINATION_ERROR = "ValidationException";
 
     private final StorageBackend<String, PaymentCryptographyKey> keyStore;
     private final StorageBackend<String, PaymentCryptographyAlias> aliasStore;
@@ -125,10 +134,13 @@ public class PaymentCryptographyService implements Resettable {
      * The keys of a region, a page at a time.
      *
      * <p>The service answers with as many keys as the caller asks for, and a
-     * token that asks for the page after that one.
+     * token that asks for the page after that one. The key's own ARN is the
+     * cursor, so a page can be resumed after the key it stopped at.
      */
-    public Page<PaymentCryptographyKey> listKeys(String region, Integer maxResults, String nextToken) {
-        return page(listKeys(region), maxResults, nextToken);
+    public PaginatedResult<PaymentCryptographyKey> listKeys(String region, Integer maxResults,
+                                                              String nextToken) {
+        return Pagination.paginate(listKeys(region), PaymentCryptographyKey::getArn,
+                maxResults, nextToken, DEFAULT_PAGE_SIZE, MAX_RESULTS, PAGINATION_ERROR);
     }
 
     /** The keys of a region. */
@@ -211,9 +223,10 @@ public class PaymentCryptographyService implements Resettable {
      * <p>The service answers with as many aliases as the caller asks for, and
      * a token that asks for the page after that one.
      */
-    public Page<PaymentCryptographyAlias> listAliases(String region, String keyArn,
-                                                       Integer maxResults, String nextToken) {
-        return page(listAliases(region, keyArn), maxResults, nextToken);
+    public PaginatedResult<PaymentCryptographyAlias> listAliases(String region, String keyArn,
+                                                                 Integer maxResults, String nextToken) {
+        return Pagination.paginate(listAliases(region, keyArn), PaymentCryptographyAlias::getAliasName,
+                maxResults, nextToken, DEFAULT_PAGE_SIZE, MAX_RESULTS, PAGINATION_ERROR);
     }
 
     /** The aliases of a region, or of one key. */
@@ -282,63 +295,10 @@ public class PaymentCryptographyService implements Resettable {
      * <p>The service answers with as many tags as the caller asks for, and a
      * token that asks for the page after that one.
      */
-    public Page<Map.Entry<String, String>> listTags(PaymentCryptographyKey key,
-                                                     Integer maxResults, String nextToken) {
-        return page(new ArrayList<>(listTags(key).entrySet()), maxResults, nextToken);
-    }
-
-    // ---- pages --------------------------------------------------------------
-
-    /**
-     * A page of results and the token that asks for the one after it.
-     *
-     * @param <T> what the page holds
-     */
-    public static final class Page<T> {
-        private final List<T> items;
-        private final String nextToken;
-
-        Page(List<T> items, String nextToken) {
-            this.items = items;
-            this.nextToken = nextToken;
-        }
-
-        /** The results of this page. */
-        public List<T> items() {
-            return items;
-        }
-
-        /** The token that asks for the page after this one, or null when this is the last. */
-        public String nextToken() {
-            return nextToken;
-        }
-    }
-
-    /**
-     * The page of a list that starts at the token and holds at most the
-     * number of results asked for.
-     *
-     * <p>The token is the place in the list where the page starts. The service
-     * keeps it to itself, so it is written down in a form the caller cannot
-     * read as a count.
-     */
-    private static <T> Page<T> page(List<T> all, Integer maxResults, String nextToken) {
-        int start = 0;
-        if (nextToken != null && !nextToken.isEmpty()) {
-            try {
-                start = Integer.parseInt(new String(Base64.getDecoder().decode(nextToken), StandardCharsets.UTF_8));
-            } catch (IllegalArgumentException e) {
-                throw new AwsException("ValidationException", "NextToken is not valid", 400);
-            }
-        }
-        if (start < 0 || start > all.size()) {
-            throw new AwsException("ValidationException", "NextToken is not valid", 400);
-        }
-        int end = maxResults == null || maxResults <= 0 ? all.size() : Math.min(all.size(), start + maxResults);
-        String next = end < all.size()
-                ? Base64.getEncoder().encodeToString(String.valueOf(end).getBytes(StandardCharsets.UTF_8))
-                : null;
-        return new Page<>(new ArrayList<>(all.subList(start, end)), next);
+    public PaginatedResult<Map.Entry<String, String>> listTags(PaymentCryptographyKey key,
+                                                                Integer maxResults, String nextToken) {
+        return Pagination.paginate(new ArrayList<>(listTags(key).entrySet()), Map.Entry::getKey,
+                maxResults, nextToken, DEFAULT_PAGE_SIZE, MAX_RESULTS, PAGINATION_ERROR);
     }
 
     // ---- helpers ------------------------------------------------------------
