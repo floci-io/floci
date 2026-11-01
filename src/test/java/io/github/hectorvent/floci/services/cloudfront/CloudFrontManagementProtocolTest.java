@@ -479,6 +479,30 @@ class CloudFrontManagementProtocolTest {
         }
     }
 
+    @ParameterizedTest(name = "{0} keeps the Comment's surrounding whitespace")
+    @ValueSource(strings = {"cache-policy", "origin-request-policy", "response-headers-policy"})
+    void policyCommentRoundTripsWithSurroundingWhitespace(String endpoint) {
+        String name = "padded-" + UUID.randomUUID();
+        String comment = "  padded comment  ";
+        String body = switch (endpoint) {
+            case "cache-policy" -> cachePolicyBody(name, comment, "3600", "session");
+            case "origin-request-policy" -> originRequestPolicyBody(name, comment, "X-Hdr");
+            default -> "<ResponseHeadersPolicyConfig xmlns=\"http://cloudfront.amazonaws.com/doc/2020-05-31/\">"
+                    + "<Name>" + name + "</Name><Comment>" + comment + "</Comment></ResponseHeadersPolicyConfig>";
+        };
+        Response created = given().contentType("application/xml").body(body)
+                .when().post(API + endpoint);
+        created.then().statusCode(201);
+        String id = XmlParser.extractFirst(created.asString(), "Id", null);
+        try {
+            given().when().get(API + endpoint + "/" + id + "/config").then().statusCode(200)
+                    .body(hasXPath("/*/*[local-name()='Comment']/text()", equalTo(comment)));
+        } finally {
+            given().header("If-Match", created.header("ETag")).when().delete(API + endpoint + "/" + id)
+                    .then().statusCode(204);
+        }
+    }
+
     @Test
     void cachePolicyReadFillsAwsTtlDefaults() {
         String name = "default-ttl-cache-policy-" + UUID.randomUUID();

@@ -3535,7 +3535,7 @@ public class CloudFrontController {
      */
     private static String directChildText(XmlParser.XmlElement root, String name) {
         XmlParser.XmlElement child = root == null ? null : root.child(name);
-        return child == null ? null : child.text();
+        return child == null ? null : child.rawText();
     }
 
     private CachePolicy parseCachePolicy(String body) {
