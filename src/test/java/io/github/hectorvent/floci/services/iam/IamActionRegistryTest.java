@@ -90,6 +90,16 @@ class IamActionRegistryTest {
     }
 
     @Test
+    void inspector2DisableRouteResolvesItsAction() {
+        ContainerRequestContext ctx = mockCtx("POST", "/disable",
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+
+        assertEquals("inspector2:Disable", registry.resolveRoute("inspector2", ctx));
+        assertNull(registry.resolveRoute("inspector2", mockCtx("GET", "/disable",
+                new MultivaluedHashMap<>(), null, "")));
+    }
+
+    @Test
     void cloudWatchGetUsesQueryActionAndOperationPrecedence() {
         MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
         query.add("Action", "GetMetricStatistics");

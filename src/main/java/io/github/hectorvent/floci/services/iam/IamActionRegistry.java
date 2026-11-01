@@ -269,6 +269,9 @@ public class IamActionRegistry {
         rule("rds-data", "POST", "^/CommitTransaction/?$",    "rds-data:CommitTransaction"),
         rule("rds-data", "POST", "^/RollbackTransaction/?$",  "rds-data:RollbackTransaction"),
 
+        // ── Amazon Inspector ───────────────────────────────────────────────────
+        rule("inspector2", "POST", "^/disable/?$", "inspector2:Disable"),
+
         // ── API Gateway ────────────────────────────────────────────────────────
         // The management API, v1 and v2, is authorized by HTTP method on the resource path:
         // apigateway:GET, POST, PUT, PATCH or DELETE. Two operations have an action of their own. The
