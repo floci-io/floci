@@ -27,7 +27,6 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
-import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -336,7 +335,7 @@ public class LambdaMicrovmsController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("name", image.name);
         node.put("imageArn", image.imageArn);
-        node.put("createdAt", epoch(image.createdAt));
+        node.put("createdAt", EpochSeconds.fromInstant(image.createdAt));
 
         boolean detail = shape == ImageShape.CREATE || shape == ImageShape.UPDATE;
         // A mutation reports the state it is entering, not the one it left.
@@ -368,7 +367,7 @@ public class LambdaMicrovmsController {
 
         // updatedAt is on everything but the list item.
         if (shape != ImageShape.LIST) {
-            node.put("updatedAt", epoch(image.updatedAt));
+            node.put("updatedAt", EpochSeconds.fromInstant(image.updatedAt));
         }
 
         if (detail) {
@@ -409,8 +408,8 @@ public class LambdaMicrovmsController {
         node.put("imageVersion", version.imageVersion);
         node.put("state", version.state);
         node.put("status", version.status);
-        node.put("createdAt", epoch(version.createdAt));
-        node.put("updatedAt", epoch(image.updatedAt));
+        node.put("createdAt", EpochSeconds.fromInstant(version.createdAt));
+        node.put("updatedAt", EpochSeconds.fromInstant(image.updatedAt));
         node.put("baseImageArn", image.baseImageArn);
         node.put("baseImageVersion", image.baseImageVersion);
         node.put("buildRoleArn", image.buildRoleArn);
@@ -447,7 +446,7 @@ public class LambdaMicrovmsController {
         node.put("chipsetGeneration", build.chipsetGeneration);
         node.put("imageArn", image.imageArn);
         node.put("imageVersion", version.imageVersion);
-        node.put("createdAt", epoch(build.createdAt));
+        node.put("createdAt", EpochSeconds.fromInstant(build.createdAt));
         node.putNull("stateReason");
         node.putNull("terminationReasonCode");
         if (withSnapshot) {
@@ -480,7 +479,7 @@ public class LambdaMicrovmsController {
         node.put("state", vm.state);
         node.put("imageArn", vm.imageArn);
         node.put("imageVersion", vm.imageVersion);
-        node.put("startedAt", epoch(vm.startedAt));
+        node.put("startedAt", EpochSeconds.fromInstant(vm.startedAt));
         return node;
     }
 
@@ -508,11 +507,11 @@ public class LambdaMicrovmsController {
         } else {
             node.put("stateReason", vm.stateReason);
         }
-        node.put("startedAt", epoch(vm.startedAt));
+        node.put("startedAt", EpochSeconds.fromInstant(vm.startedAt));
         if (vm.terminatedAt == null) {
             node.putNull("terminatedAt");
         } else {
-            node.put("terminatedAt", epoch(vm.terminatedAt));
+            node.put("terminatedAt", EpochSeconds.fromInstant(vm.terminatedAt));
         }
         return node;
     }
@@ -532,10 +531,6 @@ public class LambdaMicrovmsController {
         }
         root.putNull("nextToken");
         return root;
-    }
-
-    private double epoch(Instant instant) {
-        return EpochSeconds.fromInstant(instant);
     }
 
     private JsonNode parse(String body) {

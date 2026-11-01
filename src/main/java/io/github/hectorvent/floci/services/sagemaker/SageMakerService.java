@@ -132,7 +132,7 @@ public class SageMakerService {
         if (m.executionRoleArn != null) {
             out.put("ExecutionRoleArn", m.executionRoleArn);
         }
-        out.put("CreationTime", epoch(m.creationTime));
+        out.put("CreationTime", EpochSeconds.fromMillis(m.creationTime));
         return out;
     }
 
@@ -160,7 +160,7 @@ public class SageMakerService {
                 m -> modelAnchor(m, sortBy), comparator, (m, n) -> {
             n.put("ModelName", m.modelName);
             n.put("ModelArn", m.modelArn);
-            n.put("CreationTime", epoch(m.creationTime));
+            n.put("CreationTime", EpochSeconds.fromMillis(m.creationTime));
         }, "Models");
     }
 
@@ -204,7 +204,7 @@ public class SageMakerService {
         out.put("EndpointConfigName", cfg.endpointConfigName);
         out.put("EndpointConfigArn", cfg.endpointConfigArn);
         out.set("ProductionVariants", mapper.valueToTree(cfg.productionVariants));
-        out.put("CreationTime", epoch(cfg.creationTime));
+        out.put("CreationTime", EpochSeconds.fromMillis(cfg.creationTime));
         return out;
     }
 
@@ -228,7 +228,7 @@ public class SageMakerService {
                 c -> endpointConfigAnchor(c, sortBy), comparator, (c, n) -> {
             n.put("EndpointConfigName", c.endpointConfigName);
             n.put("EndpointConfigArn", c.endpointConfigArn);
-            n.put("CreationTime", epoch(c.creationTime));
+            n.put("CreationTime", EpochSeconds.fromMillis(c.creationTime));
         }, "EndpointConfigs");
     }
 
@@ -289,8 +289,8 @@ public class SageMakerService {
         if (ep.failureReason != null) {
             out.put("FailureReason", ep.failureReason);
         }
-        out.put("CreationTime", epoch(ep.creationTime));
-        out.put("LastModifiedTime", epoch(ep.lastModifiedTime));
+        out.put("CreationTime", EpochSeconds.fromMillis(ep.creationTime));
+        out.put("LastModifiedTime", EpochSeconds.fromMillis(ep.lastModifiedTime));
         return out;
     }
 
@@ -323,8 +323,8 @@ public class SageMakerService {
             n.put("EndpointName", e.endpointName);
             n.put("EndpointArn", e.endpointArn);
             n.put("EndpointStatus", e.endpointStatus);
-            n.put("CreationTime", epoch(e.creationTime));
-            n.put("LastModifiedTime", epoch(e.lastModifiedTime));
+            n.put("CreationTime", EpochSeconds.fromMillis(e.creationTime));
+            n.put("LastModifiedTime", EpochSeconds.fromMillis(e.lastModifiedTime));
         }, "Endpoints");
     }
 
@@ -381,13 +381,13 @@ public class SageMakerService {
                 "OutputDataConfig", job.outputDataConfig,
                 "ResourceConfig", job.resourceConfig,
                 "StoppingCondition", job.stoppingCondition,
-                "CreationTime", epoch(job.creationTime)
+                "CreationTime", EpochSeconds.fromMillis(job.creationTime)
         ));
         if (job.trainingStartTime > 0) {
-            out.put("TrainingStartTime", epoch(job.trainingStartTime));
+            out.put("TrainingStartTime", EpochSeconds.fromMillis(job.trainingStartTime));
         }
         if (job.trainingEndTime > 0) {
-            out.put("TrainingEndTime", epoch(job.trainingEndTime));
+            out.put("TrainingEndTime", EpochSeconds.fromMillis(job.trainingEndTime));
         }
         if (job.failureReason != null) {
             out.put("FailureReason", job.failureReason);
@@ -425,7 +425,7 @@ public class SageMakerService {
             n.put("TrainingJobName", j.trainingJobName);
             n.put("TrainingJobArn", j.trainingJobArn);
             n.put("TrainingJobStatus", j.trainingJobStatus);
-            n.put("CreationTime", epoch(j.creationTime));
+            n.put("CreationTime", EpochSeconds.fromMillis(j.creationTime));
         }, "TrainingJobSummaries");
     }
 
@@ -565,10 +565,6 @@ public class SageMakerService {
 
     private long nowMillis() {
         return clock.millis();
-    }
-
-    static double epoch(long millis) {
-        return EpochSeconds.fromMillis(millis);
     }
 
     static AwsException validation(String message) {
