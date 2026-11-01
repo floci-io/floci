@@ -322,10 +322,11 @@ was already this service's choice for a list over its limit, and it is now what 
 whatever it breaks. Other services do quote a list, Lambda's `Value '[x86_64, arm64]' at
 'architectures'` being a captured one, which is why this is IAM's reading and not a rule.
 
-The one message that still carries a word where the value would go is the required member a request
-leaves out, `Value null at '<member>'`, which no capture covers in either form. The form is chosen
-in one place, so a direct capture that ever shows IAM carrying its values again moves it back in one
-edit rather than across the service.
+A captured missing `Status` on the four credential updates reads `Value at 'status' failed to satisfy
+constraint: Member must not be null`, without `null` after `Value`. Other omitted required members
+may still use `Value null at '<member>'`; this capture does not settle their wording. IAM's form for
+violations with a supplied value is chosen in one place, so a future capture that shows IAM carrying
+those values again moves it back in one edit rather than across the service.
 
 ### Permission Boundaries
 

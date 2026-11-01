@@ -3456,13 +3456,12 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     private void requireStatusFromEnum(String status) {
         if (status == null) {
             throw SmithyValidationErrors.validationError(
-                    "Value at 'status' failed to satisfy constraint: Member must not be null");
+                    SmithyValidationErrors.notNullWithoutValue("status"));
         }
         if (!CREDENTIAL_STATUSES.contains(status)) {
             throw SmithyValidationErrors.validationError(
-                    "Value at 'status' failed to satisfy "
-                            + "constraint: Member must satisfy enum value set: "
-                            + "[Expired, Active, Inactive]");
+                    IamValidationErrors.MESSAGES.notInEnum(status, "status",
+                            List.of(CREDENTIAL_STATUS_EXPIRED, CREDENTIAL_STATUS_ACTIVE, "Inactive")));
         }
     }
 
