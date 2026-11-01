@@ -353,18 +353,9 @@ final class SesV2Json {
         return coerceBoolean(enabledNode);
     }
 
-    /**
-     * Epoch seconds with the millisecond fraction, the shape AWS returns for every SES v2
-     * timestamp (probe-confirmed, e.g. {@code 1.790312384592E9}). It must stay a JSON number: an
-     * ISO string, as the v1 Query path writes, breaks the SDK's unixTimestamp unmarshaller.
-     */
-    static double epochSeconds(Instant instant) {
-        return EpochSeconds.fromInstant(instant);
-    }
-
     static void putTimestamp(ObjectNode node, String field, Instant value) {
         if (value != null) {
-            node.put(field, epochSeconds(value));
+            node.put(field, EpochSeconds.fromInstant(value));
         }
     }
 }

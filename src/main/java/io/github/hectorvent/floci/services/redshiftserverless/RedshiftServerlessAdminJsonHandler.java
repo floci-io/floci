@@ -349,15 +349,16 @@ public class RedshiftServerlessAdminJsonHandler {
     private ObjectNode scheduledActionNode(ScheduledAction action) {
         ObjectNode node = objectMapper.createObjectNode();
         if (action.getEndTime() != null) {
-            node.put("endTime", epoch(action.getEndTime()));
+            node.put("endTime", EpochSeconds.fromInstant(action.getEndTime()));
         }
         node.put("namespaceName", action.getNamespaceName());
         ArrayNode invocations = node.putArray("nextInvocations");
-        RedshiftServerlessSchedule.next(action, Instant.now()).ifPresent(time -> invocations.add(epoch(time)));
+        RedshiftServerlessSchedule.next(action, Instant.now())
+                .ifPresent(time -> invocations.add(EpochSeconds.fromInstant(time)));
         node.put("roleArn", action.getRoleArn());
         ObjectNode schedule = node.putObject("schedule");
         if (action.getScheduleAt() != null) {
-            schedule.put("at", epoch(action.getScheduleAt()));
+            schedule.put("at", EpochSeconds.fromInstant(action.getScheduleAt()));
         } else {
             schedule.put("cron", action.getScheduleCron());
         }
@@ -367,7 +368,7 @@ public class RedshiftServerlessAdminJsonHandler {
         node.put("scheduledActionName", action.getScheduledActionName());
         node.put("scheduledActionUuid", action.getScheduledActionUuid());
         if (action.getStartTime() != null) {
-            node.put("startTime", epoch(action.getStartTime()));
+            node.put("startTime", EpochSeconds.fromInstant(action.getStartTime()));
         }
         node.put("state", Boolean.FALSE.equals(action.getEnabled()) ? "DISABLED" : "ACTIVE");
         ObjectNode createSnapshot = node.putObject("targetAction").putObject("createSnapshot");
@@ -387,9 +388,6 @@ public class RedshiftServerlessAdminJsonHandler {
         return node;
     }
 
-    private static double epoch(Instant instant) {
-        return EpochSeconds.fromInstant(instant);
-    }
     // ── Tracks, managed workgroups and reservations ────────────────────────
 
     /**

@@ -272,22 +272,20 @@ class SesV2JsonTest {
     }
 
     @Test
-    void epochSeconds_keepsMillisecondFraction() {
-        assertEquals(1_790_312_384.592, SesV2Json.epochSeconds(Instant.ofEpochMilli(1_790_312_384_592L)));
-    }
-
-    @Test
-    void epochSeconds_dropsSubMillisecondPrecision() {
-        assertEquals(1_790_312_384.592,
-                SesV2Json.epochSeconds(Instant.ofEpochSecond(1_790_312_384L, 592_999_999L)));
-    }
-
-    @Test
     void putTimestamp_writesDecimalNumber() {
         ObjectNode node = MAPPER.createObjectNode();
         SesV2Json.putTimestamp(node, "CreatedTimestamp", Instant.ofEpochMilli(1_790_312_384_592L));
 
         assertEquals("{\"CreatedTimestamp\":1.790312384592E9}", node.toString());
+    }
+
+    @Test
+    void putTimestamp_dropsSubMillisecondPrecision() {
+        ObjectNode node = MAPPER.createObjectNode();
+        SesV2Json.putTimestamp(node, "CreatedTimestamp",
+                Instant.ofEpochSecond(1_790_312_384L, 592_999_999L));
+
+        assertEquals(1_790_312_384.592, node.get("CreatedTimestamp").doubleValue());
     }
 
     @Test
