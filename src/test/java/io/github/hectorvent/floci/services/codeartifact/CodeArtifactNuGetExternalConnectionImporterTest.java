@@ -78,7 +78,7 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
         // CodeArtifactService method (see its own javadoc for why), so this mock is what every
         // test configures instead.
         when(service.retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(), anyString(),
-                any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), any(), anyString(), anyString(),
+                any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyString(), any(),
                 any())).thenReturn(new CodeArtifactService.AssetRetentionAttemptResult(true, true));
     }
 
@@ -91,8 +91,8 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
 
         assertTrue(imported);
         verify(service).retainAssetUnderVersionFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY), eq("nuget"),
-                isNull(), eq(PACKAGE_ID), eq(VERSION), eq(99L), eq(42L), eq(EPISODE_ID), eq(bagetter), eq(REPO_ID),
-                eq("widget.1.0.0.nupkg"), eq(NUPKG_CONTENT));
+                isNull(), eq(PACKAGE_ID), eq(VERSION), eq(99L), eq(42L), eq(EPISODE_ID), eq(REPO_ID),
+                eq("widget.1.0.0.nupkg"), eq(NUPKG_CONTENT), any());
         verify(service).ensureRetainedPackageOriginDefault(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null,
                 PACKAGE_ID, 42L);
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null,
@@ -151,8 +151,8 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
         assertTrue(imported);
         verify(externalConnectionClient, never()).fetchPackage(anyString(), anyString(), anyString());
         verify(service, never()).retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(),
-                anyString(), any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), any(), anyString(),
-                anyString(), any());
+                anyString(), any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(),
+                anyString(), any(), any());
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null,
                 PACKAGE_ID, VERSION, EPISODE_ID, true);
     }
@@ -189,8 +189,8 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
 
         assertFalse(imported);
         verify(service, never()).retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(),
-                anyString(), any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), any(), anyString(),
-                anyString(), any());
+                anyString(), any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(),
+                anyString(), any(), any());
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "nuget", null,
                 PACKAGE_ID, VERSION, EPISODE_ID, false);
     }
@@ -212,7 +212,7 @@ class CodeArtifactNuGetExternalConnectionImporterTest {
         when(externalConnectionClient.fetchPackage("public:nuget-org", PACKAGE_ID, VERSION))
                 .thenReturn(Optional.of(new NuGetExternalConnectionClient.FetchedAsset(NUPKG_CONTENT)));
         when(service.retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(), anyString(),
-                any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), any(), anyString(), anyString(),
+                any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyString(), any(),
                 any())).thenReturn(new CodeArtifactService.AssetRetentionAttemptResult(false, false));
 
         boolean imported = importer.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, PACKAGE_ID, VERSION);

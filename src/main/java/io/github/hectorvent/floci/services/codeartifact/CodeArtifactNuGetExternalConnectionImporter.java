@@ -139,7 +139,9 @@ public class CodeArtifactNuGetExternalConnectionImporter {
             // methods already hold.
             CodeArtifactService.AssetRetentionAttemptResult result = service.retainAssetUnderVersionFence(region,
                     domain, owner, repository, "nuget", null, packageId, version, versionFenceSnapshot,
-                    packageFenceSnapshot, claim.episodeId(), bagetter, repoId, assetName, content);
+                    packageFenceSnapshot, claim.episodeId(), repoId, assetName, content,
+                    () -> bagetter.storePackageVersionAsset(repoId, domain, repository, null, packageId, version,
+                            assetName, content));
             imported = result.fenceMatched() && result.wroteNewContent();
             return imported;
         } finally {

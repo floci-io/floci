@@ -1257,7 +1257,18 @@ public class CodeArtifactService implements Resettable {
         }
 
         String preferredVersion = preferredDisplayVersion;
-        String defaultDisplayVersion = preferredVersion != null
+        // Raised by Greptile's review: npm's own Verdaccio sidecar always points its own
+        // dist-tags.latest at whichever version a package's very first-ever stored version
+        // happens to be, confirmed live, with no way for a caller's write to suppress that
+        // default. A version retained through an external connection (never a deliberate local
+        // publish) is excluded from being read as this preference for exactly that reason:
+        // downloading an old, specifically-pinned version must never change what an unpinned
+        // npm install resolves to, the same most-recently-published fallback this already uses
+        // when preferredDisplayVersion itself is unset.
+        boolean preferredVersionIsExternallyRetained = preferredVersion != null
+                && entries.stream().anyMatch(e -> e.version().equals(preferredVersion)
+                        && "EXTERNAL".equals(e.originType()));
+        String defaultDisplayVersion = preferredVersion != null && !preferredVersionIsExternallyRetained
                 && entries.stream().anyMatch(e -> e.version().equals(preferredVersion)
                         && "Published".equals(e.status()))
                 ? preferredVersion
@@ -3236,16 +3247,21 @@ public class CodeArtifactService implements Resettable {
 
     /**
      * Generic sibling of {@link #deployMavenAssetUnderVersionFence}, for npm/pypi/nuget's own
-     * external-connection importers to write a retained asset into their own sidecar
-     * ({@code sidecar.storePackageVersionAsset}) under the same fence/status/claim-episode
-     * protection Maven's own method already provides, inside the exact same lock {@code
-     * deletePackageVersions}/{@code deletePackage}/{@code deleteRepository}/{@code
-     * disposePackageVersions} hold for their own entire operation.
+     * external-connection importers to write a retained asset into their own sidecar under the
+     * same fence/status/claim-episode protection Maven's own method already provides, inside the
+     * exact same lock {@code deletePackageVersions}/{@code deletePackage}/{@code
+     * deleteRepository}/{@code disposePackageVersions} hold for their own entire operation.
      *
-     * <p>Unlike {@link ReposiliteSidecarClient#deployArtifact}, {@link
-     * RepositorySidecarManager#storePackageVersionAsset} reports no status code or idempotent-match
-     * distinction of its own: it either succeeds (void) or throws. A caller that wants to avoid
-     * double-counting bytes on a retry should check {@link
+     * <p>{@code write} is the caller's own sidecar call, run only once the fence actually still
+     * allows it, inside this same {@code synchronized} method: a plain {@link Runnable} rather
+     * than a fixed {@code RepositorySidecarManager}/{@code storePackageVersionAsset} shape (found
+     * by Greptile's review of npm's own external-connection work) since npm's own write needs to
+     * reuse the real registry's own version document to avoid dropping {@code dependencies}/
+     * {@code engines}/{@code scripts}, something {@link RepositorySidecarManager#storePackageVersionAsset}'s
+     * fixed signature has no way to carry through; nuget's own call wraps the exact same plain
+     * {@code storePackageVersionAsset} call this method used to make itself. Reports no status
+     * code or idempotent-match distinction of its own: it either succeeds or throws. A caller
+     * that wants to avoid double-counting bytes on a retry should check {@link
      * RepositorySidecarManager#fetchPackageVersionAsset} first and skip this call entirely when
      * the asset is already there with matching content, the same way a direct upload's own
      * idempotency check already does for this format's controller.
@@ -3253,14 +3269,13 @@ public class CodeArtifactService implements Resettable {
     public synchronized AssetRetentionAttemptResult retainAssetUnderVersionFence(String region, String domain,
             String domainOwner, String repository, String format, String namespace, String packageName,
             String version, long versionFenceSnapshot, long packageFenceSnapshot, long episodeId,
-            RepositorySidecarManager sidecar, String repositoryContainerId, String assetName, byte[] content) {
+            String repositoryContainerId, String assetName, byte[] content, Runnable write) {
         if (!retentionWriteStillAllowed(region, domain, domainOwner, repository, format, namespace, packageName,
                 version, repositoryContainerId, versionFenceSnapshot, episodeId)) {
             return new AssetRetentionAttemptResult(false, false);
         }
         try {
-            sidecar.storePackageVersionAsset(repositoryContainerId, domain, repository, namespace, packageName,
-                    version, assetName, content);
+            write.run();
         } catch (RuntimeException e) {
             LOG.warnv(e, "Could not write {0} {1} {2}''s asset {3} while retaining it through an external "
                     + "connection.", format, packageName, version, assetName);
