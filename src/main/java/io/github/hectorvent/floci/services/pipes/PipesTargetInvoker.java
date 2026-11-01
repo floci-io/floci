@@ -3,14 +3,17 @@ package io.github.hectorvent.floci.services.pipes;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.MissingNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataTargetSubmitter;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
@@ -35,12 +38,17 @@ public class PipesTargetInvoker {
     private static final Pattern TEMPLATE_PLACEHOLDER =
             Pattern.compile("<(\\$[^>]+|aws\\.pipes\\.event\\.ingestion-time)>");
     private static final Pattern ARRAY_INDEX = Pattern.compile("^(.+?)\\[(\\d+)]$");
+    private static final Pattern DYNAMIC_PARAMETER_PATH =
+            Pattern.compile("\\$(?:\\.[\\w*/-]+|\\[\\d+\\])+");
 
     private final LambdaService lambdaService;
     private final SqsService sqsService;
     private final SnsService snsService;
     private final EventBridgeService eventBridgeService;
     private final StepFunctionsService stepFunctionsService;
+    private final RedshiftDataTargetSubmitter redshiftSubmitter;
+    private final PipesRedshiftTargetAuthorizer redshiftTargetAuthorizer;
+    private final ServiceRegistry serviceRegistry;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
 
@@ -50,6 +58,9 @@ public class PipesTargetInvoker {
                               SnsService snsService,
                               EventBridgeService eventBridgeService,
                               StepFunctionsService stepFunctionsService,
+                              RedshiftDataTargetSubmitter redshiftSubmitter,
+                              PipesRedshiftTargetAuthorizer redshiftTargetAuthorizer,
+                              ServiceRegistry serviceRegistry,
                               ObjectMapper objectMapper,
                               EmulatorConfig config) {
         this.lambdaService = lambdaService;
@@ -57,12 +68,27 @@ public class PipesTargetInvoker {
         this.snsService = snsService;
         this.eventBridgeService = eventBridgeService;
         this.stepFunctionsService = stepFunctionsService;
+        this.redshiftSubmitter = redshiftSubmitter;
+        this.redshiftTargetAuthorizer = redshiftTargetAuthorizer;
+        this.serviceRegistry = serviceRegistry;
         this.objectMapper = objectMapper;
         this.baseUrl = config.effectiveBaseUrl();
     }
 
+    /** Whether {@code targetArn} names a Redshift cluster or a Redshift Serverless workgroup. */
+    static boolean isRedshiftTarget(String targetArn) {
+        return AwsArnUtils.isArnFor(targetArn, "redshift") || AwsArnUtils.isArnFor(targetArn, "redshift-serverless");
+    }
+
     public void invoke(Pipe pipe, String payload, String region) {
         String targetArn = pipe.getTarget();
+
+        // A dynamic path in the Redshift parameters reads the source event as it arrived, and AWS does not
+        // let it name a value an input transformation produced, so this does not go through the template.
+        if (isRedshiftTarget(targetArn)) {
+            invokeRedshiftData(pipe, payload, region);
+            return;
+        }
 
         JsonNode tp = pipe.getTargetParameters();
         if (tp != null && tp.has("InputTemplate")) {
@@ -218,6 +244,61 @@ public class PipesTargetInvoker {
         String executionName = "pipes-" + UUID.randomUUID();
         stepFunctionsService.startExecution(arn, executionName, payload, sfnRegion);
         LOG.debugv("Pipe delivered to Step Functions: {0}", arn);
+    }
+
+    /**
+     * A Redshift target always runs its {@code Sqls} as one BatchExecuteStatement, under the pipe's role.
+     * The Data API accepts the statements and the pipe does not wait for them, so a statement that later
+     * fails does not fail the delivery or get retried: only a refusal or a rejected request does.
+     */
+    private void invokeRedshiftData(Pipe pipe, String payload, String region) {
+        if (serviceRegistry != null && !serviceRegistry.isServiceEnabled("redshift-data")) {
+            throw new AwsException("ServiceNotAvailableException", "Service redshift-data is not enabled.", 400);
+        }
+        JsonNode targetParameters = pipe.getTargetParameters();
+        JsonNode parameters = targetParameters == null
+                ? MissingNode.getInstance() : targetParameters.path("RedshiftDataParameters");
+        JsonNode sqlNodes = parameters.path("Sqls");
+        if (!sqlNodes.isArray() || sqlNodes.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "Pipe " + pipe.getName() + " has a Redshift target without RedshiftDataParameters.Sqls.", 400);
+        }
+        List<String> sqls = new ArrayList<>();
+        sqlNodes.forEach(sql -> sqls.add(sql.asText()));
+
+        String targetArn = pipe.getTarget();
+        String targetRegion = extractRegionFromArn(targetArn, region);
+        String account = pipe.getAccountId() != null ? pipe.getAccountId() : AwsArnUtils.parse(targetArn).accountId();
+        RedshiftDataTargetSubmitter.Statement statement = new RedshiftDataTargetSubmitter.Statement(
+                text(parameters, "Database"), text(parameters, "DbUser"), text(parameters, "SecretManagerArn"),
+                null, sqls, text(parameters, "StatementName"),
+                parameters.path("WithEvent").isBoolean() ? parameters.get("WithEvent").asBoolean() : null);
+        redshiftSubmitter.submit(targetArn, statement, pipe.getRoleArn(), account, targetRegion,
+                value -> resolveRedshiftParameter(value, payload),
+                permissions -> redshiftTargetAuthorizer.refusal(
+                        pipe.getRoleArn(), account, pipe.getArn(), permissions));
+        LOG.debugv("Pipe delivered to Redshift Data API: {0}", targetArn);
+    }
+
+    private static String text(JsonNode parent, String field) {
+        JsonNode node = parent.path(field);
+        return node.isTextual() ? node.asText() : null;
+    }
+
+    private String resolveRedshiftParameter(String value, String payload) {
+        if (value == null || !DYNAMIC_PARAMETER_PATH.matcher(value).matches()) {
+            return value;
+        }
+        String extracted = extractJsonPath(value, payload);
+        if (extracted == null) {
+            throw new AwsException("ValidationException", "Cannot resolve Redshift target path: " + value, 400);
+        }
+        try {
+            JsonNode node = objectMapper.readTree(extracted);
+            return node.isTextual() ? node.asText() : node.toString();
+        } catch (JsonProcessingException e) {
+            return extracted;
+        }
     }
 
     String applyInputTemplate(String template, String payload) {

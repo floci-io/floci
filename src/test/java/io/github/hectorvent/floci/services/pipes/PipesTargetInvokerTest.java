@@ -4,12 +4,15 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataTargetSubmitter;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
@@ -25,6 +28,7 @@ import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.UnaryOperator;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.*;
@@ -40,6 +44,9 @@ class PipesTargetInvokerTest {
     @Mock private SnsService snsService;
     @Mock private EventBridgeService eventBridgeService;
     @Mock private StepFunctionsService stepFunctionsService;
+    @Mock private RedshiftDataTargetSubmitter redshiftSubmitter;
+    @Mock private PipesRedshiftTargetAuthorizer redshiftAuthorizer;
+    @Mock private ServiceRegistry serviceRegistry;
     @Mock private EmulatorConfig config;
 
     private PipesTargetInvoker invoker;
@@ -48,7 +55,83 @@ class PipesTargetInvokerTest {
     void setUp() {
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
         invoker = new PipesTargetInvoker(lambdaService, sqsService, snsService,
-                eventBridgeService, stepFunctionsService, MAPPER, config);
+                eventBridgeService, stepFunctionsService, redshiftSubmitter, redshiftAuthorizer, serviceRegistry,
+                MAPPER, config);
+    }
+
+    private static final String CLUSTER = "arn:aws:redshift:us-east-1:000000000000:cluster:analytics";
+    private static final String PIPE_ROLE = "arn:aws:iam::000000000000:role/PipeRole";
+
+    private Pipe redshiftPipe(String targetParametersJson) throws Exception {
+        Pipe pipe = createPipe(CLUSTER, (ObjectNode) MAPPER.readTree(targetParametersJson));
+        pipe.setRoleArn(PIPE_ROLE);
+        pipe.setAccountId("000000000000");
+        return pipe;
+    }
+
+    @Test
+    void redshiftTarget_submitsTheSqlsUnderThePipeRoleAndReadsPathsFromTheSourceEvent() throws Exception {
+        when(serviceRegistry.isServiceEnabled("redshift-data")).thenReturn(true);
+        Pipe pipe = redshiftPipe("""
+                {"InputTemplate":"{\\"ignored\\": <$.messageId>}",
+                 "RedshiftDataParameters":{"Database":"dev","DbUser":"admin","StatementName":"load",
+                   "Sqls":["$.body.first","INSERT INTO t VALUES (2)"],"WithEvent":true}}""");
+        String event = "{\"messageId\":\"m1\",\"body\":\"{\\\"first\\\":\\\"INSERT INTO t VALUES (1)\\\"}\"}";
+
+        invoker.invoke(pipe, event, "us-east-1");
+
+        ArgumentCaptor<RedshiftDataTargetSubmitter.Statement> statement = ArgumentCaptor.captor();
+        ArgumentCaptor<UnaryOperator<String>> resolver = ArgumentCaptor.captor();
+        ArgumentCaptor<RedshiftDataTargetSubmitter.RoleCheck> roleCheck = ArgumentCaptor.captor();
+        verify(redshiftSubmitter).submit(eq(CLUSTER), statement.capture(), eq(PIPE_ROLE), eq("000000000000"),
+                eq("us-east-1"), resolver.capture(), roleCheck.capture());
+        assertEquals("dev", statement.getValue().database());
+        assertEquals("admin", statement.getValue().dbUser());
+        assertEquals("load", statement.getValue().statementName());
+        assertEquals(List.of("$.body.first", "INSERT INTO t VALUES (2)"), statement.getValue().sqls());
+        assertNull(statement.getValue().sql());
+        assertEquals(Boolean.TRUE, statement.getValue().withEvent());
+        // The path reads the event as it arrived, not what InputTemplate made of it.
+        assertEquals("INSERT INTO t VALUES (1)", resolver.getValue().apply("$.body.first"));
+        assertEquals("INSERT INTO t VALUES (2)", resolver.getValue().apply("INSERT INTO t VALUES (2)"));
+        roleCheck.getValue().refusal(List.of());
+        verify(redshiftAuthorizer).refusal(PIPE_ROLE, "000000000000", pipe.getArn(), List.of());
+        verifyNoInteractions(lambdaService, sqsService, snsService, eventBridgeService, stepFunctionsService);
+    }
+
+    @Test
+    void redshiftTarget_aPathThatResolvesToNothingIsAValidationError() throws Exception {
+        when(serviceRegistry.isServiceEnabled("redshift-data")).thenReturn(true);
+        Pipe pipe = redshiftPipe("{\"RedshiftDataParameters\":{\"Database\":\"dev\",\"Sqls\":[\"$.body.missing\"]}}");
+
+        invoker.invoke(pipe, "{\"messageId\":\"m1\",\"body\":\"{}\"}", "us-east-1");
+
+        ArgumentCaptor<UnaryOperator<String>> resolver = ArgumentCaptor.captor();
+        verify(redshiftSubmitter).submit(any(), any(), any(), any(), any(), resolver.capture(), any());
+        AwsException error = assertThrows(AwsException.class, () -> resolver.getValue().apply("$.body.missing"));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void redshiftTarget_withoutSqlsIsRejectedBeforeSubmitting() throws Exception {
+        when(serviceRegistry.isServiceEnabled("redshift-data")).thenReturn(true);
+        Pipe pipe = redshiftPipe("{\"RedshiftDataParameters\":{\"Database\":\"dev\"}}");
+
+        AwsException error = assertThrows(AwsException.class, () -> invoker.invoke(pipe, "{}", "us-east-1"));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        verifyNoInteractions(redshiftSubmitter);
+    }
+
+    @Test
+    void redshiftTarget_isNotDeliveredWhenTheDataApiIsDisabled() throws Exception {
+        when(serviceRegistry.isServiceEnabled("redshift-data")).thenReturn(false);
+        Pipe pipe = redshiftPipe("{\"RedshiftDataParameters\":{\"Sqls\":[\"SELECT 1\"]}}");
+
+        AwsException error = assertThrows(AwsException.class, () -> invoker.invoke(pipe, "{}", "us-east-1"));
+
+        assertEquals("ServiceNotAvailableException", error.getErrorCode());
+        verifyNoInteractions(redshiftSubmitter);
     }
 
     private Pipe createPipe(String targetArn, ObjectNode targetParameters) {

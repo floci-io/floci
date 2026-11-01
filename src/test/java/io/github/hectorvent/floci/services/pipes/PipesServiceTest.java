@@ -267,6 +267,68 @@ class PipesServiceTest {
                 pipesService.describePipe("legacy-pipe", "us-east-1").getSourceParameters());
     }
 
+    private static final String REDSHIFT_CLUSTER = "arn:aws:redshift:us-east-1:000000000000:cluster:analytics";
+
+    private Pipe createRedshiftPipe(String name, JsonNode targetParameters) {
+        return pipesService.createPipe(name, "arn:aws:sqs:us-east-1:000000000000:source", REDSHIFT_CLUSTER,
+                "arn:aws:iam::000000000000:role/role", null, null, null, null, targetParameters, null, null,
+                "us-east-1");
+    }
+
+    @Test
+    void createPipeWithARedshiftTargetKeepsItsSqls() {
+        JsonNode parameters = sourceParameters(
+                "{\"RedshiftDataParameters\":{\"Database\":\"dev\",\"Sqls\":[\"SELECT 1\"]}}");
+
+        Pipe pipe = createRedshiftPipe("redshift-pipe", parameters);
+
+        assertEquals(parameters, pipesService.describePipe("redshift-pipe", "us-east-1").getTargetParameters());
+        assertEquals(REDSHIFT_CLUSTER, pipe.getTarget());
+    }
+
+    @Test
+    void createPipeWithARedshiftTargetRequiresBetweenOneAndFortySqls() {
+        for (String parameters : List.of(
+                "null",
+                "{}",
+                "{\"RedshiftDataParameters\":{\"Database\":\"dev\"}}",
+                "{\"RedshiftDataParameters\":{\"Sqls\":[]}}",
+                "{\"RedshiftDataParameters\":{\"Sqls\":[" + "\"SELECT 1\",".repeat(40) + "\"SELECT 1\"]}}",
+                "{\"RedshiftDataParameters\":{\"Sqls\":[1]}}")) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> createRedshiftPipe("bad-redshift-pipe", sourceParameters(parameters)),
+                    parameters);
+            assertEquals("ValidationException", error.getErrorCode());
+        }
+        assertThrows(AwsException.class, () -> pipesService.describePipe("bad-redshift-pipe", "us-east-1"));
+    }
+
+    @Test
+    void createPipeRefusesARedshiftSqlOverTheLengthLimit() {
+        JsonNode parameters = sourceParameters(
+                "{\"RedshiftDataParameters\":{\"Sqls\":[\"" + "x".repeat(100_001) + "\"]}}");
+
+        AwsException error = assertThrows(AwsException.class, () -> createRedshiftPipe("long-sql-pipe", parameters));
+
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void updatePipeValidatesTheRedshiftTargetItWillHave() {
+        createRedshiftPipe("update-redshift-pipe", sourceParameters(
+                "{\"RedshiftDataParameters\":{\"Sqls\":[\"SELECT 1\"]}}"));
+
+        AwsException error = assertThrows(AwsException.class, () -> pipesService.updatePipe("update-redshift-pipe",
+                null, null, null, null, null, null, sourceParameters("{\"RedshiftDataParameters\":{\"Sqls\":[]}}"),
+                null, "us-east-1"));
+        assertEquals("ValidationException", error.getErrorCode());
+
+        // Leaving the target parameters out keeps the valid ones.
+        pipesService.updatePipe("update-redshift-pipe", null, null, "now described", null, null, null, null, null,
+                "us-east-1");
+        assertEquals("now described", pipesService.describePipe("update-redshift-pipe", "us-east-1").getDescription());
+    }
+
     @Test
     void deletePipe() {
         pipesService.createPipe("del-pipe",
