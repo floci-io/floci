@@ -13,5 +13,7 @@ import java.util.List;
 public record RecordingGroup(
         @JsonProperty("allSupported") Boolean allSupported,
         @JsonProperty("includeGlobalResourceTypes") Boolean includeGlobalResourceTypes,
-        @JsonProperty("resourceTypes") List<String> resourceTypes) {
+        @JsonProperty("resourceTypes") List<String> resourceTypes,
+        @JsonProperty("exclusionByResourceTypes") ExclusionByResourceTypes exclusionByResourceTypes,
+        @JsonProperty("recordingStrategy") RecordingStrategy recordingStrategy) {
 }

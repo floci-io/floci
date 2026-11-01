@@ -260,8 +260,8 @@ class ElastiCacheIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.UserId", equalTo(USER_ID))
-            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.UserName", equalTo(USER_NAME));
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.findAll { it.UserId == '" + USER_ID
+                    + "' && it.UserName == '" + USER_NAME + "' }.size()", equalTo(1));
     }
 
     @Test
@@ -380,7 +380,8 @@ class ElastiCacheIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.UserId", not(equalTo(USER_ID)));
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.findAll { it.UserId == '" + USER_ID
+                    + "' }.size()", equalTo(0));
     }
 
     @Test

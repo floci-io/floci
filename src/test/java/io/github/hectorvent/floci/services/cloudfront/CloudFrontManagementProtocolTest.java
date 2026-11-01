@@ -8,6 +8,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -15,12 +17,19 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.xml.HasXPath.hasXPath;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 
 /** Verifies CloudFront REST XML payload roots against the AWS service model. */
 @QuarkusTest
 class CloudFrontManagementProtocolTest {
 
     private static final String API = "/2020-05-31/";
+
+    private static final String FUNCTION_CODE = "function handler(event) { return event.request; }";
+
+    private static String encodedFunctionCode() {
+        return Base64.getEncoder().encodeToString(FUNCTION_CODE.getBytes(StandardCharsets.UTF_8));
+    }
 
     @ParameterizedTest(name = "{0} returns {1}")
     @CsvSource({
@@ -163,9 +172,9 @@ class CloudFrontManagementProtocolTest {
                     <Comment>routing function</Comment>
                     <Runtime>python3</Runtime>
                   </FunctionConfig>
-                  <FunctionCode>function handler(event) { return event.request; }</FunctionCode>
+                  <FunctionCode>%s</FunctionCode>
                 </CreateFunctionRequest>
-                """.formatted(name);
+                """.formatted(name, encodedFunctionCode());
 
         given()
             .contentType("application/xml")
@@ -195,9 +204,9 @@ class CloudFrontManagementProtocolTest {
                     <Comment>routing function</Comment>
                     <Runtime>cloudfront-js-2.0</Runtime>
                   </FunctionConfig>
-                  <FunctionCode>function handler(event) { return event.request; }</FunctionCode>
+                  <FunctionCode>%s</FunctionCode>
                 </CreateFunctionRequest>
-                """.formatted(name);
+                """.formatted(name, encodedFunctionCode());
 
         String developmentEtag = given()
             .contentType("application/xml")
@@ -256,7 +265,8 @@ class CloudFrontManagementProtocolTest {
         .then()
             .statusCode(200)
             .contentType("application/octet-stream")
-            .body(equalTo("function handler(event) { return event.request; }"));
+            .header("ETag", equalTo(developmentEtag))
+            .body(equalTo(FUNCTION_CODE));
 
         given()
             .header("If-Match", developmentEtag)
@@ -300,6 +310,83 @@ class CloudFrontManagementProtocolTest {
         given().header("If-Match", updatedEtag)
                 .when().delete(API + "function/" + name)
                 .then().statusCode(204);
+    }
+
+    @Test
+    void getFunctionReturnsTheDecodedFunctionCodeAfterAnUpdate() {
+        String name = "get-code-" + UUID.randomUUID();
+        byte[] updatedCode = "function handler(event) { return event.response; }"
+                .getBytes(StandardCharsets.UTF_8);
+        String createBody = """
+                <CreateFunctionRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <Name>%s</Name>
+                  <FunctionConfig>
+                    <Comment>routing function</Comment>
+                    <Runtime>cloudfront-js-2.0</Runtime>
+                  </FunctionConfig>
+                  <FunctionCode>%s</FunctionCode>
+                </CreateFunctionRequest>
+                """.formatted(name, encodedFunctionCode());
+
+        String etag = given()
+            .contentType("application/xml")
+            .body(createBody)
+        .when()
+            .post(API + "function")
+        .then()
+            .statusCode(201)
+            .extract().header("ETag");
+
+        byte[] createdCode = given()
+            .queryParam("Stage", "DEVELOPMENT")
+        .when()
+            .get(API + "function/" + name)
+        .then()
+            .statusCode(200)
+            .contentType("application/octet-stream")
+            .header("ETag", equalTo(etag))
+            .extract().asByteArray();
+
+        assertArrayEquals(FUNCTION_CODE.getBytes(StandardCharsets.UTF_8), createdCode);
+
+        String updateBody = """
+                <UpdateFunctionRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <FunctionConfig>
+                    <Comment>routing function</Comment>
+                    <Runtime>cloudfront-js-2.0</Runtime>
+                  </FunctionConfig>
+                  <FunctionCode>%s</FunctionCode>
+                </UpdateFunctionRequest>
+                """.formatted(Base64.getEncoder().encodeToString(updatedCode));
+
+        String updatedEtag = given()
+            .contentType("application/xml")
+            .header("If-Match", etag)
+            .body(updateBody)
+        .when()
+            .put(API + "function/" + name)
+        .then()
+            .statusCode(200)
+            .extract().header("ETtag");
+
+        byte[] served = given()
+            .queryParam("Stage", "DEVELOPMENT")
+        .when()
+            .get(API + "function/" + name)
+        .then()
+            .statusCode(200)
+            .contentType("application/octet-stream")
+            .header("ETag", equalTo(updatedEtag))
+            .extract().asByteArray();
+
+        assertArrayEquals(updatedCode, served);
+
+        given()
+            .header("If-Match", updatedEtag)
+        .when()
+            .delete(API + "function/" + name)
+        .then()
+            .statusCode(204);
     }
 
     @Test

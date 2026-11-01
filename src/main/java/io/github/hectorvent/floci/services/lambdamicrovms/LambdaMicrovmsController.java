@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService.Microvm;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService.MicrovmBuild;
@@ -534,7 +535,7 @@ public class LambdaMicrovmsController {
     }
 
     private double epoch(Instant instant) {
-        return instant.toEpochMilli() / 1000.0;
+        return EpochSeconds.fromInstant(instant);
     }
 
     private JsonNode parse(String body) {

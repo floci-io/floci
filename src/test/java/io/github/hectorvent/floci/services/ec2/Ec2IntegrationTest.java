@@ -5655,6 +5655,80 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(3225)
+    void describeIpamPoolsAppliesFiltersOverQuery() {
+        String ipamId = given()
+            .formParam("Action", "CreateIpam")
+            .formParam("OperatingRegion.1.RegionName", "us-east-1")
+            .formParam("OperatingRegion.2.RegionName", "eu-west-1")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().path("CreateIpamResponse.ipam.ipamId");
+        String scopeId = given()
+            .formParam("Action", "DescribeIpams")
+            .formParam("IpamId.1", ipamId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().path("DescribeIpamsResponse.ipamSet.item.privateDefaultScopeId");
+        String poolId = given()
+            .formParam("Action", "CreateIpamPool")
+            .formParam("IpamScopeId", scopeId)
+            .formParam("AddressFamily", "ipv4")
+            .formParam("Locale", "eu-west-1")
+            .formParam("Description", "filter-target-pool")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().path("CreateIpamPoolResponse.ipamPool.ipamPoolId");
+
+        // scope-id pins the query to this test's pool; the other filter is the one under test
+        assertIpamPoolFilter("locale", "eu-west-1", scopeId, poolId, true);
+        assertIpamPoolFilter("locale", "eu-west-9", scopeId, poolId, false);
+        assertIpamPoolFilter("address-family", "ipv4", scopeId, poolId, true);
+        assertIpamPoolFilter("address-family", "ipv6", scopeId, poolId, false);
+        assertIpamPoolFilter("description", "filter-target-*", scopeId, poolId, true);
+        assertIpamPoolFilter("description", "no-such-pool", scopeId, poolId, false);
+        assertIpamPoolFilter("ipam-scope-type", "private", scopeId, poolId, true);
+        assertIpamPoolFilter("ipam-scope-type", "public", scopeId, poolId, false);
+        assertIpamPoolFilter("tag:Env", "prod", scopeId, poolId, false);
+
+        // AND across two non-scope filters: locale matches, description does not
+        List<String> anded = given()
+            .formParam("Action", "DescribeIpamPools")
+            .formParam("Filter.1.Name", "locale")
+            .formParam("Filter.1.Value.1", "eu-west-1")
+            .formParam("Filter.2.Name", "description")
+            .formParam("Filter.2.Value.1", "no-such-pool")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().xmlPath()
+            .getList("DescribeIpamPoolsResponse.ipamPoolSet.item.ipamPoolId");
+        assertEquals(List.of(), anded);
+
+        given()
+            .formParam("Action", "DescribeIpamPools")
+            .formParam("Filter.1.Name", "no-such-filter")
+            .formParam("Filter.1.Value.1", "x")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(400).body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    private void assertIpamPoolFilter(String name, String value, String scopeId, String poolId,
+                                      boolean expectPool) {
+        List<String> ids = given()
+            .formParam("Action", "DescribeIpamPools")
+            .formParam("Filter.1.Name", "ipam-scope-id")
+            .formParam("Filter.1.Value.1", scopeId)
+            .formParam("Filter.2.Name", name)
+            .formParam("Filter.2.Value.1", value)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().xmlPath()
+            .getList("DescribeIpamPoolsResponse.ipamPoolSet.item.ipamPoolId");
+        assertEquals(expectPool ? List.of(poolId) : List.of(), ids, name + "=" + value);
+    }
+
+    @Test
     @Order(323)
     void associateIpamByoasnSuccess() {
         given()

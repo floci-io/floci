@@ -5,8 +5,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
-import io.github.hectorvent.floci.services.lambda.model.InvocationType;
-import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.testing.CfnStackWaits;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
@@ -15,18 +13,12 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.when;
 
 /**
  * {@code AWS::NoValue} is an omission wherever a template property can hold it: the properties a
@@ -45,7 +37,7 @@ class CloudFormationNoValueOmissionIntegrationTest {
     private static final String NO_VALUE_IF = "{\"Fn::If\": [\"Off\", \"unused\", {\"Ref\": \"AWS::NoValue\"}]}";
 
     private final ObjectMapper mapper = new ObjectMapper();
-    private final List<JsonNode> events = new CopyOnWriteArrayList<>();
+    private CustomResourceProbe probe;
 
     @InjectMock
     LambdaService lambdaService;
@@ -57,13 +49,7 @@ class CloudFormationNoValueOmissionIntegrationTest {
 
     @BeforeEach
     void stubHandler() {
-        when(lambdaService.invoke(any(), eq(SERVICE_TOKEN), any(), eq(InvocationType.RequestResponse)))
-                .thenAnswer(inv -> {
-                    JsonNode event = mapper.readTree((byte[]) inv.getArgument(2));
-                    events.add(event);
-                    putResponse(event);
-                    return new InvokeResult(200, null, "null".getBytes(StandardCharsets.UTF_8), null, "req-1");
-                });
+        probe = CustomResourceProbe.stub(lambdaService, SERVICE_TOKEN, "no-value-probe");
     }
 
     @Test
@@ -126,10 +112,10 @@ class CloudFormationNoValueOmissionIntegrationTest {
         assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(stack).status());
 
         assertEquals(List.of("Create", "Update"),
-                events.stream().map(e -> e.get("RequestType").asText()).toList());
-        assertEquals(expected("one"), events.get(0).get("ResourceProperties"));
-        assertEquals(expected("two"), events.get(1).get("ResourceProperties"));
-        assertEquals(expected("one"), events.get(1).get("OldResourceProperties"));
+                probe.events().stream().map(e -> e.get("RequestType").asText()).toList());
+        assertEquals(expected("one"), probe.events().get(0).get("ResourceProperties"));
+        assertEquals(expected("two"), probe.events().get(1).get("ResourceProperties"));
+        assertEquals(expected("one"), probe.events().get(1).get("OldResourceProperties"));
     }
 
     private JsonNode expected(String revision) {
@@ -211,19 +197,6 @@ class CloudFormationNoValueOmissionIntegrationTest {
                 .body("{\"SecretId\": \"" + name + "\"}")
                 .when().post("/").then().statusCode(200)
                 .extract().jsonPath().getString("Description");
-    }
-
-    /** Answers the request the way a handler does: a PUT of its result document to ResponseURL. */
-    private void putResponse(JsonNode event) {
-        ObjectNode response = mapper.createObjectNode();
-        response.put("Status", "SUCCESS");
-        response.put("RequestId", event.get("RequestId").asText());
-        response.put("StackId", event.get("StackId").asText());
-        response.put("LogicalResourceId", event.get("LogicalResourceId").asText());
-        response.put("PhysicalResourceId", "no-value-probe");
-        response.putObject("Data");
-        String path = URI.create(event.get("ResponseURL").asText()).getPath();
-        given().body(response.toString()).when().put(path).then().statusCode(200);
     }
 
     private static String unique(String prefix) {

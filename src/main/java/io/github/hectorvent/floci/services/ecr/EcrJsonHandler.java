@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.ecr.model.AuthorizationData;
 import io.github.hectorvent.floci.services.ecr.model.Image;
@@ -48,6 +49,7 @@ public class EcrJsonHandler {
     /** The actions whose requests are checked against the vendored model constraints first. */
     private static final Set<String> MODEL_CHECKED = Set.of(
             "GetAccountSetting", "PutAccountSetting",
+            "RegisterPullTimeUpdateExclusion", "DeregisterPullTimeUpdateExclusion", "ListPullTimeUpdateExclusions",
             "PutRegistryPolicy", "GetRegistryPolicy", "DeleteRegistryPolicy",
             "PutReplicationConfiguration", "DescribeRegistry",
             "PutRegistryScanningConfiguration", "GetRegistryScanningConfiguration",
@@ -106,6 +108,10 @@ public class EcrJsonHandler {
             case "DescribeRegistry" -> handleDescribeRegistry(region);
             case "PutRegistryScanningConfiguration" -> handlePutRegistryScanningConfiguration(request, region);
             case "GetRegistryScanningConfiguration" -> handleGetRegistryScanningConfiguration(region);
+            case "RegisterPullTimeUpdateExclusion" -> handleRegisterPullTimeUpdateExclusion(request, region);
+            case "DeregisterPullTimeUpdateExclusion" -> Response.ok(objectMapper.createObjectNode().put("principalArn",
+                    service.deregisterPullTimeUpdateExclusion(request.path("principalArn").asText(null), region))).build();
+            case "ListPullTimeUpdateExclusions" -> handleListPullTimeUpdateExclusions(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation",
                             "Operation " + action + " is not supported."))
@@ -715,6 +721,26 @@ public class EcrJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("registryId", service.registryId());
         response.set("scanningConfiguration", buildScanningConfiguration(service.registryScanningConfiguration(region)));
+        return Response.ok(response).build();
+    }
+
+    private Response handleRegisterPullTimeUpdateExclusion(JsonNode request, String region) {
+        RegistrySettings.PullTimeUpdateExclusion exclusion = service.registerPullTimeUpdateExclusion(
+                request.path("principalArn").asText(null), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("principalArn", exclusion.principalArn());
+        response.put("createdAt", EpochSeconds.fromInstant(exclusion.createdAt()));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListPullTimeUpdateExclusions(JsonNode request, String region) {
+        PaginatedResult<String> page = service.listPullTimeUpdateExclusions(parseMaxResults(request.path("maxResults")),
+                request.path("nextToken").asText(null), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("pullTimeUpdateExclusions", objectMapper.valueToTree(page.items()));
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 

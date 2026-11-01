@@ -60,6 +60,8 @@ public class StsQueryHandler {
     private static final int MAX_ROOT_SESSION_SECONDS = 900;
     /** "If not specified, the default duration is 300 seconds (5 minutes)." */
     private static final int DEFAULT_TOKEN_SECONDS = 300;
+    /** The session token this emulator has always minted, and the floor a request cannot go under. */
+    private static final int SESSION_TOKEN_LENGTH = 200;
     private static final String STS_AUDIENCE = "sts.amazonaws.com"; // partition-literal: web-identity audience; no source outside the commercial partition (P9)
 
     private final IamService iamService;
@@ -164,7 +166,7 @@ public class StsQueryHandler {
 
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
-        String sessionToken = randomSecret(200);
+        String sessionToken = sessionToken(params);
         Instant expiration = clock.instant().plusSeconds(durationSeconds);
 
         String roleName = roleArn != null && roleArn.contains("/")
@@ -177,6 +179,17 @@ public class StsQueryHandler {
         Response trustDenied = enforceTrustPolicy(roleArn, role, accountId, params);
         if (trustDenied != null) {
             return trustDenied;
+        }
+
+        Response roleDurationError = validateMaxSessionDuration(durationSeconds, role);
+        if (roleDurationError != null) {
+            return roleDurationError;
+        }
+
+        if (durationSeconds > 3600 && iamService.isRoleSession(callerAccessKeyId(), callerSessionToken(params))) {
+            return AwsQueryResponse.error("ValidationError",
+                    "The requested DurationSeconds exceeds the 1 hour session limit for roles assumed by role chaining.",
+                    AwsNamespaces.STS, 400);
         }
 
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
@@ -262,16 +275,21 @@ public class StsQueryHandler {
                 "role" + IamService.normalizePath(role.getPath()) + roleName);
     }
 
+    private String callerSessionToken(MultivaluedMap<String, String> params) {
+        String token = headers == null ? null : headers.getHeaderString("X-Amz-Security-Token");
+        if (token == null && params != null) {
+            token = getParam(params, "X-Amz-Security-Token");
+        }
+        if (token == null && uriInfo != null) {
+            token = uriInfo.getQueryParameters().getFirst("X-Amz-Security-Token");
+        }
+        return token;
+    }
+
     private Response handleGetCallerIdentity(MultivaluedMap<String, String> params) {
         String accountId = regionResolver.getAccountId();
         String accessKeyId = callerAccessKeyId();
-        String sessionToken = headers == null ? null : headers.getHeaderString("X-Amz-Security-Token");
-        if (sessionToken == null && params != null) {
-            sessionToken = getParam(params, "X-Amz-Security-Token");
-        }
-        if (sessionToken == null && uriInfo != null) {
-            sessionToken = uriInfo.getQueryParameters().getFirst("X-Amz-Security-Token");
-        }
+        String sessionToken = callerSessionToken(params);
         String arn = iamService.resolveCallerArn(accessKeyId)
                 .orElse(regionResolver.buildGlobalArn("iam", accountId, "root"));
         String userId = iamService.resolveCallerUserId(accessKeyId, sessionToken).orElse(accountId);
@@ -324,10 +342,10 @@ public class StsQueryHandler {
         if (validation != null) {
             return validation;
         }
-        int durationSeconds = getIntParam(params, "DurationSeconds", 43200);
+        int durationSeconds = longTermTokenDuration(params);
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
-        String sessionToken = randomSecret(200);
+        String sessionToken = sessionToken(params);
         Instant expiration = clock.instant().plusSeconds(durationSeconds);
 
         String result = credentialsXml(accessKeyId, secretKey, sessionToken, expiration);
@@ -373,9 +391,14 @@ public class StsQueryHandler {
             }
         }
 
+        Response roleDurationError = validateMaxSessionDuration(durationSeconds, role);
+        if (roleDurationError != null) {
+            return roleDurationError;
+        }
+
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
-        String sessionToken = randomSecret(200);
+        String sessionToken = sessionToken(params);
         Instant expiration = clock.instant().plusSeconds(durationSeconds);
 
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
@@ -568,19 +591,20 @@ public class StsQueryHandler {
             throw new AwsException("AccessDenied", "Not authorized to perform sts:AssumeRoleWithSAML on resource: " + roleArn, 403);
         }
 
+        Response roleDurationError = validateMaxSessionDuration(durationSeconds, role);
+        if (roleDurationError != null) {
+            return roleDurationError;
+        }
+
         String sessionName = verified.subject().replaceAll("[^A-Za-z0-9+=,.@_-]", "_");
         if (sessionName.length() > 64) {
             sessionName = sessionName.substring(0, 64);
         }
         Instant requestedExpiration = clock.instant().plusSeconds(durationSeconds);
-        Instant roleExpiration = clock.instant().plusSeconds(role.getMaxSessionDuration());
         Instant expiration = verified.expiration().isBefore(requestedExpiration) ? verified.expiration() : requestedExpiration;
-        if (roleExpiration.isBefore(expiration)) {
-            expiration = roleExpiration;
-        }
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
-        String sessionToken = randomSecret(200);
+        String sessionToken = sessionToken(params);
         String sessionRoleArn = canonicalRoleArn(role, accountId, roleName);
         String assumedRoleArn = assumedRoleArn(sessionRoleArn, accountId, roleName, sessionName);
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
@@ -604,6 +628,12 @@ public class StsQueryHandler {
         return auth == null ? null : accountResolver.extractAccessKeyId(auth);
     }
 
+    private int longTermTokenDuration(MultivaluedMap<String, String> params) {
+        int requested = getIntParam(params, "DurationSeconds", 43200);
+        // Session registration treats an unheld long-term key as Floci's account-root credential.
+        return iamService.isKnownAccessKey(callerAccessKeyId()) ? requested : Math.min(requested, 3600);
+    }
+
     private Response handleGetFederationToken(MultivaluedMap<String, String> params) {
         if (IamService.isTemporaryAccessKey(callerAccessKeyId())) {
             return AwsQueryResponse.error("AccessDenied", IamService.FEDERATION_TOKEN_SESSION_MESSAGE,
@@ -618,11 +648,11 @@ public class StsQueryHandler {
             return validation;
         }
         String name = getParam(params, "Name");
-        int durationSeconds = getIntParam(params, "DurationSeconds", 43200);
+        int durationSeconds = longTermTokenDuration(params);
 
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
-        String sessionToken = randomSecret(200);
+        String sessionToken = sessionToken(params);
         Instant expiration = clock.instant().plusSeconds(durationSeconds);
         String accountId = regionResolver.getAccountId();
         String federatedUserId = accountId + ":" + name;
@@ -673,7 +703,8 @@ public class StsQueryHandler {
 
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
-        String sessionToken = randomSecret(200);
+        // The operation models no size to ask for, so the token is the length this mints.
+        String sessionToken = randomSecret(SESSION_TOKEN_LENGTH);
         // The session acts in the customer's account as the identity that approved the request,
         // bounded by the rendered permission policy wherever the request carries one and by that
         // identity's own permissions either way. The account is the owner's: a request is visible
@@ -760,8 +791,7 @@ public class StsQueryHandler {
         Instant expiration = clock.instant().plusSeconds(durationSeconds);
         String accessKeyId = "ASIA" + randomId(16);
         String secretKey = randomSecret(40);
-        String sessionToken = randomSecret(Math.max(200,
-                getIntParam(params, "MinimumSessionTokenSize", 0)));
+        String sessionToken = sessionToken(params);
         // The session is the member account's root user, bounded by the task policy. The origin is
         // the member account too: the privileged task is performed there, not where it was asked for.
         iamService.registerSession(accessKeyId, secretKey, sessionToken,
@@ -841,6 +871,15 @@ public class StsQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("DecodeAuthorizationMessage", AwsNamespaces.STS, result)).build();
     }
 
+    private static Response validateMaxSessionDuration(int durationSeconds, IamRole role) {
+        if (durationSeconds > role.getMaxSessionDuration()) {
+            return AwsQueryResponse.error("ValidationError",
+                    "The requested DurationSeconds exceeds the MaxSessionDuration set for this role.",
+                    AwsNamespaces.STS, 400);
+        }
+        return null;
+    }
+
     /**
      * The constraints the model declares for {@code action}, answered the way this handler answers
      * every other refusal: one {@code ValidationError} naming every violation it found, in the
@@ -882,20 +921,6 @@ public class StsQueryHandler {
             }
         }
         return null;
-    }
-
-    /**
-     * One violation as this handler answers it, or null where {@code violation} is null. The
-     * wording comes from {@link SmithyValidationErrors} rather than from a sentence written here,
-     * so a member held to its shape by a check of this file's own reads the same as one the model
-     * holds.
-     */
-    private static Response violation(String violation) {
-        if (violation == null) {
-            return null;
-        }
-        return AwsQueryResponse.error("ValidationError",
-                SmithyValidationErrors.message(List.of(violation)), AwsNamespaces.STS, 400);
     }
 
     /**
@@ -1093,6 +1118,18 @@ public class StsQueryHandler {
             sb.append(upper.charAt(ThreadLocalRandom.current().nextInt(upper.length())));
         }
         return sb.toString();
+    }
+
+    /**
+     * The session token for a request: the length its {@code MinimumSessionTokenSize} asks for,
+     * never under the 200 characters this emulator mints by default. Every operation that models
+     * the member answers it from here, so the floor is written once, and the model holds the value
+     * to the 0 to 4096 it declares ahead of this. A request asking for less than the floor is
+     * answered with the floor, which is what "minimum" asks for.
+     */
+    private String sessionToken(MultivaluedMap<String, String> params) {
+        return randomSecret(Math.max(SESSION_TOKEN_LENGTH,
+                getIntParam(params, "MinimumSessionTokenSize", 0)));
     }
 
     private String randomSecret(int length) {

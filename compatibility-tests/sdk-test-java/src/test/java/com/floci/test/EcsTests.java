@@ -1,6 +1,7 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.parallel.Isolated;
 import software.amazon.awssdk.core.waiters.WaiterResponse;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.*;
@@ -14,6 +15,7 @@ import static org.assertj.core.api.Assertions.*;
 
 @DisplayName("ECS Elastic Container Service")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@Isolated
 class EcsTests {
 
     private static EcsClient ecs;

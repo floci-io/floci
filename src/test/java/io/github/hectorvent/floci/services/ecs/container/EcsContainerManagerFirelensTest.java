@@ -97,11 +97,11 @@ class EcsContainerManagerFirelensTest {
         when(containerBuilder.resolveImage(anyString())).thenAnswer(invocation -> invocation.getArgument(0));
 
         lifecycleManager = mock(ContainerLifecycleManager.class);
-        when(lifecycleManager.resolveImageForLaunch(any(), any()))
+        when(lifecycleManager.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
         when(lifecycleManager.removeVolume(anyString())).thenReturn(true);
-        when(lifecycleManager.createAndStartEphemeral(any())).thenReturn(new ContainerInfo("app-id", Map.of()));
-        when(lifecycleManager.create(any())).thenReturn("router-id");
+        when(lifecycleManager.createAndStartEphemeral(any(), any())).thenReturn(new ContainerInfo("app-id", Map.of()));
+        when(lifecycleManager.create(any(), any())).thenReturn("router-id");
         when(lifecycleManager.startCreated(anyString(), any())).thenReturn(new ContainerInfo("router-id", Map.of()));
 
         dockerClient = mock(DockerClient.class, RETURNS_DEEP_STUBS);
@@ -167,9 +167,9 @@ class EcsContainerManagerFirelensTest {
         EcsTaskHandle handle = manager.startTask(task, taskDef, null, "us-east-1");
 
         InOrder order = inOrder(lifecycleManager);
-        order.verify(lifecycleManager).create(any(ContainerSpec.class));
+        order.verify(lifecycleManager).create(any(ContainerSpec.class), any());
         order.verify(lifecycleManager).startCreated(anyString(), any());
-        order.verify(lifecycleManager).createAndStartEphemeral(any(ContainerSpec.class));
+        order.verify(lifecycleManager).createAndStartEphemeral(any(ContainerSpec.class), any());
 
         ArgumentCaptor<LogConfig> logConfig = ArgumentCaptor.forClass(LogConfig.class);
         verify(builder).withLogConfig(logConfig.capture());
@@ -220,9 +220,9 @@ class EcsContainerManagerFirelensTest {
         manager.startTask(task, taskDef, null, "us-east-1");
 
         InOrder order = inOrder(lifecycleManager);
-        order.verify(lifecycleManager).create(any(ContainerSpec.class));
+        order.verify(lifecycleManager).create(any(ContainerSpec.class), any());
         order.verify(lifecycleManager).startCreated(anyString(), any());
-        order.verify(lifecycleManager).createAndStartEphemeral(any(ContainerSpec.class));
+        order.verify(lifecycleManager).createAndStartEphemeral(any(ContainerSpec.class), any());
 
         ArgumentCaptor<LogConfig> logConfig = ArgumentCaptor.forClass(LogConfig.class);
         verify(builder).withLogConfig(logConfig.capture());
@@ -348,8 +348,8 @@ class EcsContainerManagerFirelensTest {
         assertEquals("Unable to download firelens s3 config file: unable to download s3 config "
                 + "missing.conf from bucket firelens-configs: The specified key does not exist.",
                 failure.getMessage());
-        verify(lifecycleManager, never()).create(any(ContainerSpec.class));
-        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class), any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
     }
 
     @Test
@@ -365,7 +365,7 @@ class EcsContainerManagerFirelensTest {
         assertEquals("ClientException", failure.getErrorCode());
         assertEquals("awsfirelens log driver requires a firelensConfiguration container",
                 failure.getMessage());
-        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
     }
 
     @Test
@@ -379,8 +379,8 @@ class EcsContainerManagerFirelensTest {
 
         assertEquals("ClientException", failure.getErrorCode());
         assertEquals("A task definition can have only one FireLens log router.", failure.getMessage());
-        verify(lifecycleManager, never()).create(any(ContainerSpec.class));
-        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class), any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
     }
 
     @Test
@@ -392,7 +392,7 @@ class EcsContainerManagerFirelensTest {
 
         assertEquals("ClientException", failure.getErrorCode());
         assertEquals("FireLens port 24224 must not be exposed.", failure.getMessage());
-        verify(lifecycleManager, never()).create(any(ContainerSpec.class));
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class), any());
     }
 
     @Test
@@ -404,7 +404,7 @@ class EcsContainerManagerFirelensTest {
 
         assertEquals("ClientException", failure.getErrorCode());
         assertEquals("FireLens configuration type must be fluentbit or fluentd.", failure.getMessage());
-        verify(lifecycleManager, never()).create(any(ContainerSpec.class));
+        verify(lifecycleManager, never()).create(any(ContainerSpec.class), any());
     }
 
     @ParameterizedTest
@@ -464,10 +464,10 @@ class EcsContainerManagerFirelensTest {
             assertNull(tar.getNextEntry());
         }
         InOrder order = inOrder(lifecycleManager, uploads.commands.get(1));
-        order.verify(lifecycleManager).create(any());
+        order.verify(lifecycleManager).create(any(), any());
         order.verify(uploads.commands.get(1)).exec();
         order.verify(lifecycleManager).startCreated(eq("router-id"), any());
-        order.verify(lifecycleManager).createAndStartEphemeral(any());
+        order.verify(lifecycleManager).createAndStartEphemeral(any(), any());
         verify(lifecycleManager, never()).removeIfExists(anyString());
         if (external) {
             verify(s3Service).getObject("firelens-configs", "extra.conf");
@@ -514,7 +514,7 @@ class EcsContainerManagerFirelensTest {
         assertEquals(1, uploads.commands.size());
         assertEquals(1, uploads.completed.size());
         verify(lifecycleManager).startCreated(eq("router-id"), any());
-        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
         verify(lifecycleManager).removeIfExists("router-id");
         verifyFirelensVolumeRemoved();
     }
@@ -545,8 +545,8 @@ class EcsContainerManagerFirelensTest {
         when(dockerClient.inspectVolumeCmd(anyString()).exec().getMountpoint()).thenReturn(path);
         assertThrows(AwsException.class, () -> manager.startTask(
                 task(), retryTaskDefinition("fluentbit", false, ""), null, "us-east-1"));
-        verify(lifecycleManager, never()).create(any());
-        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).create(any(), any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
         verifyFirelensVolumeRemoved();
     }
 
@@ -596,7 +596,7 @@ class EcsContainerManagerFirelensTest {
         } else {
             assertThrows(AwsException.class, () -> manager.startTask(
                     task(), retryTaskDefinition("fluentbit", false, ""), null, "us-east-1"));
-            verify(lifecycleManager, never()).create(any());
+            verify(lifecycleManager, never()).create(any(), any());
             verifyFirelensVolumeRemoved();
         }
     }
@@ -610,9 +610,9 @@ class EcsContainerManagerFirelensTest {
     }
 
     private void verifyFailedLaunchCleanup() {
-        verify(lifecycleManager).create(any());
+        verify(lifecycleManager).create(any(), any());
         verify(lifecycleManager, never()).startCreated(anyString(), any());
-        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
         verify(lifecycleManager).removeIfExists("router-id");
         verifyFirelensVolumeRemoved();
     }

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambda;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.lambdamicrovms.LambdaMicrovmsService;
 import jakarta.inject.Inject;
@@ -50,8 +51,7 @@ public class LambdaTagController {
      * the ARN's resource type. The region comes from the ARN itself.
      */
     private static String arnRegion(String arn) {
-        String[] parts = arn.split(":"); // partition-literal: Lambda reads the fourth field of any tag target, ARN or not
-        return parts.length > 3 ? parts[3] : "";
+        return AwsArnUtils.parse(arn).region();
     }
 
     @GET

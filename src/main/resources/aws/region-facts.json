@@ -1,9 +1,10 @@
 {
   "_source": {
     "generator": "tools/aws/regen_region_facts.py",
+    "rds": "https://docs.aws.amazon.com/cli/v1/reference/rds/describe-db-instances.html",
     "terraform": "terraform-provider-aws internal/service/elb/hosted_zone_id_data_source.go, internal/service/elbv2/hosted_zone_id_data_source.go, internal/service/s3/hosted_zones.go, internal/conns/awsclient.go",
     "cdk": "aws-cdk packages/aws-cdk-lib/region-info/build-tools/fact-tables.ts, packages/aws-cdk-lib/aws-route53-targets/lib/cloudfront-target.ts, packages/aws-cdk-lib/aws-ec2/lib/vpc-endpoint.ts",
-    "docs": "aws-docs/partition-guides (snapshots of the China and GovCloud user guides) cn/cloudfront.md, cn/console.md, gov/configure-account.md, gov/govcloud-abp.md, gov/govcloud-organizations.md",
+    "docs": "aws-docs/partition-guides (snapshots of AWS guides and CLI examples) cn/cloudfront.md, cn/console.md, gov/configure-account.md, gov/govcloud-abp.md, gov/govcloud-organizations.md, rds/describe-db-instances.txt",
     "botocore": "botocore cloudfront/2020-05-31/service-2.json (Distribution$DomainName, DistributionSummary$DomainName)",
     "s3WebsiteConflicts": "terraform wins over the CDK where they disagree (it cites the S3 website-endpoint table)"
   },
@@ -377,7 +378,8 @@
       "albHostedZoneId": "Z35SXDOTRQ7X7K",
       "classicElbHostedZoneId": "Z35SXDOTRQ7X7K",
       "nlbHostedZoneId": "Z26RNL4JYFTOTI",
-      "s3WebsiteHostedZoneId": "Z3AQBSTGFYJSTF"
+      "s3WebsiteHostedZoneId": "Z3AQBSTGFYJSTF",
+      "rdsHostedZoneId": "Z2R2ITUGPM61AM"
     },
     "us-east-2": {
       "albHostedZoneId": "Z3AADJGX6KTTL2",

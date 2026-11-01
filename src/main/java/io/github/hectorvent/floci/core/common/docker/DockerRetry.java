@@ -5,6 +5,8 @@ import org.jboss.logging.Logger;
 import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.net.SocketTimeoutException;
+import java.nio.file.AccessDeniedException;
+import java.nio.file.NoSuchFileException;
 import java.util.Locale;
 
 /**
@@ -129,9 +131,14 @@ public final class DockerRetry {
      * file or directory}), as when Floci runs without a mounted docker socket, or that this
      * process may not open it ({@code Permission denied}). A retry cannot create the file or
      * change the process's permissions, so retrying only delays the failure: six attempts held
-     * Floci's startup, and each docker call of its shutdown, for about 15 seconds.
+     * Floci's startup, and each docker call of its shutdown, for about 15 seconds. A Windows named
+     * pipe reports the same two cases as {@link NoSuchFileException} and {@link AccessDeniedException},
+     * whose message is only the pipe's name.
      */
     private static boolean isUnusableSocket(Throwable t) {
+        if (t instanceof NoSuchFileException || t instanceof AccessDeniedException) {
+            return true;
+        }
         String m = t.getMessage();
         if (m == null) {
             return false;

@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_emr_serverless_shapes.py",
-    "botocore": "botocore 1.43.113 (installed package)"
+    "botocore": "botocore 1.43.118 (local/aws/botocore)"
   },
   "operations": {
     "CancelJobRun": "CancelJobRunRequest",

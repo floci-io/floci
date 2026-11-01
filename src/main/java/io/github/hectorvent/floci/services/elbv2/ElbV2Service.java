@@ -405,6 +405,10 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         return loadBalancers.getOrDefault(region, Map.of()).get(arn);
     }
 
+    Listener getListener(String region, String arn) {
+        return listeners.getOrDefault(region, Map.of()).get(arn);
+    }
+
     /** Capacity reservation status for a load balancer. All fields are {@code null} when no
      *  capacity is reserved, which is always the case in Floci (capacity cannot be reserved). */
     public record CapacityReservation(Integer decreaseRequestsRemaining,
@@ -684,12 +688,16 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         List<Listener> result = new ArrayList<>(regionListeners.values());
 
         if (lbArn != null && !lbArn.isEmpty()) {
+            requireLoadBalancer(region, lbArn);
             result = result.stream()
                     .filter(l -> l.getLoadBalancerArn().equals(lbArn))
                     .collect(Collectors.toList());
         }
         if (listenerArns != null && !listenerArns.isEmpty()) {
             Set<String> arnSet = new HashSet<>(listenerArns);
+            for (String arn : arnSet) {
+                requireListener(region, arn);
+            }
             result = result.stream().filter(l -> arnSet.contains(l.getListenerArn())).collect(Collectors.toList());
         }
         return result;
@@ -702,8 +710,31 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     public void modifyListenerAttributes(String region, String arn, Map<String, String> newAttrs) {
         Listener listener = requireListener(region, arn);
+        validateListenerAttributes(newAttrs);
         listener.getAttributes().putAll(newAttrs);
         persistRegion(listeners, region);
+    }
+
+    private void validateListenerAttributes(Map<String, String> newAttrs) {
+        if (newAttrs == null) {
+            return;
+        }
+        for (Map.Entry<String, String> entry : newAttrs.entrySet()) {
+            if (ElbV2DataPlane.TCP_IDLE_TIMEOUT_ATTRIBUTE.equals(entry.getKey())) {
+                String value = entry.getValue();
+                long seconds = -1;
+                try {
+                    seconds = Long.parseLong(value != null ? value.trim() : "");
+                } catch (NumberFormatException ignored) {
+                    // Handled by range check below
+                }
+                if (seconds < ElbV2DataPlane.MIN_TCP_IDLE_TIMEOUT_SECONDS
+                        || seconds > ElbV2DataPlane.MAX_TCP_IDLE_TIMEOUT_SECONDS) {
+                    throw new AwsException("InvalidConfigurationRequest",
+                            "The attribute 'tcp.idle_timeout.seconds' must be between 60 and 6000", 400);
+                }
+            }
+        }
     }
 
     public void deleteListener(String region, String listenerArn) {

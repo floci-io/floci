@@ -1,12 +1,8 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
-import io.github.hectorvent.floci.services.lambda.model.InvocationType;
-import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
@@ -14,19 +10,13 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CopyOnWriteArrayList;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.fail;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.when;
 
 /**
  * Every request CloudFormation sends a custom resource carries the {@code StackId} of the stack that
@@ -43,8 +33,7 @@ class CloudFormationCustomResourceStackIdIntegrationTest {
     private static final String SERVICE_TOKEN =
             "arn:aws:lambda:us-east-1:000000000000:function:stack-id-probe";
 
-    private final ObjectMapper mapper = new ObjectMapper();
-    private final List<JsonNode> events = new CopyOnWriteArrayList<>();
+    private CustomResourceProbe probe;
 
     @InjectMock
     LambdaService lambdaService;
@@ -56,13 +45,8 @@ class CloudFormationCustomResourceStackIdIntegrationTest {
 
     @BeforeEach
     void stubHandler() {
-        when(lambdaService.invoke(any(), eq(SERVICE_TOKEN), any(), eq(InvocationType.RequestResponse)))
-                .thenAnswer(inv -> {
-                    JsonNode event = mapper.readTree((byte[]) inv.getArgument(2));
-                    events.add(event);
-                    putResponse(event);
-                    return new InvokeResult(200, null, "null".getBytes(StandardCharsets.UTF_8), null, "req-1");
-                });
+        probe = CustomResourceProbe.stub(lambdaService, SERVICE_TOKEN, "stack-id-probe")
+                .data(event -> Map.of("EventStackId", event.get("StackId").asText()));
     }
 
     @Test
@@ -83,13 +67,13 @@ class CloudFormationCustomResourceStackIdIntegrationTest {
         awaitStackStatus(stackId, "DELETE_COMPLETE");
 
         assertEquals(List.of("Create", "Update", "Delete"),
-                events.stream().map(e -> e.get("RequestType").asText()).toList());
-        for (JsonNode event : events) {
+                probe.events().stream().map(e -> e.get("RequestType").asText()).toList());
+        for (JsonNode event : probe.events()) {
             assertEquals(stackId, event.get("StackId").asText(), event.toString());
         }
         // What a handler compares: the property built from Ref AWS::StackId against the event.
-        assertEquals(events.get(0).get("StackId").asText(),
-                events.get(0).get("ResourceProperties").get("OwningStackArn").asText());
+        assertEquals(probe.events().get(0).get("StackId").asText(),
+                probe.events().get(0).get("ResourceProperties").get("OwningStackArn").asText());
     }
 
     @Test
@@ -123,8 +107,8 @@ class CloudFormationCustomResourceStackIdIntegrationTest {
         assertEquals(childStackId, outputValue(parent, "ChildEventStackId"));
         String child = awaitStackStatus(childStackId, "CREATE_COMPLETE");
         assertEquals(childStackId, outputValue(child, "RefStackId"));
-        assertEquals(1, events.size());
-        assertEquals(childStackId, events.get(0).get("StackId").asText());
+        assertEquals(1, probe.events().size());
+        assertEquals(childStackId, probe.events().get(0).get("StackId").asText());
     }
 
     private static String probeTemplate(String revision) {
@@ -146,19 +130,6 @@ class CloudFormationCustomResourceStackIdIntegrationTest {
                   }
                 }
                 """.formatted(SERVICE_TOKEN, revision);
-    }
-
-    /** Answers the request the way a handler does: a PUT of its result document to ResponseURL. */
-    private void putResponse(JsonNode event) {
-        ObjectNode response = mapper.createObjectNode();
-        response.put("Status", "SUCCESS");
-        response.put("RequestId", event.get("RequestId").asText());
-        response.put("StackId", event.get("StackId").asText());
-        response.put("LogicalResourceId", event.get("LogicalResourceId").asText());
-        response.put("PhysicalResourceId", "stack-id-probe");
-        response.putObject("Data").put("EventStackId", event.get("StackId").asText());
-        String path = URI.create(event.get("ResponseURL").asText()).getPath();
-        given().body(response.toString()).when().put(path).then().statusCode(200);
     }
 
     private static String createStack(String stackName, String template) {

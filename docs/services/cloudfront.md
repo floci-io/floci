@@ -238,6 +238,16 @@ PUT, PATCH and DELETE).
   so a large object is never held in memory. A custom origin's `Content-Length` is passed on, and a
   response it sends chunked stays chunked. Floci does not cache, so it serves objects larger than
   50 GB the way CloudFront does with caching disabled; with caching enabled, CloudFront refuses them.
+- WebSocket connections to custom origins are tunneled on every distribution, with no setting, as on
+  AWS. An HTTP/1.1 GET with `Upgrade: websocket` and `Connection: Upgrade` goes to the origin the
+  matched behavior selects with its `Upgrade` and `Connection` fields, and once the origin answers
+  `101 Switching Protocols` the viewer and origin connections are joined. Any other origin answer is
+  relayed as an ordinary response, without custom error responses or a response headers policy,
+  within the origin's response and response completion timeouts. The
+  `Sec-WebSocket-*` fields follow the behavior's forwarding settings as any other header does, so the
+  behavior must forward all viewer headers (the `AllViewer` origin request policy, or legacy cache
+  settings) or at least `Sec-WebSocket-Key` and `Sec-WebSocket-Version`. A WebSocket handshake to an
+  S3 origin is served as an ordinary GET.
 - Range GETs: an S3 origin serves the one byte range a viewer's `Range` asks for as 206 with its
   `Content-Range`, and answers 416 when the range starts past the end of the object. Any other
   `Range` gets the whole object: one CloudFront does not accept (ranges out of order or overlapping,
@@ -265,6 +275,14 @@ PUT, PATCH and DELETE).
   keeps a connection to the origin after the last packet of a response. An origin that does not
   answer in time is answered 504, "The origin didn't respond before the request expired", as on AWS.
 - Custom origins that resolve to loopback, private, link-local, carrier-grade NAT, or other non-routable addresses are rejected by default. Development-only private origins must be explicitly allowlisted by exact hostname.
+  A refused origin is logged with the host and the setting that allows it.
+- A custom origin that names this Floci itself, as `localhost`, `127.0.0.1`, `::1` or the configured
+  `floci.hostname`, on a port Floci listens on (its own port, or `floci.tls.aws-https-port` with TLS on)
+  for the protocol the request uses, is served by Floci itself, so neither DNS nor the private address check applies. This is the usual local setup for a
+  single-page app: a path-style S3 bucket as the origin path, fronted by the distribution's custom error
+  responses. The request reaches Floci with the origin's domain as its `Host`, and dot segments cannot
+  leave the origin path. A forwarded viewer `Host` is a 502, since it would route the request back to the
+  distribution. The same hosts on any other port are still refused unless allowlisted.
 - A custom origin whose domain is an execute-api endpoint (`{apiId}.execute-api.{region}.amazonaws.com`) of an
   HTTP or REST API that exists in this Floci is served by Floci itself, at the address the viewer reached,
   through the same host routing as a direct call. The origin path names the stage, as on AWS. Neither DNS nor
@@ -301,6 +319,9 @@ PUT, PATCH and DELETE).
 - `ViewerCertificate.IAMCertificateId` must be the `ServerCertificateId` of an uploaded IAM server
   certificate: distribution create and update reject an unknown one with `InvalidViewerCertificate`,
   and `DeleteServerCertificate` returns `DeleteConflict` while a distribution references it.
+- `ViewerCertificate.ACMCertificateArn` must name an existing ACM certificate: distribution create and
+  update reject an unknown one with `InvalidViewerCertificate`. ACM lists the distribution's ARN under
+  `InUseBy`, and `DeleteCertificate` returns `ResourceInUseException` while a distribution references it.
 - Up to 20 custom response headers policies can be created, and one policy can be associated with
   up to 100 distributions.
 - The five AWS managed response headers policy IDs are available and can be selected with

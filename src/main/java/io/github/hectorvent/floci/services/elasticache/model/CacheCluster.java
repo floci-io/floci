@@ -15,6 +15,8 @@ public class CacheCluster {
     private CacheClusterStatus cacheClusterStatus;
     private String engine;
     private String engineVersion;
+    // null on records persisted before the field existed; AWS defaults it to true
+    private Boolean autoMinorVersionUpgrade;
     private Endpoint configurationEndpoint;
     private Instant cacheClusterCreateTime;
     private String cacheNodeType;
@@ -68,6 +70,9 @@ public class CacheCluster {
 
     public String getEngineVersion() { return engineVersion; }
     public void setEngineVersion(String engineVersion) { this.engineVersion = engineVersion; }
+
+    public boolean isAutoMinorVersionUpgrade() { return autoMinorVersionUpgrade == null || autoMinorVersionUpgrade; }
+    public void setAutoMinorVersionUpgrade(Boolean autoMinorVersionUpgrade) { this.autoMinorVersionUpgrade = autoMinorVersionUpgrade; }
 
     public Endpoint getConfigurationEndpoint() { return configurationEndpoint; }
     public void setConfigurationEndpoint(Endpoint configurationEndpoint) { this.configurationEndpoint = configurationEndpoint; }

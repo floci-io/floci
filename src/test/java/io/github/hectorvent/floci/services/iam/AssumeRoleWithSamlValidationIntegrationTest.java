@@ -1,8 +1,13 @@
 package io.github.hectorvent.floci.services.iam;
 
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.testing.AwsTestClients;
+import io.github.hectorvent.floci.testing.SamlMetadata;
+import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
@@ -13,6 +18,13 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
+import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.iam.IamClient;
+import software.amazon.awssdk.services.iam.model.IamException;
+import software.amazon.awssdk.services.sts.StsClient;
+import software.amazon.awssdk.services.sts.model.AssumeRoleWithSamlResponse;
+import software.amazon.awssdk.services.sts.model.StsException;
 
 import javax.xml.crypto.dsig.CanonicalizationMethod;
 import javax.xml.crypto.dsig.DigestMethod;
@@ -34,22 +46,31 @@ import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
 import java.io.StringWriter;
 import java.math.BigInteger;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.Security;
 import java.security.cert.X509Certificate;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Date;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.function.Function;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class AssumeRoleWithSamlValidationIntegrationTest {
@@ -59,6 +80,15 @@ class AssumeRoleWithSamlValidationIntegrationTest {
     private static final String PROVIDER = "arn:aws:iam::" + ACCOUNT + ":saml-provider/" + PROVIDER_NAME;
     private static final String AUDIENCE = "urn:amazon:webservices";
     private static final String SAML_NS = "urn:oasis:names:tc:SAML:2.0:assertion";
+    @TestHTTPResource
+    URI endpoint;
+
+    @Inject
+    IamService iamService;
+
+    @Inject
+    SAMLProviderService samlProviders;
+
     private static KeyPair signingKeys;
     private static String certificateBase64;
     private static boolean providerRegistered;
@@ -207,9 +237,7 @@ class AssumeRoleWithSamlValidationIntegrationTest {
 
     @Test
     void duplicateProviderCreationIsRejected() {
-        String metadata = "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\""
-                + ISSUER + "\"><md:IDPSSODescriptor><md:KeyDescriptor use=\"signing\"><ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data><ds:X509Certificate>"
-                + certificateBase64 + "</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor></md:IDPSSODescriptor></md:EntityDescriptor>";
+        String metadata = SamlMetadata.forEntity(ISSUER, certificateBase64);
         given().contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "CreateSAMLProvider").formParam("Name", PROVIDER_NAME)
                 .formParam("SAMLMetadataDocument", metadata)
@@ -251,6 +279,184 @@ class AssumeRoleWithSamlValidationIntegrationTest {
                 .body("GetCallerIdentityResponse.GetCallerIdentityResult.UserId", equalTo(assumedRoleId));
     }
 
+    @Test
+    void samlDurationAboveRoleMaximumIsRejected() {
+        try (DurationFixture fixture = new DurationFixture(3600)) {
+            StsException error = assertThrows(StsException.class,
+                    () -> fixture.assume(3601, Instant.now().plusSeconds(7200), true));
+            assertEquals("ValidationError", error.awsErrorDetails().errorCode());
+            assertEquals(400, error.statusCode());
+        }
+    }
+
+    @Test
+    void samlShortAssertionDoesNotBypassRoleMaximum() {
+        try (DurationFixture fixture = new DurationFixture(3600)) {
+            StsException error = assertThrows(StsException.class,
+                    () -> fixture.assume(7200, Instant.now().plusSeconds(300), true));
+            assertEquals("ValidationError", error.awsErrorDetails().errorCode());
+        }
+    }
+
+    @Test
+    void samlDurationAtRoleMaximumRetainsRequestedExpiration() {
+        try (DurationFixture fixture = new DurationFixture(7200)) {
+            Instant before = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+            AssumeRoleWithSamlResponse result = fixture.assume(7200, before.plusSeconds(10000), true);
+            assertTrue(!result.credentials().expiration().isBefore(before.plusSeconds(7200)));
+            assertTrue(!result.credentials().expiration().isAfter(Instant.now().plusSeconds(7200)));
+        }
+    }
+
+    @Test
+    void samlValidDurationStillUsesShorterAssertionExpiration() {
+        try (DurationFixture fixture = new DurationFixture(7200)) {
+            Instant expiry = Instant.now().plusSeconds(300).truncatedTo(ChronoUnit.MILLIS);
+            AssumeRoleWithSamlResponse result = fixture.assume(7200, expiry, true);
+            assertEquals(expiry, result.credentials().expiration());
+        }
+    }
+
+    @Test
+    void samlInvalidSignaturePrecedesRoleDurationValidation() {
+        try (DurationFixture fixture = new DurationFixture(3600)) {
+            StsException error = assertThrows(StsException.class,
+                    () -> fixture.assume(7200, Instant.now().plusSeconds(300), false));
+            assertEquals("InvalidIdentityToken", error.awsErrorDetails().errorCode());
+        }
+    }
+
+    @Test
+    void samlDurationFixtureCleansProviderAfterConstructionFailure() {
+        List<String> providers = new ArrayList<>();
+        IllegalStateException original = new IllegalStateException("before role creation");
+        IllegalStateException caught = assertThrows(IllegalStateException.class,
+                () -> new DurationFixture(3600, provider -> {
+                    providers.add(provider);
+                    throw original;
+                }));
+        assertSame(original, caught);
+        assertEquals(0, caught.getSuppressed().length);
+        assertEquals(1, providers.size());
+        assertTrue(samlProviders.find(providers.getFirst()).isEmpty());
+    }
+
+    @Test
+    void samlDurationFixturePreservesConstructionFailureWhenCleanupFails() {
+        List<String> providers = new ArrayList<>();
+        IllegalStateException original = new IllegalStateException("before role creation");
+        IllegalStateException caught = assertThrows(IllegalStateException.class,
+                () -> new DurationFixture(3600, provider -> {
+                    providers.add(provider);
+                    samlProviders.delete(ACCOUNT, provider);
+                    throw original;
+                }));
+        assertSame(original, caught);
+        assertEquals(1, caught.getSuppressed().length);
+        IamException cleanup = assertInstanceOf(IamException.class, caught.getSuppressed()[0]);
+        assertEquals("NoSuchEntity", cleanup.awsErrorDetails().errorCode());
+        assertEquals(1, providers.size());
+        assertTrue(samlProviders.find(providers.getFirst()).isEmpty());
+    }
+
+    private final class DurationFixture implements AutoCloseable {
+        private final IamClient client;
+        private final StsClient sts;
+        private final String name = "saml-duration-" + UUID.randomUUID();
+        private final List<String> sessions = new ArrayList<>();
+        private String providerArn;
+        private String roleArn;
+
+        private DurationFixture(int maximum) {
+            this(maximum, provider -> assertTrue(samlProviders.find(provider).isPresent()));
+        }
+
+        private DurationFixture(int maximum, Consumer<String> providerCreated) {
+            client = AwsTestClients.create(IamClient.builder(), ACCOUNT, Region.US_EAST_1, endpoint);
+            try {
+                sts = StsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
+                        .credentialsProvider(AnonymousCredentialsProvider.create()).build();
+                String metadata = SamlMetadata.forEntity(ISSUER, certificateBase64);
+                providerArn = client.createSAMLProvider(b -> b.name(name).samlMetadataDocument(metadata))
+                        .samlProviderArn();
+                providerCreated.accept(providerArn);
+                String trust = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                        + "\"Principal\":{\"Federated\":\"" + providerArn
+                        + "\"},\"Action\":\"sts:AssumeRoleWithSAML\"}]}";
+                roleArn = client.createRole(b -> b.roleName(name).assumeRolePolicyDocument(trust)
+                        .maxSessionDuration(maximum)).role().arn();
+            } catch (RuntimeException | Error failure) {
+                try {
+                    close();
+                } catch (RuntimeException | Error cleanup) {
+                    if (cleanup != failure) {
+                        failure.addSuppressed(cleanup);
+                    }
+                }
+                throw failure;
+            }
+        }
+
+        private AssumeRoleWithSamlResponse assume(int duration, Instant expiry, boolean sign) {
+            AssumeRoleWithSamlResponse response = sts.assumeRoleWithSAML(b -> b.roleArn(roleArn)
+                    .principalArn(providerArn).durationSeconds(duration)
+                    .samlAssertion(assertion(roleArn, providerArn, expiry, AUDIENCE, ISSUER, sign)));
+            sessions.add(response.credentials().accessKeyId());
+            return response;
+        }
+
+        @Override
+        public void close() {
+            try {
+                for (String key : sessions.reversed()) {
+                    iamService.unregisterSession(ACCOUNT, key);
+                    assertTrue(iamService.resolveCallerArns(key).isEmpty());
+                }
+            } finally {
+                try {
+                    if (roleArn != null) {
+                        client.deleteRole(b -> b.roleName(name));
+                        assertTrue(iamService.findRole(ACCOUNT, name).isEmpty());
+                    }
+                } finally {
+                    try {
+                        if (providerArn != null) {
+                            client.deleteSAMLProvider(b -> b.samlProviderArn(providerArn));
+                            assertTrue(samlProviders.find(providerArn).isEmpty());
+                        }
+                    } finally {
+                        try {
+                            if (sts != null) {
+                                sts.close();
+                            }
+                        } finally {
+                            client.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * The session token is as long as the request's {@code MinimumSessionTokenSize} asks for, which
+     * this operation models and now answers with the five others that do. It is pinned here rather
+     * than beside them because a token is minted only once the assertion verifies, which wants the
+     * signing fixture this class already has.
+     */
+    @Test
+    void theSessionTokenIsAsLongAsTheRequestAsksFor() {
+        String role = createRole(true);
+        String assertion = assertion(role, PROVIDER, Instant.now().plusSeconds(300), AUDIENCE, ISSUER, true);
+
+        String token = assumeRequest(role, assertion, PROVIDER)
+                .formParam("MinimumSessionTokenSize", "1024")
+                .when().post("/").then().statusCode(200)
+                .extract().path("AssumeRoleWithSAMLResponse.AssumeRoleWithSAMLResult.Credentials.SessionToken");
+
+        assertEquals(1024, token.length());
+    }
+
     private static void assertSignatureInvalid(Function<XMLSignatureFactory, List<Transform>> transforms) {
         String role = createRole(true);
         assume(role, assertion(role, PROVIDER, Instant.now().plusSeconds(300), AUDIENCE, ISSUER, true, false, transforms),
@@ -273,13 +479,17 @@ class AssumeRoleWithSamlValidationIntegrationTest {
     }
 
     private static ValidatableResponse assume(String role, String assertion, String provider) {
+        return assumeRequest(role, assertion, provider).when().post("/").then();
+    }
+
+    /** The request every case here posts, for a case that carries a member of its own on top. */
+    private static RequestSpecification assumeRequest(String role, String assertion, String provider) {
         return given().contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "AssumeRoleWithSAML")
                 .formParam("RoleArn", role)
                 .formParam("PrincipalArn", provider)
                 .formParam("SAMLAssertion", assertion)
-                .header("Authorization", auth("sts"))
-                .when().post("/").then();
+                .header("Authorization", auth("sts"));
     }
 
     private static String createRole(boolean allow) {
@@ -303,9 +513,7 @@ class AssumeRoleWithSamlValidationIntegrationTest {
     }
 
     private static void registerProvider() {
-        String metadata = "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\"" + ISSUER
-                + "\"><md:IDPSSODescriptor><md:KeyDescriptor use=\"signing\"><ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data><ds:X509Certificate>"
-                + certificateBase64 + "</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor></md:IDPSSODescriptor></md:EntityDescriptor>";
+        String metadata = SamlMetadata.forEntity(ISSUER, certificateBase64);
         given().contentType("application/x-www-form-urlencoded").formParam("Action", "CreateSAMLProvider")
                 .formParam("Name", PROVIDER_NAME).formParam("SAMLMetadataDocument", metadata)
                 .header("Authorization", auth("iam")).when().post("/").then().statusCode(200);

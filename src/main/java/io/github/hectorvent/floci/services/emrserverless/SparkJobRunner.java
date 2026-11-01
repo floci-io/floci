@@ -50,21 +50,35 @@ public interface SparkJobRunner {
     /**
      * What a run needs: the service it belongs to and its id there, which name its container; its account
      * and Region; its release, and the image template and Docker network to run it in (a null template is
-     * the release's public EMR Serverless image, a null network the global default); the execution role
-     * whose credentials it gets; the {@code spark-defaults} properties that apply to it;
+     * the release's public EMR Serverless image, a null network the global default); {@code customImage}, when
+     * not null, the image the run's application names, which it runs in place of the template's, resolved
+     * again for each run; the execution role whose credentials it gets; the {@code spark-defaults} properties
+     * that apply to it;
      * {@code application}, what follows Floci's own settings on {@code spark-submit}'s command line (the
      * run's options, then its application and that application's arguments); or {@code command}, when not
      * null, what the container runs in place of {@code spark-submit}, where a {@code spark-submit} it starts
      * gets Floci's settings and the {@code spark-defaults} as defaults (its {@code application} is then
      * empty); how long it may run
      * ({@link Duration#ZERO} for no limit); the S3 folder its driver's {@code stdout.gz} and
-     * {@code stderr.gz} go to once it ends, ending in a slash (null for none); and where in CloudWatch Logs
-     * its driver's output goes while it runs (null for nowhere but Floci's log).
+     * {@code stderr.gz} go to once it ends, ending in a slash (null for none); where in CloudWatch Logs
+     * its driver's output goes while it runs (null for nowhere but Floci's log); the environment variables
+     * its container gets besides Floci's own, which they replace where a name is the same (empty for none);
+     * its {@code spark.archives}, each a path with, after a {@code #}, the directory it is unpacked to, of
+     * which those in S3 are unpacked into the container's working directory before the driver starts (empty
+     * for none); and the storage of the cluster it runs on (null for none, as for an EMR Serverless run).
      */
     record Job(String service, String runId, String accountId, String region, String releaseLabel,
-               String imageTemplate, String dockerNetwork, String executionRole, Map<String, String> sparkDefaults,
-               List<String> application, List<String> command, Duration timeout, String logFolder,
-               CloudWatchLogs cloudWatchLogs) {
+               String imageTemplate, String customImage, String dockerNetwork, String executionRole,
+               Map<String, String> sparkDefaults, List<String> application, List<String> command, Duration timeout,
+               String logFolder, CloudWatchLogs cloudWatchLogs, Map<String, String> environment,
+               List<String> archives, Storage storage) {
+    }
+
+    /**
+     * The Docker volumes holding an EMR cluster's storage, which every one of its steps' containers mounts:
+     * {@code home} at {@code /home/hadoop}, and {@code mnt} at {@code /mnt}, where its HDFS is.
+     */
+    record Storage(String home, String mnt) {
     }
 
     /**

@@ -73,7 +73,7 @@ class StsRequestConstraintsIntegrationTest {
             .body(MESSAGE, equalTo("2 validation errors detected: Value 'bad#serial' at"
                     + " 'serialNumber' failed to satisfy constraint: Member must satisfy regular"
                     + " expression pattern: [\\w+=/:,.@-]*; Value '12345' at 'tokenCode' failed to"
-                    + " satisfy constraint: Member must have length greater than or equal to 6"));
+                    + " satisfy constraint: Member must have length equal to 6"));
 
         sts("GetSessionToken")
             .formParam("TokenCode", "abcdef")
@@ -187,7 +187,7 @@ class StsRequestConstraintsIntegrationTest {
         .when().post("/").then().statusCode(400)
             .body(MESSAGE, equalTo("1 validation error detected: Value 'HS25' at"
                     + " 'signingAlgorithm' failed to satisfy constraint: Member must have length"
-                    + " greater than or equal to 5"))
+                    + " equal to 5"))
             .body(MESSAGE, not(containsString("enum value set")));
     }
 
@@ -337,5 +337,30 @@ class StsRequestConstraintsIntegrationTest {
                     + " equal to 1; Value '' at 'tags.1.member.key' failed to satisfy constraint:"
                     + " Member must satisfy regular expression pattern:"
                     + " [\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]+"));
+    }
+
+    /**
+     * {@code arnType}'s pattern ends in a five-digit escape, the U+10000 to U+10FFFF range, which
+     * Java reads as four digits and a literal zero: compiled as written it refuses every
+     * supplementary character the model admits and admits the C1 controls it excludes. Read as the
+     * code points it spells, a {@code RoleArn} carrying an emoji is past the constraints and
+     * answered by the role lookup, and one carrying U+0081 is refused for the pattern.
+     */
+    @Test
+    void theArnPatternAdmitsTheCodePointsTheModelAdmits() {
+        sts("AssumeRole")
+            .formParam("RoleArn", "arn:aws:iam::000000000000:role/r" + Character.toString(0x1F600))
+            .formParam("RoleSessionName", "session")
+        .when().post("/").then().statusCode(403)
+            .body(CODE, equalTo("AccessDenied"))
+            .body(MESSAGE, not(containsString("regular expression pattern")));
+
+        sts("AssumeRole")
+            .formParam("RoleArn", "arn:aws:iam::000000000000:role/r" + Character.toString(0x81))
+            .formParam("RoleSessionName", "session")
+        .when().post("/").then().statusCode(400)
+            .body(CODE, equalTo("ValidationError"))
+            .body(MESSAGE, containsString("failed to satisfy constraint: Member must satisfy"
+                    + " regular expression pattern:"));
     }
 }

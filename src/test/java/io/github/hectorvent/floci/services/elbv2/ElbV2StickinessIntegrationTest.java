@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.services.elbv2;
 
-import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.testing.RealElbV2DataPlaneProfile;
 import io.github.hectorvent.floci.testutil.FreePorts;
 import io.quarkus.test.junit.QuarkusTest;
@@ -19,6 +18,11 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.github.hectorvent.floci.testing.AlbFixtures.createListener;
+import static io.github.hectorvent.floci.testing.AlbFixtures.createLoadBalancer;
+import static io.github.hectorvent.floci.testing.AlbFixtures.deleteLoadBalancer;
+import static io.github.hectorvent.floci.testing.AlbFixtures.deleteTargetGroup;
+import static io.github.hectorvent.floci.testing.AlbFixtures.registerTarget;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -48,31 +52,22 @@ class ElbV2StickinessIntegrationTest {
         first = backend("first");
         second = backend("second");
         listenerPort = FreePorts.anyInterfacePort();
-        loadBalancerArn = query("CreateLoadBalancer", "Name", "sticky-lb", "Type", "application",
-                "Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"),
-                "Subnets.member.2", Ec2Service.defaultSubnetId("us-east-1", "b"))
-                .xmlPath().getString("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+        loadBalancerArn = createLoadBalancer("sticky-lb");
         targetGroupArn = query("CreateTargetGroup", "Name", "sticky-tg", "Protocol", "HTTP",
                 "Port", first.actualPort(), "TargetType", "ip", "HealthCheckPath", "/health",
                 "HealthCheckIntervalSeconds", 1, "HealthyThresholdCount", 1, "UnhealthyThresholdCount", 1)
                 .xmlPath().getString("CreateTargetGroupResponse.CreateTargetGroupResult.TargetGroups.member.TargetGroupArn");
-        query("RegisterTargets", "TargetGroupArn", targetGroupArn,
-                "Targets.member.1.Id", "127.0.0.1", "Targets.member.1.Port", first.actualPort(),
-                "Targets.member.2.Id", "127.0.0.1", "Targets.member.2.Port", second.actualPort());
-        query("CreateListener", "LoadBalancerArn", loadBalancerArn, "Protocol", "HTTP", "Port", listenerPort,
-                "DefaultActions.member.1.Type", "forward", "DefaultActions.member.1.TargetGroupArn", targetGroupArn);
+        registerTarget(targetGroupArn, "127.0.0.1", first.actualPort());
+        registerTarget(targetGroupArn, "127.0.0.1", second.actualPort());
+        createListener(loadBalancerArn, targetGroupArn, listenerPort);
         await().atMost(Duration.ofSeconds(3)).ignoreExceptions()
                 .untilAsserted(() -> assertEquals(200, request(null).statusCode()));
     }
 
     @AfterEach
     void cleanUp() throws Exception {
-        if (loadBalancerArn != null) {
-            query("DeleteLoadBalancer", "LoadBalancerArn", loadBalancerArn);
-        }
-        if (targetGroupArn != null) {
-            query("DeleteTargetGroup", "TargetGroupArn", targetGroupArn);
-        }
+        deleteLoadBalancer(loadBalancerArn);
+        deleteTargetGroup(targetGroupArn);
         for (HttpServer backend : List.of(first, second)) {
             backend.close().toCompletionStage().toCompletableFuture().get(3, TimeUnit.SECONDS);
         }

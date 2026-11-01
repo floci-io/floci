@@ -14,16 +14,24 @@ import jakarta.ws.rs.core.MultivaluedMap;
  * <p>The violations read as IAM writes them, naming the member with no value beside it, which is
  * {@link IamValidationErrors}' reading of the captures rather than the walk's own default.
  *
- * <p>The vendored file carries a wave of operations rather than all 180, and grows a wave at a
- * time, each one chosen where no operation checks a declared constraint by hand, so the model adds
+ * <p>The vendored file carries 162 of IAM's 180 operations, which is every one the model
+ * constrains bar the two account alias operations: those answer their single member in AWS's own
+ * wording, so there is nothing left for the walk to read on them. It arrived a wave at a time,
+ * each wave chosen where no operation checked a declared constraint by hand, so the model added
  * the refusals AWS answers without rewording an answer already given. The managed-policy family
  * came first, with {@code AttachRolePolicy} and {@code DetachRolePolicy} as the exception and the
  * parity case, {@code IamService.validateRoleName} already answering {@code roleName} in the same
- * form. {@code GetAccountAuthorizationDetails} is the first read through the list walk, its
- * {@code Filter}, {@code MaxItems} and {@code Marker} having been read by nothing at all. Every
- * other paged operation follows, so {@code MaxItems} and {@code Marker} are held to the model here
- * rather than by the paging itself; six of them carry only those two members, the rest of their
- * request being answered by hand or nested past what the walk reads.
+ * form. {@code GetAccountAuthorizationDetails} was the first read through the list walk, its
+ * {@code Filter}, {@code MaxItems} and {@code Marker} having been read by nothing at all, and the
+ * last wave took the operations whose requests nest a map or a list deeper than the walk read:
+ * {@code AcquireRole}, {@code PutAccountProperties}, {@code CreateDelegationRequest} and both
+ * simulators. {@code MaxItems} and {@code Marker} are held to the model here rather than by the
+ * paging itself, for every paged operation.
+ *
+ * <p>Two hand-written checks answered a map before this read one, and the answers they gave are
+ * the answers it gives: an entry's value is named under the key the entry carried, and a key
+ * outside its shape's rules carries the whole set the shape declares. {@code docs/services/iam.md}
+ * records what moved with them and what did not.
  */
 final class IamRequestShapes {
 

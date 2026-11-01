@@ -7,6 +7,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.math.BigDecimal;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.function.Consumer;
 
 /**
  * DynamoDB number validation and normalization.
@@ -17,8 +20,63 @@ final class DynamoDbNumberUtils {
 
     private static final BigDecimal MAX_ABS = new BigDecimal("1E+126");
     private static final BigDecimal MIN_ABS_NONZERO = new BigDecimal("1E-130");
+    static final String NUMBER_OVERFLOW =
+            "Number overflow. Attempting to store a number with magnitude larger than supported range";
+    static final String NUMBER_UNDERFLOW =
+            "Number underflow. Attempting to store a number with magnitude smaller than supported range";
+    static final String TOO_MANY_DIGITS = "Attempting to store more than 38 significant digits in a Number";
+    static final String PARAMETER_NOT_NUMERIC = "The parameter cannot be converted to a numeric value";
 
     private DynamoDbNumberUtils() {}
+
+    // DynamoDB measures a PartiQL number in 32-bit arithmetic, so an exponent near the limit wraps
+    // around and reads as an underflow.
+    static String partiQLNumberProblem(BigDecimal number) {
+        int magnitude = number.precision() - number.scale() + 1;
+        if (127 < magnitude) {
+            return NUMBER_OVERFLOW;
+        }
+        if (magnitude < -128) {
+            return NUMBER_UNDERFLOW;
+        }
+        if (38 < number.stripTrailingZeros().precision()) {
+            return TOO_MANY_DIGITS;
+        }
+        return null;
+    }
+
+    // DynamoDB reads a PartiQL parameter as BigDecimal does, but only with an exponent that fits in
+    // an int. Unlike a literal, the parameter is not rounded to 38 digits.
+    static BigDecimal requirePartiQLParameterNumber(String text) {
+        if (text.isEmpty()) {
+            throw new AwsException("ValidationException", PARAMETER_NOT_NUMERIC, 400);
+        }
+        BigDecimal number;
+        try {
+            int exponent = Math.max(text.indexOf('e'), text.indexOf('E'));
+            if (0 <= exponent) {
+                Integer.parseInt(text.substring(exponent + 1));
+            }
+            number = new BigDecimal(text);
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationException", PARAMETER_NOT_NUMERIC + ": " + text, 400);
+        }
+        String problem = partiQLNumberProblem(number);
+        if (problem != null) {
+            throw new AwsException("ValidationException", problem, 400);
+        }
+        return number;
+    }
+
+    // Members are equal by value here, so 1 and 1.0 are duplicates.
+    static void requirePartiQLParameterNumberSet(JsonNode members) {
+        Set<BigDecimal> seen = new TreeSet<>();
+        for (JsonNode member : members) {
+            if (!seen.add(requirePartiQLParameterNumber(member.asText()))) {
+                throw new AwsException("ValidationException", "Input collection contains duplicates", 400);
+            }
+        }
+    }
 
     /**
      * Validates and normalizes a DynamoDB number string.
@@ -64,57 +122,61 @@ final class DynamoDbNumberUtils {
         return toNormalizedString(stripped);
     }
 
-    // AWS checks every number in a request before the table lookup. Single-item write
-    // APIs wrap the error in the validation envelope, Query and Scan do not.
-    static void requireStorable(JsonNode attributes, boolean inValidationEnvelope) {
-        if (attributes == null || !attributes.isObject()) {
-            return;
-        }
-        for (JsonNode value : attributes) {
-            requireStorableValue(value, inValidationEnvelope ? "1 validation error detected: " : "");
-        }
-    }
-
-    private static void requireStorableValue(JsonNode value, String prefix) {
-        if (!value.isObject()) {
-            return;
-        }
-        if (value.has("N")) {
-            requireStorableNumber(value.get("N").asText(), prefix);
-        }
-        for (JsonNode n : value.path("NS")) {
-            requireStorableNumber(n.asText(), prefix);
-        }
-        for (JsonNode element : value.path("L")) {
-            requireStorableValue(element, prefix);
-        }
-        for (JsonNode entry : value.path("M")) {
-            requireStorableValue(entry, prefix);
+    static void forEachNumber(JsonNode values, Consumer<String> check) {
+        for (JsonNode value : values) {
+            JsonNode number = value.get("N");
+            if (number != null && number.isTextual()) {
+                check.accept(number.asText());
+            }
+            for (JsonNode member : value.path("NS")) {
+                if (member.isTextual()) {
+                    check.accept(member.asText());
+                }
+            }
+            forEachNumber(value.path("L"), check);
+            forEachNumber(value.path("M"), check);
         }
     }
 
-    private static void requireStorableNumber(String numStr, String prefix) {
-        BigDecimal bd;
+    static void requireItemNumber(String text, String prefix) {
+        String problem = itemNumberProblem(text);
+        if (problem != null) {
+            throw new AwsException("ValidationException", prefix + problem, 400);
+        }
+    }
+
+    // An item call reads the exponent as a long and checks the range without wrapping around,
+    // unlike a PartiQL parameter. It counts the digits before it checks the range.
+    private static String itemNumberProblem(String text) {
+        int marker = exponentMarker(text);
+        BigDecimal mantissa;
+        long exponent;
         try {
-            bd = new BigDecimal(numStr);
+            mantissa = new BigDecimal(marker < 0 ? text : text.substring(0, marker));
+            exponent = marker < 0 ? 0 : Long.parseLong(text.substring(marker + 1));
         } catch (NumberFormatException e) {
-            throw new AwsException("ValidationException",
-                    "The parameter cannot be converted to a numeric value: " + numStr, 400);
+            return PARAMETER_NOT_NUMERIC + ": " + text;
         }
-        BigDecimal stripped = bd.stripTrailingZeros();
-        if (stripped.precision() > 38) {
-            throw new AwsException("ValidationException",
-                    prefix + "Attempting to store more than 38 significant digits in a Number", 400);
+        if (38 < mantissa.stripTrailingZeros().precision()) {
+            return TOO_MANY_DIGITS;
         }
-        BigDecimal abs = stripped.abs();
-        if (abs.compareTo(MAX_ABS) >= 0) {
-            throw new AwsException("ValidationException",
-                    prefix + "Number overflow. Attempting to store a number with magnitude larger than supported range", 400);
+        long magnitude = (long) mantissa.precision() - mantissa.scale() + 1;
+        if (127 - magnitude < exponent) {
+            return NUMBER_OVERFLOW;
         }
-        if (abs.signum() > 0 && abs.compareTo(MIN_ABS_NONZERO) < 0) {
-            throw new AwsException("ValidationException",
-                    prefix + "Number underflow. Attempting to store a number with magnitude smaller than supported range", 400);
+        if (exponent < -128 - magnitude) {
+            return NUMBER_UNDERFLOW;
         }
+        return null;
+    }
+
+    private static int exponentMarker(String text) {
+        int lower = text.indexOf('e');
+        int upper = text.indexOf('E');
+        if (lower < 0 || upper < 0) {
+            return Math.max(lower, upper);
+        }
+        return Math.min(lower, upper);
     }
 
     // AWS answers with the overflow wording for any arithmetic result it cannot store,
@@ -124,8 +186,7 @@ final class DynamoDbNumberUtils {
         BigDecimal abs = stripped.abs();
         if (stripped.precision() > 38 || abs.compareTo(MAX_ABS) >= 0
                 || (abs.signum() > 0 && abs.compareTo(MIN_ABS_NONZERO) < 0)) {
-            throw new AwsException("ValidationException",
-                    "Number overflow. Attempting to store a number with magnitude larger than supported range", 400);
+            throw new AwsException("ValidationException", NUMBER_OVERFLOW, 400);
         }
     }
 

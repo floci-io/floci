@@ -59,9 +59,9 @@ class EcsContainerManagerSecretsTest {
         when(containerBuilder.resolveImage(anyString())).thenAnswer(invocation -> invocation.getArgument(0));
 
         lifecycleManager = mock(ContainerLifecycleManager.class);
-        when(lifecycleManager.resolveImageForLaunch(any(), any()))
+        when(lifecycleManager.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(lifecycleManager.createAndStartEphemeral(any()))
+        when(lifecycleManager.createAndStartEphemeral(any(), any()))
                 .thenReturn(new ContainerInfo("docker-id", Map.of()));
 
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
@@ -187,7 +187,7 @@ class EcsContainerManagerSecretsTest {
         assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
         assertTrue(thrown.getMessage().contains("/missing"));
         verify(containerBuilder, never()).newContainer(anyString());
-        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
     }
 
     @Test
@@ -207,7 +207,7 @@ class EcsContainerManagerSecretsTest {
         assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
         assertTrue(thrown.getMessage().contains(secretArn));
         verify(containerBuilder, never()).newContainer(anyString());
-        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
     }
 
     @Test
@@ -273,7 +273,7 @@ class EcsContainerManagerSecretsTest {
 
         assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
         assertTrue(thrown.getMessage().contains("did not contain json key token"));
-        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
     }
 
     @Test
@@ -305,7 +305,7 @@ class EcsContainerManagerSecretsTest {
         assertTrue(thrown.getMessage().contains("ResourceInitializationError"));
         assertTrue(thrown.getMessage().contains(
                 "an invalid ARN format for the AWS Secrets Manager secret was specified"));
-        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
     }
 
     private static ContainerDefinition containerDef(String name, List<Secret> secrets) {

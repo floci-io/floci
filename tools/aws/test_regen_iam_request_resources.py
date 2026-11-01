@@ -179,6 +179,7 @@ def corrections(monkeypatch):
     monkeypatch.setattr(r, "CORRECTIONS", {})
     monkeypatch.setattr(r, "UNQUALIFIED", {})
     monkeypatch.setattr(r, "MINTED_IDS", {})
+    monkeypatch.setattr(r, "FOUND_BY", {})
     monkeypatch.setattr(r, "CLIENTS_NOT_READ", {})
     return monkeypatch
 
@@ -257,6 +258,31 @@ def test_a_type_whose_service_mints_an_id_after_its_name_is_recorded_and_must_be
     corrections.setattr(r, "MINTED_IDS", {"svc:gone": "no longer there"})
     with pytest.raises(ValueError, match="svc:gone"):
         r.build(DOCUMENTS, "test", tmp_path, "botocore test")
+
+
+def test_a_type_whose_arn_is_all_an_id_its_service_mints_is_found_by_the_members_naming_it(corrections, tmp_path):
+    documents = [reference("svc", {"PutTarget": ["target"], "TagTarget": ["target"], "GetByResource": ["target"]},
+                           {"target": "arn:${Partition}:svc:${Region}:${Account}:target/${ResourceId}"})]
+    write_models(tmp_path, {"svc": model({"PutTarget": {"Namespace": "String", "ResourceId": "String",
+                                                        "Dimension": "String"},
+                                          "TagTarget": {"ResourceArn": "String"},
+                                          "GetByResource": {"ResourceId": "String"}})})
+    corrections.setattr(r, "FOUND_BY", {"svc:target": (["Namespace", "ResourceId", "Dimension"], "its service mints the id")})
+    document = r.build(documents, "test", tmp_path, "botocore test")
+    assert r.validate(document) == [] and r.derive(document, tmp_path) == []
+    operations = document["operations"]
+    # Found by the three, in order, rather than filled by ResourceId, which is not the id the ARN ends in.
+    assert operations["svc:PutTarget"]["resources"] == [
+        {"type": "target", "fill": {}, "find": ["Namespace", "ResourceId", "Dimension"]}]
+    # Its ARN names it as given, and a request lacking a member names none.
+    assert operations["svc:TagTarget"]["resources"] == [{"types": ["target"], "arn": "ResourceArn"}]
+    assert operations["svc:GetByResource"]["resources"] == []
+    # A hand edit no longer matches, and a type the file has no format for fails the build.
+    operations["svc:PutTarget"]["resources"] = [{"type": "target", "fill": {"ResourceId": "ResourceId"}}]
+    assert r.validate(document) == [] and len(r.derive(document, tmp_path)) == 1
+    corrections.setattr(r, "FOUND_BY", {"svc:gone": (["Namespace"], "no longer there")})
+    with pytest.raises(ValueError, match="svc:gone"):
+        r.build(documents, "test", tmp_path, "botocore test")
 
 
 def test_a_client_not_read_gives_no_members_and_aws_listing_it_is_no_untrue_claim(corrections, tmp_path):
@@ -348,6 +374,10 @@ def test_a_well_formed_document_validates():
         fill={"GroupName": "Group.Name"}, absent={"Group.Name": "default"}, fixed={"GroupId": "g-1"}, made=True)
     document["operations"]["svc:A"]["resources"][0]["made"] = True
     assert r.validate(document) == []
+    # A type whose ARN is all an id its service mints, found by the members naming it.
+    document = good_document()
+    document["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Namespace", "Id"])
+    assert r.validate(document) == []
 
 
 def with_a_create() -> dict:
@@ -410,6 +440,15 @@ def with_a_create() -> dict:
     (lambda d: d.update(mintedIds={"other": ["thing"]}), "mintedIds"),
     (lambda d: d.update(mintedIds={"svc": []}), "mintedIds"),
     (lambda d: d.pop("mintedIds"), "mintedIds"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(find=["Namespace"]), "beside a fill"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=[]), "beside a fill"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Ids[]"]), "beside a fill"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find="Namespace"), "beside a fill"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Namespace"], account="registryId"),
+     "beside a fill"),
+    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Namespace"], absent={"Namespace": "ecs"}),
+     "beside a fill"),
+    (lambda d: d["operations"]["svc:A"]["resources"][0].update(find=["Namespace"]), "neither an ARN member"),
 ])
 def test_a_malformed_document_is_rejected(change, problem):
     document = good_document()
@@ -503,6 +542,11 @@ def test_the_vendored_file_is_well_formed():
     assert operations["elasticloadbalancing:CreateRule"]["creates"] == [
         {"type": f"listener-rule/{kind}", "parent": f"listener/{kind}", "arn": "ListenerArn"} for kind in ("app", "net")]
     assert set(document["handBuilt"]) >= {"lambda", "s3", "sqs"}
+    # A scalable target is found by the three members naming it, its ARN ending in the id the service mints.
+    assert operations["application-autoscaling:DeregisterScalableTarget"]["resources"] == [
+        {"type": "ScalableTarget", "fill": {}, "find": ["ServiceNamespace", "ResourceId", "ScalableDimension"]}]
+    assert operations["application-autoscaling:TagResource"]["resources"] == [
+        {"types": ["ScalableTarget"], "arn": "ResourceARN"}]
     # The v2 API's Type picks the load balancer it creates, application when it gives none.
     assert operations["elasticloadbalancing:CreateLoadBalancer"]["resources"][1] == {
         "type": "loadbalancer/app/", "fill": {"LoadBalancerName": "Name"}, "when": {"Type": ["application", None]}}

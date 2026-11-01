@@ -320,12 +320,13 @@ public class ApiGatewayExecuteController {
     public Response handleDelete(@Context HttpHeaders headers, @Context UriInfo uriInfo,
                                  @PathParam("apiId") String apiId,
                                  @PathParam("stageName") String stageName,
-                                 @PathParam("proxy") String proxy) {
+                                 @PathParam("proxy") String proxy,
+                                 byte[] body) {
         if (isWebSocketConnectionRequest(apiId, proxy)) {
             String connectionId = decodeConnectionId(proxy.substring(CONNECTIONS_PREFIX.length()));
             return handleDeleteConnection(connectionId);
         }
-        return dispatch("DELETE", apiId, stageName, proxy, headers, uriInfo, null);
+        return dispatch("DELETE", apiId, stageName, proxy, headers, uriInfo, body);
     }
 
     @PATCH

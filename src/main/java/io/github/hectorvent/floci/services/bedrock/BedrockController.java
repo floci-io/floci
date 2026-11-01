@@ -142,6 +142,42 @@ public class BedrockController {
         return Response.ok(response).build();
     }
 
+    // Resource policies
+
+    @POST
+    @Path("/resource-policy")
+    public Response putResourcePolicy(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        JsonNode request = readTree(body);
+        String resourceArn = textOrNull(request, "resourceArn");
+        bedrockService.putResourcePolicy(resourceArn, textOrNull(request, "resourcePolicy"), region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("resourceArn", resourceArn);
+        return Response.status(201).entity(response).build();
+    }
+
+    @GET
+    @Path("/resource-policy/{resourceArn: .+}")
+    public Response getResourcePolicy(@PathParam("resourceArn") String resourceArn, @Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        String policy = bedrockService.getResourcePolicy(resourceArn, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        if (policy != null) {
+            response.put("resourcePolicy", policy);
+        }
+        return Response.ok(response).build();
+    }
+
+    @DELETE
+    @Path("/resource-policy/{resourceArn: .+}")
+    public Response deleteResourcePolicy(@PathParam("resourceArn") String resourceArn, @Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        bedrockService.deleteResourcePolicy(resourceArn, region);
+        return Response.ok().build();
+    }
+
     // Tags
 
     @POST

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iam;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
+import io.github.hectorvent.floci.testing.SamlMetadata;
 import io.github.hectorvent.floci.testutil.AwsRequestSigner;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
@@ -304,13 +305,8 @@ class IamResourceScopedPolicyEnforcementIntegrationTest {
                 .statusCode(200);
     }
 
-    /** The shape {@code SAMLProviderLifecycleIntegrationTest} already establishes as acceptable. */
     private static String samlMetadata(String entityId) {
-        return "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\" entityID=\""
-                + entityId + "\"><md:IDPSSODescriptor><md:KeyDescriptor use=\"signing\">"
-                + "<ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data>"
-                + "<ds:X509Certificate>c2NvcGVk</ds:X509Certificate></ds:X509Data></ds:KeyInfo>"
-                + "</md:KeyDescriptor></md:IDPSSODescriptor></md:EntityDescriptor>";
+        return SamlMetadata.forEntity(entityId, "c2NvcGVk");
     }
 
     private String createUser(String name, String... extraParams) {

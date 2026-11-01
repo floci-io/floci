@@ -46,7 +46,7 @@ class DynamoDbPartiQLHandler {
     // --- SELECT ---
 
     private Result executeSelect(Stmt.Select stmt, PartiQLExecuteContext ctx, String region) {
-        TableDefinition table = service.describeTable(stmt.table(), region);
+        TableDefinition table = service.requireTableForItemCall(stmt.table(), region);
         // A vector index is reachable through SearchVectors alone, and PartiQL says so
         // rather than reporting the index as missing.
         if (table.findVectorIndex(stmt.index()).isPresent()) {
@@ -454,8 +454,8 @@ class DynamoDbPartiQLHandler {
                 "attribute_type(" + ean.alias(at.path()) + ", " + eav.add(toTypedNode(at.type())) + ")";
             case Cond.SizeCmp sc ->
                 "size(" + ean.alias(sc.path()) + ") " + sc.op() + " " + eav.add(toTypedNode(sc.val()));
-            case Cond.IsNull isNull -> (isNull.negated() ? "NOT " : "") + "attribute_type(" + ean.alias(isNull.path())
-                    + ", " + eav.add(mapper.createObjectNode().put("S", "NULL")) + ")";
+            case Cond.IsType isType -> (isType.negated() ? "NOT " : "") + "attribute_type(" + ean.alias(isType.path())
+                    + ", " + eav.add(mapper.createObjectNode().put("S", isType.type().attributeType())) + ")";
             case Cond.And and -> joinOperands(and.operands(), " AND ", eav, ean);
             case Cond.Or or   -> joinOperands(or.operands(), " OR ", eav, ean);
             case Cond.Not not -> "NOT (" + buildCondExpr(not.operand(), eav, ean) + ")";
@@ -544,7 +544,7 @@ class DynamoDbPartiQLHandler {
     // --- INSERT ---
 
     private Result executeInsert(Stmt.Insert stmt, String region) {
-        TableDefinition table = service.describeTable(stmt.table(), region);
+        TableDefinition table = service.requireTableForItemCall(stmt.table(), region);
         String pkName = table.getPartitionKeyName();
 
         ObjectNode item = mapper.createObjectNode();
@@ -564,7 +564,7 @@ class DynamoDbPartiQLHandler {
 
     private Result executeUpdate(Stmt.Update stmt, String returnValuesOnConditionCheckFailure, String region) {
         requireNoIndexQualifier(stmt.index());
-        TableDefinition table = service.describeTable(stmt.table(), region);
+        TableDefinition table = service.requireTableForItemCall(stmt.table(), region);
         requireOneValuePerKey(table, stmt.where());
         ObjectNode key = buildKey(table, stmt.where());
 
@@ -619,7 +619,7 @@ class DynamoDbPartiQLHandler {
 
     private Result executeDelete(Stmt.Delete stmt, String returnValuesOnConditionCheckFailure, String region) {
         requireNoIndexQualifier(stmt.index());
-        TableDefinition table = service.describeTable(stmt.table(), region);
+        TableDefinition table = service.requireTableForItemCall(stmt.table(), region);
         requireOneValuePerKey(table, stmt.where());
         ObjectNode key = buildKey(table, stmt.where());
 
@@ -652,7 +652,7 @@ class DynamoDbPartiQLHandler {
             case Stmt.Delete del -> del.index();
             default -> null;
         });
-        Optional<TableDefinition> found = service.findTable(stmt.table(), region);
+        Optional<TableDefinition> found = service.findTableForItemCall(stmt.table(), region);
         if (found.isEmpty()) {
             return TransactMember.TABLE_NOT_FOUND;
         }
@@ -767,7 +767,7 @@ class DynamoDbPartiQLHandler {
     }
 
     TransactMember toTransactGetItem(Stmt.Select stmt, String region) {
-        Optional<TableDefinition> found = service.findTable(stmt.table(), region);
+        Optional<TableDefinition> found = service.findTableForItemCall(stmt.table(), region);
         if (found.isEmpty()) {
             return TransactMember.TABLE_NOT_FOUND;
         }

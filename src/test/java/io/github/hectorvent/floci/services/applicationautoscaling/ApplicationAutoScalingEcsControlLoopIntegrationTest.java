@@ -115,7 +115,7 @@ class ApplicationAutoScalingEcsControlLoopIntegrationTest {
             }
             metricData.append("""
                     {
-                      "MetricName": "ECSServiceAverageCPUUtilization",
+                      "MetricName": "CPUUtilization",
                       "Value": 90.0,
                       "Unit": "Percent",
                       "Timestamp": %d,

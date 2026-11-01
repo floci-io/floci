@@ -4,6 +4,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
@@ -27,6 +28,8 @@ import software.amazon.awssdk.services.rds.model.DBClusterRole;
 import software.amazon.awssdk.services.rds.model.DBClusterSnapshot;
 import software.amazon.awssdk.services.rds.model.DBEngineVersion;
 import software.amazon.awssdk.services.rds.model.DBInstance;
+import software.amazon.awssdk.services.rds.model.DBInstanceAutomatedBackup;
+import software.amazon.awssdk.services.rds.model.DBInstanceAutomatedBackupsReplication;
 import software.amazon.awssdk.services.rds.model.DBInstanceRole;
 import software.amazon.awssdk.services.rds.model.DBProxyEndpointTargetRole;
 import software.amazon.awssdk.services.rds.model.DBProxyTarget;
@@ -36,6 +39,7 @@ import software.amazon.awssdk.services.rds.model.DbClusterEndpointNotFoundExcept
 import software.amazon.awssdk.services.rds.model.DbClusterRoleAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbClusterRoleNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbClusterSnapshotNotFoundException;
+import software.amazon.awssdk.services.rds.model.DbInstanceAutomatedBackupNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbInstanceRoleAlreadyExistsException;
 import software.amazon.awssdk.services.rds.model.DbInstanceRoleNotFoundException;
 import software.amazon.awssdk.services.rds.model.DbLogFileNotFoundException;
@@ -53,6 +57,7 @@ import software.amazon.awssdk.services.rds.model.DescribeOptionGroupsResponse;
 import software.amazon.awssdk.services.rds.model.DescribeOrderableDbInstanceOptionsResponse;
 import software.amazon.awssdk.services.rds.model.DownloadDbLogFilePortionResponse;
 import software.amazon.awssdk.services.rds.model.EngineDefaults;
+import software.amazon.awssdk.services.rds.model.InvalidDbInstanceAutomatedBackupStateException;
 import software.amazon.awssdk.services.rds.model.InvalidDbInstanceStateException;
 import software.amazon.awssdk.services.rds.model.InvalidDbProxyEndpointStateException;
 import software.amazon.awssdk.services.rds.model.InvalidOptionGroupStateException;
@@ -84,6 +89,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.assertj.core.api.Assertions.tuple;
 
 @DisplayName("RDS Control Plane")
+@ResourceLock("port-5432")
 class RdsControlPlaneTest {
 
     private static final Logger LOG = Logger.getLogger(RdsControlPlaneTest.class.getName());
@@ -146,6 +152,7 @@ class RdsControlPlaneTest {
                         .minCapacity(0.0)
                         .maxCapacity(16.0)));
 
+        assertThat(created.dbCluster().hostedZoneId()).isEqualTo("Z2R2ITUGPM61AM");
         assertThat(created.dbCluster().engine()).isEqualTo("aurora-postgresql");
         assertThat(created.dbCluster().serverlessV2ScalingConfiguration().minCapacity())
                 .isEqualTo(0.0);
@@ -167,6 +174,7 @@ class RdsControlPlaneTest {
 
         DBCluster described = rds.describeDBClusters(b -> b
                 .dbClusterIdentifier(serverlessClusterName)).dbClusters().get(0);
+        assertThat(described.hostedZoneId()).isEqualTo("Z2R2ITUGPM61AM");
         assertThat(described.serverlessV2ScalingConfiguration().minCapacity()).isEqualTo(0.0);
         assertThat(described.serverlessV2ScalingConfiguration().maxCapacity()).isEqualTo(16.0);
         assertThat(described.serverlessV2ScalingConfiguration().secondsUntilAutoPause())
@@ -917,6 +925,56 @@ class RdsControlPlaneTest {
         }
         assertThat(rds.describeCertificates(b -> {}).defaultCertificateForNewLaunches())
                 .isEqualTo("rds-ca-rsa2048-g1");
+    }
+
+    @Test
+    @DisplayName("Automated backups: active, retained after a delete, restored from, replicated and deleted")
+    void sdkRoundTripsAutomatedBackups() {
+        String instanceName = TestFixtures.uniqueName("rds-ab");
+        String restoredName = TestFixtures.uniqueName("rds-ab-restored");
+        Region destination = Region.US_WEST_2;
+        try (RdsClient west = rdsClient(destination)) {
+            DBInstance created = createDbInstance(rds, instanceName, "ab-secret").dbInstance();
+            String dbi = created.dbiResourceId();
+            DBInstanceAutomatedBackup active = rds.describeDBInstanceAutomatedBackups(b -> b.dbiResourceId(dbi))
+                    .dbInstanceAutomatedBackups().get(0);
+            assertThat(active.status()).isEqualTo("active");
+            assertThat(active.dbInstanceAutomatedBackupsArn()).endsWith(":auto-backup:ab-" + dbi.substring(3));
+            assertThat(active.restoreWindow().earliestTime()).isBeforeOrEqualTo(active.restoreWindow().latestTime());
+            assertThatThrownBy(() -> rds.deleteDBInstanceAutomatedBackup(b -> b.dbiResourceId(dbi)))
+                    .isInstanceOf(InvalidDbInstanceAutomatedBackupStateException.class);
+
+            DBInstanceAutomatedBackup replica = west.startDBInstanceAutomatedBackupsReplication(b -> b
+                    .sourceDBInstanceArn(created.dbInstanceArn()).backupRetentionPeriod(5))
+                    .dbInstanceAutomatedBackup();
+            assertThat(replica.status()).isEqualTo("replicating");
+            assertThat(replica.backupRetentionPeriod()).isEqualTo(5);
+            assertThat(rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName)).dbInstances().get(0)
+                    .dbInstanceAutomatedBackupsReplications())
+                    .extracting(DBInstanceAutomatedBackupsReplication::dbInstanceAutomatedBackupsArn)
+                    .containsExactly(replica.dbInstanceAutomatedBackupsArn());
+            assertThat(west.stopDBInstanceAutomatedBackupsReplication(b -> b
+                    .sourceDBInstanceArn(created.dbInstanceArn())).dbInstanceAutomatedBackup().status())
+                    .isEqualTo("retained");
+            west.deleteDBInstanceAutomatedBackup(b -> b
+                    .dbInstanceAutomatedBackupsArn(replica.dbInstanceAutomatedBackupsArn()));
+
+            rds.deleteDBInstance(b -> b.dbInstanceIdentifier(instanceName).skipFinalSnapshot(true)
+                    .deleteAutomatedBackups(false));
+            assertThat(rds.describeDBInstanceAutomatedBackups(b -> b.dbiResourceId(dbi))
+                    .dbInstanceAutomatedBackups().get(0).status()).isEqualTo("retained");
+            assertThat(rds.restoreDBInstanceToPointInTime(b -> b.sourceDbiResourceId(dbi)
+                    .targetDBInstanceIdentifier(restoredName).useLatestRestorableTime(true))
+                    .dbInstance().dbInstanceIdentifier()).isEqualTo(restoredName);
+
+            assertThat(rds.deleteDBInstanceAutomatedBackup(b -> b.dbiResourceId(dbi))
+                    .dbInstanceAutomatedBackup().status()).isEqualTo("deleting");
+            assertThatThrownBy(() -> rds.describeDBInstanceAutomatedBackups(b -> b.dbiResourceId(dbi)))
+                    .isInstanceOf(DbInstanceAutomatedBackupNotFoundException.class);
+        } finally {
+            deleteDbInstance(rds, restoredName);
+            deleteDbInstance(rds, instanceName);
+        }
     }
 
     @Test

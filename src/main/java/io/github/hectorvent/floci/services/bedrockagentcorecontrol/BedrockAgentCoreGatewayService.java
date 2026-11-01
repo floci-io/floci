@@ -99,11 +99,11 @@ public class BedrockAgentCoreGatewayService {
     }
 
     private Gateway findByArn(String region, String arn) {
-        String[] parts = arn == null ? new String[0] : arn.split(":");
-        if (parts.length < 6 || !parts[5].startsWith("gateway/")) {
+        String resource = BedrockAgentCoreArns.resource(arn);
+        if (resource == null || !resource.startsWith("gateway/")) {
             throw new AwsException("ValidationException", "Unsupported resource ARN: " + arn, 400);
         }
-        return get(parts[5].substring("gateway/".length()), region);
+        return get(resource.substring("gateway/".length()), region);
     }
 
     public Gateway get(String id, String region) {

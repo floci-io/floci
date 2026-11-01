@@ -266,13 +266,13 @@ class AppConfigCfnProvisionerTest {
     }
 
     @Test
-    void aProfileWithoutTypeHasNoneAndAddingOneReplacesIt() {
+    void aProfileWithoutTypeDefaultsToFreeformAndChangingItReplacesIt() {
         String appId = create(APPLICATION, props("Name", "orders")).getPhysicalId();
         StackResource profile = create(PROFILE, props("ApplicationId", appId, "Name", "settings",
                 "LocationUri", "hosted"));
         String oldId = profile.getPhysicalId();
         assertEquals(oldId, profile.getAttributes().get("ConfigurationProfileId"));
-        assertNull(service.getConfigurationProfile(appId, oldId).getType());
+        assertEquals("AWS.Freeform", service.getConfigurationProfile(appId, oldId).getType());
 
         update(profile, props("ApplicationId", appId, "Name", "flags", "LocationUri", "hosted",
                 "Type", "AWS.AppConfig.FeatureFlags"));

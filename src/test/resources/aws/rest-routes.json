@@ -1,5 +1,5 @@
 {
-  "_source": {"generator": "tools/aws/regen_rest_routes.py", "botocore": "botocore 1.43.113 (installed package)"},
+  "_source": {"generator": "tools/aws/regen_rest_routes.py", "botocore": "botocore 1.43.118 (local/aws/botocore)"},
   "models": {
     "apigateway": {
       "credentialScope": "apigateway",

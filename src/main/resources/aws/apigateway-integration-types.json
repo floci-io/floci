@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_apigateway_types.py",
-    "botocore": "botocore 1.43.111 (installed package)",
+    "botocore": "botocore 1.43.118 (local/aws/botocore)",
     "model": "apigateway/2015-07-09/service-2.json",
     "shape": "IntegrationType"
   },

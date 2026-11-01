@@ -298,6 +298,10 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
         applyDockerFlags(specBuilder, dockerFlags);
 
         specBuilder.withEmbeddedDns();
+        // A container image's runtime is its own, Java as likely as any.
+        if (isJavaRuntime(fn.getRuntime()) || "Image".equals(fn.getPackageType())) {
+            specBuilder.withJavaTrustStore();
+        }
 
         // Inject extra hosts entries into the container if present. Split on the FIRST
         // colon, mirroring docker --add-host: hostnames cannot contain colons, but IPv6
@@ -1352,6 +1356,10 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
 
     private static boolean isProvidedRuntime(String runtime) {
         return runtime != null && runtime.startsWith("provided");
+    }
+
+    private static boolean isJavaRuntime(String runtime) {
+        return runtime != null && runtime.startsWith("java");
     }
 
     /** Directory Lambda's real init system scans for extension binaries. */

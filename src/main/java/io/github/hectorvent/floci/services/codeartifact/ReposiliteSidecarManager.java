@@ -167,12 +167,16 @@ public class ReposiliteSidecarManager implements ContainerTeardown {
     }
 
     @Override
-    public void stopManagedContainers() {
+    public synchronized void stopManagedContainers() {
         if (containerId == null) {
             return;
         }
         LOG.info("Stopping Reposilite sidecar container");
-        lifecycleManager.stopAndRemove(containerId, null);
+        lifecycleManager.stopAndRemoveStrict(containerId, null);
+        containerId = null;
+        resolvedUrl = null;
+        resolvedTokenName = null;
+        resolvedTokenSecret = null;
     }
 
     private static String trimTrailingSlash(String url) {

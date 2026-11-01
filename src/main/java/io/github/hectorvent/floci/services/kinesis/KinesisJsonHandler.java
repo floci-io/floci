@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsEventStreamEncoder;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisConsumer;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisShard;
@@ -471,7 +472,7 @@ public class KinesisJsonHandler {
         node.put("ConsumerName", c.getConsumerName());
         node.put("ConsumerARN", c.getConsumerArn());
         node.put("ConsumerStatus", c.getConsumerStatus());
-        node.put("ConsumerCreationTimestamp", c.getConsumerCreationTimestamp().toEpochMilli() / 1000.0);
+        node.put("ConsumerCreationTimestamp", EpochSeconds.fromInstant(c.getConsumerCreationTimestamp()));
         if (c.getStreamArn() != null) {
             node.put("StreamARN", c.getStreamArn());
         }

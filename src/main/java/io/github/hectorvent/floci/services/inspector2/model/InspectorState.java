@@ -9,6 +9,7 @@ public class InspectorState {
     private String adminAccountId;
     private String status = "DISABLED";
     private int enablingPollsRemaining;
+    private int disablingPollsRemaining;
     private String ec2Status = "DISABLED";
     private String ecrStatus = "DISABLED";
     private String lambdaStatus = "DISABLED";
@@ -29,6 +30,8 @@ public class InspectorState {
     public void setStatus(String status) { this.status = status; }
     public int getEnablingPollsRemaining() { return enablingPollsRemaining; }
     public void setEnablingPollsRemaining(int enablingPollsRemaining) { this.enablingPollsRemaining = enablingPollsRemaining; }
+    public int getDisablingPollsRemaining() { return disablingPollsRemaining; }
+    public void setDisablingPollsRemaining(int value) { disablingPollsRemaining = value; }
     public String getEc2Status() { return ec2Status; }
     public void setEc2Status(String value) { ec2Status = value; }
     public String getEcrStatus() { return ecrStatus; }

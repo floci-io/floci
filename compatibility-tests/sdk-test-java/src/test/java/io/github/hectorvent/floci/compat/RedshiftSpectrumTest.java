@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.compat;
 import com.floci.test.TestFixtures;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.CreateRoleRequest;
@@ -32,6 +33,7 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+@ResourceLock("floci-duck")
 class RedshiftSpectrumTest {
 
     private static final String ROLE_PREFIX = "SpectrumCompatRole";

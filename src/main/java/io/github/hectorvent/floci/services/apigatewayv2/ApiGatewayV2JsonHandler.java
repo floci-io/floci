@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.JsonErrorResponseUtils;
 import io.github.hectorvent.floci.services.apigatewayv2.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -515,7 +516,7 @@ public class ApiGatewayV2JsonHandler {
         node.put("Name", api.getName());
         node.put("ProtocolType", api.getProtocolType());
         node.put("ApiEndpoint", api.getApiEndpoint());
-        node.put("CreatedDate", api.getCreatedDate() / 1000.0);
+        node.put("CreatedDate", EpochSeconds.fromMillis(api.getCreatedDate()));
         node.put("DisableExecuteApiEndpoint", api.isDisableExecuteApiEndpoint());
         if (api.getRouteSelectionExpression() != null) {
             node.put("RouteSelectionExpression", api.getRouteSelectionExpression());
@@ -589,6 +590,9 @@ public class ApiGatewayV2JsonHandler {
                 auth.getJwtConfiguration().audience().forEach(aud::add);
             }
         }
+        if (auth.getAuthorizerCredentialsArn() != null) {
+            node.put("AuthorizerCredentialsArn", auth.getAuthorizerCredentialsArn());
+        }
         if (auth.getAuthorizerUri() != null) {
             node.put("AuthorizerUri", auth.getAuthorizerUri());
         }
@@ -628,6 +632,9 @@ public class ApiGatewayV2JsonHandler {
         if (i.getConnectionType() != null) node.put("ConnectionType", i.getConnectionType());
         if (i.getConnectionId() != null) node.put("ConnectionId", i.getConnectionId());
         node.put("PayloadFormatVersion", i.getPayloadFormatVersion());
+        if (i.getCredentialsArn() != null) {
+            node.put("CredentialsArn", i.getCredentialsArn());
+        }
         if (i.getIntegrationUri() != null) node.put("IntegrationUri", i.getIntegrationUri());
         if (i.getRequestTemplates() != null) {
             ObjectNode requestTemplates = node.putObject("RequestTemplates");
@@ -657,8 +664,8 @@ public class ApiGatewayV2JsonHandler {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("StageName", s.getStageName());
         node.put("AutoDeploy", s.isAutoDeploy());
-        node.put("CreatedDate", s.getCreatedDate() / 1000.0);
-        node.put("LastUpdatedDate", s.getLastUpdatedDate() / 1000.0);
+        node.put("CreatedDate", EpochSeconds.fromMillis(s.getCreatedDate()));
+        node.put("LastUpdatedDate", EpochSeconds.fromMillis(s.getLastUpdatedDate()));
         if (s.getDeploymentId() != null) node.put("DeploymentId", s.getDeploymentId());
         if (s.getStageVariables() != null) {
             ObjectNode stageVariables = node.putObject("StageVariables");
@@ -714,7 +721,7 @@ public class ApiGatewayV2JsonHandler {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("DeploymentId", d.getDeploymentId());
         node.put("DeploymentStatus", d.getDeploymentStatus());
-        node.put("CreatedDate", d.getCreatedDate() / 1000.0);
+        node.put("CreatedDate", EpochSeconds.fromMillis(d.getCreatedDate()));
         if (d.getDescription() != null) node.put("Description", d.getDescription());
         return node;
     }

@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -547,11 +548,11 @@ public class SageMakerService {
 
     /** ARN shape: {@code arn:aws:sagemaker:<region>:<account>:<type>/<name>}. */
     private static String arnRegion(String arn) {
-        String[] parts = arn.split(":", 6);
-        if (parts.length < 4 || parts[3].isBlank()) {
+        String region = AwsArnUtils.regionOrDefault(arn, "");
+        if (region.isBlank()) {
             throw validation("ResourceArn is invalid");
         }
-        return parts[3];
+        return region;
     }
 
     private static String regionKey(String region, String name) {
@@ -567,7 +568,7 @@ public class SageMakerService {
     }
 
     static double epoch(long millis) {
-        return millis / 1000.0;
+        return EpochSeconds.fromMillis(millis);
     }
 
     static AwsException validation(String message) {

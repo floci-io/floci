@@ -8,6 +8,7 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.athena.AthenaClient;
 import software.amazon.awssdk.services.athena.model.Datum;
@@ -77,6 +78,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @DisplayName("Firehose data format conversion delivery (JSON to Parquet)")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@ResourceLock("floci-duck")
 class FirehoseParquetDeliveryTest {
 
     private static final int BUFFERING_INTERVAL_SECONDS = 5;

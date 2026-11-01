@@ -6,10 +6,13 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.mockito.Answers;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -24,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class LambdaLayerCodePathIsolationTest {
@@ -157,13 +161,54 @@ class LambdaLayerCodePathIsolationTest {
                 + "Member must have length less than or equal to 512", error.getMessage());
     }
 
+    @Test
+    void pinnedS3ObjectVersionIsReadInsteadOfTheLatest(@TempDir Path baseDir) throws Exception {
+        // Catches: resolveLayerContent ignoring S3ObjectVersion and fetching the latest object.
+        S3Service s3Service = mock(S3Service.class);
+        byte[] zip = zipBytes("pinned");
+        S3Service.ObjectRead read = new S3Service.ObjectRead(inMemoryObject(zip), new ByteArrayInputStream(zip));
+        when(s3Service.openObject("layers", "code.zip", "v1")).thenReturn(read);
+
+        LambdaLayerService service = serviceFor(baseDir, "111111111111",
+                new LambdaLayerStore(AccountAwareStorageBackend.inMemory("111111111111")), s3Service);
+        service.publishLayerVersion("us-east-1", LAYER_NAME, Map.of("Content",
+                Map.of("S3Bucket", "layers", "S3Key", "code.zip", "S3ObjectVersion", "v1")));
+
+        verify(s3Service).openObject("layers", "code.zip", "v1");
+    }
+
+    @Test
+    void unpinnedS3ContentReadsTheLatestObjectVersion(@TempDir Path baseDir) throws Exception {
+        S3Service s3Service = mock(S3Service.class);
+        byte[] zip = zipBytes("latest");
+        S3Service.ObjectRead read = new S3Service.ObjectRead(inMemoryObject(zip), new ByteArrayInputStream(zip));
+        when(s3Service.openObject("layers", "code.zip", null)).thenReturn(read);
+
+        LambdaLayerService service = serviceFor(baseDir, "111111111111",
+                new LambdaLayerStore(AccountAwareStorageBackend.inMemory("111111111111")), s3Service);
+        service.publishLayerVersion("us-east-1", LAYER_NAME, Map.of("Content",
+                Map.of("S3Bucket", "layers", "S3Key", "code.zip")));
+
+        verify(s3Service).openObject("layers", "code.zip", null);
+    }
+
     private static LambdaLayerService serviceFor(Path baseDir, String account, LambdaLayerStore store) {
+        return serviceFor(baseDir, account, store, null);
+    }
+
+    private static LambdaLayerService serviceFor(Path baseDir, String account, LambdaLayerStore store, S3Service s3Service) {
         EmulatorConfig config = mock(EmulatorConfig.class, Answers.RETURNS_DEEP_STUBS);
         when(config.services().lambda().codePath()).thenReturn(baseDir.toString());
         when(config.services().lambda().zipMaxEntries()).thenReturn(100_000);
         when(config.services().lambda().executor()).thenReturn("docker");
         return new LambdaLayerService(store, new ZipExtractor(), config,
-                new RegionResolver("us-east-1", account), null);
+                new RegionResolver("us-east-1", account), s3Service);
+    }
+
+    private static S3Object inMemoryObject(byte[] data) {
+        S3Object object = mock(S3Object.class);
+        when(object.getData()).thenReturn(data);
+        return object;
     }
 
     private static Map<String, Object> request(String content) throws Exception {
@@ -171,13 +216,17 @@ class LambdaLayerCodePathIsolationTest {
     }
 
     private static String zipBase64(String content) throws Exception {
+        return Base64.getEncoder().encodeToString(zipBytes(content));
+    }
+
+    private static byte[] zipBytes(String content) throws Exception {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         try (ZipOutputStream zip = new ZipOutputStream(bytes)) {
             zip.putNextEntry(new ZipEntry("index.js"));
             zip.write(content.getBytes());
             zip.closeEntry();
         }
-        return Base64.getEncoder().encodeToString(bytes.toByteArray());
+        return bytes.toByteArray();
     }
 
     private static void assertEqualsContent(String path, String expected) throws Exception {

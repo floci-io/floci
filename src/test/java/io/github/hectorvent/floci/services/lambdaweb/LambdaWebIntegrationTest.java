@@ -455,6 +455,31 @@ class LambdaWebIntegrationTest {
                 .body("message", equalTo("The specified S3 object does not exist: s3://" + BUCKET
                         + "/missing.zip. Verify the object exists in the bucket."));
 
+        s3Service.putObject(BUCKET, "deleted.zip", LambdaWebZips.indexJs(""), "application/zip", Map.of());
+        String marker = s3Service.deleteObject(BUCKET, "deleted.zip").getVersionId();
+        given().contentType("application/json")
+                .body("""
+                        {"buildConfig": {"codeConfig": {"s3Object": {"bucket": "%s", "key": "deleted.zip"}},
+                                         "runtimeConfig": {"runtime": "nodejs24.x"}},
+                         "serviceConfig": {"executionRoleArn": "%s"}}
+                        """.formatted(BUCKET, ROLE))
+                .when().post(revisions)
+                .then().statusCode(400)
+                .header("X-Amzn-Errortype", "ValidationException")
+                .body("message", equalTo("The latest version of the S3 object is a delete marker. Upload a new object"
+                        + " version or pass an explicit S3ObjectVersion."));
+        given().contentType("application/json")
+                .body("""
+                        {"buildConfig": {"codeConfig": {"s3Object": {"bucket": "%s", "key": "deleted.zip",
+                                                                     "versionId": "%s"}},
+                                         "runtimeConfig": {"runtime": "nodejs24.x"}},
+                         "serviceConfig": {"executionRoleArn": "%s"}}
+                        """.formatted(BUCKET, marker, ROLE))
+                .when().post(revisions)
+                .then().statusCode(500)
+                .header("X-Amzn-Errortype", "InternalServerException")
+                .body(equalTo("{}"));
+
         given().contentType("application/json")
                 .body("""
                         {"buildConfig": %s, "serviceConfig": {"executionRoleArn": "%s",
@@ -568,6 +593,22 @@ class LambdaWebIntegrationTest {
         given().when().delete(policyPath)
                 .then().statusCode(404)
                 .body("message", equalTo("The function does not have a policy."));
+
+        // Lambda writes the policy back in its own form, and GetResourcePolicy names an account by its root.
+        String written = "{\"Statement\":{\"Resource\":[\"" + ARN + "/endpoint/*\"],\"Principal\":{\"AWS\":"
+                + "\"000000000000\"},\"Effect\":\"allow\",\"Action\":\"lambda:InvokeWebFunctionEndpoint\"}}";
+        String kept = "{\"Version\":\"2008-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":"
+                + "\"000000000000\"},\"Action\":\"lambda:InvokeWebFunctionEndpoint\",\"Resource\":\"" + ARN
+                + "/endpoint/*\"}]}";
+        given().contentType("application/json").body(Map.of("Policy", written))
+                .when().put(policyPath)
+                .then().statusCode(200)
+                .body("Policy", equalTo(kept));
+        given().when().get(policyPath)
+                .then().statusCode(200)
+                .body("Policy", equalTo(kept.replace("\"000000000000\"", "\"arn:aws:iam::000000000000:root\"")));
+        given().when().delete(policyPath)
+                .then().statusCode(204);
 
         // The roles a policy names have to exist, under the path IAM holds them.
         String reader = "web-it-reader-" + Long.toString(System.nanoTime(), 36);

@@ -454,7 +454,8 @@ public class ElastiCacheQueryHandler {
                             params.getFirst("IpDiscovery"),
                             boolParam(params, "AtRestEncryptionEnabled"),
                             region,
-                            parseTags(params));
+                            parseTags(params),
+                            boolParam(params, "AutoMinorVersionUpgrade"));
             CacheCluster cluster = "memcached".equalsIgnoreCase(engine)
                     ? memcachedService.createCacheCluster(request)
                     : service.createCacheCluster(request);
@@ -1039,7 +1040,8 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                   .elem("CacheClusterId", c.getCacheClusterId())
                   .elem("CacheClusterStatus", c.getCacheClusterStatus().wireName())
                   .elem("Engine", c.getEngine())
-                  .elem("EngineVersion", c.getEngineVersion());
+                  .elem("EngineVersion", c.getEngineVersion())
+                  .elem("AutoMinorVersionUpgrade", c.isAutoMinorVersionUpgrade());
         boolean memcached = "memcached".equals(c.getEngine());
         int numCacheNodes = c.getNumCacheNodes();
         if (memcached) {
@@ -1055,7 +1057,6 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             xml.elem("NumCacheNodes", (long) numCacheNodes);
         } else {
             xml.elem("NumCacheNodes", (long) numCacheNodes)
-               .elem("AutoMinorVersionUpgrade", true)
                .elem("AuthTokenEnabled", c.getAuthMode() == AuthMode.PASSWORD)
                .elem("TransitEncryptionEnabled", c.getAuthMode() != null && c.getAuthMode() != AuthMode.NO_AUTH)
                .elem("AtRestEncryptionEnabled", c.isAtRestEncryptionEnabled())

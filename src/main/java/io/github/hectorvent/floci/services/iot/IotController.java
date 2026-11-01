@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
 import io.github.hectorvent.floci.services.iot.model.IotJob;
@@ -1224,7 +1225,7 @@ public class IotController {
 
     private void putEpoch(ObjectNode node, String field, Instant instant) {
         if (instant != null) {
-            node.put(field, instant.toEpochMilli() / 1000.0);
+            node.put(field, EpochSeconds.fromInstant(instant));
         }
     }
 

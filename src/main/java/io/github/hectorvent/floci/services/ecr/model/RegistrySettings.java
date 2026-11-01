@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ecr.model;
 
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -29,6 +30,11 @@ public class RegistrySettings {
     @RegisterForReflection
     public record ScanningRule(String scanFrequency, List<RepositoryFilter> repositoryFilters) {}
 
+    /** An excluded principal and the time its registration was created. */
+    @RegisterForReflection
+    public record PullTimeUpdateExclusion(String principalArn, Instant createdAt) {}
+
+    private List<PullTimeUpdateExclusion> pullTimeUpdateExclusions;
     private String policyText;
     private List<ReplicationRule> replicationRules;
     private String scanType;
@@ -36,6 +42,9 @@ public class RegistrySettings {
     private Map<String, String> accountSettings;
 
     public RegistrySettings() {}
+
+    public List<PullTimeUpdateExclusion> getPullTimeUpdateExclusions() { return pullTimeUpdateExclusions; }
+    public void setPullTimeUpdateExclusions(List<PullTimeUpdateExclusion> exclusions) { this.pullTimeUpdateExclusions = exclusions; }
 
     public String getPolicyText() { return policyText; }
     public void setPolicyText(String policyText) { this.policyText = policyText; }

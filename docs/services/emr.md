@@ -112,7 +112,7 @@ one container per step from the cluster's release image, the one EMR Serverless'
 (`public.ecr.aws/emr-serverless/spark/<release>`), and runs the step in it: a Spark step's
 `spark-submit` in local mode, the container holding the driver and its executors, or a command or a
 script. The cluster itself gets no container, and goes through its lifecycle as in the `immediate` mode,
-but for its bootstrap actions.
+but for its bootstrap actions and its storage.
 
 * **Which steps run**: a `command-runner.jar` step whose first argument is `spark-submit`, the way the
   Management Guide writes Spark steps, runs the arguments after it, without its `--master` and
@@ -120,17 +120,73 @@ but for its bootstrap actions.
   `spark-submit`, with the JAR and the step's `Args`. Any other `command-runner.jar` step runs its
   command, its first argument, with the rest, and a `script-runner.jar` step (by name, or by its
   `s3://<region>.elasticmapreduce/libs/script-runner/script-runner.jar` URI) its script, as the Release
-  Guide's "Run commands and scripts on an Amazon EMR cluster" describes them. `hive-script`,
-  `pig-script`, `hadoop-streaming`, `hadoop-lzo` and `s3-dist-cp`, which the image does not have, are
-  `FAILED` without running.
+  Guide's "Run commands and scripts on an Amazon EMR cluster" describes them. An `s3-dist-cp` step runs
+  Floci's own S3DistCp (see **S3DistCp**). `hive-script`, `pig-script`, `hadoop-streaming` and
+  `hadoop-lzo`, which the image does not have, are `FAILED` without running.
 * **Commands and scripts**: they run as the image's `hadoop` user in `/home/hadoop`, with `bash`, Python
   3, Java, `curl` and the AWS CLI v2, which reaches Floci through `AWS_ENDPOINT_URL`. A
   `script-runner.jar` step's script is fetched from S3 with the AWS CLI and the step's credentials, then
   run with the step's other arguments; a path not in S3 is run as it is, a bare name from `/home/hadoop`
-  when a file there has it, though nothing a former step wrote is there, each step having a container of
-  its own. A `spark-submit` they start runs in local mode on Floci's S3 with the cluster's
-  `spark-defaults`, which Floci puts in a Spark configuration of its own, ahead of the image's EMR
-  Serverless master; its own `--master yarn` or `--deploy-mode cluster` fails, as there is no YARN.
+  when a file there has it, one a former step left there included. `hadoop fs` and `hdfs dfs` reach the
+  cluster's HDFS (see **Storage**). A `spark-submit` they start runs in local mode on Floci's S3 with the
+  cluster's `spark-defaults` and `spark-hive-site`, which Floci puts in a Spark configuration of its own,
+  ahead of the image's EMR Serverless master; its own `--master yarn` or `--deploy-mode cluster` fails, as
+  there is no YARN.
+* **Storage**: a cluster's primary node keeps its disks while the cluster lives, and so does Floci: each
+  step's container mounts the cluster's two Docker volumes, one at `/home/hadoop` and one at `/mnt`, so what
+  a step leaves there is there for the steps after it, and for steps running at the same time. HDFS, "best
+  used for caching the results produced by intermediate job-flow steps", as the Management Guide puts it,
+  is the `hdfs` folder of `/mnt`. In Spark, `hdfs://` paths, and paths without a scheme ("hdfs:// (or no
+  prefix)"), lead there through Hadoop's `ViewFileSystemOverloadScheme`, a relative path under
+  `/user/hadoop` as in HDFS, and a structured streaming query keeps its checkpoints through Spark's file
+  system checkpoint manager; the cluster's `spark-defaults` can set any of these otherwise. A command's
+  `hadoop fs` gets the same, through a copy of the image's Hadoop configuration, or of the folder a
+  `spark-env` export of `HADOOP_CONF_DIR` names; the image's `hdfs` command cannot run, so `hdfs dfs` runs
+  as `hadoop fs`, and its other commands fail. What the bootstrap actions left in `/home/hadoop` or `/mnt`
+  comes with the image the steps run in, and Docker copies it into the
+  volumes when the first step starts. The volumes go once the cluster has ended and its last step is done
+  ("HDFS is ephemeral storage that is reclaimed when you terminate a cluster"), on a state reset, and, for
+  clusters that are gone or have ended, when the EMR service starts, unless
+  `reconcile-containers-on-startup` is off. HDFS is a folder, without a NameNode or replication: an
+  `hdfs://` path naming a host is not served, `hadoop fs -ls /` fails ("URI scheme is not "file""), where
+  `-ls -d /` and a folder below it do not, and `hadoop fs` does not reach S3, as its classpath has no AWS
+  SDK v2 and the image's EMRFS is not pointed at Floci (`aws s3 cp` does). `/tmp` is each container's own.
+* **S3DistCp**: the image has neither `s3-dist-cp` nor MapReduce, so a `command-runner.jar` step whose
+  first argument is `s3-dist-cp`, the Release Guide's form, runs Floci's own program instead, through
+  `spark-submit` in the step's container, copying through Hadoop's file systems: `--src` and `--dest` take
+  S3 paths in Floci's S3, the cluster's HDFS (`hdfs:///output`, or a path without a scheme) or a file of
+  the container, a source folder's files keeping their folders under `--dest`. It takes the Release
+  Guide's options, `--name=value` or `--name value`, and `-D property=value`. `--srcPattern` and
+  `--groupBy` match the whole source path, as Python regular expressions, which share Java's common
+  syntax. `--groupBy` concatenates the files whose groups give the same name, which is the groups' text,
+  into the folder of the first of them, and refuses a regular expression with no group, as S3DistCp does;
+  `--targetSize` breaks a group larger than it into parts named with a number before the extension.
+  `--outputCodec` (`gzip`, `gz`, `lzo`, `lzop`, `snappy`, or `none` to decompress) decompresses each
+  source by its own extension and replaces that extension with the codec's; without it a file's
+  compression stays as it is, and a group keeps the compression its files share, named with that codec's
+  extension, or has none when they differ, each file decompressed so that the group is one stream.
+  `--deleteOnSuccess` deletes the copied files, but not their folders, once
+  all are copied. `--outputManifest` writes gzipped JSON lines (`path`, `baseName`, `srcDir`, `size`) to
+  `--dest`; `--previousManifest` leaves out the files it names by `baseName`, and fails the step when it
+  is not there unless `--requirePreviousManifest` is `false` (`=false` or `false` after it);
+  `--copyFromManifest` copies the files it names. `--srcPrefixesFile` copies the files under each of its
+  lines instead of listing `--src`, a line ending in `/` naming that folder alone and any other a prefix as
+  S3 lists one (`logs/day` takes in `logs/day-old/`).
+  `--s3ServerSideEncryption`, `--storageClass`, `--disableMultipartUpload` and
+  `--multipartUploadChunkSize` set S3A's matching settings; `--s3Endpoint` is ignored, as S3 is Floci's. A
+  bucket name with an underscore fails the step, as S3DistCp "does not support" one, and so does a copy
+  Hadoop fails, leaving what was copied, as S3DistCp does. `--appendToLastFile` puts the new data after
+  what a destination file holds, through a copy renamed over it, as neither S3 nor the cluster's HDFS, a
+  folder, appends in place. The copy has a name of its own and goes if the writing fails; the file steps
+  aside, under a name of its own too, until the copy has taken its place, and comes back if it cannot, so a
+  failed append leaves it as it was. A copy that would write two files to the same path, the manifest included
+  (`a.log` and `a.log.gz` with `--outputCodec=gzip`, say), a file over one of its own sources, as with the
+  same `--src` and `--dest`, a file outside `--dest`, through a `..` in a manifest's `baseName` or in
+  `--outputManifest`, or a file with no name, from a `--groupBy` whose groups matched nothing, say, fails
+  before it writes anything. A step's log has one line saying what was copied.
+  Floci's own readings, as no source says: the grouped file's folder, `--numberFiles` putting the number
+  straight before the file's name, a group's compression without `--outputCodec`, and failing a copy that
+  would write over its own output or source, or outside `--dest`.
 * **HTTPS**: with [TLS](../configuration/tls.md) on, each step's container, and the bootstrap actions'
   one, also gets Floci's CA bundle as a Java trust store, which every JVM in it uses, as an
   [EMR Serverless job run](emr-serverless.md#running-spark-job-runs)'s do, so Java code reaches Floci
@@ -178,10 +234,21 @@ but for its bootstrap actions.
   driver, and start no other step; a driver a hard stop left running is removed when the EMR service
   starts, before any step can start, unless `reconcile-containers-on-startup` is off.
 * **What `spark-submit` gets**: the step's arguments, after the `spark-defaults` properties of the
-  cluster's `Configurations`. `s3://` and `s3a://` paths reach Floci's S3 through S3A, on releases
+  cluster's `Configurations` and its `spark-hive-site` ones as `spark.hadoop.` settings, which Spark's Hive
+  client reads as it would `hive-site.xml`, so the Management Guide's `hive.metastore.client.factory.class`
+  for the Glue Data Catalog applies; a `spark.hadoop.` setting in `spark-defaults` wins over the same one in
+  `spark-hive-site`. `s3://` and `s3a://` paths reach Floci's S3 through S3A, on releases
   before 7.10.0 too, where `s3://` would otherwise be EMRFS, so the application and its files can be read
-  from there; the Glue Data Catalog client is pointed at Floci's Glue. A step's `Properties` are not
-  applied.
+  from there; the Glue Data Catalog client is pointed at Floci's Glue, and `hdfs://` paths, and those
+  without a scheme, at the cluster's HDFS. A step's `Properties` are not applied, nor are the other
+  classifications (`core-site`, `hadoop-env`, `spark-log4j2` and the rest).
+* **`spark-env`**: the variables the cluster's `spark-env` exports, in its nested `export` classification,
+  are in each step's container environment, `PYSPARK_PYTHON` or `JAVA_HOME` say, replacing any of Floci's
+  own with the same name. They are set as given, with no shell expansion of a `$VARIABLE` in
+  them, and a command or script sees them too, where EMR writes them in `spark-env.sh`, which only Spark's
+  own scripts read. The image's `spark-env.sh` gives `PYSPARK_PYTHON`, `PYSPARK_DRIVER_PYTHON`,
+  `SPARK_HOME` and `HADOOP_CONF_DIR` only a default, so the exports win there, but a variable it sets
+  outright, such as `AWS_STS_REGIONAL_ENDPOINTS`, keeps the image's value in `spark-submit`.
 * **Credentials**: the container gets a session for the step's `ExecutionRoleArn`, or else for the role
   of the cluster's `JobFlowRole` instance profile, when IAM knows it and the profile holds one role,
   and otherwise the account's placeholder credentials, with `AWS_ENDPOINT_URL` pointing at Floci.

@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 
@@ -65,15 +66,6 @@ final class SesV2Json {
             throw unexpectedStartError(root);
         }
         throw new AwsException(SERIALIZATION_EXCEPTION, null, 400);
-    }
-
-    static JsonNode requireObjectOrAbsent(JsonNode parent, String fieldName) {
-        JsonNode child = parent.path(fieldName);
-        if (!child.isMissingNode() && !child.isNull() && !child.isObject()) {
-            throw new AwsException("BadRequestException",
-                    fieldName + " must be a JSON object.", 400);
-        }
-        return child;
     }
 
     /**
@@ -361,18 +353,9 @@ final class SesV2Json {
         return coerceBoolean(enabledNode);
     }
 
-    /**
-     * Epoch seconds with the millisecond fraction, the shape AWS returns for every SES v2
-     * timestamp (probe-confirmed, e.g. {@code 1.790312384592E9}). It must stay a JSON number: an
-     * ISO string, as the v1 Query path writes, breaks the SDK's unixTimestamp unmarshaller.
-     */
-    static double epochSeconds(Instant instant) {
-        return instant.toEpochMilli() / 1000.0;
-    }
-
     static void putTimestamp(ObjectNode node, String field, Instant value) {
         if (value != null) {
-            node.put(field, epochSeconds(value));
+            node.put(field, EpochSeconds.fromInstant(value));
         }
     }
 }

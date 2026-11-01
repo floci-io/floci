@@ -642,6 +642,41 @@ class ElastiCacheQueryHandlerTest {
     }
 
     @Test
+    void createCacheCluster_memcachedKeepsRequestedVersionAndAutoMinorVersionUpgrade() {
+        ArgumentCaptor<ElastiCacheService.CreateCacheClusterRequest> captor =
+                ArgumentCaptor.forClass(ElastiCacheService.CreateCacheClusterRequest.class);
+        CacheCluster created = new CacheCluster(
+                "mc", CacheClusterStatus.AVAILABLE, "memcached", "1.5.16",
+                new Endpoint("localhost", 11211), Instant.now());
+        created.setAutoMinorVersionUpgrade(false);
+        when(memcachedService.createCacheCluster(captor.capture())).thenReturn(created);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("CacheClusterId", "mc");
+        p.add("Engine", "memcached");
+        p.add("EngineVersion", "1.5.16");
+        p.add("AutoMinorVersionUpgrade", "false");
+
+        String body = (String) handler.handle("CreateCacheCluster", p, "us-east-1").getEntity();
+
+        assertEquals("1.5.16", captor.getValue().engineVersion());
+        assertEquals(false, captor.getValue().autoMinorVersionUpgrade());
+        assertTrue(body.contains("<EngineVersion>1.5.16</EngineVersion>"), body);
+        assertTrue(body.contains("<AutoMinorVersionUpgrade>false</AutoMinorVersionUpgrade>"), body);
+    }
+
+    @Test
+    void describeCacheClusters_autoMinorVersionUpgradeDefaultsToTrue() {
+        when(service.findCacheClusters("tf-redis")).thenReturn(List.of(redisCacheCluster("tf-redis")));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("CacheClusterId", "tf-redis");
+        String body = (String) handler.handle("DescribeCacheClusters", p, "us-east-1").getEntity();
+
+        assertTrue(body.contains("<AutoMinorVersionUpgrade>true</AutoMinorVersionUpgrade>"), body);
+    }
+
+    @Test
     void describeCacheClusters_reportsASingleNodeRedisClusterByItsNodeEndpoint() {
         // AWS gives a redis cache cluster no ConfigurationEndpoint (that is Memcached's node
         // discovery endpoint); terraform-provider-aws reads the port off CacheNodes instead.
