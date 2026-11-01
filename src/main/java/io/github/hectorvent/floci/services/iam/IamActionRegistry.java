@@ -265,6 +265,9 @@ public class IamActionRegistry {
         // ── DynamoDB (JSON 1.1, action from X-Amz-Target handled separately) ──
         // Handled via Query-style action extraction in the filter
 
+        // ── AppConfig ─────────────────────────────────────────────────────────
+        rule("appconfig", "PATCH", "^/applications/[^/]+$", "appconfig:UpdateApplication"),
+
         // ── RDS Data API ───────────────────────────────────────────────────────
         rule("rds-data", "POST", "^/Execute/?$",              "rds-data:ExecuteStatement"),
         rule("rds-data", "POST", "^/ExecuteSql/?$",           "rds-data:ExecuteSql"),

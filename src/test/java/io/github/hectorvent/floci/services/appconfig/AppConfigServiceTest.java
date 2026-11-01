@@ -119,6 +119,24 @@ class AppConfigServiceTest {
     }
 
     @Test
+    void updateApplicationRejectsNonStringFieldsWithoutWriting() {
+        clearInvocations(applicationStore);
+
+        AwsException nameError = assertThrows(AwsException.class,
+                () -> service.updateApplication("app", Map.of("Name", 123)));
+        AwsException descriptionError = assertThrows(AwsException.class,
+                () -> service.updateApplication("app", Map.of("Name", "renamed", "Description", false)));
+
+        assertEquals("BadRequestException", nameError.getErrorCode());
+        assertEquals(400, nameError.getHttpStatus());
+        assertEquals("BadRequestException", descriptionError.getErrorCode());
+        assertEquals(400, descriptionError.getHttpStatus());
+        assertEquals("orders", service.getApplication("app").getName());
+        assertEquals("Order processing", service.getApplication("app").getDescription());
+        verify(applicationStore, never()).put(anyString(), any(Application.class));
+    }
+
+    @Test
     void onlyHostedProfilesReceiveTheOmittedTypeDefault() {
         assertEquals("AWS.Freeform", service.createConfigurationProfile("app",
                 Map.of("Name", "hosted", "LocationUri", "hosted")).getType());

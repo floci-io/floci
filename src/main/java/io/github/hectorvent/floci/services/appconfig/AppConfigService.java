@@ -124,6 +124,12 @@ public class AppConfigService {
 
     /** Updates only the application fields present in an UpdateApplication request. */
     public synchronized Application updateApplication(String applicationIdentifier, Map<String, Object> request) {
+        if (request.containsKey("Name") && !(request.get("Name") instanceof String)) {
+            throw new AwsException("BadRequestException", "Name must be a string", 400);
+        }
+        if (request.containsKey("Description") && !(request.get("Description") instanceof String)) {
+            throw new AwsException("BadRequestException", "Description must be a string", 400);
+        }
         Application app = copy(resolveApplication(applicationIdentifier));
         if (request.containsKey("Name")) {
             app.setName((String) request.get("Name"));
