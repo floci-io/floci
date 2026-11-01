@@ -129,8 +129,13 @@ public class PaymentCryptographyDataPlaneHandler {
         byte[] expected = PaymentCryptographyCrypto.cmac(material(key), message);
         byte[] cut = new byte[length];
         System.arraycopy(expected, 0, cut, 0, Math.min(length, expected.length));
-        boolean valid = mac.length == length && java.security.MessageDigest.isEqual(cut, mac);
-        return answer(key, Map.of("MacValid", valid));
+        if (mac.length != length || !java.security.MessageDigest.isEqual(cut, mac)) {
+            // The service does not answer that a MAC is not valid: it fails, because a caller
+            // that asks whether a MAC is good gets an error rather than a false.
+            throw new AwsException("VerificationFailedException",
+                    "This request failed verification.", 400);
+        }
+        return answer(key, Map.of());
     }
 
     /**

@@ -133,7 +133,7 @@ class PaymentCryptographyDataPlaneHandlerTest {
         Map<String, Object> verified = handler.verifyMac(request(Map.of(
                 "KeyIdentifier", key.getArn(), "MessageData", message, "Mac", value, "MacLength", 16)),
                 "us-east-1");
-        assertEquals(Boolean.TRUE, verified.get("MacValid"));
+        assertEquals(key.getArn(), verified.get("KeyArn"));
     }
 
     @Test
@@ -143,12 +143,12 @@ class PaymentCryptographyDataPlaneHandlerTest {
                 "KeyIdentifier", key.getArn(),
                 "MessageData", hex("a message".getBytes()))), "us-east-1").get("Mac");
 
-        Map<String, Object> verified = handler.verifyMac(request(Map.of(
+        AwsException refused = assertThrows(AwsException.class, () -> handler.verifyMac(request(Map.of(
                 "KeyIdentifier", key.getArn(),
                 "MessageData", hex("another message".getBytes()),
-                "Mac", mac)), "us-east-1");
+                "Mac", mac)), "us-east-1"));
 
-        assertEquals(Boolean.FALSE, verified.get("MacValid"));
+        assertEquals("VerificationFailedException", refused.getErrorCode());
     }
 
     @Test
