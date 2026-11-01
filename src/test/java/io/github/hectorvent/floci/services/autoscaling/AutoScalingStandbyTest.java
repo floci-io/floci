@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.elb.ElbClassicService;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
+import io.github.hectorvent.floci.testutil.LogCapture;
 import io.restassured.path.xml.XmlPath;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
@@ -35,6 +36,8 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
@@ -658,8 +661,16 @@ class AutoScalingStandbyTest {
             doThrow(failure).doNothing().when(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
         }
 
-        reconciler.reconcile(group());
+        List<LogRecord> records = LogCapture.capture(AutoScalingReconciler.class,
+                () -> reconciler.reconcile(group()));
 
+        List<LogRecord> warnings = records.stream()
+                .filter(record -> record.getLevel().intValue() == Level.WARNING.intValue()).toList();
+        assertEquals(1, warnings.size());
+        LogRecord warning = warnings.getFirst();
+        assertArrayEquals(new Object[]{GROUP, "i-a", classicFailure ? CLASSIC : TARGET_GROUP,
+                failure.getMessage()}, warning.getParameters());
+        assertSame(failure, warning.getThrown());
         assertEquals("Pending", lifecycle("i-a"));
         AsgInstance returning = group().getInstances().stream()
                 .filter(instance -> "i-a".equals(instance.getInstanceId())).findFirst().orElseThrow();
@@ -697,6 +708,29 @@ class AutoScalingStandbyTest {
 
         assertEquals("InService", lifecycle("i-a"));
         assertEquals("Successful", activity(describeScalingActivities(), activityId, "StatusCode"));
+        verify(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
+        verify(elbClassic).registerInstances(REGION, CLASSIC, List.of("i-a"));
+        assertNoLaunch();
+    }
+
+    @Test
+    void launchRegistrationPrecedesInServiceWithoutAStandbyActivity() {
+        AsgInstance launching = group().getInstances().stream()
+                .filter(instance -> "i-a".equals(instance.getInstanceId())).findFirst().orElseThrow();
+        launching.setLifecycleState("Pending");
+        assertNull(launching.getStandbyActivityId());
+        doAnswer(invocation -> {
+            assertEquals("Pending", launching.getLifecycleState());
+            return null;
+        }).when(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
+        when(elbClassic.registerInstances(REGION, CLASSIC, List.of("i-a"))).thenAnswer(invocation -> {
+            assertEquals("Pending", launching.getLifecycleState());
+            return List.of();
+        });
+
+        reconciler.reconcile(group());
+
+        assertEquals("InService", launching.getLifecycleState());
         verify(elbV2).registerTargets(eq(REGION), eq(TARGET_GROUP), anyList());
         verify(elbClassic).registerInstances(REGION, CLASSIC, List.of("i-a"));
         assertNoLaunch();
