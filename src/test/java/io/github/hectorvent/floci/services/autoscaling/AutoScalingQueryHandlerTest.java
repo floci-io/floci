@@ -14,7 +14,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -63,7 +62,7 @@ class AutoScalingQueryHandlerTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"AttachInstances", "DetachInstances", "SetInstanceProtection"})
+    @ValueSource(strings = {"AttachInstances", "DetachInstances", "SetInstanceProtection", "EnterStandby", "ExitStandby"})
     void instanceMutationsRetainSparseOrderedAndRepeatedMembers(String action) {
         AutoScalingService service = mock(AutoScalingService.class);
         AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
@@ -85,8 +84,12 @@ class AutoScalingQueryHandlerTest {
             verify(service).attachInstances(REGION, "indexed-instances", expected);
         } else if ("DetachInstances".equals(action)) {
             verify(service).detachInstances(REGION, "indexed-instances", expected, true);
-        } else {
+        } else if ("SetInstanceProtection".equals(action)) {
             verify(service).setInstanceProtection(REGION, "indexed-instances", expected, true);
+        } else if ("EnterStandby".equals(action)) {
+            verify(service).enterStandby(REGION, "indexed-instances", expected, true);
+        } else {
+            verify(service).exitStandby(REGION, "indexed-instances", expected);
         }
     }
 
@@ -127,38 +130,6 @@ class AutoScalingQueryHandlerTest {
         assertEquals("EnteringStandby", moving.getLifecycleState());
         assertFalse(original.isProtectedFromScaleIn());
         verifyNoInteractions(service.ec2Service);
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"EnterStandby", "ExitStandby"})
-    void standbyMembersRetainNumericOrderAndRepeatedParameterValues(String action) {
-        AutoScalingService service = mock(AutoScalingService.class);
-        AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
-        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
-        params.add("AutoScalingGroupName", "indexed-standby");
-        params.add("ShouldDecrementDesiredCapacity", "true");
-        for (int index = 12; index >= 1; index--) {
-            params.add("InstanceIds.member." + index, "i-" + index);
-        }
-        params.add("InstanceIds.member.2", "i-repeated");
-        List<String> expected = new ArrayList<>();
-        for (int index = 1; index <= 12; index++) {
-            expected.add("i-" + index);
-            if (index == 2) {
-                expected.add("i-repeated");
-            }
-        }
-        when(service.enterStandby(eq(REGION), eq("indexed-standby"), anyList(), eq(true)))
-                .thenReturn(List.of());
-        when(service.exitStandby(eq(REGION), eq("indexed-standby"), anyList())).thenReturn(List.of());
-
-        assertEquals(200, handler.handle(action, params, REGION).getStatus());
-
-        if ("EnterStandby".equals(action)) {
-            verify(service).enterStandby(REGION, "indexed-standby", expected, true);
-        } else {
-            verify(service).exitStandby(REGION, "indexed-standby", expected);
-        }
     }
 
     @ParameterizedTest
