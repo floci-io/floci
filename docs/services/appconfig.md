@@ -11,6 +11,7 @@ The management plane allows you to create and manage applications, environments,
 - `CreateApplication`
 - `GetApplication`
 - `ListApplications`
+- `UpdateApplication`
 - `DeleteApplication`
 - `CreateEnvironment`
 - `GetEnvironment`

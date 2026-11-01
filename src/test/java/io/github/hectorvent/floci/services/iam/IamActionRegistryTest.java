@@ -90,6 +90,13 @@ class IamActionRegistryTest {
     }
 
     @Test
+    void updateApplicationRouteResolvesItsAction() {
+        ContainerRequestContext ctx = mockCtx("PATCH", "/applications/abc1234",
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+        assertEquals("appconfig:UpdateApplication", registry.resolveRoute("appconfig", ctx));
+    }
+
+    @Test
     void cloudWatchGetUsesQueryActionAndOperationPrecedence() {
         MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
         query.add("Action", "GetMetricStatistics");
