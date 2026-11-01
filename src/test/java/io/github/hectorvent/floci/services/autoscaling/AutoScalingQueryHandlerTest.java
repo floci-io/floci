@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
@@ -27,6 +28,73 @@ import static org.mockito.Mockito.*;
 class AutoScalingQueryHandlerTest {
 
     private static final String REGION = "us-east-1";
+
+    @ParameterizedTest
+    @ValueSource(strings = {"AttachInstances", "DetachInstances", "SetInstanceProtection"})
+    void instanceMutationsRetainSparseOrderedAndRepeatedMembers(String action) {
+        AutoScalingService service = mock(AutoScalingService.class);
+        AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupName", "indexed-instances");
+        params.add("ShouldDecrementDesiredCapacity", "true");
+        params.add("ProtectedFromScaleIn", "true");
+        params.add("InstanceIds.member.999999999999999999999999", "i-large");
+        params.add("InstanceIds.member.10", "i-ten");
+        params.add("InstanceIds.member.2", "i-two");
+        params.add("InstanceIds.member.2", "i-repeated");
+        params.add("InstanceIds.member.01", "ignored");
+        params.add("InstanceIds.member.3.Other", "ignored");
+        List<String> expected = List.of("i-two", "i-repeated", "i-ten", "i-large");
+
+        assertEquals(200, handler.handle(action, params, REGION).getStatus());
+
+        if ("AttachInstances".equals(action)) {
+            verify(service).attachInstances(REGION, "indexed-instances", expected);
+        } else if ("DetachInstances".equals(action)) {
+            verify(service).detachInstances(REGION, "indexed-instances", expected, true);
+        } else {
+            verify(service).setInstanceProtection(REGION, "indexed-instances", expected, true);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"AttachInstances", "DetachInstances", "SetInstanceProtection"})
+    void instanceMutationsValidateMembersAfterGapBeforeChangingGroup(String action) {
+        AutoScalingService service = new AutoScalingService();
+        service.regionResolver = new RegionResolver(REGION, "000000000000");
+        service.createAutoScalingGroup(REGION, "indexed-validation", null, "lt", null, "1", null,
+                0, 3, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(),
+                "EC2", 0, List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("indexed-validation")).getFirst();
+        service.ec2Service = mock(Ec2Service.class);
+        AsgInstance original = new AsgInstance();
+        original.setInstanceId("i-original");
+        original.setLifecycleState("InService");
+        group.getInstances().add(original);
+        AsgInstance moving = new AsgInstance();
+        moving.setInstanceId("i-moving");
+        moving.setLifecycleState("EnteringStandby");
+        group.getInstances().add(moving);
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupName", "indexed-validation");
+        params.add("ProtectedFromScaleIn", "true");
+        params.add("ShouldDecrementDesiredCapacity", "true");
+        params.add("InstanceIds.member.1", "AttachInstances".equals(action) ? "i-new" : "i-original");
+        params.add("InstanceIds.member.3", "SetInstanceProtection".equals(action) ? "i-missing" : "i-moving");
+        AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
+
+        Response response = handler.handle(action, params, REGION);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<Code>ValidationError</Code>"));
+        assertEquals(List.of("i-original", "i-moving"),
+                group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+        assertEquals(1, group.getDesiredCapacity());
+        assertEquals("InService", original.getLifecycleState());
+        assertEquals("EnteringStandby", moving.getLifecycleState());
+        assertFalse(original.isProtectedFromScaleIn());
+        verifyNoInteractions(service.ec2Service);
+    }
 
     @ParameterizedTest
     @ValueSource(strings = {"EnterStandby", "ExitStandby"})

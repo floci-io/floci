@@ -638,7 +638,7 @@ public class AutoScalingQueryHandler {
 
     private Response handleSetInstanceProtection(MultivaluedMap<String, String> p, String region) {
         String groupName = p.getFirst("AutoScalingGroupName");
-        List<String> instanceIds = memberList(p, "InstanceIds");
+        List<String> instanceIds = indexedMembers(p, "InstanceIds");
         boolean protectedFromScaleIn = requiredBoolParam(p, "ProtectedFromScaleIn");
         service.setInstanceProtection(region, groupName, instanceIds, protectedFromScaleIn);
         return ok(new XmlBuilder()
@@ -893,7 +893,7 @@ public class AutoScalingQueryHandler {
     }
 
     private Response handleAttachInstances(MultivaluedMap<String, String> p, String region) {
-        service.attachInstances(region, p.getFirst("AutoScalingGroupName"), memberList(p, "InstanceIds"));
+        service.attachInstances(region, p.getFirst("AutoScalingGroupName"), indexedMembers(p, "InstanceIds"));
         return ok(new XmlBuilder()
                 .start("AttachInstancesResponse", NS)
                   .raw(AwsQueryResponse.responseMetadata())
@@ -902,7 +902,7 @@ public class AutoScalingQueryHandler {
 
     private Response handleDetachInstances(MultivaluedMap<String, String> p, String region) {
         service.detachInstances(region, p.getFirst("AutoScalingGroupName"),
-                memberList(p, "InstanceIds"),
+                indexedMembers(p, "InstanceIds"),
                 "true".equalsIgnoreCase(p.getFirst("ShouldDecrementDesiredCapacity")));
         return ok(new XmlBuilder()
                 .start("DetachInstancesResponse", NS)
