@@ -11173,22 +11173,11 @@ public class RdsService implements Resettable, ResourceProvider {
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
 
-    /**
-     * Stores what a CreateDBCluster request carries beyond the arguments of {@code createDbCluster}: its Tags and
-     * its KmsKeyId. Tags go on the cluster as AddTagsToResource would put them, so ListTagsForResource returns them.
-     */
-    public synchronized DbCluster applyCreateDbClusterOptions(String region, String clusterId, String kmsKeyId,
-                                                              Map<String, String> tags) {
+    /** Stores the KmsKeyId a CreateDBCluster request carries, which {@code createDbCluster} has no argument for. */
+    public synchronized DbCluster setNewDbClusterKmsKeyId(String region, String clusterId, String kmsKeyId) {
         String effectiveRegion = effectiveRegion(region);
         DbCluster cluster = getDbCluster(clusterId, effectiveRegion);
-        if (kmsKeyId != null && !kmsKeyId.isBlank()) {
-            cluster.setKmsKeyId(kmsKeyId);
-        }
-        if (tags != null && !tags.isEmpty()) {
-            Map<String, String> merged = new LinkedHashMap<>(cluster.getTags());
-            merged.putAll(tags);
-            cluster.setTags(merged);
-        }
+        cluster.setKmsKeyId(kmsKeyId);
         putClusterForScope(currentAccountId(), effectiveRegion, clusterId, cluster);
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }

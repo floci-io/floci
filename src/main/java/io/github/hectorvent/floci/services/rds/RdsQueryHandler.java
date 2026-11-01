@@ -1359,8 +1359,13 @@ public class RdsQueryHandler {
             }
             Map<String, String> tags = parseTags(params);
             String kmsKeyId = params.getFirst("KmsKeyId");
-            if (!tags.isEmpty() || (kmsKeyId != null && !kmsKeyId.isBlank())) {
-                cluster = service.applyCreateDbClusterOptions(region, id, kmsKeyId, tags);
+            if (!tags.isEmpty()) {
+                service.addTagsToResource(cluster.getDbClusterArn(), tags, region);
+            }
+            if (kmsKeyId != null && !kmsKeyId.isBlank()) {
+                cluster = service.setNewDbClusterKmsKeyId(region, id, kmsKeyId);
+            } else if (!tags.isEmpty()) {
+                cluster = service.getDbCluster(id, region);
             }
             if (!associatedRoles.isEmpty()) {
                 try {
