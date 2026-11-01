@@ -19,9 +19,11 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -55,6 +57,9 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
 
     /** The only class this service makes material for. */
     private static final String SUPPORTED_CLASS = "SYMMETRIC_KEY";
+
+    /** The regions the account replicates a new key to when the request names none. */
+    private final Set<String> defaultReplicationRegions = new LinkedHashSet<>();
 
     private final StorageBackend<String, PaymentCryptographyKey> keyStore;
     private final StorageBackend<String, PaymentCryptographyAlias> aliasStore;
@@ -103,6 +108,83 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     }
 
     /**
+     * Creates a key, in the region of the request and in the regions it is replicated to.
+     *
+     * <p>A key that is replicated is one key with one identifier in several regions, and each
+     * region has its own ARN of it. The regions the request names are the ones the key is
+     * replicated to; when it names none, the account's default regions are the ones, and the
+     * key says that it took them.
+     */
+    public PaymentCryptographyKey createKey(String region, Map<String, Object> attributes,
+                                            Map<String, Boolean> modesOfUse, boolean exportable,
+                                            boolean enabled, Map<String, String> tags,
+                                            List<String> replicationRegions) {
+        Set<String> regions = new LinkedHashSet<>();
+        boolean usingDefaults = false;
+        if (replicationRegions != null && !replicationRegions.isEmpty()) {
+            regions.addAll(replicationRegions);
+        } else {
+            regions.addAll(defaultReplicationRegions);
+            usingDefaults = !regions.isEmpty();
+        }
+        regions.remove(region);
+        for (String target : regions) {
+            if (!RegionResolver.isKnownRegion(target)) {
+                throw new AwsException("ValidationException",
+                        "the region " + target + " is not a region this service serves", 400);
+            }
+        }
+        if (!regions.isEmpty() && !exportable) {
+            throw new AwsException("ValidationException",
+                    "a key that is replicated has to be exportable, and this one is not", 400);
+        }
+        PaymentCryptographyKey primary = makeKey(region, attributes, modesOfUse, exportable, enabled, tags, null);
+        if (regions.isEmpty()) {
+            return primary;
+        }
+        primary.setPrimaryRegion(region);
+        primary.setMultiRegionKeyType("PRIMARY");
+        primary.setReplicationRegions(new ArrayList<>(regions));
+        primary.setUsingDefaultReplicationRegions(usingDefaults);
+        keyStore.put(storageKey(region, primary.getKeyId()), primary);
+        for (String target : regions) {
+            PaymentCryptographyKey replica = replicaOf(primary, target);
+            keyStore.put(storageKey(target, replica.getKeyId()), replica);
+        }
+        return primary;
+    }
+
+    /**
+     * The record of a key in another region: the same key, with the ARN of that region.
+     *
+     * <p>The tags and the alias names are the region's own, so a replica starts with no tags.
+     */
+    private PaymentCryptographyKey replicaOf(PaymentCryptographyKey primary, String region) {
+        PaymentCryptographyKey replica = new PaymentCryptographyKey();
+        replica.setKeyId(primary.getKeyId());
+        replica.setArn(regionResolver.buildArn(SERVICE, region, "key/" + primary.getKeyId()));
+        replica.setRegion(region);
+        replica.setKeyAlgorithm(primary.getKeyAlgorithm());
+        replica.setKeyClass(primary.getKeyClass());
+        replica.setKeyUsage(primary.getKeyUsage());
+        replica.setKeyModesOfUse(new LinkedHashMap<>(primary.getKeyModesOfUse()));
+        replica.setKeyOrigin(primary.getKeyOrigin());
+        replica.setKeyCheckValue(primary.getKeyCheckValue());
+        replica.setKeyCheckValueAlgorithm(primary.getKeyCheckValueAlgorithm());
+        replica.setKeyState(primary.getKeyState());
+        replica.setExportable(primary.isExportable());
+        replica.setEnabled(primary.isEnabled());
+        replica.setKeyMaterialHex(primary.getKeyMaterialHex());
+        replica.setCreateTimestamp(primary.getCreateTimestamp());
+        replica.setUsageStartTimestamp(primary.getUsageStartTimestamp());
+        replica.setPrimaryRegion(primary.getPrimaryRegion());
+        replica.setReplicationRegions(new ArrayList<>(primary.getReplicationRegions()));
+        replica.setMultiRegionKeyType("REPLICA");
+        replica.setUsingDefaultReplicationRegions(primary.isUsingDefaultReplicationRegions());
+        return replica;
+    }
+
+    /**
      * Makes a key, with the material it is given rather than with fresh material.
      *
      * <p>An imported key holds the material that came in with it, so the material is a
@@ -146,7 +228,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         long now = Instant.now().getEpochSecond();
         key.setCreateTimestamp(now);
         key.setUsageStartTimestamp(now);
-        keyStore.put(key.getKeyId(), key);
+        keyStore.put(storageKey(region, key.getKeyId()), key);
         return key;
     }
 
@@ -176,7 +258,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             }
             return null;
         }
-        PaymentCryptographyKey byId = keyStore.get(identifier).orElse(null);
+        PaymentCryptographyKey byId = keyStore.get(storageKey(region, identifier)).orElse(null);
         return byId != null && region.equals(byId.getRegion()) ? byId : null;
     }
 
@@ -222,11 +304,16 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * is being tagged cannot be written back after it was deleted.
      */
     public synchronized PaymentCryptographyKey deleteKey(PaymentCryptographyKey key) {
+        if ("REPLICA".equals(key.getMultiRegionKeyType())) {
+            throw new AwsException("ValidationException",
+                    "the key " + key.getArn() + " is a replica of a key in "
+                            + key.getPrimaryRegion() + ", and only the primary may be deleted", 400);
+        }
         long now = Instant.now().getEpochSecond();
         key.setKeyState("DELETE_PENDING");
         key.setEnabled(false);
         key.setDeletePendingTimestamp(now);
-        keyStore.delete(key.getKeyId());
+        keyStore.delete(storageKey(key.getRegion(), key.getKeyId()));
         for (PaymentCryptographyAlias alias : aliasStore.scan(a -> true)) {
             if (key.getKeyId().equals(alias.getKeyId())) {
                 aliasStore.delete(aliasKey(alias.getAliasName(), alias.getRegion()));
@@ -262,7 +349,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             keyId = alias == null || alias.getKeyId() == null ? "" : alias.getKeyId();
             requestContext.pinAliasKeyId(region, aliasName, keyId);
         }
-        return keyId.isEmpty() ? null : keyStore.get(keyId).orElse(null);
+        return keyId.isEmpty() ? null : keyStore.get(storageKey(region, keyId)).orElse(null);
     }
 
     /** Points a name at a key. The name must be free in the key's region. */
@@ -357,7 +444,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public synchronized void tag(PaymentCryptographyKey key, Map<String, String> tags) {
         PaymentCryptographyKey current = liveKey(key);
         current.getTags().putAll(tags);
-        keyStore.put(current.getKeyId(), current);
+        keyStore.put(storageKey(current.getRegion(), current.getKeyId()), current);
     }
 
     /**
@@ -369,7 +456,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * read again under the lock and the request fails if it is not there.
      */
     private PaymentCryptographyKey liveKey(PaymentCryptographyKey key) {
-        PaymentCryptographyKey current = keyStore.get(key.getKeyId()).orElse(null);
+        PaymentCryptographyKey current = keyStore.get(storageKey(key.getRegion(), key.getKeyId())).orElse(null);
         if (current == null) {
             throw new AwsException("ResourceNotFoundException",
                     "Key " + key.getArn() + " is not found", 400);
@@ -383,7 +470,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         for (String tagKey : tagKeys) {
             current.getTags().remove(tagKey);
         }
-        keyStore.put(current.getKeyId(), current);
+        keyStore.put(storageKey(current.getRegion(), current.getKeyId()), current);
     }
 
     /**
@@ -406,6 +493,113 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                                                 Integer maxResults, String nextToken) {
         return Pagination.paginate(new ArrayList<>(listTags(key).entrySet()), Map.Entry::getKey,
                 maxResults, nextToken, DEFAULT_PAGE_SIZE, MAX_RESULTS, PAGINATION_ERROR);
+    }
+
+    // ---- the replication ------------------------------------------------------
+
+    /**
+     * The regions the account replicates a new key to when the request names none.
+     */
+    public List<String> defaultReplicationRegions() {
+        return new ArrayList<>(defaultReplicationRegions);
+    }
+
+    /**
+     * Turns the default replication of the account on for the regions the request names.
+     *
+     * <p>The regions the account already had are left on, so the operation adds rather than
+     * replaces.
+     */
+    public List<String> enableDefaultReplicationRegions(List<String> regions) {
+        for (String region : regions) {
+            if (!RegionResolver.isKnownRegion(region)) {
+                throw new AwsException("ValidationException",
+                        "the region " + region + " is not a region this service serves", 400);
+            }
+        }
+        defaultReplicationRegions.addAll(regions);
+        return defaultReplicationRegions();
+    }
+
+    /**
+     * Turns the default replication of the account off for the regions the request names.
+     *
+     * <p>Only the regions the request names are turned off, so the others stay on.
+     */
+    public List<String> disableDefaultReplicationRegions(List<String> regions) {
+        defaultReplicationRegions.removeAll(regions);
+        return defaultReplicationRegions();
+    }
+
+    /**
+     * The key with the regions the request names added to its replication.
+     *
+     * <p>Only the primary of a multi-region key may be replicated further, and a key that is
+     * replicated has to be exportable.
+     */
+    public PaymentCryptographyKey addKeyReplicationRegions(String region, String keyIdentifier,
+                                                            List<String> regions) {
+        PaymentCryptographyKey key = primaryOf(region, keyIdentifier);
+        if (!key.isExportable()) {
+            throw new AwsException("ValidationException",
+                    "a key that is replicated has to be exportable, and " + key.getArn() + " is not", 400);
+        }
+        Set<String> added = new LinkedHashSet<>(key.getReplicationRegions());
+        for (String target : regions) {
+            if (!RegionResolver.isKnownRegion(target)) {
+                throw new AwsException("ValidationException",
+                        "the region " + target + " is not a region this service serves", 400);
+            }
+            if (target.equals(region)) {
+                continue;
+            }
+            added.add(target);
+        }
+        key.setReplicationRegions(new ArrayList<>(added));
+        keyStore.put(storageKey(region, key.getKeyId()), key);
+        for (String target : added) {
+            PaymentCryptographyKey replica = replicaOf(key, target);
+            keyStore.put(storageKey(target, replica.getKeyId()), replica);
+        }
+        return key;
+    }
+
+    /**
+     * The key with the regions the request names taken away from its replication.
+     *
+     * <p>The key goes out of the region it was replicated to, and the record of it there is
+     * gone.
+     */
+    public PaymentCryptographyKey removeKeyReplicationRegions(String region, String keyIdentifier,
+                                                               List<String> regions) {
+        PaymentCryptographyKey key = primaryOf(region, keyIdentifier);
+        Set<String> left = new LinkedHashSet<>(key.getReplicationRegions());
+        left.removeAll(regions);
+        key.setReplicationRegions(new ArrayList<>(left));
+        keyStore.put(storageKey(region, key.getKeyId()), key);
+        for (String target : regions) {
+            keyStore.delete(storageKey(target, key.getKeyId()));
+        }
+        return key;
+    }
+
+    /**
+     * The primary of a key, which is the only one that may be replicated further.
+     *
+     * <p>A replica is read-only: it cannot be deleted on its own and it cannot be replicated
+     * further, so the operations that change the replication of a key start at its primary.
+     */
+    private PaymentCryptographyKey primaryOf(String region, String keyIdentifier) {
+        PaymentCryptographyKey key = findKey(region, keyIdentifier);
+        if (key == null) {
+            throw new AwsException("ResourceNotFoundException", "Key not found: " + keyIdentifier, 400);
+        }
+        if ("REPLICA".equals(key.getMultiRegionKeyType())) {
+            throw new AwsException("ValidationException",
+                    "the key " + key.getArn() + " is a replica of a key in "
+                            + key.getPrimaryRegion() + ", and only the primary may be replicated", 400);
+        }
+        return key;
     }
 
     // ---- the key exchange ----------------------------------------------------
@@ -600,6 +794,16 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     }
 
     /**
+     * The storage key of a key.
+     *
+     * <p>The region is part of it, because a multi-region key has one identifier in several
+     * regions, and each of them is a key of its own region.
+     */
+    private static String storageKey(String region, String keyId) {
+        return region + "\u0000" + keyId;
+    }
+
+    /**
      * The storage key of an alias.
      *
      * <p>The name and the region together, because the name is unique in the
@@ -632,5 +836,11 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public void clear() {
         keyStore.clear();
         aliasStore.clear();
+        defaultReplicationRegions.clear();
+    }
+
+    /** The key store, for the tests. */
+    Optional<PaymentCryptographyKey> storedKey(String region, String keyId) {
+        return keyStore.get(storageKey(region, keyId));
     }
 }

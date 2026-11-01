@@ -63,6 +63,11 @@ public class PaymentCryptographyJsonHandler {
             case "GetParametersForExport" -> Response.ok(getParametersForExport(request, region)).build();
             case "GetParametersForImport" -> Response.ok(getParametersForImport(request, region)).build();
             case "GetPublicKeyCertificate" -> Response.ok(getPublicKeyCertificate(request, region)).build();
+            case "AddKeyReplicationRegions" -> Response.ok(addKeyReplicationRegions(request, region)).build();
+            case "RemoveKeyReplicationRegions" -> Response.ok(removeKeyReplicationRegions(request, region)).build();
+            case "GetDefaultKeyReplicationRegions" -> Response.ok(getDefaultKeyReplicationRegions(request, region)).build();
+            case "EnableDefaultKeyReplicationRegions" -> Response.ok(enableDefaultKeyReplicationRegions(request, region)).build();
+            case "DisableDefaultKeyReplicationRegions" -> Response.ok(disableDefaultKeyReplicationRegions(request, region)).build();
             default -> throw new AwsException("UnknownOperationException",
                     "Operation " + action + " is not supported by floci", 400);
         };
@@ -102,7 +107,8 @@ public class PaymentCryptographyJsonHandler {
         // A key may be created disabled, and it may be created with tags.
         boolean enabled = request.has("Enabled") ? request.path("Enabled").asBoolean(true) : true;
         PaymentCryptographyKey key = service.createKey(region, declared, modesOfUse(attributes),
-                request.path("Exportable").asBoolean(false), enabled, tagsOf(request));
+                request.path("Exportable").asBoolean(false), enabled, tagsOf(request),
+                stringsOf(request, "ReplicationRegions"));
         return Map.of("Key", keyObject(key));
     }
 
@@ -212,6 +218,43 @@ public class PaymentCryptographyJsonHandler {
     private Map<String, Object> deleteAlias(JsonNode request, String region) {
         service.deleteAlias(region, aliasName(request));
         return Map.of();
+    }
+
+    // ---- the replication ------------------------------------------------------
+
+    /**
+     * The key with the regions the request names added to its replication.
+     */
+    private Map<String, Object> addKeyReplicationRegions(JsonNode request, String region) {
+        PaymentCryptographyKey key = service.addKeyReplicationRegions(region,
+                request.path("KeyIdentifier").asText(), stringsOf(request, "ReplicationRegions"));
+        return Map.of("Key", keyObject(key));
+    }
+
+    /**
+     * The key with the regions the request names taken away from its replication.
+     */
+    private Map<String, Object> removeKeyReplicationRegions(JsonNode request, String region) {
+        PaymentCryptographyKey key = service.removeKeyReplicationRegions(region,
+                request.path("KeyIdentifier").asText(), stringsOf(request, "ReplicationRegions"));
+        return Map.of("Key", keyObject(key));
+    }
+
+    /** The regions the account replicates a new key to by default. */
+    private Map<String, Object> getDefaultKeyReplicationRegions(JsonNode request, String region) {
+        return Map.of("EnabledReplicationRegions", service.defaultReplicationRegions());
+    }
+
+    /** Turns the default replication of the account on for the regions the request names. */
+    private Map<String, Object> enableDefaultKeyReplicationRegions(JsonNode request, String region) {
+        return Map.of("EnabledReplicationRegions",
+                service.enableDefaultReplicationRegions(stringsOf(request, "ReplicationRegions")));
+    }
+
+    /** Turns the default replication of the account off for the regions the request names. */
+    private Map<String, Object> disableDefaultKeyReplicationRegions(JsonNode request, String region) {
+        return Map.of("EnabledReplicationRegions",
+                service.disableDefaultReplicationRegions(stringsOf(request, "ReplicationRegions")));
     }
 
     // ---- the key exchange ----------------------------------------------------
@@ -327,6 +370,20 @@ public class PaymentCryptographyJsonHandler {
         return out;
     }
 
+    /** The strings of a request, such as the replication regions. */
+    private static List<String> stringsOf(JsonNode request, String member) {
+        List<String> values = new ArrayList<>();
+        JsonNode declared = request.get(member);
+        if (declared != null && declared.isArray()) {
+            for (JsonNode value : declared) {
+                if (value.isTextual()) {
+                    values.add(value.textValue());
+                }
+            }
+        }
+        return values;
+    }
+
     /** The tags of a request, as the name and the value of each. */
     private static Map<String, String> tagsOf(JsonNode request) {
         Map<String, String> tags = new LinkedHashMap<>();
@@ -427,6 +484,16 @@ public class PaymentCryptographyJsonHandler {
         }
         if (key.getDeleteTimestamp() > 0) {
             out.put("DeleteTimestamp", key.getDeleteTimestamp());
+        }
+        if (key.getMultiRegionKeyType() != null) {
+            out.put("MultiRegionKeyType", key.getMultiRegionKeyType());
+            out.put("PrimaryRegion", key.getPrimaryRegion());
+            Map<String, Object> status = new LinkedHashMap<>();
+            for (String target : key.getReplicationRegions()) {
+                status.put(target, Map.of("Status", "ENABLED", "StatusMessage", ""));
+            }
+            out.put("ReplicationStatus", status);
+            out.put("UsingDefaultReplicationRegions", key.isUsingDefaultReplicationRegions());
         }
         return out;
     }
