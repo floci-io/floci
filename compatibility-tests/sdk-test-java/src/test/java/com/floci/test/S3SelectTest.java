@@ -1,6 +1,7 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.async.SdkPublisher;
@@ -20,6 +21,7 @@ import static org.assertj.core.api.Assertions.*;
 
 @DisplayName("S3 SelectObjectContent")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@ResourceLock("floci-duck")
 class S3SelectTest {
 
     private static S3Client s3;

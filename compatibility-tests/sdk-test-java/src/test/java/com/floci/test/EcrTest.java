@@ -35,6 +35,12 @@ class EcrTest {
     @BeforeAll
     static void setup() {
         ecr = TestFixtures.ecrClient();
+        // Floci removes the backing registry when the last repository goes and starts a new one
+        // on the next create, which can stall for as long as Floci caches the old container's
+        // address. These tests are not about that, so one repository stays for the whole class.
+        String keepRegistry = "floci-it/keep-registry-" + System.nanoTime();
+        ecr.createRepository(b -> b.repositoryName(keepRegistry));
+        reposToCleanup.add(keepRegistry);
     }
 
     @AfterAll

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.compat;
 import com.floci.test.TestFixtures;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.glue.model.DatabaseInput;
@@ -24,6 +25,7 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
+@ResourceLock("floci-duck")
 class RedshiftRelationalSpectrumTest {
     @Test
     @DisplayName("Glue external tables join internal tables through JDBC and the SDK Data API")
