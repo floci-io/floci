@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessingConfiguration;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.Processor;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessorParameter;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
@@ -94,7 +95,7 @@ public class FirehoseLambdaTransformer {
     public Outcome transform(DeliveryStreamDescription stream, String bucket, List<byte[]> records,
                              Instant deliveryTime) {
         S3Destination s3 = stream.s3Destination();
-        Processor processor = lambdaProcessor(s3);
+        Processor processor = lambdaProcessor(stream.processingConfiguration());
         if (processor == null) {
             return new Outcome(records, 0, 0, null);
         }
@@ -136,11 +137,11 @@ public class FirehoseLambdaTransformer {
      * stream has none: the other processor types AWS models are stored and echoed but not
      * applied. The validator has already made "at most one" true.
      */
-    private static Processor lambdaProcessor(S3Destination s3) {
-        if (s3 == null || !s3.isProcessingEnabled() || s3.getProcessingConfiguration().getProcessors() == null) {
+    private static Processor lambdaProcessor(ProcessingConfiguration processing) {
+        if (processing == null || !Boolean.TRUE.equals(processing.getEnabled()) || processing.getProcessors() == null) {
             return null;
         }
-        for (Processor processor : s3.getProcessingConfiguration().getProcessors()) {
+        for (Processor processor : processing.getProcessors()) {
             if (processor != null && "Lambda".equals(processor.getType())
                     && parameterValue(processor, "LambdaArn") != null) {
                 return processor;

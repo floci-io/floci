@@ -36,11 +36,11 @@ final class ProcessingConfigurationValidator {
     private ProcessingConfigurationValidator() {}
 
     static void validateEffective(S3Destination config) {
-        if (config == null || config.getProcessingConfiguration() == null) {
-            return;
-        }
-        ProcessingConfiguration processing = config.getProcessingConfiguration();
-        if (processing.getProcessors() == null) {
+        validateEffective(config == null ? null : config.getProcessingConfiguration());
+    }
+
+    static void validateEffective(ProcessingConfiguration processing) {
+        if (processing == null || processing.getProcessors() == null) {
             return;
         }
         // Before anything a processor's own parameters say: a repeated name is rejected
