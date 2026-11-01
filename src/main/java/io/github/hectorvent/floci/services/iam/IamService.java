@@ -4820,6 +4820,31 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                         session.getPresignedAction(), session.getPresignedResourceArn()));
     }
 
+    /** Binds a Redshift Spectrum scratch object ARN to an active transfer role session. */
+    public void registerSpectrumScratchResource(String accessKeyId, String resourceArn) {
+        currentSession(accessKeyId).ifPresent(session -> {
+            session.setSpectrumScratchResourceArn(resourceArn);
+            String accountId = session.getOriginAccountId() != null ? session.getOriginAccountId() : "000000000000";
+            putSessionForAccount(accountId, accessKeyId, session);
+        });
+    }
+
+    /** Clears the Spectrum scratch object permission from the session when the transfer completes. */
+    public void clearSpectrumScratchResource(String accessKeyId) {
+        currentSession(accessKeyId).ifPresent(session -> {
+            session.setSpectrumScratchResourceArn(null);
+            String accountId = session.getOriginAccountId() != null ? session.getOriginAccountId() : "000000000000";
+            putSessionForAccount(accountId, accessKeyId, session);
+        });
+    }
+
+    /** The exact scratch object ARN permitted for this session, if it is a Spectrum transfer session. */
+    public Optional<String> spectrumScratchResourceArn(String accessKeyId) {
+        return currentSession(accessKeyId)
+                .map(SessionCredential::getSpectrumScratchResourceArn)
+                .filter(arn -> arn != null && !arn.isBlank());
+    }
+
     /**
      * Stores a non-expiring session for a Lambda execution role under the function's account.
      * Lambda launches can happen outside request scope, so the account namespace must be explicit.

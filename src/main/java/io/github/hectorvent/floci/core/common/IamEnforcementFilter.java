@@ -54,7 +54,6 @@ import java.util.UUID;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.stream.Collectors;
 
 /**
  * JAX-RS filter that enforces IAM policies on every incoming request when
@@ -215,6 +214,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     /** The clock {@link IamService} measures session expiry on, so both read the same time. */
     private final Clock clock;
     private final ResourceInfo resourceInfo;
+    private final Instance<S3Service> s3ServiceProvider;
 
     @Inject
     public IamEnforcementFilter(EmulatorConfig config,
@@ -234,7 +234,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                 Instance<ResourcePolicyProvider> resourcePolicyProviders,
                                 Instance<PassedRoleLookup> passedRoleLookups,
                                 Clock clock,
-                                @Context ResourceInfo resourceInfo) {
+                                @Context ResourceInfo resourceInfo,
+                                Instance<S3Service> s3ServiceProvider) {
         this.config = config;
         this.accountResolver = accountResolver;
         this.iamService = iamService;
@@ -253,6 +254,32 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this.passedRoleLookups = passedRoleLookups;
         this.clock = clock;
         this.resourceInfo = resourceInfo;
+        this.s3ServiceProvider = s3ServiceProvider;
+    }
+
+    /** Package-private constructor for callers predating s3ServiceProvider. */
+    IamEnforcementFilter(EmulatorConfig config,
+                         AccountResolver accountResolver,
+                         IamService iamService,
+                         IamPolicyEvaluator evaluator,
+                         IamActionRegistry actionRegistry,
+                         AwsQueryServiceResolver queryServiceResolver,
+                         ResourceArnBuilder arnBuilder,
+                         RequestContext requestContext,
+                         IamConditionContextResolver conditionContextResolver,
+                         CloudTrailService cloudTrailService,
+                         CurrentVertxRequest currentVertxRequest,
+                         ResolvedServiceCatalog catalog,
+                         Instance<ScpProvider> scpProvider,
+                         SessionAccountLookup sessionAccountLookup,
+                         Instance<ResourcePolicyProvider> resourcePolicyProviders,
+                         Instance<PassedRoleLookup> passedRoleLookups,
+                         Clock clock,
+                         ResourceInfo resourceInfo) {
+        this(config, accountResolver, iamService, evaluator, actionRegistry,
+                queryServiceResolver, arnBuilder, requestContext,
+                conditionContextResolver, cloudTrailService, currentVertxRequest, catalog,
+                scpProvider, sessionAccountLookup, resourcePolicyProviders, passedRoleLookups, clock, resourceInfo, null);
     }
 
     /** Package-private constructor for callers predating Query dispatch-aware enforcement. */
@@ -273,7 +300,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this(config, accountResolver, iamService, evaluator, actionRegistry,
                 new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
                 conditionContextResolver, cloudTrailService, currentVertxRequest, catalog,
-                scpProvider, sessionAccountLookup, resourcePolicyProviders, null, Clock.systemUTC(), null);
+                scpProvider, sessionAccountLookup, resourcePolicyProviders, null, Clock.systemUTC(), null, null);
     }
 
     /** Package-private constructor for callers predating resourcePolicyProviders. */
@@ -293,7 +320,29 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         this(config, accountResolver, iamService, evaluator, actionRegistry,
                 new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
                 conditionContextResolver, cloudTrailService, currentVertxRequest, catalog,
-                scpProvider, sessionAccountLookup, null, null, Clock.systemUTC(), null);
+                scpProvider, sessionAccountLookup, null, null, Clock.systemUTC(), null, null);
+    }
+
+    /** Package-private constructor for testing with S3Service. */
+    IamEnforcementFilter(EmulatorConfig config,
+                         AccountResolver accountResolver,
+                         IamService iamService,
+                         IamPolicyEvaluator evaluator,
+                         IamActionRegistry actionRegistry,
+                         ResourceArnBuilder arnBuilder,
+                         RequestContext requestContext,
+                         IamConditionContextResolver conditionContextResolver,
+                         CloudTrailService cloudTrailService,
+                         CurrentVertxRequest currentVertxRequest,
+                         ResolvedServiceCatalog catalog,
+                         Instance<ScpProvider> scpProvider,
+                         SessionAccountLookup sessionAccountLookup,
+                         Instance<ResourcePolicyProvider> resourcePolicyProviders,
+                         Instance<S3Service> s3ServiceProvider) {
+        this(config, accountResolver, iamService, evaluator, actionRegistry,
+                new AwsQueryServiceResolver(catalog), arnBuilder, requestContext,
+                conditionContextResolver, cloudTrailService, currentVertxRequest, catalog,
+                scpProvider, sessionAccountLookup, resourcePolicyProviders, null, Clock.systemUTC(), null, s3ServiceProvider);
     }
 
     @Override
@@ -508,11 +557,13 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             conditionContext = conditionContext == null ? new HashMap<>() : new HashMap<>(conditionContext);
             callerArns.get().putPrincipalKeys(conditionContext);
         }
-        // The Spectrum transfer writes its CSV to Floci's own scratch bucket under the role session, and no
-        // user policy names that bucket. An Allow for exactly those objects is added to the session's own
-        // policies, so an explicit Deny, a boundary or an SCP still decides the request.
-        if (isSpectrumScratchTransfer(credentialScope, action, resources, callerArns.orElse(null))) {
-            caller = caller.withIdentityPolicy(spectrumScratchAllow(action, resources));
+        // Floci Spectrum transfer writes internal materialization to its own scratch bucket under the minted
+        // role session key. Since AWS Spectrum has no S3 write, this transfer is internal and must not be
+        // evaluated against the role's policies, permissions boundary, or SCPs (which often enforce read-only
+        // on data lake buckets). Tying authorization ahead of role policies directly to the minted transfer key
+        // and scratch key ensures boundary/SCP checks apply only to the actual S3 source reads.
+        if (isSpectrumScratchTransfer(credentialScope, action, resources, akid, callerArns.orElse(null))) {
+            return;
         }
         // A create that carries tags is checked with them where its own action takes them, as the tagging
         // action it also needs is (see TagOnCreate); keys the service's own resolver gives are kept.
@@ -713,27 +764,33 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         return "POST".equalsIgnoreCase(ctx.getMethod()) && namesUpload && !params.containsKey("uploads");
     }
 
-    /** An identity policy allowing {@code action} on exactly the scratch objects the request names. */
-    private static String spectrumScratchAllow(String action, List<String> resources) {
-        String resourceList = resources.stream().map(resource -> "\"" + resource + "\"")
-                .collect(Collectors.joining(","));
-        return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"" + action
-                + "\",\"Resource\":[" + resourceList + "]}]}";
-    }
-
     /**
-     * A write or delete of an object in the Spectrum scratch bucket by an assumed-role session. The
-     * transfer is Floci's own, so the role needs no policy naming the bucket; any other action, bucket
-     * or kind of principal stays under the normal evaluation.
+     * A write or delete of the scratch object in the Spectrum scratch bucket by the exact assumed-role
+     * session running that transfer. The transfer is Floci's own, so it is authorized ahead of the
+     * role's policies and permissions boundaries; any other action, bucket, key or session stays
+     * under normal policy evaluation.
      */
-    private static boolean isSpectrumScratchTransfer(String credentialScope, String action,
-                                                     List<String> resources, CallerArns callerArns) {
-        if (!"s3".equals(credentialScope) || callerArns == null
+    private boolean isSpectrumScratchTransfer(String credentialScope, String action,
+                                              List<String> resources, String akid,
+                                              CallerArns callerArns) {
+        if (!"s3".equals(credentialScope) || akid == null || callerArns == null
                 || !CallerArns.TYPE_ASSUMED_ROLE.equals(callerArns.principalType())
                 || !SPECTRUM_SCRATCH_ACTIONS.contains(action) || resources.isEmpty()) {
             return false;
         }
-        return resources.stream().allMatch(resource -> SPECTRUM_SCRATCH_OBJECT.matcher(resource).matches());
+        if (s3ServiceProvider != null && s3ServiceProvider.isResolvable()
+                && !s3ServiceProvider.get().isSpectrumScratchBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET)) {
+            return false;
+        }
+        Optional<String> allowedScratchArn = iamService.spectrumScratchResourceArn(akid);
+        if (allowedScratchArn.isEmpty()) {
+            return false;
+        }
+        String expectedArn = allowedScratchArn.get();
+        if (!SPECTRUM_SCRATCH_OBJECT.matcher(expectedArn).matches()) {
+            return false;
+        }
+        return resources.stream().allMatch(expectedArn::equals);
     }
 
     /**

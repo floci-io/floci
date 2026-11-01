@@ -628,6 +628,14 @@ public class S3Service implements Resettable, ResourceProvider {
                 && REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE.equals(bucket.getTags().get(INTERNAL_BUCKET_TAG_KEY));
     }
 
+    /**
+     * Returns true if the named bucket is Floci's internal Redshift Spectrum scratch bucket,
+     * verified by its name and internal tag.
+     */
+    public boolean isSpectrumScratchBucket(String bucketName) {
+        return resolveBucket(bucketName).filter(S3Service::isSpectrumScratchBucket).isPresent();
+    }
+
     public String getBucketOwnerAccountId(String bucketName) {
         return resolveBucketEntry(bucketName)
                 .map(AccountAwareStorageBackend.OwnedEntry::account)

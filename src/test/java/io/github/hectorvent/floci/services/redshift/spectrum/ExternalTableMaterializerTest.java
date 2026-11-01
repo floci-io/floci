@@ -243,6 +243,63 @@ class ExternalTableMaterializerTest {
         verify(duck).execute(argThat(sql -> sql.contains("LIMIT 1001")), isNull(), anyString(),
                 startsWith("ASIA"), anyString(), notNull());
         verify(duck, never()).execute(anyString(), any(), anyString(), eq(ACCOUNT));
+        verify(iam).registerSpectrumScratchResource(startsWith("ASIA"),
+                startsWith("arn:aws:s3:::floci-internal-redshift-spectrum-scratch/spectrum-"));
+        verify(iam).clearSpectrumScratchResource(startsWith("ASIA"));
+    }
+
+    @Test
+    void transferDenialDuringColdLoadReturns42501() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(iam.resolvePrincipalContext(BINDING.iamRoleArn())).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:ListBucket","s3:GetObject"],"Resource":"*"}
+                ]}""")));
+        doThrow(new RuntimeException("floci-duck execute returned HTTP 500: HTTP Error: HTTP 403 (Forbidden) while writing scratch"))
+                .when(duck).execute(anyString(), any(), anyString(), anyString(), anyString(), anyString());
+
+        SpectrumReadException exception = assertThrows(SpectrumReadException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("42501"));
+        verify(iam).clearSpectrumScratchResource(startsWith("ASIA"));
+    }
+
+    @Test
+    void accessDenialDuringIcebergScanReturns42501() {
+        Table table = icebergTable("s3://bucket/events/metadata/v1.json");
+        when(glue.getTable("lake", "events")).thenReturn(table);
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(iam.resolvePrincipalContext(BINDING.iamRoleArn())).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:ListBucket","s3:GetObject"],"Resource":"*"}
+                ]}""")));
+        when(duck.query(anyString(), any(), startsWith("ASIA"), anyString(), anyString()))
+                .thenThrow(new RuntimeException("floci-duck query error: AccessDenied: Access Denied"));
+
+        SpectrumReadException exception = assertThrows(SpectrumReadException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("42501"));
+    }
+
+    @Test
+    void unrelatedExecutionErrorDuringColdLoadReturns58030() {
+        when(glue.getTable("lake", "events")).thenReturn(csvTable());
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(iam.resolvePrincipalContext(BINDING.iamRoleArn())).thenReturn(CallerContext.of(List.of("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":["s3:ListBucket","s3:GetObject"],"Resource":"*"}
+                ]}""")));
+        doThrow(new RuntimeException("floci-duck execute returned HTTP 500: Parser Error: syntax error"))
+                .when(duck).execute(anyString(), any(), anyString(), anyString(), anyString(), anyString());
+
+        SpectrumReadException exception = assertThrows(SpectrumReadException.class,
+                () -> materializer.ensureCurrent(backend, session(false), BINDING, "events"));
+
+        assertThat(exception.sqlState(), equalTo("58030"));
+        verify(iam).clearSpectrumScratchResource(startsWith("ASIA"));
     }
 
     @Test

@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.iam.ResourcePolicyProvider;
 import io.github.hectorvent.floci.services.iam.ScpProvider;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.s3.S3Controller;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.scheduler.SchedulerController;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
@@ -1595,6 +1596,10 @@ class IamEnforcementFilterTest {
             + "spectrum-123e4567-e89b-12d3-a456-426614174000.csv";
 
     private IamEnforcementFilter newFilterWithRealEvaluator() {
+        return newFilterWithRealEvaluator(null);
+    }
+
+    private IamEnforcementFilter newFilterWithRealEvaluator(Instance<S3Service> s3ServiceProvider) {
         @SuppressWarnings("unchecked")
         Instance<ScpProvider> scpProvider = mock(Instance.class);
         when(scpProvider.isResolvable()).thenReturn(false);
@@ -1603,7 +1608,7 @@ class IamEnforcementFilterTest {
                 actionRegistry, arnBuilder, requestContext, conditionContextResolver,
                 mock(CloudTrailService.class),
                 mock(CurrentVertxRequest.class),
-                catalog, scpProvider, sessionAccountLookup);
+                catalog, scpProvider, sessionAccountLookup, null, s3ServiceProvider);
     }
 
     private void stubSignedS3Request(ContainerRequestContext containerRequest, String action, String resource,
@@ -1618,6 +1623,7 @@ class IamEnforcementFilterTest {
         when(iamService.resolveCallerContext(eq("ASIASESSION"), any()))
                 .thenReturn(CallerContext.of(List.of(identityPolicy)));
         when(iamService.resolveCallerArns("ASIASESSION")).thenReturn(Optional.of(callerArns));
+        when(iamService.spectrumScratchResourceArn("ASIASESSION")).thenReturn(Optional.of(SCRATCH_OBJECT));
         when(arnBuilder.buildResources(eq("s3"), any(), eq(containerRequest), anyString(), anyString(), anyString()))
                 .thenReturn(List.of(resource));
         UriInfo uriInfo = mock(UriInfo.class);
@@ -1645,13 +1651,30 @@ class IamEnforcementFilterTest {
     }
 
     @Test
-    void anExplicitDenyStillBlocksTheSpectrumScratchWrite() {
+    void spectrumScratchWriteIsAuthorizedAheadOfRolePoliciesAndDenies() {
         ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
         stubSignedS3Request(containerRequest, "s3:PutObject", SCRATCH_OBJECT, assumedRoleArns(),
                 "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\",\"Action\":\"s3:*\","
                         + "\"Resource\":\"*\"}]}");
 
         newFilterWithRealEvaluator().filter(containerRequest);
+
+        verify(containerRequest, never()).abortWith(any());
+    }
+
+    @Test
+    void scratchWriteDeniedWhenBucketIsNotInternalScratchBucket() {
+        @SuppressWarnings("unchecked")
+        Instance<S3Service> s3ServiceProvider = mock(Instance.class);
+        S3Service s3Service = mock(S3Service.class);
+        when(s3ServiceProvider.isResolvable()).thenReturn(true);
+        when(s3ServiceProvider.get()).thenReturn(s3Service);
+        when(s3Service.isSpectrumScratchBucket(S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET)).thenReturn(false);
+
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        stubSignedS3Request(containerRequest, "s3:PutObject", SCRATCH_OBJECT, assumedRoleArns(), NO_STATEMENTS);
+
+        newFilterWithRealEvaluator(s3ServiceProvider).filter(containerRequest);
 
         verify(containerRequest).abortWith(any(Response.class));
     }
@@ -1679,6 +1702,17 @@ class IamEnforcementFilterTest {
                 new IamService.CallerArns("arn:aws:iam::222233334444:user/alice",
                         "arn:aws:iam::222233334444:user/alice", IamService.CallerArns.TYPE_USER, null, "alice",
                         false), NO_STATEMENTS);
+
+        newFilterWithRealEvaluator().filter(containerRequest);
+
+        verify(containerRequest).abortWith(any(Response.class));
+    }
+
+    @Test
+    void anUnrelatedRoleSessionCannotWriteTheSpectrumScratchBucket() {
+        ContainerRequestContext containerRequest = mock(ContainerRequestContext.class);
+        stubSignedS3Request(containerRequest, "s3:PutObject", SCRATCH_OBJECT, assumedRoleArns(), NO_STATEMENTS);
+        when(iamService.spectrumScratchResourceArn("ASIASESSION")).thenReturn(Optional.empty());
 
         newFilterWithRealEvaluator().filter(containerRequest);
 

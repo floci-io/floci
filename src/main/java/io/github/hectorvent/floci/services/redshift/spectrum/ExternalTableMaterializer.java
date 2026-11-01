@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.redshift.spectrum;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
@@ -200,6 +202,10 @@ public class ExternalTableMaterializer {
         } catch (SpectrumSqlException | SpectrumReadException exception) {
             throw exception;
         } catch (RuntimeException exception) {
+            if (isAccessDenied(exception)) {
+                throw new SpectrumReadException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                        "Access denied for external table \"" + label + "\"", exception);
+            }
             // the cause can carry DuckDB request text, so it goes to the log and not to the client
             LOG.warnv(exception, "Unable to load external table {0}", label);
             throw new SpectrumReadException(SQLSTATE_LOAD_FAILED, "Unable to load external table \"" + label + "\"", exception);
@@ -645,6 +651,12 @@ public class ExternalTableMaterializer {
                 // before a key exists: a scratch bucket that is not ours must see no write and no delete
                 prepareScratchBucket(session.accountId());
                 scratchKey = SCRATCH_KEY_PREFIX + UUID.randomUUID() + ".csv";
+                if (roleSession != null && roleSession.accessKeyId() != null) {
+                    String partition = AwsRegions.partitionFor(config.defaultRegion());
+                    String scratchArn = AwsArnUtils.Arn.global(partition, "s3", "",
+                            SCRATCH_BUCKET + "/" + scratchKey).toString();
+                    iamService.registerSpectrumScratchResource(roleSession.accessKeyId(), scratchArn);
+                }
                 readWithDuckDb(session.accountId(), roleSession, table, sources,
                         config.services().redshift().spectrumMaxRows(), scratchKey);
                 long rows;
@@ -679,6 +691,9 @@ public class ExternalTableMaterializer {
             }
             throw exception;
         } finally {
+            if (roleSession != null && roleSession.accessKeyId() != null) {
+                iamService.clearSpectrumScratchResource(roleSession.accessKeyId());
+            }
             if (scratchKey != null) {
                 String cleanupKey = scratchKey;
                 try {
@@ -712,23 +727,57 @@ public class ExternalTableMaterializer {
                 : "SELECT * FROM (" + String.join(" UNION ALL ", selects) + ") AS spectrum_partitions";
         String setup = GlueTableResolver.isIcebergTable(table) ? ICEBERG_SETUP : null;
         String outputPath = "s3://" + SCRATCH_BUCKET + "/" + scratchKey;
-        if (s3Service.isAuthEnforced()) {
-            requireSignedSession(roleSession);
-            duckClient.execute(query + " LIMIT " + (maxRows + 1), setup, outputPath,
-                    roleSession.accessKeyId(), roleSession.secretAccessKey(), roleSession.sessionToken());
-        } else {
-            duckClient.execute(query + " LIMIT " + (maxRows + 1), setup, outputPath, accountId);
+        try {
+            if (s3Service.isAuthEnforced()) {
+                requireSignedSession(roleSession);
+                duckClient.execute(query + " LIMIT " + (maxRows + 1), setup, outputPath,
+                        roleSession.accessKeyId(), roleSession.secretAccessKey(), roleSession.sessionToken());
+            } else {
+                duckClient.execute(query + " LIMIT " + (maxRows + 1), setup, outputPath, accountId);
+            }
+        } catch (RuntimeException exception) {
+            if (isAccessDenied(exception)) {
+                throw new SpectrumReadException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                        "Access denied during external table transfer for \"" + table.getName() + "\"", exception);
+            }
+            throw exception;
         }
     }
 
     private List<Map<String, Object>> duckQuery(String accountId, RedshiftRoleAccess.RoleSession roleSession,
                                                 String sql) {
-        if (!s3Service.isAuthEnforced()) {
-            return duckClient.query(sql, ICEBERG_SETUP, accountId);
+        try {
+            if (!s3Service.isAuthEnforced()) {
+                return duckClient.query(sql, ICEBERG_SETUP, accountId);
+            }
+            requireSignedSession(roleSession);
+            return duckClient.query(sql, ICEBERG_SETUP,
+                    roleSession.accessKeyId(), roleSession.secretAccessKey(), roleSession.sessionToken());
+        } catch (RuntimeException exception) {
+            if (isAccessDenied(exception)) {
+                throw new SpectrumReadException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                        "Access denied during Iceberg metadata scan", exception);
+            }
+            throw exception;
         }
-        requireSignedSession(roleSession);
-        return duckClient.query(sql, ICEBERG_SETUP,
-                roleSession.accessKeyId(), roleSession.secretAccessKey(), roleSession.sessionToken());
+    }
+
+    /**
+     * Whether an exception represents an S3 or IAM access denial (e.g. HTTP 403, AccessDenied).
+     */
+    private static boolean isAccessDenied(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            String message = current.getMessage();
+            if (message != null && (message.contains("403")
+                    || message.contains("AccessDenied")
+                    || message.contains("Access Denied")
+                    || message.contains("Forbidden"))) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     /** Under S3 auth enforcement a transfer never falls back to the account-scoped development credentials. */

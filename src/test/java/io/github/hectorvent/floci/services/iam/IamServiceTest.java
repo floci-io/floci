@@ -2613,6 +2613,30 @@ class IamServiceTest {
         assertTrue(sessions.getForAccount("000000000000", "ASIASTSSESSION").isPresent());
     }
 
+    @Test
+    void spectrumScratchResourceRegistrationAndClear() {
+        String accountId = "222233334444";
+        String accessKeyId = "ASIASPECTRUM";
+        AccountAwareStorageBackend<SessionCredential> sessions = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        IamService service = iamService(false, new InMemoryStorage<>(), sessions);
+
+        service.registerSessionForAccount(
+                accountId, accessKeyId, "secret", "token",
+                "arn:aws:iam::222233334444:role/R", Instant.now().plusSeconds(900), null);
+
+        assertTrue(service.spectrumScratchResourceArn(accessKeyId).isEmpty());
+
+        String scratchArn = "arn:aws:s3:::floci-internal-redshift-spectrum-scratch/spectrum-1234.csv";
+        service.registerSpectrumScratchResource(accessKeyId, scratchArn);
+
+        assertEquals(Optional.of(scratchArn), service.spectrumScratchResourceArn(accessKeyId));
+
+        service.clearSpectrumScratchResource(accessKeyId);
+
+        assertTrue(service.spectrumScratchResourceArn(accessKeyId).isEmpty());
+    }
+
     // =========================================================================
     // Instance Profiles
     // =========================================================================

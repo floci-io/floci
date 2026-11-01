@@ -683,10 +683,11 @@ the configured enforcement mode. With `FLOCI_SERVICES_S3_ENFORCE_AUTH=true` the 
 a cold load or reload is signed with the role's own short-lived session (access key, secret key and
 session token), so the role's identity policy and the bucket policy are evaluated for the transfer
 itself, and a deny stops it with SQLSTATE `42501`. The transfer writes its result to Floci's internal
-scratch bucket; with `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true` the role session is given an Allow for
-that one kind of object, so it needs no policy naming the bucket, while an explicit Deny, a permissions
-boundary or an SCP still applies. Reads of the bucket and every other bucket stay under the normal
-policy evaluation.
+scratch bucket; because AWS Spectrum performs no S3 write and realistic role policies, permissions
+boundaries or SCPs follow AWS's read-only permissions on source data, this internal scratch write
+is authorized ahead of the role's policies directly for the minted transfer session key and scratch key,
+verifying Floci's internal tag on the bucket. Reads of the scratch bucket and every other bucket stay under
+normal policy evaluation.
 
 Writes to external relations are rejected. AWS prohibits external UPDATE/DELETE but supports
 some external INSERT operations; external INSERT is an intentional Floci limitation here. Use

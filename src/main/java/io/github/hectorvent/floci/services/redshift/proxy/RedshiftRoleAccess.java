@@ -53,7 +53,7 @@ public final class RedshiftRoleAccess {
     }
 
     public record RoleSession(String accessKeyId, String secretAccessKey, String sessionToken) {
-        // Không để record in secret và token ra log qua toString mặc định
+        // Do not print secret and token to logs via the default toString
         @Override
         public String toString() {
             return "RoleSession[accessKeyId=" + accessKeyId + "]";
