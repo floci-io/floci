@@ -152,21 +152,32 @@ class PipesTargetInvokerTest {
     }
 
     @Test
-    void extractJsonPath_decodesBase64DataKeyAndValueButNotBody() {
+    void extractJsonPath_decodesBase64OnlyInKafkaAndKinesisSourceRecords() {
         String encoded = Base64.getEncoder().encodeToString("hello".getBytes(StandardCharsets.UTF_8));
-        String json = "{\"data\":\"" + encoded + "\",\"key\":\"" + encoded + "\",\"value\":\"" + encoded
-                + "\",\"body\":\"" + encoded + "\"}";
+        String kafka = "{\"eventSource\":\"aws:kafka\",\"key\":\"" + encoded + "\",\"value\":\"" + encoded + "\"}";
+        String kinesis = "{\"eventSource\":\"aws:kinesis\",\"kinesis\":{\"data\":\"" + encoded + "\"}}";
 
-        assertEquals("\"hello\"", invoker.extractJsonPath("$.data", json));
-        assertEquals("\"hello\"", invoker.extractJsonPath("$.key", json));
-        assertEquals("\"hello\"", invoker.extractJsonPath("$.value", json));
-        assertEquals("\"" + encoded + "\"", invoker.extractJsonPath("$.body", json));
+        assertEquals("\"hello\"", invoker.extractJsonPath("$.key", kafka));
+        assertEquals("\"hello\"", invoker.extractJsonPath("$.value", kafka));
+        assertEquals("\"hello\"", invoker.extractJsonPath("$.kinesis.data", kinesis));
+    }
+
+    @Test
+    void extractJsonPath_leavesFieldsOfAnEnrichmentResponseOrAnSqsBodyUnchanged() {
+        String encoded = Base64.getEncoder().encodeToString("hello".getBytes(StandardCharsets.UTF_8));
+        String enriched = "{\"data\":\"" + encoded + "\",\"key\":\"" + encoded + "\",\"value\":\"" + encoded
+                + "\",\"body\":\"" + encoded + "\",\"kinesis\":{\"data\":\"" + encoded + "\"}}";
+
+        for (String path : List.of("$.data", "$.key", "$.value", "$.body", "$.kinesis.data")) {
+            assertEquals("\"" + encoded + "\"", invoker.extractJsonPath(path, enriched), path);
+        }
+        assertEquals("\"" + encoded + "\"", invoker.extractJsonPath("$.key", "{\"key\":\"" + encoded + "\"}"));
     }
 
     @Test
     void inputTemplate_readsAFieldOfBase64KinesisData() {
         String data = Base64.getEncoder().encodeToString("{\"id\":7}".getBytes(StandardCharsets.UTF_8));
-        String event = "{\"kinesis\":{\"data\":\"" + data + "\"}}";
+        String event = "{\"eventSource\":\"aws:kinesis\",\"kinesis\":{\"data\":\"" + data + "\"}}";
 
         assertEquals("{\"id\": 7}", invoker.applyInputTemplate("{\"id\": <$.kinesis.data.id>}", event));
     }

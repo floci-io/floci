@@ -378,12 +378,15 @@ public class PipesTargetInvoker {
 
             JsonNode current = objectMapper.readTree(json);
             String previousSegment = null;
+            JsonNode container = null;
+            JsonNode outer = null;
             boolean sourceFieldDecoded = false;
             for (String segment : segments) {
                 // AWS Pipes parses an encoded source body when traversing into it.
                 if (!sourceFieldDecoded && isEncodedSourceField(previousSegment) && current.isTextual()) {
                     try {
-                        JsonNode decoded = objectMapper.readTree(decodedSourceText(previousSegment, current.asText()));
+                        JsonNode decoded = objectMapper.readTree(
+                                decodedSourceText(previousSegment, current.asText(), container, outer));
                         if (decoded != null && (decoded.isObject() || decoded.isArray())) {
                             current = decoded;
                         }
@@ -392,20 +395,21 @@ public class PipesTargetInvoker {
                         return null;
                     }
                 }
-                if (current.isArray()) {
-                    current = current.path(Integer.parseInt(segment));
-                } else {
-                    current = current.path(segment);
-                }
-                if (current.isMissingNode() || current.isNull()) {
+                JsonNode next = current.isArray()
+                        ? current.path(Integer.parseInt(segment))
+                        : current.path(segment);
+                if (next.isMissingNode() || next.isNull()) {
                     return null;
                 }
+                outer = container;
+                container = current;
+                current = next;
                 previousSegment = segment;
             }
             if (!sourceFieldDecoded && isEncodedSourceField(previousSegment) && current.isTextual()) {
                 // SQS bodies commonly contain a JSON document as a string. Pipes input
                 // transformation resolves that document when the body itself is selected.
-                String text = decodedSourceText(previousSegment, current.asText());
+                String text = decodedSourceText(previousSegment, current.asText(), container, outer);
                 try {
                     JsonNode decoded = objectMapper.readTree(text);
                     if (decoded != null && (decoded.isObject() || decoded.isArray())) {
@@ -430,10 +434,15 @@ public class PipesTargetInvoker {
 
     /**
      * Kinesis {@code data} and Kafka {@code key} and {@code value} arrive as base64, so a path into them has to
-     * read the decoded bytes. An SQS {@code body} is already text, and text that is not base64 stays as it is.
+     * read the decoded bytes. Only the fields of a Kinesis or Kafka source record qualify: a field of the same
+     * name in an enrichment response or an SQS body is ordinary text and stays as it is, and so does text that
+     * is not base64.
+     *
+     * @param container the object that holds {@code field}
+     * @param outer the object that holds {@code container}
      */
-    private static String decodedSourceText(String field, String text) {
-        if ("body".equals(field)) {
+    private static String decodedSourceText(String field, String text, JsonNode container, JsonNode outer) {
+        if (!isBase64SourceField(field, container, outer)) {
             return text;
         }
         try {
@@ -442,6 +451,21 @@ public class PipesTargetInvoker {
             // Not base64, so the field holds plain text such as an inline JSON document.
             return text;
         }
+    }
+
+    private static boolean isBase64SourceField(String field, JsonNode container, JsonNode outer) {
+        if ("data".equals(field)) {
+            return outer != null && "aws:kinesis".equals(outer.path("eventSource").asText())
+                    && outer.path("kinesis") == container;
+        }
+        if ("key".equals(field) || "value".equals(field)) {
+            return container != null && isKafkaEventSource(container.path("eventSource").asText());
+        }
+        return false;
+    }
+
+    private static boolean isKafkaEventSource(String eventSource) {
+        return "aws:kafka".equals(eventSource) || "SelfManagedKafka".equals(eventSource);
     }
 
     private static boolean isEncodedSourceField(String segment) {
