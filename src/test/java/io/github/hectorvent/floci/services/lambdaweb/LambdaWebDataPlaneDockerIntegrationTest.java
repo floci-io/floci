@@ -79,6 +79,7 @@ class LambdaWebDataPlaneDockerIntegrationTest {
             const http = require('node:http');
             const [host, port] = process.env.AWS_LAMBDA_HTTP_ENDPOINT.split(':');
             console.log('starting');
+            const STALE_DATE = 'Thu, 01 Jan 2015 00:00:00 GMT';
             if (process.env.MODE === 'throw') { throw new Error('init boom'); }
             if (process.env.MODE === 'exit') { process.exit(1); }
             if (process.env.MODE === 'missing') { require('no-such-module'); }
@@ -117,6 +118,9 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 }, (e) => { res.statusCode = 500; res.end(String(e)); });
                 return;
               }
+              if (req.url === '/date/none') { res.sendDate = false; res.end('none'); return; }
+              if (req.url === '/date/stale') { res.setHeader('Date', STALE_DATE); res.end('stale'); return; }
+              if (req.url === '/date/lower') { res.setHeader('date', STALE_DATE); res.end('lower'); return; }
               if (req.url.startsWith('/crash')) { setTimeout(() => process.exit(1), 50); return; }
               if (req.url.startsWith('/exit')) { res.end('bye', () => process.exit(0)); return; }
               let body = '';
@@ -236,6 +240,27 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 .body("headers.authorization", nullValue())
                 .body("headers.x-amz-security-token", nullValue())
                 .body("headers.x-amz-date", equalTo("20260101T000000Z"));
+    }
+
+    @Test
+    @Timeout(180)
+    void thePlatformWritesItsOwnDateInPlaceOfTheApps() throws Exception {
+        String domain = createFunction(30);
+        String own = "Date: [A-Z][a-z]{2}, \\d{2} [A-Z][a-z]{2} \\d{4} \\d{2}:\\d{2}:\\d{2} GMT";
+        String stale = "Thu, 01 Jan 2015 00:00:00 GMT";
+
+        List<String> none = dateLines(domain, "/date/none");
+        assertEquals(1, none.size(), none.toString());
+        assertTrue(none.getFirst().matches(own), none.toString());
+
+        List<String> replaced = dateLines(domain, "/date/stale");
+        assertEquals(1, replaced.size(), replaced.toString());
+        assertTrue(replaced.getFirst().matches(own) && !replaced.getFirst().endsWith(stale), replaced.toString());
+
+        List<String> lowercase = dateLines(domain, "/date/lower");
+        assertEquals(2, lowercase.size(), lowercase.toString());
+        assertTrue(lowercase.getFirst().matches(own), lowercase.toString());
+        assertEquals("date: " + stale, lowercase.get(1));
     }
 
     @Test
@@ -899,6 +924,13 @@ class LambdaWebDataPlaneDockerIntegrationTest {
             InputStream in = socket.getInputStream();
             return new String(in.readAllBytes(), StandardCharsets.UTF_8);
         }
+    }
+
+    /** The date header lines of the answer to {@code path}, in their case and order. */
+    private static List<String> dateLines(String domain, String path) throws Exception {
+        String response = raw("GET " + path + " HTTP/1.1\r\nHost: " + domain + "\r\nConnection: close\r\n\r\n");
+        String head = response.substring(0, response.indexOf("\r\n\r\n"));
+        return List.of(head.split("\r\n")).stream().filter(line -> line.regionMatches(true, 0, "date:", 0, 5)).toList();
     }
 
     private static byte[] zip(String indexJs) throws IOException {
