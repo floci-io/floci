@@ -4,15 +4,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.InMemoryStorage;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.FlowLogService;
 import io.github.hectorvent.floci.services.ec2.model.FlowLog;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -206,10 +204,8 @@ class Ec2FlowLogCfnProvisionerTest {
         // A real FlowLogService, so the update is compared against what create actually stored:
         // a CloudWatch Logs ARN with no LogDestinationType is stored as cloud-watch-logs, and the
         // compare must default the template the same way or an unchanged update is rejected.
-        StorageFactory storage = mock(StorageFactory.class);
-        when(storage.create(anyString(), anyString(), any()))
-                .thenReturn(new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000"));
-        FlowLogService real = new FlowLogService(mock(Ec2Service.class), mock(S3Service.class), storage);
+        FlowLogService real = new FlowLogService(mock(Ec2Service.class), mock(S3Service.class),
+                new InMemoryStorageFactory("000000000000"));
         Ec2FlowLogCfnProvisioner p = new Ec2FlowLogCfnProvisioner(real);
         ObjectNode props = mapper.createObjectNode()
                 .put("ResourceId", "vpc-123")
