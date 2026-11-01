@@ -644,6 +644,9 @@ class DynamoDbPartiQLIntegrationTest {
             [{"M":{"a":{"N":"abc"},"d":%1$s}}]                | Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit
             [{"L":[{"N":"1e126"},{"N":"abc"}]}]               | Number overflow. Attempting to store a number with magnitude larger than supported range
             [{"NS":["1","1"]},{"N":"abc"}]                    | Input collection contains duplicates
+            [{},{"N":"abc"}]                                  | Supplied AttributeValue is empty, must contain exactly one of the supported datatypes
+            [{"S":"a","N":"1"},{"N":"abc"}]                   | Supplied AttributeValue has more than one datatypes set, must contain exactly one of the supported datatypes
+            [{"S":"a","N":"abc"}]                             | The parameter cannot be converted to a numeric value: abc
             """)
     void aParameterIsRefusedAtTheFirstValueThatCannotBeRead(String parameters, String message) {
         String deep = "{\"M\":{\"n\":".repeat(40) + "{\"S\":\"leaf\"}" + "}}".repeat(40);
@@ -679,6 +682,30 @@ class DynamoDbPartiQLIntegrationTest {
             .statusCode(200)
             .body("Responses[0].Error.Code", equalTo("ValidationError"))
             .body("Responses[0].Error.Message", equalTo(unconvertible));
+    }
+
+    @Test
+    @Order(32)
+    void aBinaryParameterIsDecodedBeforeAnythingElse() {
+        String update = "UPDATE \\\"" + TABLE + "\\\" SET n = ? WHERE pk = 'x'";
+
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"","Parameters":[{"N":"abc"},{"B":"AQI"}]}
+                """)
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo("Base64 encoded length is expected a multiple of 4 bytes but found: 3"));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"%1$s","Parameters":[{"N":"abc"}]},
+                 {"Statement":"%1$s","Parameters":[{"B":"AQI"}]}]}
+                """.formatted(update))
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":""},{"Statement":"%s","Parameters":[{"B":"AQI"}]}]}
+                """.formatted(update))
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
     }
 
     private static void putItem(String pk, String attributes) {

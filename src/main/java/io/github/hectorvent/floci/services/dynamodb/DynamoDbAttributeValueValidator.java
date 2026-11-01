@@ -100,7 +100,7 @@ final class DynamoDbAttributeValueValidator {
         }
     }
 
-    private static void requireBase64(JsonNode value) {
+    static void requireBase64(JsonNode value) {
         if (!value.isObject()) {
             return;
         }
