@@ -715,7 +715,13 @@ their create default (`XrayEnabled`, `AdditionalAuthenticationProviders`, a func
 a resolver's `Kind`). Not cleared: the identifiers, `Tags` and `EnvironmentVariables`, which the
 provisioner already drives to the template, required members (`AuthenticationType`, `Type`, a function's
 `DataSourceName`), create-only members, an API key's `Expires`, a GraphQL API's `ApiType` and
-`Visibility`, and a UNIT resolver's `DataSourceName`.
+`Visibility`, and a UNIT resolver's `DataSourceName`. When a later resource fails the update, the
+rollback puts each AppSync API, data source, function, resolver and API key that the update changed in
+place back to the members it had, including the ones the update cleared. An API that had no
+`AdditionalAuthenticationProviders` gets an empty list back, and an API key's `Expires` is sent again
+only when the update changed it, so one now less than a day away fails the rollback and the key stays as the update left it. A `GraphQLSchema`
+and a replaced AppSync resource (a changed `ApiId`, name, `TypeName` or `FieldName`) are not rolled back
+and end the stack in `UPDATE_ROLLBACK_FAILED`.
 
 On the EC2 networking types (`Subnet`, `InternetGateway`, `RouteTable`, `NatGateway`, `EIP`, `PrefixList`),
 a `Tags` property the previous template declared and the new one drops is cleared on `UpdateStack`, and

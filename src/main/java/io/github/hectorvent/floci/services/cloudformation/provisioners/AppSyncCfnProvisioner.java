@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.cloudformation.provisioners;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.AppSyncService;
@@ -24,8 +27,11 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * Provisions the AppSync resource types a GraphQL API is deployed from: the API itself, its schema,
@@ -57,11 +63,20 @@ import java.util.function.Consumer;
  * <p><b>Inline definitions only.</b> {@code DefinitionS3Location} and {@code CodeS3Location} are
  * refused with a clear message rather than silently producing an API with an empty schema or a
  * resolver with no code. Serverless Framework and the AppSync plugins inline both.
+ *
+ * <p><b>An in-place update is undone from a snapshot.</b> Before the update call of an API, data
+ * source, function, resolver or API key, the members the update can change or clear are read back
+ * from the service and kept on the resource ({@link CfnRollback#APPSYNC_UPDATE_SNAPSHOT_ATTR}).
+ * The service applies an update member by {@code containsKey}, so replaying every recorded member,
+ * an old value or an explicit null, puts back what the update changed and what it cleared. A
+ * stack update that fails afterwards, or the update call itself failing part way, restores it.
  */
 @ApplicationScoped
 public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(AppSyncCfnProvisioner.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final TypeReference<Map<String, Object>> OBJECT_MAP = new TypeReference<>() { };
 
     private static final String GRAPHQL_API = "AWS::AppSync::GraphQLApi";
     private static final String GRAPHQL_SCHEMA = "AWS::AppSync::GraphQLSchema";
@@ -116,6 +131,29 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
             RESOLVER, Map.of("Kind", "UNIT"));
 
     /**
+     * The members an update of each type can change or clear, which a snapshot records and a
+     * restore replays. A GraphQL API's {@code apiType} and {@code visibility} are here because a
+     * template that changes them reaches the update request, which applies both. An API key's
+     * {@code expires} joins when the update sends it.
+     */
+    private static final Map<String, List<String>> ROLLBACK_MEMBERS = Map.of(
+            GRAPHQL_API, List.of("name", "authenticationType", "apiType", "visibility", "xrayEnabled",
+                    "logConfig", "additionalAuthenticationProviders", "tags", "owner", "ownerContact",
+                    "introspectionConfig", "queryDepthLimit", "resolverCountLimit",
+                    "enhancedMetricsConfig", "lambdaAuthorizerConfig", "openIDConnectConfig",
+                    "userPoolConfig", "dns", "wafWebAclArn", "mergedApiExecutionRoleArn"),
+            DATA_SOURCE, List.of("description", "type", "serviceRoleArn", "dynamodbConfig",
+                    "lambdaConfig", "httpConfig", "eventBridgeConfig", "relationalDatabaseConfig",
+                    "openSearchServiceConfig", "amazonBedrockRuntimeConfig"),
+            FUNCTION_CONFIGURATION, List.of("name", "description", "dataSourceName",
+                    "requestMappingTemplate", "responseMappingTemplate", "functionVersion", "code",
+                    "runtime", "maxBatchSize"),
+            RESOLVER, List.of("dataSourceName", "functionId", "requestMappingTemplate",
+                    "responseMappingTemplate", "kind", "code", "runtime", "cachingConfig",
+                    "maxBatchSize", "metricsConfig", "pipelineConfig", "syncConfig"),
+            API_KEY, List.of("description"));
+
+    /**
      * How long a stack resource waits for a schema to compile. Generous: the wait is bounded only so
      * a wedged worker cannot hang a stack operation forever, and a schema that hits this is reported
      * as a resource failure rather than left in an unknown state.
@@ -137,6 +175,8 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale.
+        r.getAttributes().remove(CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR);
         switch (r.getResourceType()) {
             case GRAPHQL_API -> provisionGraphqlApi(r, props, ctx);
             case GRAPHQL_SCHEMA -> provisionSchema(r, props, ctx);
@@ -173,19 +213,29 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
             clearDropped(req, props, ctx, GRAPHQL_API);
         }
 
-        GraphqlApi api = ctx.isUpdate()
-                ? appSyncService.updateGraphqlApi(ctx.priorPhysicalId(), req, ctx.region())
-                : appSyncService.createGraphqlApi(req, ctx.region());
-
-        Map<String, String> resolvedEnvironment = stringMap(environmentVariables);
-        if (resolvedEnvironment == null && ctx.isUpdate()) {
-            // The property was dropped from the template. The call replaces the whole set, so an
-            // empty map is what clears it; skipping the call left the old variables readable by
-            // every resolver.
-            resolvedEnvironment = Map.of();
-        }
-        if (resolvedEnvironment != null) {
-            appSyncService.putEnvironmentVariables(api.getApiId(), resolvedEnvironment);
+        Map<String, String> templateEnvironment = stringMap(environmentVariables);
+        // The property was dropped from the template. The call replaces the whole set, so an
+        // empty map is what clears it; skipping the call left the old variables readable by
+        // every resolver.
+        Map<String, String> resolvedEnvironment = templateEnvironment == null && ctx.isUpdate()
+                ? Map.of() : templateEnvironment;
+        GraphqlApi api;
+        if (ctx.isUpdate()) {
+            String priorApiId = ctx.priorPhysicalId();
+            snapshotBeforeUpdate(r, ctx, appSyncService.getGraphqlApi(priorApiId),
+                    Map.of("apiId", priorApiId), req, appSyncService.getEnvironmentVariables(priorApiId));
+            api = updateInPlace(r, ctx, () -> {
+                GraphqlApi updated = appSyncService.updateGraphqlApi(priorApiId, req, ctx.region());
+                if (resolvedEnvironment != null) {
+                    appSyncService.putEnvironmentVariables(updated.getApiId(), resolvedEnvironment);
+                }
+                return updated;
+            });
+        } else {
+            api = appSyncService.createGraphqlApi(req, ctx.region());
+            if (resolvedEnvironment != null) {
+                appSyncService.putEnvironmentVariables(api.getApiId(), resolvedEnvironment);
+            }
         }
 
         r.setPhysicalId(api.getApiId());
@@ -284,12 +334,16 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
         }
 
         boolean update = reusesEntity(r, ctx, apiId) && name.equals(attribute(r, "Name"));
+        DataSource ds;
         if (update) {
             clearDropped(req, props, ctx, DATA_SOURCE);
+            String dataSourceName = name;
+            snapshotBeforeUpdate(r, ctx, appSyncService.getDataSource(apiId, dataSourceName),
+                    Map.of("apiId", apiId, "name", dataSourceName), req, null);
+            ds = updateInPlace(r, ctx, () -> appSyncService.updateDataSource(apiId, dataSourceName, req));
+        } else {
+            ds = appSyncService.createDataSource(apiId, req, ctx.region());
         }
-        DataSource ds = update
-                ? appSyncService.updateDataSource(apiId, name, req)
-                : appSyncService.createDataSource(apiId, req, ctx.region());
 
         r.setPhysicalId(ds.getDataSourceArn());
         r.getAttributes().put("DataSourceArn", ds.getDataSourceArn());
@@ -310,12 +364,15 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
 
         String priorFunctionId = attribute(r, "FunctionId");
         boolean update = reusesEntity(r, ctx, apiId) && !blank(priorFunctionId);
+        FunctionConfiguration fn;
         if (update) {
             clearDropped(req, props, ctx, FUNCTION_CONFIGURATION);
+            snapshotBeforeUpdate(r, ctx, appSyncService.getFunction(apiId, priorFunctionId),
+                    Map.of("apiId", apiId, "functionId", priorFunctionId), req, null);
+            fn = updateInPlace(r, ctx, () -> appSyncService.updateFunction(apiId, priorFunctionId, req));
+        } else {
+            fn = appSyncService.createFunction(apiId, req, ctx.region());
         }
-        FunctionConfiguration fn = update
-                ? appSyncService.updateFunction(apiId, priorFunctionId, req)
-                : appSyncService.createFunction(apiId, req, ctx.region());
 
         r.setPhysicalId(fn.getFunctionArn());
         r.getAttributes().put("FunctionArn", fn.getFunctionArn());
@@ -343,6 +400,7 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
         boolean sameField = typeName.equals(attribute(r, "TypeName"))
                 && fieldName.equals(attribute(r, "FieldName"));
         boolean update = reusesEntity(r, ctx, apiId) && sameField;
+        Resolver resolver;
         if (update) {
             clearDropped(req, props, ctx, RESOLVER);
             // A UNIT resolver needs its data source (createResolver refuses none): clear it only on a pipeline.
@@ -350,10 +408,13 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
                     && isPipeline(req, apiId, typeName, fieldName)) {
                 req.put("dataSourceName", null);
             }
+            snapshotBeforeUpdate(r, ctx, appSyncService.getResolver(apiId, typeName, fieldName),
+                    Map.of("apiId", apiId, "typeName", typeName, "fieldName", fieldName), req, null);
+            resolver = updateInPlace(r, ctx,
+                    () -> appSyncService.updateResolver(apiId, typeName, fieldName, req));
+        } else {
+            resolver = appSyncService.createResolver(apiId, req, ctx.region());
         }
-        Resolver resolver = update
-                ? appSyncService.updateResolver(apiId, typeName, fieldName, req)
-                : appSyncService.createResolver(apiId, req, ctx.region());
 
         r.setPhysicalId(resolver.getResolverArn());
         r.getAttributes().put("ResolverArn", resolver.getResolverArn());
@@ -369,12 +430,16 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
         String apiId = requiredApiId(req, API_KEY);
 
         boolean update = reusesEntity(r, ctx, apiId);
+        ApiKey key;
         if (update) {
             clearDropped(req, props, ctx, API_KEY);
+            String priorKeyId = ctx.priorPhysicalId();
+            snapshotBeforeUpdate(r, ctx, appSyncService.getApiKey(apiId, priorKeyId),
+                    Map.of("apiId", apiId, "keyId", priorKeyId), req, null);
+            key = updateInPlace(r, ctx, () -> appSyncService.updateApiKey(apiId, priorKeyId, req));
+        } else {
+            key = appSyncService.createApiKey(apiId, req);
         }
-        ApiKey key = update
-                ? appSyncService.updateApiKey(apiId, ctx.priorPhysicalId(), req)
-                : appSyncService.createApiKey(apiId, req);
 
         r.setPhysicalId(key.getId());
         // On AWS the key id and the key value are the same string (the da2-… secret), and both
@@ -384,6 +449,154 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Arn", AwsArnUtils.Arn.of("appsync", ctx.region(), ctx.accountId(),
                 "apis/" + apiId + "/apikeys/" + key.getId()).toString());
         r.getAttributes().put("ApiId", apiId);
+    }
+
+    // ── Rollback ─────────────────────────────────────────────────────────────
+
+    /**
+     * Puts an entity this update changed in place back to the members it had before, and answers
+     * false for one it did not: a resource the failed update created is deleted by the engine, and
+     * a replacement leaves no snapshot. The snapshot is spent only once the restore succeeded, so
+     * a restore that throws keeps it for the next attempt.
+     */
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        if (!resource.getAttributes().containsKey(CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR)) {
+            return false;
+        }
+        restoreSnapshot(resource);
+        return true;
+    }
+
+    /**
+     * Keeps the snapshot of an in-place update whose own undo did not complete. The engine restores
+     * the previous resource and reports the rollback failure once; with the snapshot of the state
+     * the update started from, a ContinueUpdateRollback restores that state.
+     */
+    @Override
+    public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
+        String snapshot = attempted.getAttributes().get(CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR);
+        if (snapshot != null && attempted.getAttributes().containsKey(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR)) {
+            previous.getAttributes().put(CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR, snapshot);
+        }
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR);
+        return UpdateCleanupResult.notApplicable();
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR);
+    }
+
+    /**
+     * Runs an in-place update so that a failure inside it, the call or a step after it, puts the
+     * entity back from the snapshot before the failure propagates. The engine discards the
+     * attempted resource, snapshot included, when the resource itself fails.
+     */
+    private <T> T updateInPlace(StackResource r, ProvisionContext ctx, Supplier<T> update) {
+        AtomicReference<T> updated = new AtomicReference<>();
+        CfnRollback.guarded(r, ctx, false, () -> { }, () -> restoreSnapshot(r),
+                () -> updated.set(update.get()));
+        return updated.get();
+    }
+
+    /**
+     * Records what the entity looks like now, before the update call about to change it. The
+     * service's getters throw NotFound for an entity that is gone, so the null guard only covers a
+     * service that answers with nothing, as the mocked one in the unit tests does; the update then
+     * runs without a snapshot. A member the entity does not carry is recorded as null, which the
+     * restore sends as a clear. {@code environment} is a GraphQL API's variables, which have a
+     * call of their own.
+     */
+    private void snapshotBeforeUpdate(StackResource r, ProvisionContext ctx, Object current,
+                                      Map<String, String> identity, Map<String, Object> request,
+                                      Map<String, String> environment) {
+        if (current == null) {
+            return;
+        }
+        Map<String, Object> entity = MAPPER.convertValue(current, OBJECT_MAP);
+        Map<String, Object> members = new LinkedHashMap<>();
+        for (String member : ROLLBACK_MEMBERS.get(r.getResourceType())) {
+            members.put(member, entity.get(member));
+        }
+        if (API_KEY.equals(r.getResourceType()) && request.containsKey("expires")) {
+            members.put("expires", entity.get("expires"));
+        }
+        Map<String, Object> snapshot = new LinkedHashMap<>();
+        snapshot.put("region", ctx.region());
+        snapshot.putAll(identity);
+        snapshot.put("members", members);
+        if (environment != null) {
+            snapshot.put("environmentVariables", environment);
+        }
+        try {
+            r.getAttributes().put(CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR, MAPPER.writeValueAsString(snapshot));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not record the AppSync update snapshot for "
+                    + r.getLogicalId(), e);
+        }
+    }
+
+    /**
+     * Replays the snapshot through the update call that changed the entity, if the resource carries
+     * one, and spends it. A GraphQL API's {@code xrayEnabled}, {@code additionalAuthenticationProviders}
+     * and tags are not cleared by a null, so an API that had none gets {@code false}, an empty list
+     * and an empty map back.
+     */
+    @SuppressWarnings("unchecked")
+    private void restoreSnapshot(StackResource r) {
+        String raw = r.getAttributes().get(CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return;
+        }
+        Map<String, Object> snapshot;
+        try {
+            snapshot = MAPPER.readValue(raw, OBJECT_MAP);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read the AppSync update snapshot for "
+                    + r.getLogicalId(), e);
+        }
+        Map<String, Object> members = (Map<String, Object>) snapshot.get("members");
+        String apiId = str(snapshot.get("apiId"));
+        switch (r.getResourceType()) {
+            case GRAPHQL_API -> {
+                members.computeIfAbsent("xrayEnabled", name -> false);
+                members.computeIfAbsent("additionalAuthenticationProviders", name -> List.of());
+                members.computeIfAbsent("tags", name -> Map.of());
+                appSyncService.updateGraphqlApi(apiId, members, str(snapshot.get("region")));
+                appSyncService.putEnvironmentVariables(apiId, stringMap(snapshot.get("environmentVariables")));
+            }
+            case DATA_SOURCE -> appSyncService.updateDataSource(apiId, str(snapshot.get("name")), members);
+            case FUNCTION_CONFIGURATION -> {
+                appSyncService.updateFunction(apiId, str(snapshot.get("functionId")), members);
+                r.getAttributes().put("Name", str(members.get("name")));
+                if (blank(str(members.get("dataSourceName")))) {
+                    r.getAttributes().remove("DataSourceName");
+                } else {
+                    r.getAttributes().put("DataSourceName", str(members.get("dataSourceName")));
+                }
+            }
+            case RESOLVER -> appSyncService.updateResolver(apiId, str(snapshot.get("typeName")),
+                    str(snapshot.get("fieldName")), members);
+            case API_KEY -> {
+                String keyId = str(snapshot.get("keyId"));
+                // The service refuses an expiry inside the next day, so one that has not moved is
+                // not sent again.
+                Object expires = members.get("expires");
+                if (expires instanceof Number prior
+                        && Objects.equals(prior.longValue(), appSyncService.getApiKey(apiId, keyId).getExpires())) {
+                    members.remove("expires");
+                }
+                appSyncService.updateApiKey(apiId, keyId, members);
+            }
+            default -> throw new IllegalStateException(
+                    "AppSyncCfnProvisioner cannot restore " + r.getResourceType());
+        }
+        r.getAttributes().remove(CfnRollback.APPSYNC_UPDATE_SNAPSHOT_ATTR);
     }
 
     // ── Deletes ──────────────────────────────────────────────────────────────

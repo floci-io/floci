@@ -1,14 +1,7 @@
 package io.github.hectorvent.floci.services.appsync;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaRegistry;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.LambdaAuthorizerCache;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.LambdaAuthorizerResult;
@@ -17,8 +10,6 @@ import io.github.hectorvent.floci.services.appsync.model.AuthenticationType;
 import io.github.hectorvent.floci.services.appsync.model.DomainName;
 import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
-import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
-import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -27,18 +18,16 @@ import org.junit.jupiter.params.provider.CsvSource;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Answers.RETURNS_DEEP_STUBS;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -153,7 +142,7 @@ class AppSyncServiceTest {
 
     @Test
     void validateApiKeyExpiresAtBoundaryFails() {
-        MutableClock clock = new MutableClock(NOW);
+        AppSyncServiceFixture.MutableClock clock = new AppSyncServiceFixture.MutableClock(NOW);
         AppSyncService svc = newService(clock);
         GraphqlApi api = svc.createGraphqlApi(Map.of("name", "b", "authenticationType", "API_KEY"), "us-east-1");
         long expires = NOW.getEpochSecond() + Duration.ofDays(1).getSeconds();
@@ -192,6 +181,70 @@ class AppSyncServiceTest {
         AwsException tooFar = assertThrows(AwsException.class,
                 () -> service.updateApiKey(api.getApiId(), created.getId(), Map.of("expires", tooLate)));
         assertEquals("ApiKeyValidityOutOfBoundsException", tooFar.getErrorCode());
+    }
+
+    @Test
+    void aRefusedApiKeyUpdateLeavesTheDescriptionAsItWas() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "refuse-key", "authenticationType", "API_KEY"), "us-east-1");
+        ApiKey created = service.createApiKey(api.getApiId(), Map.of("description", "kept"));
+        long expires = created.getExpires();
+
+        AwsException refused = assertThrows(AwsException.class, () -> service.updateApiKey(api.getApiId(),
+                created.getId(), Map.of("description", "changed", "expires", NOW.getEpochSecond())));
+
+        assertEquals("ApiKeyValidityOutOfBoundsException", refused.getErrorCode());
+        ApiKey stored = service.getApiKey(api.getApiId(), created.getId());
+        assertEquals("kept", stored.getDescription());
+        assertEquals(expires, stored.getExpires());
+    }
+
+    @Test
+    void aRefusedDataSourceUpdateLeavesTheDescriptionAsItWas() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "refuse-ds", "authenticationType", "API_KEY"), "us-east-1");
+        service.createDataSource(api.getApiId(), Map.of("name", "ds", "type", "NONE", "description", "kept"), "us-east-1");
+
+        assertThrows(AwsException.class, () -> service.updateDataSource(api.getApiId(), "ds",
+                Map.of("description", "changed", "type", "NOT_A_TYPE")));
+
+        assertEquals("kept", service.getDataSource(api.getApiId(), "ds").getDescription());
+    }
+
+    @Test
+    void aRefusedFunctionUpdateLeavesTheNameAsItWas() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "refuse-fn", "authenticationType", "API_KEY"), "us-east-1");
+        FunctionConfiguration created = service.createFunction(api.getApiId(), Map.of("name", "kept"), "us-east-1");
+
+        assertThrows(AwsException.class, () -> service.updateFunction(api.getApiId(), created.getFunctionId(),
+                Map.of("name", "changed", "runtime", Map.of("name", "NOT_A_RUNTIME"))));
+
+        assertEquals("kept", service.getFunction(api.getApiId(), created.getFunctionId()).getName());
+    }
+
+    @Test
+    void aRefusedResolverUpdateLeavesTheDataSourceAsItWas() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "refuse-rs", "authenticationType", "API_KEY"), "us-east-1");
+        service.createDataSource(api.getApiId(), Map.of("name", "ds", "type", "NONE"), "us-east-1");
+        service.createResolver(api.getApiId(), Map.of("typeName", "Query", "fieldName", "hello",
+                "dataSourceName", "ds"), "us-east-1");
+
+        assertThrows(AwsException.class, () -> service.updateResolver(api.getApiId(), "Query", "hello",
+                Map.of("dataSourceName", "other", "kind", "NOT_A_KIND")));
+
+        assertEquals("ds", service.getResolver(api.getApiId(), "Query", "hello").getDataSourceName());
+    }
+
+    @Test
+    void aRefusedGraphqlApiUpdateLeavesTheNameAsItWas() {
+        GraphqlApi api = service.createGraphqlApi(Map.of("name", "kept", "authenticationType", "API_KEY"), "us-east-1");
+        Map<String, Object> pool = Map.of("userPoolId", "pool-1", "awsRegion", "us-east-1");
+        Map<String, Object> provider = Map.of("authenticationType", "AMAZON_COGNITO_USER_POOLS",
+                "userPoolConfig", pool);
+
+        assertThrows(AwsException.class, () -> service.updateGraphqlApi(api.getApiId(),
+                Map.of("name", "changed", "additionalAuthenticationProviders", List.of(provider, provider)),
+                "us-east-1"));
+
+        assertEquals("kept", service.getGraphqlApi(api.getApiId()).getName());
     }
 
     @Test
@@ -365,7 +418,9 @@ class AppSyncServiceTest {
                 apiId, Map.of("name", "updated-api"), "us-east-1");
         assertEquals("updated-api", updated.getName());
         assertEquals(expectedUris, updated.getUris());
-        verify(apiStore, times(2)).put(apiId, api);
+        // The URI repair on read stores the persisted instance; the update then stores its own copy.
+        verify(apiStore).put(apiId, api);
+        verify(apiStore, times(2)).put(eq(apiId), any(GraphqlApi.class));
     }
 
     @Test
@@ -409,68 +464,12 @@ class AppSyncServiceTest {
         return newService(clock, baseUrl, AccountAwareStorageBackend.inMemory("000000000000"));
     }
 
-    @SuppressWarnings("unchecked")
     private AppSyncService newService(Clock clock, String baseUrl,
             AccountAwareStorageBackend<GraphqlApi> apiStore) {
-        StorageFactory storageFactory = new StorageFactory(null, null) {
-            @Override
-            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
-                    TypeReference<Map<String, V>> typeReference) {
-                if ("appsync-apis.json".equals(fileName)) {
-                    return (AccountAwareStorageBackend<V>) apiStore;
-                }
-                if ("appsync-apikeys.json".equals(fileName) && apiKeyStoreOverride != null) {
-                    return (AccountAwareStorageBackend<V>) apiKeyStoreOverride;
-                }
-                return AccountAwareStorageBackend.inMemory("000000000000");
-            }
-        };
-        Instance<RequestContext> requestContext = mock(Instance.class);
         schemaRegistry = mock(SchemaRegistry.class);
         lambdaAuthorizerCache = new LambdaAuthorizerCache();
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.effectiveBaseUrl()).thenReturn(baseUrl);
-        when(config.services().cloudfront().domainSuffix()).thenReturn(Optional.empty());
-        return new AppSyncService(
-                storageFactory,
-                config,
-                partition == null ? new RegionResolver(region, "000000000000")
-                        : new RegionResolver(region, "000000000000", partition),
-                schemaRegistry,
-                mock(SchemaCreationWorker.class),
-                requestContext,
-                new ObjectMapper(),
-                AccountAwareStorageBackend.inMemory("000000000000"),
-                AccountAwareStorageBackend.inMemory("000000000000"),
-                clock,
-                lambdaAuthorizerCache);
-    }
-
-    private static final class MutableClock extends Clock {
-        private Instant instant;
-
-        private MutableClock(Instant instant) {
-            this.instant = instant;
-        }
-
-        void set(Instant instant) {
-            this.instant = instant;
-        }
-
-        @Override
-        public ZoneId getZone() {
-            return ZoneOffset.UTC;
-        }
-
-        @Override
-        public Clock withZone(ZoneId zone) {
-            return this;
-        }
-
-        @Override
-        public Instant instant() {
-            return instant;
-        }
+        return AppSyncServiceFixture.create(clock, baseUrl, region, partition, apiStore,
+                apiKeyStoreOverride, schemaRegistry, lambdaAuthorizerCache);
     }
 
     /**

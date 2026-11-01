@@ -201,6 +201,16 @@ public final class CfnRollback {
     public static final String APPCONFIG_UPDATE_SNAPSHOT_ATTR = "__FlociAppConfigUpdateSnapshot";
 
     /**
+     * Holds the members an AppSync GraphQL API, data source, function, resolver or API key carried
+     * before an in-place update changed or cleared them, in the request shape its update call takes,
+     * with the identifiers that address it, so a failed stack update can put them back. Written by
+     * {@code AppSyncCfnProvisioner} before its update call and spent by its {@code rollbackUpdate};
+     * when its own undo did not complete, the provisioner carries it onto the restored resource
+     * through {@code mergeFailedUpdateResourceTracking}.
+     */
+    public static final String APPSYNC_UPDATE_SNAPSHOT_ATTR = "__FlociAppSyncUpdateSnapshot";
+
+    /**
      * Holds the name and tags an API Gateway V2 VPC link carried before an in-place update changed
      * them, so a failed stack update can put them back. Written by {@code ApiGatewayV2CfnProvisioner}
      * before its update call and spent by its {@code rollbackUpdate}.

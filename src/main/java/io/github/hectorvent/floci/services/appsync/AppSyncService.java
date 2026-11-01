@@ -176,7 +176,7 @@ public class AppSyncService {
     @SuppressWarnings("unchecked")
     public GraphqlApi updateGraphqlApi(String apiId, Map<String, Object> request, String region) {
         assertSchemaNotBusy(apiId);
-        GraphqlApi existing = getGraphqlApi(apiId);
+        GraphqlApi existing = copyOf(getGraphqlApi(apiId), GraphqlApi.class);
         if (request.containsKey("name")) existing.setName((String) request.get("name"));
         if (request.containsKey("authenticationType")) existing.setAuthenticationType(parseEnum(AuthenticationType.class, request.get("authenticationType")));
         if (request.containsKey("xrayEnabled")) {
@@ -357,7 +357,7 @@ public class AppSyncService {
     @SuppressWarnings("unchecked")
     public DataSource updateDataSource(String apiId, String dataSourceName, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
-        DataSource existing = getDataSource(apiId, dataSourceName);
+        DataSource existing = copyOf(getDataSource(apiId, dataSourceName), DataSource.class);
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
         if (request.containsKey("type")) existing.setType(parseEnum(DataSourceType.class, request.get("type")));
         if (request.containsKey("serviceRoleArn")) existing.setServiceRoleArn((String) request.get("serviceRoleArn"));
@@ -478,7 +478,7 @@ public class AppSyncService {
     @SuppressWarnings("unchecked")
     public Resolver updateResolver(String apiId, String typeName, String fieldName, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
-        Resolver existing = getResolver(apiId, typeName, fieldName);
+        Resolver existing = copyOf(getResolver(apiId, typeName, fieldName), Resolver.class);
         if (request.containsKey("dataSourceName")) existing.setDataSourceName((String) request.get("dataSourceName"));
         if (request.containsKey("functionId")) existing.setFunctionId((String) request.get("functionId"));
         if (request.containsKey("requestMappingTemplate")) existing.setRequestMappingTemplate((String) request.get("requestMappingTemplate"));
@@ -543,7 +543,7 @@ public class AppSyncService {
 
     public FunctionConfiguration updateFunction(String apiId, String functionId, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
-        FunctionConfiguration existing = getFunction(apiId, functionId);
+        FunctionConfiguration existing = copyOf(getFunction(apiId, functionId), FunctionConfiguration.class);
         // UpdateFunction takes a new name on AWS, and CloudFormation drives FunctionConfiguration
         // renames through it. Leaving the name alone let a stack complete while GetFunction still
         // reported the old one.
@@ -673,11 +673,13 @@ public class AppSyncService {
 
     public ApiKey updateApiKey(String apiId, String keyId, Map<String, Object> request) {
         ApiKey existing = getApiKey(apiId, keyId);
-        if (request.containsKey("description")) {
-            existing.setDescription((String) request.get("description"));
-        }
+        // The expiry is checked against the bounds before anything is written, so a refused
+        // update leaves the key as it was.
         if (request.containsKey("expires")) {
             applyApiKeyExpires(existing, parseExpires(request.get("expires")));
+        }
+        if (request.containsKey("description")) {
+            existing.setDescription((String) request.get("description"));
         }
         apiKeyStore.put(apiKey(apiId, keyId), existing);
         return existing;
@@ -1103,6 +1105,15 @@ public class AppSyncService {
             case AWS_LAMBDA -> provider.getLambdaAuthorizerConfig();
             default -> Map.of();
         };
+    }
+
+    /**
+     * An update is applied to a copy and stored only once every member has been read and checked,
+     * so a request the service refuses leaves the stored entity untouched. The stores hand out
+     * their own instances, which a half-applied update would otherwise have changed in place.
+     */
+    private <T> T copyOf(T entity, Class<T> type) {
+        return objectMapper.convertValue(entity, type);
     }
 
     private long parseExpires(Object expiresValue) {
