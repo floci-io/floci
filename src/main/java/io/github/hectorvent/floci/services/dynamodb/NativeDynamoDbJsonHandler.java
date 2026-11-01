@@ -3876,20 +3876,11 @@ public class NativeDynamoDbJsonHandler {
         return params;
     }
 
-    // DynamoDB takes a member set to null as absent, and it decodes the binary values of every
-    // statement before it checks anything else.
+    // DynamoDB decodes the binary values of every statement before it checks anything else.
     private static void decodePartiQLParameters(JsonNode parameters) {
         for (JsonNode parameter : parameters) {
-            dropNullMembers(parameter);
+            DynamoDbAttributeValueValidator.dropNullMembers(parameter);
             DynamoDbAttributeValueValidator.requireBase64(parameter);
-        }
-    }
-
-    private static void dropNullMembers(JsonNode value) {
-        if (value instanceof ObjectNode object) {
-            object.properties().removeIf(member -> member.getValue().isNull());
-            object.path("M").forEach(NativeDynamoDbJsonHandler::dropNullMembers);
-            object.path("L").forEach(NativeDynamoDbJsonHandler::dropNullMembers);
         }
     }
 

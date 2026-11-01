@@ -244,7 +244,8 @@ public final class DynamoDbConditionKeys {
         }
         try {
             List<JsonNode> parameters = new ArrayList<>();
-            body.path("Parameters").forEach(parameters::add);
+            body.path("Parameters").forEach(parameter ->
+                    parameters.add(DynamoDbAttributeValueValidator.dropNullMembers(parameter.deepCopy())));
             return DynamoDbPartiQLParser.parse(statement, parameters)
                     instanceof DynamoDbPartiQLParser.Stmt.Select select ? select : null;
         } catch (RuntimeException ignored) {
