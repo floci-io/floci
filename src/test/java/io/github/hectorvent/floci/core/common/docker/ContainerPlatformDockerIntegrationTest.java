@@ -53,6 +53,14 @@ class ContainerPlatformDockerIntegrationTest {
                 .withCmd(List.of("uname", "-m"))
                 .build();
 
+        try (PreservedImageTag ignored = new PreservedImageTag(dockerClient,
+                IMAGE.substring(0, IMAGE.lastIndexOf(':')), IMAGE.substring(IMAGE.lastIndexOf(':') + 1))) {
+            createAndVerify(spec, platform, armHost, hostArchitecture, requestedArchitecture);
+        }
+    }
+
+    private void createAndVerify(ContainerSpec spec, String platform, boolean armHost, String hostArchitecture,
+                                 String requestedArchitecture) {
         String containerId = null;
         try {
             containerId = lifecycleManager.create(spec, platform);
