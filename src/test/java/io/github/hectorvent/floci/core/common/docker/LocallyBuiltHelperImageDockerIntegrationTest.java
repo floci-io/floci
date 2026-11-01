@@ -38,53 +38,55 @@ class LocallyBuiltHelperImageDockerIntegrationTest {
             String nativePlatform = DockerPlatform.daemon(docker);
             Assumptions.assumeTrue(nativePlatform.equals("linux/amd64") || nativePlatform.equals("linux/arm64"));
             String foreignPlatform = nativePlatform.equals("linux/amd64") ? "linux/arm64" : "linux/amd64";
-            try (PullImageResultCallback pulled = new PullImageResultCallback()) {
-                assertTrue(docker.pullImageCmd(BASE).withPlatform(foreignPlatform).exec(pulled)
-                        .awaitCompletion(120, TimeUnit.SECONDS));
-            }
-            String tag = UUID.randomUUID().toString();
-            String repository = "floci/helper-platform-test";
-            String helper = repository + ":" + tag;
-            String containerId = null;
-            docker.tagImageCmd(BASE, repository, tag).exec();
-            try {
-                Assumptions.assumeTrue(DockerPlatform.matches(docker.inspectImageCmd(helper).exec(), foreignPlatform),
-                        "This daemon does not expose the cached foreign image platform");
-                ContainerBuilder builder = new ContainerBuilder(config, mock(DockerHostResolver.class),
-                        mock(EmbeddedDnsServer.class));
-
-                LocallyBuiltHelperImage.ensureBuilt(docker, builder, helper, helper,
-                        "/docker/native-platform-helper.Dockerfile");
-
-                assertTrue(DockerPlatform.matches(docker.inspectImageCmd(helper).exec(), nativePlatform));
-                String builtImage = docker.inspectImageCmd(helper).exec().getId();
-                LocallyBuiltHelperImage.ensureBuilt(docker, builder, helper, helper,
-                        "/docker/native-platform-helper.Dockerfile");
-                assertEquals(builtImage, docker.inspectImageCmd(helper).exec().getId());
-                verify(docker, times(1)).buildImageCmd(any(InputStream.class));
-                containerId = docker.createContainerCmd(helper).exec().getId();
-                docker.startContainerCmd(containerId).exec();
-                try (WaitContainerResultCallback exited = new WaitContainerResultCallback()) {
-                    assertEquals(0, docker.waitContainerCmd(containerId).exec(exited)
-                            .awaitStatusCode(30, TimeUnit.SECONDS));
+            try (PreservedImageTag base = new PreservedImageTag(docker, "busybox", "1.37.0")) {
+                try (PullImageResultCallback pulled = new PullImageResultCallback()) {
+                    assertTrue(docker.pullImageCmd(BASE).withPlatform(foreignPlatform).exec(pulled)
+                            .awaitCompletion(120, TimeUnit.SECONDS));
                 }
-                StringBuilder output = new StringBuilder();
-                try (ResultCallback.Adapter<Frame> logs = new ResultCallback.Adapter<>() {
-                    @Override
-                    public void onNext(Frame frame) {
-                        output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
+                String tag = UUID.randomUUID().toString();
+                String repository = "floci/helper-platform-test";
+                String helper = repository + ":" + tag;
+                String containerId = null;
+                docker.tagImageCmd(BASE, repository, tag).exec();
+                try {
+                    Assumptions.assumeTrue(DockerPlatform.matches(docker.inspectImageCmd(helper).exec(), foreignPlatform),
+                            "This daemon does not expose the cached foreign image platform");
+                    ContainerBuilder builder = new ContainerBuilder(config, mock(DockerHostResolver.class),
+                            mock(EmbeddedDnsServer.class));
+
+                    LocallyBuiltHelperImage.ensureBuilt(docker, builder, helper, helper,
+                            "/docker/native-platform-helper.Dockerfile");
+
+                    assertTrue(DockerPlatform.matches(docker.inspectImageCmd(helper).exec(), nativePlatform));
+                    String builtImage = docker.inspectImageCmd(helper).exec().getId();
+                    LocallyBuiltHelperImage.ensureBuilt(docker, builder, helper, helper,
+                            "/docker/native-platform-helper.Dockerfile");
+                    assertEquals(builtImage, docker.inspectImageCmd(helper).exec().getId());
+                    verify(docker, times(1)).buildImageCmd(any(InputStream.class));
+                    containerId = docker.createContainerCmd(helper).exec().getId();
+                    docker.startContainerCmd(containerId).exec();
+                    try (WaitContainerResultCallback exited = new WaitContainerResultCallback()) {
+                        assertEquals(0, docker.waitContainerCmd(containerId).exec(exited)
+                                .awaitStatusCode(30, TimeUnit.SECONDS));
                     }
-                }) {
-                    assertTrue(docker.logContainerCmd(containerId).withStdOut(true).withStdErr(true)
-                            .exec(logs).awaitCompletion(30, TimeUnit.SECONDS));
+                    StringBuilder output = new StringBuilder();
+                    try (ResultCallback.Adapter<Frame> logs = new ResultCallback.Adapter<>() {
+                        @Override
+                        public void onNext(Frame frame) {
+                            output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
+                        }
+                    }) {
+                        assertTrue(docker.logContainerCmd(containerId).withStdOut(true).withStdErr(true)
+                                .exec(logs).awaitCompletion(30, TimeUnit.SECONDS));
+                    }
+                    assertEquals(nativePlatform.equals("linux/amd64") ? "x86_64" : "aarch64",
+                            output.toString().trim());
+                } finally {
+                    if (containerId != null) {
+                        docker.removeContainerCmd(containerId).withForce(true).exec();
+                    }
+                    docker.removeImageCmd(helper).withForce(true).exec();
                 }
-                assertEquals(nativePlatform.equals("linux/amd64") ? "x86_64" : "aarch64",
-                        output.toString().trim());
-            } finally {
-                if (containerId != null) {
-                    docker.removeContainerCmd(containerId).withForce(true).exec();
-                }
-                docker.removeImageCmd(helper).withForce(true).exec();
             }
         }
     }
