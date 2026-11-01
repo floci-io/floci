@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.KinesisStreamSource;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessingConfiguration;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
@@ -417,6 +418,10 @@ public class FirehoseService implements ResourceProvider {
         }
         DataFormatConversionValidator.validateEffective(s3Config);
         ProcessingConfigurationValidator.validateEffective(s3Config);
+        if (redshift != null) {
+            ProcessingConfigurationValidator.validateEffective(redshift.getProcessingConfiguration());
+            redshift.canonicalizeProcessors();
+        }
         if (s3Config != null) {
             s3Config.canonicalizeProcessors();
         }
@@ -545,7 +550,10 @@ public class FirehoseService implements ResourceProvider {
             if (update.getS3Backup() != null && current.getS3Backup() == null) {
                 RedshiftDestinationValidator.validateNewBackup(update.getS3Backup(), "redshiftDestinationUpdate");
             }
+            // The update's ProcessingConfiguration replaces the stored one outright, so it is what gets checked.
+            ProcessingConfigurationValidator.validateEffective(update.getProcessingConfiguration());
             mergeRedshiftDestination(current, update);
+            current.canonicalizeProcessors();
             stream.setVersionId(String.valueOf(parseVersionId(stream.getVersionId()) + 1));
             stream.setLastUpdateTimestamp(Instant.now());
             streamPut(streamKey, stream);
@@ -1152,7 +1160,8 @@ public class FirehoseService implements ResourceProvider {
             String bucket = resolveBucket(stream);
             S3Destination s3 = stream.s3Destination();
             List<byte[]> records = toFlush;
-            if (s3 != null && s3.isProcessingEnabled()) {
+            ProcessingConfiguration processing = stream.processingConfiguration();
+            if (s3 != null && processing != null && Boolean.TRUE.equals(processing.getEnabled())) {
                 ensureBucket(bucket, stream);
                 FirehoseLambdaTransformer.Outcome transformed =
                         lambdaTransformer.transform(stream, bucket, records, clock.instant());

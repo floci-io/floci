@@ -166,6 +166,23 @@ public class DeliveryStreamDescription {
     }
 
     /**
+     * The ProcessingConfiguration that transforms this stream's records, or null when it has none. A Redshift
+     * destination carries its own, next to its intermediate S3 configuration; any other destination keeps it
+     * on the S3 destination.
+     */
+    public ProcessingConfiguration processingConfiguration() {
+        if (destinations == null || destinations.isEmpty()) {
+            return null;
+        }
+        Destination first = destinations.get(0);
+        if (first.getRedshiftDestinationDescription() != null) {
+            return first.getRedshiftDestinationDescription().getProcessingConfiguration();
+        }
+        S3Destination s3 = first.getExtendedS3DestinationDescription();
+        return s3 == null ? null : s3.getProcessingConfiguration();
+    }
+
+    /**
      * Fills the AWS defaults on every S3 configuration the stream describes: its S3 destination, or
      * a Redshift destination's intermediate and backup configurations.
      */
@@ -399,6 +416,14 @@ public class DeliveryStreamDescription {
          * role was current at the time of the read.
          */
         public void canonicalizeProcessors() {
+            canonicalizeProcessors(processingConfiguration, roleArn);
+        }
+
+        /**
+         * The same defaults for a ProcessingConfiguration that is not an S3 destination's own, as a Redshift
+         * destination's is; {@code roleArn} is the role of the destination that carries it.
+         */
+        public static void canonicalizeProcessors(ProcessingConfiguration processingConfiguration, String roleArn) {
             if (processingConfiguration == null) {
                 return;
             }

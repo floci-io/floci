@@ -2,9 +2,11 @@ package io.github.hectorvent.floci.services.firehose;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
@@ -30,6 +32,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -53,6 +56,7 @@ class FirehoseRedshiftServiceTest {
     private FirehoseService service;
     private S3Service s3Service;
     private FirehoseRedshiftDelivery delivery;
+    private FirehoseLambdaTransformer transformer;
     private MutableClock clock;
     private StorageFactory storageFactory;
     private RegionResolver regionResolver;
@@ -68,6 +72,7 @@ class FirehoseRedshiftServiceTest {
                         k -> AccountAwareStorageBackend.inMemory("000000000000")));
         s3Service = Mockito.mock(S3Service.class);
         delivery = Mockito.mock(FirehoseRedshiftDelivery.class);
+        transformer = Mockito.mock(FirehoseLambdaTransformer.class);
         clock = new MutableClock();
 
         EmulatorConfig.FirehoseServiceConfig firehoseCfg = mock(EmulatorConfig.FirehoseServiceConfig.class);
@@ -82,7 +87,111 @@ class FirehoseRedshiftServiceTest {
 
         service = new FirehoseService(storageFactory, s3Service, new KinesisService(storageFactory, regionResolver),
                 regionResolver, clock, config, mock(FirehoseParquetConverter.class),
-                mock(FirehoseLambdaTransformer.class), delivery, Runnable::run);
+                transformer, delivery, Runnable::run);
+    }
+
+    private static final String LAMBDA_PROCESSING = ", \"ProcessingConfiguration\": {\"Enabled\": true, "
+            + "\"Processors\": [{\"Type\": \"Lambda\", \"Parameters\": [{\"ParameterName\": \"LambdaArn\", "
+            + "\"ParameterValue\": \"arn:aws:lambda:us-east-1:000000000000:function:xform\"}]}]}";
+
+    @Test
+    void recordsAreTransformedByTheRedshiftDestinationsLambdaBeforeStaging() throws Exception {
+        createStream(LAMBDA_PROCESSING);
+        when(transformer.transform(any(), eq("stage"), any(), any())).thenReturn(new FirehoseLambdaTransformer.Outcome(
+                List.of("{\"id\":2}".getBytes(StandardCharsets.UTF_8)), 0, 0, null));
+
+        service.flush(STREAM);
+
+        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service).putObject(eq("stage"), anyString(), body.capture(), anyString(), anyMap(), any());
+        assertEquals("{\"id\":2}\n", new String(body.getValue(), StandardCharsets.UTF_8));
+        verify(delivery, times(1)).copy(eq("000000000000"), eq("us-east-1"), any(), eq("stage"), anyString());
+    }
+
+    @Test
+    void aRedshiftLambdaProcessorIsDescribedWithItsDefaultParameters() throws Exception {
+        createStream(LAMBDA_PROCESSING);
+
+        List<DeliveryStreamDescription.ProcessorParameter> parameters = service.describeDeliveryStream(STREAM)
+                .getDestinations().get(0).getRedshiftDestinationDescription().getProcessingConfiguration()
+                .getProcessors().get(0).getParameters();
+
+        Map<String, String> byName = new HashMap<>();
+        parameters.forEach(parameter -> byName.put(parameter.getParameterName(), parameter.getParameterValue()));
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:xform", byName.get("LambdaArn"));
+        assertEquals("3", byName.get("NumberOfRetries"));
+        assertEquals("arn:aws:iam::000000000000:role/firehose", byName.get("RoleArn"));
+        assertEquals("1", byName.get("BufferSizeInMBs"));
+        assertEquals("60", byName.get("BufferIntervalInSeconds"));
+    }
+
+    @Test
+    void aDisabledProcessingConfigurationDoesNotTransform() throws Exception {
+        createStream(LAMBDA_PROCESSING.replace("\"Enabled\": true", "\"Enabled\": false"));
+
+        service.flush(STREAM);
+
+        verify(transformer, never()).transform(any(), anyString(), any(), any());
+        verifyStagedTimes(1);
+    }
+
+    @Test
+    void whenTheLambdaDropsEveryRecordNothingIsStagedOrLoaded() throws Exception {
+        createStream(LAMBDA_PROCESSING);
+        when(transformer.transform(any(), eq("stage"), any(), any())).thenReturn(
+                new FirehoseLambdaTransformer.Outcome(List.of(), 1, 0, null));
+
+        service.flush(STREAM);
+
+        verifyStagedTimes(0);
+        verify(delivery, never()).copy(anyString(), anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void aRedshiftProcessingConfigurationWithTwoLambdaProcessorsIsRejected() throws Exception {
+        String lambda = "{\"Type\": \"Lambda\", \"Parameters\": [{\"ParameterName\": \"LambdaArn\", "
+                + "\"ParameterValue\": \"arn:aws:lambda:us-east-1:000000000000:function:xform\"}]}";
+        String twoProcessors = ", \"ProcessingConfiguration\": {\"Enabled\": true, \"Processors\": ["
+                + lambda + "," + lambda + "]}";
+
+        AwsException error = assertThrows(AwsException.class, () -> createStream(twoProcessors));
+
+        assertEquals("InvalidArgumentException", error.getErrorCode());
+    }
+
+    @Test
+    void aRedshiftLambdaProcessorWithoutALambdaArnIsRejected() throws Exception {
+        String withoutArn = ", \"ProcessingConfiguration\": {\"Enabled\": true, \"Processors\": ["
+                + "{\"Type\": \"Lambda\", \"Parameters\": []}]}";
+
+        AwsException error = assertThrows(AwsException.class, () -> createStream(withoutArn));
+
+        assertEquals("InvalidArgumentException", error.getErrorCode());
+    }
+
+    @Test
+    void updatingARedshiftDestinationValidatesAndAppliesItsProcessingConfiguration() throws Exception {
+        createStream("");
+        String destinationId = service.describeDeliveryStream(STREAM).getDestinations().get(0).getDestinationId();
+        RedshiftDestination invalid = mapper.readValue("{" + LAMBDA_PROCESSING.substring(2)
+                .replace("\"Parameters\": [{\"ParameterName\": \"LambdaArn\", \"ParameterValue\": "
+                        + "\"arn:aws:lambda:us-east-1:000000000000:function:xform\"}]", "\"Parameters\": []") + "}",
+                RedshiftDestination.class);
+        assertThrows(AwsException.class,
+                () -> service.updateRedshiftDestination(STREAM, "1", destinationId, invalid));
+
+        RedshiftDestination valid = mapper.readValue("{" + LAMBDA_PROCESSING.substring(2) + "}",
+                RedshiftDestination.class);
+        service.updateRedshiftDestination(STREAM, "1", destinationId, valid);
+        when(transformer.transform(any(), eq("stage"), any(), any())).thenReturn(new FirehoseLambdaTransformer.Outcome(
+                List.of("{\"id\":3}".getBytes(StandardCharsets.UTF_8)), 0, 0, null));
+
+        service.flush(STREAM);
+
+        verify(transformer, times(1)).transform(any(), eq("stage"), any(), any());
+        ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service).putObject(eq("stage"), anyString(), body.capture(), anyString(), anyMap(), any());
+        assertEquals("{\"id\":3}\n", new String(body.getValue(), StandardCharsets.UTF_8));
     }
 
     private RedshiftDestination destination(String extraMembers) throws Exception {
