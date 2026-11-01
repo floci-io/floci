@@ -17,6 +17,8 @@ import io.github.hectorvent.floci.services.timestreaminfluxdb.model.DbInstance;
 import io.github.hectorvent.floci.services.timestreaminfluxdb.model.DbParameterGroup;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
@@ -56,6 +58,8 @@ class TimestreamInfluxDbServiceTest {
         when(containerManager.volumeName(anyString())).thenAnswer(inv -> CURRENT_PREFIX + inv.getArgument(0));
         when(containerManager.legacyVolumeName(anyString())).thenAnswer(inv -> LEGACY_PREFIX + inv.getArgument(0));
         when(containerManager.start(anyString(), anyString(), anyString(), anyString(), any(), anyMap()))
+                .thenReturn(new InfluxDbEndpoint("container-1", "localhost", 18086));
+        when(containerManager.restart("container-1"))
                 .thenReturn(new InfluxDbEndpoint("container-1", "localhost", 18086));
         SecretsManagerService secrets = mock(SecretsManagerService.class);
         Secret secret = mock(Secret.class);
@@ -160,6 +164,53 @@ class TimestreamInfluxDbServiceTest {
         service.rebootDbInstance(json("{\"identifier\":\"" + id + "\"}"), REGION);
 
         assertEquals("REBOOT_FAILED", service.getDbInstance(json("{\"identifier\":\"" + id + "\"}"), REGION).getStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rebootProbesAndPersistsTheRediscoveredEndpoint(boolean unhealthy) throws Exception {
+        String id = createInstance("reboot-moved-db", null).getId();
+        InfluxDbEndpoint moved = new InfluxDbEndpoint("container-1", "reassigned-host", 28086);
+        when(containerManager.restart("container-1")).thenReturn(moved);
+        if (unhealthy) {
+            doThrow(new IllegalStateException("not healthy")).when(containerManager).waitUntilReady(moved);
+        }
+
+        service.rebootDbInstance(json("{\"identifier\":\"" + id + "\"}"), REGION);
+
+        verify(containerManager).waitUntilReady(moved);
+        DbInstance stored = service.getDbInstance(json("{\"identifier\":\"" + id + "\"}"), REGION);
+        assertEquals(unhealthy ? "REBOOT_FAILED" : "AVAILABLE", stored.getStatus());
+        assertEquals("reassigned-host", stored.getEndpoint());
+        assertEquals(28086, stored.getPort());
+        assertEquals("container-1", stored.getContainerId());
+    }
+
+    @Test
+    void clusterRebootPropagatesTheRediscoveredEndpointToMembers() throws Exception {
+        String id = service.createDbCluster(json("""
+                {"name":"moved-cluster","dbInstanceType":"db.influx.large","allocatedStorage":20,
+                 "username":"admin","password":"password123","organization":"org","bucket":"bucket",
+                 "vpcSubnetIds":["subnet-1"],"vpcSecurityGroupIds":["sg-1"]}
+                """), REGION).resource().getId();
+        InfluxDbEndpoint moved = new InfluxDbEndpoint("container-1", "reassigned-host", 28086);
+        when(containerManager.restart("container-1")).thenReturn(moved);
+
+        service.rebootDbCluster(json("{\"dbClusterId\":\"" + id + "\"}"), REGION);
+
+        verify(containerManager).waitUntilReady(moved);
+        DbCluster stored = service.getDbCluster(json("{\"dbClusterId\":\"" + id + "\"}"), REGION);
+        assertEquals("AVAILABLE", stored.getStatus());
+        assertEquals("reassigned-host", stored.getEndpoint());
+        assertEquals("reassigned-host", stored.getReaderEndpoint());
+        List<DbInstance> members = service.listDbInstancesForCluster(
+                json("{\"dbClusterId\":\"" + id + "\"}"), REGION).items();
+        assertTrue(!members.isEmpty());
+        for (DbInstance member : members) {
+            assertEquals("reassigned-host", member.getEndpoint());
+            assertEquals(28086, member.getPort());
+            assertEquals("AVAILABLE", member.getStatus());
+        }
     }
 
     @Test

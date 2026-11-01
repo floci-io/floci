@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.timestreaminfluxdb.container;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.RestartContainerCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -20,7 +21,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.InOrder;
 import org.mockito.Mockito;
 
 import java.io.IOException;
@@ -37,10 +40,12 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
@@ -54,6 +59,7 @@ class TimestreamInfluxDbContainerManagerTest {
     private PortAllocator portAllocator;
     private TimestreamInfluxDbContainerManager manager;
     private EmulatorConfig.StorageConfig storage;
+    private EmulatorConfig.TimestreamInfluxDbServiceConfig influx;
 
     @BeforeEach
     void setUp() {
@@ -67,7 +73,7 @@ class TimestreamInfluxDbContainerManagerTest {
 
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
-        EmulatorConfig.TimestreamInfluxDbServiceConfig influx = mock(EmulatorConfig.TimestreamInfluxDbServiceConfig.class);
+        influx = mock(EmulatorConfig.TimestreamInfluxDbServiceConfig.class);
         storage = mock(EmulatorConfig.StorageConfig.class);
         when(config.services()).thenReturn(services);
         when(config.storage()).thenReturn(storage);
@@ -79,6 +85,27 @@ class TimestreamInfluxDbContainerManagerTest {
 
         manager = new TimestreamInfluxDbContainerManager(containerBuilder, lifecycleManager,
                 mock(ContainerDetector.class), portAllocator, config);
+    }
+
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = "service-network")
+    void restartResolvesTheCurrentEndpointAfterDockerCompletes(String network) {
+        DockerClient docker = mock(DockerClient.class);
+        RestartContainerCmd restart = mock(RestartContainerCmd.class);
+        when(lifecycleManager.getDockerClient()).thenReturn(docker);
+        when(docker.restartContainerCmd("container-id")).thenReturn(restart);
+        when(influx.dockerNetwork()).thenReturn(Optional.ofNullable(network));
+        when(lifecycleManager.resolveEndpoint("container-id", 8086, network))
+                .thenReturn(new EndpointInfo("reassigned-host", 18086));
+
+        assertEquals(new InfluxDbEndpoint("container-id", "reassigned-host", 18086),
+                manager.restart("container-id"));
+
+        InOrder order = inOrder(restart, lifecycleManager);
+        order.verify(restart).exec();
+        order.verify(lifecycleManager).resolveEndpoint("container-id", 8086, network);
+        verify(portAllocator, never()).allocate(anyInt(), anyInt());
     }
 
     @Test
