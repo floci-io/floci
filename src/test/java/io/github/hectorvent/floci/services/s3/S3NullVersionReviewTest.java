@@ -172,9 +172,10 @@ class S3NullVersionReviewTest {
             assertPreservedBodies(service);
             if ("GOVERNANCE".equals(lock)) {
                 service.deleteObject("bucket", "key", null, true);
-                AwsException missing = assertThrows(AwsException.class,
-                        () -> service.getObject("bucket", "key", "null"));
-                assertEquals("NoSuchVersion", missing.getErrorCode());
+                S3Object nullEntry = service.listObjectVersions("bucket", "key", 100, null).versions().stream()
+                        .filter(version -> version.getVersionId() == null)
+                        .findFirst().orElseThrow();
+                assertTrue(nullEntry.isDeleteMarker());
             } else {
                 assertDenied(() -> service.deleteObject("bucket", "key", null, true));
                 assertPreservedBodies(service);

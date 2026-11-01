@@ -72,9 +72,9 @@ class EcsContainerManagerVolumesFromTest {
         when(appBuilder.build()).thenReturn(new ContainerSpec("test-image"));
 
         lifecycleManager = mock(ContainerLifecycleManager.class);
-        when(lifecycleManager.resolveImageForLaunch(any(), any()))
+        when(lifecycleManager.resolveImageForLaunch(any(), any(), any()))
                 .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
-        when(lifecycleManager.createAndStartEphemeral(any()))
+        when(lifecycleManager.createAndStartEphemeral(any(), any()))
                 .thenReturn(new ContainerInfo("source-id", Map.of()))
                 .thenReturn(new ContainerInfo("app-id", Map.of()));
 
@@ -128,7 +128,7 @@ class EcsContainerManagerVolumesFromTest {
         ContainerBuilder.Builder routerBuilder = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         when(containerBuilder.newContainer("router:latest")).thenReturn(routerBuilder);
         when(routerBuilder.build()).thenReturn(new ContainerSpec("test-image"));
-        when(lifecycleManager.create(any())).thenReturn("router-id");
+        when(lifecycleManager.create(any(), any())).thenReturn("router-id");
         when(lifecycleManager.startCreated(eq("router-id"), any()))
                 .thenReturn(new ContainerInfo("router-id", Map.of()));
         DockerClient dockerClient = mock(DockerClient.class, RETURNS_DEEP_STUBS);
@@ -160,11 +160,11 @@ class EcsContainerManagerVolumesFromTest {
         order.verify(containerBuilder).newContainer("router:latest");
         order.verify(containerBuilder).newContainer("app:latest");
         InOrder lifecycleOrder = inOrder(lifecycleManager, copyCmd);
-        lifecycleOrder.verify(lifecycleManager).createAndStartEphemeral(any(ContainerSpec.class));
-        lifecycleOrder.verify(lifecycleManager).create(any(ContainerSpec.class));
+        lifecycleOrder.verify(lifecycleManager).createAndStartEphemeral(any(ContainerSpec.class), any());
+        lifecycleOrder.verify(lifecycleManager).create(any(ContainerSpec.class), any());
         lifecycleOrder.verify(copyCmd).exec();
         lifecycleOrder.verify(lifecycleManager).startCreated(eq("router-id"), any(ContainerSpec.class));
-        lifecycleOrder.verify(lifecycleManager).createAndStartEphemeral(any(ContainerSpec.class));
+        lifecycleOrder.verify(lifecycleManager).createAndStartEphemeral(any(ContainerSpec.class), any());
         verify(routerBuilder).withVolumesFrom("source-id", false);
         verify(appBuilder).withVolumesFrom("source-id", true);
         verify(lifecycleManager).ensureVolume(eq(handle.getFirelensVolumeName()), any());
@@ -205,8 +205,8 @@ class EcsContainerManagerVolumesFromTest {
                         List.of(), "us-east-1"));
 
         verify(containerBuilder, never()).newContainer(anyString());
-        verify(lifecycleManager, never()).create(any());
-        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).create(any(), any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
         verify(lifecycleManager, never()).ensureVolume(anyString(), any());
     }
 
@@ -234,8 +234,8 @@ class EcsContainerManagerVolumesFromTest {
                 failure.getMessage());
         verify(s3Service).getObject("firelens-configs", "missing.conf");
         verify(containerBuilder, never()).newContainer(anyString());
-        verify(lifecycleManager, never()).create(any());
-        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).create(any(), any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
         verify(lifecycleManager, never()).ensureVolume(anyString(), any());
     }
 
@@ -247,7 +247,7 @@ class EcsContainerManagerVolumesFromTest {
         assertThrows(IllegalArgumentException.class,
                 () -> manager.startTask(task(), taskDefinition(List.of(app)), List.of(), "us-east-1"));
 
-        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
     }
 
     @Test
@@ -260,7 +260,7 @@ class EcsContainerManagerVolumesFromTest {
         assertThrows(IllegalArgumentException.class,
                 () -> manager.startTask(task(), taskDefinition(List.of(app, source)), List.of(), "us-east-1"));
 
-        verify(lifecycleManager, never()).createAndStartEphemeral(any());
+        verify(lifecycleManager, never()).createAndStartEphemeral(any(), any());
     }
 
     private static ContainerDefinition definition(String name, String image) {

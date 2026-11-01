@@ -66,7 +66,8 @@ quarkus:
       # catalog (sagemaker/instance-type-catalog.yaml), KMS reads its AWS managed
       # key catalog (kms/aws-managed-keys.yaml), AppSync's GraphQL
       # parser reads its message bundles, Lambda Web Functions copy their
-      # runtime (lambdaweb/index.mjs) into each environment, EC2 security group enforcement builds
+      # runtime (lambdaweb/index.mjs) into each environment, EMR writes its S3DistCp program
+      # (emr/s3-dist-cp.py) into a step's container, EC2 security group enforcement builds
       # its helper image from docker/*.Dockerfile, and API Gateway's Velocity
       # engine reads its default properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
@@ -82,6 +83,7 @@ quarkus:
         - ui/*.html
         - appsync/*.mjs
         - lambdaweb/*.mjs
+        - emr/*.py
         - ec2/*.yaml
         - docker/*.Dockerfile
         - sagemaker/*.yaml
@@ -134,6 +136,12 @@ quarkus:
     additional-build-args:
       - --enable-url-protocols=http,https
       - --initialize-at-run-time=io.vertx.ext.mail.impl.sasl.NTLMEngineImpl
+      # JNA, which docker-java's named-pipe socket loads on Windows, binds its native dispatch
+      # library in Native's static initializer. Initialized at build time (the Quarkus default),
+      # that library loads into the builder and never into the binary, so every JNA call fails
+      # with UnsatisfiedLinkError on Native.open. The JNI and proxy metadata JNA needs at run time
+      # is under META-INF/native-image/net.java.dev.jna and META-INF/native-image/io.github.hectorvent.
+      - --initialize-at-run-time=com.sun.jna
       - --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.AcmService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator
@@ -536,6 +544,8 @@ floci:
       automated-snapshots-enabled: true
       cloudwatch-metrics-enabled: true
       snapshot-sweep-interval-seconds: 60
+      snapshot-copy-enabled: true
+      snapshot-copy-sweep-interval-seconds: 60
       default-port: 5439
       image-version: postgres:15-alpine
       poll-interval-ms: 1000
@@ -583,6 +593,10 @@ floci:
       shutdown-timeout-seconds: ${FLOCI_SERVICES_REDSHIFT_DATA_SHUTDOWN_TIMEOUT_SECONDS:10}
     redshift-serverless:
       enabled: true
+      snapshot-expiration-enabled: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SNAPSHOT_EXPIRATION_ENABLED:true}
+      snapshot-expiration-sweep-interval-seconds: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SNAPSHOT_EXPIRATION_SWEEP_INTERVAL_SECONDS:60}
+      snapshot-copy-enabled: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SNAPSHOT_COPY_ENABLED:true}
+      snapshot-copy-sweep-interval-seconds: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SNAPSHOT_COPY_SWEEP_INTERVAL_SECONDS:60}
       scheduled-actions-enabled: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SCHEDULED_ACTIONS_ENABLED:true}
       scheduled-action-sweep-interval-seconds: ${FLOCI_SERVICES_REDSHIFT_SERVERLESS_SCHEDULED_ACTION_SWEEP_INTERVAL_SECONDS:60}
     neptune:

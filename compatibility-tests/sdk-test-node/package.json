@@ -21,6 +21,7 @@
     "@aws-sdk/client-kinesis": "^3.500.0",
     "@aws-sdk/client-kms": "^3.500.0",
     "@aws-sdk/client-lambda": "^3.500.0",
+    "@aws-sdk/client-lambda-web": "^3.1145.0",
     "@aws-sdk/client-neptune": "^3.500.0",
     "@aws-sdk/client-pipes": "^3.500.0",
     "@aws-sdk/client-s3": "^3.500.0",

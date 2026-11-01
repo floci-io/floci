@@ -7,22 +7,36 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
+import io.github.hectorvent.floci.services.ecs.exec.EcsExecSessionRegistry;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
+import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.ProtectedTask;
+import io.github.hectorvent.floci.testing.MutableClock;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
@@ -86,6 +100,182 @@ class EcsServiceTaskOwnershipTest {
                 "the service drains its own task down to the new desired count");
         assertEquals("RUNNING", reload(service, intruder).getLastStatus(),
                 "scale-in must not reach a task the service never launched");
+    }
+
+    @Test
+    void scaleInWaitsForProtectedTasksAndContinuesWhenProtectionIsRemoved() {
+        EcsService service = newMockModeService();
+        service.createCluster("protected-cluster", REGION);
+        registerTaskDef(service);
+        service.createService("protected-cluster", "worker", "own-fam", 2, LaunchType.FARGATE,
+                List.of(), null, REGION);
+        service.reconcileServices();
+        service.reconcileServices();
+
+        List<EcsTask> running = ownedTasks(service, "protected-cluster", "worker");
+        assertEquals(2, running.size());
+        List<String> arns = running.stream().map(EcsTask::getTaskArn).toList();
+        service.updateTaskProtection("protected-cluster", arns, true, 60, REGION);
+        service.updateService("protected-cluster", "worker", null, 0, null, REGION);
+        service.reconcileServices();
+
+        assertEquals(2, ownedTasks(service, "protected-cluster", "worker").size(),
+                "protected tasks stay running despite the lower desired count");
+        service.updateTaskProtection("protected-cluster", List.of(arns.getFirst()), false, null, REGION);
+        service.reconcileServices();
+        assertEquals("STOPPED", reload(service, running.getFirst()).getLastStatus());
+        assertEquals("RUNNING", reload(service, running.getLast()).getLastStatus());
+
+        service.updateTaskProtection("protected-cluster", List.of(arns.getLast()), false, null, REGION);
+        service.reconcileServices();
+        assertEquals(0, ownedTasks(service, "protected-cluster", "worker").size());
+    }
+
+    @Test
+    void replicaScaleInOnEc2RetainsProtectedTask() {
+        EcsService service = newMockModeService();
+        service.createCluster("ec2-protected", REGION);
+        service.registerContainerInstance("ec2-protected", null, List.of(), REGION);
+        service.registerContainerInstance("ec2-protected", null, List.of(), REGION);
+        registerTaskDef(service);
+        service.createService("ec2-protected", "worker", "own-fam", 2, LaunchType.EC2,
+                List.of(), null, REGION);
+        service.reconcileServices();
+        service.reconcileServices();
+
+        List<EcsTask> running = ownedTasks(service, "ec2-protected", "worker");
+        assertEquals(2, running.size());
+        EcsTask protectedTask = running.getFirst();
+        EcsTask otherTask = running.getLast();
+        service.updateTaskProtection("ec2-protected", List.of(protectedTask.getTaskArn()), true, 60, REGION);
+        service.updateService("ec2-protected", "worker", null, 1, null, REGION);
+        service.reconcileServices();
+
+        assertEquals("RUNNING", reload(service, protectedTask).getLastStatus());
+        assertEquals("STOPPED", reload(service, otherTask).getLastStatus());
+        assertEquals(1, ownedTasks(service, "ec2-protected", "worker").size());
+    }
+
+    @Test
+    void scaleInSkipsProtectedTaskAndStopsExpiredTaskOnNextTick() {
+        MutableClock clock = new MutableClock();
+        EcsService service = newMockModeService(clock);
+        service.createCluster("mixed-cluster", REGION);
+        registerTaskDef(service);
+        service.createService("mixed-cluster", "worker", "own-fam", 2, LaunchType.FARGATE,
+                List.of(), null, REGION);
+        service.reconcileServices();
+        service.reconcileServices();
+
+        List<EcsTask> running = ownedTasks(service, "mixed-cluster", "worker");
+        assertEquals(2, running.size());
+        EcsTask protectedTask = running.getFirst();
+        EcsTask unprotectedTask = running.getLast();
+        service.updateTaskProtection("mixed-cluster", List.of(protectedTask.getTaskArn()), true, 60, REGION);
+        service.updateService("mixed-cluster", "worker", null, 1, null, REGION);
+        service.reconcileServices();
+
+        assertEquals("RUNNING", reload(service, protectedTask).getLastStatus());
+        assertEquals("STOPPED", reload(service, unprotectedTask).getLastStatus());
+
+        clock.advance(Duration.ofMinutes(61));
+        service.updateService("mixed-cluster", "worker", null, 0, null, REGION);
+        service.reconcileServices();
+        assertEquals("STOPPED", reload(service, protectedTask).getLastStatus());
+        assertFalse(service.getTaskProtection("mixed-cluster",
+                List.of(protectedTask.getTaskArn()), REGION).getFirst().protectionEnabled());
+    }
+
+    @Test
+    void taskProtectionDefaultsToTwoHoursAndExplicitStopStillWorks() {
+        MutableClock clock = new MutableClock();
+        EcsService service = newMockModeService(clock);
+        service.createCluster("default-cluster", REGION);
+        registerTaskDef(service);
+        service.createService("default-cluster", "worker", "own-fam", 1, LaunchType.FARGATE,
+                List.of(), null, REGION);
+        service.reconcileServices();
+        EcsTask task = ownedTasks(service, "default-cluster", "worker").getFirst();
+
+        clock.reset();
+        Instant before = clock.instant();
+        clock.reset();
+        ProtectedTask protection = service.updateTaskProtection("default-cluster", List.of(task.getTaskArn()),
+                true, null, REGION).getFirst();
+        assertTrue(protection.protectionEnabled());
+        assertEquals(before.plus(Duration.ofMinutes(120)), protection.expirationDate());
+        assertEquals(protection.expirationDate(), service.getTaskProtection("default-cluster",
+                List.of(task.getTaskArn()), REGION).getFirst().expirationDate());
+
+        service.stopTask("default-cluster", task.getTaskArn(), "requested by user", REGION);
+        assertEquals("STOPPED", reload(service, task).getLastStatus());
+    }
+
+    @Test
+    void deploymentWaitsToDrainProtectedOldRevision() {
+        EcsEventPublisher publisher = mock(EcsEventPublisher.class);
+        EcsService service = newMockModeService(publisher);
+        service.createCluster("rollout-cluster", REGION);
+        registerTaskDef(service);
+        service.createService("rollout-cluster", "worker", "own-fam", 1, LaunchType.FARGATE,
+                List.of(), null, REGION);
+        service.reconcileServices();
+        EcsTask oldTask = ownedTasks(service, "rollout-cluster", "worker").getFirst();
+        clearInvocations(publisher);
+        service.updateTaskProtection("rollout-cluster", List.of(oldTask.getTaskArn()), true, 60, REGION);
+
+        registerTaskDef(service);
+        service.updateService("rollout-cluster", "worker", "own-fam:2", null, null, REGION);
+        service.reconcileServices();
+        service.reconcileServices();
+        assertEquals("RUNNING", reload(service, oldTask).getLastStatus(),
+                "deployment must leave the protected old revision running");
+        assertEquals(2, ownedTasks(service, "rollout-cluster", "worker").size());
+        EcsServiceModel svc = service.describeServices("rollout-cluster", List.of("worker"), REGION).getFirst();
+        assertEquals("IN_PROGRESS", service.listServiceDeploymentsDetailed("worker", "rollout-cluster",
+                null, REGION).getFirst().getStatus());
+        assertEquals("IN_PROGRESS", service.deploymentsFor(svc).getFirst().getRolloutState());
+        assertTrue(service.eventsFor(svc).isEmpty(), "protected old revision blocks steady state");
+        verify(publisher, never()).emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"),
+                any(), eq(REGION));
+
+        service.updateTaskProtection("rollout-cluster", List.of(oldTask.getTaskArn()), false, null, REGION);
+        service.reconcileServices();
+        assertEquals("STOPPED", reload(service, oldTask).getLastStatus());
+        assertEquals(1, ownedTasks(service, "rollout-cluster", "worker").size());
+        assertEquals("SUCCESSFUL", service.listServiceDeploymentsDetailed("worker", "rollout-cluster",
+                null, REGION).getFirst().getStatus());
+        assertEquals("COMPLETED", service.deploymentsFor(svc).getFirst().getRolloutState());
+        assertFalse(service.eventsFor(svc).isEmpty());
+        verify(publisher, times(1)).emitDeploymentStateChange(any(), eq("SERVICE_DEPLOYMENT_COMPLETED"),
+                any(), eq(REGION));
+    }
+
+    @Test
+    void daemonDeploymentWaitsForProtectedTask() {
+        EcsService service = newMockModeService();
+        service.createCluster("daemon-protected", REGION);
+        service.registerContainerInstance("daemon-protected", null, List.of(), REGION);
+        registerTaskDef(service);
+        service.createService("daemon-protected", "agent", "own-fam", 1, LaunchType.EC2,
+                List.of(), null, null, "DAEMON", null, null, REGION);
+        service.reconcileServices();
+        EcsTask oldTask = ownedTasks(service, "daemon-protected", "agent").getFirst();
+        service.updateTaskProtection("daemon-protected", List.of(oldTask.getTaskArn()), true, 60, REGION);
+
+        registerTaskDef(service);
+        service.updateService("daemon-protected", "agent", "own-fam:2", null, null, REGION);
+        service.reconcileServices();
+        assertEquals("RUNNING", reload(service, oldTask).getLastStatus());
+        assertEquals(1, ownedTasks(service, "daemon-protected", "agent").size());
+        assertEquals(1, service.describeServices("daemon-protected", List.of("agent"), REGION)
+                .getFirst().getRunningCount());
+
+        service.updateTaskProtection("daemon-protected", List.of(oldTask.getTaskArn()), false, null, REGION);
+        service.reconcileServices();
+        service.reconcileServices();
+        assertEquals("STOPPED", reload(service, oldTask).getLastStatus());
+        assertEquals(1, ownedTasks(service, "daemon-protected", "agent").size());
     }
 
     @Test
@@ -240,6 +430,18 @@ class EcsServiceTaskOwnershipTest {
     }
 
     private static EcsService newMockModeService() {
+        return newMockModeService(null, Clock.systemUTC());
+    }
+
+    private static EcsService newMockModeService(EcsEventPublisher publisher) {
+        return newMockModeService(publisher, Clock.systemUTC());
+    }
+
+    private static EcsService newMockModeService(Clock clock) {
+        return newMockModeService(null, clock);
+    }
+
+    private static EcsService newMockModeService(EcsEventPublisher publisher, Clock clock) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().mock()).thenReturn(true);
         when(config.effectiveBaseUrl()).thenReturn("http://localhost:4566");
@@ -249,7 +451,7 @@ class EcsServiceTaskOwnershipTest {
                 config,
                 mock(EcsLoadBalancerRegistrar.class),
                 new InMemoryStorageFactory(),
-                null);
+                publisher, new EcsExecSessionRegistry(), null, null, clock);
         service.initializeStorage();
         return service;
     }

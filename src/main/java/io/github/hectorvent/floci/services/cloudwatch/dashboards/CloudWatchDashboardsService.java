@@ -257,12 +257,12 @@ public class CloudWatchDashboardsService {
      * returned unchanged, since there is no region field to blank.
      */
     private static String withoutRegion(String arn) {
-        String[] fields = arn.split(":", 6);
-        if (fields.length < 6) {
+        if (!AwsArnUtils.isArn(arn)) {
             return arn;
         }
-        fields[3] = "";
-        return String.join(":", fields);
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return new AwsArnUtils.Arn(parsed.partition(), parsed.service(), "", parsed.accountId(), parsed.resource())
+                .toString();
     }
 
     private static String key(String region, String dashboardName) {

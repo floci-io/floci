@@ -140,11 +140,10 @@ class SigningCertificateIntegrationTest {
             .formParam("Status", "Revoked")
         .when().post("/").then().statusCode(400)
             .body(containsString("ValidationError"))
-            // statusType is one shape across the three operations that take it, and AWS renders it
-            // without the offending value or the permitted set.
+            // The AWS capture lists the set but does not echo the offending value.
             .body(containsString("1 validation error detected"))
-            .body(containsString("Member must satisfy enum value set"))
-            .body(not(containsString("enum value set:")))
+            .body(containsString("Member must satisfy enum value set: "
+                    + "[Expired, Active, Inactive]"))
             .body(not(containsString("Revoked")));
     }
 

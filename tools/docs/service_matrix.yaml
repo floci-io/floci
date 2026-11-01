@@ -83,6 +83,7 @@ action_count_sources:
   glue: services/glue/GlueJsonHandler.java
   iam: services/iam/IamQueryHandler.java
   resource-groups-tagging: services/resourcegroupstagging/ResourceGroupsTaggingJsonHandler.java
+  ses: services/ses/SesQueryHandler.java
 
 # docs/services pages that intentionally have no Service Matrix row of their own.
 facet_pages:

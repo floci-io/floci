@@ -1,6 +1,7 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.firehose.FirehoseClient;
 import software.amazon.awssdk.services.firehose.model.*;
 
@@ -17,6 +18,7 @@ import static org.assertj.core.api.Assertions.*;
  */
 @DisplayName("Firehose data format conversion configuration")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@ResourceLock("floci-duck")
 class FirehoseDataFormatConversionTest {
 
     private static FirehoseClient firehose;

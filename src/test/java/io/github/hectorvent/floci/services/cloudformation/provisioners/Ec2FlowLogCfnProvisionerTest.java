@@ -6,8 +6,11 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.FlowLogService;
 import io.github.hectorvent.floci.services.ec2.model.FlowLog;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
@@ -194,6 +197,30 @@ class Ec2FlowLogCfnProvisionerTest {
         AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r,
                 mapper.createObjectNode().put("ResourceId", "vpc-123").put("LogFormat", "${srcaddr}"), ctx()));
         assertEquals("ValidationError", e.getErrorCode());
+    }
+
+    @Test
+    void reapplyingACloudWatchTemplateThatOmitsTheDestinationTypeIsANoOp() {
+        // A real FlowLogService, so the update is compared against what create actually stored:
+        // a CloudWatch Logs ARN with no LogDestinationType is stored as cloud-watch-logs, and the
+        // compare must default the template the same way or an unchanged update is rejected.
+        FlowLogService real = new FlowLogService(mock(Ec2Service.class), mock(S3Service.class),
+                new InMemoryStorageFactory("000000000000"));
+        Ec2FlowLogCfnProvisioner p = new Ec2FlowLogCfnProvisioner(real);
+        ObjectNode props = mapper.createObjectNode()
+                .put("ResourceId", "vpc-123")
+                .put("LogDestination", "arn:aws:logs:us-east-1:000000000000:log-group:flows")
+                .put("DeliverLogsPermissionArn", "arn:aws:iam::000000000000:role/flow-logs-role");
+        StackResource r = resource();
+
+        p.provision(r, props, ctx());
+        String created = r.getPhysicalId();
+        p.provision(r, props, ctx());
+
+        assertEquals(created, r.getPhysicalId());
+        List<FlowLog> logs = real.describeFlowLogs("us-east-1", List.of());
+        assertEquals(1, logs.size());
+        assertEquals("cloud-watch-logs", logs.get(0).getLogDestinationType());
     }
 
     @Test

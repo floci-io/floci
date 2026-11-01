@@ -3,13 +3,16 @@ package io.github.hectorvent.floci.services.cloudfront;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.LocalStackParity;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
 import io.github.hectorvent.floci.core.common.CloudFrontEdgeDomain;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.acm.AcmCertificateReferenceProvider.CertificateReference;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.CachePolicy;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontFunction;
@@ -136,6 +139,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private final String accountId;
     private final RegionResolver regionResolver;
     private final IamService iamService;
+    private final CertificateReferenceResolver certificates;
     private final String configuredDomainSuffix;
     /**
      * Host suffixes under which every distribution is served as {@code <id><suffix>}, whatever
@@ -150,13 +154,14 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     private final Pattern lambdaOriginHost;
 
     public CloudFrontService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver) {
-        this(factory, config, regionResolver, null);
+        this(factory, config, regionResolver, null, null);
     }
 
     @Inject
     public CloudFrontService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver,
-                             IamService iamService) {
+                             IamService iamService, CertificateReferenceResolver certificates) {
         this.iamService = iamService;
+        this.certificates = certificates;
         this.distStore = factory.create("cloudfront", "cloudfront-distributions.json",
                 new TypeReference<Map<String, Distribution>>() {});
         this.invalidationStore = factory.create("cloudfront", "cloudfront-invalidations.json",
@@ -268,6 +273,30 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         return references;
     }
 
+    /**
+     * The ACM certificates the distributions serve, each held by its distribution, so ACM lists the
+     * distribution in {@code InUseBy} and refuses to delete the certificate. Like
+     * {@link #serverCertificateReferences} it reads a copy of the store and takes no monitor.
+     */
+    public List<CertificateReference> acmCertificateReferences() {
+        List<CertificateReference> references = new ArrayList<>();
+        for (Distribution distribution : distStore.scan(k -> true)) {
+            String certificateArn = acmCertificateArn(distribution.getConfig());
+            if (certificateArn != null) {
+                references.add(new CertificateReference(certificateArn, distribution.getArn()));
+            }
+        }
+        return references;
+    }
+
+    private static String acmCertificateArn(DistributionConfig config) {
+        if (config == null || config.getViewerCertificate() == null) {
+            return null;
+        }
+        String certificateArn = config.getViewerCertificate().get("ACMCertificateArn");
+        return certificateArn == null || certificateArn.isBlank() ? null : certificateArn;
+    }
+
     private static String iamCertificateId(DistributionConfig config) {
         if (config == null || config.getViewerCertificate() == null) {
             return null;
@@ -284,24 +313,49 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
                     "The specified SSL certificate doesn't exist, isn't valid, "
                             + "or doesn't include a valid certificate chain.", 400);
         }
+        String certificateArn = acmCertificateArn(config);
+        if (certificateArn != null && !isExistingAcmCertificate(certificateArn)) {
+            throw new AwsException("InvalidViewerCertificate",
+                    "The specified SSL certificate doesn't exist, isn't valid, "
+                            + "or doesn't include a valid certificate chain.", 400);
+        }
     }
 
     /**
-     * Runs a write that may record an IAM server certificate reference while IAM holds the lock
-     * {@code DeleteServerCertificate} takes, so the certificate cannot be deleted between
+     * Only an ACM certificate: the resolver also answers for IAM server certificates, but one named
+     * here would never be held by {@link #serverCertificateReferences}, which reads
+     * {@code IAMCertificateId}.
+     */
+    private boolean isExistingAcmCertificate(String arn) {
+        if (!AwsArnUtils.isArn(arn)) {
+            return false;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return "acm".equals(parsed.service())
+                && (certificates == null || certificates.exists(parsed.region(), arn));
+    }
+
+    /**
+     * Runs a write that may record a certificate reference while the certificate's owner holds the
+     * lock its delete takes, IAM's for {@code DeleteServerCertificate} and ACM's for
+     * {@code DeleteCertificate}, so the certificate cannot be deleted between
      * {@link #validateViewerCertificate} and the store write. Without the guard the delete sees no
      * reference, because the distribution is not saved yet, and the distribution is left holding a
-     * certificate that is gone.
+     * certificate that is gone. IAM's lock is taken first, the order the resolver uses.
      */
     private <T> T whileCertificatesHeld(DistributionConfig config, Supplier<T> action) {
+        String certificateArn = acmCertificateArn(config);
+        Supplier<T> acmHeld = certificates == null || certificateArn == null
+                ? action
+                : () -> certificates.supplyWhileHeld(List.of(certificateArn), action);
         if (iamService == null || iamCertificateId(config) == null) {
-            // Nothing to order. A distribution that names no IAM certificate cannot be left
-            // holding one, and the scan reads a copy of the store rather than a live collection,
-            // so this write cannot disturb it either. Taking the lock anyway would make every
-            // distribution write wait on a certificate delete, and the other way round.
-            return action.get();
+            // Nothing to order with IAM. A distribution that names no IAM certificate cannot be
+            // left holding one, and the scan reads a copy of the store rather than a live
+            // collection, so this write cannot disturb it either. Taking the lock anyway would make
+            // every distribution write wait on a certificate delete, and the other way round.
+            return acmHeld.get();
         }
-        return iamService.supplyWithServerCertificatesHeld(action);
+        return iamService.supplyWithServerCertificatesHeld(acmHeld);
     }
 
     private static void validateOriginSettings(DistributionConfig config) {
@@ -2159,7 +2213,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     public RealtimeLogConfig getRealtimeLogConfig(String nameOrArn) {
-        if (nameOrArn != null && nameOrArn.startsWith("arn:")) {
+        if (AwsArnUtils.looksLikeArn(nameOrArn)) {
             String name = nameOrArn.substring(nameOrArn.lastIndexOf('/') + 1);
             return realtimeLogConfigStore.get(name).orElseThrow(() ->
                     new AwsException("NoSuchRealtimeLogConfig",

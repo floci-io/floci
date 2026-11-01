@@ -591,15 +591,15 @@ public class VerifiedPermissionsService implements Resettable {
             }
             ObjectNode cognito = source.deepCopy();
             String arn = requiredText(cognito, "userPoolArn");
-            String[] arnParts = arn.split(":", 6);
-            if (arnParts.length != 6 || !"cognito-idp".equals(arnParts[2]) || !arnParts[5].startsWith("userpool/")) {
+            if (!AwsArnUtils.isArnFor(arn, "cognito-idp") || !AwsArnUtils.parse(arn).resource().startsWith("userpool/")) {
                 throw validation("userPoolArn must be a Cognito user pool ARN.");
             }
-            if (!region.equals(arnParts[3])) {
+            AwsArnUtils.Arn poolArn = AwsArnUtils.parse(arn);
+            if (!region.equals(poolArn.region())) {
                 throw validation("The Cognito user pool must be in the same Region as the policy store.");
             }
-            String poolId = arnParts[5].substring("userpool/".length());
-            cognito.put("issuer", "https://" + AwsEndpoints.host("cognito-idp", arnParts[3]) + "/" + poolId);
+            String poolId = poolArn.resource().substring("userpool/".length());
+            cognito.put("issuer", "https://" + AwsEndpoints.host("cognito-idp", poolArn.region()) + "/" + poolId);
             validateStringArray(cognito.get("clientIds"), "clientIds", 0, 1000);
             JsonNode group = cognito.get("groupConfiguration");
             if (group != null && !group.isNull()) {
@@ -1061,8 +1061,14 @@ public class VerifiedPermissionsService implements Resettable {
                 .forEach(a -> aliases.delete(aliasKey(region, a.aliasName())));
     }
 
+    /**
+     * A policy store's ARN carries no Region, as AWS gives it
+     * ({@code arn:aws:verifiedpermissions::123456789012:policy-store/PSEXAMPLEabcdefg111111}), in the partition of the
+     * Region the store is in.
+     */
     private String storeArn(String region, String id) {
-        return AwsArnUtils.Arn.of("verifiedpermissions", region, regionResolver.getAccountId(), "policy-store/" + id).toString();
+        return AwsArnUtils.Arn.global(regionResolver.partitionForRegion(region), "verifiedpermissions",
+                regionResolver.getAccountId(), "policy-store/" + id).toString();
     }
 
     private String aliasArn(String region, String aliasName) {

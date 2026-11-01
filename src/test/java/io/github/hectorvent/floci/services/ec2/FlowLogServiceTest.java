@@ -19,6 +19,7 @@ import java.util.zip.GZIPInputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
@@ -255,6 +256,41 @@ class FlowLogServiceTest {
         try (GZIPInputStream in = new GZIPInputStream(new ByteArrayInputStream(gz))) {
             return new String(in.readAllBytes(), StandardCharsets.UTF_8).trim();
         }
+    }
+
+    @Test
+    void anS3PrefixContainingLogGroupStaysS3AndDelivers() {
+        // Only a logs ARN names a log group; an S3 prefix may contain ":log-group:" too.
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        when(ec2Service.callerAccountId()).thenReturn("000000000000");
+        when(ec2Service.describeInstances(any(), any(), anyMap()))
+                .thenReturn(List.of(reservation("us-east-1")));
+        when(ec2Service.endpointNetworkInterfaces(any())).thenReturn(List.of());
+        S3Service s3Service = mock(S3Service.class);
+        FlowLogService service = new FlowLogService(ec2Service, s3Service, new InMemoryStorage<>());
+
+        FlowLog fl = service.createFlowLog("us-east-1", "vpc-123", "VPC", "ALL", null,
+                "arn:aws:s3:::bkt/archive:log-group:daily/", null, null, 600);
+
+        FlowLog stored = service.describeFlowLogs("us-east-1", List.of(fl.getFlowLogId())).get(0);
+        assertEquals("s3", stored.getLogDestinationType());
+        assertNull(stored.getLogGroupName());
+        verify(s3Service).putObject(eq("bkt"), anyString(), any(byte[].class), anyString(), any(Map.class));
+    }
+
+    @Test
+    void aLogsArnNamesItsLogGroup() {
+        assertEquals("/aws/flows", FlowLogService.logGroupFromArn("arn:aws:logs:us-east-1:000000000000:log-group:/aws/flows:*"));
+        assertEquals("flows", FlowLogService.logGroupFromArn("arn:aws-cn:logs:cn-north-1:000000000000:log-group:flows"));
+        assertNull(FlowLogService.logGroupFromArn("arn:aws:s3:::bkt/archive:log-group:daily/"));
+    }
+
+    @Test
+    void aLogsArnWithNoGroupNameIsNotACloudWatchDestination() {
+        assertNull(FlowLogService.logGroupFromArn("arn:aws:logs:us-east-1:000000000000:log-group:"));
+        assertNull(FlowLogService.logGroupFromArn("arn:aws:logs:us-east-1:000000000000:log-group::*"));
+        assertEquals("s3", FlowLogService.effectiveLogDestinationType(null,
+                "arn:aws:logs:us-east-1:000000000000:log-group:", null));
     }
 
     @Test

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.efs.model;
 
 import com.fasterxml.jackson.databind.PropertyNamingStrategies;
 import com.fasterxml.jackson.databind.annotation.JsonNaming;
+import io.github.hectorvent.floci.core.common.AvailabilityZoneIds;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.List;
@@ -24,8 +25,17 @@ public class MountTarget {
     private String subnetId;
     private String vpcId;
 
+    /**
+     * Derived from the zone name, {@code <region><letter>}, rather than read back as stored: a
+     * mount target persisted before zone ids took AWS's shape carries the old id.
+     */
     public String getAvailabilityZoneId() {
-        return availabilityZoneId;
+        if (availabilityZoneName == null || availabilityZoneName.length() < 2
+                || !Character.isLetter(availabilityZoneName.charAt(availabilityZoneName.length() - 1))) {
+            return availabilityZoneId;
+        }
+        String region = availabilityZoneName.substring(0, availabilityZoneName.length() - 1);
+        return AvailabilityZoneIds.forZoneName(region, availabilityZoneName);
     }
 
     public void setAvailabilityZoneId(String availabilityZoneId) {

@@ -7,7 +7,9 @@ import com.fasterxml.jackson.databind.ObjectReader;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
+import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -113,19 +115,24 @@ public class RamController {
         JsonNode request = readTree(body);
         String resourceOwner = request.hasNonNull("resourceOwner")
                 ? request.path("resourceOwner").asText() : null;
-        List<ResourceShare> shares = service.getResourceShares(
+        PaginatedResult<ResourceShare> page = service.getResourceSharesPage(
                 regionResolver.getAccountId(),
                 resourceOwner,
                 request.hasNonNull("name") ? request.path("name").asText() : null,
                 stringList(request.path("resourceShareArns")),
                 request.hasNonNull("resourceShareStatus")
                         ? request.path("resourceShareStatus").asText() : null,
-                regionResolver.getRegion());
+                regionResolver.getRegion(),
+                Pagination.parseMaxResults(request, "maxResults", "InvalidParameterException"),
+                Pagination.parseNextToken(request, "nextToken", "InvalidNextTokenException"));
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = objectMapper.createArrayNode();
-        shares.forEach(share -> array.add(shareNode(share)));
+        page.items().forEach(share -> array.add(shareNode(share)));
         response.set("resourceShares", array);
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
         return Response.ok(response).build();
     }
 
@@ -229,8 +236,8 @@ public class RamController {
             node.put("associatedEntity", association.associatedEntity());
             node.put("associationType", association.associationType());
             node.put("status", "ASSOCIATED");
-            node.put("creationTime", association.creationTime().toEpochMilli() / 1000.0);
-            node.put("lastUpdatedTime", association.lastUpdatedTime().toEpochMilli() / 1000.0);
+            node.put("creationTime", EpochSeconds.fromInstant(association.creationTime()));
+            node.put("lastUpdatedTime", EpochSeconds.fromInstant(association.lastUpdatedTime()));
             node.put("external", false);
             associations.add(node);
         }
@@ -259,8 +266,8 @@ public class RamController {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("id", principal.id());
             node.put("resourceShareArn", principal.resourceShareArn());
-            node.put("creationTime", principal.creationTime().toEpochMilli() / 1000.0);
-            node.put("lastUpdatedTime", principal.lastUpdatedTime().toEpochMilli() / 1000.0);
+            node.put("creationTime", EpochSeconds.fromInstant(principal.creationTime()));
+            node.put("lastUpdatedTime", EpochSeconds.fromInstant(principal.lastUpdatedTime()));
             node.put("external", principal.external());
             array.add(node);
         }
@@ -287,8 +294,8 @@ public class RamController {
             node.put("name", permission.name());
             node.put("resourceType", permission.resourceType());
             node.put("status", "ATTACHABLE");
-            node.put("creationTime", permission.creationTime().toEpochMilli() / 1000.0);
-            node.put("lastUpdatedTime", permission.lastUpdatedTime().toEpochMilli() / 1000.0);
+            node.put("creationTime", EpochSeconds.fromInstant(permission.creationTime()));
+            node.put("lastUpdatedTime", EpochSeconds.fromInstant(permission.lastUpdatedTime()));
             node.put("isResourceTypeDefault", true);
             node.put("permissionType", "AWS_MANAGED");
             node.put("featureSet", "STANDARD");
@@ -381,7 +388,7 @@ public class RamController {
         node.put("resourceShareName", invitation.resourceShareName());
         node.put("senderAccountId", invitation.senderAccountId());
         node.put("receiverAccountId", invitation.receiverAccountId());
-        node.put("invitationTimestamp", invitation.invitationTimestamp().toEpochMilli() / 1000.0);
+        node.put("invitationTimestamp", EpochSeconds.fromInstant(invitation.invitationTimestamp()));
         node.put("status", invitation.status());
         return node;
     }
@@ -421,8 +428,8 @@ public class RamController {
         // Shares created through the API are STANDARD; CREATED_FROM_POLICY covers shares RAM
         // derives from a resource policy, which floci has no path to produce.
         node.put("featureSet", "STANDARD");
-        node.put("creationTime", share.getCreationTime().toEpochMilli() / 1000.0);
-        node.put("lastUpdatedTime", share.getLastUpdatedTime().toEpochMilli() / 1000.0);
+        node.put("creationTime", EpochSeconds.fromInstant(share.getCreationTime()));
+        node.put("lastUpdatedTime", EpochSeconds.fromInstant(share.getLastUpdatedTime()));
         ArrayNode tags = objectMapper.createArrayNode();
         share.getTags().forEach((key, value) -> {
             ObjectNode tag = objectMapper.createObjectNode();
@@ -438,7 +445,7 @@ public class RamController {
     private ArrayNode associationArray(ResourceShare share, List<String> resourceArns,
                                        List<String> principals, String status) {
         ArrayNode array = objectMapper.createArrayNode();
-        double now = share.getLastUpdatedTime().toEpochMilli() / 1000.0;
+        double now = EpochSeconds.fromInstant(share.getLastUpdatedTime());
         for (String resourceArn : resourceArns) {
             array.add(associationNode(share, resourceArn, "RESOURCE", status, now));
         }

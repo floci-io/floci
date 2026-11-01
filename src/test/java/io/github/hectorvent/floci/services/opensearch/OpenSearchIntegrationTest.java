@@ -64,6 +64,38 @@ class OpenSearchIntegrationTest {
     }
 
     @Test
+    @Order(2)
+    void createAndDescribeNewEngineVersions() {
+        for (String version : new String[] {"OpenSearch_3.7", "OpenSearch_1.1", "OpenSearch_1.0"}) {
+            String domainName = "version-" + version.substring("OpenSearch_".length()).replace('.', '-');
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("{\"DomainName\":\"" + domainName + "\",\"EngineVersion\":\"" + version + "\"}")
+            .when()
+                .post("/2021-01-01/opensearch/domain")
+            .then()
+                .statusCode(200)
+                .body("DomainStatus.EngineVersion", equalTo(version));
+
+            given()
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .get("/2021-01-01/opensearch/domain/" + domainName)
+            .then()
+                .statusCode(200)
+                .body("DomainStatus.EngineVersion", equalTo(version));
+
+            given()
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .delete("/2021-01-01/opensearch/domain/" + domainName)
+            .then()
+                .statusCode(200);
+        }
+    }
+
+    @Test
     @Order(3)
     void describeDomain() {
         given()
@@ -228,6 +260,7 @@ class OpenSearchIntegrationTest {
         .then()
             .statusCode(200)
             .body("Versions", not(empty()))
+            .body("Versions", hasItems("OpenSearch_3.7", "OpenSearch_1.1", "OpenSearch_1.0"))
             .body("Versions", hasItem("OpenSearch_3.6"))
             .body("Versions", hasItem("OpenSearch_2.19"))
             .body("Versions", hasItem("OpenSearch_2.11"))
@@ -262,6 +295,71 @@ class OpenSearchIntegrationTest {
             .body("CompatibleVersions", hasSize(1))
             .body("CompatibleVersions[0].SourceVersion", equalTo("OpenSearch_2.11"))
             .body("CompatibleVersions[0].TargetVersions", hasItem("OpenSearch_2.13"));
+    }
+
+    @Test
+    @Order(14)
+    void getCompatibleVersionsAndUpgradeAlongNewPaths() {
+        for (String[] path : new String[][] {
+                {"OpenSearch_1.0", "OpenSearch_1.2"},
+                {"OpenSearch_1.3", "OpenSearch_2.3"},
+                {"OpenSearch_2.3", "OpenSearch_2.5"},
+                {"OpenSearch_2.19", "OpenSearch_3.7"},
+                {"OpenSearch_3.6", "OpenSearch_3.7"},
+                {"Elasticsearch_7.8", "Elasticsearch_7.9"},
+                {"Elasticsearch_7.9", "OpenSearch_1.3"},
+                {"Elasticsearch_7.10", "OpenSearch_1.0"}
+        }) {
+            String source = path[0];
+            String target = path[1];
+            String domainName = "upgrade-" + source.substring(source.indexOf('_') + 1).replace('.', '-');
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("{\"DomainName\":\"" + domainName + "\",\"EngineVersion\":\"" + source + "\"}")
+            .when()
+                .post("/2021-01-01/opensearch/domain")
+            .then()
+                .statusCode(200);
+
+            try {
+                given()
+                    .header("Authorization", AUTH_HEADER)
+                    .queryParam("domainName", domainName)
+                .when()
+                    .get("/2021-01-01/opensearch/compatibleVersions")
+                .then()
+                    .statusCode(200)
+                    .body("CompatibleVersions", hasSize(1))
+                    .body("CompatibleVersions[0].SourceVersion", equalTo(source))
+                    .body("CompatibleVersions[0].TargetVersions", hasItem(target));
+
+                given()
+                    .contentType("application/json")
+                    .header("Authorization", AUTH_HEADER)
+                    .body("{\"DomainName\":\"" + domainName + "\",\"TargetVersion\":\"" + target + "\"}")
+                .when()
+                    .post("/2021-01-01/opensearch/upgradeDomain")
+                .then()
+                    .statusCode(200)
+                    .body("TargetVersion", equalTo(target));
+
+                given()
+                    .header("Authorization", AUTH_HEADER)
+                .when()
+                    .get("/2021-01-01/opensearch/domain/" + domainName)
+                .then()
+                    .statusCode(200)
+                    .body("DomainStatus.EngineVersion", equalTo(target));
+            } finally {
+                given()
+                    .header("Authorization", AUTH_HEADER)
+                .when()
+                    .delete("/2021-01-01/opensearch/domain/" + domainName)
+                .then()
+                    .statusCode(200);
+            }
+        }
     }
 
     @Test

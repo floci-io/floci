@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.bedrockagentcorecontrol;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.TagHandler;
@@ -69,19 +70,19 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
     private enum ResourceKind { RUNTIME, GATEWAY, MEMORY }
 
     private ResourceKind kind(String region, String arn) {
-        String[] parts = arn == null ? new String[0] : arn.split(":");
-        if (parts.length < 6) {
+        String resource = BedrockAgentCoreArns.resource(arn);
+        if (resource == null) {
             throw new AwsException("ValidationException",
                     "Tagging is not supported for this AgentCore resource: " + arn, 400);
         }
-        requireLocalIdentity(region, arn, parts);
-        if (parts[5].startsWith("gateway/")) {
+        requireLocalIdentity(region, arn, AwsArnUtils.parse(arn));
+        if (resource.startsWith("gateway/")) {
             return ResourceKind.GATEWAY;
         }
-        if (parts[5].startsWith("agent/")) {
+        if (resource.startsWith("agent/")) {
             return ResourceKind.RUNTIME;
         }
-        if (parts[5].startsWith("memory/")) {
+        if (resource.startsWith("memory/")) {
             return ResourceKind.MEMORY;
         }
         // Not a runtime, gateway, or memory → not a taggable AgentCore resource.
@@ -95,8 +96,8 @@ public class BedrockAgentCoreTagHandler implements TagHandler {
      * account or region and read or change its tags. Reported as not found rather than a
      * validation error, so the response does not confirm what exists behind the foreign identity.
      */
-    private void requireLocalIdentity(String region, String arn, String[] parts) {
-        if (!region.equals(parts[3]) || !regionResolver.getAccountId().equals(parts[4])) {
+    private void requireLocalIdentity(String region, String arn, AwsArnUtils.Arn parsed) {
+        if (!region.equals(parsed.region()) || !regionResolver.getAccountId().equals(parsed.accountId())) {
             throw new AwsException("ResourceNotFoundException",
                     "AgentCore resource not found: " + arn, 404);
         }

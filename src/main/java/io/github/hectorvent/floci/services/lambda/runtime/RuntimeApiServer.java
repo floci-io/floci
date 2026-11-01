@@ -73,6 +73,9 @@ public class RuntimeApiServer {
 
     private static final Logger LOG = Logger.getLogger(RuntimeApiServer.class);
 
+    // The Go runtime sends X-Ray error causes below 1 MiB, in addition to normal request headers.
+    private static final int MAX_RUNTIME_API_HEADER_SIZE = 1024 * 1024 + 16 * 1024;
+
     private static final String RUNTIME_API_VERSION = "2018-06-01";
     private static final String NEXT_PATH = "/" + RUNTIME_API_VERSION + "/runtime/invocation/next";
     private static final String RESPONSE_PATH = "/" + RUNTIME_API_VERSION + "/runtime/invocation/:requestId/response";
@@ -613,6 +616,7 @@ public class RuntimeApiServer {
         if (started.isDone()) return;
         httpServer = vertx.createHttpServer(new HttpServerOptions()
                 .setMaxFormAttributeSize(-1)
+                .setMaxHeaderSize(MAX_RUNTIME_API_HEADER_SIZE)
                 // Real AWS's Runtime/Extensions API is plain HTTP/1.1. Vert.x defaults to
                 // accepting an h2c upgrade, which the JDK HttpClient used in tests and by some
                 // language runtimes opts into unless told otherwise. That multiplexes every

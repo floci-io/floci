@@ -6,12 +6,15 @@ import io.github.hectorvent.floci.services.lambda.launcher.BootstrapProcess;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -94,8 +97,36 @@ class EmrSparkStepsTest {
     }
 
     @Test
+    void anS3DistCpStepWritesFlocisS3DistCpAndRunsItThroughSparkSubmit(@TempDir Path folder) throws Exception {
+        // The Release Guide's own S3DistCp step.
+        List<String> command = EmrSparkSteps.command(step("command-runner.jar", null, "s3-dist-cp",
+                "--s3Endpoint=s3.amazonaws.com", "--src=s3://bucket/logs/j-3GYXXXXXX9IOJ/node/",
+                "--dest=hdfs:///output", "--srcPattern=.*[a-zA-Z,]+"));
+        // A spark-submit that shows what it was given and keeps the program, in place of the image's.
+        Path sparkSubmit = folder.resolve("spark-submit");
+        Files.writeString(sparkSubmit, "#!/bin/sh\nprintf '%s|' \"$@\"\ncp \"$3\" " + folder.resolve("kept.py") + "\n");
+        assertTrue(sparkSubmit.toFile().setExecutable(true));
+        ProcessBuilder builder = new ProcessBuilder(command);
+        builder.environment().put("PATH", folder + ":" + System.getenv("PATH"));
+        builder.environment().put("TMPDIR", folder.toString());
+
+        BootstrapProcess.Result ended = BootstrapProcess.run(builder);
+
+        assertEquals(List.of("bash", "-c"), command.subList(0, 2));
+        assertEquals(new BootstrapProcess.Result(0, "--conf|spark.ui.enabled=false|" + folder + "/floci-s3-dist-cp.py|"
+                + "--s3Endpoint=s3.amazonaws.com|--src=s3://bucket/logs/j-3GYXXXXXX9IOJ/node/|--dest=hdfs:///output|"
+                + "--srcPattern=.*[a-zA-Z,]+|"), ended);
+        String program;
+        try (InputStream in = getClass().getClassLoader().getResourceAsStream(EmrSparkSteps.S3_DIST_CP_RESOURCE)) {
+            program = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        assertEquals(program.stripTrailing(), Files.readString(folder.resolve("kept.py")).stripTrailing());
+        assertFalse(program.lines().anyMatch(EmrSparkSteps.S3_DIST_CP_END::equals));
+    }
+
+    @Test
     void toolsTheImageDoesNotHaveAreNotRun() {
-        for (String tool : List.of("hive-script", "pig-script", "hadoop-streaming", "hadoop-lzo", "s3-dist-cp")) {
+        for (String tool : List.of("hive-script", "pig-script", "hadoop-streaming", "hadoop-lzo")) {
             assertNull(EmrSparkSteps.command(step("command-runner.jar", null, tool, "--src", "s3://bucket/in/")));
         }
         assertNull(EmrSparkSteps.command(step("command-runner.jar", null)));
@@ -115,6 +146,41 @@ class EmrSparkStepsTest {
                 EmrSparkSteps.sparkDefaults(configurations, objectMapper));
         assertEquals(Map.of(), EmrSparkSteps.sparkDefaults(null, objectMapper));
         assertEquals(Map.of(), EmrSparkSteps.sparkDefaults("[{", objectMapper));
+    }
+
+    @Test
+    void sparkHiveSitePropertiesReachSparkAsHadoopSettingsThatSparkDefaultsOverride() {
+        // The Management Guide's Glue Data Catalog setting for Spark, and one spark-defaults overrides.
+        String configurations = """
+                [{"Classification": "spark-hive-site", "Properties": {
+                  "hive.metastore.client.factory.class":
+                    "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory",
+                  "hive.metastore.glue.catalogid": "111122223333"}},
+                 {"Classification": "spark-defaults", "Properties": {
+                  "spark.hadoop.hive.metastore.glue.catalogid": "444455556666"}}]
+                """;
+
+        assertEquals(Map.of("spark.hadoop.hive.metastore.client.factory.class",
+                        "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory",
+                        "spark.hadoop.hive.metastore.glue.catalogid", "444455556666"),
+                EmrSparkSteps.sparkDefaults(configurations, objectMapper));
+    }
+
+    @Test
+    void theClustersSparkEnvExportsAreItsStepsEnvironment() {
+        // The Release Guide's spark-env example, with a property outside export, which sets nothing.
+        String configurations = """
+                [{"Classification": "spark-env", "Properties": {"IGNORED": "1"}, "Configurations": [
+                   {"Classification": "export", "Properties": {"JAVA_HOME": "/usr/lib/jvm/java-1.8.0",
+                    "PYSPARK_PYTHON": "/usr/bin/python3.11"}, "Configurations": []}]},
+                 {"Classification": "hadoop-env", "Properties": {}, "Configurations": [
+                   {"Classification": "export", "Properties": {"HADOOP_HEAPSIZE": "2048"}}]}]
+                """;
+
+        assertEquals(Map.of("JAVA_HOME", "/usr/lib/jvm/java-1.8.0", "PYSPARK_PYTHON", "/usr/bin/python3.11"),
+                EmrSparkSteps.sparkEnvironment(configurations, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.sparkEnvironment(null, objectMapper));
+        assertEquals(Map.of(), EmrSparkSteps.sparkEnvironment("[{", objectMapper));
     }
 
     private static EmrStep step(String jar, String mainClass, String... args) {

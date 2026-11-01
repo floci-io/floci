@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.services.s3.model.S3Checksum;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.config.DecoderConfig;
+import io.restassured.config.RestAssuredConfig;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -215,6 +217,8 @@ class S3MultipartIntegrationTest {
         .then()
             .statusCode(200)
             .header("Content-Disposition", equalTo("attachment; filename=\"multipart.bin\""))
+            .header("Content-Encoding", nullValue())
+            .header("Cache-Control", nullValue())
             .header("x-amz-server-side-encryption", equalTo("AES256"))
             .header("x-amz-meta-owner", equalTo("team-a"))
             .header("x-amz-storage-class", equalTo("STANDARD_IA"))
@@ -1559,6 +1563,60 @@ class S3MultipartIntegrationTest {
 
     @Test
     @Order(40)
+    void completedObjectKeepsContentEncodingAndCacheControl() {
+        String key = "encoded-multipart.bin";
+        String encodedUploadId = given()
+            .header("Content-Type", "text/plain")
+            .header("Content-Encoding", "gzip,aws-chunked")
+            .header("Cache-Control", "no-cache")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        String eTag = given()
+            .body(PART_1)
+        .when()
+            .put("/" + BUCKET + "/" + key + "?uploadId=" + encodedUploadId + "&partNumber=1")
+        .then()
+            .statusCode(200)
+            .extract().header("ETag");
+
+        given()
+            .contentType("application/xml")
+            .body(singlePartCompleteXml(eTag, ""))
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + encodedUploadId)
+        .then()
+            .statusCode(200)
+            .body(containsString("<CompleteMultipartUploadResult"));
+
+        given()
+        .when()
+            .head("/" + BUCKET + "/" + key)
+        .then()
+            .statusCode(200)
+            .header("Content-Encoding", equalTo("gzip"))
+            .header("Cache-Control", equalTo("no-cache"))
+            // RestAssured appends a default charset to the Content-Type it sends
+            .header("Content-Type", startsWith("text/plain"));
+
+        RestAssuredConfig noDecompress = RestAssuredConfig.config()
+                .decoderConfig(DecoderConfig.decoderConfig().noContentDecoders());
+        given()
+            .config(noDecompress)
+        .when()
+            .get("/" + BUCKET + "/" + key)
+        .then()
+            .statusCode(200)
+            .header("Content-Encoding", equalTo("gzip"))
+            .header("Cache-Control", equalTo("no-cache"))
+            .body(equalTo(PART_1));
+    }
+
+    @Test
+    @Order(41)
     void cleanUp() {
         given().when().delete("/" + BUCKET + "/copy-of-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/" + KEY).then().statusCode(204);
@@ -1577,6 +1635,7 @@ class S3MultipartIntegrationTest {
         given().when().delete("/" + BUCKET + "/range-source.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/one-part-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/one-part-composite.bin").then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/encoded-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET).then().statusCode(204);
     }
 

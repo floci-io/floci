@@ -508,7 +508,7 @@ class RdsQueryHandlerTest {
     @Test
     void modifyDbCluster_forwardsDbClusterParameterGroupName() {
         when(service.modifyDbCluster(eq("mycluster"), isNull(), isNull(),
-                isNull(), isNull(), isNull(), isNull(), isNull(), eq("app-cluster-params"), any()))
+                isNull(), isNull(), isNull(), isNull(), isNull(), eq("app-cluster-params"), eq(false), eq(false), any()))
                 .thenReturn(makeCluster("mycluster"));
         MultivaluedMap<String, String> p = params();
         p.putSingle("DBClusterIdentifier", "mycluster");
@@ -517,7 +517,7 @@ class RdsQueryHandlerTest {
         assertEquals(200, handler.handle("ModifyDBCluster", p).getStatus());
 
         verify(service).modifyDbCluster(eq("mycluster"), isNull(), isNull(),
-                isNull(), isNull(), isNull(), isNull(), isNull(), eq("app-cluster-params"), any());
+                isNull(), isNull(), isNull(), isNull(), isNull(), eq("app-cluster-params"), eq(false), eq(false), any());
     }
 
     @Test
@@ -574,7 +574,7 @@ class RdsQueryHandlerTest {
         when(service.getDbInstance("mydb", null)).thenReturn(makeInstance("mydb"));
         doThrow(new AwsException("InvalidParameterCombination",
                 "Cannot delete protected DB Instance, please disable deletion protection and try again.", 400))
-                .when(service).deleteDbInstance("mydb", null);
+                .when(service).deleteDbInstance("mydb", null, true);
 
         MultivaluedMap<String, String> p = params();
         p.add("DBInstanceIdentifier", "mydb");
@@ -772,7 +772,7 @@ class RdsQueryHandlerTest {
         when(service.listDbClusters(null, "us-west-2")).thenReturn(List.of());
         when(service.getDbCluster("mycluster", "us-west-2")).thenReturn(cluster);
         when(service.modifyDbCluster("mycluster", null, null,
-                null, null, null, null, null, null, "us-west-2"))
+                null, null, null, null, null, null, false, false, "us-west-2"))
                 .thenReturn(cluster);
 
         handler.handle("DescribeDBInstances", params(), "us-west-2");
@@ -790,16 +790,16 @@ class RdsQueryHandlerTest {
 
         verify(service).listDbInstances(null, "us-west-2");
         verify(service).getDbInstance("mydb", "us-west-2");
-        verify(service).deleteDbInstance("mydb", "us-west-2");
+        verify(service).deleteDbInstance("mydb", "us-west-2", true);
         verify(service).modifyDbInstance(
                 eq("mydb"), isNull(), isNull(), isNull(), anyList(), isNull(), eq("us-west-2"), isNull(),
                 any(DbInstanceSettings.class), isNull(), any(DbInstanceScalingChanges.class), isNull(), isNull());
         verify(service).rebootDbInstance("mydb", "us-west-2");
         verify(service).listDbClusters(null, "us-west-2");
         verify(service).getDbCluster("mycluster", "us-west-2");
-        verify(service).deleteDbCluster("mycluster", "us-west-2");
+        verify(service).deleteDbCluster("mycluster", "us-west-2", true);
         verify(service).modifyDbCluster("mycluster", null, null,
-                null, null, null, null, null, null, "us-west-2");
+                null, null, null, null, null, null, false, false, "us-west-2");
     }
 
     @Test
@@ -879,7 +879,7 @@ class RdsQueryHandlerTest {
     void modifyDbClusterPassesManagedMasterUserSecretOptions() {
         DbCluster cluster = makeCluster("mycluster");
         when(service.modifyDbCluster(eq("mycluster"), isNull(), isNull(),
-                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), any()))
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false), eq(false), any()))
                 .thenReturn(cluster);
 
         MultivaluedMap<String, String> p = params();
@@ -889,7 +889,24 @@ class RdsQueryHandlerTest {
         handler.handle("ModifyDBCluster", p);
 
         verify(service).modifyDbCluster(eq("mycluster"), isNull(), isNull(),
-                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), any());
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false), eq(false), any());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,true", "true,false", "false,true", "false,false"})
+    void modifyDbClusterForwardsRotationAndApplyImmediately(boolean rotatePassword, boolean applyImmediately) {
+        DbCluster cluster = makeCluster("mycluster");
+        when(service.modifyDbCluster("mycluster", null, null, null, null, null,
+                null, null, null, rotatePassword, applyImmediately, "us-west-2")).thenReturn(cluster);
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterIdentifier", "mycluster");
+        p.add("RotateMasterUserPassword", Boolean.toString(rotatePassword));
+        p.add("ApplyImmediately", Boolean.toString(applyImmediately));
+
+        assertEquals(200, handler.handle("ModifyDBCluster", p, "us-west-2").getStatus());
+
+        verify(service).modifyDbCluster("mycluster", null, null, null, null, null,
+                null, null, null, rotatePassword, applyImmediately, "us-west-2");
     }
 
     @Test
@@ -907,14 +924,14 @@ class RdsQueryHandlerTest {
         when(service.getDbParameterGroup("pg1", "us-west-2"))
                 .thenReturn(parameterGroup);
         when(service.modifyDbParameterGroup(
-                "pg1", Map.of("max_connections", "200"), "us-west-2"))
+                "pg1", Map.of("max_connections", "200"), Map.of(), "us-west-2"))
                 .thenReturn(parameterGroup);
         when(service.listDbClusterParameterGroups(null, "us-west-2"))
                 .thenReturn(List.of(clusterParameterGroup));
         when(service.getDbClusterParameterGroup("cpg1", "us-west-2"))
                 .thenReturn(clusterParameterGroup);
         when(service.modifyDbClusterParameterGroup(
-                "cpg1", Map.of("log_statement", "all"), "us-west-2"))
+                "cpg1", Map.of("log_statement", "all"), Map.of(), "us-west-2"))
                 .thenReturn(clusterParameterGroup);
 
         MultivaluedMap<String, String> subnetParams = params();
@@ -947,12 +964,12 @@ class RdsQueryHandlerTest {
         verify(service).deleteDbSubnetGroup("custom-group", "us-west-2");
         verify(service).listDbParameterGroups(null, "us-west-2");
         verify(service).modifyDbParameterGroup(
-                "pg1", Map.of("max_connections", "200"), "us-west-2");
+                "pg1", Map.of("max_connections", "200"), Map.of(), "us-west-2");
         verify(service).getDbParameterGroup("pg1", "us-west-2");
         verify(service).deleteDbParameterGroup("pg1", "us-west-2");
         verify(service).listDbClusterParameterGroups(null, "us-west-2");
         verify(service).modifyDbClusterParameterGroup(
-                "cpg1", Map.of("log_statement", "all"), "us-west-2");
+                "cpg1", Map.of("log_statement", "all"), Map.of(), "us-west-2");
         verify(service).getDbClusterParameterGroup("cpg1", "us-west-2");
         verify(service).deleteDbClusterParameterGroup("cpg1", "us-west-2");
     }
@@ -1385,7 +1402,7 @@ class RdsQueryHandlerTest {
     void modifyDbParameterGroup_ignoresParametersWithoutValue() {
         DbParameterGroup group = new DbParameterGroup("pg1", "postgres15", "test group");
         when(service.modifyDbParameterGroup(
-                eq("pg1"), eq(Map.of("max_connections", "200")), isNull()))
+                eq("pg1"), eq(Map.of("max_connections", "200")), eq(Map.of()), isNull()))
                 .thenReturn(group);
 
         MultivaluedMap<String, String> p = params();
@@ -1396,7 +1413,7 @@ class RdsQueryHandlerTest {
         handler.handle("ModifyDBParameterGroup", p);
 
         verify(service).modifyDbParameterGroup(
-                "pg1", Map.of("max_connections", "200"), null);
+                "pg1", Map.of("max_connections", "200"), Map.of(), null);
     }
 
     @Test
@@ -1405,6 +1422,102 @@ class RdsQueryHandlerTest {
 
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("DBParameterGroupName is required."));
+    }
+
+    @Test
+    void describeDbParameters_wrapsEachRowInParameterAndFiltersBySource() {
+        DbParameterGroup group = new DbParameterGroup("pg1", "postgres16", "test group");
+        group.getParameters().put("max_connections", "250");
+        group.getParameters().put("work_mem", "64MB");
+        group.getApplyMethods().put("max_connections", "pending-reboot");
+        when(service.getDbParameterGroup("pg1", null)).thenReturn(group);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBParameterGroupName", "pg1");
+        String body = (String) handler.handle("DescribeDBParameters", p).getEntity();
+
+        assertTrue(body.contains("<Parameter>"), "Each row must be wrapped in <Parameter>");
+        assertFalse(body.contains("<member>"), "Must not use <member> wrapper");
+        assertTrue(body.contains("<ParameterName>max_connections</ParameterName>"));
+        assertTrue(body.contains("<ParameterValue>250</ParameterValue>"));
+        assertTrue(body.contains("<Source>user</Source>"));
+        assertTrue(body.contains("<ApplyMethod>pending-reboot</ApplyMethod>"));
+        assertTrue(body.contains("<ParameterName>work_mem</ParameterName>"));
+    }
+
+    @Test
+    void describeDbParameters_filtersBySource() {
+        DbParameterGroup group = new DbParameterGroup("pg1", "postgres16", "test group");
+        group.getParameters().put("max_connections", "250");
+        when(service.getDbParameterGroup("pg1", null)).thenReturn(group);
+
+        MultivaluedMap<String, String> pUser = params();
+        pUser.add("DBParameterGroupName", "pg1");
+        pUser.add("Source", "user");
+        String bodyUser = (String) handler.handle("DescribeDBParameters", pUser).getEntity();
+        assertTrue(bodyUser.contains("<ParameterName>max_connections</ParameterName>"),
+                "Source=user must return user rows");
+
+        MultivaluedMap<String, String> pSystem = params();
+        pSystem.add("DBParameterGroupName", "pg1");
+        pSystem.add("Source", "system");
+        String bodySystem = (String) handler.handle("DescribeDBParameters", pSystem).getEntity();
+        assertFalse(bodySystem.contains("<Parameter>"),
+                "Source=system must filter out all rows (unmodelled)");
+
+        MultivaluedMap<String, String> pEngineDefault = params();
+        pEngineDefault.add("DBParameterGroupName", "pg1");
+        pEngineDefault.add("Source", "engine-default");
+        String bodyEngineDefault = (String) handler.handle("DescribeDBParameters", pEngineDefault).getEntity();
+        assertFalse(bodyEngineDefault.contains("<Parameter>"),
+                "Source=engine-default must filter out all rows (unmodelled)");
+    }
+
+    @Test
+    void describeDbClusterParameters_wrapsEachRowInParameterAndFiltersBySource() {
+        DbClusterParameterGroup group = new DbClusterParameterGroup("cpg1", "aurora-postgresql16", "test group");
+        group.getParameters().put("log_statement", "all");
+        group.getApplyMethods().put("log_statement", "immediate");
+        when(service.getDbClusterParameterGroup("cpg1", null)).thenReturn(group);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterParameterGroupName", "cpg1");
+        String body = (String) handler.handle("DescribeDBClusterParameters", p).getEntity();
+
+        assertTrue(body.contains("<Parameter>"), "Each row must be wrapped in <Parameter>");
+        assertFalse(body.contains("<member>"), "Must not use <member> wrapper");
+        assertTrue(body.contains("<ParameterName>log_statement</ParameterName>"));
+        assertTrue(body.contains("<ParameterValue>all</ParameterValue>"));
+        assertTrue(body.contains("<Source>user</Source>"));
+        assertTrue(body.contains("<ApplyMethod>immediate</ApplyMethod>"));
+    }
+
+    @Test
+    void describeDbClusterParameters_filtersBySource() {
+        DbClusterParameterGroup group = new DbClusterParameterGroup("cpg1", "aurora-postgresql16", "test group");
+        group.getParameters().put("log_statement", "all");
+        when(service.getDbClusterParameterGroup("cpg1", null)).thenReturn(group);
+
+        MultivaluedMap<String, String> pUser = params();
+        pUser.add("DBClusterParameterGroupName", "cpg1");
+        pUser.add("Source", "user");
+        String bodyUser = (String) handler.handle("DescribeDBClusterParameters", pUser).getEntity();
+        assertTrue(bodyUser.contains("<ParameterName>log_statement</ParameterName>"),
+                "Source=user must return user rows");
+
+        MultivaluedMap<String, String> pSystem = params();
+        pSystem.add("DBClusterParameterGroupName", "cpg1");
+        pSystem.add("Source", "system");
+        String bodySystem = (String) handler.handle("DescribeDBClusterParameters", pSystem).getEntity();
+        assertFalse(bodySystem.contains("<Parameter>"),
+                "Source=system must filter out all rows (unmodelled)");
+
+        MultivaluedMap<String, String> pEngineDefault = params();
+        pEngineDefault.add("DBClusterParameterGroupName", "cpg1");
+        pEngineDefault.add("Source", "engine-default");
+        String bodyEngineDefault = (String) handler.handle("DescribeDBClusterParameters", pEngineDefault).getEntity();
+        assertFalse(bodyEngineDefault.contains("<Parameter>"),
+                "Source=engine-default must filter out all rows (unmodelled)");
     }
 
     @Test
@@ -1469,7 +1582,7 @@ class RdsQueryHandlerTest {
     void modifyDbClusterParameterGroup_ignoresParametersWithoutValue() {
         DbClusterParameterGroup group = new DbClusterParameterGroup("cpg1", "aurora-postgresql16", "test group");
         when(service.modifyDbClusterParameterGroup(
-                eq("cpg1"), eq(Map.of("log_statement", "all")), isNull()))
+                eq("cpg1"), eq(Map.of("log_statement", "all")), eq(Map.of()), isNull()))
                 .thenReturn(group);
 
         MultivaluedMap<String, String> p = params();
@@ -1480,7 +1593,7 @@ class RdsQueryHandlerTest {
         handler.handle("ModifyDBClusterParameterGroup", p);
 
         verify(service).modifyDbClusterParameterGroup(
-                "cpg1", Map.of("log_statement", "all"), null);
+                "cpg1", Map.of("log_statement", "all"), Map.of(), null);
     }
 
     @Test

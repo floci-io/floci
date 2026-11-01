@@ -10,6 +10,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 
 /**
@@ -62,6 +63,26 @@ class RdsParameterGroupTagIntegrationTest {
             .statusCode(200)
             .body(containsString("<Key>team</Key>"))
             .body(containsString("<Value>data</Value>"));
+    }
+
+    @Test
+    @Order(2)
+    void describingAnUnknownParameterGroupIsNotFoundButAKnownOneIsReturned() {
+        query("DescribeDBParameterGroups")
+                .formParam("DBParameterGroupName", "no-such-pg")
+        .when().post("/")
+        .then()
+            .statusCode(404)
+            .body(containsString("<Code>DBParameterGroupNotFound</Code>"))
+            .body("ErrorResponse.Error.Message",
+                    equalTo("DBParameterGroupName doesn't refer to an existing DB parameter group."));
+
+        query("DescribeDBParameterGroups")
+                .formParam("DBParameterGroupName", PG)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<DBParameterGroupName>" + PG + "</DBParameterGroupName>"));
     }
 
     @Test

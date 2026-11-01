@@ -56,7 +56,7 @@ floci start
 ```
 
 No Docker? Each [release](https://github.com/floci-io/floci/releases) also ships a standalone `floci-aws`
-binary for Linux, macOS and Windows; see [Native binary](https://floci.io/docs/getting-started/installation/#native-binary).
+binary for Linux, macOS and Windows; see [Native binary](https://floci.io/floci/getting-started/installation/#native-binary).
 
 Export the AWS environment variables:
 

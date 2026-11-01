@@ -3,11 +3,13 @@ package com.floci.test;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.inspector2.Inspector2Client;
 import software.amazon.awssdk.services.inspector2.model.AutoEnable;
 import software.amazon.awssdk.services.inspector2.model.BatchGetAccountStatusResponse;
 import software.amazon.awssdk.services.inspector2.model.DescribeOrganizationConfigurationResponse;
 import software.amazon.awssdk.services.inspector2.model.DisableDelegatedAdminAccountResponse;
+import software.amazon.awssdk.services.inspector2.model.DisableResponse;
 import software.amazon.awssdk.services.inspector2.model.EnableDelegatedAdminAccountResponse;
 import software.amazon.awssdk.services.inspector2.model.EnableResponse;
 import software.amazon.awssdk.services.inspector2.model.ResourceScanType;
@@ -20,6 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("Amazon Inspector organization configuration")
+@ResourceLock("organizations")
 class Inspector2OrganizationConfigurationTest {
     private static final Logger LOG = Logger.getLogger(Inspector2OrganizationConfigurationTest.class);
     private static final String MANAGEMENT_ACCOUNT = "test";
@@ -80,6 +83,26 @@ class Inspector2OrganizationConfigurationTest {
                         assertThat(account.resourceState().ec2().statusAsString()).isEqualTo("ENABLED");
                         assertThat(account.resourceState().ecr().statusAsString()).isEqualTo("DISABLED");
                     });
+
+                    DisableResponse disableMember = administrator.disable(request -> request
+                            .accountIds(inspectedMemberAccount)
+                            .resourceTypes(ResourceScanType.EC2));
+                    assertThat(disableMember.accounts()).singleElement().satisfies(account -> {
+                        assertThat(account.accountId()).isEqualTo(inspectedMemberAccount);
+                        assertThat(account.statusAsString()).isEqualTo("DISABLING");
+                        assertThat(account.resourceStatus().ec2AsString()).isEqualTo("DISABLING");
+                    });
+                    administrator.batchGetAccountStatus(request -> request.accountIds(inspectedMemberAccount));
+                    assertThat(administrator.batchGetAccountStatus(request -> request.accountIds(inspectedMemberAccount))
+                            .accounts()).singleElement().satisfies(account -> {
+                                assertThat(account.state().statusAsString()).isEqualTo("DISABLED");
+                                assertThat(account.resourceState().ec2().statusAsString()).isEqualTo("DISABLED");
+                            });
+                    assertThat(administrator.disable(request -> request.accountIds(inspectedMemberAccount)).accounts())
+                            .singleElement().satisfies(account -> {
+                                assertThat(account.accountId()).isEqualTo(inspectedMemberAccount);
+                                assertThat(account.statusAsString()).isEqualTo("DISABLED");
+                            });
 
                     UpdateOrganizationConfigurationResponse updated = administrator.updateOrganizationConfiguration(request -> request
                             .autoEnable(AutoEnable.builder()

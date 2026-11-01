@@ -712,6 +712,20 @@ Gateway v1 (`AWS`/Lambda mapping templates) and the AppSync resolver templates d
 
 ## API Gateway v2 (HTTP and WebSocket APIs) {#v2}
 
+### HTTP and WebSocket integration credentials
+
+V2 management APIs retain `credentialsArn` for integrations and
+`authorizerCredentialsArn` for REQUEST authorizers through create, update, get and
+list. Omitting either member on update preserves its stored value. HTTP API quick
+create retains integration credentials for Lambda ARN targets and ignores them for
+HTTP targets. OpenAPI import and CloudFormation API `Body` map the integration
+`credentials` and authorizer `authorizerCredentials` extensions to these fields.
+Integration copies and authorizer restore paths retain them too.
+
+This models credential selection; execution-role assumption and credential-based
+Lambda invocation authorization are not implemented by this change. Dedicated
+CloudFormation credential properties remain outside this support.
+
 **Protocol:** REST JSON
 **Endpoint:** `http://localhost:4566/v2/apis/...`
 
@@ -740,6 +754,16 @@ curl http://{apiId}.execute-api.{region}.localhost.floci.io:4566/{stageName}/{pa
 
 APIs created or updated with `disableExecuteApiEndpoint` reject requests to
 this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
+
+HTTP API route selection prefers an exact method-and-path key. Otherwise, a
+matching non-greedy path outranks a greedy `{proxy+}` path; among comparable
+templates, literal segments outrank `{parameter}` segments at the first
+position where they differ. For `/pets/dog`, `GET /pets/dog` wins over
+`GET /pets/{pet}`, which wins over `GET /pets/{proxy+}`. Among greedy routes,
+a longer literal prefix such as `GET /pets/dogs/{proxy+}` wins over
+`GET /pets/{proxy+}`. For equally specific paths, a method-specific route
+wins over `ANY`; `$default` handles requests no other route matches. Route
+selection determines which route's authorizer and integration handle the request.
 
 HTTP API Lambda REQUEST authorizers resolve header, query string, context, and
 stage variable sources once, in configured order. Format `2.0` carries the values

@@ -14,6 +14,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
@@ -85,7 +86,8 @@ class StorageFactoryLifecycleTest {
         assertTrue(Files.readString(tempDir.resolve("svc-snapshot.json")).contains("before"),
                 "final shutdown must flush the store into the snapshot");
         long walSizeAfterShutdown = walSize();
-        backend.put("after", "v2");
+        assertThrows(IllegalStateException.class, () -> backend.put("after", "v2"));
+        assertEquals(Optional.empty(), backend.get("after"), "a rejected write must not change memory");
         assertEquals(walSizeAfterShutdown, walSize(), "no WAL writer may be open after shutdown");
     }
 
@@ -100,7 +102,8 @@ class StorageFactoryLifecycleTest {
         assertDoesNotThrow(factory::shutdownAll);
 
         long walSizeAfterShutdown = walSize();
-        backend.put("after", "v2");
+        assertThrows(IllegalStateException.class, () -> backend.put("after", "v2"));
+        assertEquals(Optional.empty(), backend.get("after"), "a rejected write must not change memory");
         assertEquals(walSizeAfterShutdown, walSize(), "no WAL writer may be open after shutdown");
 
         StorageFactory reloaded = newFactory("wal");

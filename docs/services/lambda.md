@@ -593,9 +593,12 @@ Code signing enforcement is not emulated: an attached configuration never gates 
 The attachment lifecycle is supported for `$LATEST`: `PutFunctionCodeSigningConfig` attaches or
 replaces a configuration, `GetFunctionCodeSigningConfig` reads it,
 `DeleteFunctionCodeSigningConfig` detaches it, and `ListFunctionsByCodeSigningConfig` returns
-attached functions with marker pagination. An unknown configuration is
-`ResourceNotFoundException`; a malformed ARN or out-of-range `MaxItems` is rejected with
-`InvalidParameterValueException` first.
+attached functions with marker pagination. `PutFunctionCodeSigningConfig` and the
+`CodeSigningConfigArn` supplied to `CreateFunction` return
+`CodeSigningConfigNotFoundException` when the named configuration does not exist.
+Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
+`ResourceNotFoundException` for an unknown configuration. A malformed ARN or out-of-range
+`MaxItems` is rejected with `InvalidParameterValueException` first.
 
 ## Configuration
 

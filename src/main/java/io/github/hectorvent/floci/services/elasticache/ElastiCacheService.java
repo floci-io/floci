@@ -83,6 +83,7 @@ public class ElastiCacheService implements ResourceProvider {
      * is one namespace whatever engine claims it, and only a reader of both can say it is free.
      */
     private final StorageBackend<String, CacheCluster> memcachedClusters;
+    private static final String DEFAULT_USER_ID = "default";
     private final AccountAwareStorageBackend<ElastiCacheUser> users;
     private final AccountAwareStorageBackend<ElastiCacheUserGroup> userGroups;
     private final AccountAwareStorageBackend<CacheParameterGroup> parameterGroups;
@@ -1346,6 +1347,7 @@ public class ElastiCacheService implements ResourceProvider {
             Boolean atRestEncryptionEnabled,
             String region,
             Map<String, String> tags,
+            Boolean autoMinorVersionUpgrade,
             Boolean transitEncryptionEnabled) {
 
         public CreateCacheClusterRequest(
@@ -1373,7 +1375,36 @@ public class ElastiCacheService implements ResourceProvider {
                     authMode, authToken, cacheParameterGroupName, cacheSubnetGroupName,
                     snapshotRetentionLimit, snapshotWindow, preferredMaintenanceWindow,
                     preferredAvailabilityZone, securityGroupIds, networkType, ipDiscovery,
-                    atRestEncryptionEnabled, region, tags, null);
+                    atRestEncryptionEnabled, region, tags, null, null);
+        }
+
+        public CreateCacheClusterRequest(
+                String cacheClusterId,
+                String engine,
+                String engineVersion,
+                String cacheNodeType,
+                Integer numCacheNodes,
+                Integer port,
+                AuthMode authMode,
+                String authToken,
+                String cacheParameterGroupName,
+                String cacheSubnetGroupName,
+                Integer snapshotRetentionLimit,
+                String snapshotWindow,
+                String preferredMaintenanceWindow,
+                String preferredAvailabilityZone,
+                List<String> securityGroupIds,
+                String networkType,
+                String ipDiscovery,
+                Boolean atRestEncryptionEnabled,
+                String region,
+                Map<String, String> tags,
+                Boolean autoMinorVersionUpgrade) {
+            this(cacheClusterId, engine, engineVersion, cacheNodeType, numCacheNodes, port,
+                    authMode, authToken, cacheParameterGroupName, cacheSubnetGroupName,
+                    snapshotRetentionLimit, snapshotWindow, preferredMaintenanceWindow,
+                    preferredAvailabilityZone, securityGroupIds, networkType, ipDiscovery,
+                    atRestEncryptionEnabled, region, tags, autoMinorVersionUpgrade, null);
         }
     }
 
@@ -1613,6 +1644,7 @@ public class ElastiCacheService implements ResourceProvider {
                 ? request.ipDiscovery() : "ipv4");
         cluster.setAtRestEncryptionEnabled(Boolean.TRUE.equals(request.atRestEncryptionEnabled()));
         cluster.setTransitEncryptionEnabled(request.transitEncryptionEnabled());
+        cluster.setAutoMinorVersionUpgrade(request.autoMinorVersionUpgrade());
         if (request.securityGroupIds() != null && !request.securityGroupIds().isEmpty()) {
             cluster.setSecurityGroupIds(new ArrayList<>(request.securityGroupIds()));
         }
@@ -1767,7 +1799,7 @@ public class ElastiCacheService implements ResourceProvider {
         String id = original.getCacheClusterId();
         String account = original.getOwnerAccountId();
         return new ElastiCacheAuthProxy.PasswordValidator() {
-            private ElastiCacheUser member(String username) {
+            private ElastiCacheUser member(String username, boolean requireEnabled) {
                 String name = username == null || username.isEmpty() ? "default" : username;
                 synchronized (users) {
                     CacheCluster cluster = cacheClusters.getForAccount(account, id).orElse(null);
@@ -1779,14 +1811,14 @@ public class ElastiCacheService implements ResourceProvider {
                         return null;
                     }
                     return group.getUserIds().stream().map(userId -> users.getForAccount(account, userId).orElse(null))
-                            .filter(user -> user != null && name.equals(user.getUserName()) && user.isEnabled())
+                            .filter(user -> user != null && name.equals(user.getUserName()) && (!requireEnabled || user.isEnabled()))
                             .findFirst().orElse(null);
                 }
             }
 
             @Override
             public boolean validatePassword(String username, String password) {
-                ElastiCacheUser user = member(username);
+                ElastiCacheUser user = member(username, true);
                 return user != null && (user.getAuthMode() == AuthMode.NO_AUTH
                         || user.getAuthMode() == AuthMode.PASSWORD && user.getPasswords().contains(password));
             }
@@ -1799,7 +1831,7 @@ public class ElastiCacheService implements ResourceProvider {
 
             @Override
             public AuthMode memberAuthMode(String username) {
-                ElastiCacheUser user = member(username);
+                ElastiCacheUser user = member(username, true);
                 return user == null ? null : user.getAuthMode();
             }
 
@@ -1810,7 +1842,7 @@ public class ElastiCacheService implements ResourceProvider {
 
             @Override
             public String accessString(String username) {
-                ElastiCacheUser user = member(username);
+                ElastiCacheUser user = member(username, false);
                 return user == null ? null : user.getAccessString();
             }
 
@@ -1948,7 +1980,7 @@ public class ElastiCacheService implements ResourceProvider {
                 }
                 Set<String> seenUserNames = new HashSet<>();
                 for (String userId : nextUserIds) {
-                    ElastiCacheUser u = users.get(userId).orElse(null);
+                    ElastiCacheUser u = findUser(userId).orElse(null);
                     if (u != null && !seenUserNames.add(u.getUserName())) {
                         throw new AwsException("DuplicateUserName",
                                 "Duplicate user name " + u.getUserName() + " in user group.", 400);
@@ -2028,7 +2060,7 @@ public class ElastiCacheService implements ResourceProvider {
     public ElastiCacheUser createUser(String userId, String userName, AuthMode authMode,
                                       List<String> passwords, String accessString, String engine,
                                       Map<String, String> tags) {
-        if (users.get(userId).isPresent()) {
+        if (findUser(userId).isPresent()) {
             throw new AwsException("UserAlreadyExists",
                     "User " + userId + " already exists.", 400);
         }
@@ -2234,9 +2266,37 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     /**
-     * Resolves a user by ID. Aligns with PR #7136 built-in user resolution.
+     * AWS provisions a built-in user with id and name {@code default} in every account; redis
+     * user groups must contain a user named default. Seeded on first touch of the user store.
+     *
+     * ponytail: users are keyed per account, not per region, so the ARN carries the region of the
+     * first request that seeded it; region-scope the user store if per-region ARNs matter.
      */
+    private void ensureDefaultUser() {
+        if (users.get(DEFAULT_USER_ID).isPresent()) {
+            return;
+        }
+        // re-checked under the lock tag updates hold, so a racing seed cannot overwrite a tag just added
+        synchronized (userGroupLock) {
+            if (users.get(DEFAULT_USER_ID).isEmpty()) {
+                ElastiCacheUser user = new ElastiCacheUser(DEFAULT_USER_ID, DEFAULT_USER_ID, AuthMode.NO_AUTH,
+                        List.of(), "on ~* +@all", "redis", "active", Instant.now());
+                user.setArn(regionResolver.buildArn("elasticache", regionResolver.getRegion(),
+                        "user:" + DEFAULT_USER_ID));
+                users.put(DEFAULT_USER_ID, user);
+            }
+        }
+    }
+
+    /** AWS: the built-in default user cannot be modified or deleted; a custom user named default can. */
+    private static void requireNotBuiltInDefault(String userId, String action) {
+        if (DEFAULT_USER_ID.equals(userId)) {
+            throw new AwsException("InvalidParameterValue", "The default user cannot be " + action + ".", 400);
+        }
+    }
+
     private Optional<ElastiCacheUser> findUser(String userId) {
+        ensureDefaultUser();
         return users.get(userId);
     }
 
@@ -2248,11 +2308,12 @@ public class ElastiCacheService implements ResourceProvider {
     public Collection<ElastiCacheUser> listUsers(String filterUserId, String filterEngine) {
         // UserId wins when both filters are sent; AWS documents no interaction between them.
         if (filterUserId != null && !filterUserId.isBlank()) {
-            return users.get(filterUserId)
+            return findUser(filterUserId)
                     .map(List::of)
                     .orElseThrow(() -> new AwsException("UserNotFound",
                             "User " + filterUserId + " not found.", 404));
         }
+        ensureDefaultUser();
         if (filterEngine != null && !filterEngine.isBlank()) {
             return users.scan(k -> true).stream()
                     .filter(u -> filterEngine.equalsIgnoreCase(u.getEngine()))
@@ -2269,9 +2330,40 @@ public class ElastiCacheService implements ResourceProvider {
     public ElastiCacheUser modifyUser(String userId, AuthMode authMode, List<String> passwords,
                                       String accessString, String appendAccessString, String engine) {
         ElastiCacheUser user = getUser(userId);
+        requireNotBuiltInDefault(userId, "modified");
         // Storage backends hand back the live stored object, so validate everything
         // before the first setter — a rejected request must not leave changes behind.
         String normalizedEngine = (engine == null || engine.isBlank()) ? null : normalizeEngine(engine);
+        ElastiCacheUser modified = applyUserModification(userId, user, authMode, passwords, accessString,
+                appendAccessString, normalizedEngine);
+        if (accessString != null || appendAccessString != null) {
+            reapplyAccessString(userId, modified);
+        }
+        return modified;
+    }
+
+    /** Lets the open sessions of every cache the user can sign in to pick up its new access string. */
+    private void reapplyAccessString(String userId, ElastiCacheUser user) {
+        for (ReplicationGroup group : groups.scan(k -> true)) {
+            if (effectiveUserIds(groups.accountId(), group).contains(userId)) {
+                proxyManager.refreshUser(group.getReplicationGroupId(), user.getUserName());
+            }
+        }
+        for (CacheCluster cluster : cacheClusters.scan(k -> true)) {
+            if (cluster.getServerlessCacheName() != null && cluster.getUserGroupId() != null) {
+                String account = cluster.getOwnerAccountId() != null ? cluster.getOwnerAccountId() : cacheClusters.accountId();
+                ElastiCacheUserGroup group = userGroups.getForAccount(account,
+                        normalizeUserGroupId(cluster.getUserGroupId())).orElse(null);
+                if (group != null && group.getUserIds().contains(userId)) {
+                    proxyManager.refreshUser(cluster.getCacheClusterId(), user.getUserName());
+                }
+            }
+        }
+    }
+
+    private ElastiCacheUser applyUserModification(String userId, ElastiCacheUser user, AuthMode authMode,
+                                                  List<String> passwords, String accessString,
+                                                  String appendAccessString, String normalizedEngine) {
         synchronized (userGroupLock) {
             String nextEngine = normalizedEngine != null ? normalizedEngine : user.getEngine();
             AuthMode nextAuthMode = authMode != null ? authMode : user.getAuthMode();
@@ -2328,9 +2420,10 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     public void deleteUser(String userId) {
-        if (users.get(userId).isEmpty()) {
+        if (findUser(userId).isEmpty()) {
             throw new AwsException("UserNotFound", "User " + userId + " not found.", 404);
         }
+        requireNotBuiltInDefault(userId, "deleted");
         synchronized (userGroupLock) {
             users.delete(userId);
             // AWS removes a deleted user from every user group it belongs to
@@ -2777,7 +2870,7 @@ public class ElastiCacheService implements ResourceProvider {
                 }
                 return effectiveUserIds(accountId, group).stream()
                         .map(id -> users.getForAccount(accountId, id).orElse(null))
-                        .filter(user -> user != null && user.isEnabled() && username.equals(user.getUserName()))
+                        .filter(user -> user != null && username.equals(user.getUserName()))
                         .map(ElastiCacheUser::getAccessString).findFirst().orElse(null);
             }
 

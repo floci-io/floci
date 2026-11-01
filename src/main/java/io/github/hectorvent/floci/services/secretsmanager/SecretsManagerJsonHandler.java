@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.IamEnforcementFilter;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
@@ -35,13 +36,16 @@ public class SecretsManagerJsonHandler {
     private final SecretsManagerService service;
     private final ObjectMapper objectMapper;
     private final IamEnforcementFilter iamEnforcementFilter;
+    private final SecretsManagerEventPublisher eventPublisher;
 
     @Inject
     public SecretsManagerJsonHandler(SecretsManagerService service, ObjectMapper objectMapper,
-                                     IamEnforcementFilter iamEnforcementFilter) {
+                                     IamEnforcementFilter iamEnforcementFilter,
+                                     SecretsManagerEventPublisher eventPublisher) {
         this.service = service;
         this.objectMapper = objectMapper;
         this.iamEnforcementFilter = iamEnforcementFilter;
+        this.eventPublisher = eventPublisher;
     }
 
     /**
@@ -59,7 +63,7 @@ public class SecretsManagerJsonHandler {
      *                      resource
      */
     public Response handle(String action, JsonNode request, String region, String authorization) {
-        return switch (action) {
+        Response response = switch (action) {
             case "CreateSecret" -> handleCreateSecret(request, region);
             case "GetSecretValue" -> handleGetSecretValue(request, region);
             case "PutSecretValue" -> handlePutSecretValue(request, region);
@@ -87,6 +91,10 @@ public class SecretsManagerJsonHandler {
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
         };
+        if (response.getStatus() == 200 && ("PutSecretValue".equals(action) || "UpdateSecret".equals(action))) {
+            eventPublisher.secretWritten(action, request, (JsonNode) response.getEntity(), region, authorization);
+        }
+        return response;
     }
 
     private Response handleBatchGetSecretValue(JsonNode request, String region) {
@@ -178,7 +186,7 @@ public class SecretsManagerJsonHandler {
                 node.put("SecretBinary", value.secretBinary());
             }
             if (value.createdDate() != null) {
-                node.put("CreatedDate", value.createdDate().toEpochMilli() / 1000.0);
+                node.put("CreatedDate", EpochSeconds.fromInstant(value.createdDate()));
             }
             putVersionStages(node, value.versionStages());
             secretValues.add(node);
@@ -252,7 +260,7 @@ public class SecretsManagerJsonHandler {
             response.put("SecretBinary", version.getSecretBinary());
         }
         if (version.getCreatedDate() != null) {
-            response.put("CreatedDate", version.getCreatedDate().toEpochMilli() / 1000.0);
+            response.put("CreatedDate", EpochSeconds.fromInstant(version.getCreatedDate()));
         }
         putVersionStages(response, version.getVersionStages());
         return Response.ok(response).build();
@@ -354,21 +362,21 @@ public class SecretsManagerJsonHandler {
             response.set("RotationRules", rotationRulesNode(secret.getRotationRules()));
         }
         if (secret.getLastRotatedDate() != null) {
-            response.put("LastRotatedDate", secret.getLastRotatedDate().toEpochMilli() / 1000.0);
+            response.put("LastRotatedDate", EpochSeconds.fromInstant(secret.getLastRotatedDate()));
         }
 
         Instant nextRotationDate = nextRotationDate(secret);
         if (nextRotationDate != null) {
-            response.put("NextRotationDate", nextRotationDate.toEpochMilli() / 1000.0);
+            response.put("NextRotationDate", EpochSeconds.fromInstant(nextRotationDate));
         }
         if (secret.getCreatedDate() != null) {
-            response.put("CreatedDate", secret.getCreatedDate().toEpochMilli() / 1000.0);
+            response.put("CreatedDate", EpochSeconds.fromInstant(secret.getCreatedDate()));
         }
         if (secret.getLastChangedDate() != null) {
-            response.put("LastChangedDate", secret.getLastChangedDate().toEpochMilli() / 1000.0);
+            response.put("LastChangedDate", EpochSeconds.fromInstant(secret.getLastChangedDate()));
         }
         if (secret.getDeletedDate() != null) {
-            response.put("DeletedDate", secret.getDeletedDate().toEpochMilli() / 1000.0);
+            response.put("DeletedDate", EpochSeconds.fromInstant(secret.getDeletedDate()));
         }
         if (secret.getOwningService() != null) {
             response.put("OwningService", secret.getOwningService());
@@ -566,23 +574,23 @@ public class SecretsManagerJsonHandler {
                 node.set("RotationRules", rotationRulesNode(secret.getRotationRules()));
             }
             if (secret.getLastRotatedDate() != null) {
-                node.put("LastRotatedDate", secret.getLastRotatedDate().toEpochMilli() / 1000.0);
+                node.put("LastRotatedDate", EpochSeconds.fromInstant(secret.getLastRotatedDate()));
             }
             Instant nextRotation = nextRotationDate(secret);
             if (nextRotation != null) {
-                node.put("NextRotationDate", nextRotation.toEpochMilli() / 1000.0);
+                node.put("NextRotationDate", EpochSeconds.fromInstant(nextRotation));
             }
             if (secret.getCreatedDate() != null) {
-                node.put("CreatedDate", secret.getCreatedDate().toEpochMilli() / 1000.0);
+                node.put("CreatedDate", EpochSeconds.fromInstant(secret.getCreatedDate()));
             }
             if (secret.getLastChangedDate() != null) {
-                node.put("LastChangedDate", secret.getLastChangedDate().toEpochMilli() / 1000.0);
+                node.put("LastChangedDate", EpochSeconds.fromInstant(secret.getLastChangedDate()));
             }
             if (secret.getLastAccessedDate() != null) {
-                node.put("LastAccessedDate", secret.getLastAccessedDate().toEpochMilli() / 1000.0);
+                node.put("LastAccessedDate", EpochSeconds.fromInstant(secret.getLastAccessedDate()));
             }
             if (secret.getDeletedDate() != null) {
-                node.put("DeletedDate", secret.getDeletedDate().toEpochMilli() / 1000.0);
+                node.put("DeletedDate", EpochSeconds.fromInstant(secret.getDeletedDate()));
             }
             if (secret.getOwningService() != null) {
                 node.put("OwningService", secret.getOwningService());
@@ -616,7 +624,7 @@ public class SecretsManagerJsonHandler {
         response.put("ARN", secret.getArn());
         response.put("Name", secret.getName());
         if (secret.getDeletedDate() != null) {
-            response.put("DeletionDate", secret.getDeletedDate().toEpochMilli() / 1000.0);
+            response.put("DeletionDate", EpochSeconds.fromInstant(secret.getDeletedDate()));
         }
         return Response.ok(response).build();
     }
@@ -797,10 +805,10 @@ public class SecretsManagerJsonHandler {
             }
             SecretVersion sv = secret.getVersions() != null ? secret.getVersions().get(versionId) : null;
             if (sv != null && sv.getCreatedDate() != null) {
-                versionNode.put("CreatedDate", sv.getCreatedDate().toEpochMilli() / 1000.0);
+                versionNode.put("CreatedDate", EpochSeconds.fromInstant(sv.getCreatedDate()));
             }
             if (sv != null && sv.getLastAccessedDate() != null) {
-                versionNode.put("LastAccessedDate", sv.getLastAccessedDate().toEpochMilli() / 1000.0);
+                versionNode.put("LastAccessedDate", EpochSeconds.fromInstant(sv.getLastAccessedDate()));
             }
             versions.add(versionNode);
         }
@@ -928,7 +936,7 @@ public class SecretsManagerJsonHandler {
                 node.put("StatusMessage", status.statusMessage());
             }
             if (status.lastAccessedDate() != null) {
-                node.put("LastAccessedDate", status.lastAccessedDate().toEpochMilli() / 1000.0);
+                node.put("LastAccessedDate", EpochSeconds.fromInstant(status.lastAccessedDate()));
             }
             statuses.add(node);
         }

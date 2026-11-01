@@ -47,7 +47,7 @@ class VerifiedPermissionsIntegrationTest {
         givenAws("GetPolicyStore", "{\"policyStoreId\":\"" + policyStoreId + "\",\"tags\":true}")
                 .then().statusCode(200)
                 .body("policyStoreId", equalTo(policyStoreId))
-                .body("arn", matchesPattern("arn:aws:verifiedpermissions:us-east-1:111122223333:policy-store/PS[A-Za-z0-9]+"))
+                .body("arn", matchesPattern("arn:aws:verifiedpermissions::111122223333:policy-store/PS[A-Za-z0-9]+"))
                 .body("validationSettings.mode", equalTo("OFF"))
                 .body("cedarVersion", equalTo("CEDAR_4"))
                 .body("deletionProtection", equalTo("DISABLED"));

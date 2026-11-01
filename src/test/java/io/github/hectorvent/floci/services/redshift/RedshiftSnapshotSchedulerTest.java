@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.redshift;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.testutil.ShutdownOrdering;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
@@ -29,5 +30,10 @@ class RedshiftSnapshotSchedulerTest {
         scheduler.afterReset();
         scheduler.tick(NOW);
         verify(service).runSnapshotSchedules(NOW);
+    }
+
+    @Test
+    void shutdownObserverRunsBeforeStorageIsFlushedAndClosed() throws Exception {
+        ShutdownOrdering.assertStopsBeforeStorageCloses(RedshiftSnapshotScheduler.class);
     }
 }

@@ -924,6 +924,22 @@ public class RedshiftQueryHandler {
             String clusterIdentifier = requireParam(params, "ClusterIdentifier");
             return loggingStatusResponse(action, service.disableLogging(clusterIdentifier));
         }
+        case "PauseCluster", "ResumeCluster" -> {
+            String clusterIdentifier = requireParam(params, "ClusterIdentifier");
+            Cluster cluster = "PauseCluster".equals(action)
+                    ? service.pauseCluster(clusterIdentifier) : service.resumeCluster(clusterIdentifier);
+            String xml = new XmlBuilder()
+                    .start(action + "Response", AwsNamespaces.REDSHIFT)
+                      .start(action + "Result")
+                        .raw(buildClusterXml(cluster))
+                      .end(action + "Result")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end(action + "Response")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
         case "RebootCluster" -> {
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
             if (clusterIdentifier == null || clusterIdentifier.isBlank()) {
@@ -1210,7 +1226,11 @@ public class RedshiftQueryHandler {
             .elem("ManualSnapshotRetentionPeriod", snapshot.getManualSnapshotRetentionPeriod().toString())
             .elem("Status", snapshot.getStatus())
             .elem("Port", String.valueOf(snapshot.getPort()))
-            .elem("MasterUsername", snapshot.getMasterUsername());
+            .elem("MasterUsername", snapshot.getMasterUsername())
+            .elem("SourceRegion", snapshot.getSourceRegion());
+        if (snapshot.getKmsKeyId() != null) {
+            builder.elem("Encrypted", "true").elem("KmsKeyId", snapshot.getKmsKeyId());
+        }
 
         return builder.end("Snapshot").build();
     }

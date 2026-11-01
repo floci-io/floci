@@ -26,11 +26,17 @@ public class SecurityHubState {
     private int organizationConfigurationPendingPollsRemaining;
     private Map<String, JsonNode> policies = new LinkedHashMap<>();
     private Map<String, SecurityHubAssociation> associations = new LinkedHashMap<>();
+    /** Enabled standards: subscription ARN to standards ARN. */
+    private Map<String, String> standardsSubscriptions = new LinkedHashMap<>();
 
     public String getAdminAccountId() { return adminAccountId; }
     public void setAdminAccountId(String adminAccountId) { this.adminAccountId = adminAccountId; }
     public String getAdminFeature() { return adminFeature; }
     public void setAdminFeature(String adminFeature) { this.adminFeature = adminFeature; }
+    public Map<String, String> getStandardsSubscriptions() { return standardsSubscriptions; }
+    public void setStandardsSubscriptions(Map<String, String> value) {
+        standardsSubscriptions = value == null ? new LinkedHashMap<>() : value;
+    }
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
     public boolean isAutoEnable() { return autoEnable; }

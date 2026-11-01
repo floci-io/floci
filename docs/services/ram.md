@@ -87,8 +87,8 @@ aws --endpoint-url http://localhost:4566 ram accept-resource-share-invitation \
   missing or unmodelled value is rejected with `InvalidParameterException` rather than defaulted
   to `SELF`.
 - `GetResourceShares` applies the `name`, `resourceShareArns` and `resourceShareStatus` filters;
-  `tagFilters`, `permissionArn`, `permissionVersion` and pagination (`nextToken`/`maxResults`)
-  are accepted but ignored, every matching share is returned in one page.
+  `maxResults`/`nextToken` page the matching shares. `tagFilters`, `permissionArn` and
+  `permissionVersion` are accepted but ignored.
 - Operations outside the table above are not routed. RAM's paths are matched literally, so an
   unimplemented operation falls through to S3's `/{bucket}` route and comes back as an S3
   `NoSuchBucket` XML body where the SDK expects JSON, not a modeled `UnknownOperationException`.

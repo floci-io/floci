@@ -31,8 +31,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "partition"))
-from partition_literals import code_text  # noqa: E402  the same comment/string lexer as the partition gate
+PARTITION_TOOL = Path(__file__).resolve().parents[1] / "partition"
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -150,6 +149,12 @@ def _string_spans(code_line: str) -> list[tuple[int, int]]:
 
 
 def classify_java(path: str, text: str) -> list[Hit]:
+    # Imported here, not at the top: apply needs no lexer, so rebase_across_rename.sh runs it with
+    # a bare python3, without the partition tool's PyYAML dependency.
+    if str(PARTITION_TOOL) not in sys.path:
+        sys.path.insert(0, str(PARTITION_TOOL))
+    from partition_literals import code_text  # the same comment/string lexer as the partition gate
+
     hits: list[Hit] = []
     code = code_text(text)
     lines = text.split("\n")

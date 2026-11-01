@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.services.ssoadmin.model.ApplicationAccessScope;
 import io.github.hectorvent.floci.services.ssoadmin.model.ApplicationAssignment;
@@ -138,7 +139,7 @@ public class SsoAdminJsonHandler {
                 node.put("Name", updateState.name());
             }
             node.put("OwnerAccountId", instance.ownerAccountId());
-            node.put("CreatedDate", instance.createdDateEpochMillis() / 1000.0d);
+            node.put("CreatedDate", EpochSeconds.fromMillis(instance.createdDateEpochMillis()));
             node.put("PrimaryRegion", instance.primaryRegion());
             ArrayNode regionNodes = node.putArray("Regions");
             service.listRegionsForInstance(instance).forEach(region -> {
@@ -170,7 +171,7 @@ public class SsoAdminJsonHandler {
         SsoInstance instance = service.describeInstance(request);
         InstanceUpdateState updateState = service.instanceUpdateState(instance);
         ObjectNode response = mapper.createObjectNode();
-        response.put("CreatedDate", instance.createdDateEpochMillis() / 1000.0d);
+        response.put("CreatedDate", EpochSeconds.fromMillis(instance.createdDateEpochMillis()));
         response.put("IdentityStoreId", instance.identityStoreId());
         response.put("InstanceArn", instance.instanceArn());
         if (updateState.name() != null) {
@@ -558,7 +559,7 @@ public class SsoAdminJsonHandler {
         response.put("ApplicationAccount", application.applicationAccount());
         response.put("ApplicationArn", application.applicationArn());
         response.put("ApplicationProviderArn", application.applicationProviderArn());
-        response.put("CreatedDate", application.createdDateEpochMillis() / 1000.0d);
+        response.put("CreatedDate", EpochSeconds.fromMillis(application.createdDateEpochMillis()));
         response.put("CreatedFrom", application.createdFrom());
         if (application.description() != null) {
             response.put("Description", application.description());
@@ -753,7 +754,7 @@ public class SsoAdminJsonHandler {
         ObjectNode status = response.putObject("PermissionSetProvisioningStatus");
         status.put("RequestId", operation.requestId());
         status.put("Status", operation.status());
-        status.put("CreatedDate", operation.createdDateEpochMillis() / 1000.0d);
+        status.put("CreatedDate", EpochSeconds.fromMillis(operation.createdDateEpochMillis()));
         if (operation.accountId() != null) {
             status.put("AccountId", operation.accountId());
         }
@@ -772,7 +773,7 @@ public class SsoAdminJsonHandler {
         ObjectNode status = response.putObject("PermissionSetProvisioningStatus");
         status.put("RequestId", operation.requestId());
         status.put("Status", operation.status());
-        status.put("CreatedDate", operation.createdDateEpochMillis() / 1000.0d);
+        status.put("CreatedDate", EpochSeconds.fromMillis(operation.createdDateEpochMillis()));
         if (operation.accountId() != null) {
             status.put("AccountId", operation.accountId());
         }
@@ -793,7 +794,7 @@ public class SsoAdminJsonHandler {
             ObjectNode status = statuses.addObject();
             status.put("RequestId", operation.requestId());
             status.put("Status", operation.status());
-            status.put("CreatedDate", operation.createdDateEpochMillis() / 1000.0d);
+            status.put("CreatedDate", EpochSeconds.fromMillis(operation.createdDateEpochMillis()));
         }
         if (page.nextToken() != null) {
             response.put("NextToken", page.nextToken());
@@ -836,7 +837,7 @@ public class SsoAdminJsonHandler {
         ObjectNode status = response.putObject("AccountAssignmentDeletionStatus");
         status.put("RequestId", operation.requestId());
         status.put("Status", operation.status());
-        status.put("CreatedDate", operation.createdDateEpochMillis() / 1000.0d);
+        status.put("CreatedDate", EpochSeconds.fromMillis(operation.createdDateEpochMillis()));
         status.put("TargetId", operation.accountId());
         status.put("TargetType", "AWS_ACCOUNT");
         status.put("PermissionSetArn", operation.permissionSetArn());
@@ -865,7 +866,7 @@ public class SsoAdminJsonHandler {
             ObjectNode status = statuses.addObject();
             status.put("RequestId", operation.requestId());
             status.put("Status", operation.status());
-            status.put("CreatedDate", operation.createdDateEpochMillis() / 1000.0d);
+            status.put("CreatedDate", EpochSeconds.fromMillis(operation.createdDateEpochMillis()));
         }
         if (page.nextToken() != null) {
             response.put("NextToken", page.nextToken());
@@ -881,7 +882,7 @@ public class SsoAdminJsonHandler {
         ObjectNode status = response.putObject("AccountAssignmentDeletionStatus");
         status.put("RequestId", operation.requestId());
         status.put("Status", operation.status());
-        status.put("CreatedDate", operation.createdDateEpochMillis() / 1000.0d);
+        status.put("CreatedDate", EpochSeconds.fromMillis(operation.createdDateEpochMillis()));
         status.put("TargetId", operation.accountId());
         status.put("TargetType", "AWS_ACCOUNT");
         status.put("PermissionSetArn", operation.permissionSetArn());
@@ -901,7 +902,7 @@ public class SsoAdminJsonHandler {
             ObjectNode status = statuses.addObject();
             status.put("RequestId", operation.requestId());
             status.put("Status", operation.status());
-            status.put("CreatedDate", operation.createdDateEpochMillis() / 1000.0d);
+            status.put("CreatedDate", EpochSeconds.fromMillis(operation.createdDateEpochMillis()));
         });
         if (page.nextToken() != null) {
             response.put("NextToken", page.nextToken());
@@ -923,7 +924,7 @@ public class SsoAdminJsonHandler {
     private ObjectNode assignmentOperationNode(AssignmentOperation op) {
         ObjectNode node = mapper.createObjectNode();
         node.put("RequestId", op.requestId()); node.put("Status", op.status());
-        node.put("CreatedDate", op.createdDateEpochMillis() / 1000.0d);
+        node.put("CreatedDate", EpochSeconds.fromMillis(op.createdDateEpochMillis()));
         node.put("TargetId", op.accountId()); node.put("TargetType", "AWS_ACCOUNT");
         node.put("PermissionSetArn", op.permissionSetArn()); node.put("PrincipalId", op.principalId());
         node.put("PrincipalType", op.principalType());

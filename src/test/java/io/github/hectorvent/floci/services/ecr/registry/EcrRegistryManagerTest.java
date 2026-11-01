@@ -325,6 +325,49 @@ class EcrRegistryManagerTest {
     }
 
     @Test
+    void httpClient_usesTheStartedRegistrysAddressInsideDocker() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(lifecycleManager.createAndStart(any())).thenReturn(containerAt("container-id", "172.18.0.3"));
+
+        manager.ensureStarted();
+
+        assertEquals("http://172.18.0.3:5000", manager.httpClient().baseUrl());
+    }
+
+    @Test
+    void httpClient_followsTheRegistryWhenDeletingTheLastRepositoryReplacesIt() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(storage.pruneVolumesOnDelete()).thenReturn(true);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                containerAt("old-container", "172.18.0.3"), containerAt("new-container", "172.18.0.9"));
+        manager.ensureStarted();
+
+        manager.pruneStorage();
+        assertEquals("http://" + REGISTRY_NAME + ":5000", manager.httpClient().baseUrl());
+
+        manager.ensureStarted();
+        assertEquals("http://172.18.0.9:5000", manager.httpClient().baseUrl());
+    }
+
+    @Test
+    void httpClient_forgetsTheAddressOfARegistryThatDisappeared() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                containerAt("old-container", "172.18.0.3"), containerAt("new-container", "172.18.0.9"));
+        manager.ensureStarted();
+        when(lifecycleManager.presenceOf("old-container")).thenReturn(ContainerPresence.ABSENT);
+
+        manager.ensureStarted();
+
+        assertEquals("http://172.18.0.9:5000", manager.httpClient().baseUrl());
+    }
+
+    private static ContainerLifecycleManager.ContainerInfo containerAt(String containerId, String ip) {
+        return new ContainerLifecycleManager.ContainerInfo(containerId,
+                Map.of(5000, new ContainerLifecycleManager.EndpointInfo(ip, 5000)));
+    }
+
+    @Test
     void freshlyCreatedRegistryStreamsItsCompleteLog() {
         when(lifecycleManager.createAndStart(any())).thenReturn(
                 new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
@@ -724,5 +767,29 @@ class EcrRegistryManagerTest {
                 "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_layers",
                 "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_manifests",
                 "/var/lib/registry/docker/registry/v2/repositories/000000000000/us-east-1/team/app/_uploads");
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "123456789012.dkr.ecr.eu-west-1.amazonaws.com/spark/custom:7.5.0, eu-west-1",
+            "123456789012.dkr.ecr.cn-north-1.amazonaws.com.cn/spark/custom:7.5.0, cn-north-1",
+            "000000000000.dkr.ecr.us-east-1.localhost:4566/spark/custom:7.5.0, us-east-1",
+            "000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566/spark/custom:7.5.0, us-east-1",
+            "localhost:4566/000000000000/us-west-2/spark/custom:7.5.0, us-west-2",
+            "localhost.floci.io:4566/000000000000/us-west-2/spark/custom:7.5.0, us-west-2"
+    })
+    void anImageInAnEcrRepositoryHasItsRepositorysRegion(String image, String region) {
+        assertEquals(Optional.of(region), EcrRegistryManager.imageRegion(image));
+    }
+
+    @Test
+    void anImageOutsideEcrHasNoRegion() {
+        for (String image : List.of("public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest", "python:3.12",
+                "localhost:5000/spark/custom:7.5.0", "registry.internal/123456789012/us-east-1/spark:7.5.0",
+                "123456789012.dkr.ecr.us-east-1.registry.internal/spark/custom:7.5.0",
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com.example.com/spark/custom:7.5.0")) {
+            assertEquals(Optional.empty(), EcrRegistryManager.imageRegion(image), image);
+        }
+        assertEquals(Optional.empty(), EcrRegistryManager.imageRegion(null));
     }
 }

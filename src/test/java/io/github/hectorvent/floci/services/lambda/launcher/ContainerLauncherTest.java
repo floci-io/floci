@@ -580,6 +580,31 @@ class ContainerLauncherTest {
                 spec.labels());
     }
 
+    @ParameterizedTest
+    @CsvSource({"java21, true", "java8.al2, true", "java17, true", "nodejs20.x, false", "python3.13, false",
+            "provided.al2023, false"})
+    void launchFunction_hasTheJvmsOfAJavaRuntimeTrustFlocisCa(String runtime, boolean javaTrustStore)
+            throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("code"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("runtime-fn");
+        fn.setRuntime(runtime);
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        assertEquals(javaTrustStore, captureRealContainerSpec().javaTrustStore());
+    }
+
+    @Test
+    void launchFunction_hasTheJvmsOfAContainerImageTrustFlocisCa() {
+        launcher.launch(imageFunction());
+
+        assertTrue(captureRealContainerSpec().javaTrustStore());
+    }
+
     @Test
     void launchFunction_createsWithoutBindMountsOrVolume_forSmallCode() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("code"));

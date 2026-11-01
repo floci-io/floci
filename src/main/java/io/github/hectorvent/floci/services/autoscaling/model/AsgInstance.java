@@ -9,7 +9,8 @@ public class AsgInstance {
 
     private String instanceId;
     private String availabilityZone;
-    private String lifecycleState;   // Pending | InService | Terminating | Terminated | Detached
+    // Pending | InService | EnteringStandby | Standby | Terminating | Terminated | Detached
+    private String lifecycleState;
     private String healthStatus;     // Healthy | Unhealthy
     private String launchConfigurationName;
     private String launchTemplateId;
@@ -17,6 +18,9 @@ public class AsgInstance {
     private String launchTemplateVersion;
     private String instanceType;
     private boolean protectedFromScaleIn;
+    // The EnterStandby or ExitStandby activity the reconciler completes when this instance finishes moving
+    // into or out of standby; null otherwise, and for members stored before standby was supported.
+    private String standbyActivityId;
 
     public AsgInstance() {}
 
@@ -49,4 +53,7 @@ public class AsgInstance {
 
     public boolean isProtectedFromScaleIn() { return protectedFromScaleIn; }
     public void setProtectedFromScaleIn(boolean v) { this.protectedFromScaleIn = v; }
+
+    public String getStandbyActivityId() { return standbyActivityId; }
+    public void setStandbyActivityId(String v) { this.standbyActivityId = v; }
 }

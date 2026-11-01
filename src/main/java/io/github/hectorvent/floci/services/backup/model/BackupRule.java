@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.backup.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
@@ -18,6 +19,10 @@ public class BackupRule {
 
     @JsonProperty("TargetBackupVaultName")
     private String targetBackupVaultName;
+
+    @JsonProperty("TargetLogicallyAirGappedBackupVaultArn")
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    private String targetLogicallyAirGappedBackupVaultArn;
 
     @JsonProperty("ScheduleExpression")
     private String scheduleExpression;
@@ -53,6 +58,9 @@ public class BackupRule {
 
     public String getTargetBackupVaultName() { return targetBackupVaultName; }
     public void setTargetBackupVaultName(String targetBackupVaultName) { this.targetBackupVaultName = targetBackupVaultName; }
+
+    public String getTargetLogicallyAirGappedBackupVaultArn() { return targetLogicallyAirGappedBackupVaultArn; }
+    public void setTargetLogicallyAirGappedBackupVaultArn(String targetLogicallyAirGappedBackupVaultArn) { this.targetLogicallyAirGappedBackupVaultArn = targetLogicallyAirGappedBackupVaultArn; }
 
     public String getScheduleExpression() { return scheduleExpression; }
     public void setScheduleExpression(String scheduleExpression) { this.scheduleExpression = scheduleExpression; }

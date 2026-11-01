@@ -42,7 +42,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "aps", "autoscaling", "backup", "batch", "bcmdataexports", "bedrock", "bedrockagentcorecontrol", "ce",
             "cloudfront", "cloudmap", "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito",
             "configservice", "connect", "controlcatalog", "controltower", "datasync", "dlm", "dms", "dsql", "dynamodb", "ec2",
-            "ecr", "ecs", "efs", "eks", "elasticache", "elasticbeanstalk", "elbv2", "emr", "emrserverless",
+            "ecr", "ecs", "efs", "eks", "elasticache", "elasticbeanstalk", "elb", "elbv2", "emr", "emrserverless",
             "eventbridge", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "lambda",
             "lambdamicrovms", "lambdaweb", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
             "pipes", "ram", "rds", "redshift", "redshiftserverless", "resourceexplorer2", "resourcegroups", "route53resolver",
@@ -164,6 +164,40 @@ class PartitionCrossServiceSmokeIntegrationTest {
             .formParam("Version", "2015-12-01")
             .formParam("TargetGroupArn", arn)
         .when().post("/"));
+        PartitionMatrix.assertArnIn(partitionCase, arn);
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void elbClassicLoadBalancerArnInAcmInUseBy(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "acm");
+        offered(partitionCase, "elasticloadbalancing");
+        String certificateArn = json11(region, "acm", "CertificateManager.RequestCertificate",
+                "{\"DomainName\":\"" + unique("smoke-elb", partitionCase) + ".example.com\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("CertificateArn");
+        cleanup.register(() -> json11(region, "acm", "CertificateManager.DeleteCertificate",
+                "{\"CertificateArn\":\"" + certificateArn + "\"}").when().post("/"));
+        String name = unique("elb", partitionCase);
+        signed(region, "elasticloadbalancing")
+            .formParam("Action", "CreateLoadBalancer")
+            .formParam("Version", "2012-06-01")
+            .formParam("LoadBalancerName", name)
+            .formParam("AvailabilityZones.member.1", region + "a")
+            .formParam("Listeners.member.1.Protocol", "HTTPS")
+            .formParam("Listeners.member.1.LoadBalancerPort", "443")
+            .formParam("Listeners.member.1.InstancePort", "8080")
+            .formParam("Listeners.member.1.SSLCertificateId", certificateArn)
+        .when().post("/").then().statusCode(200);
+        cleanup.register(() -> signed(region, "elasticloadbalancing")
+            .formParam("Action", "DeleteLoadBalancer")
+            .formParam("Version", "2012-06-01")
+            .formParam("LoadBalancerName", name)
+        .when().post("/"));
+        String arn = json11(region, "acm", "CertificateManager.DescribeCertificate",
+                "{\"CertificateArn\":\"" + certificateArn + "\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("Certificate.InUseBy[0]");
         PartitionMatrix.assertArnIn(partitionCase, arn);
     }
 
@@ -1223,7 +1257,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
         String policyStoreId = created.jsonPath().getString("policyStoreId");
         cleanup.register(() -> json10(region, "verifiedpermissions", "VerifiedPermissions.DeletePolicyStore",
                 "{\"policyStoreId\":\"" + policyStoreId + "\"}").when().post("/"));
-        PartitionMatrix.assertArnIn(partitionCase, created.jsonPath().getString("arn"));
+        PartitionMatrix.assertGlobalArnIn(partitionCase, created.jsonPath().getString("arn"));
     }
 
     @ParameterizedTest

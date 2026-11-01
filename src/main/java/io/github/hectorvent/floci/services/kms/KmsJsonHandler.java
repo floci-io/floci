@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -933,15 +934,10 @@ public class KmsJsonHandler {
             if (!"PRIMARY".equals(candidate.getMultiRegionKeyType())) {
                 ObjectNode replica = replicas.addObject();
                 replica.put("Arn", candidate.getArn());
-                replica.put("Region", regionFromArn(candidate.getArn()));
+                replica.put("Region", AwsArnUtils.regionOrDefault(candidate.getArn(), ""));
             }
         }
         return configuration;
-    }
-
-    private static String regionFromArn(String arn) {
-        String[] parts = arn.split(":", 6);
-        return parts.length > 3 ? parts[3] : "";
     }
 
     private static void addTags(ArrayNode array, KmsKey key) {

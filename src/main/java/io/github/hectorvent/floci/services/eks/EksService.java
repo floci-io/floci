@@ -72,6 +72,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
+import java.util.function.UnaryOperator;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -1269,42 +1270,41 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         return "eks";
     }
 
+    /** EKS models no {@code responseCode} on either tag write, so both answer 200. */
+    @Override
+    public int tagResourceSuccessStatus() {
+        return 200;
+    }
+
+    @Override
+    public int untagResourceSuccessStatus() {
+        return 200;
+    }
+
     @Override
     public void tagResource(String region, String resourceArn, Map<String, String> tags) {
         ReservedTags.rejectReservedTagsOnUpdate(tags);
-        String clusterName = extractClusterName(resourceArn);
-        Cluster cluster = storage.get(clusterName)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Resource not found: " + resourceArn, 404));
-
-        if (cluster.getTags() == null) {
-            cluster.setTags(new HashMap<>());
-        }
-        cluster.getTags().putAll(tags);
-        storage.put(clusterName, cluster);
+        retag(resourceArn, current -> {
+            Map<String, String> next = new HashMap<>(current);
+            next.putAll(tags);
+            return next;
+        });
     }
 
     @Override
     public void untagResource(String region, String resourceArn, List<String> tagKeys) {
-        String clusterName = extractClusterName(resourceArn);
-        Cluster cluster = storage.get(clusterName)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Resource not found: " + resourceArn, 404));
-
-        if (cluster.getTags() != null && tagKeys != null) {
-            tagKeys.forEach(cluster.getTags()::remove);
-        }
-        storage.put(clusterName, cluster);
+        retag(resourceArn, current -> {
+            Map<String, String> next = new HashMap<>(current);
+            if (tagKeys != null) {
+                tagKeys.forEach(next::remove);
+            }
+            return next;
+        });
     }
 
     @Override
     public Map<String, String> listTags(String region, String resourceArn) {
-        String clusterName = extractClusterName(resourceArn);
-        Cluster cluster = storage.get(clusterName)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Resource not found: " + resourceArn, 404));
-
-        return cluster.getTags() != null ? cluster.getTags() : Map.of();
+        return retag(resourceArn, UnaryOperator.identity());
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags) {
@@ -1319,14 +1319,81 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         return listTags(null, resourceArn);
     }
 
-    private String extractClusterName(String resourceArn) {
-        // arn:aws:eks:us-east-1:000000000000:cluster/my-cluster
-        int idx = resourceArn.lastIndexOf('/');
-        if (idx < 0 || idx == resourceArn.length() - 1) {
-            throw new AwsException("InvalidParameterException",
-                    "Invalid resource ARN: " + resourceArn, 400);
+    /**
+     * Applies {@code edit} to the tags of the resource {@code resourceArn} names and returns them.
+     * TagResource takes a cluster, node group, Fargate profile, add-on, pod identity association or
+     * access entry ARN; each child ARN names its cluster as the segment after the resource type.
+     */
+    private Map<String, String> retag(String resourceArn, UnaryOperator<Map<String, String>> edit) {
+        String resource = AwsArnUtils.isArnFor(resourceArn, "eks") ? AwsArnUtils.parse(resourceArn).resource() : "";
+        String[] parts = resource.split("/", -1);
+        boolean child = !"cluster".equals(parts[0]);
+        if (parts.length < (child ? 3 : 2) || parts[1].isEmpty() || (child && parts[2].isEmpty())) {
+            throw new AwsException("BadRequestException", "Invalid resource ARN: " + resourceArn, 400);
         }
-        return resourceArn.substring(idx + 1);
+        String clusterName = parts[1];
+        String childName = child ? parts[2] : "";
+        UnaryOperator<Map<String, String>> change = current -> {
+            Map<String, String> next = edit.apply(current);
+            if (!next.equals(current)) {
+                checkTagLimits(next);
+            }
+            return next;
+        };
+        Optional<Map<String, String>> tags = switch (parts[0]) {
+            case "cluster" -> storage.get(clusterName).map(cluster -> applyTags(cluster.getTags(), change, next -> {
+                cluster.setTags(new HashMap<>(next));
+                storage.put(clusterName, cluster);
+            }));
+            case "nodegroup" -> nodeGroupStorage.get(nodeGroupKey(clusterName, childName))
+                    .filter(nodegroup -> resourceArn.equals(nodegroup.getNodegroupArn()))
+                    .map(nodegroup -> applyTags(nodegroup.getTags(), change, next -> {
+                        nodegroup.setTags(new HashMap<>(next));
+                        nodeGroupStorage.put(nodeGroupKey(clusterName, childName), nodegroup);
+                    }));
+            case "fargateprofile" -> fargateProfileStorage.get(fargateProfileKey(clusterName, childName))
+                    .filter(profile -> resourceArn.equals(profile.getFargateProfileArn()))
+                    .map(profile -> applyTags(profile.getTags(), change, next -> {
+                        profile.setTags(new HashMap<>(next));
+                        fargateProfileStorage.put(fargateProfileKey(clusterName, childName), profile);
+                    }));
+            case "addon" -> addons == null ? Optional.empty() : storage.get(clusterName)
+                    .flatMap(cluster -> addons.retag(cluster, childName, resourceArn, change));
+            case "podidentityassociation" -> podIdentityAssociations == null ? Optional.empty()
+                    : storage.get(clusterName)
+                            .flatMap(cluster -> podIdentityAssociations.retag(cluster, childName, resourceArn, change));
+            case "access-entry" -> accessEntries == null ? Optional.empty() : storage.get(clusterName)
+                    .flatMap(cluster -> accessEntries.retag(cluster, resourceArn, change));
+            default -> Optional.empty();
+        };
+        return tags.orElseThrow(() -> new AwsException("NotFoundException",
+                "Resource not found: " + resourceArn, 404));
+    }
+
+    /** The TagMap limits: at most 50 tags, keys of 1 to 128 characters and values of at most 256. */
+    private static void checkTagLimits(Map<String, String> tags) {
+        if (tags.size() > 50) {
+            throw new AwsException("BadRequestException", "Too many tags: maximum is 50", 400);
+        }
+        for (Map.Entry<String, String> tag : tags.entrySet()) {
+            if (tag.getKey() == null || tag.getKey().isEmpty() || tag.getKey().length() > 128) {
+                throw new AwsException("BadRequestException", "Invalid tag key: " + tag.getKey(), 400);
+            }
+            if (tag.getValue() == null || tag.getValue().length() > 256) {
+                throw new AwsException("BadRequestException", "Invalid tag value for key: " + tag.getKey(), 400);
+            }
+        }
+    }
+
+    /** The tags {@code change} makes of {@code current}, handed to {@code store} only when they differ. */
+    private static Map<String, String> applyTags(Map<String, String> current,
+                                                 UnaryOperator<Map<String, String>> change,
+                                                 Consumer<Map<String, String>> store) {
+        Map<String, String> next = Map.copyOf(change.apply(current != null ? current : Map.of()));
+        if (!next.equals(current)) {
+            store.accept(next);
+        }
+        return next;
     }
 
     /**

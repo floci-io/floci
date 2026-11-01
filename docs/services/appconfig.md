@@ -28,6 +28,7 @@ The management plane allows you to create and manage applications, environments,
 - `ListDeploymentStrategies`
 - `DeleteDeploymentStrategy`
 - `StartDeployment`
+- `StopDeployment`
 - `GetDeployment`
 - `ListDeployments` (`GET /applications/{ApplicationId}/environments/{EnvironmentId}/deployments`)
 - `GetConfiguration` (deprecated by AWS in favor of the [data plane](#data-plane))
@@ -48,7 +49,7 @@ such as one from an S3 or SSM source, returns `ResourceNotFoundException`.
 
 `CreateEnvironment` keeps up to five `Monitors`, each a CloudWatch `AlarmArn` with an optional IAM role
 `AlarmRoleArn`, and environment reads return them; an environment created without monitors returns none.
-Floci does not evaluate the alarms or roll a deployment back. More than five monitors, or an `AlarmRoleArn`
+Floci does not evaluate the alarms or trigger automatic rollback. More than five monitors, or an `AlarmRoleArn`
 that is not an IAM role ARN, returns `BadRequestException`.
 `StartDeployment` and `GetDeployment` return the deployed profile's name and location URI as
 `ConfigurationName` and `ConfigurationLocationUri`. Deployments stored by earlier Floci versions did not
@@ -59,6 +60,20 @@ deployment with the profile name and strategy settings it recorded, also once it
 A deployment stored by an earlier Floci version returns no strategy settings from `GetDeployment`, and
 `ListDeployments` reports the strategy's current settings while the strategy exists.
 A configuration profile created without `Type` reports no type, as AWS documents no default.
+
+Configuration content becomes available immediately. A positive `FinalBakeTimeInMinutes`
+keeps the deployment in `BAKING` at 100 percent until that time has elapsed; get and list
+readback then report `COMPLETE`. Started and completed timestamps use the API's ISO 8601
+format and survive restart. Gradual per-client rollout and alarm evaluation are not implemented.
+
+`StopDeployment` with `AllowRevert=true` returns an in-progress deployment as `ROLLED_BACK`
+or a completed deployment as `REVERTED`, restoring the previous available configuration
+for that environment and profile. It rejects older deployments while a newer one is
+active, and rejects completed deployments outside their 72-hour revert window.
+If the previous hosted configuration version has been deleted, the stop is rejected
+with `BadRequestException` before changing the active version or stopping the deployment.
+Older persisted deployments without completion timestamps cannot be reverted because
+that window cannot be verified.
 
 ## Data Plane (AppConfigData) {#data-plane}
 
@@ -79,6 +94,37 @@ each flag with variants is a list of its variants, and each basic flag in the sa
 as a string. Rules of the form `(eq $attribute "value")` are
 encoded; a profile with any other rule is returned unchanged, as JSON, and Floci logs a warning, as it does for a
 caller that does not accept Ion.
+
+## CloudFormation
+
+Floci provisions these resource types:
+
+- `AWS::AppConfig::Application`
+- `AWS::AppConfig::Environment`
+- `AWS::AppConfig::ConfigurationProfile`
+- `AWS::AppConfig::DeploymentStrategy`
+
+`Ref` returns the AppConfig ID of each, which `Fn::GetAtt` also returns as `ApplicationId`, `EnvironmentId`,
+`ConfigurationProfileId` and `Id`. A configuration profile's `KmsKeyArn` is not set.
+
+An update that changes only mutable properties keeps the ID and changes the resource in place: the name and
+description of an application, environment or configuration profile, an environment's `Monitors`, an application's
+`Tags`, and a deployment strategy's description, duration, final bake time, growth factor and growth type. A property
+the template drops is cleared, or set back to its default (`FinalBakeTimeInMinutes` 0, `GrowthType` `LINEAR`). A
+change to a createOnly property (`ApplicationId` on an environment or configuration profile, `LocationUri` or `Type`
+on a configuration profile, `Name` or `ReplicateTo` on a deployment strategy) replaces the resource: the new one is
+created and the old one is deleted once the stack update completes. A failed stack update puts back what it changed in
+place and deletes what it created.
+
+Deleting an environment deletes its deployments, and deleting a configuration profile deletes its hosted configuration
+versions. Floci keeps tags on applications only, so `Tags` on the other three types are accepted and not stored, as
+`TagResource` treats them; so are a configuration profile's `KmsKeyIdentifier`, `RetrievalRoleArn` and `Validators`,
+and `DeletionProtectionCheck`. `ReplicateTo: SSM_DOCUMENT` writes no SSM document.
+`AWS::AppConfig::HostedConfigurationVersion`, `Deployment`, `Extension` and `ExtensionAssociation` are not provisioned.
+
+A stack created before Floci provisioned these types holds stubs for them, and an update creates the real resource in
+place of a stub only when it changes that resource. An update that changes an environment or configuration profile of
+a stubbed application therefore fails with `ResourceNotFoundException` unless it changes the application too.
 
 ## Configuration
 

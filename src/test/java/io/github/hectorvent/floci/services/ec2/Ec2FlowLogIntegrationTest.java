@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -188,6 +190,69 @@ class Ec2FlowLogIntegrationTest {
         .then()
             .statusCode(200)
             .body("DescribeFlowLogsResponse.flowLogSet.findAll { it.flowLogId == '" + flowLogId + "' }.size()",
+                    equalTo(0));
+    }
+
+    private static String createFlowLogWith(String... extraParams) {
+        RequestSpecification req = given()
+            .formParam("Action", "CreateFlowLogs")
+            .formParam("ResourceType", "VPC")
+            .formParam("ResourceId.1", vpcId)
+            .formParam("TrafficType", "ALL")
+            .header("Authorization", AUTH_HEADER);
+        for (int i = 0; i < extraParams.length; i += 2) {
+            req = req.formParam(extraParams[i], extraParams[i + 1]);
+        }
+        return req.when().post("/").then().statusCode(200)
+            .extract().path("CreateFlowLogsResponse.flowLogIdSet.item[0]");
+    }
+
+    private static ValidatableResponse describe(String id) {
+        return given()
+            .formParam("Action", "DescribeFlowLogs")
+            .formParam("FlowLogId.1", id)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(15)
+    void cloudWatchFlowLogKeepsItsLogGroupName() {
+        String id = createFlowLogWith(
+                "LogDestinationType", "cloud-watch-logs",
+                "LogGroupName", "/rep/fl",
+                "DeliverLogsPermissionArn", "arn:aws:iam::000000000000:role/flow-logs-role");
+
+        describe(id)
+            .body("DescribeFlowLogsResponse.flowLogSet.item[0].logGroupName", equalTo("/rep/fl"))
+            .body("DescribeFlowLogsResponse.flowLogSet.item[0].logDestinationType", equalTo("cloud-watch-logs"));
+    }
+
+    @Test
+    @Order(16)
+    void logGroupNameWithoutADestinationTypeDefaultsToCloudWatchLogs() {
+        String id = createFlowLogWith("LogGroupName", "/rep/fl-default");
+
+        describe(id)
+            .body("DescribeFlowLogsResponse.flowLogSet.item[0].logGroupName", equalTo("/rep/fl-default"))
+            .body("DescribeFlowLogsResponse.flowLogSet.item[0].logDestinationType", equalTo("cloud-watch-logs"));
+    }
+
+    @Test
+    @Order(17)
+    void s3FlowLogHasNoLogGroupName() {
+        String id = createFlowLogWith(
+                "LogDestinationType", "s3",
+                "LogDestination", "arn:aws:s3:::flow-logs-test-bucket-2");
+
+        describe(id)
+            .body("DescribeFlowLogsResponse.flowLogSet.item[0].logDestinationType", equalTo("s3"))
+            .body("DescribeFlowLogsResponse.flowLogSet.item[0].logDestination",
+                    equalTo("arn:aws:s3:::flow-logs-test-bucket-2"))
+            .body("DescribeFlowLogsResponse.flowLogSet.item[0].children().findAll { it.name() == 'logGroupName' }.size()",
                     equalTo(0));
     }
 }

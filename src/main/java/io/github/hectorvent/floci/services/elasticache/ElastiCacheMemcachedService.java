@@ -144,10 +144,13 @@ public class ElastiCacheMemcachedService {
             Endpoint endpoint = new Endpoint(endpointHost, endpointPort);
 
             CacheCluster cluster = new CacheCluster(
-                    clusterId, CacheClusterStatus.AVAILABLE, ENGINE, ENGINE_VERSION,
+                    clusterId, CacheClusterStatus.AVAILABLE, ENGINE,
+                    request.engineVersion() != null && !request.engineVersion().isBlank()
+                            ? request.engineVersion() : ENGINE_VERSION,
                     endpoint, Instant.now());
             // What terraform's aws_elasticache_cluster reads back: anything the request set and the
             // describe omitted would be a diff no apply can settle.
+            cluster.setAutoMinorVersionUpgrade(request.autoMinorVersionUpgrade());
             cluster.setNumCacheNodes(request.numCacheNodes() != null ? request.numCacheNodes() : 1);
             cluster.setCacheNodeType(request.cacheNodeType() != null && !request.cacheNodeType().isBlank()
                     ? request.cacheNodeType() : DEFAULT_CACHE_NODE_TYPE);

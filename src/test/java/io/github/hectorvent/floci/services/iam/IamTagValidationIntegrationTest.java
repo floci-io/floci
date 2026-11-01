@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.testing.SamlMetadata;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
@@ -25,11 +26,8 @@ class IamTagValidationIntegrationTest {
     private static final String POLICY_DOCUMENT = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
             + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
     private static final String THUMBPRINT = "9e99a48a9960b14926bb7f3b02e22da2b0ab7280";
-    private static final String SAML_METADATA = "<md:EntityDescriptor xmlns:md=\"urn:oasis:names:tc:SAML:2.0:metadata\""
-            + " entityID=\"https://idp.example.test/untag-key\"><md:IDPSSODescriptor><md:KeyDescriptor use=\"signing\">"
-            + "<ds:KeyInfo xmlns:ds=\"http://www.w3.org/2000/09/xmldsig#\"><ds:X509Data>"
-            + "<ds:X509Certificate>dW50YWc=</ds:X509Certificate></ds:X509Data></ds:KeyInfo>"
-            + "</md:KeyDescriptor></md:IDPSSODescriptor></md:EntityDescriptor>";
+    private static final String SAML_METADATA =
+            SamlMetadata.forEntity("https://idp.example.test/untag-key", "dW50YWc=");
 
     private static RequestSpecification iam(String action) {
         return given().header("Authorization", IAM_AUTH).formParam("Action", action);

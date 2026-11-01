@@ -9,7 +9,6 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
-import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
@@ -702,7 +701,7 @@ public class LambdaService implements ResourceProvider {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(functionName);
             if (!region.equals(arn.region())
                     || !regionResolver.getAccountId().equals(arn.accountId())
-                    || !AwsRegions.partitionFor(region).equals(arn.partition())) {
+                    || !regionResolver.partitionForRegion(region).equals(arn.partition())) {
                 throw new AwsException("ResourceNotFoundException", "Function not found: " + functionName, 404);
             }
             return reference.name();
@@ -3882,7 +3881,7 @@ public class LambdaService implements ResourceProvider {
      * (such as {@code *}) is kept as given. ARNs are checked first because an IAM role, user or
      * session name may contain a dot.
      */
-    private static Object permissionPrincipal(String principal, String region) {
+    private Object permissionPrincipal(String principal, String region) {
         if (principal == null) {
             return null;
         }
@@ -3890,7 +3889,7 @@ public class LambdaService implements ResourceProvider {
             return Map.of("AWS", principal);
         }
         if (ACCOUNT_ID_PATTERN.matcher(principal).matches()) {
-            String partition = AwsRegions.partitionFor(region);
+            String partition = regionResolver.partitionForRegion(region);
             return Map.of("AWS", AwsArnUtils.Arn.global(partition, "iam", principal, "root").toString());
         }
         if (principal.contains(".")) {

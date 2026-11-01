@@ -408,11 +408,20 @@ public class DynamoDbService {
         return rekeyedItems;
     }
 
+    private Map<String, JsonNode> itemsForStorage(Map<String, JsonNode> items) {
+        // Memory storage can retain the live concurrent map; durable stores still need a snapshot.
+        if (itemStore instanceof InMemoryStorage<?, ?>
+                || itemStore instanceof AccountAwareStorageBackend<?> aware && aware.isInMemory()) {
+            return items;
+        }
+        return new HashMap<>(items);
+    }
+
     private void persistItems(String storageKey) {
         if (itemStore == null) return;
         ConcurrentSkipListMap<String, JsonNode> items = currentItems(storageKey, false);
         if (items != null) {
-            itemStore.put(storageKey, new HashMap<>(items));
+            itemStore.put(storageKey, itemsForStorage(items));
         } else {
             itemStore.delete(storageKey);
         }
@@ -1481,7 +1490,7 @@ public class DynamoDbService {
                 }
             }
 
-            DynamoDbSetOrder.sortSetsIn(item);
+            item.setAll(DynamoDbNumberUtils.normalizeNumbersInItem(item));
 
             // Reject any attempt to modify a key attribute
             validateKeyNotModified(table, key, item);
@@ -3212,9 +3221,9 @@ public class DynamoDbService {
     private void persistItemsForAccount(String accountId, String storageKey, Map<String, JsonNode> items) {
         if (itemStore == null) return;
         if (accountId != null && itemStore instanceof AccountAwareStorageBackend<Map<String, JsonNode>> aware) {
-            aware.putForAccount(accountId, storageKey, new HashMap<>(items));
+            aware.putForAccount(accountId, storageKey, itemsForStorage(items));
         } else {
-            itemStore.put(storageKey, new HashMap<>(items));
+            itemStore.put(storageKey, itemsForStorage(items));
         }
     }
 
@@ -4919,18 +4928,22 @@ public class DynamoDbService {
     }
 
     private TableDefinition requireActiveTable(String storageKey) {
-        TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(DynamoDbService::itemCallResourceNotFound);
-        if ("CREATING".equals(table.getTableStatus())) {
-            throw itemCallResourceNotFound();
-        }
-        return table;
+        return findActiveTable(storageKey).orElseThrow(DynamoDbService::itemCallResourceNotFound);
+    }
+
+    private Optional<TableDefinition> findActiveTable(String storageKey) {
+        return tableStore.get(storageKey).filter(table -> !"CREATING".equals(table.getTableStatus()));
     }
 
     /** Resolves a table for an item call, so a miss reports the message AWS uses there. */
     public TableDefinition requireTableForItemCall(String tableName, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         return requireActiveTable(regionKey(region, canonicalTableName));
+    }
+
+    /** Finds a table for an item call, which treats a CREATING table as absent. */
+    public Optional<TableDefinition> findTableForItemCall(String tableName, String region) {
+        return findActiveTable(regionKey(region, canonicalTableName(region, tableName)));
     }
 
     /**

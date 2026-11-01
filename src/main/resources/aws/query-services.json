@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_query_services.py",
-    "botocore": "botocore 1.43.113 (installed package)"
+    "botocore": "botocore 1.43.118 (local/aws/botocore)"
   },
   "services": {
     "autoscaling": {
@@ -29,6 +29,7 @@
         "DeleteTags",
         "DeleteWarmPool",
         "DescribeAccountLimits",
+        "DescribeAccountSettings",
         "DescribeAdjustmentTypes",
         "DescribeAutoScalingGroups",
         "DescribeAutoScalingInstances",
@@ -60,6 +61,7 @@
         "ExitStandby",
         "GetPredictiveScalingForecast",
         "LaunchInstances",
+        "PutAccountSetting",
         "PutLifecycleHook",
         "PutNotificationConfiguration",
         "PutScalingPolicy",
@@ -794,6 +796,7 @@
         "GetSnapshotBlockPublicAccessState",
         "GetSpotPlacementScores",
         "GetSubnetCidrReservations",
+        "GetTransitGatewayAttachmentNatConfiguration",
         "GetTransitGatewayAttachmentPropagations",
         "GetTransitGatewayMeteringPolicyEntries",
         "GetTransitGatewayMulticastDomainAssociations",
@@ -875,6 +878,7 @@
         "ModifyTrafficMirrorFilterRule",
         "ModifyTrafficMirrorSession",
         "ModifyTransitGateway",
+        "ModifyTransitGatewayAttachmentNatConfiguration",
         "ModifyTransitGatewayMeteringPolicy",
         "ModifyTransitGatewayPolicyTableEntry",
         "ModifyTransitGatewayPrefixListReference",
@@ -1059,6 +1063,7 @@
         "ModifyServerlessCache",
         "ModifyUser",
         "ModifyUserGroup",
+        "PrepareMigration",
         "PurchaseReservedCacheNodesOffering",
         "RebalanceSlotsInGlobalReplicationGroup",
         "RebootCacheCluster",
@@ -1066,6 +1071,7 @@
         "ResetCacheParameterGroup",
         "RevokeCacheSecurityGroupIngress",
         "StartMigration",
+        "StopMigration",
         "TestFailover",
         "TestMigration"
       ]
@@ -1542,6 +1548,7 @@
         "ApplyPendingMaintenanceAction",
         "AuthorizeDBSecurityGroupIngress",
         "BacktrackDBCluster",
+        "CancelDBCapacityReservation",
         "CancelExportTask",
         "CopyDBClusterParameterGroup",
         "CopyDBClusterSnapshot",
@@ -1550,6 +1557,7 @@
         "CopyOptionGroup",
         "CreateBlueGreenDeployment",
         "CreateCustomDBEngineVersion",
+        "CreateDBCapacityReservation",
         "CreateDBCluster",
         "CreateDBClusterEndpoint",
         "CreateDBClusterParameterGroup",
@@ -1593,6 +1601,7 @@
         "DescribeAccountAttributes",
         "DescribeBlueGreenDeployments",
         "DescribeCertificates",
+        "DescribeDBCapacityReservations",
         "DescribeDBClusterAutomatedBackups",
         "DescribeDBClusterBacktracks",
         "DescribeDBClusterEndpoints",
@@ -1647,6 +1656,7 @@
         "ModifyCertificates",
         "ModifyCurrentDBClusterCapacity",
         "ModifyCustomDBEngineVersion",
+        "ModifyDBCapacityReservation",
         "ModifyDBCluster",
         "ModifyDBClusterEndpoint",
         "ModifyDBClusterParameterGroup",

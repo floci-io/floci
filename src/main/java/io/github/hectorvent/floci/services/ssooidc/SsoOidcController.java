@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.services.ssoadmin.SsoAdminService;
@@ -300,7 +301,7 @@ public class SsoOidcController {
     private void validateTokenExchangeTarget(JsonNode request, String targetApplicationArn) {
         String subjectToken = requiredText(request, "subjectToken");
         TokenSession subject = service.requireAccessToken(subjectToken);
-        if (targetApplicationArn.equals(subject.clientId()) || !subject.clientId().startsWith("arn:")) {
+        if (targetApplicationArn.equals(subject.clientId()) || !AwsArnUtils.looksLikeArn(subject.clientId())) {
             throw new SsoOidcException("invalid_grant", "Subject token must come from a different IAM application", 400);
         }
         boolean authorizedTarget = ssoAdminService.applicationAccessScopesForOidc(subject.clientId()).stream()
@@ -370,7 +371,7 @@ public class SsoOidcController {
                 throw new SsoOidcException("invalid_request", "code_challenge_method must be S256", 400);
             }
             AuthorizationCode authorization;
-            if (clientId != null && clientId.startsWith("arn:")) {
+            if (AwsArnUtils.looksLikeArn(clientId)) {
                 ApplicationGrant grant = ssoAdminService.applicationGrantForOidc(clientId, "authorization_code");
                 List<String> redirects = new ArrayList<>();
                 grant.grant().path("AuthorizationCode").path("RedirectUris")

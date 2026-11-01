@@ -454,6 +454,7 @@ public class ElastiCacheQueryHandler {
                             boolParam(params, "AtRestEncryptionEnabled"),
                             region,
                             parseTags(params),
+                            boolParam(params, "AutoMinorVersionUpgrade"),
                             boolParam(params, "TransitEncryptionEnabled"));
             CacheCluster cluster = "memcached".equalsIgnoreCase(engine)
                     ? memcachedService.createCacheCluster(request)
@@ -1037,7 +1038,8 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                   .elem("CacheClusterId", c.getCacheClusterId())
                   .elem("CacheClusterStatus", c.getCacheClusterStatus().wireName())
                   .elem("Engine", c.getEngine())
-                  .elem("EngineVersion", c.getEngineVersion());
+                  .elem("EngineVersion", c.getEngineVersion())
+                  .elem("AutoMinorVersionUpgrade", c.isAutoMinorVersionUpgrade());
         boolean memcached = "memcached".equals(c.getEngine());
         int numCacheNodes = c.getNumCacheNodes();
         if (memcached) {
@@ -1053,7 +1055,6 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
             xml.elem("NumCacheNodes", (long) numCacheNodes);
         } else {
             xml.elem("NumCacheNodes", (long) numCacheNodes)
-               .elem("AutoMinorVersionUpgrade", true)
                .elem("AuthTokenEnabled", c.getAuthMode() == AuthMode.PASSWORD)
                .elem("TransitEncryptionEnabled", c.isEncryptedInTransit())
                .elem("AtRestEncryptionEnabled", c.isAtRestEncryptionEnabled())

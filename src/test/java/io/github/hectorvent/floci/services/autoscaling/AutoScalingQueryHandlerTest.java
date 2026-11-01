@@ -3,20 +3,188 @@ package io.github.hectorvent.floci.services.autoscaling;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
+import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.w3c.dom.Element;
+import org.w3c.dom.NodeList;
 
 import java.util.List;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.services.autoscaling.AutoScalingXmlAssertions.XML_NAMESPACE;
+import static io.github.hectorvent.floci.services.autoscaling.AutoScalingXmlAssertions.assertModeledNamespace;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.*;
 
 class AutoScalingQueryHandlerTest {
 
     private static final String REGION = "us-east-1";
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void repeatedDetachMembersCountEachDetachedInstanceOnce(boolean decrementDesiredCapacity) {
+        AutoScalingService service = new AutoScalingService();
+        service.regionResolver = new RegionResolver(REGION, "000000000000");
+        service.createAutoScalingGroup(REGION, "repeated-detach", null, "lt", null, "1", null,
+                0, 3, 3, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(),
+                "EC2", 0, List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
+        service.ec2Service = mock(Ec2Service.class);
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("repeated-detach")).getFirst();
+        for (String id : List.of("i-detached", "i-retained-one", "i-retained-two")) {
+            AsgInstance instance = new AsgInstance();
+            instance.setInstanceId(id);
+            instance.setLifecycleState("InService");
+            group.getInstances().add(instance);
+        }
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupName", "repeated-detach");
+        params.add("ShouldDecrementDesiredCapacity", Boolean.toString(decrementDesiredCapacity));
+        params.add("InstanceIds.member.1", "i-detached");
+        params.add("InstanceIds.member.1", "i-detached");
+        params.add("InstanceIds.member.3", "i-detached");
+
+        Response response = new AutoScalingQueryHandler(service).handle("DetachInstances", params, REGION);
+
+        assertEquals(200, response.getStatus());
+        assertEquals(decrementDesiredCapacity ? 2 : 3, group.getDesiredCapacity());
+        assertEquals(List.of("i-retained-one", "i-retained-two"),
+                group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+        verify(service.ec2Service).deleteSystemTag(
+                REGION, List.of("i-detached"), "aws:autoscaling:groupName", "repeated-detach");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"AttachInstances", "DetachInstances", "SetInstanceProtection", "EnterStandby", "ExitStandby"})
+    void instanceMutationsRetainSparseOrderedAndRepeatedMembers(String action) {
+        AutoScalingService service = mock(AutoScalingService.class);
+        AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupName", "indexed-instances");
+        params.add("ShouldDecrementDesiredCapacity", "true");
+        params.add("ProtectedFromScaleIn", "true");
+        params.add("InstanceIds.member.999999999999999999999999", "i-large");
+        params.add("InstanceIds.member.10", "i-ten");
+        params.add("InstanceIds.member.2", "i-two");
+        params.add("InstanceIds.member.2", "i-repeated");
+        params.add("InstanceIds.member.01", "ignored");
+        params.add("InstanceIds.member.3.Other", "ignored");
+        List<String> expected = List.of("i-two", "i-repeated", "i-ten", "i-large");
+
+        assertEquals(200, handler.handle(action, params, REGION).getStatus());
+
+        if ("AttachInstances".equals(action)) {
+            verify(service).attachInstances(REGION, "indexed-instances", expected);
+        } else if ("DetachInstances".equals(action)) {
+            verify(service).detachInstances(REGION, "indexed-instances", expected, true);
+        } else if ("SetInstanceProtection".equals(action)) {
+            verify(service).setInstanceProtection(REGION, "indexed-instances", expected, true);
+        } else if ("EnterStandby".equals(action)) {
+            verify(service).enterStandby(REGION, "indexed-instances", expected, true);
+        } else {
+            verify(service).exitStandby(REGION, "indexed-instances", expected);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"AttachInstances", "DetachInstances", "SetInstanceProtection"})
+    void instanceMutationsValidateMembersAfterGapBeforeChangingGroup(String action) {
+        AutoScalingService service = new AutoScalingService();
+        service.regionResolver = new RegionResolver(REGION, "000000000000");
+        service.createAutoScalingGroup(REGION, "indexed-validation", null, "lt", null, "1", null,
+                0, 3, 1, 300, List.of("us-east-1a"), List.of(), List.of(), List.of(),
+                "EC2", 0, List.of("Default"), Map.of(), Map.of(), AsgOptionalFields.none());
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("indexed-validation")).getFirst();
+        service.ec2Service = mock(Ec2Service.class);
+        AsgInstance original = new AsgInstance();
+        original.setInstanceId("i-original");
+        original.setLifecycleState("InService");
+        group.getInstances().add(original);
+        AsgInstance moving = new AsgInstance();
+        moving.setInstanceId("i-moving");
+        moving.setLifecycleState("EnteringStandby");
+        group.getInstances().add(moving);
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupName", "indexed-validation");
+        params.add("ProtectedFromScaleIn", "true");
+        params.add("ShouldDecrementDesiredCapacity", "true");
+        params.add("InstanceIds.member.1", "AttachInstances".equals(action) ? "i-new" : "i-original");
+        params.add("InstanceIds.member.3", "SetInstanceProtection".equals(action) ? "i-missing" : "i-moving");
+        AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
+
+        Response response = handler.handle(action, params, REGION);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<Code>ValidationError</Code>"));
+        assertEquals(List.of("i-original", "i-moving"),
+                group.getInstances().stream().map(AsgInstance::getInstanceId).toList());
+        assertEquals(1, group.getDesiredCapacity());
+        assertEquals("InService", original.getLifecycleState());
+        assertEquals("EnteringStandby", moving.getLifecycleState());
+        assertFalse(original.isProtectedFromScaleIn());
+        verifyNoInteractions(service.ec2Service);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "CapacityReservationIds,cr-0123456789abcdef0",
+        "CapacityReservationResourceGroupArns,arn:aws:resource-groups:us-east-1:000000000000:group/capacity"
+    })
+    void capacityReservationMembersRetainSparseTargetsAndRejectMultipleTargets(String field, String target) {
+        AutoScalingService service = new AutoScalingService();
+        service.regionResolver = new RegionResolver(REGION, "000000000000");
+        AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupName", "indexed-capacity");
+        params.add("LaunchTemplate.LaunchTemplateId", "lt-original");
+        params.add("MinSize", "0");
+        params.add("MaxSize", "3");
+        String prefix = "CapacityReservationSpecification.CapacityReservationTarget.";
+        params.add(prefix + field + ".member.999999999999999999999999", target);
+        params.add(prefix + field + ".member.01", "ignored");
+        params.add(prefix + field + ".member.3.Other", "ignored");
+
+        assertEquals(200, handler.handle("CreateAutoScalingGroup", params, REGION).getStatus());
+
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("indexed-capacity")).getFirst();
+        assertEquals("CapacityReservationIds".equals(field) ? List.of(target) : List.of(),
+                group.getCapacityReservationSpecification().getCapacityReservationIds());
+        assertEquals("CapacityReservationResourceGroupArns".equals(field) ? List.of(target) : List.of(),
+                group.getCapacityReservationSpecification().getCapacityReservationResourceGroupArns());
+
+        params.add(prefix + field + ".member.2", target + "-other");
+        Response rejected = handler.handle("UpdateAutoScalingGroup", params, REGION);
+        assertEquals(400, rejected.getStatus());
+        assertTrue(rejected.getEntity().toString().contains("Specify only one Capacity Reservation target."));
+        assertEquals("CapacityReservationIds".equals(field) ? List.of(target) : List.of(),
+                group.getCapacityReservationSpecification().getCapacityReservationIds());
+        assertEquals("CapacityReservationResourceGroupArns".equals(field) ? List.of(target) : List.of(),
+                group.getCapacityReservationSpecification().getCapacityReservationResourceGroupArns());
+    }
+
+    @Test
+    void describeAutoScalingInstancesEmptyUsesModeledNamespace() throws Exception {
+        AutoScalingService service = new AutoScalingService();
+        service.regionResolver = new RegionResolver(REGION, "000000000000");
+        AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
+
+        Response response = handler.handle("DescribeAutoScalingInstances", new MultivaluedHashMap<>(), REGION);
+
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        Element root = assertModeledNamespace(xml);
+        NodeList collections = root.getElementsByTagNameNS(XML_NAMESPACE, "AutoScalingInstances");
+        assertEquals(1, collections.getLength());
+        Element instances = (Element) collections.item(0);
+        assertEquals(0, instances.getElementsByTagName("*").getLength());
+    }
 
     @Test
     void startAndDescribeInstanceRefreshUseAwsQueryXmlShape() {
@@ -84,7 +252,7 @@ class AutoScalingQueryHandlerTest {
     }
 
     @Test
-    void updateAutoScalingGroupRejectsDesiredConfigurationChangeDuringActiveInstanceRefresh() {
+    void updateAutoScalingGroupRejectsDesiredConfigurationChangeDuringActiveInstanceRefresh() throws Exception {
         AutoScalingService service = new AutoScalingService();
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.createAutoScalingGroup(REGION,
@@ -137,10 +305,11 @@ class AutoScalingQueryHandlerTest {
         String xml = (String) response.getEntity();
         assertTrue(xml.contains("<Code>ValidationError</Code>"));
         assertTrue(xml.contains(AutoScalingService.ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE));
+        assertModeledNamespace(xml);
     }
 
     @Test
-    void describeAutoScalingGroupsIncludesInstanceLaunchTemplateMetadata() {
+    void describeAutoScalingGroupsIncludesInstanceLaunchTemplateMetadata() throws Exception {
         AutoScalingService service = new AutoScalingService();
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.createAutoScalingGroup(REGION,
@@ -186,6 +355,16 @@ class AutoScalingQueryHandlerTest {
         assertTrue(xml.contains("<LaunchTemplate>"));
         assertTrue(xml.contains("<LaunchTemplateId>lt-current</LaunchTemplateId>"));
         assertTrue(xml.contains("<Version>7</Version>"));
+        assertModeledNamespace(xml);
+
+        MultivaluedHashMap<String, String> instanceParams = new MultivaluedHashMap<>();
+        instanceParams.add("InstanceIds.member.1", "i-current");
+        Response instancesResponse = handler.handle("DescribeAutoScalingInstances", instanceParams, REGION);
+
+        assertEquals(200, instancesResponse.getStatus());
+        String instancesXml = (String) instancesResponse.getEntity();
+        assertTrue(instancesXml.contains("<InstanceId>i-current</InstanceId>"));
+        assertModeledNamespace(instancesXml);
     }
 
     @Test
@@ -212,7 +391,7 @@ class AutoScalingQueryHandlerTest {
         assertEquals(200, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("<SetInstanceProtectionResponse"));
         assertTrue(service.describeAutoScalingInstances(REGION, List.of("i-protected"))
-                .getFirst().isProtectedFromScaleIn());
+                .getFirst().instance().isProtectedFromScaleIn());
     }
 
     @Test
@@ -238,7 +417,7 @@ class AutoScalingQueryHandlerTest {
         assertEquals(200, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("<SetInstanceHealthResponse"));
         assertEquals("Unhealthy", service.describeAutoScalingInstances(REGION, List.of("i-unhealthy"))
-                .getFirst().getHealthStatus());
+                .getFirst().instance().getHealthStatus());
     }
 
     @Test
@@ -266,7 +445,7 @@ class AutoScalingQueryHandlerTest {
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("ValidationError"));
         assertEquals(false, service.describeAutoScalingInstances(REGION, List.of("i-flagless"))
-                .getFirst().isProtectedFromScaleIn(),
+                .getFirst().instance().isProtectedFromScaleIn(),
                 "a rejected request must not silently strip/apply protection");
     }
 
@@ -294,7 +473,7 @@ class AutoScalingQueryHandlerTest {
 
         assertEquals(400, response.getStatus());
         assertEquals(false, service.describeAutoScalingInstances(REGION, List.of("i-malformed"))
-                .getFirst().isProtectedFromScaleIn(),
+                .getFirst().instance().isProtectedFromScaleIn(),
                 "a malformed boolean must not silently coerce to false and succeed");
     }
 

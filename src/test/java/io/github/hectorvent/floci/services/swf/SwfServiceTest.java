@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.swf;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -18,11 +19,13 @@ import io.github.hectorvent.floci.services.swf.model.SwfHistoryEvent;
 import io.github.hectorvent.floci.services.swf.model.SwfWorkflowExecution;
 import io.github.hectorvent.floci.services.swf.model.SwfWorkflowType;
 import io.github.hectorvent.floci.testing.MutableClock;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.Mockito;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -425,6 +428,135 @@ class SwfServiceTest {
         SwfWorkflowExecution execution = service.describeWorkflowExecution(REGION, DOMAIN, "wf-timer", runId);
         assertEquals("t-1", lastAttribute(execution, "TimerFired", "timerId"));
         assertEquals(0, service.openTimerCount(execution));
+    }
+
+    @Test
+    void backgroundSweep_expiresTimersAcrossAccountsAndRegionsWithoutChangingRequestScope() {
+        RequestContext context = accountScopedService();
+        for (String account : List.of("111111111111", "222222222222")) {
+            context.setAccountId(account);
+            for (String region : List.of(REGION, "eu-west-1")) {
+                service.registerDomain(DOMAIN, "scope", "1", Map.of(), region);
+                service.registerWorkflowType(region, DOMAIN, workflowType("W", "1"));
+                service.startWorkflowExecution(new StartWorkflowExecutionRequest(region, DOMAIN,
+                        "same-workflow", "W", "1", null, null, null, null, null, null, null, null));
+                SwfDecisionTask task = service.pollForDecisionTask(region, DOMAIN, "tl", "d").orElseThrow();
+                service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(new Decision("StartTimer",
+                        Map.of("timerId", "same-timer", "startToFireTimeout",
+                                account.equals("111111111111") ? "1" : "30"))), null);
+            }
+        }
+        context.setAccountId(null); // The background thread has no request account.
+        clock.advance(Duration.ofSeconds(2));
+        service.sweep();
+        assertNull(context.getAccountId());
+        for (String account : List.of("111111111111", "222222222222")) {
+            context.setAccountId(account);
+            for (String region : List.of(REGION, "eu-west-1")) {
+                SwfWorkflowExecution execution = service.describeWorkflowExecution(
+                        region, DOMAIN, "same-workflow", null);
+                assertEquals(account.equals("111111111111") ? 1 : 0,
+                        execution.getEvents().stream().filter(e -> e.getEventType().equals("TimerFired")).count());
+                assertEquals(account.equals("111111111111"), execution.isDecisionTaskOutstanding());
+            }
+        }
+        context.setAccountId(null);
+        clock.advance(Duration.ofSeconds(30));
+        service.sweep();
+        service.sweep();
+        assertThrows(AwsException.class,
+                () -> service.describeWorkflowExecution(REGION, DOMAIN, "same-workflow", null));
+        for (String account : List.of("111111111111", "222222222222")) {
+            context.setAccountId(account);
+            for (String region : List.of(REGION, "eu-west-1")) {
+                assertEquals(1, service.getWorkflowExecutionHistory(region, DOMAIN,
+                        "same-workflow", null, false).stream()
+                        .filter(e -> e.getEventType().equals("TimerFired")).count());
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"TERMINATE", "REQUEST_CANCEL", "ABANDON"})
+    void backgroundWorkflowTimeout_keepsChildPolicyInOwningAccount(String policy) {
+        RequestContext context = accountScopedService();
+        Map<String, String> parents = new LinkedHashMap<>();
+        Map<String, String> children = new LinkedHashMap<>();
+        for (String account : List.of("111111111111", "222222222222")) {
+            context.setAccountId(account);
+            service.registerDomain(DOMAIN, "scope", "1", Map.of(), REGION);
+            SwfWorkflowType type = workflowType("W", "1");
+            type.setDefaultExecutionStartToCloseTimeout(account.equals("111111111111") ? "1" : "300");
+            type.setDefaultChildPolicy(policy);
+            service.registerWorkflowType(REGION, DOMAIN, type);
+            parents.put(account, start("parent"));
+            SwfDecisionTask task = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d").orElseThrow();
+            service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(new Decision(
+                    "StartChildWorkflowExecution", Map.of("workflowId", "child",
+                    "workflowType", Map.of("name", "W", "version", "1"),
+                    "executionStartToCloseTimeout", "300", "taskList", Map.of("name", "child")))), null);
+            children.put(account, service.describeWorkflowExecution(REGION, DOMAIN, "child", null).getRunId());
+        }
+        context.setAccountId(null);
+        clock.advance(Duration.ofSeconds(2));
+        service.sweep();
+        assertNull(context.getAccountId());
+        context.setAccountId("111111111111");
+        assertEquals("TIMED_OUT", service.describeWorkflowExecution(REGION, DOMAIN, "parent", parents.get("111111111111")).getCloseStatus());
+        SwfWorkflowExecution child = service.describeWorkflowExecution(REGION, DOMAIN, "child", children.get("111111111111"));
+        assertEquals(!policy.equals("TERMINATE"), child.isOpen());
+        assertEquals(policy.equals("REQUEST_CANCEL"), child.isCancelRequested());
+        context.setAccountId("222222222222");
+        assertTrue(service.describeWorkflowExecution(REGION, DOMAIN, "parent", null).isOpen());
+        child = service.describeWorkflowExecution(REGION, DOMAIN, "child", null);
+        assertTrue(child.isOpen());
+        assertFalse(child.isCancelRequested());
+        context.setAccountId(null);
+        assertThrows(AwsException.class,
+                () -> service.describeWorkflowExecution(REGION, DOMAIN, "child", null));
+    }
+
+    @Test
+    void backgroundChildTimeout_notifiesOnlyItsOwningParent() {
+        RequestContext context = accountScopedService();
+        for (String account : List.of("111111111111", "222222222222")) {
+            context.setAccountId(account);
+            service.registerDomain(DOMAIN, "scope", "1", Map.of(), REGION);
+            service.registerWorkflowType(REGION, DOMAIN, workflowType("W", "1"));
+            start("parent");
+            SwfDecisionTask task = service.pollForDecisionTask(REGION, DOMAIN, "tl", "d").orElseThrow();
+            service.respondDecisionTaskCompleted(task.getTaskToken(), List.of(new Decision(
+                    "StartChildWorkflowExecution", Map.of("workflowId", "child",
+                    "workflowType", Map.of("name", "W", "version", "1"),
+                    "executionStartToCloseTimeout", account.equals("111111111111") ? "1" : "300",
+                    "taskList", Map.of("name", "child")))), null);
+        }
+        context.setAccountId(null);
+        clock.advance(Duration.ofSeconds(2));
+        service.sweep();
+        for (String account : List.of("111111111111", "222222222222")) {
+            context.setAccountId(account);
+            SwfWorkflowExecution parent = service.describeWorkflowExecution(REGION, DOMAIN, "parent", null);
+            assertEquals(account.equals("111111111111") ? 1 : 0, parent.getEvents().stream()
+                    .filter(e -> e.getEventType().equals("ChildWorkflowExecutionTimedOut")).count());
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private RequestContext accountScopedService() {
+        RequestContext context = new RequestContext();
+        Instance<RequestContext> request = Mockito.mock(Instance.class);
+        Mockito.when(request.get()).thenReturn(context);
+        StorageFactory factory = new StorageFactory(null, null) {
+            @Override
+            public synchronized <V> AccountAwareStorageBackend<V> create(String serviceName,
+                    String fileName, TypeReference<Map<String, V>> typeReference) {
+                return new AccountAwareStorageBackend<>(new InMemoryStorage<>(), request, "000000000000");
+            }
+        };
+        service = new SwfService(factory, new RegionResolver(REGION, "000000000000"),
+                clock, recordingLambdaInvoker());
+        return context;
     }
 
     @Test

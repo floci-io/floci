@@ -409,16 +409,16 @@ public class SesTenantService implements SesTaggable {
             throw SmithyValidationErrors.badRequest(
                     SmithyValidationErrors.notNullWithoutValue("resourceArn"));
         }
-        String[] parts = resourceArn.split(":", 6);
-        if (parts.length < 6 || !"arn".equals(parts[0])) {
+        if (!AwsArnUtils.isArn(resourceArn)) {
             throw new AwsException("BadRequestException",
                     "Provided resource identifier is not an SES resource", 400);
         }
-        if (!"ses".equals(parts[2])) {
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(resourceArn);
+        if (!"ses".equals(parsed.service())) {
             throw new AwsException("BadRequestException",
                     "Provided ARN is not in SES resource ARN format", 400);
         }
-        String resource = parts[5];
+        String resource = parsed.resource();
         int slash = resource.indexOf('/');
         String type = slash < 0 ? resource : resource.substring(0, slash);
         if (!SUPPORTED_RESOURCE_TYPES.contains(type)) {
@@ -430,11 +430,11 @@ public class SesTenantService implements SesTaggable {
             throw new AwsException("BadRequestException",
                     "Provided resource identifier is not an SES resource", 400);
         }
-        if (!region.equals(parts[3])) {
+        if (!region.equals(parsed.region())) {
             throw new AwsException("BadRequestException",
                     "Resource <" + resourceArn + "> must be in the same region", 400);
         }
-        if (!accountId.equals(parts[4])) {
+        if (!accountId.equals(parsed.accountId())) {
             throw new AwsException("BadRequestException",
                     "Resource <" + resourceArn + "> must be in the same account", 400);
         }
@@ -560,7 +560,7 @@ public class SesTenantService implements SesTaggable {
 
     // Stored ARNs were validated by parseResourceArn, so the resource part always has a name segment.
     private static String resourceNameFromArn(String arn) {
-        String resource = arn.split(":", 6)[5];
+        String resource = AwsArnUtils.parse(arn).resource();
         return resource.substring(resource.indexOf('/') + 1);
     }
 

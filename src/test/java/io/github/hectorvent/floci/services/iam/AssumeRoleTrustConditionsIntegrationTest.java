@@ -53,9 +53,9 @@ class AssumeRoleTrustConditionsIntegrationTest {
                   "Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"sts:AssumeRole",
                   "Condition":{"StringEquals":{"sts:ExternalId":"expected-id"}}}]}""".formatted(TRUSTED_ACCOUNT));
 
-        assertTrustDenied(assumeRole(TRUSTED_ACCOUNT, role, "s", null), role);
-        assertTrustDenied(assumeRole(TRUSTED_ACCOUNT, role, "s", "other-id"), role);
-        assumeRole(TRUSTED_ACCOUNT, role, "s", "expected-id").then().statusCode(200);
+        assertTrustDenied(assumeRole(TRUSTED_ACCOUNT, role, "sx", null), role);
+        assertTrustDenied(assumeRole(TRUSTED_ACCOUNT, role, "sx", "other-id"), role);
+        assumeRole(TRUSTED_ACCOUNT, role, "sx", "expected-id").then().statusCode(200);
     }
 
     @Test
@@ -66,9 +66,9 @@ class AssumeRoleTrustConditionsIntegrationTest {
                   {"Effect":"Deny","Principal":{"AWS":"arn:aws:iam::%1$s:root"},"Action":"sts:AssumeRole",
                    "Condition":{"StringNotEquals":{"sts:ExternalId":"expected-id"}}}]}""".formatted(TRUSTED_ACCOUNT));
 
-        assertTrustDenied(assumeRole(TRUSTED_ACCOUNT, role, "s", null), role);
-        assertTrustDenied(assumeRole(TRUSTED_ACCOUNT, role, "s", "other-id"), role);
-        assumeRole(TRUSTED_ACCOUNT, role, "s", "expected-id").then().statusCode(200);
+        assertTrustDenied(assumeRole(TRUSTED_ACCOUNT, role, "sx", null), role);
+        assertTrustDenied(assumeRole(TRUSTED_ACCOUNT, role, "sx", "other-id"), role);
+        assumeRole(TRUSTED_ACCOUNT, role, "sx", "expected-id").then().statusCode(200);
     }
 
     @Test
@@ -98,8 +98,8 @@ class AssumeRoleTrustConditionsIntegrationTest {
         String trustsDefault = createRole(trustAccountRoot(DEFAULT_ACCOUNT));
         String trustsOwnAccount = createRole(trustAccountRoot(OTHER_ACCOUNT));
 
-        assertTrustDenied(assumeRole(accessKeyId, trustsDefault, "s", null), trustsDefault);
-        assumeRole(accessKeyId, trustsOwnAccount, "s", null).then().statusCode(200);
+        assertTrustDenied(assumeRole(accessKeyId, trustsDefault, "sx", null), trustsDefault);
+        assumeRole(accessKeyId, trustsOwnAccount, "sx", null).then().statusCode(200);
     }
 
     @Test
@@ -112,8 +112,8 @@ class AssumeRoleTrustConditionsIntegrationTest {
         String namesSomeoneElse = createRole(trustWithCondition(ownerRoot,
                 "{\"StringEquals\":{\"aws:username\":\"someone-else\"}}"));
 
-        assumeRole(accessKeyId, namesTheCaller, "s", null).then().statusCode(200);
-        assertTrustDenied(assumeRole(accessKeyId, namesSomeoneElse, "s", null), namesSomeoneElse);
+        assumeRole(accessKeyId, namesTheCaller, "sx", null).then().statusCode(200);
+        assertTrustDenied(assumeRole(accessKeyId, namesSomeoneElse, "sx", null), namesSomeoneElse);
     }
 
     @Test
@@ -127,10 +127,10 @@ class AssumeRoleTrustConditionsIntegrationTest {
         String onlySessions = createRole(trustWithCondition("*",
                 "{\"StringEquals\":{\"aws:PrincipalType\":\"AssumedRole\"}}"));
 
-        assumeRole(accessKeyId, onlyUsers, "s", null).then().statusCode(200);
+        assumeRole(accessKeyId, onlyUsers, "sx", null).then().statusCode(200);
         assertTrustDenied(assumeRoleWithSession(session, onlyUsers), onlyUsers);
         assumeRoleWithSession(session, onlySessions).then().statusCode(200);
-        assertTrustDenied(assumeRole(accessKeyId, onlySessions, "s", null), onlySessions);
+        assertTrustDenied(assumeRole(accessKeyId, onlySessions, "sx", null), onlySessions);
     }
 
     @Test
@@ -139,8 +139,8 @@ class AssumeRoleTrustConditionsIntegrationTest {
         String onlyTheRoot = createRole(trustWithCondition("*",
                 "{\"StringEquals\":{\"aws:PrincipalType\":\"Account\",\"aws:userid\":\"" + TRUSTED_ACCOUNT + "\"}}"));
 
-        assumeRole(TRUSTED_ACCOUNT, onlyTheRoot, "s", null).then().statusCode(200);
-        assertTrustDenied(assumeRole(accessKeyId, onlyTheRoot, "s", null), onlyTheRoot);
+        assumeRole(TRUSTED_ACCOUNT, onlyTheRoot, "sx", null).then().statusCode(200);
+        assertTrustDenied(assumeRole(accessKeyId, onlyTheRoot, "sx", null), onlyTheRoot);
     }
 
     @Test
@@ -150,14 +150,14 @@ class AssumeRoleTrustConditionsIntegrationTest {
         createCallerRole(callerRole, "/");
         Session session = assumeCallerRole(callerRole, "/");
         // A user's aws:userid is its own unique id; a session's is role-id:session-name, and the
-        // session below was issued under the name s.
+        // session below was issued under the name sx.
         String userIds = createRole(trustWithCondition("*", "{\"StringLike\":{\"aws:userid\":\"AIDA*\"}}"));
-        String sessionIds = createRole(trustWithCondition("*", "{\"StringLike\":{\"aws:userid\":\"AROA*:s\"}}"));
+        String sessionIds = createRole(trustWithCondition("*", "{\"StringLike\":{\"aws:userid\":\"AROA*:sx\"}}"));
 
-        assumeRole(accessKeyId, userIds, "s", null).then().statusCode(200);
+        assumeRole(accessKeyId, userIds, "sx", null).then().statusCode(200);
         assertTrustDenied(assumeRoleWithSession(session, userIds), userIds);
         assumeRoleWithSession(session, sessionIds).then().statusCode(200);
-        assertTrustDenied(assumeRole(accessKeyId, sessionIds, "s", null), sessionIds);
+        assertTrustDenied(assumeRole(accessKeyId, sessionIds, "sx", null), sessionIds);
     }
 
     @Test
@@ -246,7 +246,7 @@ class AssumeRoleTrustConditionsIntegrationTest {
             .formParam("Action", "AssumeRole")
             .formParam("Version", "2011-06-15")
             .formParam("RoleArn", "arn:aws:iam::" + ROLE_ACCOUNT + ":role/" + role)
-            .formParam("RoleSessionName", "s")
+            .formParam("RoleSessionName", "sx")
             .header("Authorization", auth(session.accessKeyId(), "sts"))
             .header("X-Amz-Security-Token", session.sessionToken())
         .when().post("/");
@@ -265,7 +265,7 @@ class AssumeRoleTrustConditionsIntegrationTest {
             .formParam("Action", "AssumeRole")
             .formParam("Version", "2011-06-15")
             .formParam("RoleArn", "arn:aws:iam::" + ROLE_ACCOUNT + ":role/" + role)
-            .formParam("RoleSessionName", "s")
+            .formParam("RoleSessionName", "sx")
         .when().post("/");
     }
 

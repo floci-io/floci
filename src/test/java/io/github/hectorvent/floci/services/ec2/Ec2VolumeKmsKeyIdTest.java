@@ -56,7 +56,7 @@ class Ec2VolumeKmsKeyIdTest {
                 mock(Ec2PortForwardManager.class), new AmiImageResolver(imageCatalog), imageCatalog,
                 new Ec2InstanceTypeCatalog(), new MemoryFactory());
         handler = new Ec2QueryHandler(service, mock(EmulatorConfig.class), mock(FlowLogService.class),
-                mock(Ec2EbsEncryptionService.class), mock(Ec2SnapshotBlockPublicAccessService.class),
+                mock(Ec2EbsEncryptionService.class), mock(Ec2BlockPublicAccessService.class),
                 mock(Ec2IpamService.class), new RegionResolver(REGION, "000000000000"));
     }
 

@@ -574,17 +574,30 @@ class ReposiliteSidecarClientTest {
     }
 
     @Test
-    void packageExistsReflectsAGetResponseOnTheGroupArtifactDirectory() {
-        server.createContext("/dom--repo/com/example/present/", exchange -> respond(exchange, 200, ""));
-        server.createContext("/dom--repo/com/example/absent/", exchange -> respond(exchange, 404, ""));
+    void packageExistsReflectsWhetherTheGroupArtifactDirectoryHasAVersionSubdirectory() {
+        server.createContext("/api/maven/details/dom--repo/com/example/present/",
+                exchange -> respond(exchange, 200, "{\"files\":["
+                        + "{\"name\":\"1.0\",\"type\":\"DIRECTORY\"}]}"));
+        server.createContext("/api/maven/details/dom--repo/com/example/absent/", exchange -> respond(exchange, 404,
+                "{\"status\":404,\"message\":\"File not found\"}"));
 
         assertTrue(client.packageExists("dom--repo", "dom", "repo", "com.example", "present"));
         assertFalse(client.packageExists("dom--repo", "dom", "repo", "com.example", "absent"));
     }
 
     @Test
+    void packageExistsIsFalseForAGroupArtifactDirectoryThatHasOnlyAMergedMetadataFileAndNoRealVersion() {
+        server.createContext("/api/maven/details/dom--repo/com/example/metadata-only/",
+                exchange -> respond(exchange, 200, "{\"files\":["
+                        + "{\"name\":\"maven-metadata.xml\",\"type\":\"FILE\"}]}"));
+
+        assertFalse(client.packageExists("dom--repo", "dom", "repo", "com.example", "metadata-only"));
+    }
+
+    @Test
     void packageExistsThrowsRatherThanReportingAbsentOnASidecarServerError() {
-        server.createContext("/dom--repo/com/example/broken/", exchange -> respond(exchange, 500, ""));
+        server.createContext("/api/maven/details/dom--repo/com/example/broken/", exchange -> respond(exchange, 500,
+                "{\"status\":500,\"message\":\"internal error\"}"));
 
         assertThrows(IllegalStateException.class, () -> client.packageExists("dom--repo", "dom", "repo",
                 "com.example", "broken"));
@@ -786,6 +799,273 @@ class ReposiliteSidecarClientTest {
         assertEquals(List.of("1.0", "2.0-SNAPSHOT"), XmlParser.extractAll(xml, "version"));
         assertEquals("2.0-SNAPSHOT", XmlParser.extractFirst(xml, "latest", null));
         assertEquals("1.0", XmlParser.extractFirst(xml, "release", null));
+    }
+
+    @Test
+    void mergeExternalConnectionReleaseVersionsCreatesMetadataFromTheExternalSourceWhenNoneExistsLocally() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 404, "");
+            } else if (metadataPath.equals(exchange.getRequestURI().getPath())) {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            } else {
+                respond(exchange, 200, "");
+            }
+        });
+        String externalXml = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.2</latest><release>1.2</release><versions><version>1.0</version>"
+                + "<version>1.1</version><version>1.2</version></versions></versioning></metadata>";
+
+        boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+
+        assertTrue(merged);
+        String xml = new String(putBody.get(), StandardCharsets.UTF_8);
+        assertEquals("com.example", XmlParser.extractFirst(xml, "groupId", null));
+        assertEquals("a", XmlParser.extractFirst(xml, "artifactId", null));
+        assertEquals("1.2", XmlParser.extractFirst(xml, "latest", null));
+        assertEquals("1.2", XmlParser.extractFirst(xml, "release", null));
+        assertEquals(List.of("1.0", "1.1", "1.2"), XmlParser.extractAll(xml, "version"));
+    }
+
+    @Test
+    void mergeExternalConnectionReleaseVersionsWritesMatchingSha1AndMd5Checksums() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        AtomicReference<byte[]> sha1Body = new AtomicReference<>();
+        AtomicReference<byte[]> md5Body = new AtomicReference<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 404, "");
+            } else if (metadataPath.equals(exchange.getRequestURI().getPath())) {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            } else {
+                respond(exchange, 200, "");
+            }
+        });
+        server.createContext(metadataPath + ".sha1", exchange -> {
+            sha1Body.set(exchange.getRequestBody().readAllBytes());
+            respond(exchange, 200, "");
+        });
+        server.createContext(metadataPath + ".md5", exchange -> {
+            md5Body.set(exchange.getRequestBody().readAllBytes());
+            respond(exchange, 200, "");
+        });
+        String externalXml = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions>"
+                + "</versioning></metadata>";
+
+        client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+
+        assertEquals(Digests.sha1Hex(putBody.get()), new String(sha1Body.get(), StandardCharsets.UTF_8));
+        assertEquals(Digests.md5Hex(putBody.get()), new String(md5Body.get(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void mergeExternalConnectionReleaseVersionsExcludesAVersionTheVersionAllowedPredicateRejects() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 404, "");
+            } else if (metadataPath.equals(exchange.getRequestURI().getPath())) {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            } else {
+                respond(exchange, 200, "");
+            }
+        });
+        String externalXml = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.1</latest><release>1.1</release><versions><version>1.0</version>"
+                + "<version>1.1</version></versions></versioning></metadata>";
+
+        // Simulates a version this repository already knows is Disposed: a public repository's
+        // own metadata has no idea that happened, so a merge must never let a rejected version
+        // back in just because the public source still lists it.
+        boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> !v.equals("1.1"));
+
+        assertTrue(merged);
+        String xml = new String(putBody.get(), StandardCharsets.UTF_8);
+        assertEquals(List.of("1.0"), XmlParser.extractAll(xml, "version"));
+        assertEquals("1.0", XmlParser.extractFirst(xml, "latest", null));
+        assertEquals("1.0", XmlParser.extractFirst(xml, "release", null));
+    }
+
+    /**
+     * {@link io.github.hectorvent.floci.services.codeartifact.ReposiliteSidecarClient#fetchArtifact}
+     * returns {@code empty()} for a transient server error too, not just a confirmed 404: a merge
+     * that read the existing local metadata through that method could mistake the error for "no
+     * local metadata yet" and silently replace a real, locally-published package's {@code latest}/
+     * {@code release} with the external source's own guess at them. The merge must surface the
+     * failure instead.
+     */
+    @Test
+    void mergeExternalConnectionReleaseVersionsThrowsOnATransientReadErrorInsteadOfTreatingItAsMissing() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        server.createContext("/dom--repo/com/example/a/maven-metadata.xml", exchange -> respond(exchange, 500, ""));
+        String externalXml = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions>"
+                + "</versioning></metadata>";
+
+        assertThrows(IllegalStateException.class, () -> client.mergeExternalConnectionReleaseVersions("dom--repo",
+                "com.example", "a", externalXml.getBytes(StandardCharsets.UTF_8), v -> true));
+    }
+
+    /**
+     * A locally-published version has no reliable way to be compared against whatever the public
+     * repository's own metadata declares as its latest/release (Maven version strings don't sort
+     * by any universal rule), so a merge must only ever add the versions the local copy doesn't
+     * already have, never move {@code latest}/{@code release} away from what a real local publish
+     * already recorded.
+     */
+    @Test
+    void mergeExternalConnectionReleaseVersionsAppendsMissingVersionsWithoutOverridingAnExistingLocalLatest() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>2.0</latest><release>2.0</release><versions><version>2.0</version></versions>"
+                + "<lastUpdated>20260101000000</lastUpdated></versioning></metadata>";
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else if (metadataPath.equals(exchange.getRequestURI().getPath())) {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            } else {
+                respond(exchange, 200, "");
+            }
+        });
+        String externalXml = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.1</latest><release>1.1</release><versions><version>1.0</version>"
+                + "<version>1.1</version></versions></versioning></metadata>";
+
+        boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+
+        assertTrue(merged);
+        String xml = new String(putBody.get(), StandardCharsets.UTF_8);
+        assertEquals(List.of("2.0", "1.0", "1.1"), XmlParser.extractAll(xml, "version"));
+        assertEquals("2.0", XmlParser.extractFirst(xml, "latest", null));
+        assertEquals("2.0", XmlParser.extractFirst(xml, "release", null));
+    }
+
+    @Test
+    void mergeExternalConnectionReleaseVersionsFiltersOutSnapshotVersionsFromTheExternalSource() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 404, "");
+            } else if (metadataPath.equals(exchange.getRequestURI().getPath())) {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            } else {
+                respond(exchange, 200, "");
+            }
+        });
+        String externalXml = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.1-SNAPSHOT</latest><versions><version>1.0</version>"
+                + "<version>1.1-SNAPSHOT</version></versions></versioning></metadata>";
+
+        boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+
+        assertTrue(merged);
+        String xml = new String(putBody.get(), StandardCharsets.UTF_8);
+        assertEquals(List.of("1.0"), XmlParser.extractAll(xml, "version"));
+        assertEquals("1.0", XmlParser.extractFirst(xml, "latest", null));
+    }
+
+    @Test
+    void mergeExternalConnectionReleaseVersionsIsANoOpWhenEveryExternalVersionIsAlreadyListedLocally() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions>"
+                + "<lastUpdated>20260101000000</lastUpdated></versioning></metadata>";
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        AtomicReference<byte[]> putBody = new AtomicReference<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else if (metadataPath.equals(exchange.getRequestURI().getPath())) {
+                putBody.set(exchange.getRequestBody().readAllBytes());
+                respond(exchange, 200, "");
+            } else {
+                respond(exchange, 200, "");
+            }
+        });
+        String externalXml = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions></"
+                + "versioning></metadata>";
+
+        boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+
+        assertFalse(merged);
+        assertNull(putBody.get());
+    }
+
+    /**
+     * Raised by Greptile's review: a prior attempt whose metadata write succeeded but whose
+     * checksum write then failed would otherwise leave a stale checksum in place forever, since
+     * every later request for this exact package also finds nothing new to add and takes this
+     * same no-op path. The repair must happen every time this path is taken, not just once.
+     */
+    @Test
+    void mergeExternalConnectionReleaseVersionsRepairsChecksumsEvenWhenItIsANoOp() {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        String existing = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions>"
+                + "<lastUpdated>20260101000000</lastUpdated></versioning></metadata>";
+        String metadataPath = "/dom--repo/com/example/a/maven-metadata.xml";
+        AtomicReference<byte[]> sha1Body = new AtomicReference<>();
+        AtomicReference<byte[]> md5Body = new AtomicReference<>();
+        server.createContext(metadataPath, exchange -> {
+            if ("GET".equals(exchange.getRequestMethod())) {
+                respond(exchange, 200, existing);
+            } else {
+                respond(exchange, 200, "");
+            }
+        });
+        server.createContext(metadataPath + ".sha1", exchange -> {
+            sha1Body.set(exchange.getRequestBody().readAllBytes());
+            respond(exchange, 200, "");
+        });
+        server.createContext(metadataPath + ".md5", exchange -> {
+            md5Body.set(exchange.getRequestBody().readAllBytes());
+            respond(exchange, 200, "");
+        });
+        String externalXml = "<metadata><groupId>com.example</groupId><artifactId>a</artifactId><versioning>"
+                + "<latest>1.0</latest><release>1.0</release><versions><version>1.0</version></versions></"
+                + "versioning></metadata>";
+
+        boolean merged = client.mergeExternalConnectionReleaseVersions("dom--repo", "com.example", "a",
+                externalXml.getBytes(StandardCharsets.UTF_8), v -> true);
+
+        assertFalse(merged);
+        assertEquals(Digests.sha1Hex(existing.getBytes(StandardCharsets.UTF_8)),
+                new String(sha1Body.get(), StandardCharsets.UTF_8));
+        assertEquals(Digests.md5Hex(existing.getBytes(StandardCharsets.UTF_8)),
+                new String(md5Body.get(), StandardCharsets.UTF_8));
     }
 
     /**

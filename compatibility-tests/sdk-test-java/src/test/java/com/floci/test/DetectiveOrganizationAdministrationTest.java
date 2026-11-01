@@ -2,6 +2,7 @@ package com.floci.test;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.detective.DetectiveClient;
 import software.amazon.awssdk.services.detective.model.Account;
 import software.amazon.awssdk.services.detective.model.CreateMembersResponse;
@@ -14,6 +15,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("Detective organization administration")
+@ResourceLock("organizations")
 class DetectiveOrganizationAdministrationTest {
     private static final String MANAGEMENT_ACCOUNT = "222222222222";
     private static final String ADMIN_ACCOUNT = MANAGEMENT_ACCOUNT;

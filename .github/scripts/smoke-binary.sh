@@ -44,8 +44,17 @@ trap cleanup EXIT
 
 fail() {
     echo "FAIL: $*" >&2
-    echo "--- floci log (last 60 lines) ---" >&2
-    tail -n 60 "$LOG" >&2 || true
+    # The first exception of a failed startup is at the top of the log and its cause chain at the
+    # bottom, so a long log shows both ends.
+    if [ "$(wc -l < "$LOG" 2>/dev/null || echo 0)" -le 200 ]; then
+        echo "--- floci log ---" >&2
+        cat "$LOG" >&2 || true
+    else
+        echo "--- floci log (first 100 lines) ---" >&2
+        head -n 100 "$LOG" >&2 || true
+        echo "--- floci log (last 100 lines) ---" >&2
+        tail -n 100 "$LOG" >&2 || true
+    fi
     exit 1
 }
 

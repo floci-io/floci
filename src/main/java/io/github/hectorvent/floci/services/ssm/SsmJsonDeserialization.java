@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ssm;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.JsonNumberCoercion;
 
 final class SsmJsonDeserialization {
     private SsmJsonDeserialization() {
@@ -14,14 +15,7 @@ final class SsmJsonDeserialization {
         if (!node.isNumber() || Double.isNaN(node.doubleValue())) {
             throw serializationException(node, "an Integer");
         }
-        double value = node.doubleValue();
-        if (value >= Integer.MAX_VALUE) {
-            return Integer.MAX_VALUE;
-        }
-        if (value <= Integer.MIN_VALUE) {
-            return Integer.MIN_VALUE;
-        }
-        return node.intValue();
+        return JsonNumberCoercion.truncateAndClampToInt(node);
     }
 
     static AwsException serializationException(JsonNode node, String targetDescription) {

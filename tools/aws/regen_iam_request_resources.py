@@ -82,7 +82,12 @@ past its format, and whose service checks it without one: Step Functions checks 
 on its state machine's ARN. `MINTED_IDS` are the resource types whose service follows the name their
 format ends in with an id it mints, `/<id>`, which the format leaves out and a request naming one by
 its name does not give: EventBridge's connections and API destinations, whose stored ARN the reader
-asks the service for, or else checks with that id open.
+asks the service for, or else checks with that id open. `FOUND_BY` are the resource types whose ARN is
+all an id their service mints, which a request names by members the ARN does not hold, with those
+members: each operation whose request has them all names the type by them (`find`), and the reader
+asks the service for the ARN they find, or else checks the ARN with its id open, as for a create; an
+Application Auto Scaling scalable target, `scalable-target/<id>`, is named by its service namespace,
+resource id and scalable dimension.
 
 The Service Reference is live rather than a pinned dependency, so a fresh generation is not
 byte-identical. The two gates split along the sources:
@@ -119,8 +124,10 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 
 # The namespaces read, in batches: each moves here from NOT_COVERED with the tests that show its ARNs
 # are the ones its handlers mint.
-NAMESPACES = ("acm", "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "ecr", "elasticloadbalancing",
-              "events", "firehose", "kinesisanalytics", "servicediscovery", "states")
+NAMESPACES = ("acm", "application-autoscaling", "athena", "bcm-data-exports", "bcm-pricing-calculator", "budgets", "ce", "cloudtrail",
+              "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "cur", "ecr", "elasticloadbalancing",
+              "events", "firehose", "globalaccelerator", "kinesisanalytics", "servicediscovery", "servicequotas",
+              "states", "textract", "timestream-influxdb", "translate")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.
@@ -134,8 +141,8 @@ CLIENTS_NOT_READ: dict[str, str] = {
 }
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ("dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes", "resource-groups",
-              "s3", "scheduler", "secretsmanager", "sns", "sqs", "ssm", "sts")
+HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes",
+              "resource-groups", "s3", "scheduler", "secretsmanager", "sns", "sqs", "ssm", "sts")
 
 _LATER = "not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
 _REST = "REST: its requests name their resources in the path, which RequestResources does not read yet"
@@ -145,41 +152,35 @@ NOT_COVERED: dict[str, str] = {
     "access-analyzer": _REST,
     "account": _REST,
     "airflow": _REST,
-    "apigateway": _REST,
     "app-integrations": _REST,
     "appconfig": _REST,
-    "application-autoscaling": "not read yet: a scalable target's ARN ends in an id the service mints, "
-                               "`scalable-target/<id>`, while its requests name the target by ServiceNamespace, "
-                               "ResourceId and ScalableDimension, so its resource is the stored ARN those three "
-                               "find, which RequestResources has no lookup for yet; read as a member, ResourceId "
-                               "would fill that id",
     "appsync": _REST,
     "aps": _REST,
-    "athena": _LATER,
-    "autoscaling": _LATER,
+    "autoscaling": "not read yet: AWS's group and launch configuration ARNs carry an id the service mints, "
+                   "`autoScalingGroup:<id>:autoScalingGroupName/<name>`, while Floci mints `autoScalingGroup:<name>`, "
+                   "which other services (ECS capacity providers) read back; the mint is fixed first",
     "aws-marketplace": _LATER,
     "backup": _REST,
     "batch": _REST,
-    "bcm-data-exports": _LATER,
-    "bcm-pricing-calculator": _LATER,
-    "bedrock": _LATER,
     "bedrock-agentcore": _REST,
-    "budgets": _LATER,
-    "ce": _LATER,
     "cloudformation": _LATER,
     "cloudfront": _REST,
-    "cloudhsm": _LATER,
-    "cloudtrail": _LATER,
+    "cloudhsm": "not read yet: its ARN formats end in ${CloudHsmClusterInstanceName} and "
+                "${CloudHsmBackupInstanceName}, names, while its requests give ClusterId and BackupId, ids, which the "
+                "rule does not fill a name from, so nearly every operation needs a correction",
     "cloudwatch": _LATER,
     "codeartifact": _REST,
-    "codedeploy": _LATER,
     "codeguru-reviewer": _REST,
+    "codedeploy": "not read yet: the Service Reference gives an on-premises instance's ARN as "
+                  "`instance:${InstanceName}`, while the CodeDeploy permissions reference gives "
+                  "arn:aws:codedeploy:region:account-id:instance/instance-ID and AWS's GetOnPremisesInstance example "
+                  "answers instance/<name>_<id>, an id the service mints after the name; reading it needs that format "
+                  "corrected",
     "comprehend": _LATER,
     "config": _LATER,
     "connect": _REST,
     "controlcatalog": _REST,
     "controltower": _REST,
-    "cur": _LATER,
     "datasync": _LATER,
     "detective": _REST,
     "dlm": _REST,
@@ -194,7 +195,6 @@ NOT_COVERED: dict[str, str] = {
     "es": _REST,
     "execute-api": _REST,
     "fis": _REST,
-    "globalaccelerator": _LATER,
     "glue": _LATER,
     "guardduty": _REST,
     "identitystore": _LATER,
@@ -212,7 +212,9 @@ NOT_COVERED: dict[str, str] = {
     "rds": _LATER,
     "rds-data": _REST,
     "redshift": _LATER,
-    "redshift-data": _LATER,
+    "redshift-data": "not read yet: a serverless workgroup's ARN ends in an id the service mints, `workgroup/<id>`, "
+                     "while its requests name the workgroup by WorkgroupName, a name or an ARN, so its resource is the "
+                     "stored ARN that name finds, a FOUND_BY type its service does not look up yet",
     "redshift-serverless": _LATER,
     "rekognition": _LATER,
     "resource-explorer-2": _REST,
@@ -223,19 +225,24 @@ NOT_COVERED: dict[str, str] = {
     "s3vectors": _REST,
     "sagemaker": _LATER,
     "securityhub": _REST,
-    "servicecatalog": _LATER,
-    "servicequotas": _LATER,
+    "servicecatalog": "not read yet: CreatePortfolioShare, UpdatePortfolioShare and DeletePortfolioShare give in "
+                      "AccountId the account a portfolio is shared with, which the rule reads as the portfolio's; a "
+                      "portfolio or product imported from another account keeps its owner's account in its ARN while "
+                      "requests name it by its id alone; and AppRegistry's applications and attribute groups are "
+                      "named in the path",
     "ses": _LATER,
     "signin": _REST,
     "sso": _LATER,
     "sso-oauth": _REST,
-    "swf": _LATER,
-    "textract": _LATER,
-    "timestream-influxdb": _LATER,
+    "swf": "not read yet: the Service Reference gives a domain's ARN no Region, `swf::<account>:/domain/<name>`, "
+           "while the SWF Developer Guide gives it as arn:aws:swf:Region:AccountID:/domain/DomainName, as Floci mints "
+           "it; reading it needs that format corrected",
     "transcribe": _LATER,
     "transfer": _LATER,
-    "translate": _LATER,
-    "verifiedpermissions": _LATER,
+    "verifiedpermissions": "not read yet: a policyStoreId may name its store by an alias, `policy-store-alias/<name>`, "
+                           "which AWS authorizes as the action on the store the alias points to and "
+                           "GetPolicyStoreAlias on the alias, and an aliasName carries the `policy-store-alias/` its "
+                           "format already gives; reading it needs both",
     "wafv2": _LATER,
 }
 
@@ -249,12 +256,23 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
         {"type": "loadbalancer/net/", "fill": {"LoadBalancerName": "Name"}, "when": {"Type": ["network"]}},
     ], "the classic API names its load balancer by LoadBalancerName; the v2 API by Name, its type by Type, "
        "an application load balancer when it gives none, which the rule cannot tell apart"),
+    **{f"budgets:{operation}": ([{"type": "budget", "fill": {"BudgetName": member}}],
+                                f"the request names the budget by {member} ('The name of a budget'), which the rule "
+                                "does not read inside a structure; its BillingViewArn is a billing view's ARN "
+                                "(arn:aws:billing::<account>:billingview/...), never a budget's")
+       for operation, member in (("CreateBudget", "Budget.BudgetName"), ("UpdateBudget", "NewBudget.BudgetName"))},
     **{f"codebuild:{operation}": ([{"type": "project", "fill": {"ProjectName": member}, "before": ":"}],
                                   "a build is checked on its project (the CodeBuild User Guide's permissions reference "
                                   "gives each of these the resource project/project-name), which its id names before "
                                   "its ':' (CODEBUILD_BUILD_ID, for example codebuild-demo-project:b1e6661e-...)")
        for operation, member in (("BatchDeleteBuilds", "ids[]"), ("BatchGetBuilds", "ids[]"), ("RetryBuild", "id"),
                                  ("StopBuild", "id"))},
+    **{f"cur:{operation}": ([{"type": "cur", "fill": {"ReportName": member}}],
+                            f"the request names the report by {member} ('The name of the report that you want to "
+                            "create') alone; its ReportDefinition's BillingViewArn, which the rule reads as a report "
+                            "definition's ARN, is a billing view's (arn:aws:billing::<payer account>:billingview/...)")
+       for operation, member in (("ModifyReportDefinition", "ReportName"),
+                                 ("PutReportDefinition", "ReportDefinition.ReportName"))},
     **{f"codepipeline:{operation}": ([{"type": "pipeline", "fill": {"PipelineName": "pipeline.name"}}],
                                      "the request names the pipeline by its pipeline structure's name, which the "
                                      "rule does not read inside a structure; its roleArn is the role CodePipeline "
@@ -311,6 +329,67 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
                               "Floci takes Step Functions Local's <stateMachineArn>#<test case> and runs the machine "
                               "the part before the # names, so that part is the one checked")
        for operation in ("StartExecution", "StartSyncExecution")},
+    **{f"athena:{operation}": ([{"type": "workgroup", "fill": {"WorkGroupName": "WorkGroup"},
+                                 "absent": {"WorkGroup": "primary"}}],
+                               "a request naming no workgroup acts in the primary one (ListQueryExecutions: 'If a "
+                               "workgroup is not specified, returns a list of query execution IDs for the primary "
+                               "workgroup', ListNamedQueries alike; the user guide has users without their own "
+                               "workgroup 'continue running queries in the primary workgroup'), and Floci's "
+                               "GetWorkGroup answers the primary one for a request naming none")
+       for operation in ("GetWorkGroup", "ListNamedQueries", "ListQueryExecutions", "StartQueryExecution")},
+    "athena:GetDataCatalog": ([{"type": "datacatalog", "fill": {"DataCatalogName": "Name"},
+                                "absent": {"Name": "AwsDataCatalog"}}],
+                              "Floci's GetDataCatalog answers the account's Glue Data Catalog, AwsDataCatalog, for a "
+                              "request naming no catalog, so that is the one checked"),
+    **{f"athena:{operation}": ([{"type": "datacatalog", "fill": {"DataCatalogName": "CatalogName"},
+                                 "absent": {"CatalogName": "AwsDataCatalog"}},
+                                {"type": "datacatalog", "fill": {}, "fixed": {"DataCatalogName": "AwsDataCatalog"}}],
+                               "Floci's handler reads the account's Glue Data Catalog, AwsDataCatalog, whichever "
+                               "catalog CatalogName names, so that one is checked as well as the one named, and a "
+                               "request naming none is read as naming it")
+       for operation in ("GetTableMetadata", "ListDatabases", "ListTableMetadata")},
+    **{f"ce:{operation}": ([], "Floci serves no billing views: it answers the account's costs whichever view "
+                               "BillingViewArn names, so the request is checked on `*`, as one naming no view, and a "
+                               "grant scoped to a view does not reach them")
+       for operation in ("GetCostAndUsage", "GetCostAndUsageComparisons", "GetCostAndUsageWithResources",
+                         "GetCostCategories", "GetCostComparisonDrivers", "GetCostForecast", "GetDimensionValues",
+                         "GetTags", "GetUsageForecast")},
+    "bcm-data-exports:CreateExport": ([], "its Export.ExportArn is the ARN 'for this export', the one the request "
+                                          "creates, never a billing view's or a table's, although its pattern takes "
+                                          "any bcm-data-exports ARN, a table's included; the request names its table "
+                                          "in its query statement and its table configurations' keys, which the rule "
+                                          "does not read"),
+    **{f"cloudtrail:{operation}": ([{"type": "trail", "fill": {"TrailName": "Name"}}],
+                                   "the request names the trail by a bare Name, 'the name or the CloudTrail ARN of "
+                                   "the trail', which the rule reads only for an operation named after the type")
+       for operation in ("GetTrailStatus", "StartLogging", "StopLogging")},
+    **{f"cloudtrail:{operation}": ([{"types": ["channel", "dashboard", "eventdatastore", "trail"], "arn": member}],
+                                   f"the request names the resource by its ARN in {member} ('the ARN of the trail, "
+                                   "event data store, dashboard, or channel'), whose name does not end in Arn")
+       for operation, member in (("AddTags", "ResourceId"), ("ListTags", "ResourceIdList[]"),
+                                 ("RemoveTags", "ResourceId"))},
+    **{f"cloudtrail:{operation}": ([{"type": "dashboard", "fill": {"DashboardName": "DashboardId"}}],
+                                   "the request names the dashboard by DashboardId, 'The name or ARN for the "
+                                   "dashboard', which the rule does not take for a name")
+       for operation in ("DeleteDashboard", "GetDashboard", "StartDashboardRefresh", "UpdateDashboard")},
+    **{f"ce:{operation}": ([{"types": [kind], "arn": f"{member}[]"}],
+                           f"the request names the {noun} by the ARNs in {member} ('A list of cost anomaly {noun} "
+                           "ARNs'), whose name does not end in Arn" + extra)
+       for operation, member, kind, noun, extra in (
+           ("GetAnomalyMonitors", "MonitorArnList", "anomalymonitor", "monitor", ""),
+           ("GetAnomalySubscriptions", "SubscriptionArnList", "anomalysubscription", "subscription",
+            "; its MonitorArn narrows them to a monitor's, an anomaly monitor's ARN, never a subscription's"))},
+    "timestream-influxdb:RebootDbCluster": ([
+        {"type": "db-cluster", "fill": {"DbClusterId": "dbClusterId"}},
+        {"type": "db-instance", "fill": {"DbInstanceIdentifier": "instanceIds[]"}},
+    ], "the request names the cluster's instances to reboot by instanceIds ('A list of service-generated unique DB "
+       "Instance Ids belonging to the DB Cluster to reboot'), ids the rule does not take for an identifier"),
+    "globalaccelerator:ListCustomRoutingPortMappings": ([{"types": ["accelerator"], "arn": "AcceleratorArn"}],
+                                                        "its EndpointGroupArn narrows the mappings to an endpoint "
+                                                        "group of the accelerator, whose ARN extends the "
+                                                        "accelerator's (accelerator/<id>/listener/<id>/"
+                                                        "endpoint-group/<id>) and so matches the accelerator's "
+                                                        "format, which the action acts on alone"),
 }
 
 # Resource types whose ARN a request may give with a qualifier, one more `:<name>` past its format, which their
@@ -330,6 +409,19 @@ MINTED_IDS: dict[str, str] = {
     "events:api-destination": "EventBridge mints an API destination's ARN as api-destination/<name>/<id> "
                               "(botocore's ApiDestinationArn pattern ends in api-destination/<name>/<id>), "
                               "as it does a connection's",
+}
+
+# Resource types whose ARN is all an id their service mints, which a request names by members the ARN does not
+# hold, the members in the order the service reads them, and why: an operation whose request has them all names the
+# type by them, and the reader asks the service for the ARN they find.
+FOUND_BY: dict[str, tuple[list[str], str]] = {
+    "application-autoscaling:ScalableTarget": (
+        ["ServiceNamespace", "ResourceId", "ScalableDimension"],
+        "a scalable target's ARN ends in its unique id, scalable-target/<id> ('The unique ID "
+        "(1234abcd56ab78cd901ef1234567890ab123) is a value assigned by Application Auto Scaling to the scalable "
+        "target', Application Auto Scaling User Guide), which the reference names ${ResourceId}, while its requests "
+        "name the target by ServiceNamespace, ResourceId and ScalableDimension; ResourceId is the target's "
+        "resource (service/<cluster>/<service>), not that id"),
 }
 
 # The variables of an ARN format the account, partition and Region fill.
@@ -682,7 +774,7 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     if operation in CORRECTIONS:
         resources = CORRECTIONS[operation][0]
     else:
-        resources = resources_for(operation, types, formats, members)
+        resources = with_found(resources_for(operation, types, formats, members), namespace_of(operation), members)
     resources = with_account(resources, formats, account_members(models, operation.split(":", 1)[1]))
     resources = with_arn_of(resources, formats, name_or_arn_members(models, operation.split(":", 1)[1]))
     resources = with_made(resources, operation, formats)
@@ -691,6 +783,19 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     if creates:
         entry["creates"] = creates
     return entry
+
+
+def with_found(resources: list[dict], namespace: str, members: dict[str, str]) -> list[dict]:
+    """The resources, each a `FOUND_BY` type fills named by the members its service finds it by instead, when the
+    request has them all, and left out when it does not: its variables are an id the request does not give."""
+    found = []
+    for resource in resources:
+        key = f"{namespace}:{resource.get('type')}"
+        if "fill" not in resource or key not in FOUND_BY:
+            found.append(resource)
+        elif all(members.get(member) == member for member in FOUND_BY[key][0]):
+            found.append({"type": resource["type"], "fill": {}, "find": list(FOUND_BY[key][0])})
+    return found
 
 
 def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> dict:
@@ -710,6 +815,8 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
     missing += [f"MINTED_IDS names {namespace}:{kind}, whose ARN format does not end in its one variable"
                 for namespace, kinds in minted.items() for kind in kinds
                 if kind in formats.get(namespace, {}) and not ONE_VARIABLE_RE.match(_resource(formats[namespace][kind]))]
+    missing += [f"FOUND_BY names {key}, no resource type with an ARN format of a namespace the file reads"
+                for key in sorted(FOUND_BY) if key.split(":", 1)[1] not in formats.get(key.split(":", 1)[0], {})]
     if missing:
         raise ValueError("; ".join(missing))
     operations = {}
@@ -806,6 +913,8 @@ FILL_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|\[]\.[A-Za-z][A-Za-z0-9_]
 ARN_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_]*(\[])?)?$")
 # A format's resource that is a literal and one variable, at its end.
 ONE_VARIABLE_RE = re.compile(r"^[^$]*\$\{\w+}$")
+# The keys a resource found by members does not take: it is read no other way, in the caller's account.
+FOUND_ONLY = {"absent", "arnOf", "account", "fixed", "before"}
 
 
 def validate(document: dict) -> list[str]:
@@ -869,7 +978,7 @@ def validate(document: dict) -> list[str]:
 def _resource_problems(operation: str, resource: object, types: set[str], formats: dict[str, str]) -> list[str]:
     if not isinstance(resource, dict) or not ({"types", "arn"} <= set(resource) <= {"types", "arn", "before", "made"}
                                               or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "absent", "arnOf", "account",
-                                                                                       "fixed", "made", "before"}):
+                                                                                       "fixed", "made", "before", "find"}):
         return [f"{operation} names {resource!r}, which is neither an ARN member nor a type's variables"]
     if resource.get("made", True) is not True:
         return [f"{operation} marks {resource!r} made by {resource['made']!r}, which is not true"]
@@ -884,6 +993,11 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
             return [f"{operation} reads an ARN at {resource['arn']!r}, which is no member"]
         return []
     fill = resource["fill"]
+    find = resource.get("find", [])
+    if not isinstance(find, list) or ("find" in resource and (not find or fill or set(resource) & FOUND_ONLY)) \
+            or not all(isinstance(path, str) and PATH_RE.match(path) and not path.endswith("[]") for path in find):
+        return [f"{operation} finds {kinds[0]} by {find!r}, which are no members of one value each, or beside a fill "
+                f"or members reading it otherwise"]
     variables = set(VARIABLE_RE.findall(formats[kinds[0]])) - KNOWN_VARIABLES
     if not isinstance(fill, dict) or set(fill) - variables or not all(
             isinstance(path, str) and FILL_PATH_RE.match(path) for path in fill.values()):

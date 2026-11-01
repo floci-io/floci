@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_partitions.py",
-    "botocore": "botocore 1.43.113 (local/aws/botocore)",
+    "botocore": "botocore 1.43.118 (local/aws/botocore)",
     "partitionsJsonVersion": "1.1",
     "endpointsJsonVersion": 3,
     "regionFlags": "aws-cdk region-info/lib/aws-entities.ts rules"
@@ -509,8 +509,6 @@
         "es",
         "events",
         "eventsv2",
-        "finspace",
-        "finspace-api",
         "firehose",
         "fms",
         "forecast",
@@ -677,7 +675,6 @@
         "tax",
         "textract",
         "thinclient",
-        "tnb",
         "transcribe",
         "transcribestreaming",
         "transfer",
@@ -1267,6 +1264,7 @@
         "appconfigdata",
         "application-autoscaling",
         "appstream2",
+        "aps",
         "arc-zonal-shift",
         "athena",
         "autoscaling",
@@ -1309,6 +1307,7 @@
         "guardduty",
         "health",
         "iam",
+        "kafka",
         "kinesis",
         "kinesisanalytics",
         "kinesisvideo",

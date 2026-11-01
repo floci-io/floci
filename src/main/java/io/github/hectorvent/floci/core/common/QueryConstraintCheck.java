@@ -46,10 +46,19 @@ import java.util.regex.Pattern;
  * the count is held to the list's own bounds with the value left out of the message. A structure
  * member arrives as {@code TaskPolicyArn.Arn} and is named {@code taskPolicyArn.arn}.
  *
- * <p>A map is refused when the file loads rather than passed over quietly: this package answers one
- * today in a form of its own, {@code Map keys must satisfy constraint: [...]} against the whole map,
- * and which of the two forms AWS answers for a Query map is a question no source here settles. So is
- * anything nested deeper than a list of structures or a structure of scalars.
+ * <p>A map arrives as entries numbered under its own name, {@code Properties.entry.1.key} and
+ * {@code Properties.entry.1.value}, or bare as {@code Properties.1.key}. An entry's value is named
+ * under the key the entry carries, {@code properties.Team/Owner}, which is how the hand-written
+ * checks these waves replace already named one and how {@link RequestConstraintCheck} names a map's
+ * value on the JSON protocols. An entry numbered with no key of its own is no entry the map could
+ * hold, so it is neither counted nor answered. A key outside its shape's rules is answered with the
+ * whole set the shape declares, nested under the map's own name, which is the form AWS answers for
+ * a map key everywhere this repository has one recorded.
+ *
+ * <p>Every one of those may hold any of the others: a structure's field may be a list, a list's
+ * member a map, a map's value a structure. A shape of some other type is one this walk would pass
+ * over without reading, so the file refuses to load rather than letting a request through
+ * unchecked.
  */
 public final class QueryConstraintCheck {
 
@@ -72,7 +81,7 @@ public final class QueryConstraintCheck {
         this.messages = messages;
         for (Map.Entry<String, JsonNode> shape : shapes.properties()) {
             if (shape.getValue().has("pattern")) {
-                patterns.put(shape.getKey(), Pattern.compile(shape.getValue().get("pattern").asText()));
+                patterns.put(shape.getKey(), VendoredPatterns.compile(shape.getValue().get("pattern").asText()));
             }
         }
         for (Map.Entry<String, JsonNode> operation : operations.properties()) {
@@ -105,40 +114,34 @@ public final class QueryConstraintCheck {
 
     private void requireReadableMembers(String operation, String inputShape) {
         for (Map.Entry<String, JsonNode> member : shapes.path(inputShape).path("members").properties()) {
-            requireReadableMember(operation, member.getKey(), member.getValue().asText());
+            requireReadable(operation, member.getKey(), member.getValue().asText(), new LinkedHashSet<>());
         }
     }
 
-    private void requireReadableMember(String operation, String member, String shapeName) {
-        String type = shapes.path(shapeName).path("type").asText();
-        if (SCALAR_TYPES.contains(type)) {
+    /**
+     * Every member of every operation the file carries is read, whatever it nests. {@code seen}
+     * carries the shapes on the way down, so a shape that holds itself is read once rather than
+     * forever.
+     */
+    private void requireReadable(String operation, String member, String shapeName, Set<String> seen) {
+        JsonNode shape = shapes.path(shapeName);
+        String type = shape.path("type").asText();
+        if (SCALAR_TYPES.contains(type) || !seen.add(shapeName)) {
             return;
         }
         switch (type) {
-            case "list" -> requireReadableElement(operation, member, shapes.path(shapeName).path("member").asText());
-            case "structure" -> requireScalarFields(operation, member, shapeName);
-            default -> throw refusal(operation, member, type);
-        }
-    }
-
-    private void requireReadableElement(String operation, String member, String elementShape) {
-        String type = shapes.path(elementShape).path("type").asText();
-        if (SCALAR_TYPES.contains(type)) {
-            return;
-        }
-        if ("structure".equals(type)) {
-            requireScalarFields(operation, member, elementShape);
-            return;
-        }
-        throw refusal(operation, member, "list of " + type);
-    }
-
-    private void requireScalarFields(String operation, String member, String structure) {
-        for (Map.Entry<String, JsonNode> field : shapes.path(structure).path("members").properties()) {
-            String type = shapes.path(field.getValue().asText()).path("type").asText();
-            if (!SCALAR_TYPES.contains(type)) {
-                throw refusal(operation, member + "." + field.getKey(), type);
+            case "list" -> requireReadable(operation, member, shape.path("member").asText(), seen);
+            case "map" -> {
+                requireReadable(operation, member + ".key", shape.path("key").asText(), seen);
+                requireReadable(operation, member + ".value", shape.path("value").asText(), seen);
             }
+            case "structure" -> {
+                for (Map.Entry<String, JsonNode> field : shape.path("members").properties()) {
+                    requireReadable(operation, member + "." + field.getKey(),
+                            field.getValue().asText(), seen);
+                }
+            }
+            default -> throw refusal(operation, member, type);
         }
     }
 
@@ -202,11 +205,7 @@ public final class QueryConstraintCheck {
             String param = prefix + name;
             boolean mandatory = required.contains(name);
             JsonNode shape = shapes.path(shapeName);
-            List<String> own = switch (shape.path("type").asText()) {
-                case "list" -> listViolations(shape, param, memberPath, mandatory, params);
-                case "structure" -> nestedViolations(shape, param, memberPath, mandatory, params);
-                default -> scalarViolations(shapeName, param, memberPath, mandatory, params);
-            };
+            List<String> own = memberViolations(shapeName, param, memberPath, mandatory, params);
             violations.addAll(own);
             if (own.isEmpty() && documented.containsKey(name) && carries(params, param)) {
                 violations.add(documented.get(name));
@@ -224,6 +223,75 @@ public final class QueryConstraintCheck {
     private static boolean carries(MultivaluedMap<String, String> params, String param) {
         return params != null && (params.containsKey(param)
                 || params.keySet().stream().anyMatch(key -> key.startsWith(param + ".")));
+    }
+
+    /**
+     * One member, whatever its shape nests: a scalar at its own name, a list or a map numbered
+     * under it, a structure's fields below it.
+     */
+    private List<String> memberViolations(String shapeName, String param, String path,
+                                          boolean required, MultivaluedMap<String, String> params) {
+        JsonNode shape = shapes.path(shapeName);
+        return switch (shape.path("type").asText()) {
+            case "list" -> listViolations(shape, param, path, required, params);
+            case "map" -> mapViolations(shape, param, path, required, params);
+            case "structure" -> nestedViolations(shape, param, path, required, params);
+            default -> scalarViolations(shapeName, param, path, required, params);
+        };
+    }
+
+    /**
+     * A map's entries, held to the map's own bounds and then each key and value to its shape. An
+     * entry arrives as {@code Properties.entry.1.key} and {@code Properties.entry.1.value}, and
+     * the value is named under the key the entry carries. An entry is read off that key, as the
+     * count of one has always been here, so one numbered with no key is not an entry the map could
+     * hold: it is neither counted nor answered.
+     */
+    private List<String> mapViolations(JsonNode shape, String param, String path, boolean required,
+                                       MultivaluedMap<String, String> params) {
+        List<AwsQueryLists.IndexedMember> entries = params == null
+                ? List.of()
+                : AwsQueryLists.members(params, param, "entry").stream()
+                        .filter(entry -> params.getFirst(entry.prefix() + ".key") != null)
+                        .toList();
+        if (entries.isEmpty()) {
+            return required ? List.of(SmithyValidationErrors.notNull(path)) : List.of();
+        }
+        String valueShape = shape.path("value").asText();
+        boolean structure = "structure".equals(shapes.path(valueShape).path("type").asText());
+        List<String> violations = new ArrayList<>();
+        violations.addAll(single(SmithyValidationErrors.sizeOutOfRange(path, entries.size(),
+                shape.path("min").asInt(0), shape.path("max").asInt(Integer.MAX_VALUE))));
+        for (AwsQueryLists.IndexedMember entry : entries) {
+            String key = params.getFirst(entry.prefix() + ".key");
+            violations.addAll(keyViolations(shape.path("key").asText(), key, path));
+            String valueParam = entry.prefix() + ".value";
+            String valuePath = path + "." + key;
+            if (structure) {
+                // An entry the request numbered with a key is an entry, so what the structure
+                // under it requires is answered inside it rather than the value reading as absent.
+                violations.addAll(structureViolations(shapes.path(valueShape), valueParam + ".",
+                        valuePath + ".", params, Map.of()));
+            } else {
+                violations.addAll(memberViolations(valueShape, valueParam, valuePath, true, params));
+            }
+        }
+        return violations;
+    }
+
+    /**
+     * A map key outside its shape's rules, answered with the whole set that shape declares rather
+     * than with the one rule the key broke. Which rules a key breaks is read the way every other
+     * value is, so one object decides whether a key is good and another how a map words it.
+     */
+    private List<String> keyViolations(String shapeName, String key, String path) {
+        if (violations(shapeName, key, path).isEmpty()) {
+            return List.of();
+        }
+        JsonNode shape = shapes.path(shapeName);
+        return List.of(messages.mapKeys(path, key, SmithyValidationErrors.constraintSet(
+                shape.path("min").asInt(0), shape.path("max").asInt(Integer.MAX_VALUE),
+                shape.path("pattern").asText(null), allowedValues(shape))));
     }
 
     /**
@@ -246,25 +314,30 @@ public final class QueryConstraintCheck {
      */
     private List<String> listViolations(JsonNode shape, String param, String path, boolean required,
                                         MultivaluedMap<String, String> params) {
+        String elementShape = shape.path("member").asText();
+        boolean scalar = SCALAR_TYPES.contains(shapes.path(elementShape).path("type").asText());
+        // A scalar member's value lives at its own name, so an index the request numbered only
+        // under a deeper key carries no value and is no member of the list: nothing reads one
+        // there either. A member present and empty is a member all the same.
         List<AwsQueryLists.IndexedMember> members = params == null
                 ? List.of()
-                : AwsQueryLists.members(params, param, null);
+                : AwsQueryLists.members(params, param, null).stream()
+                        .filter(member -> !scalar || params.getFirst(member.prefix()) != null)
+                        .toList();
         if (members.isEmpty()) {
             return required ? List.of(SmithyValidationErrors.notNull(path)) : List.of();
         }
         List<String> violations = new ArrayList<>();
         violations.addAll(single(SmithyValidationErrors.sizeOutOfRange(path, members.size(),
                 shape.path("min").asInt(0), shape.path("max").asInt(Integer.MAX_VALUE))));
-        String elementShape = shape.path("member").asText();
-        boolean structure = "structure".equals(shapes.path(elementShape).path("type").asText());
         for (AwsQueryLists.IndexedMember member : members) {
             String memberPath = path + "." + member.index() + ".member";
-            if (structure) {
-                violations.addAll(structureViolations(shapes.path(elementShape),
-                        member.prefix() + ".", memberPath + ".", params, Map.of()));
+            if (scalar) {
+                violations.addAll(violations(elementShape, params.getFirst(member.prefix()),
+                        memberPath));
             } else {
-                String value = params.getFirst(member.prefix());
-                violations.addAll(violations(elementShape, value == null ? "" : value, memberPath));
+                violations.addAll(memberViolations(elementShape, member.prefix(), memberPath,
+                        false, params));
             }
         }
         return violations;
@@ -308,7 +381,9 @@ public final class QueryConstraintCheck {
         }
         Pattern pattern = patterns.get(shapeName);
         if (pattern != null && !pattern.matcher(value).matches()) {
-            violations.add(messages.pattern(path, value, pattern.pattern()));
+            // Quoted as the model declares it, which is what AWS answers and what the service docs
+            // carry, rather than as it was compiled: a wide escape is rewritten to match on.
+            violations.add(messages.pattern(path, value, shape.path("pattern").asText()));
         }
         violations.addAll(single(enumViolation(shape, value, path)));
         return violations;
@@ -357,11 +432,17 @@ public final class QueryConstraintCheck {
     }
 
     private String enumViolation(JsonNode shape, String value, String path) {
-        if (!shape.has("enum")) {
+        List<String> allowed = allowedValues(shape);
+        if (allowed.isEmpty()) {
             return null;
         }
+        return allowed.contains(value) ? null : messages.notInEnum(value, path, allowed);
+    }
+
+    /** The values a shape's enum admits, in the model's order, or none for a shape without one. */
+    private static List<String> allowedValues(JsonNode shape) {
         List<String> allowed = new ArrayList<>();
         shape.path("enum").forEach(choice -> allowed.add(choice.asText()));
-        return allowed.contains(value) ? null : messages.notInEnum(value, path, allowed);
+        return allowed;
     }
 }

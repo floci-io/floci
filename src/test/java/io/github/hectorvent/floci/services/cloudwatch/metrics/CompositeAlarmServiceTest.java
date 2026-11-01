@@ -15,8 +15,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -26,11 +32,18 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class CompositeAlarmServiceTest {
     private static final String REGION = "cn-north-1";
+    /** A child's transition time in a composite alarm's StateReason, as CloudWatch prints it. */
+    private static final DateTimeFormatter REASON_TIME = DateTimeFormatter
+            .ofPattern("EEEE dd MMMM, yyyy HH:mm:ss 'UTC'", Locale.ENGLISH).withZone(ZoneOffset.UTC);
+    /** A child's state time in triggeringAlarms, as CloudWatch writes it. */
+    private static final DateTimeFormatter DATA_TIME = DateTimeFormatter
+            .ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.ROOT).withZone(ZoneOffset.UTC);
     private final CloudWatchMetricsService service = new CloudWatchMetricsService(
             new InMemoryStorage<>(), new InMemoryStorage<>(), new RegionResolver(REGION, "123456789012"));
 
@@ -39,6 +52,7 @@ class CompositeAlarmServiceTest {
         MetricAlarm metric = new MetricAlarm();
         metric.setAlarmName("latency");
         service.putMetricAlarm(metric, REGION);
+        put("maintenance", "FALSE");
         put("combined", "ALARM(\"" + metric.getAlarmArn() + "\") AND NOT ALARM(\"maintenance\")");
         put("outer", "ALARM(combined) OR (TRUE AND FALSE)");
         assertEquals("OK", state("outer"));
@@ -103,18 +117,21 @@ class CompositeAlarmServiceTest {
     }
 
     @Test
-    void creationAndDeletionReevaluateOnlyReferencingComposites() {
-        MetricAlarm metric = new MetricAlarm();
-        metric.setAlarmName("late");
+    void aRuleMustNameExistingAlarmsWhichThenCannotBeDeleted() {
+        assertRejected("Could not save the composite alarm as alarms [" + arn("late")
+                + "] in the alarm rule do not exist", () -> put("watcher", "INSUFFICIENT_DATA(late)"));
+        assertTrue(service.describeCompositeAlarms(List.of("watcher"), null, REGION).isEmpty());
+        metric("late");
         put("watcher", "INSUFFICIENT_DATA(late)");
         put("outer", "ALARM(watcher)");
-        assertEquals("OK", state("watcher"));
-        service.putMetricAlarm(metric, REGION);
         assertEquals("ALARM", state("watcher"));
         assertEquals("ALARM", state("outer"));
-        service.deleteAlarms(List.of("late"), REGION);
-        assertEquals("OK", state("watcher"));
-        assertEquals("OK", state("outer"));
+        assertRejected("Cannot delete late as there are composite alarm(s) depending on it.", () -> delete("late"));
+        assertRejected("Cannot delete watcher as there are composite alarm(s) depending on it.",
+                () -> delete("watcher"));
+        assertEquals(1, service.describeAlarms(List.of("late"), null, REGION).size());
+        assertEquals("ALARM", state("watcher"));
+        assertEquals("ALARM", state("outer"));
     }
 
     @Test
@@ -130,10 +147,11 @@ class CompositeAlarmServiceTest {
 
     @Test
     void cyclesStopEvaluationEvenBehindShortCircuitAndMustBeBrokenBeforeDelete() {
-        put("a", "FALSE AND ALARM(b)");
+        put("a", "FALSE");
         put("b", "ALARM(a)");
+        put("a", "FALSE AND ALARM(b)");
         service.setAlarmState("b", "ALARM", "manual", null, REGION);
-        assertThrows(AwsException.class, () -> service.deleteAlarms(List.of("a"), REGION));
+        assertRejected("Cannot delete a as there are composite alarm(s) depending on it.", () -> delete("a"));
         assertEquals(2, service.describeCompositeAlarms(null, null, REGION).size());
         put("a", "FALSE");
         service.deleteAlarms(List.of("b"), REGION);
@@ -144,12 +162,16 @@ class CompositeAlarmServiceTest {
 
     @Test
     void manuallyChangingOneMemberDoesNotResumeACyclicDependency() {
+        put("b", "FALSE");
         put("a", "ALARM(b)");
         put("b", "ALARM(a)");
         assertEquals("OK", state("a"));
         service.setAlarmState("b", "ALARM", "manual", null, REGION);
         assertEquals("OK", state("a"));
         put("b", "TRUE");
+        service.setAlarmState("b", "ALARM", "same state", null, REGION);
+        assertEquals("OK", state("a"));
+        service.setAlarmState("b", "OK", "cycle broken", null, REGION);
         service.setAlarmState("b", "ALARM", "cycle broken", null, REGION);
         assertEquals("ALARM", state("a"));
     }
@@ -323,8 +345,323 @@ class CompositeAlarmServiceTest {
                 "parent:Alarm updated from INSUFFICIENT_DATA to OK"),
                 items.stream().map(item -> item.alarmName() + ":" + item.historySummary()).toList());
         JsonNode data = new ObjectMapper().readTree(items.getFirst().historyData());
-        assertEquals("AlarmRule evaluated to ALARM", data.path("newState").path("stateReason").asText());
-        assertEquals("AlarmRule evaluated to OK", data.path("oldState").path("stateReason").asText());
+        assertEquals(arn("child") + " transitioned to ALARM at " + reasonTime("child"),
+                data.path("newState").path("stateReason").asText());
+        assertEquals(arn("child"), data.path("newState").path("stateReasonData")
+                .path("triggeringAlarms").path(0).path("arn").asText());
+        assertEquals(arn("parent") + " was created and its alarm rule evaluates to OK",
+                data.path("oldState").path("stateReason").asText());
+        assertEquals("INSUFFICIENT_DATA", data.path("oldState").path("stateReasonData")
+                .path("triggeringAlarms").path(0).path("state").path("value").asText());
+    }
+
+    /**
+     * Replays a published probe of CloudWatch in eu-central-1, leaving out its AT_LEAST rules: at every
+     * step the composite alarms take the state, StateReason and triggeringAlarms that CloudWatch
+     * reported. The probe and its two runs of 2026-10-15, with the same results, are at
+     * https://github.com/ministackorg/ministack/pull/2260.
+     */
+    @Test
+    void evaluationMatchesWhatCloudWatchReportedForTheSameSteps() {
+        for (String name : List.of("m-a", "m-b", "m-c")) {
+            metric(name);
+        }
+        Map<String, String> rules = new LinkedHashMap<>();
+        rules.put("c-and", "ALARM(\"m-a\") AND ALARM(\"m-b\")");
+        rules.put("c-or", "ALARM(" + arn("m-a") + ") OR ALARM(m-b)");
+        rules.put("c-not", "NOT ALARM(\"m-a\")");
+        rules.put("c-ok", "OK(\"m-a\")");
+        rules.put("c-ins", "INSUFFICIENT_DATA(\"m-b\")");
+        rules.put("c-true", "TRUE");
+        rules.put("c-false", "FALSE");
+        rules.put("c-nest", "ALARM(\"c-or\")");
+        rules.put("c-mix", "(ALARM(\"m-a\") OR OK(\"m-b\")) AND NOT INSUFFICIENT_DATA(\"m-b\")");
+        rules.put("c-rev", "ALARM(\"m-b\") AND ALARM(\"m-a\")");
+        rules.put("c-prec", "TRUE OR TRUE AND FALSE");
+        rules.put("c-notprec", "NOT TRUE AND FALSE");
+        rules.forEach(this::put);
+
+        assertStates("c-and OK, c-false OK, c-ins ALARM, c-mix OK, c-nest OK, c-not ALARM, c-notprec OK, c-ok OK, "
+                + "c-or OK, c-prec ALARM, c-rev OK, c-true ALARM");
+        for (String name : rules.keySet()) {
+            assertEquals(arn(name) + " was created and its alarm rule evaluates to " + state(name),
+                    alarm(name).getStateReason());
+        }
+        assertTriggering("c-and", "m-b INSUFFICIENT_DATA", "m-a INSUFFICIENT_DATA");
+        assertTriggering("c-false");
+        assertTriggering("c-ins", "m-b INSUFFICIENT_DATA");
+        assertTriggering("c-mix", "m-b INSUFFICIENT_DATA", "m-a INSUFFICIENT_DATA");
+        assertTriggering("c-nest", "c-or OK");
+        assertTriggering("c-not", "m-a INSUFFICIENT_DATA");
+        assertTriggering("c-ok", "m-a INSUFFICIENT_DATA");
+        assertTriggering("c-or", "m-b INSUFFICIENT_DATA", "m-a INSUFFICIENT_DATA");
+        assertTriggering("c-rev", "m-b INSUFFICIENT_DATA", "m-a INSUFFICIENT_DATA");
+        assertTriggering("c-true");
+
+        set("m-a", "ALARM");
+        assertStates("c-and OK, c-mix OK, c-nest ALARM, c-not OK, c-ok OK, c-or ALARM, c-rev OK");
+        assertTransitionedBecause("c-or", "m-a", "m-a ALARM");
+        assertTransitionedBecause("c-nest", "c-or", "c-or ALARM");
+        assertTransitionedBecause("c-not", "m-a", "m-a ALARM");
+        assertEquals(arn("c-and") + " was created and its alarm rule evaluates to OK", alarm("c-and").getStateReason());
+
+        set("m-b", "ALARM");
+        assertStates("c-and ALARM, c-ins OK, c-mix ALARM, c-nest ALARM, c-or ALARM, c-rev ALARM");
+        assertTransitionedBecause("c-and", "m-b", "m-b ALARM", "m-a ALARM");
+        assertTransitionedBecause("c-ins", "m-b", "m-b ALARM");
+        assertTransitionedBecause("c-mix", "m-b", "m-b ALARM", "m-a ALARM");
+        assertTransitionedBecause("c-rev", "m-b", "m-b ALARM", "m-a ALARM");
+
+        set("m-a", "OK");
+        assertStates("c-and OK, c-mix OK, c-nest ALARM, c-not ALARM, c-ok ALARM, c-or ALARM, c-rev OK");
+        for (String name : List.of("c-and", "c-mix", "c-not", "c-ok", "c-rev")) {
+            assertTransitionedBecause(name, "m-a", "m-a OK");
+        }
+
+        set("m-b", "OK");
+        assertStates("c-and OK, c-ins OK, c-mix ALARM, c-nest OK, c-or OK, c-rev OK");
+        assertTransitionedBecause("c-mix", "m-b", "m-b OK");
+        assertTransitionedBecause("c-nest", "c-or", "c-or OK");
+        assertTransitionedBecause("c-or", "m-b", "m-b OK", "m-a OK");
+
+        set("m-a", "ALARM");
+        put("c-late", "ALARM(\"m-a\")");
+        assertEquals("ALARM", state("c-late"));
+        assertTriggering("c-late", "m-a ALARM");
+
+        set("c-true", "OK");
+        assertEquals("probe", alarm("c-true").getStateReason());
+        assertNull(alarm("c-true").getStateReasonData());
+
+        set("c-and", "ALARM");
+        set("m-b", "INSUFFICIENT_DATA");
+        assertEquals("OK", state("c-and"));
+        assertTransitionedBecause("c-and", "m-b", "m-b INSUFFICIENT_DATA");
+
+        put("c-false", "TRUE");
+        assertEquals("ALARM", state("c-false"));
+        assertEquals(arn("c-false") + " was updated and its new alarm rule evaluates to ALARM",
+                alarm("c-false").getStateReason());
+        assertTriggering("c-false");
+
+        Alarm sameState = alarm("c-ok");
+        String reason = sameState.getStateReason();
+        String data = sameState.getStateReasonData();
+        long updated = sameState.getStateUpdatedTimestamp();
+        put("c-ok", "NOT ALARM(\"m-a\")");
+        assertEquals("OK", state("c-ok"));
+        assertEquals(reason, alarm("c-ok").getStateReason());
+        assertEquals(data, alarm("c-ok").getStateReasonData());
+        assertEquals(updated, alarm("c-ok").getStateUpdatedTimestamp());
+
+        put("c-not", "ALARM(\"m-a\") OR ALARM(\"m-b\")");
+        assertEquals("ALARM", state("c-not"));
+        assertEquals(arn("c-not") + " was updated and its new alarm rule evaluates to ALARM",
+                alarm("c-not").getStateReason());
+        assertTriggering("c-not", "m-a ALARM");
+
+        set("m-b", "OK");
+        set("m-a", "OK");
+        put("c-dist", "ALARM(\"m-a\") OR ALARM(\"m-b\")");
+        put("c-ord", "ALARM(\"m-b\") AND ALARM(\"m-a\")");
+        assertTriggering("c-dist", "m-a OK", "m-b OK");
+        assertTriggering("c-ord", "m-a OK", "m-b OK");
+        set("m-b", "INSUFFICIENT_DATA");
+        assertEquals(arn("c-dist") + " was created and its alarm rule evaluates to OK", alarm("c-dist").getStateReason());
+        set("m-a", "ALARM");
+        assertEquals("ALARM", state("c-dist"));
+        assertTransitionedBecause("c-dist", "m-a", "m-a ALARM");
+        assertEquals("OK", state("c-ord"));
+
+        assertRejected("Could not save the composite alarm as alarms [" + arn("does-not-exist")
+                + "] in the alarm rule do not exist", () -> put("c-bad1", "ALARM(\"does-not-exist\")"));
+        assertTrue(service.describeCompositeAlarms(List.of("c-bad1"), null, REGION).isEmpty());
+
+        put("c-or", "ALARM(\"c-nest\")");
+        assertStates("c-nest ALARM, c-or ALARM");
+        assertRejected("Cannot delete m-a as there are composite alarm(s) depending on it.", () -> delete("m-a"));
+        assertRejected("Cannot delete c-or as there are composite alarm(s) depending on it.", () -> delete("c-or"));
+        assertRejected("Cannot delete [2] Composite Alarms as only one composite alarm delete is allowed in single "
+                + "request", () -> delete("c-true", "c-false"));
+        delete("does-not-exist", "c-ok");
+        assertTrue(service.describeCompositeAlarms(List.of("c-ok"), null, REGION).isEmpty());
+        delete("does-not-exist");
+        assertRejected("Cannot delete [2] Composite Alarms as only one composite alarm delete is allowed in single "
+                + "request", () -> delete("c-nest", "c-or"));
+        put("c-solo", "ALARM(\"m-c\")");
+        assertRejected("Cannot delete m-c as there are composite alarm(s) depending on it.", () -> delete("m-c", "c-solo"));
+        assertEquals(1, service.describeAlarms(List.of("m-c"), null, REGION).size());
+        assertEquals("ALARM(\"m-c\")", ((CompositeAlarm) alarm("c-solo")).getAlarmRule());
+    }
+
+    @Test
+    void deletingSeveralReferencedAlarmsNamesThemAllAndDeletesNothing() {
+        metric("x");
+        metric("y");
+        metric("free");
+        put("both", "ALARM(x) OR ALARM(\"" + arn("y") + "\")");
+        assertRejected("Cannot delete x,y as there are composite alarm(s) depending on them.",
+                () -> delete("free", "x", "y", "x"));
+        assertEquals(3, service.describeAlarms(null, null, REGION).size());
+        assertRejected("Cannot delete y as there are composite alarm(s) depending on it.", () -> delete("y", "both"));
+        delete(arn("both"));
+        assertEquals(1, service.describeCompositeAlarms(null, null, REGION).size());
+        delete("both", "both");
+        delete("x", "y", "free");
+        assertTrue(service.describeAlarms(null, null, REGION).isEmpty());
+    }
+
+    @Test
+    void aRuleNamingMissingAlarmsIsRefusedWithTheirArnsInRuleOrder() {
+        metric("present");
+        assertRejected("Could not save the composite alarm as alarms [" + arn("first") + ", " + arn("second")
+                + "] in the alarm rule do not exist", () -> put("orphan", "ALARM(first) OR ALARM(present) OR OK(\""
+                + arn("second") + "\") OR ALARM(\"first\")"));
+        assertTrue(service.describeCompositeAlarms(null, null, REGION).isEmpty());
+
+        put("kept", "ALARM(present)");
+        assertRejected("Could not save the composite alarm as alarms [" + arn("gone")
+                + "] in the alarm rule do not exist", () -> put("kept", "ALARM(gone)"));
+        assertEquals("ALARM(present)", ((CompositeAlarm) alarm("kept")).getAlarmRule());
+    }
+
+    @Test
+    void anUpdateIsEvaluatedAndATransitionReachesItsParents() {
+        metric("child");
+        set("child", "ALARM");
+        put("middle", "OK(child)");
+        put("top", "ALARM(middle)");
+        assertEquals("OK", state("middle"));
+        assertEquals("OK", state("top"));
+
+        put("middle", "ALARM(child)");
+        assertEquals("ALARM", state("middle"));
+        assertEquals(arn("middle") + " was updated and its new alarm rule evaluates to ALARM",
+                alarm("middle").getStateReason());
+        assertTriggering("middle", "child ALARM");
+        assertEquals("ALARM", state("top"));
+        assertTransitionedBecause("top", "middle", "middle ALARM");
+
+        Alarm before = alarm("top");
+        String reason = before.getStateReason();
+        long transitioned = before.getStateTransitionedTimestamp();
+        put("top", "ALARM(middle) OR ALARM(child)");
+        assertEquals(reason, alarm("top").getStateReason());
+        assertEquals(transitioned, alarm("top").getStateTransitionedTimestamp());
+
+        set("top", "OK");
+        put("top", "ALARM(middle) OR ALARM(child)");
+        assertEquals("ALARM", state("top"));
+        assertEquals(arn("top") + " was updated and its new alarm rule evaluates to ALARM", alarm("top").getStateReason());
+        assertTriggering("top", "middle ALARM", "child ALARM");
+    }
+
+    /**
+     * A composite alarm set with SetAlarmState "returns to its actual state only once any of its
+     * children alarms change state"
+     * (https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_SetAlarmState.html):
+     * a metric alarm child's update or a SetAlarmState to the state it already has does not change
+     * its state.
+     */
+    @Test
+    void aManualStateHoldsThroughAChildsUpdateAndSameStateSet() {
+        metric("m");
+        set("m", "ALARM");
+        put("c", "ALARM(m)");
+        set("c", "OK");
+        MetricAlarm update = new MetricAlarm();
+        update.setAlarmName("m");
+        update.setThreshold(5);
+        service.putMetricAlarm(update, REGION);
+        set("m", "ALARM");
+        assertEquals("OK", state("c"));
+        assertEquals("probe", alarm("c").getStateReason());
+
+        set("m", "OK");
+        set("m", "ALARM");
+        assertEquals("ALARM", state("c"));
+        assertTransitionedBecause("c", "m", "m ALARM");
+    }
+
+    /** The cycle between c and d is not evaluated, but p above it follows its other child. */
+    @Test
+    void aCompositeAlarmAboveACycleIsStillEvaluated() {
+        metric("m");
+        put("c", "ALARM(m)");
+        put("d", "ALARM(c)");
+        put("c", "ALARM(d) OR ALARM(m)");
+        put("p", "ALARM(c) OR ALARM(m)");
+        set("m", "ALARM");
+        assertEquals("ALARM", state("p"));
+        assertTransitionedBecause("p", "m", "m ALARM");
+    }
+
+    /** Rules saved before missing children were refused can name an alarm that is created later. */
+    @Test
+    void aCompositeAlarmStoredOverAMissingAlarmIsEvaluatedWhenThatAlarmIsCreated() {
+        InMemoryStorage<String, Alarm> alarms = new InMemoryStorage<>();
+        CloudWatchMetricsService stored = new CloudWatchMetricsService(new InMemoryStorage<>(), alarms,
+                new RegionResolver(REGION, "123456789012"));
+        CompositeAlarm watcher = new CompositeAlarm();
+        watcher.setAlarmName("watcher");
+        watcher.setAlarmArn(arn("watcher"));
+        watcher.setAlarmRule("INSUFFICIENT_DATA(late)");
+        watcher.setRegion(REGION);
+        watcher.setStateValue("OK");
+        alarms.put(REGION + "::watcher", watcher);
+        MetricAlarm late = new MetricAlarm();
+        late.setAlarmName("late");
+        stored.putMetricAlarm(late, REGION);
+        CompositeAlarm evaluated = stored.describeCompositeAlarms(List.of("watcher"), null, REGION).getFirst();
+        assertEquals("ALARM", evaluated.getStateValue());
+        assertTrue(evaluated.getStateReason().startsWith(arn("late") + " transitioned to INSUFFICIENT_DATA at "),
+                evaluated.getStateReason());
+    }
+
+    @Test
+    void aParentOfTwoChildrenThatChangedTogetherNamesTheLastOfThem() {
+        metric("m");
+        put("c", "ALARM(m)");
+        put("p", "ALARM(c) OR ALARM(m)");
+        set("m", "ALARM");
+        assertTransitionedBecause("c", "m", "m ALARM");
+        assertTransitionedBecause("p", "c", "c ALARM", "m ALARM");
+    }
+
+    @Test
+    void stateReasonDataStaysWithinItsDocumentedLengthAndKeepsTheNewestChildren() throws Exception {
+        String prefix = "child-with-a-long-name-to-fill-state-reason-data-";
+        IntStream.range(0, 100).forEach(index -> metric(prefix + index));
+        put("wide", IntStream.range(0, 100).mapToObj(index -> "ALARM(" + prefix + index + ")")
+                .collect(Collectors.joining(" OR ")));
+        String data = alarm("wide").getStateReasonData();
+        assertTrue(data.length() <= 4000, "StateReasonData is " + data.length() + " characters");
+        List<String> listed = triggering("wide");
+        assertTrue(listed.size() > 10 && listed.size() < 100, listed.size() + " children listed");
+        assertEquals(prefix + "99 INSUFFICIENT_DATA", listed.getFirst());
+    }
+
+    /**
+     * StateReasonData's 4000 is counted in Unicode code points, as its length check counts it. An emoji is one
+     * code point but two UTF-16 units, so each emoji child here adds 347 code points to the list, its comma
+     * included, but 547 units. The newest child's 17-character name brings 12 entries to exactly 4000 code
+     * points, which still fit; counted in units, only 7 entries would.
+     */
+    @Test
+    void stateReasonDataCountsCodePointsAsItsLengthLimitDoes() {
+        String emoji = "\uD83D\uDE00";
+        List<String> names = new ArrayList<>(IntStream.range(0, 15)
+                .mapToObj(index -> emoji.repeat(200) + String.format("-%02d", index)).toList());
+        names.add("exactly-4000-edge");
+        names.forEach(this::metric);
+        put("wide", names.stream().map(name -> "ALARM(\"" + name + "\")").collect(Collectors.joining(" OR ")));
+        List<String> listed = triggering("wide");
+        assertEquals(12, listed.size(), "children listed");
+        assertEquals("exactly-4000-edge INSUFFICIENT_DATA", listed.getFirst());
+        assertEquals(names.get(4) + " INSUFFICIENT_DATA", listed.getLast());
+        String data = alarm("wide").getStateReasonData();
+        assertEquals(4000, data.codePointCount(0, data.length()));
+        assertTrue(data.length() > 4000, data.length() + " UTF-16 units");
     }
 
     private CompositeAlarm put(String name, String rule) {
@@ -338,5 +675,81 @@ class CompositeAlarmServiceTest {
 
     private String state(String name) {
         return service.describeCompositeAlarms(List.of(name), null, REGION).getFirst().getStateValue();
+    }
+
+    private void metric(String name) {
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName(name);
+        service.putMetricAlarm(alarm, REGION);
+    }
+
+    private void set(String name, String state) {
+        service.setAlarmState(name, state, "probe", null, REGION);
+    }
+
+    private void delete(String... names) {
+        service.deleteAlarms(List.of(names), REGION);
+    }
+
+    private Alarm alarm(String name) {
+        return Stream.concat(service.describeAlarms(List.of(name), null, REGION).stream(),
+                service.describeCompositeAlarms(List.of(name), null, REGION).stream()).findFirst().orElseThrow();
+    }
+
+    private static String arn(String name) {
+        return "arn:aws-cn:cloudwatch:" + REGION + ":123456789012:alarm:" + name;
+    }
+
+    /** The child's last transition as a composite alarm's StateReason prints it, "Monday 14 September, 2026 06:29:58 UTC". */
+    private String reasonTime(String child) {
+        return REASON_TIME.format(Instant.ofEpochSecond(alarm(child).getStateTransitionedTimestamp()));
+    }
+
+    private void assertStates(String expected) {
+        Map<String, String> wanted = new LinkedHashMap<>();
+        for (String entry : expected.split(",")) {
+            String[] parts = entry.trim().split(" ");
+            wanted.put(parts[0], parts[1]);
+        }
+        Map<String, String> actual = new LinkedHashMap<>();
+        wanted.keySet().forEach(name -> actual.put(name, state(name)));
+        assertEquals(wanted, actual);
+    }
+
+    /** The composite last changed state because {@code child} did, and lists these triggering children. */
+    private void assertTransitionedBecause(String name, String child, String... triggering) {
+        assertEquals(arn(child) + " transitioned to " + alarm(child).getStateValue() + " at " + reasonTime(child),
+                alarm(name).getStateReason());
+        assertTriggering(name, triggering);
+    }
+
+    private void assertTriggering(String name, String... expected) {
+        assertEquals(List.of(expected), triggering(name));
+    }
+
+    /** The StateReasonData children, newest first, each as "name STATE" after checking its timestamp. */
+    private List<String> triggering(String name) {
+        JsonNode data;
+        try {
+            data = new ObjectMapper().readTree(alarm(name).getStateReasonData());
+        } catch (Exception e) {
+            throw new AssertionError("StateReasonData of " + name + " is not JSON", e);
+        }
+        List<String> children = new ArrayList<>();
+        for (JsonNode child : data.path("triggeringAlarms")) {
+            String childArn = child.path("arn").asText();
+            String childName = childArn.substring(childArn.lastIndexOf(':') + 1);
+            assertEquals(DATA_TIME.format(Instant.ofEpochSecond(alarm(childName).getStateTransitionedTimestamp())),
+                    child.path("state").path("timestamp").asText(), data.toString());
+            children.add(childName + " " + child.path("state").path("value").asText());
+        }
+        return children;
+    }
+
+    private static void assertRejected(String message, Runnable call) {
+        AwsException error = assertThrows(AwsException.class, call::run);
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals(message, error.getMessage());
     }
 }
