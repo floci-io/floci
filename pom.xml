@@ -15,7 +15,7 @@
     <properties>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <quarkus.platform.version>3.40.1</quarkus.platform.version>
+        <quarkus.platform.version>3.40.1.1</quarkus.platform.version>
         <jackson.version>2.22.4</jackson.version>
         <apicurio.version>2.6.13.Final</apicurio.version>
         <everit.json.schema.version>1.14.6</everit.json.schema.version>
