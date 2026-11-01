@@ -10,6 +10,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
@@ -841,5 +842,124 @@ class S3BucketPolicyEnforcementIntegrationTest {
         .then()
                 .statusCode(403)
                 .body(containsString("<Code>AccessDenied</Code>"));
+    }
+
+    private static final String BUCKET_KEY = "arn:aws:kms:us-east-1:111122223333:key/11111111-1111-1111-1111-111111111111";
+    private static final String OTHER_KEY = "arn:aws:kms:us-east-1:111122223333:key/22222222-2222-2222-2222-222222222222";
+
+    /** The refusals and the admission are what S3 answered under these two statements, measured 2026-10-30. */
+    @Test
+    void aPutIsJudgedByItsOwnEncryptionHeadersNotTheBucketsDefault() {
+        EncryptionFixture fixture = kmsOnlyBucket();
+
+        assertEncryptedPut(fixture, "none.txt", null, null, 403);
+        assertEncryptedPut(fixture, "aes.txt", "AES256", null, 403);
+        assertEncryptedPut(fixture, "bucket-key.txt", "aws:kms", BUCKET_KEY, 200);
+        assertEncryptedPut(fixture, "other-key.txt", "aws:kms", OTHER_KEY, 403);
+        assertEncryptedPut(fixture, "no-key.txt", "aws:kms", null, 403);
+    }
+
+    @Test
+    void aCopyIsJudgedByItsOwnEncryptionHeaders() {
+        EncryptionFixture fixture = kmsOnlyBucket();
+        assertEncryptedPut(fixture, "source.txt", "aws:kms", BUCKET_KEY, 200);
+        String source = "/" + fixture.bucket() + "/source.txt";
+
+        given().filter(fixture.user().signer()).header("x-amz-copy-source", source)
+                .put("/" + fixture.bucket() + "/plain-copy.txt")
+                .then().statusCode(403).body(containsString("<Code>AccessDenied</Code>"));
+        given().filter(fixture.user().signer()).header("x-amz-copy-source", source)
+                .header("x-amz-server-side-encryption", "aws:kms")
+                .header("x-amz-server-side-encryption-aws-kms-key-id", BUCKET_KEY)
+                .put("/" + fixture.bucket() + "/encrypted-copy.txt")
+                .then().statusCode(200);
+    }
+
+    @Test
+    void anAllowOnTheEncryptionKeyAdmitsOnlyTheMatchingPut() {
+        EncryptionFixture fixture = allowOnlyBucket("s3:x-amz-server-side-encryption", "aws:kms");
+
+        assertEncryptedPut(fixture, "kms.txt", "aws:kms", null, 200);
+        assertEncryptedPut(fixture, "aes.txt", "AES256", null, 403);
+        assertEncryptedPut(fixture, "none.txt", null, null, 403);
+    }
+
+    @Test
+    void anAllowOnTheKmsKeyIdKeyAdmitsOnlyTheMatchingPut() {
+        EncryptionFixture fixture = allowOnlyBucket("s3:x-amz-server-side-encryption-aws-kms-key-id", BUCKET_KEY);
+
+        assertEncryptedPut(fixture, "bucket-key.txt", "aws:kms", BUCKET_KEY, 200);
+        assertEncryptedPut(fixture, "other-key.txt", "aws:kms", OTHER_KEY, 403);
+        assertEncryptedPut(fixture, "no-key.txt", "aws:kms", null, 403);
+    }
+
+    private record EncryptionFixture(String bucket, Credentials user) {
+    }
+
+    private static void assertEncryptedPut(EncryptionFixture fixture, String key, String encryption, String kmsKeyId,
+                                           int status) {
+        RequestSpecification request = given().filter(fixture.user().signer()).contentType("text/plain").body(key);
+        if (encryption != null) {
+            request.header("x-amz-server-side-encryption", encryption);
+        }
+        if (kmsKeyId != null) {
+            request.header("x-amz-server-side-encryption-aws-kms-key-id", kmsKeyId);
+        }
+        request.put("/" + fixture.bucket() + "/" + key).then().statusCode(status);
+    }
+
+    /** A bucket defaulting to {@code aws:kms} that denies any other put, and a user allowed {@code s3:*} and {@code kms:*}. */
+    private EncryptionFixture kmsOnlyBucket() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        Credentials user = encryptionUser("kms-only-user-" + suffix, """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*","kms:*"],"Resource":"*"}]}""");
+        String bucket = encryptionBucket("kms-only-" + suffix, """
+                {"Version":"2012-10-17","Statement":[
+                  {"Sid":"DenyUnencryptedPuts","Effect":"Deny","Principal":"*","Action":"s3:PutObject",
+                   "Resource":"arn:aws:s3:::kms-only-%1$s/*",
+                   "Condition":{"StringNotEquals":{"s3:x-amz-server-side-encryption":"aws:kms"}}},
+                  {"Sid":"DenyWrongKmsKey","Effect":"Deny","Principal":"*","Action":"s3:PutObject",
+                   "Resource":"arn:aws:s3:::kms-only-%1$s/*",
+                   "Condition":{"StringNotEqualsIfExists":{"s3:x-amz-server-side-encryption-aws-kms-key-id":"%2$s"}}}]}
+                """.formatted(suffix, BUCKET_KEY), suffix);
+        return new EncryptionFixture(bucket, user);
+    }
+
+    /** A bucket whose policy alone allows a user with no identity policy, on {@code key} being {@code value}. */
+    private EncryptionFixture allowOnlyBucket(String key, String value) {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        Credentials user = encryptionUser("allow-only-user-" + suffix, null);
+        String bucket = encryptionBucket("allow-only-" + suffix, """
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Principal":{"AWS":"%s"},"Action":"s3:PutObject",
+                   "Resource":"arn:aws:s3:::allow-only-%s/*",
+                   "Condition":{"StringEquals":{"%s":"%s"}}}]}
+                """.formatted(user.userArn(), suffix, key, value), suffix);
+        return new EncryptionFixture(bucket, user);
+    }
+
+    private Credentials encryptionUser(String userName, String policy) {
+        cleanup.register(() -> EnforcementFixtures.removeUser(endpoint.getPort(), auth(ACCOUNT_A, "iam"), userName));
+        Credentials user = createUser(userName, ACCOUNT_A);
+        if (policy != null) {
+            putUserPolicy(userName, "AllowEncryptedPuts", policy, ACCOUNT_A);
+        }
+        return user;
+    }
+
+    private String encryptionBucket(String bucket, String policy, String suffix) {
+        String ownerName = "encryption-owner-" + suffix;
+        cleanup.register(() -> EnforcementFixtures.removeUser(endpoint.getPort(), auth(ACCOUNT_A, "iam"), ownerName));
+        Credentials owner = createAccountAdmin(ownerName, ACCOUNT_A);
+        cleanup.register(() -> EnforcementFixtures.removeBucket(endpoint.getPort(), owner.signer(), bucket));
+        createBucketAs(bucket, owner.signer());
+        given().filter(owner.signer()).contentType("application/xml").body("""
+                <ServerSideEncryptionConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule>
+                  <ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:kms</SSEAlgorithm>
+                    <KMSMasterKeyID>%s</KMSMasterKeyID></ApplyServerSideEncryptionByDefault>
+                </Rule></ServerSideEncryptionConfiguration>""".formatted(BUCKET_KEY))
+                .put("/" + bucket + "?encryption").then().statusCode(200);
+        putBucketPolicyAs(bucket, policy, owner.signer());
+        return bucket;
     }
 }

@@ -156,7 +156,25 @@ public final class S3ObjectActions {
         if (lock != null) {
             conditions.putAll(lock);
         }
+        conditions.putAll(encryptionConditions(header.apply("x-amz-server-side-encryption"),
+                header.apply("x-amz-server-side-encryption-aws-kms-key-id")));
         return conditions.isEmpty() ? null : conditions;
+    }
+
+    /**
+     * {@code s3:x-amz-server-side-encryption} and {@code s3:x-amz-server-side-encryption-aws-kms-key-id}
+     * as the request asks for them, each value as sent: an alias or a bare key id is not resolved to an
+     * ARN, and a bucket's default encryption fills neither.
+     */
+    public static Map<String, List<String>> encryptionConditions(String encryption, String kmsKeyId) {
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        if (encryption != null && !encryption.isBlank()) {
+            conditions.put(IamConditionContextResolver.SERVER_SIDE_ENCRYPTION, List.of(encryption));
+        }
+        if (kmsKeyId != null && !kmsKeyId.isBlank()) {
+            conditions.put(IamConditionContextResolver.SERVER_SIDE_ENCRYPTION_KMS_KEY_ID, List.of(kmsKeyId));
+        }
+        return conditions;
     }
 
     /**

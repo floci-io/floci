@@ -2477,6 +2477,16 @@ floci populates:
   body). AWS does not document how it counts the remaining retention days; floci counts a part
   day as a whole one, so a Deny on retention longer than N days refuses a date a few hours past
   N days.
+- `s3:x-amz-server-side-encryption` and `s3:x-amz-server-side-encryption-aws-kms-key-id`: the
+  encryption a request asks for, for `s3:PutObject`, from the `x-amz-server-side-encryption` and
+  `x-amz-server-side-encryption-aws-kms-key-id` headers of a `PutObject`, `CopyObject` or
+  `CreateMultipartUpload`. The value is the header's text: an alias or a bare key id is not resolved
+  to an ARN, and a bucket's default encryption fills neither key. A part or a
+  `CompleteMultipartUpload` sends neither header and carries what its upload recorded when it was
+  created. An upload holds only what its creation asked for, so one created with no encryption
+  carries neither key, where S3 gives it the bucket's default. A part naming an upload floci does
+  not hold answers `NoSuchUpload`, as on AWS, whatever the policy says, unless it copies from a
+  source.
 - An object creation offers its tag and Object Lock keys to each action it is checked as: its
   `s3:PutObject` and the extra actions its settings need.
 - `iam:PassedToService`: the service principal a request passes a role to, for the

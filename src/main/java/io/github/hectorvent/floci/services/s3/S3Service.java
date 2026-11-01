@@ -5426,6 +5426,22 @@ public class S3Service implements Resettable, ResourceProvider {
         return getMultipartUpload(bucket, key, uploadId);
     }
 
+    /** The encryption condition keys of an upload's parts and completion: what it recorded when created. */
+    public Map<String, List<String>> multipartEncryptionConditions(String bucket, String key, String uploadId) {
+        MultipartUpload upload = getMultipartUpload(bucket, key, uploadId);
+        return S3ObjectActions.encryptionConditions(upload.getServerSideEncryption(), upload.getSseKmsKeyId());
+    }
+
+    /** Checks a part or a completion against the bucket policy by the encryption its upload recorded. */
+    void authorizeMultipartWrite(String bucket, String key, String uploadId, RequestAuthorization authorization) {
+        if (!enforceAuth) {
+            return;
+        }
+        authorizeSignedRequest(authorization);
+        authorizeObjectWrite(bucket, key, null, "s3:PutObject", authorization,
+                multipartEncryptionConditions(bucket, key, uploadId));
+    }
+
     public MultipartUpload getMultipartUpload(String bucket, String key, String uploadId) {
         MultipartUpload upload = multipartUploads.get(uploadId);
         if (upload == null || !upload.getBucket().equals(bucket) || !upload.getKey().equals(key)
