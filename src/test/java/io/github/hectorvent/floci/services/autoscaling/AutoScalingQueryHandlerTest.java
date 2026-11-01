@@ -3,12 +3,17 @@ package io.github.hectorvent.floci.services.autoscaling;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
+import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -17,10 +22,80 @@ import static io.github.hectorvent.floci.services.autoscaling.AutoScalingXmlAsse
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.*;
 
 class AutoScalingQueryHandlerTest {
 
     private static final String REGION = "us-east-1";
+
+    @ParameterizedTest
+    @ValueSource(strings = {"EnterStandby", "ExitStandby"})
+    void standbyMembersRetainNumericOrderAndRepeatedParameterValues(String action) {
+        AutoScalingService service = mock(AutoScalingService.class);
+        AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupName", "indexed-standby");
+        params.add("ShouldDecrementDesiredCapacity", "true");
+        for (int index = 12; index >= 1; index--) {
+            params.add("InstanceIds.member." + index, "i-" + index);
+        }
+        params.add("InstanceIds.member.2", "i-repeated");
+        List<String> expected = new ArrayList<>();
+        for (int index = 1; index <= 12; index++) {
+            expected.add("i-" + index);
+            if (index == 2) {
+                expected.add("i-repeated");
+            }
+        }
+        when(service.enterStandby(eq(REGION), eq("indexed-standby"), anyList(), eq(true)))
+                .thenReturn(List.of());
+        when(service.exitStandby(eq(REGION), eq("indexed-standby"), anyList())).thenReturn(List.of());
+
+        assertEquals(200, handler.handle(action, params, REGION).getStatus());
+
+        if ("EnterStandby".equals(action)) {
+            verify(service).enterStandby(REGION, "indexed-standby", expected, true);
+        } else {
+            verify(service).exitStandby(REGION, "indexed-standby", expected);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "CapacityReservationIds,cr-0123456789abcdef0",
+        "CapacityReservationResourceGroupArns,arn:aws:resource-groups:us-east-1:000000000000:group/capacity"
+    })
+    void capacityReservationMembersRetainSparseTargetsAndRejectMultipleTargets(String field, String target) {
+        AutoScalingService service = new AutoScalingService();
+        service.regionResolver = new RegionResolver(REGION, "000000000000");
+        AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupName", "indexed-capacity");
+        params.add("LaunchTemplate.LaunchTemplateId", "lt-original");
+        params.add("MinSize", "0");
+        params.add("MaxSize", "3");
+        String prefix = "CapacityReservationSpecification.CapacityReservationTarget.";
+        params.add(prefix + field + ".member.999999999999999999999999", target);
+        params.add(prefix + field + ".member.01", "ignored");
+        params.add(prefix + field + ".member.3.Other", "ignored");
+
+        assertEquals(200, handler.handle("CreateAutoScalingGroup", params, REGION).getStatus());
+
+        AutoScalingGroup group = service.describeAutoScalingGroups(REGION, List.of("indexed-capacity")).getFirst();
+        assertEquals("CapacityReservationIds".equals(field) ? List.of(target) : List.of(),
+                group.getCapacityReservationSpecification().getCapacityReservationIds());
+        assertEquals("CapacityReservationResourceGroupArns".equals(field) ? List.of(target) : List.of(),
+                group.getCapacityReservationSpecification().getCapacityReservationResourceGroupArns());
+
+        params.add(prefix + field + ".member.2", target + "-other");
+        Response rejected = handler.handle("UpdateAutoScalingGroup", params, REGION);
+        assertEquals(400, rejected.getStatus());
+        assertTrue(rejected.getEntity().toString().contains("Specify only one Capacity Reservation target."));
+        assertEquals("CapacityReservationIds".equals(field) ? List.of(target) : List.of(),
+                group.getCapacityReservationSpecification().getCapacityReservationIds());
+        assertEquals("CapacityReservationResourceGroupArns".equals(field) ? List.of(target) : List.of(),
+                group.getCapacityReservationSpecification().getCapacityReservationResourceGroupArns());
+    }
 
     @Test
     void describeAutoScalingInstancesEmptyUsesModeledNamespace() throws Exception {

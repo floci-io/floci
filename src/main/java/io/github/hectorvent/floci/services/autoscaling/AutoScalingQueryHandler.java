@@ -941,7 +941,7 @@ public class AutoScalingQueryHandler {
         boolean shouldDecrement = requiredBoolParam(p, "ShouldDecrementDesiredCapacity",
                 "shouldDecrementDesiredCapacity");
         return ok(activitiesResponse("EnterStandby",
-                service.enterStandby(region, groupName, memberList(p, "InstanceIds"), shouldDecrement)));
+                service.enterStandby(region, groupName, indexedMembers(p, "InstanceIds"), shouldDecrement)));
     }
 
     private Response handleExitStandby(MultivaluedMap<String, String> p, String region) {
@@ -950,7 +950,7 @@ public class AutoScalingQueryHandler {
             throw SmithyValidationErrors.validationError(SmithyValidationErrors.notNull("autoScalingGroupName"));
         }
         return ok(activitiesResponse("ExitStandby",
-                service.exitStandby(region, groupName, memberList(p, "InstanceIds"))));
+                service.exitStandby(region, groupName, indexedMembers(p, "InstanceIds"))));
     }
 
     private static String activitiesResponse(String action, List<ScalingActivity> activities) {
@@ -1720,17 +1720,19 @@ public class AutoScalingQueryHandler {
         CapacityReservationSpecification specification = new CapacityReservationSpecification();
         specification.setCapacityReservationPreference(p.getFirst(prefix + "CapacityReservationPreference"));
         specification.setCapacityReservationIds(
-                capacityTargetMembers(p, prefix + "CapacityReservationTarget.CapacityReservationIds"));
+                indexedMembers(p, prefix + "CapacityReservationTarget.CapacityReservationIds"));
         specification.setCapacityReservationResourceGroupArns(
-                capacityTargetMembers(p, prefix + "CapacityReservationTarget.CapacityReservationResourceGroupArns"));
+                indexedMembers(p, prefix + "CapacityReservationTarget.CapacityReservationResourceGroupArns"));
         return specification;
     }
 
-    private List<String> capacityTargetMembers(MultivaluedMap<String, String> params, String prefix) {
+    private List<String> indexedMembers(MultivaluedMap<String, String> params, String prefix) {
         String memberPrefix = prefix + ".member.";
         return params.entrySet().stream()
                 .filter(entry -> entry.getKey().startsWith(memberPrefix))
                 .filter(entry -> entry.getKey().substring(memberPrefix.length()).matches("[1-9][0-9]*"))
+                .sorted(Comparator.comparingInt((Map.Entry<String, List<String>> entry) -> entry.getKey().length())
+                        .thenComparing(Map.Entry::getKey))
                 .flatMap(entry -> entry.getValue().stream())
                 .toList();
     }
