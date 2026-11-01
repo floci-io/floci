@@ -50,6 +50,12 @@ public class PaymentCryptographyService implements Resettable {
     /** The error a bad page size or a bad token is refused with. */
     private static final String PAGINATION_ERROR = "ValidationException";
 
+    /** The only algorithm this service makes material for. */
+    private static final String SUPPORTED_ALGORITHM = "AES_256";
+
+    /** The only class this service makes material for. */
+    private static final String SUPPORTED_CLASS = "SYMMETRIC_KEY";
+
     private final StorageBackend<String, PaymentCryptographyKey> keyStore;
     private final StorageBackend<String, PaymentCryptographyAlias> aliasStore;
     private final RegionResolver regionResolver;
@@ -87,12 +93,26 @@ public class PaymentCryptographyService implements Resettable {
     public PaymentCryptographyKey createKey(String region, Map<String, Object> attributes,
                                             Map<String, Boolean> modesOfUse, boolean exportable,
                                             boolean enabled, Map<String, String> tags) {
+        String algorithm = string(attributes, "KeyAlgorithm", "AES_256");
+        String keyClass = string(attributes, "KeyClass", "SYMMETRIC_KEY");
+        // The material is AES-256 and symmetric, so a key that says otherwise would be a key
+        // whose attributes do not describe it.
+        if (!SUPPORTED_ALGORITHM.equals(algorithm)) {
+            throw new AwsException("ValidationException",
+                    "KeyAlgorithm '" + algorithm + "' is not supported, this service makes "
+                            + SUPPORTED_ALGORITHM + " keys", 400);
+        }
+        if (!SUPPORTED_CLASS.equals(keyClass)) {
+            throw new AwsException("ValidationException",
+                    "KeyClass '" + keyClass + "' is not supported, this service makes "
+                            + SUPPORTED_CLASS + " keys", 400);
+        }
         PaymentCryptographyKey key = new PaymentCryptographyKey();
         key.setKeyId(UUID.randomUUID().toString().replace("-", ""));
         key.setRegion(region);
         key.setArn(regionResolver.buildArn(SERVICE, region, "key/" + key.getKeyId()));
-        key.setKeyAlgorithm(string(attributes, "KeyAlgorithm", "AES_256"));
-        key.setKeyClass(string(attributes, "KeyClass", "SYMMETRIC_KEY"));
+        key.setKeyAlgorithm(algorithm);
+        key.setKeyClass(keyClass);
         key.setKeyUsage(string(attributes, "KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"));
         key.setKeyModesOfUse(modesOfUse);
         key.setExportable(exportable);
@@ -284,8 +304,13 @@ public class PaymentCryptographyService implements Resettable {
         keyStore.put(current.getKeyId(), current);
     }
 
-    /** The tags of a key. */
-    public Map<String, String> listTags(PaymentCryptographyKey key) {
+    /**
+     * The tags of a key.
+     *
+     * <p>The copy takes the lock the tagging operations take, so it cannot read the map while
+     * another request is writing to it.
+     */
+    public synchronized Map<String, String> listTags(PaymentCryptographyKey key) {
         return new LinkedHashMap<>(key.getTags());
     }
 

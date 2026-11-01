@@ -202,6 +202,18 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void aKeyThatAsksForMaterialTheServiceDoesNotMakeIsRefused() {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "AES_128");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+
+        AwsException bad = assertThrows(AwsException.class,
+                () -> service.createKey("us-east-1", attributes, Map.of(), true, true, Map.of()));
+        assertEquals("ValidationException", bad.getErrorCode());
+    }
+
+    @Test
     void aPageSizeBelowOneIsRefused() {
         createKey("us-east-1");
 
