@@ -16,11 +16,10 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 
 @ApplicationScoped
 public class Inspector2Service implements Resettable {
-    private static final Set<String> RESOURCE_TYPES = Set.of(
+    private static final List<String> RESOURCE_TYPES = List.of(
             "EC2", "ECR", "LAMBDA", "LAMBDA_CODE", "CODE_REPOSITORY");
 
     private final AccountAwareStorageBackend<InspectorState> states;
@@ -66,6 +65,7 @@ public class Inspector2Service implements Resettable {
         }
         delegated.setStatus("ENABLED");
         delegated.setEnablingPollsRemaining(0);
+        delegated.setDisablingPollsRemaining(0);
         states.putForAccount(accountId, region, delegated);
     }
 
@@ -104,6 +104,21 @@ public class Inspector2Service implements Resettable {
             state.setStatus(overallStatus(state));
             states.putForAccount(accountId, region, state);
         }
+        if ("DISABLING".equals(state.getStatus()) && state.getDisablingPollsRemaining() > 0) {
+            InspectorState response = copyState(state);
+            state.setDisablingPollsRemaining(state.getDisablingPollsRemaining() - 1);
+            states.putForAccount(accountId, region, state);
+            return response;
+        }
+        if ("DISABLING".equals(state.getStatus())) {
+            for (String resourceType : RESOURCE_TYPES) {
+                if ("DISABLING".equals(state.resourceStatus(resourceType))) {
+                    state.setResourceStatus(resourceType, "DISABLED");
+                }
+            }
+            state.setStatus(overallStatus(state));
+            states.putForAccount(accountId, region, state);
+        }
         return copyState(state);
     }
 
@@ -130,6 +145,38 @@ public class Inspector2Service implements Resettable {
             if (changed) {
                 state.setStatus("ENABLING");
                 state.setEnablingPollsRemaining(1);
+                state.setDisablingPollsRemaining(0);
+                states.putForAccount(accountId, region, state);
+            }
+            result.put(accountId, copyState(state));
+        }
+        return result;
+    }
+
+    public synchronized Map<String, InspectorState> disable(
+            String region, String callerAccountId, JsonNode request) {
+        List<String> resourceTypes = resourceTypes(request);
+        List<String> accountIds = accountIds(request, callerAccountId);
+
+        for (String accountId : accountIds) {
+            authorizeAccountAccess(region, callerAccountId, accountId);
+        }
+
+        Map<String, InspectorState> result = new LinkedHashMap<>();
+        for (String accountId : accountIds) {
+            InspectorState state = stateForAccount(accountId, region);
+            boolean changed = false;
+            for (String resourceType : resourceTypes) {
+                String current = state.resourceStatus(resourceType);
+                if (!"DISABLED".equals(current) && !"DISABLING".equals(current)) {
+                    state.setResourceStatus(resourceType, "DISABLING");
+                    changed = true;
+                }
+            }
+            if (changed) {
+                state.setStatus("DISABLING");
+                state.setEnablingPollsRemaining(0);
+                state.setDisablingPollsRemaining(1);
                 states.putForAccount(accountId, region, state);
             }
             result.put(accountId, copyState(state));
@@ -255,6 +302,10 @@ public class Inspector2Service implements Resettable {
         if (enabling) {
             return "ENABLING";
         }
+        boolean disabling = RESOURCE_TYPES.stream().anyMatch(type -> "DISABLING".equals(state.resourceStatus(type)));
+        if (disabling) {
+            return "DISABLING";
+        }
         boolean enabled = RESOURCE_TYPES.stream().anyMatch(type -> "ENABLED".equals(state.resourceStatus(type)));
         return enabled ? "ENABLED" : "DISABLED";
     }
@@ -264,6 +315,7 @@ public class Inspector2Service implements Resettable {
         copy.setAdminAccountId(source.getAdminAccountId());
         copy.setStatus(source.getStatus());
         copy.setEnablingPollsRemaining(source.getEnablingPollsRemaining());
+        copy.setDisablingPollsRemaining(source.getDisablingPollsRemaining());
         copy.setEc2Status(source.getEc2Status());
         copy.setEcrStatus(source.getEcrStatus());
         copy.setLambdaStatus(source.getLambdaStatus());

@@ -54,7 +54,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [IAM Identity Center Access Portal](ssoportal.md) | `/assignment/accounts`, `/assignment/roles`, `/federation/credentials`, `/logout` | REST JSON | 4 |
 | [Identity Store](identitystore.md) | `POST /` + `X-Amz-Target: AWSIdentityStore.*` | JSON 1.1 | 19 |
 | [Amazon Macie](macie2.md) | `/admin`, `/macie`, `/admin/configuration` | REST JSON | 8 |
-| [Amazon Inspector](inspector2.md) | `/delegatedadminaccounts/*`, `/status/batch/get`, `/enable`, `/organizationconfiguration/*` | REST JSON | 7 |
+| [Amazon Inspector](inspector2.md) | `/delegatedadminaccounts/*`, `/status/batch/get`, `/enable`, `/disable`, `/organizationconfiguration/*` | REST JSON | 8 |
 | [Amazon Verified Permissions](verifiedpermissions.md) | `POST /` + `X-Amz-Target: VerifiedPermissions.*` | JSON 1.0 | 34 |
 | [Security Hub](securityhub.md) | `/organization/*`, `/accounts`, `/findingAggregator/*`, `/configurationPolicy*`, `/standards*`, `/tags/*` | REST JSON | 26 |
 | [Amazon Detective](detective.md) | `/orgs/*`, `/graphs/list`, `/graph/*` | REST JSON | 8 |

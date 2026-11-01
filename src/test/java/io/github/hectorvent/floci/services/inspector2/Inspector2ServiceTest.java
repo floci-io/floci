@@ -113,6 +113,35 @@ class Inspector2ServiceTest {
     }
 
     @Test
+    void disableOnlyRequestedResourceTypesAndConverges() throws Exception {
+        service.enable(REGION, MEMBER_ACCOUNT, objectMapper.readTree(
+                "{\"resourceTypes\":[\"EC2\",\"ECR\"]}"));
+        service.accountStatus(REGION, MEMBER_ACCOUNT, MEMBER_ACCOUNT);
+        service.accountStatus(REGION, MEMBER_ACCOUNT, MEMBER_ACCOUNT);
+
+        InspectorState disabling = service.disable(REGION, MEMBER_ACCOUNT,
+                objectMapper.readTree("{\"resourceTypes\":[\"EC2\"]}")).get(MEMBER_ACCOUNT);
+        assertEquals("DISABLING", disabling.getStatus());
+        assertEquals("DISABLING", disabling.getEc2Status());
+        assertEquals("ENABLED", disabling.getEcrStatus());
+
+        InspectorState first = service.accountStatus(REGION, MEMBER_ACCOUNT, MEMBER_ACCOUNT);
+        assertEquals("DISABLING", first.getStatus());
+        InspectorState converged = service.accountStatus(REGION, MEMBER_ACCOUNT, MEMBER_ACCOUNT);
+        assertEquals("ENABLED", converged.getStatus());
+        assertEquals("DISABLED", converged.getEc2Status());
+        assertEquals("ENABLED", converged.getEcrStatus());
+    }
+
+    @Test
+    void disableRejectsOmittedResourceTypes() throws Exception {
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.disable(REGION, MEMBER_ACCOUNT, objectMapper.readTree("{}")));
+
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
     void managementAccountCannotUpdateOrganizationConfiguration() throws Exception {
         service.enableDelegatedAdmin(REGION, MANAGEMENT_ACCOUNT, ADMIN_ACCOUNT);
 

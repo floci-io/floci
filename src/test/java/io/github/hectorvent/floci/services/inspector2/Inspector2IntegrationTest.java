@@ -108,6 +108,37 @@ class Inspector2IntegrationTest {
     }
 
     @Test
+    void disableSelectedScanTypePreservesOthers() {
+        String management = "940000000071";
+        String member = "940000000072";
+        createOrganization(management, member);
+
+        given().contentType("application/json").header("Authorization", auth(member))
+                .body("{\"resourceTypes\":[\"EC2\",\"ECR\"]}")
+                .post("/enable").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", auth(member)).body("{}")
+                .post("/status/batch/get").then().statusCode(200);
+        given().contentType("application/json").header("Authorization", auth(member)).body("{}")
+                .post("/status/batch/get").then().statusCode(200);
+
+        given().contentType("application/json").header("Authorization", auth(member))
+                .body("{\"resourceTypes\":[\"EC2\"]}")
+                .post("/disable").then().statusCode(200)
+                .body("accounts[0].status", equalTo("DISABLING"))
+                .body("accounts[0].resourceStatus.ec2", equalTo("DISABLING"))
+                .body("accounts[0].resourceStatus.ecr", equalTo("ENABLED"));
+
+        given().contentType("application/json").header("Authorization", auth(member)).body("{}")
+                .post("/status/batch/get").then().statusCode(200)
+                .body("accounts[0].state.status", equalTo("DISABLING"));
+        given().contentType("application/json").header("Authorization", auth(member)).body("{}")
+                .post("/status/batch/get").then().statusCode(200)
+                .body("accounts[0].state.status", equalTo("ENABLED"))
+                .body("accounts[0].resourceState.ec2.status", equalTo("DISABLED"))
+                .body("accounts[0].resourceState.ecr.status", equalTo("ENABLED"));
+    }
+
+    @Test
     void failedOrganizationUpdateDoesNotPartiallyMutateState() {
         String management = "940000000041";
         String administrator = "940000000042";
