@@ -182,6 +182,12 @@ public class PaymentCryptographyDataPlaneHandler {
         return Map.of();
     }
 
+    /** The cryptogram of an authorization request, generated. */
+    public Map<String, Object> generateAuthRequestCryptogram(JsonNode request, String region) {
+        refused("GenerateAuthRequestCryptogram");
+        return Map.of();
+    }
+
     /** The material of a key translated into another form. */
     public Map<String, Object> translateKeyMaterial(JsonNode request, String region) {
         refused("TranslateKeyMaterial");

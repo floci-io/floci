@@ -129,6 +129,12 @@ public class PaymentCryptographyDataPlaneController {
         return respond(handler.verifyAuthRequestCryptogram(parse(body), region(headers)));
     }
 
+    @POST
+    @Path("/cryptogram/generate")
+    public Response generateAuthRequestCryptogram(String body, @Context HttpHeaders headers) {
+        return respond(handler.generateAuthRequestCryptogram(parse(body), region(headers)));
+    }
+
     /** The body of a request, with the key the path names. */
     private JsonNode request(String body, String pathIdentifier, String member) {
         JsonNode request = parse(body);

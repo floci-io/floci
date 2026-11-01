@@ -23,6 +23,7 @@ client that talks to the control plane does not reach it by accident.
 | `GenerateCardValidationData` | The card validation value of a card account, on `POST /cardvalidationdata/generate` |
 | `VerifyCardValidationData` | Verify a card validation value, on `POST /cardvalidationdata/verify` |
 | `VerifyAuthRequestCryptogram` | Verify the cryptogram of an authorization request, on `POST /cryptogram/verify` |
+| `GenerateAuthRequestCryptogram` | The cryptogram of an authorization request, on `POST /cryptogram/generate` |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior
