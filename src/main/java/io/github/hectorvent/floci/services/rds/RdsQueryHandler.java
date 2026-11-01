@@ -871,7 +871,8 @@ public class RdsQueryHandler {
                 includeEncryption ? null : cloudwatchLogsExportChanges(params),
                 optionalInt(params.getFirst("MaxAllocatedStorage")),
                 params.getFirst("StorageType"),
-                params.getFirst("CACertificateIdentifier"));
+                params.getFirst("CACertificateIdentifier"),
+                params.getFirst("LicenseModel"));
     }
 
     /**
@@ -1049,7 +1050,7 @@ public class RdsQueryHandler {
         if (engine != null && engine.regionMatches(true, 0, "sqlserver", 0, 9)) {
             return "license-included";
         }
-        if (engine != null && engine.equalsIgnoreCase("aurora-mysql")) {
+        if (engine != null && (engine.toLowerCase().contains("mysql") || engine.equalsIgnoreCase("mariadb"))) {
             return "general-public-license";
         }
         return "postgresql-license";
@@ -3199,6 +3200,7 @@ public class RdsQueryHandler {
                 .elem("DBInstanceStatus", statusStr)
                 .elem("Engine", engineStr.toLowerCase())
                 .elem("EngineVersion", i.getEngineVersion())
+                .elem("LicenseModel", i.getLicenseModel() != null ? i.getLicenseModel() : licenseModel(engineStr))
                 .elem("MasterUsername", i.getMasterUsername());
         if (i.getDbName() != null && !i.getDbName().isBlank()) {
             xml.elem("DBName", i.getDbName());

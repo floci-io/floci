@@ -28,6 +28,8 @@ public class DbInstance {
     private String storageType;
     /** The RDS certificate authority for the instance; null on one stored before it was recorded. */
     private String caCertificateIdentifier;
+    /** The license model the request named; null means the engine's default. */
+    private String licenseModel;
     private DbInstanceStatus status;
     private DbEndpoint endpoint;
     private boolean iamDatabaseAuthenticationEnabled;
@@ -141,6 +143,8 @@ public class DbInstance {
     public String getStorageType() { return storageType != null ? storageType : DEFAULT_STORAGE_TYPE; }
     public void setStorageType(String storageType) { this.storageType = storageType; }
 
+    public String getLicenseModel() { return licenseModel; }
+    public void setLicenseModel(String licenseModel) { this.licenseModel = licenseModel; }
     public String getCaCertificateIdentifier() { return caCertificateIdentifier; }
     public void setCaCertificateIdentifier(String caCertificateIdentifier) {
         this.caCertificateIdentifier = caCertificateIdentifier;
