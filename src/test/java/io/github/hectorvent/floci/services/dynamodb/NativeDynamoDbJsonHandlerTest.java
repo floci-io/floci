@@ -2113,27 +2113,62 @@ class NativeDynamoDbJsonHandlerTest {
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
             PutItem            | true  | OVERFLOW  | {"TableName":"Missing","Item":{"userId":{"S":"u1"},"n":{"NS":["1","%s"]}}}
-            PutItem            | true  | OVERFLOW  | {"TableName":"Missing","Item":{"userId":{"S":"u1"}},"ConditionExpression":"n = :v","Expected":{"n":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"%s"}]}}}
+            PutItem            | true  | OVERFLOW  | {"TableName":"Users","Item":{"userId":{"S":"u1"}},"Expected":{"n":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"%s"}]}}}
             PutItem            | true  | OVERFLOW  | {"TableName":"Missing","Item":{"userId":{"S":"u1"}},"ConditionExpression":"n = :v","ExpressionAttributeValues":{":v":{"M":{"x":{"L":[{"N":"%s"}]}}}}}
             UpdateItem         | true  | OVERFLOW  | {"TableName":"Missing","Key":{"userId":{"N":"%s"}},"UpdateExpression":"SET a = :a","ExpressionAttributeValues":{":a":{"S":"x"}}}
             UpdateItem         | true  | OVERFLOW  | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"AttributeUpdates":{"n":{"Action":"PUT","Value":{"N":"%s"}}}}
-            DeleteItem         | true  | OVERFLOW  | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"Expected":{"n":{"Value":{"N":"%s"}}}}
+            DeleteItem         | true  | OVERFLOW  | {"TableName":"Users","Key":{"userId":{"S":"u1"}},"Expected":{"n":{"Value":{"N":"%s"}}}}
             GetItem            | false | OVERFLOW  | {"TableName":"Missing","Key":{"userId":{"N":"%s"}},"ProjectionExpression":"a","AttributesToGet":["a"]}
             BatchGetItem       | false | OVERFLOW  | {"RequestItems":{"Missing":{"Keys":[{"userId":{"N":"%s"}}]}}}
-            Query              | false | OVERFLOW  | {"TableName":"Missing","ExclusiveStartKey":{"userId":{"S":"u1"},"n":{"N":"%s"}}}
+            Query              | false | OVERFLOW  | {"TableName":"Missing","KeyConditionExpression":"userId = :p","ExpressionAttributeValues":{":p":{"S":"u1"}},"ExclusiveStartKey":{"userId":{"S":"u1"},"n":{"N":"%s"}}}
             Query              | false | OVERFLOW  | {"TableName":"Missing","KeyConditions":{"userId":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"u1"}]}},"QueryFilter":{"n":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"%s"}]}}}
             Scan               | false | OVERFLOW  | {"TableName":"Missing","ScanFilter":{"n":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"%s"}]}}}
-            TransactWriteItems | false | OVERFLOW  | {"TransactItems":[{"Update":{"TableName":"Missing","Key":{"userId":{"S":"u1"}},"UpdateExpression":"SET n = = :v","ExpressionAttributeValues":{":v":{"N":"%s"}}}}]}
+            TransactWriteItems | false | OVERFLOW  | {"TransactItems":[{"Put":{"TableName":"Missing","Item":{"userId":{"S":"u1"},"n":{"N":"%s"}},"ConditionExpression":"a = = b"}}]}
+            TransactWriteItems | false | OVERFLOW  | {"TransactItems":[{"Update":{"TableName":"Missing","Key":{"userId":{"S":"u1"}},"UpdateExpression":"SET n = :v","ExpressionAttributeValues":{":v":{"N":"%s"}}}}]}
             TransactGetItems   | false | OVERFLOW  | {"TransactItems":[{"Get":{"TableName":"Missing","Key":{"userId":{"N":"%s"}}}}]}
             BatchWriteItem     | false | UNDERFLOW | {"RequestItems":{"Missing":[{"DeleteRequest":{"Key":{"userId":{"N":"%s"}}}}]}}
             """)
     void everyNumberInARequestIsReadBeforeTheOtherChecks(String operation, boolean enveloped, String problem,
             String template) throws Exception {
+        createUsersTable("eu-west-1");
         JsonNode request = mapper.readTree(template.formatted("1e2147483647"));
 
         AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, request, "eu-west-1"));
         String message = "OVERFLOW".equals(problem) ? DynamoDbNumberUtils.NUMBER_OVERFLOW : DynamoDbNumberUtils.NUMBER_UNDERFLOW;
         assertEquals((enveloped ? "1 validation error detected: " : "") + message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            GetItem            | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"Item":{"n":{"N":"abc"}}}
+            PutItem            | {"TableName":"Missing","Item":{"userId":{"S":"u1"}},"Key":{"userId":{"N":"abc"}}}
+            UpdateItem         | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"UpdateExpression":"SET a = :a","ExpressionAttributeValues":{":a":{"S":"x"}},"Item":{"n":{"N":"abc"}}}
+            DeleteItem         | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"ExclusiveStartKey":{"userId":{"N":"abc"}}}
+            Query              | {"TableName":"Missing","KeyConditionExpression":"userId = :p","ExpressionAttributeValues":{":p":{"S":"u1"}},"Key":{"userId":{"N":"abc"}}}
+            Scan               | {"TableName":"Missing","KeyConditions":{"userId":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"abc"}]}}}
+            TransactWriteItems | {"TransactItems":[{"Put":{"TableName":"Missing","Item":{"userId":{"S":"u1"}},"Key":{"userId":{"N":"abc"}}}}]}
+            TransactWriteItems | {"TransactItems":[{"Delete":{"TableName":"Missing","Key":{"userId":{"S":"u1"}},"ExpressionAttributeValues":{":v":{"N":"abc"}}}}]}
+            TransactGetItems   | {"TransactItems":[{"Get":{"TableName":"Missing","Key":{"userId":{"S":"u1"}},"Item":{"n":{"N":"abc"}}}}]}
+            """)
+    void aNumberThatTheOperationDoesNotReadIsIgnored(String operation, String request) throws Exception {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle(operation, mapper.readTree(request), "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode(), ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            PutItem    | {"TableName":"Missing","Item":{"userId":{"S":"u1"}},"ConditionExpression":"n = :v","ExpressionAttributeValues":{":v":{"N":"abc"}},"Expected":{"n":{"Exists":false}}} | Can not use both expression and non-expression parameters
+            PutItem    | {"TableName":"Users","Item":{"userId":{"S":"u1"}},"Expected":{"n":{"Value":{"N":"abc"},"Exists":false}}} | Value cannot be used when Exists is false for Attribute: n
+            UpdateItem | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"UpdateExpression":"SET a = :a","ExpressionAttributeValues":{":a":{"S":"x"}},"AttributeUpdates":{"n":{"Action":"PUT","Value":{"N":"abc"}}}} | Can not use both expression and non-expression parameters
+            UpdateItem | {"TableName":"Missing","Key":{"userId":{"S":"u1"}},"ExpressionAttributeValues":{":a":{"S":"x"}},"AttributeUpdates":{"n":{"Action":"PUT","Value":{"N":"abc"}}}} | ExpressionAttributeValues can only be specified when using expressions
+            """)
+    void numbersInValuesAndLegacyConditionsAreReadAfterTheMemberChecks(String operation, String request,
+            String message) throws Exception {
+        createUsersTable("eu-west-1");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle(operation, mapper.readTree(request), "eu-west-1"));
+        assertTrue(ex.getMessage().contains(message), ex.getMessage());
     }
 
     @ParameterizedTest
