@@ -802,15 +802,14 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   column and the format, and Floci writes no `stl_load_errors` row. `ACCEPTANYDATE` loads such a value as
   `NULL` instead; when no format is given it reads the ISO form of a date, with an optional time of day, and
   turns anything else into `NULL`. An empty unquoted field of a `DATE`, `TIMESTAMP` or other non-character column
-  is loaded as `NULL`, as in AWS, without requiring `ACCEPTANYDATE` or `EMPTYASNULL`. Like `TRUNCATECOLUMNS`,
-  this and the temporal formats read column types from the catalog, so they apply only with the options that
-  query column types (`DATEFORMAT`, `TIMEFORMAT`, `FILLRECORD`), over the Simple Query protocol, and are not
-  combined with `FORMAT AS JSON`; a plain `COPY` without those options does not read the catalog. Numeric parts with no
+  is loaded as `NULL`, as in AWS, without requiring `ACCEPTANYDATE` or `EMPTYASNULL`. Numeric parts with no
   separator between them, as in `YYYYMMDD`, need their
   full width, a part may be named once, and `HH12` needs `AM` or `PM`; any other format string is not
   recognized.
-  Like `TRUNCATECOLUMNS`, these read column types from the catalog, so they work only over the Simple Query
-  protocol and are not combined with `FORMAT AS JSON`. Floci deviations: `'auto'` is accepted but converts
+  Like `TRUNCATECOLUMNS`, these and the empty non-character rule read column types from the catalog, so
+  they apply only with the options that query column types (`DATEFORMAT`, `TIMEFORMAT`, `FILLRECORD`), over the
+  Simple Query protocol, and are not combined with `FORMAT AS JSON`; a plain `COPY` without those options does
+  not read the catalog. Floci deviations: `'auto'` is accepted but converts
   nothing, leaving every value to PostgreSQL, which reads ISO 8601, Julian and `YYYYMMDD HHMISS` but not every
   form Redshift recognizes (for example `BC` dates and `YYYY.DDD`), and with it `ACCEPTANYDATE` cannot turn a
   value into `NULL`, so a value PostgreSQL rejects fails the COPY; `TIMESTAMPTZ` columns are read by
