@@ -1713,6 +1713,9 @@ its tag operations name it by its ARN. A Redshift Data API request is checked on
 names by name or by ARN, which ends in the id Redshift Serverless gives it, `workgroup/<id>`, and on
 `workgroup/*` when there is no such workgroup; one naming its session, by `SessionId`, on the
 cluster or workgroup the caller's session runs on, and on `*` when the caller has no such session.
+AWS does not document which resource a request naming a session is authorized on, so the session's
+target is Floci's inference: a session runs on the cluster or workgroup named by the statement that
+opened it.
 EventBridge V2's requests are read beside EventBridge's, each checked on the resources the API serving
 it names (an EventBridge V2 `PutEvents` on the bus its `EventBusArn` names). A
 state machine's version or alias
