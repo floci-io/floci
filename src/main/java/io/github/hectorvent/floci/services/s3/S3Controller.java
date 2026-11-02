@@ -3325,7 +3325,7 @@ public class S3Controller {
         String sourceBucket = sourceObject.bucket();
         authorizeCopySourceRead(httpHeaders, uriInfo, sourceObject, authorization);
         String copySourceRange = httpHeaders.getHeaderString("x-amz-copy-source-range");
-        String eTag = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
+        Part part = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
                 sourceBucket, sourceObject.objectKey(), sourceObject.versionId(), copySourceRange,
                 copySourceSseCustomerHeaders(httpHeaders),
                 sseCustomerHeaders(httpHeaders),
@@ -3335,14 +3335,17 @@ public class S3Controller {
         // UploadPartCopy doesn't take server-side-encryption headers itself,
         // parts always inherit the upload they belong to.
         MultipartUpload destinationUpload = s3Service.listParts(destBucket, destKey, uploadId);
-        String xml = new XmlBuilder()
+        XmlBuilder xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("CopyPartResult", AwsNamespaces.S3)
                 .elem("LastModified", ISO_FORMAT.format(java.time.Instant.now()))
-                .elem("ETag", eTag)
-                .end("CopyPartResult")
-                .build();
-        Response.ResponseBuilder response = Response.ok(xml).type(MediaType.APPLICATION_XML);
+                .elem("ETag", part.getETag());
+        ChecksumAlgorithm declared = destinationUpload.getChecksumAlgorithm();
+        if (declared != null) {
+            xml.elem("Checksum" + declared.name(), part.getChecksum().valueFor(declared));
+        }
+        Response.ResponseBuilder response = Response.ok(xml.end("CopyPartResult").build())
+                .type(MediaType.APPLICATION_XML);
         if (destinationUpload.getServerSideEncryption() != null) {
             response.header("x-amz-server-side-encryption", destinationUpload.getServerSideEncryption());
         }

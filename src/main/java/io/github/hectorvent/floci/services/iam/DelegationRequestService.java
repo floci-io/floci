@@ -5,7 +5,6 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.AwsRegions;
-import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.DelegationPermission;
@@ -753,7 +752,7 @@ public class DelegationRequestService {
      */
     private static AwsException constraintViolation(String value, String member, String constraint) {
         if (value == null) {
-            return SmithyValidationErrors.validationError(SmithyValidationErrors.notNull(member));
+            return IamValidationErrors.notNull(member);
         }
         return IamValidationErrors.validationError(member, value, constraint);
     }

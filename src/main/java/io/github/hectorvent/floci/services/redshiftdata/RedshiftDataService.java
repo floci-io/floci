@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.redshift.RedshiftAuditLogPublisher;
@@ -42,6 +43,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -50,7 +52,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class RedshiftDataService implements Resettable {
+public class RedshiftDataService implements Resettable, StoredResourceArns {
 
     private static final int PAGE_SIZE = 1000;
     static final Pattern AUTO_COMMIT_SQL = Pattern.compile(
@@ -218,6 +220,22 @@ public class RedshiftDataService implements Resettable {
 
     public ObjectNode listSessions(JsonNode request, String region) {
         return new RedshiftDataSessionListing(objectMapper, sessions).list(request, sessionScope(region, null));
+    }
+
+    @Override
+    public String namespace() {
+        return "redshift-data";
+    }
+
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return resolver.find(type, names, region);
+    }
+
+    /** The cluster or workgroup the caller's open session runs on, named by its {@code SessionId}, as it reads it. */
+    @Override
+    public Optional<String> through(String member, String value, String region) {
+        return "SessionId".equals(member) ? sessions.targetArn(sessionScope(region, null), value) : Optional.empty();
     }
 
     private Admission replay(RedshiftDataIdempotencyStore.Receipt receipt, RedshiftDataIdempotencyStore.Scope scope,

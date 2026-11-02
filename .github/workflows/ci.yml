@@ -37,15 +37,16 @@ env:
   # Hardcoded on purpose: strategy.job-total counts EVERY matrix job, so adding an
   # unrelated matrix entry later would change the modulus and silently leave part
   # of the suite running in no shard. Keep in sync with the matrix below.
-  SHARD_TOTAL: 4
+  SHARD_TOTAL: 5
 
 jobs:
   test:
     name: Build and Test (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # Shards now run up to 16m50s (about 15 min of it in "Run tests"), so 20 left little margin.
-    # This is a runaway-job kill switch, not a budget: Actions bills the minutes a job actually
-    # uses, so a higher ceiling costs nothing until something hangs.
+    # A runaway-job kill switch, not a budget: Actions bills the minutes a job actually uses, so a
+    # higher ceiling costs nothing until something hangs. It did stop being a kill switch once the
+    # suite grew into it: on 2026-11-02 one shard was cut here twice at 25m15s and 25m26s with no
+    # test having failed, which is why the suite runs in five shards rather than four.
     timeout-minutes: 25
     # Drafts skip the suite to spare runners; it runs once the PR is ready for review.
     # Written on the job rather than as a gate job so it costs no runner. Pushes to main
@@ -60,7 +61,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -72,7 +73,7 @@ jobs:
           # fails with Path Validation Error); explicit cache steps below.
 
       # Restore on every shard; save from shard 1 only. With a combined cache step
-      # all four shards would race the same save key: one wins, three spend
+      # every shard would race the same save key: one wins, the rest spend
       # post-job time reserving-then-failing plus redundant multi-hundred-MB uploads.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -124,7 +125,8 @@ jobs:
 
       # surefire.timeout kills a fork whose test ignores JUnit's interrupt (deadlock, blocking
       # I/O). It caps the whole shard (one fork runs all its tests), so 20 min leaves room above
-      # the slowest shard's ~15 min and still lets surefire report before the 25-minute job limit.
+      # the slowest shard, about 12.5 min of tests across five, and still lets surefire report
+      # before the 25-minute job limit.
       - name: Run tests
         run: >
           ./mvnw surefire:test -B

@@ -291,17 +291,14 @@ the emulator rather than by a request, a seeded configuration or a role template
 in those same words.
 
 Some refusals stay as this service answers them, and the members behind them are left out of the
-vendored shapes so the walk cannot reword them. `CreateServiceLinkedRole` validates its required
-`AWSServiceName` through IAM's validation layer: missing, empty, overlong and pattern-invalid values
-answer `ValidationError` with the corresponding member constraint. The pattern error follows a
-captured AWS response; the other cases follow IAM's validation conventions. `CustomSuffix` remains
-`InvalidInput`, as does an empty `ServiceNamespaces` on `ListPoliciesGrantingServiceAccess`. An
+vendored shapes so the walk cannot reword them. A service-linked role's custom suffix answers
+`InvalidInput` rather than a validation error at all, "Custom suffix is not allowed for
+`<service>`", which is a recorded refusal across roughly eighty principals, and so does an empty
+`ServiceNamespaces` on `ListPoliciesGrantingServiceAccess`. The principal beside that suffix is
+read off the model, which the section below sets out. An
 account alias carries AWS's own sentence about its own bounds, which is why neither alias operation
-is read at all. For `statusType` on the four credential
-updates, a missing `Status` answers `Member must not be null`; an invalid value answers `Member must
-satisfy enum value set: [Expired, Active, Inactive]` without echoing that value. These wordings
-follow the newer AWS capture. `Encoding` on `GetSSHPublicKey`
-answers the modelled `UnrecognizedPublicKeyEncoding` rather than a constraint violation. And
+is read at all. `Encoding` on `GetSSHPublicKey` answers the modelled
+`UnrecognizedPublicKeyEncoding` rather than a constraint violation. And
 `TagKeys` on the eight untag operations is answered against the list as a whole, `Value at
 'tagKeys' failed to satisfy constraint: Member must satisfy constraint: [...]`, where the walk
 names the member that broke it under its own index: both forms are readings, nothing recorded
@@ -325,11 +322,48 @@ was already this service's choice for a list over its limit, and it is now what 
 whatever it breaks. Other services do quote a list, Lambda's `Value '[x86_64, arm64]' at
 'architectures'` being a captured one, which is why this is IAM's reading and not a rule.
 
-A captured missing `Status` on the four credential updates reads `Value at 'status' failed to satisfy
-constraint: Member must not be null`, without `null` after `Value`. Other omitted required members
-may still use `Value null at '<member>'`; this capture does not settle their wording. IAM's form for
-violations with a supplied value is chosen in one place, so a future capture that shows IAM carrying
-those values again moves it back in one edit rather than across the service.
+A required member the request leaves out reads the same way, `Value at 'status' failed to satisfy
+constraint: Member must not be null`, with no `null` standing where the value would. That was the
+one message carrying a word in the value's place until 2026-10-31, when a capture from a real
+account answered an omitted `Status` and showed the word gone with every other value this service
+leaves out. The form is chosen in one place, so the capture moved it in one edit rather than across
+the service, and the services that do quote their values, STS among them, still write `Value null at
+'<member>'`.
+
+### Two answers the model carries since a capture settled them
+
+`statusType` and `CreateServiceLinkedRole`'s `AWSServiceName` were answered by hand here until
+2026-10-31, each on the reading that AWS worded them differently from the model. Captures from a
+real account, on [#6042](https://github.com/floci-io/floci/issues/6042), showed otherwise, so both
+are read off the vendored shapes with everything else.
+
+A `Status` outside the set is `Value at 'status' failed to satisfy constraint: Member must satisfy
+enum value set: [Expired, Active, Inactive]`, naming the set where this service named none, and an
+omitted one is the required-member violation rather than the same enum sentence, which is what one
+hand-written check could not tell apart. Both read the same on all four operations that share the
+shape. The set is listed in the order AWS lists it, which is not the order the vendored model
+declares: the values are the model's and only their order is read from the capture.
+
+A principal that breaks `AWSServiceName`'s pattern is `Value at 'aWSServiceName' failed to satisfy
+constraint: Member must satisfy regular expression pattern: [\w+=.@-]*`, where this service
+answered `InvalidInput` with a sentence about the member's bounds. An omitted one is the
+required-member violation, a principal over 128 characters the maximum, and one sent empty breaks
+both the minimum and the pattern, which is what every other string member here answers for an empty
+value. A principal that satisfies the pattern and names no service AWS has is still `InvalidInput`,
+"The request must include a valid AWSServiceName, for example es.amazonaws.com.", which is the
+layering the capture leaves in place: the shape first, then whether the service exists.
+
+The pattern quoted there is the one AWS quotes, not the one the shape declares, and those differ.
+botocore aliases `AWSServiceName` to the shape it gives a group name, `[\w+=,.@-]+` at 1 to 128
+characters, while AWS's message gives `[\w+=.@-]*`: the comma is gone and a `*` stands where the
+model sets a minimum of 1. Only the message is in hand rather than the shape, so the vendored shape
+records AWS's text beside its own and the walk quotes the capture while holding a value to the
+model. A comma is therefore still admitted, and an empty principal is still refused. That is the
+same split the enum order above takes, the captured rendering over the model's, and one object
+decides which text any violation quotes, so no other member moves with it.
+
+What a second capture would settle is the comma: `CreateServiceLinkedRole` with one in the
+principal, which AWS either refuses as a pattern violation or takes.
 
 ### Permission Boundaries
 
@@ -425,10 +459,11 @@ the user resolved from the signing access key, the same fallback `GetUser` uses.
 `Status` takes any of the three values `statusType` publishes, `Active`, `Inactive` and `Expired`,
 which is what the reference's Valid Values line on `UpdateAccessKey` lists, and it is held to that
 set the same way `UpdateSigningCertificate`, `UpdateSSHPublicKey` and
-`UpdateServiceSpecificCredential` hold theirs. It is read before the key is looked up, so a status
-outside the set answers `ValidationError` whether or not the key exists. The `AWS::IAM::AccessKey`
-CloudFormation resource takes the same three, its Allowed values line reading "Active | Inactive |
-Expired" as well.
+`UpdateServiceSpecificCredential` hold theirs, all four from the model since the capture above. It
+is read before the key is looked up, so a status outside the set answers `ValidationError` whether
+or not the key exists, and an omitted one answers the required member it is. The
+`AWS::IAM::AccessKey` CloudFormation resource takes the same three, its Allowed values line
+reading "Active | Inactive | Expired" as well.
 
 ### Account Aliases
 
@@ -1676,8 +1711,10 @@ on `scalable-target/*` when there is none yet, as for a `RegisterScalableTarget`
 its tag operations name it by its ARN. A Redshift Data API request is checked on the cluster its
 `ClusterIdentifier` names, or on the ARN of the Redshift Serverless workgroup its `WorkgroupName`
 names by name or by ARN, which ends in the id Redshift Serverless gives it, `workgroup/<id>`, and on
-`workgroup/*` when there is no such workgroup; one naming only its session, by `SessionId`, is
-checked on `*`. EventBridge V2's API, which Floci does not serve, is not read. A
+`workgroup/*` when there is no such workgroup; one naming its session, by `SessionId`, on the
+cluster or workgroup the caller's session runs on, and on `*` when the caller has no such session.
+EventBridge V2's requests are read beside EventBridge's, each checked on the resources the API serving
+it names (an EventBridge V2 `PutEvents` on the bus its `EventBusArn` names). A
 state machine's version or alias
 (`stateMachine:<name>:<qualifier>`) is checked on the state machine's ARN, as Step Functions
 authorizes it, so a grant or a deny on `stateMachine:<name>` covers its versions and aliases, and

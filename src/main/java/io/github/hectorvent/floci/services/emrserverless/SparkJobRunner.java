@@ -67,16 +67,19 @@ public interface SparkJobRunner {
      * which those in S3 are unpacked into the container's working directory before the driver starts (empty
      * for none); the storage of the cluster it runs on (null for none, as for an EMR Serverless run); the
      * {@code core-site.xml} properties its {@code hadoop} command gets, on a cluster, after those of the
-     * cluster's storage, which they replace where a name is the same (empty for none); and the
+     * cluster's storage, which they replace where a name is the same (empty for none); the
      * {@code log4j2.properties} lines its Spark gets after those of its configuration, which they replace where
-     * a key is the same (empty for none).
+     * a key is the same (empty for none); and, on a cluster, the {@code mapred-site.xml} properties its
+     * MapReduce gets, the {@code log4j.properties} lines and the {@code hadoop-env.sh} exports its {@code hadoop}
+     * command gets (each empty for none).
      */
     record Job(String service, String runId, String accountId, String region, String releaseLabel,
                String imageTemplate, String customImage, String dockerNetwork, String executionRole,
                Map<String, String> sparkDefaults, List<String> application, List<String> command, Duration timeout,
                String logFolder, CloudWatchLogs cloudWatchLogs, Map<String, String> environment,
                List<String> archives, Storage storage, Map<String, String> coreSite,
-               Map<String, String> sparkLog4j2) {
+               Map<String, String> sparkLog4j2, Map<String, String> mapredSite, Map<String, String> hadoopLog4j,
+               Map<String, String> hadoopEnvironment) {
     }
 
     /**

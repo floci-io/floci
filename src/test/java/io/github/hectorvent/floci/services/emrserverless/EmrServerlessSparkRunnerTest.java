@@ -478,10 +478,11 @@ class EmrServerlessSparkRunnerTest {
         verify(spec).withEnv(eq("FLOCI_HADOOP_SITE"), argThat(site -> site.startsWith(
                 "<property><name>fs.s3a.endpoint</name><value>http://floci:4566</value></property>\n")));
         verify(spec).withCmd(command);
+        verify(spec).withEnv("FLOCI_MAPRED_SITE", "<property><name>mapreduce.framework.name</name><value>local"
+                + "</value></property><property><name>mapreduce.jobtracker.staging.root.dir</name>"
+                + "<value>/tmp/hadoop/mapred/staging</value></property>");
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join("\n",
-                "  site mapred-site.xml '<property><name>mapreduce.framework.name</name><value>local</value>"
-                        + "</property><property><name>mapreduce.jobtracker.staging.root.dir</name>"
-                        + "<value>/tmp/hadoop/mapred/staging</value></property>'",
+                "  site mapred-site.xml \"$FLOCI_MAPRED_SITE\"",
                 // The local job runner names a job's files by their path alone, which leads to the cluster's HDFS.
                 "  mkdir -p \"/mnt/hdfs/tmp/hadoop/mapred/staging\" \"$(dirname /tmp/hadoop/mapred/staging)\"",
                 "  ln -sfn \"/mnt/hdfs/tmp/hadoop/mapred/staging\" /tmp/hadoop/mapred/staging\n"))
@@ -492,7 +493,9 @@ class EmrServerlessSparkRunnerTest {
                         "  for jar in /usr/lib/spark/jars/hadoop-client-api-*.jar"
                                 + " /usr/lib/spark/jars/hadoop-client-runtime-*.jar"
                                 + " /usr/lib/spark/jars/emr-serverless-spark-goodies.jar; do",
-                        "    if [ -f \"$jar\" ]; then ln -sf \"$jar\" /tmp/floci-mapreduce/; fi",
+                        "    if [ -f \"$jar\" ]; then ln -sf \"$jar\" /tmp/floci-mapreduce/;",
+                        "    else echo \"Floci: this image has no $jar, so the hadoop command may not find MapReduce"
+                                + " or S3A's AWS SDK.\" >&2; fi",
                         "  done"))
                 && entrypoint.get(2).contains(
                         "\n  export HADOOP_MAPRED_HOME=\"${HADOOP_MAPRED_HOME:-/tmp/floci-mapreduce}\"\n")
@@ -501,6 +504,36 @@ class EmrServerlessSparkRunnerTest {
                         + " 'exec hadoop jar /usr/lib/hadoop/hadoop-streaming.jar \"$@\"'"
                         + " > /tmp/floci-bin/hadoop-streaming")
                 && entrypoint.get(2).contains("chmod +x /tmp/floci-bin/hdfs /tmp/floci-bin/hadoop-streaming")));
+    }
+
+    @Test
+    void aJarTheMapReduceHomeLinksThatTheImageLacksIsNamedOnStandardError(@TempDir Path folder) throws Exception {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(commandJob(List.of("hadoop", "fs", "-ls", "/"), Map.of(), STORAGE), progress);
+
+        ArgumentCaptor<List<String>> entrypoint = ArgumentCaptor.captor();
+        verify(spec).withEntrypoint(entrypoint.capture());
+        String script = entrypoint.getValue().get(2);
+        int start = script.indexOf("  for jar in ");
+        // The wrapper's loop, on a Spark jars folder of the test's with one of the three jars in it.
+        Path jars = Files.createDirectory(folder.resolve("jars"));
+        Path home = Files.createDirectory(folder.resolve("home"));
+        Files.writeString(jars.resolve("hadoop-client-api-3.4.0-amzn-1.jar"), "");
+        String loop = script.substring(start, script.indexOf("\n  done\n", start) + 7)
+                .replace("/usr/lib/spark/jars/", jars + "/").replace("/tmp/floci-mapreduce/", home + "/");
+        BootstrapProcess.Result ended = BootstrapProcess.run(new ProcessBuilder("bash", "-c", loop)
+                .directory(folder.toFile()));
+
+        assertEquals(0, ended.exit(), ended.output());
+        assertTrue(Files.isSymbolicLink(home.resolve("hadoop-client-api-3.4.0-amzn-1.jar")));
+        assertTrue(ended.output().contains("Floci: this image has no " + jars + "/hadoop-client-runtime-*.jar, so the"
+                + " hadoop command may not find MapReduce or S3A's AWS SDK."), ended.output());
+        assertTrue(ended.output().contains("Floci: this image has no " + jars + "/emr-serverless-spark-goodies.jar"),
+                ended.output());
+        assertFalse(ended.output().contains("hadoop-client-api"), ended.output());
     }
 
     @Test
@@ -574,7 +607,8 @@ class EmrServerlessSparkRunnerTest {
                         "  printf '\\n%s\\n' \"$FLOCI_SPARK_LOG4J2\" >> \"$conf/log4j2.properties\"",
                         "fi",
                         "export SPARK_CONF_DIR=\"$conf\"",
-                        "exec \"$@\""))
+                        "if [ -n \"${FLOCI_HADOOP_SITE:-}\" ]; then"))
+                && entrypoint.get(2).endsWith("\nfi\nexec \"$@\"")
                 && entrypoint.subList(3, 5).equals(List.of("floci", "/usr/lib/spark/bin/spark-submit"))));
         ArgumentMatcher<List<String>> theStepsApplication =
                 arguments -> arguments.getLast().equals("s3://bucket/jobs/report.py");
@@ -615,15 +649,131 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
-    void aStepWithoutLog4j2LinesRunsSparkSubmitAsItIs() {
+    void anEmrServerlessRunRunsSparkSubmitAsItIs() {
         ContainerBuilder builder = mock(ContainerBuilder.class);
         ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
         when(builder.newContainer(anyString())).thenReturn(spec);
 
-        runner(builder).run(stepJob(Map.of()), progress);
+        runner(builder).run(job(null, List.of("s3://bucket/jobs/report.py"), Map.of(), Duration.ZERO), progress);
 
         verify(spec).withEntrypoint(List.of("/usr/lib/spark/bin/spark-submit"));
         verify(spec, never()).withEnv(eq("FLOCI_SPARK_LOG4J2"), anyString());
+        verify(spec, never()).withEnv(eq("FLOCI_HADOOP_SITE"), anyString());
+        verify(spec, never()).withEnv(eq("FLOCI_MAPRED_SITE"), anyString());
+    }
+
+    @Test
+    void aCustomJarOrSparkStepsMapReduceRunsLocallyOnTheClustersHadoopConfiguration() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        SparkJobRunner.Job job = hadoopJob(null, Map.of("mapreduce.job.reduces", "1"), Map.of(), Map.of());
+
+        runner(builder).run(job, progress);
+
+        // A MapReduce job its main class starts reads mapred-site.xml from HADOOP_CONF_DIR, which spark-submit puts
+        // on its class path: the image's names YARN, which the job would wait for without end.
+        verify(spec).withEnv("FLOCI_HADOOP_SITE", EmrServerlessSparkRunner.hadoopSite(job, ENDPOINT));
+        verify(spec).withEnv("FLOCI_MAPRED_SITE", EmrServerlessSparkRunner.mapredSite(job));
+        verify(spec, never()).withEnv(eq("FLOCI_SPARK_LOG4J2"), anyString());
+        verify(spec, never()).withEnv(eq("FLOCI_HADOOP_LOG4J"), anyString());
+        verify(spec, never()).withEnv(eq("FLOCI_HADOOP_ENV"), anyString());
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.size() == 5
+                && entrypoint.subList(0, 2).equals(List.of("/bin/bash", "-c"))
+                && entrypoint.get(2).contains("\n  site mapred-site.xml \"$FLOCI_MAPRED_SITE\"\n")
+                && entrypoint.get(2).contains(
+                        "\n  export HADOOP_CONF_DIR=\"$hadoop_conf\" PATH=\"/tmp/floci-bin:$PATH\"\n")
+                && entrypoint.get(2).endsWith("\nfi\nexec \"$@\"")
+                && entrypoint.subList(3, 5).equals(List.of("floci", "/usr/lib/spark/bin/spark-submit"))));
+        ArgumentMatcher<List<String>> theStepsJar =
+                arguments -> arguments.getLast().equals("s3://bucket/jobs/report.jar");
+        verify(spec).withCmd(argThat(theStepsJar));
+    }
+
+    @Test
+    void theClustersMapredSiteComesBeforeFlocisLocalModeAndStagingFolderEscapedForXml() {
+        Map<String, String> mapredSite = new LinkedHashMap<>();
+        mapredSite.put("mapreduce.framework.name", "yarn");
+        mapredSite.put("mapreduce.map.sort.spill.percent", "0.90");
+        mapredSite.put("floci.note", "a<b & \"c\"");
+
+        // A later property wins over an earlier one in the same file, so a job never waits for YARN.
+        assertEquals(String.join("\n",
+                "<property><name>mapreduce.framework.name</name><value>yarn</value></property>",
+                "<property><name>mapreduce.map.sort.spill.percent</name><value>0.90</value></property>",
+                "<property><name>floci.note</name><value>a&lt;b &amp; &quot;c&quot;</value></property>",
+                "<property><name>mapreduce.framework.name</name><value>local</value></property>"
+                        + "<property><name>mapreduce.jobtracker.staging.root.dir</name>"
+                        + "<value>/tmp/hadoop/mapred/staging</value></property>"),
+                EmrServerlessSparkRunner.mapredSite(hadoopJob(null, mapredSite, Map.of(), Map.of())));
+    }
+
+    @Test
+    void aStepsHadoopCommandGetsTheClustersHadoopLog4jLinesAfterItsOwn() throws IOException {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        Map<String, String> hadoopLog4j = new LinkedHashMap<>();
+        hadoopLog4j.put("log4j.logger.org.apache.hadoop", "WARN");
+        hadoopLog4j.put("log4j.appender.console.layout.ConversionPattern", "  %p %m%n");
+        SparkJobRunner.Job job = hadoopJob(List.of("hadoop", "fs", "-ls", "/"), Map.of(), hadoopLog4j, Map.of());
+
+        runner(builder).run(job, progress);
+
+        verify(spec).withEnv("FLOCI_HADOOP_LOG4J", EmrServerlessSparkRunner.hadoopLog4jFile(job));
+        // After the console logger an empty log4j.properties gets, each on a line of its own.
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join("\n",
+                "  fi",
+                "  if [ -n \"${FLOCI_HADOOP_LOG4J:-}\" ]; then",
+                "    printf '\\n%s\\n' \"$FLOCI_HADOOP_LOG4J\" >> \"$hadoop_conf/log4j.properties\"",
+                "  fi\n"))));
+        // Log4j 1 loads log4j.properties with Properties.load, a later key winning.
+        Properties loaded = new Properties();
+        loaded.load(new StringReader(EmrServerlessSparkRunner.hadoopLog4jFile(job)));
+        assertEquals(2, loaded.size());
+        assertEquals("WARN", loaded.getProperty("log4j.logger.org.apache.hadoop"));
+        assertEquals("  %p %m%n", loaded.getProperty("log4j.appender.console.layout.ConversionPattern"));
+    }
+
+    @Test
+    void aStepsHadoopCommandGetsTheClustersHadoopEnvExportsAsGiven(@TempDir Path folder) throws Exception {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        Map<String, String> hadoopEnvironment = new LinkedHashMap<>();
+        hadoopEnvironment.put("HADOOP_USER_CLASSPATH_FIRST", "true");
+        hadoopEnvironment.put("HADOOP_CLASSPATH", "/path/to/my.jar");
+        hadoopEnvironment.put("HADOOP_OPTS", "-Dnote='it''s' $HOME `id`");
+        hadoopEnvironment.put("NOT-A-NAME", "left out");
+        hadoopEnvironment.put("X=1; touch " + folder.resolve("ran") + "; Y", "left out");
+        SparkJobRunner.Job job = hadoopJob(List.of("hadoop", "fs", "-ls", "/"), Map.of(), Map.of(),
+                hadoopEnvironment);
+
+        runner(builder).run(job, progress);
+
+        verify(spec).withEnv("FLOCI_HADOOP_ENV", EmrServerlessSparkRunner.hadoopEnvFile(job));
+        ArgumentCaptor<List<String>> entrypoint = ArgumentCaptor.captor();
+        verify(spec).withEntrypoint(entrypoint.capture());
+        String script = entrypoint.getValue().get(2);
+        String start = "  if [ -n \"${FLOCI_HADOOP_ENV:-}\" ]; then\n";
+        String lines = script.substring(script.indexOf(start), script.indexOf("\n  fi\n", script.indexOf(start)) + 6);
+        // The wrapper's lines on a hadoop-env.sh that adds to HADOOP_CLASSPATH, as the image's does, then the file
+        // sourced as the hadoop command sources it: the exports come first, so the image's line keeps them, each
+        // value as given, with no expansion, and a name a shell cannot export runs nothing.
+        Files.writeString(folder.resolve("hadoop-env.sh"),
+                "export HADOOP_CLASSPATH=\"$HADOOP_CLASSPATH:/usr/lib/hadoop-lzo/lib/*\"\n");
+        Path printed = folder.resolve("printed");
+        List<String> command = List.of("bash", "-c", "hadoop_conf=" + folder + "\n" + lines
+                + ". \"$hadoop_conf/hadoop-env.sh\"\n"
+                + "printf '%s\\n' \"$HADOOP_USER_CLASSPATH_FIRST\" \"$HADOOP_CLASSPATH\" \"$HADOOP_OPTS\" > "
+                + printed);
+        ProcessBuilder process = new ProcessBuilder(command).directory(folder.toFile());
+        process.environment().put("FLOCI_HADOOP_ENV", EmrServerlessSparkRunner.hadoopEnvFile(job));
+        BootstrapProcess.Result ended = BootstrapProcess.run(process);
+        assertEquals(0, ended.exit(), ended.output());
+        assertEquals(List.of("true", "/path/to/my.jar:/usr/lib/hadoop-lzo/lib/*", "-Dnote='it''s' $HOME `id`"),
+                Files.readAllLines(printed));
+        assertFalse(Files.exists(folder.resolve("ran")));
     }
 
     @Test
@@ -1084,21 +1234,22 @@ class EmrServerlessSparkRunnerTest {
                                           SparkJobRunner.CloudWatchLogs cloudWatchLogs) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 imageTemplate, null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults,
-                application, null, timeout, logFolder, cloudWatchLogs, Map.of(), List.of(), null, Map.of(), Map.of());
+                application, null, timeout, logFolder, cloudWatchLogs, Map.of(), List.of(), null, Map.of(), Map.of(),
+                Map.of(), Map.of(), Map.of());
     }
 
     private static SparkJobRunner.Job customImageJob(String customImage) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 null, customImage, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
                 List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), List.of(), null,
-                Map.of(), Map.of());
+                Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
     }
 
     private static SparkJobRunner.Job archiveJob(List<String> archives) {
         return new SparkJobRunner.Job("emr-serverless", "00f0000000000001", "123456789012", "eu-west-1", "emr-7.5.0",
                 null, null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
                 List.of("s3://bucket/jobs/app.jar"), null, Duration.ZERO, null, null, Map.of(), archives, null,
-                Map.of(), Map.of());
+                Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
     }
 
     private static SparkJobRunner.Job commandJob(List<String> command, Map<String, String> sparkDefaults) {
@@ -1110,7 +1261,7 @@ class EmrServerlessSparkRunnerTest {
         return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults, List.of(), command,
                 Duration.ZERO, null, null, Map.of("PYSPARK_PYTHON", "/usr/bin/python3.11"), List.of(),
-                storage, Map.of(), Map.of());
+                storage, Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
     }
 
     // A step on a cluster with core-site and spark-log4j2 properties: a command, or a Spark step for a null one.
@@ -1119,7 +1270,17 @@ class EmrServerlessSparkRunnerTest {
         return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
                 command == null ? List.of("s3://bucket/jobs/report.py") : List.of(), command, Duration.ZERO, null,
-                null, Map.of(), List.of(), STORAGE, coreSite, sparkLog4j2);
+                null, Map.of(), List.of(), STORAGE, coreSite, sparkLog4j2, Map.of(), Map.of(), Map.of());
+    }
+
+    // A step on a cluster with mapred-site, hadoop-log4j and hadoop-env: a command, or a custom JAR for a null one.
+    private static SparkJobRunner.Job hadoopJob(List<String> command, Map<String, String> mapredSite,
+                                                Map<String, String> hadoopLog4j,
+                                                Map<String, String> hadoopEnvironment) {
+        return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
+                null, "floci-network", "arn:aws:iam::123456789012:role/job", Map.of(),
+                command == null ? List.of("s3://bucket/jobs/report.jar") : List.of(), command, Duration.ZERO, null,
+                null, Map.of(), List.of(), STORAGE, Map.of(), Map.of(), mapredSite, hadoopLog4j, hadoopEnvironment);
     }
 
     // A Spark step on a cluster, which has storage.
@@ -1127,6 +1288,6 @@ class EmrServerlessSparkRunnerTest {
         return new SparkJobRunner.Job("emr", "s-1A2B3C4D5E6F7", "123456789012", "eu-west-1", "emr-7.5.0", null,
                 null, "floci-network", "arn:aws:iam::123456789012:role/job", sparkDefaults,
                 List.of("s3://bucket/jobs/report.py"), null, Duration.ZERO, null, null, Map.of(), List.of(), STORAGE,
-                Map.of(), Map.of());
+                Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
     }
 }

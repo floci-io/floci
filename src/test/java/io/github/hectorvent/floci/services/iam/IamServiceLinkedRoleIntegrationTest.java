@@ -145,6 +145,12 @@ class IamServiceLinkedRoleIntegrationTest {
                     equalTo("AWSServiceRoleForEs_debug"));
     }
 
+    /**
+     * The member is required in the model, so it is answered as a required member rather than as a
+     * value that failed its pattern. The whole operation moved onto the model on 2026-10-31, when
+     * a capture from a real account showed AWS answering a bad principal as a constraint violation
+     * and not as the {@code InvalidInput} this service used to write for itself.
+     */
     @Test
     @Order(5)
     void aMissingServiceNameIsRejected() {
@@ -156,9 +162,8 @@ class IamServiceLinkedRoleIntegrationTest {
         .then()
             .statusCode(400)
             .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-            .body("ErrorResponse.Error.Message", equalTo(
-                    "1 validation error detected: Value null at 'aWSServiceName' failed to satisfy constraint: "
-                            + "Member must not be null"));
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value at"
+                    + " 'aWSServiceName' failed to satisfy constraint: Member must not be null"));
     }
 
     @Test
@@ -322,6 +327,12 @@ class IamServiceLinkedRoleIntegrationTest {
                     equalTo("AWSServiceRoleForAutoScaling_CustomResource"));
     }
 
+    /**
+     * The captured answer, from a real account on 2026-10-31: a principal that breaks the pattern
+     * is a constraint violation naming the member, with no value beside it and with AWS's own
+     * pattern quoted, which is the one the vendored shape carries for this member's message. The
+     * whole message is pinned, so a value leaking back into it fails here.
+     */
     @Test
     @Order(15)
     void aServiceNameWithSpacesMatchesAwsValidationError() {
@@ -339,7 +350,12 @@ class IamServiceLinkedRoleIntegrationTest {
                             + "Member must satisfy regular expression pattern: [\\w+=.@-]*"));
     }
 
-    /** The documented name pattern rejects these characters before any role lookup. */
+    /**
+     * AWS constrains AWSServiceName to 1 to 128 characters of its own pattern; anything else must
+     * not reach storage. Each of these is a constraint the model declares, so each is a
+     * {@code ValidationError} naming the member: the first four break the pattern and the last the
+     * maximum length.
+     */
     @Test
     @Order(15)
     void aServiceNameOutsideTheAwsPatternIsRejected() {
@@ -352,10 +368,17 @@ class IamServiceLinkedRoleIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(400)
-                .body("ErrorResponse.Error.Code", equalTo("ValidationError"));
+                .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+                .body("ErrorResponse.Error.Message", containsString("at 'aWSServiceName'"));
         }
     }
 
+    /**
+     * A principal sent empty breaks the minimum and the pattern at once, and the walk reports each
+     * constraint the value broke rather than the first, which is what every other string member
+     * here answers for an empty value. Nothing captured covers an empty principal: the two
+     * constraints are the model's and the form is this service's own.
+     */
     @Test
     @Order(15)
     void anEmptyServiceNameUsesIamValidationError() {
@@ -369,8 +392,10 @@ class IamServiceLinkedRoleIntegrationTest {
             .statusCode(400)
             .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
             .body("ErrorResponse.Error.Message", equalTo(
-                    "1 validation error detected: Value at 'aWSServiceName' failed to satisfy constraint: "
-                            + "Member must have length greater than or equal to 1"));
+                    "2 validation errors detected: Value at 'aWSServiceName' failed to satisfy constraint: "
+                            + "Member must have length greater than or equal to 1; Value at 'aWSServiceName'"
+                            + " failed to satisfy constraint: Member must satisfy regular expression"
+                            + " pattern: [\\w+=.@-]*"));
     }
 
     @Test

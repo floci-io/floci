@@ -117,7 +117,10 @@ but for its bootstrap actions and its storage.
 * **Which steps run**: a `command-runner.jar` step whose first argument is `spark-submit`, the way the
   Management Guide writes Spark steps, runs the arguments after it, without its `--master` and
   `--deploy-mode`. A custom JAR step runs its `MainClass`, or else the one its manifest names, through
-  `spark-submit`, with the JAR and the step's `Args`. Any other `command-runner.jar` step runs its
+  `spark-submit`, with the JAR and the step's `Args`; a MapReduce job it starts, such as the Management
+  Guide's `wordcount` of Hadoop's examples JAR, runs in local mode (see **Hadoop streaming and MapReduce**).
+  A `Jar` of `/usr/lib/hadoop-mapreduce/hadoop-streaming.jar`, where EMR has it, runs the image's
+  `/usr/lib/hadoop/hadoop-streaming.jar`. Any other `command-runner.jar` step runs its
   command, its first argument, with the rest, and a `script-runner.jar` step (by name, or by its
   `s3://<region>.elasticmapreduce/libs/script-runner/script-runner.jar` URI) its script, as the Release
   Guide's "Run commands and scripts on an Amazon EMR cluster" describes them. An `s3-dist-cp` step runs
@@ -157,20 +160,36 @@ but for its bootstrap actions and its storage.
   as there is no YARN: the image has MapReduce only in Spark's shaded Hadoop client, which Floci makes the
   command's MapReduce home (`HADOOP_MAPRED_HOME`, unless a `spark-env` export names one), so it is on the
   command's class path whatever `HADOOP_CLASSPATH` a command sets, and a copy of its `mapred-site.xml` sets
-  `mapreduce.framework.name` to `local`. So a `command-runner.jar` step whose first argument is
-  `hadoop-streaming`, which "Submits an Hadoop streaming program. In the console and some SDKs, this is a
-  streaming step", as the Release Guide's tools table puts it (the AWS CLI's `Type=STREAMING` becomes one),
-  runs the image's `hadoop-streaming.jar` with the step's other arguments: its mapper and reducer can come
-  from Floci's S3 through `-files`, `-cacheFile` or `-cacheArchive`, and its `-input` and `-output` can be in
-  Floci's S3 or the cluster's HDFS, where a job's staging folder, `/tmp/hadoop/mapred/staging`, is too. A
-  `hadoop-lzo` step runs the image's LZO indexer the same way, as does a `hadoop jar` a command or script
-  runs. `s3://` and `s3a://` paths reach Floci's S3 through S3A, with the AWS SDK Spark's own S3A finds, in
-  place of the image's EMRFS, which is not pointed at Floci. The image's `log4j.properties` for Hadoop is
-  empty, so Hadoop logs to the step's standard error, from `INFO` up, in the layout of the Management Guide's
-  step log lines, and `stderr.gz` holds a failed job's reason ("ERROR org.apache.hadoop.streaming.StreamJob
-  (main): Error Launching job : Output directory ... already exists"), which EMR writes to the step's
-  `syslog`. The cluster's `mapred-site`, `hadoop-log4j` and `hadoop-env` classifications are not applied, and
-  a job's own `-D mapreduce.framework.name=yarn` fails.
+  `mapreduce.framework.name` to `local`. This has run on the `emr-7.5.0` and `emr-7.10.0` images; on another,
+  whose Spark jars may be named otherwise, the step's standard error names each jar of the three the MapReduce
+  home links that the image lacks, as a job that needs it fails later, on its class path. So a
+  `command-runner.jar` step whose first argument is `hadoop-streaming`, which "Submits an Hadoop streaming
+  program. In the console and some SDKs, this is a streaming step", as the Release Guide's tools table puts it
+  (the AWS CLI's `Type=STREAMING` becomes one), runs the image's `hadoop-streaming.jar` with the step's other
+  arguments: its mapper and reducer can come from Floci's S3 through `-files`, `-cacheFile` or
+  `-cacheArchive`, and its `-input` and `-output` can be in Floci's S3 or the cluster's HDFS, where a job's
+  staging folder, `/tmp/hadoop/mapred/staging`, is too. A `hadoop-lzo` step runs the image's LZO indexer the
+  same way, as does a `hadoop jar` a command or script runs. `s3://` and `s3a://` paths reach Floci's S3
+  through S3A, with the AWS SDK Spark's own S3A finds, in place of the image's EMRFS, which is not pointed at
+  Floci. The image's `log4j.properties` for Hadoop is empty, so Hadoop logs to the step's standard error, from
+  `INFO` up, in the layout of the Management Guide's step log lines, and `stderr.gz` holds a failed job's
+  reason ("ERROR org.apache.hadoop.streaming.StreamJob (main): Error Launching job : Output directory ...
+  already exists"), which EMR writes to the step's `syslog`. A MapReduce job a custom JAR step's
+  `spark-submit` starts runs in local mode the same way, in the driver's JVM, as `spark-submit` puts the
+  copied Hadoop configuration (`HADOOP_CONF_DIR`) on its class path; with the image's, whose `mapred-site.xml`
+  names YARN, the job would wait for it without end. The cluster's `mapred-site` properties, which "Change
+  values in the MapReduce application's mapred-site.xml file", come before Floci's `mapreduce.framework.name`
+  and staging folder, which win, so a job's own `-D mapreduce.framework.name=yarn` still fails, and
+  `mapreduce.application.classpath`, which the Release Guide gives for a custom JAR's dependencies, changes
+  nothing, as a job's tasks run in its own JVM. The cluster's `hadoop-log4j` properties, which "Change values
+  in Hadoop's log4j.properties file", follow the `log4j.properties` lines, a later key winning, and its
+  `hadoop-env` exports, which "Change values in the Hadoop environment for all Hadoop components", start the
+  `hadoop-env.sh` the `hadoop` command reads, as given, with no shell expansion, as `spark-env`'s are, ahead
+  of the image's own lines, which add to `HADOOP_CLASSPATH` rather than set it, so the Release Guide's
+  `HADOOP_CLASSPATH` of `/path/to/my.jar` keeps the LZO codec the image's `core-site.xml` names; a name a
+  shell cannot export is left out. A custom JAR step's `spark-submit` reads neither `hadoop-env.sh` nor
+  Hadoop's `log4j.properties`, so those two do not reach it: a `hadoop-env` `HADOOP_CLASSPATH`, say, is not on
+  its class path, and it logs as Spark does.
 * **S3DistCp**: the image has no `s3-dist-cp`, so a `command-runner.jar` step whose
   first argument is `s3-dist-cp`, the Release Guide's form, runs Floci's own program instead, through
   `spark-submit` in the step's container, copying through Hadoop's file systems: `--src` and `--dest` take
@@ -264,8 +283,10 @@ but for its bootstrap actions and its storage.
   without a scheme, at the cluster's HDFS. The cluster's `spark-log4j2` properties, which "Change values in
   Spark's log4j2.properties file", follow the `log4j2.properties` of the folder a `spark-env` export of
   `SPARK_CONF_DIR` names, else of the image's, in a copy of the step's own, a later key winning, so
-  `rootLogger.level` set to `warn` quiets Spark's `INFO` lines. Other classifications (`hadoop-env`,
-  `spark-metrics`, `spark-log4j` for releases before 6.8.0 and the rest) are not applied.
+  `rootLogger.level` set to `warn` quiets Spark's `INFO` lines. Its `HADOOP_CONF_DIR` is the copy of the
+  cluster's Hadoop configuration a command's `hadoop` gets, `mapred-site` included (see **Hadoop streaming
+  and MapReduce**). Other classifications (`spark-metrics`, `spark-log4j` for releases before 6.8.0,
+  `mapred-env` and the rest) are not applied.
 * **A step's `Properties`**: "Java properties that are set when the step runs. You can use these properties
   to pass key-value pairs to your main function", as the API Reference puts it. A custom JAR step's are
   system properties of the JVM its main class runs in, which `System.getProperty` reads, passed to

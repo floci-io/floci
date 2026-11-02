@@ -21,11 +21,11 @@ import java.util.Set;
  * What a step runs in the {@code docker} runner mode, in a container of the release's EMR Serverless image.
  * A Spark step runs through {@code spark-submit} in local mode: a {@code command-runner.jar} step running
  * {@code spark-submit}, as the Management Guide's Spark steps are written, and a custom JAR step, whose main
- * class {@code spark-submit} runs with the JAR on its class path. Any other {@code command-runner.jar} step
- * runs its command, and a {@code script-runner.jar} step its script, as the Release Guide's "Run commands
- * and scripts on an Amazon EMR cluster" describes them, a {@code hadoop-streaming} or {@code hadoop-lzo} one
- * through the image's {@code hadoop}, with MapReduce in local mode; an {@code s3-dist-cp} one runs Floci's own
- * S3DistCp.
+ * class {@code spark-submit} runs with the JAR on its class path, a MapReduce job's in local mode. Any other
+ * {@code command-runner.jar} step runs its command, and a {@code script-runner.jar} step its script, as the
+ * Release Guide's "Run commands and scripts on an Amazon EMR cluster" describes them, a
+ * {@code hadoop-streaming} or {@code hadoop-lzo} one through the image's {@code hadoop}, with MapReduce in local
+ * mode; an {@code s3-dist-cp} one runs Floci's own S3DistCp.
  */
 final class EmrSparkSteps {
 
@@ -53,12 +53,22 @@ final class EmrSparkSteps {
     // which will "Change values in Spark's log4j2.properties file".
     private static final String CORE_SITE = "core-site";
     private static final String SPARK_LOG4J2 = "spark-log4j2";
+    // And mapred-site, which will "Change values in the MapReduce application's mapred-site.xml file", hadoop-log4j
+    // "Change values in Hadoop's log4j.properties file", and hadoop-env "Change values in the Hadoop environment for
+    // all Hadoop components", through its export classification.
+    private static final String MAPRED_SITE = "mapred-site";
+    private static final String HADOOP_LOG4J = "hadoop-log4j";
+    private static final String HADOOP_ENV = "hadoop-env";
     // Spark puts a spark.hadoop. setting in its Hadoop configuration, ahead of core-site.xml and hive-site.xml.
     private static final String SPARK_HADOOP_PREFIX = "spark.hadoop.";
     // spark-submit gives the JVM it runs an application's main class in the Java options of this variable.
     private static final String SPARK_SUBMIT_OPTS = "SPARK_SUBMIT_OPTS";
     // The Release Guide's command-runner.jar tools that the EMR Serverless image does not have.
     private static final Set<String> UNAVAILABLE_TOOLS = Set.of("hive-script", "pig-script");
+    // EMR's MapReduce jars are in /usr/lib/hadoop-mapreduce, as the image's own hadoop-streaming script has it,
+    // which the image does not have; its streaming jar is in /usr/lib/hadoop.
+    private static final Map<String, String> IMAGE_JARS = Map.of(
+            "/usr/lib/hadoop-mapreduce/hadoop-streaming.jar", "/usr/lib/hadoop/hadoop-streaming.jar");
     private static final String S3_DIST_CP = "s3-dist-cp";
     static final String S3_DIST_CP_RESOURCE = "emr/s3-dist-cp.py";
     // The line that ends the program where the command writes it out.
@@ -94,7 +104,7 @@ final class EmrSparkSteps {
      * {@code spark-submit}, without its {@code --master} and {@code --deploy-mode}: options come before the
      * application, so one after it is the application's own and kept. For a custom JAR, its main class, if
      * the step names one (otherwise {@code spark-submit} reads the JAR's manifest), the JAR and the step's
-     * arguments.
+     * arguments. A JAR EMR has in {@code /usr/lib/hadoop-mapreduce} is the image's copy of it.
      */
     static List<String> application(EmrStep step) {
         String jar = step.getJar();
@@ -111,7 +121,7 @@ final class EmrSparkSteps {
             application.add("--class");
             application.add(step.getMainClass());
         }
-        application.add(jar);
+        application.add(IMAGE_JARS.getOrDefault(jar, jar));
         application.addAll(args);
         return application;
     }
@@ -183,6 +193,21 @@ final class EmrSparkSteps {
         return properties(configurations, objectMapper, SPARK_LOG4J2);
     }
 
+    /** The properties of a cluster's {@code mapred-site}, which its steps' MapReduce gets in its mapred-site.xml. */
+    static Map<String, String> mapredSite(String configurations, ObjectMapper objectMapper) {
+        return properties(configurations, objectMapper, MAPRED_SITE);
+    }
+
+    /** The properties of a cluster's {@code hadoop-log4j}, which its steps' {@code hadoop} command logs with. */
+    static Map<String, String> hadoopLog4j(String configurations, ObjectMapper objectMapper) {
+        return properties(configurations, objectMapper, HADOOP_LOG4J);
+    }
+
+    /** The variables a cluster's {@code hadoop-env} exports, which its steps' {@code hadoop} command gets. */
+    static Map<String, String> hadoopEnvironment(String configurations, ObjectMapper objectMapper) {
+        return exports(configurations, objectMapper, HADOOP_ENV);
+    }
+
     /**
      * The environment variables a step's container gets: its cluster's {@code spark-env} exports and, for a
      * custom JAR step, its {@code Properties}, "Java properties that are set when the step runs. You can use
@@ -207,8 +232,14 @@ final class EmrSparkSteps {
      * classification's properties, or none.
      */
     static Map<String, String> sparkEnvironment(String configurations, ObjectMapper objectMapper) {
+        return exports(configurations, objectMapper, SPARK_ENV);
+    }
+
+    // The properties of the export classification nested in one classification, a later configuration's winning.
+    private static Map<String, String> exports(String configurations, ObjectMapper objectMapper,
+                                               String classification) {
         Map<String, String> variables = new LinkedHashMap<>();
-        for (JsonNode configuration : classified(configurations, objectMapper, SPARK_ENV)) {
+        for (JsonNode configuration : classified(configurations, objectMapper, classification)) {
             for (JsonNode nested : configuration.path("Configurations")) {
                 if (EXPORT.equals(nested.path("Classification").asText())) {
                     nested.path("Properties").properties()

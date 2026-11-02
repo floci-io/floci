@@ -15,6 +15,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -247,6 +248,25 @@ class RedshiftDataSessionsTest {
             }
             assertNotNull(sessions.find(OWNER, first.id()));
             first.abort();
+        }
+    }
+
+    @Test
+    void anOpenSessionGivesItsOwnerTheTargetItRunsOn() throws Exception {
+        ManualClock clock = new ManualClock(Instant.parse("2026-10-24T00:00:00Z"));
+        try (RedshiftDataSessions sessions = new RedshiftDataSessions(clock)) {
+            RedshiftDataConnectionFactory factory = mock(RedshiftDataConnectionFactory.class);
+            when(factory.open(any())).thenReturn(mock(Connection.class));
+            RedshiftDataSessions.Reservation first = sessions.reserve(OWNER, request().put("SessionKeepAliveSeconds", 10), TARGET);
+            first.admitted();
+            first.connection(factory);
+            first.finish();
+            assertEquals(Optional.of(TARGET.arn()), sessions.targetArn(OWNER, first.id()));
+            assertEquals(Optional.empty(), sessions.targetArn(
+                    new RedshiftDataSessions.Scope("000000000000", "us-east-1", "another-caller"), first.id()));
+            assertEquals(Optional.empty(), sessions.targetArn(OWNER, "00000000-0000-0000-0000-000000000000"));
+            clock.advance(Duration.ofSeconds(11));
+            assertEquals(Optional.empty(), sessions.targetArn(OWNER, first.id()));
         }
     }
 

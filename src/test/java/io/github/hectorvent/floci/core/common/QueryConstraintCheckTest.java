@@ -155,6 +155,31 @@ class QueryConstraintCheckTest {
                         "Status", "Pending")));
     }
 
+    /**
+     * One member quotes a pattern AWS gives for it rather than the one the model declares, which
+     * the vendored shape records beside it. What a value is held to stays the model's: the comma
+     * the model admits and the quoted text does not is still admitted.
+     */
+    @Test
+    void aShapeRecordingACapturedPatternQuotesItAndStillMatchesTheModels() throws Exception {
+        QueryConstraintCheck check = QueryConstraintCheck.of(MAPPER.readTree("""
+                {
+                  "operations": {"Link": "LinkRequest"},
+                  "shapes": {
+                    "LinkRequest": {"type": "structure", "required": ["Principal"], "members": {
+                      "Principal": "principalType"}},
+                    "principalType": {"type": "string", "min": 1, "max": 128,
+                      "pattern": "[\\\\w+=,.@-]+", "quotedPattern": "[\\\\w+=.@-]*"}
+                  }
+                }
+                """));
+
+        assertEquals(List.of("Value 'not a principal' at 'principal' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [\\w+=.@-]*"),
+                check.violations("Link", params("Principal", "not a principal")));
+        assertEquals(List.of(), check.violations("Link", params("Principal", "es,amazonaws.com")));
+    }
+
     /** A number is held to its range, and one that is no number at all is left to the operation. */
     @Test
     void aNumberIsHeldToItsRangeAndANonNumberIsLeftToTheOperation() throws Exception {

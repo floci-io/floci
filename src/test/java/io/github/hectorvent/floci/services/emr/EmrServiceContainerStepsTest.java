@@ -129,6 +129,31 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aMapReduceCustomJarStepGetsItsClustersMapredSiteHadoopLog4jAndHadoopEnv() {
+        // The Management Guide's custom JAR step, the word count of Hadoop's MapReduce examples.
+        EmrStep wordCount = sparkStep("word-count", "CONTINUE");
+        wordCount.setJar("s3://bucket/jars/hadoop-mapreduce-examples-3.4.0-amzn-1.jar");
+        wordCount.setArgs(List.of("wordcount", "s3://bucket/input/input.txt", "s3://bucket/output/"));
+        EmrCluster requested = cluster("mapreduce", true, wordCount);
+        requested.setConfigurations("""
+                [{"Classification": "mapred-site", "Properties": {"mapreduce.job.reduces": "1"}},
+                 {"Classification": "hadoop-log4j", "Properties": {"log4j.logger.org.apache.hadoop": "WARN"}},
+                 {"Classification": "hadoop-env", "Configurations": [
+                   {"Classification": "export", "Properties": {"HADOOP_CLASSPATH": "/path/to/my.jar"}}]}]""");
+        service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(List.of("s3://bucket/jars/hadoop-mapreduce-examples-3.4.0-amzn-1.jar", "wordcount",
+                "s3://bucket/input/input.txt", "s3://bucket/output/"), job.application());
+        assertEquals(Map.of("mapreduce.job.reduces", "1"), job.mapredSite());
+        assertEquals(Map.of("log4j.logger.org.apache.hadoop", "WARN"), job.hadoopLog4j());
+        assertEquals(Map.of("HADOOP_CLASSPATH", "/path/to/my.jar"), job.hadoopEnvironment());
+        assertEquals(Map.of(), job.environment());
+    }
+
+    @Test
     void aStepsLogsGoUnderItsClustersLogUri() {
         EmrCluster requested = cluster("logged", true, sparkStep("report", "CONTINUE"));
         // The DescribeCluster example in the Management Guide has a LogUri in the s3n:// scheme.

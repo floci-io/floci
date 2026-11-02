@@ -459,7 +459,11 @@
     },
     "CreateServiceLinkedRoleRequest": {
       "type": "structure",
+      "required": [
+        "AWSServiceName"
+      ],
       "members": {
+        "AWSServiceName": "aWSServiceNameType",
         "Description": "roleDescriptionType"
       }
     },
@@ -1860,11 +1864,13 @@
     "UpdateAccessKeyRequest": {
       "type": "structure",
       "required": [
-        "AccessKeyId"
+        "AccessKeyId",
+        "Status"
       ],
       "members": {
         "UserName": "existingUserNameType",
-        "AccessKeyId": "accessKeyIdType"
+        "AccessKeyId": "accessKeyIdType",
+        "Status": "statusType"
       }
     },
     "UpdateAccountPasswordPolicyRequest": {
@@ -1967,11 +1973,13 @@
       "type": "structure",
       "required": [
         "UserName",
-        "SSHPublicKeyId"
+        "SSHPublicKeyId",
+        "Status"
       ],
       "members": {
         "UserName": "userNameType",
-        "SSHPublicKeyId": "publicKeyIdType"
+        "SSHPublicKeyId": "publicKeyIdType",
+        "Status": "statusType"
       }
     },
     "UpdateServerCertificateRequest": {
@@ -1988,21 +1996,25 @@
     "UpdateServiceSpecificCredentialRequest": {
       "type": "structure",
       "required": [
-        "ServiceSpecificCredentialId"
+        "ServiceSpecificCredentialId",
+        "Status"
       ],
       "members": {
         "UserName": "userNameType",
-        "ServiceSpecificCredentialId": "serviceSpecificCredentialId"
+        "ServiceSpecificCredentialId": "serviceSpecificCredentialId",
+        "Status": "statusType"
       }
     },
     "UpdateSigningCertificateRequest": {
       "type": "structure",
       "required": [
-        "CertificateId"
+        "CertificateId",
+        "Status"
       ],
       "members": {
         "UserName": "existingUserNameType",
-        "CertificateId": "certificateIdType"
+        "CertificateId": "certificateIdType",
+        "Status": "statusType"
       }
     },
     "UpdateUserRequest": {
@@ -2040,6 +2052,13 @@
         "UserName": "existingUserNameType",
         "CertificateBody": "certificateBodyType"
       }
+    },
+    "aWSServiceNameType": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[\\w+=,.@-]+",
+      "quotedPattern": "[\\w+=.@-]*"
     },
     "accessKeyIdType": {
       "type": "string",
@@ -2422,6 +2441,14 @@
         "SERVICE_NAMESPACE_DESCENDING",
         "LAST_AUTHENTICATED_TIME_ASCENDING",
         "LAST_AUTHENTICATED_TIME_DESCENDING"
+      ]
+    },
+    "statusType": {
+      "type": "string",
+      "enum": [
+        "Expired",
+        "Active",
+        "Inactive"
       ]
     },
     "stringType": {

@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -107,6 +108,31 @@ class RequestResourceMembersTest {
         // Nor beside an ARN member, which names the resource itself.
         assertThrows(IllegalStateException.class, () -> parse(document(formats,
                 "{\"types\":[\"target\"],\"arn\":\"TargetArn\",\"find\":[\"Namespace\"]}")));
+    }
+
+    @Test
+    void aDataApiSessionNamesTheClusterOrWorkgroupItRunsOnThroughItsSessionId() {
+        Resource session = new Resource(List.of("cluster", "workgroup"), null, Map.of(), Map.of(), Map.of(), Map.of(),
+                Map.of(), null, null, Map.of(), false, List.of(), null, new Member("SessionId", false));
+        for (String operation : List.of("ExecuteStatement", "BatchExecuteStatement")) {
+            assertEquals(session, RequestResourceMembers.table().operations().get("redshift-data:" + operation)
+                    .getLast(), operation);
+        }
+        assertTrue(RequestResourceMembers.table().operations().get("redshift-data:ListSessions").isEmpty());
+        String formats = "\"arnFormats\":{\"a\":{\"cluster\":\"arn:${Partition}:a:${Region}:${Account}:cluster:${Name}\","
+                + "\"group\":\"arn:${Partition}:a:${Region}:${Account}:group/${Id}\"}}";
+        assertEquals(new Member("SessionId", false), parseUnchecked(document(formats,
+                "{\"types\":[\"cluster\",\"group\"],\"through\":\"SessionId\",\"endpoint\":\"a\"}"))
+                .operations().get("a:Op").getFirst().through());
+        // No types, a type with no format, no member of one value, or beside members reading it otherwise.
+        for (String bad : List.of("\"types\":[],\"through\":\"SessionId\"",
+                "\"types\":[\"pool\"],\"through\":\"SessionId\"", "\"types\":[\"group\"],\"through\":\"Ids[]\"",
+                "\"types\":[\"group\"],\"through\":\"Session.Id\"",
+                "\"types\":[\"group\"],\"through\":\"SessionId\",\"arn\":\"GroupArn\"",
+                "\"types\":[\"group\"],\"through\":\"SessionId\",\"before\":\"#\"",
+                "\"type\":\"group\",\"fill\":{},\"through\":\"SessionId\"")) {
+            assertThrows(IllegalStateException.class, () -> parse(document(formats, "{" + bad + "}")), bad);
+        }
     }
 
     @Test
@@ -231,7 +257,8 @@ class RequestResourceMembersTest {
     /**
      * Each resource alone, from a request naming it and nothing else, gives exactly its ARN, in the account its
      * account member names when it has one, with those of the operation's resources every request names, a create's
-     * new resource no member names (Cloud Map's {@code CreateService}).
+     * new resource no member names (Cloud Map's {@code CreateService}); one named through another resource of its
+     * service's own, the ARN its service gives for that.
      */
     @TestFactory
     Stream<DynamicTest> everyResourceOfTheTableIsReadFromAJsonBodyAndAForm() {
@@ -243,11 +270,12 @@ class RequestResourceMembersTest {
                     ArnFormat format = table.formats().get(namespace).get(resource.types().getFirst());
                     String arn = example(format.format());
                     String account = resource.account() != null ? "111122223333" : "000000000000";
-                    String expected = resource.arn() != null ? arn
+                    String expected = resource.arn() != null || resource.through() != null ? arn
                             : expected(format.format(), resource, account) + (format.minted() ? "/*" : "");
                     ObjectNode body = MAPPER.createObjectNode();
                     StringBuilder form = new StringBuilder("Action=" + name);
                     Map<Member, String> values = resource.arn() != null ? Map.of(resource.arn(), arn)
+                            : resource.through() != null ? Map.of(resource.through(), "x")
                             : Stream.concat(resource.fill().values().stream(), resource.find().stream()).distinct()
                                     .collect(Collectors.toMap(m -> m, m -> "x"));
                     Map<Member, String> given = new LinkedHashMap<>(values);
@@ -270,12 +298,13 @@ class RequestResourceMembersTest {
                                     table.formats().get(namespace).get(other.types().getFirst()).format(), other,
                                     "000000000000"))
                             .distinct().toList();
+                    StoredResourceArns stored = runningOn(namespace, arn);
                     assertEquals(named, RequestResources.of(operation.getKey(),
-                            servedBy(json(body.toString()), resource.endpoint()), "aws", "us-east-1", "000000000000"),
-                            body.toString());
+                            servedBy(json(body.toString()), resource.endpoint()), "aws", "us-east-1", "000000000000",
+                            stored), body.toString());
                     assertEquals(named, RequestResources.of(operation.getKey(),
-                            servedBy(form(form.toString()), resource.endpoint()), "aws", "us-east-1", "000000000000"),
-                            form.toString());
+                            servedBy(form(form.toString()), resource.endpoint()), "aws", "us-east-1", "000000000000",
+                            stored), form.toString());
                 })));
     }
 
@@ -308,7 +337,27 @@ class RequestResourceMembersTest {
     /** Whether every request of its operation names the resource: no member names it and no member's value selects it. */
     private static boolean named(Resource resource) {
         return resource.arn() == null && resource.fill().isEmpty() && resource.find().isEmpty()
-                && resource.when().isEmpty() && resource.unless().isEmpty();
+                && resource.through() == null && resource.when().isEmpty() && resource.unless().isEmpty();
+    }
+
+    /** A namespace's stored ARNs that find nothing, and give {@code arn} for whatever a request names a resource through. */
+    private static StoredResourceArns runningOn(String namespace, String arn) {
+        return new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return namespace;
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<String> through(String member, String value, String region) {
+                return Optional.of(arn);
+            }
+        };
     }
 
     /** The value at the member's path in a body: in its list's first element, and in its field's structure. */
