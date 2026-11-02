@@ -20,6 +20,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
@@ -117,6 +118,21 @@ class ApiGatewayV2CloudMapIntegrationTest {
         assertThat(stub.received, hasSize(1));
         assertThat(stub.received.get(0), equalTo(
                 new Received("POST", "/orders", "tag=a&tag=b", "hello", "probe-value")));
+    }
+
+    @Test
+    void contextSourceIpIsTheConnectionAddressAndNotTheCallersForwardedFor() throws IOException {
+        Stub stub = startStub("only");
+        String serviceId = createService(null);
+        register(serviceId, "i-1", stub, "");
+        String apiId = createApi(serviceArn(serviceId), "VPC_LINK", createVpcLink(),
+                ",\"requestParameters\":{\"overwrite:header.X-Probe\":\"$context.identity.sourceIp\"}");
+
+        given().header("X-Forwarded-For", "198.51.100.7")
+                .when().get("/execute-api/" + apiId + "/$default/orders")
+                .then().statusCode(200);
+
+        assertThat(stub.received.get(0).header(), anyOf(equalTo("127.0.0.1"), equalTo("0:0:0:0:0:0:0:1")));
     }
 
     @Test
@@ -356,6 +372,11 @@ class ApiGatewayV2CloudMapIntegrationTest {
     }
 
     private String createApi(String integrationUri, String connectionType, String connectionId) {
+        return createApi(integrationUri, connectionType, connectionId, "");
+    }
+
+    private String createApi(String integrationUri, String connectionType, String connectionId,
+                             String extraIntegrationFields) {
         String apiId = given().contentType(ContentType.JSON)
                 .body("{\"name\":\"cm-api\",\"protocolType\":\"HTTP\"}")
                 .when().post("/v2/apis").then().statusCode(201).extract().path("apiId");
@@ -365,7 +386,8 @@ class ApiGatewayV2CloudMapIntegrationTest {
                 + (connectionId == null ? "" : ",\"connectionId\":\"" + connectionId + "\"");
         String integrationId = given().contentType(ContentType.JSON)
                 .body("{\"integrationType\":\"HTTP_PROXY\",\"integrationUri\":\"" + integrationUri
-                        + "\",\"payloadFormatVersion\":\"1.0\",\"integrationMethod\":\"ANY\"" + connection + "}")
+                        + "\",\"payloadFormatVersion\":\"1.0\",\"integrationMethod\":\"ANY\"" + connection
+                        + extraIntegrationFields + "}")
                 .when().post("/v2/apis/" + apiId + "/integrations")
                 .then().statusCode(201).extract().path("integrationId");
 

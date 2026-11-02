@@ -397,8 +397,18 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     public void modifyLoadBalancerAttributes(String region, String arn, Map<String, String> newAttrs) {
         LoadBalancer lb = requireLoadBalancer(region, arn);
+        requireValidAttributeValue(newAttrs, ElbV2ForwardedHeaders.XFF_MODE_ATTRIBUTE, ElbV2ForwardedHeaders.XFF_MODES);
+        requireValidAttributeValue(newAttrs, ElbV2ForwardedHeaders.XFF_CLIENT_PORT_ATTRIBUTE, Set.of("true", "false"));
         lb.getAttributes().putAll(newAttrs);
         persistRegion(loadBalancers, region);
+    }
+
+    private static void requireValidAttributeValue(Map<String, String> attributes, String key, Set<String> allowed) {
+        String value = attributes.get(key);
+        if (value != null && !allowed.contains(value)) {
+            throw new AwsException("InvalidConfigurationRequest",
+                    "Load balancer attribute '" + key + "' cannot have the value '" + value + "'", 400);
+        }
     }
 
     LoadBalancer getLoadBalancer(String region, String arn) {
