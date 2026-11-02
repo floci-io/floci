@@ -5,6 +5,7 @@ Run with: pytest tools/aws -q  (or: make iam-request-resources-test)
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -239,13 +240,14 @@ def test_a_file_that_is_not_json_is_reported_and_not_read(corrections, tmp_path,
 def test_a_file_that_cannot_be_read_is_reported(corrections, tmp_path, capsys):
     output = tmp_path / "iam-request-resources.json"
     output.write_text("{}", encoding="utf-8")
-    output.chmod(0o000)
 
-    try:
-        assert r.main(["--check", "--output", str(output)]) == 1
-        assert "could not be read" in capsys.readouterr().err
-    finally:
-        output.chmod(0o600)
+    def refuse(*args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    # The read is refused rather than the file made unreadable, which a run as root could read anyway.
+    corrections.setattr(Path, "read_text", refuse)
+    assert r.main(["--check", "--output", str(output)]) == 1
+    assert "could not be read" in capsys.readouterr().err
 
 
 def test_a_hand_edited_entry_does_not_match_botocore(corrections, tmp_path):
