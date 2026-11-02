@@ -12672,7 +12672,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         endpoint.setIpAddressType(type);
         endpoint.setRegion(region);
         endpoint.setClientToken(token);
-        endpoint.setCreationTags(tagList == null ? new ArrayList<>() : new ArrayList<>(tagList));
+        endpoint.setCreationTags(InstanceConnectEndpoint.copyTags(tagList == null ? List.of() : tagList));
         synchronized (privateIpAllocationLock) {
             endpoint.setPrivateIpAddress(assignPrivateIp(region, subnetId));
             instanceConnectEndpoints.put(key(region, id), endpoint);
