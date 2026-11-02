@@ -9,7 +9,6 @@ import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService.WorkgroupTarget;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
-import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -62,16 +61,16 @@ class FirehoseRedshiftDeliveryTest {
         return destination;
     }
 
-    private void workgroup(String database, String adminSecretArn) {
+    private void workgroup(String database) {
         when(serverless.getWorkgroupTarget("wg1", "us-east-1")).thenReturn(new WorkgroupTarget(
                 "arn:aws:redshift-serverless:us-east-1:000000000000:workgroup/id1", "wg1", "host.docker.internal",
-                5432, database, "workgroupadmin", "ignored", "workgroupadmin", List.of(), adminSecretArn,
+                5432, database, "workgroupadmin", "ignored", "workgroupadmin", List.of(), null,
                 new Endpoint("localhost", 41300)));
     }
 
     @Test
     void serverlessUrlLoadsIntoTheWorkgroupItsDatabaseAndItsAdminUser() throws Exception {
-        workgroup("analytics", null);
+        workgroup("analytics");
 
         delivery.copy("000000000000", "us-east-1", serverlessDestination(), "stage", "k1");
 
@@ -85,7 +84,7 @@ class FirehoseRedshiftDeliveryTest {
 
     @Test
     void serverlessDestinationKeepsAnExplicitUsername() throws Exception {
-        workgroup("analytics", null);
+        workgroup("analytics");
         RedshiftDestination destination = serverlessDestination();
         destination.setUsername("loader");
 
@@ -96,7 +95,7 @@ class FirehoseRedshiftDeliveryTest {
 
     @Test
     void serverlessUrlNamingAnotherDatabaseFailsTheDelivery() throws Exception {
-        workgroup("dev", null);
+        workgroup("dev");
 
         IllegalStateException e = assertThrows(IllegalStateException.class,
                 () -> delivery.copy("000000000000", "us-east-1", serverlessDestination(), "stage", "k1"));
@@ -125,70 +124,26 @@ class FirehoseRedshiftDeliveryTest {
     }
 
     @Test
-    void serverlessSecretSignsInAsTheAdminWhenItIsTheManagedAdminSecret() throws Exception {
-        String secretArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:admin-AbCdEf";
-        workgroup("analytics", secretArn);
+    void serverlessSecretSignsInWithItsStoredCredentials() throws Exception {
+        workgroup("analytics");
         RedshiftDestination destination = serverlessDestination();
         RedshiftDestination.SecretsManagerConfiguration cfg = new RedshiftDestination.SecretsManagerConfiguration();
         cfg.setEnabled(true);
-        cfg.setSecretArn(secretArn);
+        cfg.setSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:admin-AbCdEf");
         destination.setSecretsManagerConfiguration(cfg);
         SecretVersion version = mock(SecretVersion.class);
         when(version.getSecretString()).thenReturn("{\"username\":\"admin\",\"password\":\"pw-managed\"}");
-        when(secrets.getSecretValue(eq(secretArn), any(), any(), eq("us-east-1"))).thenReturn(version);
+        when(secrets.getSecretValue(eq("arn:aws:secretsmanager:us-east-1:000000000000:secret:admin-AbCdEf"), any(), any(), eq("us-east-1"))).thenReturn(version);
 
         delivery.copy("000000000000", "us-east-1", destination, "stage", "k1");
 
-        assertEquals("workgroupadmin", executed.get(0)[1]);
+        assertEquals("admin", executed.get(0)[1]);
         assertEquals("pw-managed", executed.get(0)[2]);
     }
 
     @Test
-    void serverlessSecretNamedByAliasThatResolvesToTheManagedAdminSecretSignsInAsTheAdmin() throws Exception {
-        String managedArn = "arn:aws:secretsmanager:us-east-1:000000000000:secret:admin-AbCdEf";
-        String alias = "arn:aws:secretsmanager:us-east-1:000000000000:secret:admin-alias";
-        workgroup("analytics", managedArn);
-        RedshiftDestination destination = serverlessDestination();
-        RedshiftDestination.SecretsManagerConfiguration cfg = new RedshiftDestination.SecretsManagerConfiguration();
-        cfg.setEnabled(true);
-        cfg.setSecretArn(alias);
-        destination.setSecretsManagerConfiguration(cfg);
-        SecretVersion version = mock(SecretVersion.class);
-        when(version.getSecretString()).thenReturn("{\"username\":\"admin\",\"password\":\"pw-managed\"}");
-        when(secrets.getSecretValue(eq(alias), any(), any(), eq("us-east-1"))).thenReturn(version);
-        Secret resolved = mock(Secret.class);
-        when(resolved.getArn()).thenReturn(managedArn);
-        when(secrets.describeSecret(alias, "us-east-1")).thenReturn(resolved);
-
-        delivery.copy("000000000000", "us-east-1", destination, "stage", "k1");
-
-        assertEquals("workgroupadmin", executed.get(0)[1]);
-    }
-
-    @Test
-    void serverlessSecretThatIsNotTheManagedAdminSecretKeepsItsOwnUser() throws Exception {
-        String other = "arn:aws:secretsmanager:us-east-1:000000000000:secret:loader-AbCdEf";
-        workgroup("analytics", "arn:aws:secretsmanager:us-east-1:000000000000:secret:admin-AbCdEf");
-        RedshiftDestination destination = serverlessDestination();
-        RedshiftDestination.SecretsManagerConfiguration cfg = new RedshiftDestination.SecretsManagerConfiguration();
-        cfg.setEnabled(true);
-        cfg.setSecretArn(other);
-        destination.setSecretsManagerConfiguration(cfg);
-        SecretVersion version = mock(SecretVersion.class);
-        when(version.getSecretString()).thenReturn("{\"username\":\"loader\",\"password\":\"pw-loader\"}");
-        when(secrets.getSecretValue(eq(other), any(), any(), eq("us-east-1"))).thenReturn(version);
-        Secret resolved = mock(Secret.class);
-        when(resolved.getArn()).thenReturn(other);
-        when(secrets.describeSecret(other, "us-east-1")).thenReturn(resolved);
-
-        delivery.copy("000000000000", "us-east-1", destination, "stage", "k1");
-
-        assertEquals("loader", executed.get(0)[1]);
-    }
-
-    @Test
     void serverlessWithoutAnyCredentialsFailsTheDelivery() throws Exception {
-        workgroup("analytics", null);
+        workgroup("analytics");
         RedshiftDestination destination = serverlessDestination();
         destination.setPassword(null);
 

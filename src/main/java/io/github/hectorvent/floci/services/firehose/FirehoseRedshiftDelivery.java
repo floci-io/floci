@@ -8,7 +8,6 @@ import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
-import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -38,11 +37,9 @@ public class FirehoseRedshiftDelivery {
     }
 
     /**
-     * Where a delivery connects. {@code defaultUser} signs in when the destination names none, and
-     * {@code managedSecretArn} is the secret Redshift manages for the admin, whose user name is {@code defaultUser}.
+     * Where a delivery connects. {@code defaultUser} signs in when the destination names none.
      */
-    private record Backend(String description, String host, int port, String database, String defaultUser,
-                           String managedSecretArn) {
+    private record Backend(String description, String host, int port, String database, String defaultUser) {
     }
 
     private final RedshiftService redshiftService;
@@ -98,7 +95,7 @@ public class FirehoseRedshiftDelivery {
         Cluster cluster = redshiftService.describeClustersForAccount(accountId, target.clusterIdentifier()).get(0);
         // The database name in the URL is ignored: the emulated container database is always "dev".
         return new Backend("cluster " + target.clusterIdentifier(), "127.0.0.1", cluster.getEndpoint().getPort(),
-                "dev", cluster.getMasterUsername(), null);
+                "dev", cluster.getMasterUsername());
     }
 
     /**
@@ -116,7 +113,7 @@ public class FirehoseRedshiftDelivery {
                 ? workgroup.endpoint().getPort()
                 : workgroup.port();
         return new Backend("workgroup " + workgroup.workgroupName(), "127.0.0.1", port,
-                workgroup.database(), workgroup.masterUsername(), workgroup.adminPasswordSecretArn());
+                workgroup.database(), workgroup.adminUsername());
     }
 
     private String[] credentials(RedshiftDestination destination, Backend backend, String region) {
@@ -126,9 +123,7 @@ public class FirehoseRedshiftDelivery {
             DatabaseSecretCredentials credentials = DatabaseSecretCredentials.parse(mapper, secret.getSecretString())
                     .orElseThrow(() -> new IllegalStateException("Secret " + secrets.getSecretArn()
                             + " does not contain username and password fields."));
-            String user = isManagedAdminSecret(secrets.getSecretArn(), backend.managedSecretArn(), region)
-                    ? backend.defaultUser() : credentials.username();
-            return new String[] {user, credentials.password()};
+            return new String[] {credentials.username(), credentials.password()};
         }
         if (destination.getPassword() == null) {
             throw new IllegalStateException("The Redshift destination for " + backend.description()
@@ -136,18 +131,6 @@ public class FirehoseRedshiftDelivery {
         }
         String user = destination.getUsername() != null ? destination.getUsername() : backend.defaultUser();
         return new String[] {user, destination.getPassword()};
-    }
-
-    /** Whether the secret is the one Redshift manages for the admin, named by ARN or by a name that resolves to it. */
-    private boolean isManagedAdminSecret(String secretArn, String managedSecretArn, String region) {
-        if (managedSecretArn == null) {
-            return false;
-        }
-        if (managedSecretArn.equals(secretArn)) {
-            return true;
-        }
-        Secret resolved = secretsManagerService.describeSecret(secretArn, region);
-        return resolved != null && managedSecretArn.equals(resolved.getArn());
     }
 
     /**

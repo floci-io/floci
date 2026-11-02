@@ -186,10 +186,9 @@ Floci does not write the `redshift_failed` manifest objects that AWS creates aft
   provisioned cluster the database name is ignored too, because the emulated database is always `dev`. The cluster
   or workgroup is looked up at delivery time, so a stream can be created before it exists.
 - A `ClusterJDBCURL` with a `redshift-serverless` host delivers to the Serverless workgroup of that name in the
-  stream's account and region, through the workgroup's runtime. A workgroup has one database, so a URL that names
+  stream's account and region, through the workgroup proxy. A workgroup has one database, so a URL that names
   another database fails the delivery, which then follows the usual retry path. Without a `Username` the workgroup's
-  admin user signs in, and a Secrets Manager secret that is the namespace's managed admin secret signs in as that
-  admin user.
+  admin user signs in.
 - `ProcessingConfiguration` on a Redshift destination is accepted and returned but not executed.
 - The `COPY` carries no credentials, so the proxy reads the staged object as an anonymous client. With S3
   authorization enforced and a private intermediate bucket the load fails and the staged object stays in S3; use a
