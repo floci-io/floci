@@ -545,15 +545,36 @@ public final class S3CopySimulator {
         backendOut.flush();
     }
 
+    private static void checkTransformObjectLimit(long bytes) {
+        if (bytes > COPY_TRANSFORM_MAX_OBJECT_BYTES) {
+            throw new S3TransferException(SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
+                    "COPY object exceeds the " + COPY_TRANSFORM_MAX_OBJECT_BYTES
+                            + "-byte limit for the field-level options "
+                            + "(EMPTYASNULL, BLANKSASNULL, REMOVEQUOTES, ACCEPTINVCHARS, TRUNCATECOLUMNS, "
+                            + "DATEFORMAT, TIMEFORMAT, FILLRECORD)", null);
+        }
+    }
+
+    private static void acquireTransformHeap(int[] heldMib, int wantedMib) {
+        while (heldMib[0] < wantedMib) {
+            if (!COPY_TRANSFORM_HEAP_MIB.tryAcquire(1)) {
+                throw new S3TransferException(SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED,
+                        "COPY memory budget exhausted; retry shortly", null);
+            }
+            heldMib[0]++;
+        }
+    }
+
     /**
-     * Reads one decompressed object into heap and transforms it. The read is bounded by a per-object
-     * ceiling and by a budget shared across connections, so a large or highly compressed object fails
-     * its own statement instead of exhausting the emulator heap.
+     * Reads one decompressed object into heap and transforms it. The read and transformed output are
+     * bounded by a per-object ceiling and by a budget shared across connections, so a large or highly
+     * compressed object, or short rows expanded by FILLRECORD, fail their own statement instead of
+     * exhausting the emulator heap.
      */
     private static byte[] transformObject(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes,
                                           List<CopyRecordTransformer.ColumnKind> columnKinds,
                                           InputStream in) throws IOException {
-        int heldMib = 0;
+        int[] heldMib = new int[]{0};
         try {
             ByteArrayOutputStream buffered = new ByteArrayOutputStream();
             byte[] chunk = new byte[CHUNK];
@@ -561,26 +582,23 @@ public final class S3CopySimulator {
             int read;
             while ((read = in.read(chunk)) != -1) {
                 total += read;
-                if (total > COPY_TRANSFORM_MAX_OBJECT_BYTES) {
-                    throw new S3TransferException(SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
-                            "COPY object exceeds the " + COPY_TRANSFORM_MAX_OBJECT_BYTES
-                                    + "-byte limit for the field-level options "
-                                    + "(EMPTYASNULL, BLANKSASNULL, REMOVEQUOTES, ACCEPTINVCHARS, TRUNCATECOLUMNS, "
-                                    + "DATEFORMAT, TIMEFORMAT, FILLRECORD)", null);
-                }
-                int wantedMib = (int) ((total * COPY_TRANSFORM_HEAP_FACTOR) / (1024 * 1024)) + 1;
-                while (heldMib < wantedMib) {
-                    if (!COPY_TRANSFORM_HEAP_MIB.tryAcquire(1)) {
-                        throw new S3TransferException(SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED,
-                                "COPY memory budget exhausted; retry shortly", null);
-                    }
-                    heldMib++;
-                }
+                checkTransformObjectLimit(total);
+                acquireTransformHeap(heldMib, (int) ((total * COPY_TRANSFORM_HEAP_FACTOR) / (1024 * 1024)) + 1);
                 buffered.write(chunk, 0, read);
             }
-            return new CopyRecordTransformer(spec, columnMaxBytes, columnKinds).apply(buffered.toByteArray());
+            long inputTotal = total;
+            return new CopyRecordTransformer(spec, columnMaxBytes, columnKinds).apply(
+                    buffered.toByteArray(),
+                    outputSize -> {
+                        checkTransformObjectLimit(outputSize);
+                        acquireTransformHeap(heldMib,
+                                (inputTotal == 0 && outputSize == 0) ? 0
+                                        : (int) ((inputTotal + 2L * outputSize) / (1024 * 1024)) + 1);
+                    });
         } finally {
-            COPY_TRANSFORM_HEAP_MIB.release(heldMib);
+            if (heldMib[0] > 0) {
+                COPY_TRANSFORM_HEAP_MIB.release(heldMib[0]);
+            }
         }
     }
 

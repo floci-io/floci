@@ -1769,6 +1769,65 @@ class S3CopySimulatorTest {
     }
 
     @Test
+    void streamCopyInput_withFillRecordOutputOverTheObjectLimitFailsTheStatementAndReleasesTheBudget() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, true);
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "k", "|", 0, false, false, null, null, false, false, false, transforms);
+        when(s3.getObject("wh", "k")).thenReturn(
+                new S3Object("wh", "k", "1\n2\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null);
+
+        long saved = S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES;
+        int availableBefore = S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits();
+        S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES = 16;
+        List<CopyRecordTransformer.ColumnKind> kinds = List.of(
+                CopyRecordTransformer.ColumnKind.OTHER,
+                CopyRecordTransformer.ColumnKind.TEXT,
+                CopyRecordTransformer.ColumnKind.OTHER,
+                CopyRecordTransformer.ColumnKind.OTHER,
+                CopyRecordTransformer.ColumnKind.OTHER,
+                CopyRecordTransformer.ColumnKind.OTHER);
+        try {
+            S3CopySimulator.S3TransferException failure = assertThrows(S3CopySimulator.S3TransferException.class,
+                    () -> S3CopySimulator.streamCopyInput(input, null, null, kinds, new ByteArrayOutputStream()));
+            assertTrue(failure.getMessage().contains("16-byte limit"), failure.getMessage());
+            assertEquals(availableBefore, S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits());
+        } finally {
+            S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES = saved;
+        }
+    }
+
+    @Test
+    void streamCopyInput_withFillRecordOutputExhaustingHeapBudgetFailsAndReleasesTheBudget() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, true);
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "k", "|", 0, false, false, null, null, false, false, false, transforms);
+        String inputData = "1\n".repeat(2000);
+        when(s3.getObject("wh", "k")).thenReturn(
+                new S3Object("wh", "k", inputData.getBytes(StandardCharsets.UTF_8), "text/plain"));
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null);
+
+        List<CopyRecordTransformer.ColumnKind> kinds = new ArrayList<>();
+        for (int i = 0; i < 300; i++) {
+            kinds.add(CopyRecordTransformer.ColumnKind.OTHER);
+        }
+
+        int availableBefore = S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits();
+        S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.acquireUninterruptibly(availableBefore - 1);
+        try {
+            S3CopySimulator.S3TransferException failure = assertThrows(S3CopySimulator.S3TransferException.class,
+                    () -> S3CopySimulator.streamCopyInput(input, null, null, kinds, new ByteArrayOutputStream()));
+            assertTrue(failure.getMessage().contains("memory budget exhausted"), failure.getMessage());
+            assertEquals(1, S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits());
+        } finally {
+            S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.release(availableBefore - 1);
+        }
+        assertEquals(availableBefore, S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits());
+    }
+
+    @Test
     void copyBackendSql_quotesDiscoveredColumnIdentifiers() {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "orders", List.of(), "wh", "orders.csv", ",", 0, false, true, null, null);

@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.IntConsumer;
 
 /**
  * Applies the COPY options that change field content to the bytes of one S3 object before they
@@ -53,16 +54,32 @@ final class CopyRecordTransformer {
     }
 
     byte[] apply(byte[] input) {
+        return apply(input, null);
+    }
+
+    byte[] apply(byte[] input, IntConsumer onOutputBytes) {
         byte[] data = transforms.invalidCharReplacement() != null
                 ? sanitizeUtf8(input, (byte) transforms.invalidCharReplacement().charValue())
                 : input;
         if (!transforms.fieldLevel()) {
+            if (onOutputBytes != null) {
+                onOutputBytes.accept(data.length);
+            }
             return data;
+        }
+        if (data.length == 0) {
+            if (onOutputBytes != null) {
+                onOutputBytes.accept(0);
+            }
+            return new byte[0];
         }
         ByteArrayOutputStream out = new ByteArrayOutputStream(data.length + 16);
         int position = 0;
         while (position < data.length) {
             position = transformRecord(data, position, out);
+            if (onOutputBytes != null) {
+                onOutputBytes.accept(out.size());
+            }
         }
         return out.toByteArray();
     }
