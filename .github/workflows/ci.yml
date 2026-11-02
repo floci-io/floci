@@ -95,8 +95,7 @@ jobs:
             > "$GITHUB_WORKSPACE/all-classes.txt"
           cd "$GITHUB_WORKSPACE"
           python3 -m unittest discover -s .github/ci -p test_partition.py
-          .github/ci/partition.sh all-classes.txt "$SHARD_TOTAL" "${{ matrix.shard }}" \
-            .github/ci/test-durations.json > shard.txt
+          .github/ci/partition.sh all-classes.txt "$SHARD_TOTAL" "${{ matrix.shard }}" > shard.txt
           # An empty includesFile makes surefire fall back to its default includes
           # and run the ENTIRE suite into this shard's timeout.
           test -s shard.txt

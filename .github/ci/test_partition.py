@@ -1,133 +1,102 @@
 """Run with python3 -m unittest discover -s .github/ci -p 'test_partition.py'."""
-import importlib.machinery
-import importlib.util
-import json
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
 
-PATH = Path(__file__).with_name('partition.sh')
-loader = importlib.machinery.SourceFileLoader('partition', str(PATH))
-spec = importlib.util.spec_from_loader(loader.name, loader)
-module = importlib.util.module_from_spec(spec)
-loader.exec_module(module)
+PATH = Path(__file__).with_name('partition.sh').resolve()
 
 
 class PartitionTest(unittest.TestCase):
-    def test_long_plain_classes_are_distributed_before_short_classes(self):
-        classes = ['p/A', 'p/B', 'p/C', 'p/D']
-        times = dict(zip(classes, [1, 20, 1, 20]))
-        result = module.partition(classes, 2, {}, times)
-        self.assertNotEqual(result['p/B'], result['p/D'])
-        self.assertEqual([21, 21], [sum(times[c] for c in classes if result[c] == s)
-                                  for s in range(2)])
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.classes = self.root / 'classes.txt'
 
-    def test_profiles_remain_atomic_with_long_plain_classes(self):
-        classes = ['p/A', 'p/B', 'p/C', 'p/D']
-        result = module.partition(classes, 2, {'p/A': 'P', 'p/B': 'P'},
-                                  {'p/A': 20, 'p/B': 1, 'p/C': 20})
-        self.assertEqual(result['p/A'], result['p/B'])
-        self.assertNotEqual(result['p/A'], result['p/C'])
+    def source(self, name, annotation):
+        path = self.root / 'src/test/java' / (name + '.java')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(annotation + '\nclass Fixture {}\n')
 
-    def test_input_order_duplicates_and_duration_order_do_not_change_assignment(self):
-        classes = ['p/A', 'p/B', 'p/C', 'p/D']
-        durations = {'p/A': 4, 'p/B': 2, 'p/C': 0}
-        expected = module.partition(classes, 2, {}, durations)
-        actual = module.partition(list(reversed(classes)) + classes, 2, {},
-                                  dict(reversed(list(durations.items()))))
+    def invoke(self, total, index):
+        return subprocess.run([sys.executable, str(PATH), str(self.classes), str(total), str(index)],
+                              cwd=self.root, capture_output=True, text=True)
+
+    def shards(self, classes, total):
+        self.classes.write_text('\n'.join(classes) + '\n')
+        shards = []
+        for index in range(1, total + 1):
+            result = self.invoke(total, index)
+            self.assertEqual(0, result.returncode, result.stderr)
+            lines = result.stdout.splitlines()
+            self.assertEqual(sorted(set(lines)), lines)
+            shards.append(lines)
+        flattened = [name for shard in shards for name in shard]
+        expected = {name.strip() for name in classes if name.strip()}
+        self.assertEqual(expected, set(flattened))
+        self.assertEqual(len(expected), len(flattened), 'Each class must appear exactly once')
+        return shards
+
+    def test_legacy_profile_and_plain_class_assignment_is_preserved(self):
+        for name in ('p/A', 'p/B'):
+            self.source(name, '@TestProfile(P.class)')
+        self.assertEqual([['p/A', 'p/B'], ['p/C', 'p/D']],
+                         self.shards(['p/D', 'p/C', 'p/B', 'p/A'], 2))
+
+    def test_equal_profile_groups_use_stable_name_tiebreaking(self):
+        for name in ('p/A', 'p/B'):
+            self.source(name, '@TestProfile(Alpha.class)')
+        for name in ('p/C', 'p/D'):
+            self.source(name, '@TestProfile(Beta.class)')
+        self.assertEqual([['p/A', 'p/B', 'p/E'], ['p/C', 'p/D', 'p/F']],
+                         self.shards(['p/F', 'p/E', 'p/D', 'p/C', 'p/B', 'p/A'], 2))
+
+    def test_plain_classes_fill_shards_by_class_count(self):
+        self.assertEqual([['p/A', 'p/D'], ['p/B', 'p/E'], ['p/C']],
+                         self.shards(['p/E', 'p/D', 'p/C', 'p/B', 'p/A'], 3))
+
+    def test_input_order_duplicates_and_blank_lines_do_not_change_assignment(self):
+        classes = ['p/A', 'p/B', 'p/C', 'p/D', 'p/E']
+        self.source('p/A', '@TestProfile(P.class)')
+        self.source('p/B', '@TestProfile(P.class)')
+        expected = self.shards(classes, 3)
+        actual = self.shards(list(reversed(classes)) + classes + ['', '  ', ' p/C '], 3)
         self.assertEqual(expected, actual)
-        self.assertEqual(set(classes), set(actual))
 
-    def test_unrelated_stale_timings_do_not_change_unknown_fallback(self):
-        classes = ['p/A', 'p/B', 'p/C']
-        self.assertEqual(module.partition(classes, 2, {}, {'p/A': 4}),
-                         module.partition(classes, 2, {}, {'p/A': 4, 'old/Removed': 9999}))
+    def test_profiles_remain_atomic_with_complete_disjoint_coverage(self):
+        for name in ('p/A', 'p/B', 'p/C'):
+            self.source(name, '@TestProfile( Shared.class )')
+        classes = ['p/' + name for name in 'ABCDEFGHIJKL']
+        shards = self.shards(classes, 4)
+        self.assertTrue(any({'p/A', 'p/B', 'p/C'} <= set(shard) for shard in shards))
 
-    def test_all_unknown_and_zero_durations_keep_every_class(self):
-        classes = ['p/A', 'p/B', 'p/C', 'p/D']
-        for times in ({'old/Removed': 99}, {c: 0 for c in classes}):
-            with self.subTest(times=times):
-                result = module.partition(classes, 2, {}, times)
-                self.assertEqual(set(classes), set(result))
-                self.assertEqual({0, 1}, set(result.values()))
+    def test_source_paths_and_profile_tokens_group_across_packages(self):
+        self.source('first/A', '@TestProfile(profiles.Shared.class)')
+        self.source('second/B', '@TestProfile( profiles.Shared.class )')
+        self.assertEqual([['first/A', 'second/B'], ['third/C']],
+                         self.shards(['third/C', 'second/B', 'first/A'], 2))
 
-    def test_legacy_assignment_is_preserved(self):
-        self.assertEqual({'p/A': 0, 'p/B': 0, 'p/C': 1, 'p/D': 1},
-                         module.partition(['p/D', 'p/C', 'p/B', 'p/A'], 2,
-                                          {'p/A': 'P', 'p/B': 'P'}))
-
-    def test_invalid_duration_inputs_are_rejected(self):
-        invalid = [None, [], {}, {'schemaVersion': 2},
-                   {'schemaVersion': 1, 'source': '', 'classSeconds': {'p/A': 1}}]
-        for values in ({}, [], {'p/A': True}, {'p/A': -1}, {'p/A': float('nan')},
-                       {'p/A': float('inf')}, {'p/A': '1'}, {'p.A': 1}, {'/p/A': 1}):
-            invalid.append({'schemaVersion': 1, 'source': 'fixture', 'classSeconds': values})
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'data.json'
-            for value in invalid:
-                with self.subTest(value=value):
-                    path.write_text(json.dumps(value))
-                    with self.assertRaises(ValueError):
-                        module.read_durations(path)
-
-    def test_valid_zero_duration_and_provenance(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / 'data.json'
-            path.write_text(json.dumps({'schemaVersion': 1, 'source': 'run/42',
-                                        'classSeconds': {'p/A': 0, 'p/B': 2.5}}))
-            self.assertEqual({'p/A': 0, 'p/B': 2.5}, module.read_durations(path))
-
-    def test_cli_fails_before_output_for_bad_or_missing_data(self):
-        with tempfile.TemporaryDirectory() as directory:
-            classes = Path(directory) / 'classes.txt'
-            classes.write_text('p/A\np/B\n')
-            data = Path(directory) / 'bad.json'
-            data.write_text('{')
-            for extra in ([str(data)], [str(data) + '.missing']):
-                result = subprocess.run([sys.executable, str(PATH), str(classes), '2', '1'] + extra,
-                                        cwd=directory, capture_output=True, text=True)
+    def test_invalid_shard_arguments_fail_without_emitting_assignments(self):
+        self.classes.write_text('p/A\np/B\n')
+        for total, index in ((0, 1), (2, 0), (2, 3), ('invalid', 1), (2, 'invalid')):
+            with self.subTest(total=total, index=index):
+                result = self.invoke(total, index)
                 self.assertNotEqual(0, result.returncode)
                 self.assertEqual('', result.stdout)
 
-    def test_cli_rejects_invalid_schema_and_numeric_evidence_without_traceback(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            classes = root / 'classes.txt'
-            classes.write_text('p/A\np/B\n')
-            data = root / 'data.json'
-            invalid = [(True, 1), (1.0, 1), (1, True), (1, -1),
-                       (1, float('nan')), (1, float('inf')), (1, 10 ** 400)]
-            for schema, seconds in invalid:
-                with self.subTest(schema=schema, seconds=seconds):
-                    data.write_text(json.dumps({'schemaVersion': schema, 'source': 'fixture',
-                                                'classSeconds': {'p/A': seconds}}))
-                    result = subprocess.run([sys.executable, str(PATH), str(classes), '2', '1',
-                                             str(data)], cwd=root, capture_output=True, text=True)
-                    self.assertNotEqual(0, result.returncode)
-                    self.assertEqual('', result.stdout)
-                    self.assertIn('partition.sh:', result.stderr)
-                    self.assertNotIn('Traceback', result.stderr)
+    def test_empty_shard_fails_instead_of_running_the_entire_suite(self):
+        self.classes.write_text('p/A\n')
+        result = self.invoke(2, 2)
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual('', result.stdout)
+        self.assertIn('would be empty', result.stderr)
 
-    def test_cli_complete_disjoint_and_profile_atomic(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            source = root / 'src/test/java/p'
-            source.mkdir(parents=True)
-            for name in ('A', 'B'):
-                (source / (name + '.java')).write_text('@TestProfile(P.class) class ' + name + ' {}')
-            classes = root / 'classes.txt'
-            classes.write_text('p/A\np/B\np/C\np/D\np/E\n')
-            data = root / 'data.json'
-            data.write_text(json.dumps({'schemaVersion': 1, 'source': 'fixture',
-                                        'classSeconds': {'p/C': 30, 'p/E': 5}}))
-            shards = [set(subprocess.check_output([sys.executable, str(PATH), str(classes), '2',
-                                                   str(i), str(data)], cwd=root, text=True).splitlines())
-                      for i in (1, 2)]
-            self.assertFalse(shards[0] & shards[1])
-            self.assertEqual(set(classes.read_text().splitlines()), shards[0] | shards[1])
-            self.assertTrue(any({'p/A', 'p/B'} <= shard for shard in shards))
+    def test_missing_manifest_fails_without_emitting_assignments(self):
+        result = self.invoke(2, 1)
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual('', result.stdout)
 
 
 if __name__ == '__main__':
