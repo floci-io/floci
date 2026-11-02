@@ -37,6 +37,7 @@ import software.amazon.awssdk.services.elasticloadbalancingv2.model.LoadBalancer
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.LoadBalancerTypeEnum;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.ProtocolEnum;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetDescription;
+import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetHealthDescription;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetHealthStateEnum;
 import software.amazon.awssdk.services.elasticloadbalancingv2.model.TargetTypeEnum;
 
@@ -75,6 +76,12 @@ class ElbV2TcpDataPlaneIntegrationTest {
 
     @Inject
     ElbV2DataPlane dataPlane;
+
+    @Inject
+    ElbV2HealthChecker healthChecker;
+
+    @Inject
+    ElbV2Service service;
 
     @TestHTTPResource
     URI endpoint;
@@ -123,6 +130,8 @@ class ElbV2TcpDataPlaneIntegrationTest {
         client.registerTargets(request -> request.targetGroupArn(targetGroupArn)
                 .targets(TargetDescription.builder().id("127.0.0.1").port(backend.actualPort()).build()));
 
+        completeInitialHealthChecks(1);
+
         await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> assertEquals(
                 TargetHealthStateEnum.HEALTHY,
                 client.describeTargetHealth(request -> request.targetGroupArn(targetGroupArn))
@@ -143,6 +152,19 @@ class ElbV2TcpDataPlaneIntegrationTest {
                 assertEquals(listenerPort, socket.getPort());
             }
         });
+    }
+
+    private void completeInitialHealthChecks(int expectedTargets) {
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            List<TargetHealthDescription> descriptions = client.describeTargetHealth(
+                    request -> request.targetGroupArn(targetGroupArn)).targetHealthDescriptions();
+            assertEquals(expectedTargets, descriptions.size());
+            assertTrue(descriptions.stream().allMatch(description ->
+                    description.targetHealth().state() == TargetHealthStateEnum.HEALTHY
+                            || "Elb.InitialHealthChecking".equals(description.targetHealth().reasonAsString())));
+        });
+        // Keep the real network probes and threshold, without waiting for the periodic timer.
+        healthChecker.probeAll(targetGroupArn, service.getTargetGroup("us-east-1", targetGroupArn));
     }
 
     @AfterEach
@@ -352,6 +374,7 @@ class ElbV2TcpDataPlaneIntegrationTest {
         try {
             client.registerTargets(request -> request.targetGroupArn(targetGroupArn).targets(TargetDescription.builder()
                     .id("127.0.0.1").port(second.actualPort()).build()));
+            completeInitialHealthChecks(2);
             await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
                 List<TargetHealthStateEnum> states = client.describeTargetHealth(request -> request
                                 .targetGroupArn(targetGroupArn)).targetHealthDescriptions().stream()
