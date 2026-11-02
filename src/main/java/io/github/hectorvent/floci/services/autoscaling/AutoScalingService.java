@@ -1057,6 +1057,7 @@ public class AutoScalingService implements PassedRoleLookup {
                 requireDesiredCapacityWithinBounds(asg, newDesired,
                         "To place into standby " + moving.size() + " instances");
             }
+            completeInstanceRefreshIfSettled(region, name);
             Instant now = Instant.now();
             List<ScalingActivity> started = new ArrayList<>();
             for (AsgInstance instance : moving) {
