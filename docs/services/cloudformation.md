@@ -1054,7 +1054,15 @@ parameter is refused when the stack is in any other status, when it names a reso
 not have or has already deleted, or when it names one twice. A retry while that delete is still
 running must repeat the same list in the same order.
 
+A `DeleteStack` that arrives while the stack is still being created or updated waits for that
+operation: a create stops before its next resource, an update runs to its end, and the delete then
+removes everything the stack holds, its exports included. Until the delete starts, the stack keeps
+its in-progress status.
+
 Deviations from AWS to be aware of:
+
+- A delete that arrives during a create does not interrupt the resource being created; that
+  resource finishes, and is then deleted with the rest.
 
 - `Snapshot` deletes the resource without taking a snapshot; floci has no snapshot support for the
   types AWS allows it on.
