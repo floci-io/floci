@@ -30,14 +30,15 @@ public final class CopyStatementParser {
             CopyTemporalFormat dateFormat,
             CopyTemporalFormat timeFormat,
             boolean acceptAnyDate,
-            boolean fillRecord) {
+            boolean fillRecord,
+            int maxError) {
 
         public static final CopyTransforms NONE = new CopyTransforms(false, false, false, false, null);
 
         public CopyTransforms(boolean blanksAsNull, boolean emptyAsNull, boolean removeQuotes,
                               boolean truncateColumns, Character invalidCharReplacement) {
             this(blanksAsNull, emptyAsNull, removeQuotes, truncateColumns, invalidCharReplacement,
-                    null, null, false, false);
+                    null, null, false, false, 0);
         }
 
         public CopyTransforms(boolean blanksAsNull, boolean emptyAsNull, boolean removeQuotes,
@@ -45,7 +46,23 @@ public final class CopyStatementParser {
                               CopyTemporalFormat dateFormat, CopyTemporalFormat timeFormat,
                               boolean acceptAnyDate) {
             this(blanksAsNull, emptyAsNull, removeQuotes, truncateColumns, invalidCharReplacement,
-                    dateFormat, timeFormat, acceptAnyDate, false);
+                    dateFormat, timeFormat, acceptAnyDate, false, 0);
+        }
+
+        public CopyTransforms(boolean blanksAsNull, boolean emptyAsNull, boolean removeQuotes,
+                              boolean truncateColumns, Character invalidCharReplacement,
+                              CopyTemporalFormat dateFormat, CopyTemporalFormat timeFormat,
+                              boolean acceptAnyDate, boolean fillRecord) {
+            this(blanksAsNull, emptyAsNull, removeQuotes, truncateColumns, invalidCharReplacement,
+                    dateFormat, timeFormat, acceptAnyDate, fillRecord, 0);
+        }
+
+        /**
+         * Whether the load goes on past a record the backend cannot convert. A {@code MAXERROR} of 0 or 1 fails
+         * the COPY at the first error, which is how it runs without the option.
+         */
+        public boolean toleratesErrors() {
+            return maxError > 1;
         }
 
         /** Whether the options depend on the type of each column, which only the catalog can tell. */
@@ -301,6 +318,8 @@ public final class CopyStatementParser {
     private static final Pattern TIMEFORMAT_PATTERN = Pattern.compile("(?i)\\bTIMEFORMAT\\s+(?:AS\\s+)?'([^']*)'");
     private static final Pattern ACCEPTANYDATE_PATTERN = Pattern.compile("(?i)\\bACCEPTANYDATE\\b");
     private static final Pattern FILLRECORD_PATTERN = Pattern.compile("(?i)\\bFILLRECORD\\b");
+    private static final Pattern MAXERROR_PATTERN = Pattern.compile("(?i)\\bMAXERROR\\s+(?:AS\\s+)?(\\d{1,9})\\b");
+    private static final int MAX_MAXERROR = 100_000;
     private static final Pattern CREDENTIALS_PATTERN = Pattern.compile(
             "(?i)\\bCREDENTIALS\\s+(?:AS\\s+)?(?:'((?:[^']|'')*)'|\"([^\"]*)\")");
     private static final Pattern ACCESS_KEY_ID_PATTERN = Pattern.compile(
@@ -331,7 +350,7 @@ public final class CopyStatementParser {
      * silently loading the data with the wrong framing.
      */
     private static final Pattern UNSUPPORTED_CLAUSE = Pattern.compile(
-            "(?i)\\b(FIXEDWIDTH|PARQUET|AVRO|ORC|SHAPEFILE|BZIP2|LZOP|ZSTD|MAXERROR"
+            "(?i)\\b(FIXEDWIDTH|PARQUET|AVRO|ORC|SHAPEFILE|BZIP2|LZOP|ZSTD"
                     + "|ENCRYPTED|ENCODING"
                     + "|MASTER_SYMMETRIC_KEY|KMS_KEY_ID"
                     + "|TRIMBLANKS"
@@ -656,6 +675,8 @@ public final class CopyStatementParser {
         CopyTemporalFormat timeFormat = null;
         boolean acceptAnyDate = false;
         boolean fillRecord = false;
+        int maxError = 0;
+        boolean seenMaxError = false;
 
         boolean seenDateFormat = false;
         boolean seenTimeFormat = false;
@@ -689,6 +710,7 @@ public final class CopyStatementParser {
         Matcher timeFormatMatcher = TIMEFORMAT_PATTERN.matcher(options);
         Matcher acceptAnyDateMatcher = ACCEPTANYDATE_PATTERN.matcher(options);
         Matcher fillRecordMatcher = FILLRECORD_PATTERN.matcher(options);
+        Matcher maxErrorMatcher = MAXERROR_PATTERN.matcher(options);
         AuthClauses auth = new AuthClauses(options, defaultIamRoleArn);
 
         int next;
@@ -822,6 +844,14 @@ public final class CopyStatementParser {
                 }
                 fillRecord = true;
                 offset = fillRecordMatcher.end();
+            } else if (matchClause(maxErrorMatcher, offset, len)) {
+                int parsed = seenMaxError ? -1 : Integer.parseInt(maxErrorMatcher.group(1));
+                if (parsed < 0 || parsed > MAX_MAXERROR) {
+                    return null;
+                }
+                seenMaxError = true;
+                maxError = parsed;
+                offset = maxErrorMatcher.end();
             } else if ((next = auth.consume(offset, len)) != AuthClauses.NO_MATCH) {
                 if (next == AuthClauses.REJECT) {
                     return null;
@@ -850,7 +880,7 @@ public final class CopyStatementParser {
         }
         CopyTransforms transforms = new CopyTransforms(
                 blanksAsNull, emptyAsNull, removeQuotes, truncateColumns, invalidChar,
-                dateFormat, timeFormat, acceptAnyDate, fillRecord);
+                dateFormat, timeFormat, acceptAnyDate, fillRecord, maxError);
         if (transforms.any() && jsonAuto) {
             return null;
         }

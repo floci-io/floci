@@ -798,8 +798,8 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   `TIMEFORMAT` also takes `'epochsecs'` and `'epochmillisecs'`, read as UTC. A `DATEFORMAT` may name a time
   of day, which is dropped; a `TIMEFORMAT` without one gives midnight. A format that names a time zone, or
   any other text, is not recognized and the statement is forwarded to PostgreSQL. A value that does not
-  match its format fails the COPY, as it does with Redshift's default `MAXERROR` of 0; the message names the
-  column and the format, and Floci writes no `stl_load_errors` row. `ACCEPTANYDATE` loads such a value as
+  match its format fails the COPY, whatever `MAXERROR` says; the message names the column and the format, and
+  Floci writes no `stl_load_errors` row. `ACCEPTANYDATE` loads such a value as
   `NULL` instead; when no format is given it reads the ISO form of a date, with an optional time of day, and
   turns anything else into `NULL`. Numeric parts with no separator between them, as in `YYYYMMDD`, need their
   full width, a part may be named once, and `HH12` needs `AM` or `PM`; any other format string is not
@@ -819,7 +819,20 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   left out), or from the column list, in which a name that matches no column counts as a non-character column.
   A domain over a character type counts as a non-character column. It works only over the Simple Query
   protocol, and it is not combined with `FORMAT AS JSON`.
-- Any other clause (`FIXEDWIDTH`, `PARQUET`, `AVRO`, `ORC`, `MAXERROR`,
+- `MAXERROR [AS] n` (0 to 100000) lets the load go on past records that cannot be converted. With `n` of 0 or 1 the
+  COPY fails at the first error, as it does without the option. With a larger `n` Floci asks the backend to skip
+  the failing records (`ON_ERROR ignore`) and to fail the COPY, rolling it back, once `n` of them have been
+  skipped (`REJECT_LIMIT n - 1`). This uses the PostgreSQL `COPY` options of the same names, so it needs a
+  PostgreSQL 18 backend (set `floci.services.redshift.image-version`, for example `postgres:18-alpine`); the
+  default backend rejects the option as unknown and the COPY fails with that error. The COPY fails when the
+  `n`-th record is rejected, counted across all the files of the load. Floci deviations: only a value that the
+  backend cannot convert to its column type is skipped, whereas Redshift also skips a record with too many or too
+  few fields, a `NOT NULL` violation and other errors, which still fail the COPY here. So do a value that does
+  not match a `DATEFORMAT` or `TIMEFORMAT` (use `ACCEPTANYDATE` to load it as `NULL`), a quoted field without its
+  closing quote under `REMOVEQUOTES`, and a line that `FORMAT AS JSON 'auto'` cannot read, since Floci rejects
+  those before the backend sees them. The backend reports the count of skipped records in its own notice, not
+  Redshift's `Load into table ... completed` message, and no `stl_load_errors` row is written.
+- Any other clause (`FIXEDWIDTH`, `PARQUET`, `AVRO`, `ORC`,
   `ENCODING`, `ESCAPE`, `ENCRYPTED`, `MASTER_SYMMETRIC_KEY`,
   `KMS_KEY_ID`, and so on) is not recognized: the statement is forwarded unchanged and PostgreSQL
   returns its own error.

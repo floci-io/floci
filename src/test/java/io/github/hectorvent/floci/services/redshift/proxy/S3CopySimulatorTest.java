@@ -1662,6 +1662,37 @@ class S3CopySimulatorTest {
                 S3CopySimulator.alignKinds(explicit, catalog));
     }
 
+    private static String backendCopy(int maxError, boolean csv) {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, false, maxError);
+        return S3CopySimulator.copyBackendSql(new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "k", "|", 0, false, csv, null, null, false, false, false, transforms), null);
+    }
+
+    @Test
+    void copyBackendSql_asksTheBackendToSkipConversionErrorsUpToMaxErrorMinusOne() {
+        assertTrue(backendCopy(10, false).endsWith(", ON_ERROR ignore, REJECT_LIMIT 9)"), backendCopy(10, false));
+        assertTrue(backendCopy(2, true).contains("FORMAT csv"), backendCopy(2, true));
+        assertTrue(backendCopy(2, true).endsWith(", ON_ERROR ignore, REJECT_LIMIT 1)"), backendCopy(2, true));
+    }
+
+    @Test
+    void copyBackendSql_buildsTheWholeStatementFromAParsedMaxError() {
+        CopyStatementParser.S3Statement parsed = CopyStatementParser.parse(
+                "COPY t FROM 's3://wh/k' DELIMITER '|' NULL AS 'x' GZIP IGNOREHEADER 1 MAXERROR AS 10");
+
+        assertEquals("COPY t FROM STDIN WITH (FORMAT text, DELIMITER '|', NULL 'x', ON_ERROR ignore, "
+                        + "REJECT_LIMIT 9)",
+                S3CopySimulator.copyBackendSql((CopyStatementParser.S3CopyFrom) parsed, null));
+    }
+
+    @Test
+    void copyBackendSql_failsAtTheFirstErrorForAMaxErrorOfZeroOrOne() {
+        assertFalse(backendCopy(0, false).contains("ON_ERROR"), backendCopy(0, false));
+        assertFalse(backendCopy(1, false).contains("ON_ERROR"), backendCopy(1, false));
+        assertFalse(backendCopy(1, false).contains("REJECT_LIMIT"), backendCopy(1, false));
+    }
+
     @Test
     void kindOf_mapsTheCatalogTypeOids() {
         assertEquals(CopyRecordTransformer.ColumnKind.DATE, S3CopySimulator.kindOf("1082"));
