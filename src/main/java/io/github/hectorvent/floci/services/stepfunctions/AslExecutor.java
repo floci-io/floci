@@ -87,7 +87,9 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -3484,29 +3486,45 @@ public class AslExecutor {
      */
     private int resolveMapIntegerField(JsonNode container, String field, int minimum, JsonNode mapInput,
                                        boolean jsonata, JsonNode context, ObjectNode variables) {
-        JsonNode value;
-        boolean jsonataExpression = false;
-        if (container.has(field + "Path")) {
-            value = resolvePath(container.get(field + "Path").asText(), mapInput, context);
-        } else if (container.has(field)) {
-            value = container.get(field);
-            if (jsonata && value.isTextual() && JsonataEvaluator.isExpression(value.asText())) {
-                jsonataExpression = true;
-                JsonNode statesVar = buildStatesVar(mapInput, null, context);
-                value = jsonataEvaluator.evaluateField(value.asText(), field, statesVar, variables);
-            }
-        } else {
+        MapFieldValue resolved = resolveMapField(container, field, mapInput, jsonata, context, variables);
+        if (resolved == null) {
             return 0;
         }
-
+        JsonNode value = resolved.value();
         if (!value.isIntegralNumber() || value.bigIntegerValue().compareTo(BigInteger.valueOf(minimum)) < 0) {
             throw new FailStateException(
-                    jsonataExpression ? "States.QueryEvaluationError" : "States.Runtime",
+                    resolved.jsonataExpression() ? "States.QueryEvaluationError" : "States.Runtime",
                     field + " must resolve to an integer of " + minimum + " or more", field);
         }
         return value.bigIntegerValue().compareTo(BigInteger.valueOf(Integer.MAX_VALUE)) > 0
                 ? Integer.MAX_VALUE
                 : value.intValue();
+    }
+
+    /** A Map field's value as resolved, and whether a JSONata expression produced it. */
+    private record MapFieldValue(JsonNode value, boolean jsonataExpression) {
+    }
+
+    /**
+     * Reads a Map field from its literal, {@code <field>Path} or JSONata expression form, without
+     * judging the result; the callers apply the field's own type and range. Null when the field is
+     * absent in every form.
+     */
+    private MapFieldValue resolveMapField(JsonNode container, String field, JsonNode mapInput,
+                                          boolean jsonata, JsonNode context, ObjectNode variables) {
+        if (container.has(field + "Path")) {
+            return new MapFieldValue(resolvePath(container.get(field + "Path").asText(), mapInput, context), false);
+        }
+        if (!container.has(field)) {
+            return null;
+        }
+        JsonNode value = container.get(field);
+        if (jsonata && value.isTextual() && JsonataEvaluator.isExpression(value.asText())) {
+            JsonNode statesVar = buildStatesVar(mapInput, null, context);
+            return new MapFieldValue(jsonataEvaluator.evaluateField(value.asText(), field, statesVar, variables),
+                    true);
+        }
+        return new MapFieldValue(value, false);
     }
 
     static int effectiveMapConcurrency(int itemCount, int requestedConcurrency,
@@ -3670,15 +3688,16 @@ public class AslExecutor {
         }
 
         int count = hasCount
-                ? resolveToleranceField(stateDef, "ToleratedFailureCount", Integer.MAX_VALUE, mapInput,
-                        jsonata, context, variables)
+                ? resolveToleranceCount(stateDef, mapInput, jsonata, context, variables)
                 : 0;
-        int percentage = hasPercentage
-                ? resolveToleranceField(stateDef, "ToleratedFailurePercentage", 100, mapInput, jsonata,
-                        context, variables)
-                : 0;
+        BigDecimal percentage = hasPercentage
+                ? resolveTolerancePercentage(stateDef, mapInput, jsonata, context, variables)
+                : BigDecimal.ZERO;
 
-        int fromPercentage = (int) ((long) itemCount * percentage / 100);
+        // The run fails once the failed share exceeds the percentage, so the absorbed count is the
+        // floor of itemCount * percentage / 100. BigDecimal keeps a decimal percentage exact.
+        int fromPercentage = BigDecimal.valueOf(itemCount).multiply(percentage)
+                .divide(BigDecimal.valueOf(100), 0, RoundingMode.FLOOR).intValue();
         int threshold;
         if (hasCount && hasPercentage) {
             threshold = Math.min(count, fromPercentage);
@@ -3687,18 +3706,32 @@ public class AslExecutor {
         } else {
             threshold = fromPercentage;
         }
-        return new ToleratedFailures(true, count, percentage, threshold);
+        return new ToleratedFailures(true, count, percentage.doubleValue(), threshold);
     }
 
-    /** A tolerance is a percentage or a count, so it shares the Map integer resolver and adds a ceiling. */
-    private int resolveToleranceField(JsonNode stateDef, String field, int maximum, JsonNode mapInput,
-                                      boolean jsonata, JsonNode context, ObjectNode variables) {
-        int value = resolveMapIntegerField(stateDef, field, 0, mapInput, jsonata, context, variables);
-        if (value > maximum) {
-            throw new FailStateException("States.Runtime",
-                    field + " must resolve to an integer between 0 and " + maximum, field);
+    /** ToleratedFailureCount is an integer of 0 or more, so it shares the Map integer resolver. */
+    private int resolveToleranceCount(JsonNode stateDef, JsonNode mapInput, boolean jsonata, JsonNode context,
+                                      ObjectNode variables) {
+        return resolveMapIntegerField(stateDef, "ToleratedFailureCount", 0, mapInput, jsonata, context, variables);
+    }
+
+    /**
+     * ToleratedFailurePercentage is a number from 0 to 100, not an integer: AWS models it as a float, so
+     * a definition may declare {@code 100.0} or {@code 12.5}, directly, through its Path or as a JSONata
+     * expression. Create-time validation already accepts those values; this keeps execution consistent.
+     */
+    private BigDecimal resolveTolerancePercentage(JsonNode stateDef, JsonNode mapInput, boolean jsonata,
+                                                  JsonNode context, ObjectNode variables) {
+        String field = "ToleratedFailurePercentage";
+        MapFieldValue resolved = resolveMapField(stateDef, field, mapInput, jsonata, context, variables);
+        JsonNode value = resolved.value();
+        if (!value.isNumber() || value.decimalValue().signum() < 0
+                || value.decimalValue().compareTo(BigDecimal.valueOf(100)) > 0) {
+            throw new FailStateException(
+                    resolved.jsonataExpression() ? "States.QueryEvaluationError" : "States.Runtime",
+                    field + " must resolve to a number between 0 and 100", field);
         }
-        return value;
+        return value.decimalValue();
     }
 
 

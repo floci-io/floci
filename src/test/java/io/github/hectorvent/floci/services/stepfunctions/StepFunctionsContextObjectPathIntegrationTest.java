@@ -105,6 +105,32 @@ class StepFunctionsContextObjectPathIntegrationTest {
         assertEquals(2, results.size(), "results: " + results);
     }
 
+    /**
+     * ToleratedFailurePercentagePath may resolve to a decimal. One of two items fails, a 50 percent
+     * share, which a tolerance of 50.5 read from the Context Object absorbs.
+     */
+    @Test
+    void toleratedFailurePercentagePathResolvesADecimal() throws Exception {
+        String definition = """
+                {"StartAt":"M","States":{"M":{"Type":"Map",
+                  "InputPath":"$.payload","ItemsPath":"$.items",
+                  "ToleratedFailurePercentagePath":"$$.Execution.Input.percentage",
+                  "ItemProcessor":{"ProcessorConfig":{"Mode":"DISTRIBUTED","ExecutionType":"STANDARD"},
+                    "StartAt":"Check","States":{
+                      "Check":{"Type":"Choice",
+                        "Choices":[{"Variable":"$.n","NumericLessThan":0,"Next":"Boom"}],
+                        "Default":"Keep"},
+                      "Boom":{"Type":"Fail","Error":"ItemFailed"},
+                      "Keep":{"Type":"Pass","End":true}}},
+                  "End":true}}}
+                """;
+
+        JsonNode results = mapper.readTree(run(definition,
+                "{\"percentage\":50.5,\"payload\":{\"items\":[{\"n\":1},{\"n\":-1}]}}"));
+
+        assertEquals(1, results.size(), "results: " + results);
+    }
+
     private String run(String definition, String input) throws InterruptedException {
         String name = "context-path-" + System.nanoTime();
         Response create = given()
