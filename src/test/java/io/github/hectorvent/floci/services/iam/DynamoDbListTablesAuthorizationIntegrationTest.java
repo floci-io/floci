@@ -85,10 +85,10 @@ class DynamoDbListTablesAuthorizationIntegrationTest {
         byte[] body = mapper.writeValueAsBytes(Map.of("Limit", 1, "ExclusiveStartTableName", "page-start",
                 "TableName", "decoy", "ResourceArn", "arn:aws:dynamodb:us-east-1:000000000000:table/decoy"));
         try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "list-selectors-", "list",
-                policy("arn:aws:dynamodb:us-east-1:000000000000:table/*", explicitDeny))) {
+                policy("arn:aws:dynamodb:us-east-1:000000000000:table/decoy", explicitDeny))) {
             Response response = given().filter(user.signer("dynamodb")).headers(headers).body(body).post(uri);
-            assertEquals(explicitDeny ? (cbor ? 403 : 400) : 200, response.statusCode(), response.asString());
-            if (explicitDeny) {
+            assertEquals(explicitDeny ? 200 : (cbor ? 403 : 400), response.statusCode(), response.asString());
+            if (!explicitDeny) {
                 assertTrue(mapper.readTree(response.asByteArray()).path("__type").asText()
                         .contains("AccessDeniedException"));
             }
