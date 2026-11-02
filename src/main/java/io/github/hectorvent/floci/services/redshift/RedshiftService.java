@@ -13,6 +13,8 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.backend.DynamoDbStreamReader;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.rds.proxy.PasswordValidator;
 import io.github.hectorvent.floci.services.redshift.RedshiftEventCatalog.EventInfo;
 import io.github.hectorvent.floci.services.redshift.container.RedshiftContainerHandle;
@@ -108,6 +110,7 @@ public class RedshiftService implements ManagedSecretRotator {
     private final RedshiftAuditLogPublisher auditLogPublisher;
     private final RedshiftEventService events;
     private final RedshiftIntegrationEventPublisher integrationEvents;
+    private final Ec2Service ec2Service;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<ResourceKey, ResourceLock> resourceLocks = new ConcurrentHashMap<>();
@@ -190,7 +193,8 @@ public class RedshiftService implements ManagedSecretRotator {
                             RedshiftCredentialBroker credentialBroker,
                             SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
                             DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher,
-                            RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents) {
+                            RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents,
+                            Ec2Service ec2Service) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.snapshotCopies = storageFactory.create("redshift", "redshift-snapshot-copies.json", new TypeReference<Map<String, Snapshot>>() {});
@@ -213,6 +217,19 @@ public class RedshiftService implements ManagedSecretRotator {
         this.auditLogPublisher = auditLogPublisher;
         this.events = events;
         this.integrationEvents = integrationEvents;
+        this.ec2Service = ec2Service;
+    }
+
+    // Hand-built test constructions need not supply EC2; a null ec2Service skips subnet resolution.
+    RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
+                    EmulatorConfig config, RegionResolver regionResolver, RedshiftProxyManager proxyManager,
+                    DockerHostResolver dockerHostResolver, RedshiftCredentialBroker credentialBroker,
+                    SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
+                    DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher,
+                    RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents) {
+        this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
+                credentialBroker, secretsManagerService, objectMapper, streamReader, auditLogPublisher, events,
+                integrationEvents, null);
     }
 
     RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
@@ -2261,13 +2278,40 @@ public class RedshiftService implements ManagedSecretRotator {
     // ── Cluster Subnet Group Operations ──────────────────────────────────────
 
     public ClusterSubnetGroup createClusterSubnetGroup(String name, String description, String vpcId, List<String> subnetIds) {
+        return createClusterSubnetGroup(name, description, vpcId, subnetIds, null);
+    }
+
+    public ClusterSubnetGroup createClusterSubnetGroup(String name, String description, String vpcId,
+                                                       List<String> subnetIds, Map<String, String> tags) {
         if (subnetGroups.get(name).isPresent()) {
             throw new AwsException("ClusterSubnetGroupAlreadyExists", "Cluster subnet group " + name + " already exists", 400);
         }
         ClusterSubnetGroup group = new ClusterSubnetGroup(name, description, vpcId, subnetIds);
+        if (tags != null) {
+            group.setTags(new LinkedHashMap<>(tags));
+        }
+        resolveSubnets(group);
         subnetGroups.put(name, group);
         subnetGroups.flush();
         return group;
+    }
+
+    /**
+     * Fills the VPC and per-subnet zones from EC2. Subnets EC2 does not know stay unresolved
+     * rather than failing the call, as this has always accepted arbitrary subnet ids.
+     */
+    private void resolveSubnets(ClusterSubnetGroup group) {
+        if (ec2Service == null || group.getSubnetIds() == null || group.getSubnetIds().isEmpty()) {
+            return;
+        }
+        Map<String, String> zones = new LinkedHashMap<>();
+        for (Subnet subnet : ec2Service.describeSubnets(regionResolver.getRegion(), group.getSubnetIds(), Map.of())) {
+            zones.put(subnet.getSubnetId(), subnet.getAvailabilityZone());
+            if (group.getVpcId() == null) {
+                group.setVpcId(subnet.getVpcId());
+            }
+        }
+        group.setSubnetZones(zones);
     }
 
     public List<ClusterSubnetGroup> describeClusterSubnetGroups(String name) {
@@ -2288,6 +2332,8 @@ public class RedshiftService implements ManagedSecretRotator {
         }
         if (subnetIds != null && !subnetIds.isEmpty()) {
             group.setSubnetIds(subnetIds);
+            group.setVpcId(null);
+            resolveSubnets(group);
         }
         subnetGroups.put(name, group);
         subnetGroups.flush();
