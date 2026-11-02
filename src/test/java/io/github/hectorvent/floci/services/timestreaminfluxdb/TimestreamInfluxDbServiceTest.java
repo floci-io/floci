@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.timestreaminfluxdb.model.DbParameterG
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
@@ -186,36 +187,10 @@ class TimestreamInfluxDbServiceTest {
         assertEquals("container-1", stored.getContainerId());
     }
 
-    @Test
-    void clusterRebootPropagatesTheRediscoveredEndpointToMembers() throws Exception {
-        String id = service.createDbCluster(json("""
-                {"name":"moved-cluster","dbInstanceType":"db.influx.large","allocatedStorage":20,
-                 "username":"admin","password":"password123","organization":"org","bucket":"bucket",
-                 "vpcSubnetIds":["subnet-1"],"vpcSecurityGroupIds":["sg-1"]}
-                """), REGION).resource().getId();
-        InfluxDbEndpoint moved = new InfluxDbEndpoint("container-1", "reassigned-host", 28086);
-        when(containerManager.restart("container-1")).thenReturn(moved);
-
-        service.rebootDbCluster(json("{\"dbClusterId\":\"" + id + "\"}"), REGION);
-
-        verify(containerManager).waitUntilReady(moved);
-        DbCluster stored = service.getDbCluster(json("{\"dbClusterId\":\"" + id + "\"}"), REGION);
-        assertEquals("AVAILABLE", stored.getStatus());
-        assertEquals("reassigned-host", stored.getEndpoint());
-        assertEquals("reassigned-host", stored.getReaderEndpoint());
-        List<DbInstance> members = service.listDbInstancesForCluster(
-                json("{\"dbClusterId\":\"" + id + "\"}"), REGION).items();
-        assertTrue(!members.isEmpty());
-        for (DbInstance member : members) {
-            assertEquals("reassigned-host", member.getEndpoint());
-            assertEquals(28086, member.getPort());
-            assertEquals("AVAILABLE", member.getStatus());
-        }
-    }
-
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
-    void memberRebootPropagatesTheRediscoveredEndpointToClusterAndMembers(boolean unhealthy) throws Exception {
+    @CsvSource({"false, false", "false, true", "true, false", "true, true"})
+    void rebootPropagatesTheRediscoveredEndpointToClusterAndMembers(boolean memberReboot, boolean unhealthy)
+            throws Exception {
         String id = service.createDbCluster(json("""
                 {"name":"moved-cluster","dbInstanceType":"db.influx.large","allocatedStorage":20,
                  "username":"admin","password":"password123","organization":"org","bucket":"bucket",
@@ -230,8 +205,12 @@ class TimestreamInfluxDbServiceTest {
         List<DbInstance> before = service.listDbInstancesForCluster(
                 json("{\"dbClusterId\":\"" + id + "\"}"), REGION).items();
         assertTrue(before.size() > 1);
-        String memberId = before.getFirst().getId();
-        service.rebootDbInstance(json("{\"identifier\":\"" + memberId + "\"}"), REGION);
+        if (memberReboot) {
+            String memberId = before.getFirst().getId();
+            service.rebootDbInstance(json("{\"identifier\":\"" + memberId + "\"}"), REGION);
+        } else {
+            service.rebootDbCluster(json("{\"dbClusterId\":\"" + id + "\"}"), REGION);
+        }
 
         verify(containerManager).waitUntilReady(moved);
         DbCluster stored = service.getDbCluster(json("{\"dbClusterId\":\"" + id + "\"}"), REGION);
