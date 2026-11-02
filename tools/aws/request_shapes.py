@@ -79,8 +79,9 @@ def build(model: dict, provenance: str, generator: str, outputs: bool = False) -
 
 def build_constraints(model: dict, operations: tuple[str, ...], provenance: str, generator: str) -> dict:
     """The input shapes of `operations` with the constraints `RequestConstraintCheck` reads: for every
-    shape reachable from one, its type, required members, min, max, pattern and enum, and the shapes
-    of its members, list elements or map keys and values. Unlike `build`, it keeps members bound to
+    shape reachable from one, its type, required members, min, max, pattern, the pattern a violation
+    quotes where that is not the one matched on, and enum, and the shapes of its members, list
+    elements or map keys and values. Unlike `build`, it keeps members bound to
     the URI, query string or headers, so it suits the JSON protocols, whose members all travel in
     the body."""
     kept: dict[str, dict] = {}
@@ -89,7 +90,8 @@ def build_constraints(model: dict, operations: tuple[str, ...], provenance: str,
         if name in kept:
             return
         shape = model["shapes"][name]
-        entry = {k: shape[k] for k in ("type", "required", "min", "max", "pattern", "enum") if k in shape}
+        entry = {k: shape[k] for k in ("type", "required", "min", "max", "pattern", "quotedPattern", "enum")
+                 if k in shape}
         kept[name] = entry
         if shape["type"] == "structure":
             entry["members"] = {k: v["shape"] for k, v in shape.get("members", {}).items()}

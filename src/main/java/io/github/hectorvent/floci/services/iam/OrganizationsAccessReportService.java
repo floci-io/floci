@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.iam;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.OrganizationsAccessReportJob;
@@ -282,7 +281,7 @@ public class OrganizationsAccessReportService {
      */
     private static AwsException validationError(String value, String at, String constraint) {
         if (value == null) {
-            return SmithyValidationErrors.validationError(SmithyValidationErrors.notNull(at));
+            return IamValidationErrors.notNull(at);
         }
         return IamValidationErrors.validationError(at, value, constraint);
     }

@@ -1,11 +1,13 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -66,5 +68,28 @@ class VendoredPatternsTest {
                 "compiled as written, the class refuses what the model admits");
         assertTrue(asWritten.matcher(c1Control).matches(),
                 "and admits what the model excludes");
+    }
+
+    /**
+     * Which text a violation quotes is this object's other answer. It is the pattern the model
+     * declares, except for a member whose message AWS gives a pattern of its own for, where the
+     * vendored shape records both: what is matched on stays the model's either way.
+     */
+    @Test
+    void theQuotedTextIsTheCapturedPatternWhereTheShapeRecordsOneAndTheModelsOtherwise() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+
+        assertEquals("[\\w+=.@-]*", VendoredPatterns.quoted(mapper.readTree("""
+                {"type": "string", "min": 1, "max": 128,
+                 "pattern": "[\\\\w+=,.@-]+", "quotedPattern": "[\\\\w+=.@-]*"}
+                """)));
+        assertEquals("[\\w+=,.@-]+", VendoredPatterns.quoted(mapper.readTree("""
+                {"type": "string", "pattern": "[\\\\w+=,.@-]+"}
+                """)),
+                "a shape recording no captured text quotes the one it declares");
+        assertNull(VendoredPatterns.quoted(mapper.readTree("""
+                {"type": "string", "min": 1}
+                """)),
+                "and a shape with no pattern at all quotes none");
     }
 }

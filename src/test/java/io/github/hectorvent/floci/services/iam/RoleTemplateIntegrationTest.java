@@ -87,7 +87,7 @@ class RoleTemplateIntegrationTest {
                 .statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
                 .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value "
-                        + "null at 'templateArn' failed to satisfy constraint: Member must not be "
+                        + "at 'templateArn' failed to satisfy constraint: Member must not be "
                         + "null"))
                 .body(not(containsString("NoSuchEntity")));
         }
@@ -175,7 +175,7 @@ class RoleTemplateIntegrationTest {
         .when().post("/").then()
             .statusCode(400)
             .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value null "
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value "
                     + "at 'replacementValues.Department.values' failed to satisfy constraint: "
                     + "Member must not be null"))
             .body(not(containsString("NoSuchEntity")));
@@ -254,7 +254,7 @@ class RoleTemplateIntegrationTest {
             .formParam("ReplacementValues.entry.01.key", "Department")
         .when().post("/").then()
             .statusCode(400)
-            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value null "
+            .body("ErrorResponse.Error.Message", equalTo("1 validation error detected: Value "
                     + "at 'replacementValues.Department.values' failed to satisfy constraint: "
                     + "Member must not be null"));
     }
@@ -280,8 +280,8 @@ class RoleTemplateIntegrationTest {
             .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
             .body("ErrorResponse.Error.Message", equalTo("3 validation errors detected: Value at "
                     + "'replacementValues' failed to satisfy constraint: Member must have length "
-                    + "less than or equal to 30; Value null at 'replacementValues.Parameter2."
-                    + "values' failed to satisfy constraint: Member must not be null; Value null "
+                    + "less than or equal to 30; Value at 'replacementValues.Parameter2."
+                    + "values' failed to satisfy constraint: Member must not be null; Value "
                     + "at 'replacementValues.Parameter10.values' failed to satisfy constraint: "
                     + "Member must not be null"));
     }

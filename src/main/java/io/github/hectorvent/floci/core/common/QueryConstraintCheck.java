@@ -255,7 +255,7 @@ public final class QueryConstraintCheck {
                         .filter(entry -> params.getFirst(entry.prefix() + ".key") != null)
                         .toList();
         if (entries.isEmpty()) {
-            return required ? List.of(SmithyValidationErrors.notNull(path)) : List.of();
+            return required ? List.of(messages.notNull(path)) : List.of();
         }
         String valueShape = shape.path("value").asText();
         boolean structure = "structure".equals(shapes.path(valueShape).path("type").asText());
@@ -291,7 +291,7 @@ public final class QueryConstraintCheck {
         JsonNode shape = shapes.path(shapeName);
         return List.of(messages.mapKeys(path, key, SmithyValidationErrors.constraintSet(
                 shape.path("min").asInt(0), shape.path("max").asInt(Integer.MAX_VALUE),
-                shape.path("pattern").asText(null), allowedValues(shape))));
+                VendoredPatterns.quoted(shape), allowedValues(shape))));
     }
 
     /**
@@ -302,7 +302,7 @@ public final class QueryConstraintCheck {
                                          boolean required, MultivaluedMap<String, String> params) {
         String value = params == null ? null : params.getFirst(param);
         if (value == null) {
-            return required ? List.of(SmithyValidationErrors.notNull(path)) : List.of();
+            return required ? List.of(messages.notNull(path)) : List.of();
         }
         return violations(shapeName, value, path);
     }
@@ -325,7 +325,7 @@ public final class QueryConstraintCheck {
                         .filter(member -> !scalar || params.getFirst(member.prefix()) != null)
                         .toList();
         if (members.isEmpty()) {
-            return required ? List.of(SmithyValidationErrors.notNull(path)) : List.of();
+            return required ? List.of(messages.notNull(path)) : List.of();
         }
         List<String> violations = new ArrayList<>();
         violations.addAll(single(SmithyValidationErrors.sizeOutOfRange(path, members.size(),
@@ -352,7 +352,7 @@ public final class QueryConstraintCheck {
         boolean present = params != null
                 && params.keySet().stream().anyMatch(key -> key.startsWith(param + "."));
         if (!present) {
-            return required ? List.of(SmithyValidationErrors.notNull(path)) : List.of();
+            return required ? List.of(messages.notNull(path)) : List.of();
         }
         return structureViolations(shape, param + ".", path + ".", params, Map.of());
     }
@@ -382,8 +382,10 @@ public final class QueryConstraintCheck {
         Pattern pattern = patterns.get(shapeName);
         if (pattern != null && !pattern.matcher(value).matches()) {
             // Quoted as the model declares it, which is what AWS answers and what the service docs
-            // carry, rather than as it was compiled: a wide escape is rewritten to match on.
-            violations.add(messages.pattern(path, value, shape.path("pattern").asText()));
+            // carry, rather than as it was compiled: a wide escape is rewritten to match on. One
+            // member is quoted from a capture instead, where AWS gives a pattern of its own for a
+            // shape botocore shares, and one object decides which text that is.
+            violations.add(messages.pattern(path, value, VendoredPatterns.quoted(shape)));
         }
         violations.addAll(single(enumViolation(shape, value, path)));
         return violations;

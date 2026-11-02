@@ -1,11 +1,13 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
  * Compiles a pattern a vendored AWS model declares, in the dialect the model writes it in rather
- * than in Java's.
+ * than in Java's, and answers which text a violation on it quotes.
  *
  * <p>One thing differs between the two. A model writes a code point above U+FFFF as a backslash-u
  * escape of five or six hex digits, the U+10000 to U+10FFFF range on STS's {@code arnType} among
@@ -34,6 +36,21 @@ public final class VendoredPatterns {
     /** {@code pattern} compiled as the model means it. */
     public static Pattern compile(String pattern) {
         return Pattern.compile(rewrite(pattern));
+    }
+
+    /**
+     * The pattern a violation on {@code shape} quotes: the text AWS quotes for that member where
+     * the vendored shape records one, and the pattern the model declares everywhere else, which is
+     * also what a value is matched against either way.
+     *
+     * <p>The two differ where AWS's message gives a pattern of its own for a member botocore
+     * aliases to a shape it shares, IAM's {@code AWSServiceName} on {@code CreateServiceLinkedRole}
+     * being the one such member vendored today: AWS quotes a class without the comma the shape
+     * admits. Only the message is in hand rather than the shape, so the generator records AWS's
+     * text beside the model's and what the request is held to stays the model's own.
+     */
+    public static String quoted(JsonNode shape) {
+        return shape.path("quotedPattern").asText(shape.path("pattern").asText(null));
     }
 
     /**

@@ -1409,8 +1409,7 @@ public class IamQueryHandler {
         // empty Description is a value that clears the description, not an absent member.
         String description = params.getFirst("Description");
         if (description == null) {
-            throw SmithyValidationErrors.validationError(
-                    SmithyValidationErrors.notNull("description"));
+            throw IamValidationErrors.notNull("description");
         }
         IamRole role = iamService.updateRoleDescription(getParam(params, "RoleName"), description);
         String result = new XmlBuilder().start("Role").raw(roleXml(role, true)).end("Role").build();
@@ -3616,8 +3615,7 @@ public class IamQueryHandler {
     private String requireParam(MultivaluedMap<String, String> params, String name) {
         String value = params.getFirst(name);
         if (value == null || value.isBlank()) {
-            throw SmithyValidationErrors.validationError(
-                    SmithyValidationErrors.notNull(memberPath(name)));
+            throw IamValidationErrors.notNull(memberPath(name));
         }
         return value;
     }
