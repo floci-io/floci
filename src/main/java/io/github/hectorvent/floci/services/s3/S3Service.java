@@ -4952,10 +4952,10 @@ public class S3Service implements Resettable, ResourceProvider {
                                   SseCustomerHeaders sseCustomerHeaders) {
         return uploadPartCopy(destBucket, destKey, uploadId, partNumber, sourceBucket, sourceKey,
                 sourceVersionId, copySourceRange, copySourceSseCustomerHeaders, sseCustomerHeaders,
-                CopySourceConditions.NONE);
+                CopySourceConditions.NONE).getETag();
     }
 
-    public String uploadPartCopy(String destBucket, String destKey, String uploadId, int partNumber,
+    public Part uploadPartCopy(String destBucket, String destKey, String uploadId, int partNumber,
                                   String sourceBucket, String sourceKey, String sourceVersionId,
                                   String copySourceRange,
                                   SseCustomerHeaders copySourceSseCustomerHeaders,
@@ -4977,8 +4977,7 @@ public class S3Service implements Resettable, ResourceProvider {
             }
             return storePart(destBucket, destKey, uploadId, partNumber,
                     new ByteRangeInputStream(read.body(), range.first(), range.length()), UploadChecksums.NONE,
-                    sseCustomerHeaders.algorithm(), sseCustomerHeaders.key(), sseCustomerHeaders.keyMd5())
-                    .getETag();
+                    sseCustomerHeaders.algorithm(), sseCustomerHeaders.key(), sseCustomerHeaders.keyMd5());
         } catch (IOException e) {
             throw new UncheckedIOException("Failed to close the copy source", e);
         }
