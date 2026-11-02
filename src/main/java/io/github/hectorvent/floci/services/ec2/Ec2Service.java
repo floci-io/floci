@@ -12684,9 +12684,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     .filter(a -> !a.isPrimary()).toList());
             NatGatewayAddress[] result = new NatGatewayAddress[slots];
             // A slot naming an Elastic IP or an address keeps the secondary that already matches it;
-            // the counted slots then keep the last of the other secondaries with neither. Counted
-            // addresses always follow the listed ones, so the last are the ones the subnet picked
-            // rather than listed ones the request dropped.
+            // the counted slots then keep the last of the other secondaries with neither. Slot
+            // position is the only record of where an address came from: counted addresses usually
+            // follow the listed ones, so the last are usually ones the subnet picked rather than
+            // listed ones the request dropped. Across updates an address once listed can move
+            // behind a picked one, and then it is the one kept.
             for (int i = 0; i < slots; i++) {
                 String eip = i < eips.size() ? eips.get(i) : null;
                 String ip = i < ips.size() ? ips.get(i) : null;

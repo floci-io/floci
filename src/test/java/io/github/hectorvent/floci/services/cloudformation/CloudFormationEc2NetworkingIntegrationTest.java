@@ -325,13 +325,14 @@ class CloudFormationEc2NetworkingIntegrationTest {
         List<String> two = secondaryIps(natXml(natId));
         assertEquals(2, two.size(), natXml(natId));
         assertEquals(first.get(0), two.get(0), "the counted address is kept: " + two);
+        assertTrue(!two.get(1).equals(two.get(0)) && two.get(1).startsWith("10.47.0."), "a new address in the subnet: " + two);
 
         cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.47.0.0/24", counted.formatted(1, ""), false));
         assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
                 "Outputs", "OutputKey", "OutputValue").get("NatId"));
         List<String> one = secondaryIps(natXml(natId));
         assertEquals(1, one.size(), natXml(natId));
-        assertTrue(two.contains(one.get(0)), "one of the two survives: " + one);
+        assertEquals(List.of(two.get(1)), one, "the last counted address is kept");
 
         cloudFormation(stack, "DeleteStack", null);
         CfnStackWaits.awaitStackDeleted(stack);
