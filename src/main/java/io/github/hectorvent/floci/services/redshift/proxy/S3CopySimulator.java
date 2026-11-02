@@ -641,7 +641,8 @@ public final class S3CopySimulator {
 
     /**
      * 1082 = date, 1114 = timestamp, and 25 = text, 1043 = varchar for the character columns.
-     * CHAR (1042 = bpchar) is left as OTHER so missing columns load as NULL, matching AWS FILLRECORD.
+     * 1042 = bpchar (CHAR) has its own kind so missing columns load as NULL under FILLRECORD
+     * while present empty fields remain character strings.
      * A timestamptz (1184) is read by PostgreSQL as it stands.
      */
     static CopyRecordTransformer.ColumnKind kindOf(String typeOid) {
@@ -653,6 +654,9 @@ public final class S3CopySimulator {
         }
         if ("25".equals(typeOid) || "1043".equals(typeOid)) {
             return CopyRecordTransformer.ColumnKind.TEXT;
+        }
+        if ("1042".equals(typeOid)) {
+            return CopyRecordTransformer.ColumnKind.CHAR;
         }
         return CopyRecordTransformer.ColumnKind.OTHER;
     }

@@ -102,6 +102,51 @@ class CopyRecordTransformerTest {
     }
 
     @Test
+    void emptyCharFieldRemainsEmptyStringWithoutEmptyAsNull() {
+        List<CopyRecordTransformer.ColumnKind> kindsWithChar = List.of(
+                CopyRecordTransformer.ColumnKind.CHAR,
+                CopyRecordTransformer.ColumnKind.DATE);
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, CopyTemporalFormat.parse("MM/DD/YYYY", false), null, false);
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "b", "k", "|", 0, false, false, null, null, false, false, false, transforms);
+
+        assertEquals("|2003-03-31\n", new String(
+                new CopyRecordTransformer(spec, null, kindsWithChar).apply("|03/31/2003\n".getBytes(StandardCharsets.UTF_8)),
+                StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void emptyCharFieldWithEmptyAsNullLoadsAsNull() {
+        List<CopyRecordTransformer.ColumnKind> kindsWithChar = List.of(
+                CopyRecordTransformer.ColumnKind.CHAR,
+                CopyRecordTransformer.ColumnKind.DATE);
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, true, false, false, null, CopyTemporalFormat.parse("MM/DD/YYYY", false), null, false);
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "b", "k", "|", 0, false, false, null, null, false, false, false, transforms);
+
+        assertEquals("\\N|2003-03-31\n", new String(
+                new CopyRecordTransformer(spec, null, kindsWithChar).apply("|03/31/2003\n".getBytes(StandardCharsets.UTF_8)),
+                StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void fillRecordFillsMissingCharColumnAsNull() {
+        List<CopyRecordTransformer.ColumnKind> kinds = List.of(
+                CopyRecordTransformer.ColumnKind.TEXT,
+                CopyRecordTransformer.ColumnKind.CHAR);
+        CopyStatementParser.CopyTransforms fill = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, true);
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "b", "k", "|", 0, false, false, null, null, false, false, false, fill);
+
+        assertEquals("hello|\\N\n", new String(
+                new CopyRecordTransformer(spec, null, kinds).apply("hello\n".getBytes(StandardCharsets.UTF_8)),
+                StandardCharsets.UTF_8));
+    }
+
+    @Test
     void acceptAnyDateLoadsEmptyDateAndTimestampAsNull() {
         assertEquals("1|\\N|\\N\n",
                 applyTemporal(false, temporal("MM/DD/YYYY", "MM/DD/YYYY", true), "1||\n"));

@@ -802,7 +802,10 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   column and the format, and Floci writes no `stl_load_errors` row. `ACCEPTANYDATE` loads such a value as
   `NULL` instead; when no format is given it reads the ISO form of a date, with an optional time of day, and
   turns anything else into `NULL`. An empty unquoted field of a `DATE`, `TIMESTAMP` or other non-character column
-  is always loaded as `NULL`, as in AWS, without requiring `ACCEPTANYDATE` or `EMPTYASNULL`. Numeric parts with no
+  is loaded as `NULL`, as in AWS, without requiring `ACCEPTANYDATE` or `EMPTYASNULL`. Like `TRUNCATECOLUMNS`,
+  this and the temporal formats read column types from the catalog, so they apply only with the options that
+  query column types (`DATEFORMAT`, `TIMEFORMAT`, `FILLRECORD`), over the Simple Query protocol, and are not
+  combined with `FORMAT AS JSON`; a plain `COPY` without those options does not read the catalog. Numeric parts with no
   separator between them, as in `YYYYMMDD`, need their
   full width, a part may be named once, and `HH12` needs `AM` or `PM`; any other format string is not
   recognized.

@@ -1667,7 +1667,7 @@ class S3CopySimulatorTest {
         assertEquals(CopyRecordTransformer.ColumnKind.DATE, S3CopySimulator.kindOf("1082"));
         assertEquals(CopyRecordTransformer.ColumnKind.TIMESTAMP, S3CopySimulator.kindOf("1114"));
         assertEquals(CopyRecordTransformer.ColumnKind.TEXT, S3CopySimulator.kindOf("25"));
-        assertEquals(CopyRecordTransformer.ColumnKind.OTHER, S3CopySimulator.kindOf("1042"));
+        assertEquals(CopyRecordTransformer.ColumnKind.CHAR, S3CopySimulator.kindOf("1042"));
         assertEquals(CopyRecordTransformer.ColumnKind.TEXT, S3CopySimulator.kindOf("1043"));
         assertEquals(CopyRecordTransformer.ColumnKind.OTHER, S3CopySimulator.kindOf("1184"));
         assertEquals(CopyRecordTransformer.ColumnKind.OTHER, S3CopySimulator.kindOf("23"));
