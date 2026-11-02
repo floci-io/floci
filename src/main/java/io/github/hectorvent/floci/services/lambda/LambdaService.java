@@ -1693,6 +1693,7 @@ public class LambdaService implements ResourceProvider {
 
         Integer maximumRetryAttempts = parseMaximumRetryAttempts(request);
         Integer maximumRecordAgeInSeconds = parseMaximumRecordAgeInSeconds(request);
+        Integer parallelizationFactor = parseParallelizationFactor(request, eventSourceArn);
 
         EventSourceMapping.DestinationConfig destinationConfig = parseDestinationConfig(request);
 
@@ -1721,6 +1722,7 @@ public class LambdaService implements ResourceProvider {
         esm.setBisectBatchOnFunctionError(bisectBatchOnFunctionError);
         esm.setMaximumRetryAttempts(maximumRetryAttempts);
         esm.setMaximumRecordAgeInSeconds(maximumRecordAgeInSeconds);
+        esm.setParallelizationFactor(parallelizationFactor);
         esm.setDestinationConfig(destinationConfig);
         esm.setFilterCriteria(filterCriteria);
         esm.setStartingPosition(startingPosition.position());
@@ -2190,6 +2192,42 @@ public class LambdaService implements ResourceProvider {
         return (int) value;
     }
 
+    /**
+     * Parses {@code ParallelizationFactor}: an integer in [1, 10], accepted only on Kinesis and
+     * DynamoDB Streams sources. Returns {@code null} when the field is absent.
+     */
+    private Integer parseParallelizationFactor(Map<String, Object> request, String eventSourceArn) {
+        Object raw = request.get("ParallelizationFactor");
+        if (raw == null) {
+            return null;
+        }
+        if (!(raw instanceof Number number)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "ParallelizationFactor must be a numeric value", 400);
+        }
+        double d = number.doubleValue();
+        if (Double.isNaN(d) || Double.isInfinite(d) || d != Math.floor(d)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "ParallelizationFactor must be an integer", 400);
+        }
+        long value = number.longValue();
+        if (value < 1 || value > 10) {
+            throw new AwsException("InvalidParameterValueException",
+                    "ParallelizationFactor must be between 1 and 10 (got " + value + ")", 400);
+        }
+        if (!isStreamSource(eventSourceArn)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "ParallelizationFactor is only supported for Amazon Kinesis and Amazon DynamoDB Streams event sources",
+                    400);
+        }
+        return (int) value;
+    }
+
+    static boolean isStreamSource(String eventSourceArn) {
+        return eventSourceArn != null
+                && (eventSourceArn.contains(":kinesis:") || eventSourceArn.contains(":dynamodb:"));
+    }
+
     private void startPollingHelper(EventSourceMapping esm) {
         if (esm.getEventSourceArn() == null) {
             return;
@@ -2305,6 +2343,10 @@ public class LambdaService implements ResourceProvider {
         if (request.containsKey("MaximumRecordAgeInSeconds")) {
             Integer maximumRecordAge = parseMaximumRecordAgeInSeconds(request);
             changes.add(m -> m.setMaximumRecordAgeInSeconds(maximumRecordAge));
+        }
+        if (request.containsKey("ParallelizationFactor")) {
+            Integer parallelizationFactor = parseParallelizationFactor(request, esm.getEventSourceArn());
+            changes.add(m -> m.setParallelizationFactor(parallelizationFactor));
         }
 
         if (request.containsKey("DestinationConfig")) {
