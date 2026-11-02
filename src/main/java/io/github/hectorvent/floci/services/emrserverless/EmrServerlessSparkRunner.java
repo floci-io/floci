@@ -46,6 +46,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import java.util.regex.Pattern;
 import java.util.zip.GZIPOutputStream;
 
 /**
@@ -60,7 +61,8 @@ import java.util.zip.GZIPOutputStream;
  * Floci's log and, while it runs, to the run's CloudWatch log streams, when it has some; once it ends, its
  * standard output and error go, gzipped, to the run's log folder in Floci's S3, when it has one. An EMR step's
  * container mounts its cluster's storage, where {@code hdfs://} paths, and paths without a scheme, lead, and a
- * step's {@code hadoop} command reaches Floci's S3 and runs MapReduce in local mode.
+ * step's {@code hadoop} command, and a MapReduce job its {@code spark-submit} starts, reach Floci's S3 and run
+ * MapReduce in local mode, with the cluster's Hadoop configuration.
  */
 @ApplicationScoped
 public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardown {
@@ -70,6 +72,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private static final String SPARK_DEFAULTS_VARIABLE = "FLOCI_SPARK_DEFAULTS";
     private static final String HADOOP_SITE_VARIABLE = "FLOCI_HADOOP_SITE";
     private static final String SPARK_LOG4J2_VARIABLE = "FLOCI_SPARK_LOG4J2";
+    private static final String MAPRED_SITE_VARIABLE = "FLOCI_MAPRED_SITE";
+    private static final String HADOOP_LOG4J_VARIABLE = "FLOCI_HADOOP_LOG4J";
+    private static final String HADOOP_ENV_VARIABLE = "FLOCI_HADOOP_ENV";
+    private static final Pattern SHELL_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
     // A cluster's HDFS, as Hadoop settings: hdfs:// paths, and those without a scheme ("hdfs:// (or no prefix)"),
     // lead to the HDFS folder of the cluster's /mnt volume, through a view of it under the hdfs scheme, as the
     // image has no HDFS of its own.
@@ -86,7 +92,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // Where Hadoop's local job runner puts a job's files, -files and -archives among them: a folder of the local
     // file system, whose files it then names by their path alone, which leads to the cluster's HDFS.
     private static final String MAPRED_STAGING = "/tmp/hadoop/mapred/staging";
-    // A command's MapReduce runs in the hadoop command's own JVM, as there is no YARN to run it on.
+    // A step's MapReduce runs in the JVM that starts it, as there is no YARN to run it on.
     private static final String MAPRED_SITE = "<property><name>mapreduce.framework.name</name><value>local</value>"
             + "</property><property><name>mapreduce.jobtracker.staging.root.dir</name><value>" + MAPRED_STAGING
             + "</value></property>";
@@ -102,8 +108,13 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "log4j.appender.console.layout.ConversionPattern=%d{ISO8601} %p %c (%t): %m%n");
     // MapReduce, which a streaming job, the LZO indexer and any other hadoop jar run in, is only in Spark's shaded
     // Hadoop client, and S3A's AWS SDK only in the jar Spark's own S3A finds it in; links to them make up the hadoop
-    // command's MapReduce home, whose jars it puts after its own, whatever HADOOP_CLASSPATH a command sets.
+    // command's MapReduce home, whose jars it puts after its own, whatever HADOOP_CLASSPATH a command sets. The names
+    // are those of the emr-7.5.0 and emr-7.10.0 images; one another image lacks is named on standard error, as a job
+    // that needs it fails later, on its class path.
     private static final String MAPRED_HOME = "/tmp/floci-mapreduce";
+    // No source gives AWS's wording for this; it is Floci's.
+    private static final String MISSING_JAR = "Floci: this image has no $jar, so the hadoop command may not find"
+            + " MapReduce or S3A's AWS SDK.";
     private static final List<String> MAPRED_JARS = List.of(
             "/usr/lib/spark/jars/hadoop-client-api-*.jar",
             "/usr/lib/spark/jars/hadoop-client-runtime-*.jar",
@@ -120,25 +131,18 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "  printf '\\n%s\\n' \"$" + SPARK_LOG4J2_VARIABLE + "\" >> \"$conf/log4j2.properties\"",
             "fi",
             "export SPARK_CONF_DIR=\"$conf\"");
-    // A Spark step whose job has log4j2.properties lines runs spark-submit after this.
-    private static final String SPARK_CONF_WRAPPER = String.join("\n", concat(SPARK_CONF_COPY, "exec \"$@\""));
-    // A command runs after this sets up a Spark configuration of its own, so a spark-submit it starts runs
-    // locally on Floci's S3: the image's spark-defaults.conf names EMR Serverless's resource manager as its
-    // master, which a system property cannot override, so its master and that manager's lines give way to
-    // local mode, Floci's settings and the job's spark-defaults, passed in SPARK_DEFAULTS_VARIABLE.
-    private static final String COMMAND_WRAPPER = String.join("\n", concat(SPARK_CONF_COPY,
-            "touch \"$conf/spark-defaults.conf\"",
-            "sed -i -e '/^spark\\.master[[:space:]]/d' -e '/^spark\\.submit\\.deployMode[[:space:]]/d'"
-                    + " -e '/^spark\\.submit\\.customResourceManager/d' \"$conf/spark-defaults.conf\"",
-            "printf '\\n%s\\n' \"$" + SPARK_DEFAULTS_VARIABLE + "\" >> \"$conf/spark-defaults.conf\"",
-            // On a cluster, the hadoop command gets its HDFS and Floci's S3 too, through a copy of its Hadoop
-            // configuration (the image's, or the folder a spark-env export names), links followed, whose
-            // core-site.xml takes in the original's through Hadoop's XInclude, whatever its XML, then
-            // HADOOP_SITE_VARIABLE's properties, which win (see hadoopSite), and whose mapred-site.xml runs
-            // MapReduce in local mode the same way. Its script runs only once its HDFS, MapReduce and YARN homes
-            // name folders that are there, and the image has /usr/lib/hadoop alone, without MapReduce, so the
-            // MapReduce home is Floci's (see MAPRED_HOME). The image's hdfs command cannot run, so hdfs dfs runs
-            // as hadoop fs, and its hadoop-streaming names a jar it does not have, so the one it has runs.
+    // On a cluster, the hadoop command, and MapReduce in a step's spark-submit, get its HDFS and Floci's S3 too,
+    // through a copy of its Hadoop configuration (the image's, or the folder a spark-env export names), links
+    // followed, whose core-site.xml takes in the original's through Hadoop's XInclude, whatever its XML, then
+    // HADOOP_SITE_VARIABLE's properties, which win (see hadoopSite), and whose mapred-site.xml runs MapReduce in local
+    // mode the same way (see mapredSite). The cluster's hadoop-log4j lines follow the log4j.properties, on a line of
+    // their own, a later key winning, and its hadoop-env exports start the hadoop-env.sh the hadoop command reads,
+    // ahead of the image's own lines, which add to HADOOP_CLASSPATH rather than set it, so a HADOOP_CLASSPATH the
+    // cluster sets keeps the LZO codec the image's core-site.xml names. The hadoop script runs only once its HDFS,
+    // MapReduce and YARN homes name folders that are there, and the image has /usr/lib/hadoop alone, without
+    // MapReduce, so the MapReduce home is Floci's (see MAPRED_HOME). The image's hdfs command cannot run, so hdfs dfs
+    // runs as hadoop fs, and its hadoop-streaming names a jar it does not have, so the one it has runs.
+    private static final List<String> HADOOP_CONF_SETUP = List.of(
             "if [ -n \"${" + HADOOP_SITE_VARIABLE + ":-}\" ]; then",
             "  hadoop_conf=/tmp/floci-hadoop-conf source_conf=\"${HADOOP_CONF_DIR:-/etc/hadoop/conf}\"",
             "  mkdir -p \"$hadoop_conf\" /tmp/floci-bin " + MAPRED_HOME,
@@ -153,7 +157,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                     + " '</configuration>' > \"$hadoop_conf/$1\"",
             "  }",
             "  site core-site.xml \"$" + HADOOP_SITE_VARIABLE + "\"",
-            "  site mapred-site.xml '" + MAPRED_SITE + "'",
+            "  site mapred-site.xml \"$" + MAPRED_SITE_VARIABLE + "\"",
             // The local staging folder is a link to the same path in the HDFS folder, so a job's files are where
             // their path leads.
             "  mkdir -p \"" + HDFS_FOLDER + MAPRED_STAGING + "\" \"$(dirname " + MAPRED_STAGING + ")\"",
@@ -161,20 +165,40 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "  if [ ! -s \"$hadoop_conf/log4j.properties\" ]; then",
             "    printf '%s\\n' '" + String.join("' '", HADOOP_CONSOLE_LOG) + "' > \"$hadoop_conf/log4j.properties\"",
             "  fi",
+            "  if [ -n \"${" + HADOOP_LOG4J_VARIABLE + ":-}\" ]; then",
+            "    printf '\\n%s\\n' \"$" + HADOOP_LOG4J_VARIABLE + "\" >> \"$hadoop_conf/log4j.properties\"",
+            "  fi",
+            "  if [ -n \"${" + HADOOP_ENV_VARIABLE + ":-}\" ]; then",
+            "    { printf '%s\\n' \"$" + HADOOP_ENV_VARIABLE + "\"; cat \"$hadoop_conf/hadoop-env.sh\" 2>/dev/null; }"
+                    + " > \"$hadoop_conf/floci-hadoop-env.sh\"",
+            "    mv \"$hadoop_conf/floci-hadoop-env.sh\" \"$hadoop_conf/hadoop-env.sh\"",
+            "  fi",
             "  printf '%s\\n' '#!/bin/bash' 'if [ \"$1\" = dfs ]; then shift; exec hadoop fs \"$@\"; fi'"
                     + " 'echo \"hdfs $1: only hdfs dfs runs here, as hadoop fs\" >&2' 'exit 1' > /tmp/floci-bin/hdfs",
             "  printf '%s\\n' '#!/bin/bash' 'exec hadoop jar /usr/lib/hadoop/hadoop-streaming.jar \"$@\"'"
                     + " > /tmp/floci-bin/hadoop-streaming",
             "  chmod +x /tmp/floci-bin/hdfs /tmp/floci-bin/hadoop-streaming",
             "  for jar in " + String.join(" ", MAPRED_JARS) + "; do",
-            "    if [ -f \"$jar\" ]; then ln -sf \"$jar\" " + MAPRED_HOME + "/; fi",
+            "    if [ -f \"$jar\" ]; then ln -sf \"$jar\" " + MAPRED_HOME + "/;",
+            "    else echo \"" + MISSING_JAR + "\" >&2; fi",
             "  done",
             "  export HADOOP_CONF_DIR=\"$hadoop_conf\" PATH=\"/tmp/floci-bin:$PATH\"",
             "  export HADOOP_HDFS_HOME=\"${HADOOP_HDFS_HOME:-/usr/lib/hadoop}\"",
             "  export HADOOP_MAPRED_HOME=\"${HADOOP_MAPRED_HOME:-" + MAPRED_HOME + "}\"",
             "  export HADOOP_YARN_HOME=\"${HADOOP_YARN_HOME:-/usr/lib/hadoop}\"",
-            "fi",
-            "exec \"$@\""));
+            "fi");
+    // A step on a cluster, or one whose job has log4j2.properties lines, runs spark-submit after this.
+    private static final String SPARK_CONF_WRAPPER = wrapper(SPARK_CONF_COPY, HADOOP_CONF_SETUP);
+    // A command runs after this sets up a Spark configuration of its own, so a spark-submit it starts runs
+    // locally on Floci's S3: the image's spark-defaults.conf names EMR Serverless's resource manager as its
+    // master, which a system property cannot override, so its master and that manager's lines give way to
+    // local mode, Floci's settings and the job's spark-defaults, passed in SPARK_DEFAULTS_VARIABLE.
+    private static final String COMMAND_WRAPPER = wrapper(SPARK_CONF_COPY, List.of(
+            "touch \"$conf/spark-defaults.conf\"",
+            "sed -i -e '/^spark\\.master[[:space:]]/d' -e '/^spark\\.submit\\.deployMode[[:space:]]/d'"
+                    + " -e '/^spark\\.submit\\.customResourceManager/d' \"$conf/spark-defaults.conf\"",
+            "printf '\\n%s\\n' \"$" + SPARK_DEFAULTS_VARIABLE + "\" >> \"$conf/spark-defaults.conf\""),
+            HADOOP_CONF_SETUP);
     // The archives a driver needs in its working directory are put in this folder of its container, each in a
     // numbered folder of its own, which the copy creates.
     private static final String ARCHIVES_FOLDER = "/tmp/floci-archives";
@@ -276,24 +300,29 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                             job.environment()));
             // bash -c's script gets "floci" as its $0, and what runs after it as its arguments, "$@".
             if (job.command() == null) {
-                List<String> sparkSubmit = job.sparkLog4j2().isEmpty() ? List.of(SPARK_SUBMIT)
-                        : List.of("/bin/bash", "-c", SPARK_CONF_WRAPPER, "floci", SPARK_SUBMIT);
+                List<String> sparkSubmit = job.sparkLog4j2().isEmpty() && job.storage() == null
+                        ? List.of(SPARK_SUBMIT) : List.of("/bin/bash", "-c", SPARK_CONF_WRAPPER, "floci", SPARK_SUBMIT);
                 container.withEntrypoint(unpackingFirst(archives, sparkSubmit))
                         .withCmd(sparkSubmitArguments(job, endpoint));
             } else {
                 container.withEntrypoint(unpackingFirst(archives, List.of("/bin/bash", "-c", COMMAND_WRAPPER, "floci")))
                         .withCmd(job.command())
                         .withEnv(SPARK_DEFAULTS_VARIABLE, sparkDefaultsFile(job, endpoint));
-                if (job.storage() != null) {
-                    container.withEnv(HADOOP_SITE_VARIABLE, hadoopSite(job, endpoint));
-                }
             }
             if (!job.sparkLog4j2().isEmpty()) {
                 container.withEnv(SPARK_LOG4J2_VARIABLE, sparkLog4j2File(job));
             }
             if (job.storage() != null) {
                 container.withNamedVolume(job.storage().home(), "/home/hadoop")
-                        .withNamedVolume(job.storage().mnt(), "/mnt");
+                        .withNamedVolume(job.storage().mnt(), "/mnt")
+                        .withEnv(HADOOP_SITE_VARIABLE, hadoopSite(job, endpoint))
+                        .withEnv(MAPRED_SITE_VARIABLE, mapredSite(job));
+                if (!job.hadoopLog4j().isEmpty()) {
+                    container.withEnv(HADOOP_LOG4J_VARIABLE, hadoopLog4jFile(job));
+                }
+                if (!job.hadoopEnvironment().isEmpty()) {
+                    container.withEnv(HADOOP_ENV_VARIABLE, hadoopEnvFile(job));
+                }
             }
             ContainerSpec spec = container
                     .withDockerNetwork(Optional.ofNullable(job.dockerNetwork()))
@@ -633,8 +662,44 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
      * reads as a {@code Properties} file, so each key and value is escaped for it.
      */
     static String sparkLog4j2File(Job job) {
+        return propertiesLines(job.sparkLog4j2());
+    }
+
+    /**
+     * The {@code mapred-site.xml} properties a step's MapReduce gets: its cluster's {@code mapred-site}, then
+     * Floci's local mode and staging folder, which win, as there is no YARN to run a job on.
+     */
+    static String mapredSite(Job job) {
+        List<String> properties = new ArrayList<>();
+        job.mapredSite().forEach((name, value) -> properties.add(siteProperty(name, value)));
+        properties.add(MAPRED_SITE);
+        return String.join("\n", properties);
+    }
+
+    /** The lines a step's {@code hadoop} command gets after those of its {@code log4j.properties}. */
+    static String hadoopLog4jFile(Job job) {
+        return propertiesLines(job.hadoopLog4j());
+    }
+
+    /**
+     * The lines that start a step's {@code hadoop-env.sh}: an export of each {@code hadoop-env} variable, as given,
+     * in single quotes, with no shell expansion, as its {@code spark-env} ones are. A name a shell cannot export
+     * is left out, as its line would run what it holds.
+     */
+    static String hadoopEnvFile(Job job) {
         List<String> lines = new ArrayList<>();
-        job.sparkLog4j2().forEach((key, value) ->
+        job.hadoopEnvironment().forEach((name, value) -> {
+            if (SHELL_NAME.matcher(name).matches()) {
+                lines.add("export " + name + "='" + value.replace("'", "'\\''") + "'");
+            }
+        });
+        return String.join("\n", lines);
+    }
+
+    // Each property as a line Properties.load reads back as it is.
+    private static String propertiesLines(Map<String, String> properties) {
+        List<String> lines = new ArrayList<>();
+        properties.forEach((key, value) ->
                 lines.add(propertiesEscaped(key, true) + " = " + propertiesEscaped(value, false)));
         return String.join("\n", lines);
     }
@@ -644,10 +709,15 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                 + "</value></property>";
     }
 
-    private static List<String> concat(List<String> lines, String... more) {
-        List<String> all = new ArrayList<>(lines);
-        all.addAll(List.of(more));
-        return all;
+    // A wrapper's script: the lines of each part, in order, then what it runs.
+    @SafeVarargs
+    private static String wrapper(List<String>... parts) {
+        List<String> lines = new ArrayList<>();
+        for (List<String> part : parts) {
+            lines.addAll(part);
+        }
+        lines.add("exec \"$@\"");
+        return String.join("\n", lines);
     }
 
     // A backslash starts an escape and a line break ends a setting; in a key, whitespace, '=' and ':' end it,
