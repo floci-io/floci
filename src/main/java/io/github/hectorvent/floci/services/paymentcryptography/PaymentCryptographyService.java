@@ -207,13 +207,20 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                     "KeyClass '" + keyClass + "' is not supported, this service makes "
                             + SUPPORTED_CLASS + " keys", 400);
         }
+        String usage = string(attributes, "KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        // The usage binds the key to its purpose, and a key whose algorithm does not serve
+        // that purpose is not one the service makes.
+        String badAlgorithm = PaymentCryptographyKeyAlgorithm.refusal(usage, algorithm);
+        if (badAlgorithm != null) {
+            throw new AwsException("ValidationException", badAlgorithm, 400);
+        }
         PaymentCryptographyKey key = new PaymentCryptographyKey();
         key.setKeyId(UUID.randomUUID().toString().replace("-", ""));
         key.setRegion(region);
         key.setArn(regionResolver.buildArn(SERVICE, region, "key/" + key.getKeyId()));
         key.setKeyAlgorithm(algorithm.name());
         key.setKeyClass(keyClass);
-        key.setKeyUsage(usage(attributes));
+        key.setKeyUsage(usage);
         key.setKeyModesOfUse(modesOfUse);
         key.setExportable(exportable);
         key.setEnabled(enabled);
@@ -629,6 +636,13 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                     "the key " + protection.getArn() + " does not have the mode of use Wrap, which it needs "
                             + "to wrap a key", 400);
         }
+        // The wrapping key has to be at least as strong as the key it protects, or the
+        // protection buys nothing.
+        String tooWeak = PaymentCryptographyKeyStrength.refusal(
+                protection.getKeyAlgorithm(), key.getKeyAlgorithm());
+        if (tooWeak != null) {
+            throw new AwsException("ValidationException", tooWeak, 400);
+        }
         String usage = usageCode(key.getKeyUsage());
         String mode = modeCode(key.getKeyUsage());
         String block = PaymentCryptographyTr31.wrap(
@@ -677,8 +691,17 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         String usage = usageName(PaymentCryptographyTr31.usageOf(block));
         String mode = PaymentCryptographyTr31.modeOf(block);
         boolean exportable = "E".equals(PaymentCryptographyTr31.exportabilityOf(block));
+        String algorithm = algorithmOf(block, material.length);
+        // The wrapping key has to be at least as strong as the key it protects, or the
+        // protection buys nothing. The key's own algorithm is read from the block's
+        // header, not from the block type, so the two are compared as they are.
+        String tooWeak = PaymentCryptographyKeyStrength.refusal(
+                protection.getKeyAlgorithm(), algorithm);
+        if (tooWeak != null) {
+            throw new AwsException("ValidationException", tooWeak, 400);
+        }
         Map<String, Object> attributes = new LinkedHashMap<>();
-        attributes.put("KeyAlgorithm", algorithmOf(block, material.length));
+        attributes.put("KeyAlgorithm", algorithm);
         attributes.put("KeyClass", "SYMMETRIC_KEY");
         attributes.put("KeyUsage", usage);
         return makeKey(region, attributes, modesFor(mode), exportable, true, Map.of(),

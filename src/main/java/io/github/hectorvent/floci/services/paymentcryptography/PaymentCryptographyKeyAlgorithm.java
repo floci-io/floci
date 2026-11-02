@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.paymentcryptography;
 
+import java.util.List;
+
 /**
  * The key algorithms this service makes, with each one's key length.
  *
@@ -55,5 +57,40 @@ enum PaymentCryptographyKeyAlgorithm {
             sb.append(algorithm.name());
         }
         return sb.toString();
+    }
+
+    /**
+     * The algorithms a key of a usage may be made of.
+     *
+     * <p>The service refuses a key whose algorithm its usage does not allow, because the usage
+     * is what binds the key to its purpose, and a MAC key made of AES is a key whose purpose
+     * its own algorithm does not serve.
+     *
+     * @param usage the TR-31 usage name of the key
+     * @return the algorithms the usage allows
+     */
+    static List<PaymentCryptographyKeyAlgorithm> allowedOf(String usage) {
+        if ("TR31_M1_ISO_9797_1_MAC_KEY".equals(usage)
+                || "TR31_M3_ISO_9797_3_MAC_KEY".equals(usage)) {
+            // The ISO 9797 MACs are defined over Triple DES.
+            return List.of(TDES_2KEY, TDES_3KEY);
+        }
+        // Every other symmetric usage takes every symmetric algorithm.
+        return List.of(TDES_2KEY, TDES_3KEY, AES_128, AES_192, AES_256);
+    }
+
+    /**
+     * The reason an algorithm is refused for a usage, in words a caller can act on.
+     *
+     * @param usage the TR-31 usage name of the key
+     * @param algorithm the algorithm of the key
+     * @return the message, or null when the combination is allowed
+     */
+    static String refusal(String usage, PaymentCryptographyKeyAlgorithm algorithm) {
+        if (allowedOf(usage).contains(algorithm)) {
+            return null;
+        }
+        return "a key of the usage " + usage + " may not be made of " + algorithm.name()
+                + ": the usage allows " + allowedOf(usage);
     }
 }

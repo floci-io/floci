@@ -374,6 +374,52 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void aKeyUnderAWeakerProtectionKeyIsRefused() {
+        // The wrapping key has to be at least as strong as the key it protects, or the
+        // protection buys nothing. The strengths are the ones the standards count, so a
+        // two-key TDES key is 80 bits and an AES-128 one is 128.
+        PaymentCryptographyKey protection = service.createKey("us-east-1",
+                attributes("AES_128", "TR31_K1_KEY_BLOCK_PROTECTION_KEY"),
+                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE), true, true, Map.of());
+        PaymentCryptographyKey key = service.createKey("us-east-1",
+                attributes("AES_256", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
+                Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), protection.getKeyId()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("at least as strong"), refused.getMessage());
+    }
+
+    @Test
+    void aKeyUnderAStrongerProtectionKeyIsAllowed() {
+        PaymentCryptographyKey protection = service.createKey("us-east-1",
+                attributes("AES_256", "TR31_K1_KEY_BLOCK_PROTECTION_KEY"),
+                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE), true, true, Map.of());
+        PaymentCryptographyKey key = service.createKey("us-east-1",
+                attributes("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
+                Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
+
+        PaymentCryptographyService.KeyExport export = service.exportKey("us-east-1", key.getKeyId(),
+                protection.getKeyId());
+
+        assertTrue(export.block().startsWith("D"), "an AES protection key gives a type D block");
+    }
+
+    @Test
+    void aKeyOfAUsageThatDoesNotTakeItsAlgorithmIsRefused() {
+        // The ISO 9797 MACs are defined over Triple DES, so an AES key of that usage is
+        // a key whose purpose its own algorithm does not serve.
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.createKey("us-east-1",
+                        attributes("AES_256", "TR31_M1_ISO_9797_1_MAC_KEY"),
+                        Map.of("Generate", Boolean.TRUE, "Verify", Boolean.TRUE), true, true, Map.of()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
     void aKeyThatIsNotExportableDoesNotLeaveTheService() {
         PaymentCryptographyKey protection = createKey("us-east-1");
         Map<String, Object> attributes = new LinkedHashMap<>();
