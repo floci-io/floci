@@ -1162,8 +1162,13 @@ public class FirehoseService implements ResourceProvider {
             List<byte[]> records = toFlush;
             if (s3 != null && stream.isProcessingEnabled()) {
                 ensureBucket(bucket, stream);
-                FirehoseLambdaTransformer.Outcome transformed =
-                        lambdaTransformer.transform(stream, bucket, records, clock.instant());
+                FirehoseLambdaTransformer.Outcome transformed = isRedshiftStream(stream) && redshiftDelivery != null
+                        ? lambdaTransformer.transform(stream, bucket, records, clock.instant(),
+                                errorKey -> redshiftDelivery.requireStagingAccess(stream.getAccountId(),
+                                        stream.getDeliveryStreamARN(),
+                                        stream.getDestinations().get(0).getRedshiftDestinationDescription(),
+                                        bucket, errorKey))
+                        : lambdaTransformer.transform(stream, bucket, records, clock.instant());
                 LOG.infov("Transformed {0} records from stream {1} ({2} dropped, {3} failed)",
                         records.size(), streamName, transformed.droppedRecords(), transformed.failedRecords());
                 records = transformed.records();
@@ -1194,6 +1199,10 @@ public class FirehoseService implements ResourceProvider {
             String key = S3ObjectKeyResolver.resolveKey(s3, stream.getDeliveryStreamName(),
                     stream.getVersionId(), clock.instant(), compression);
 
+            if (isRedshiftStream(stream) && redshiftDelivery != null) {
+                redshiftDelivery.requireStagingAccess(stream.getAccountId(), stream.getDeliveryStreamARN(),
+                        stream.getDestinations().get(0).getRedshiftDestinationDescription(), bucket, key);
+            }
             ensureBucket(bucket, stream);
 
             byte[] rawPayload = concatenateRecords(records);
@@ -1350,6 +1359,8 @@ public class FirehoseService implements ResourceProvider {
         try {
             String region = AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(),
                     regionResolver.getDefaultRegion());
+            redshiftDelivery.requireLoadAccess(stream.getAccountId(), stream.getDeliveryStreamARN(), redshift,
+                    pending.bucket, pending.key);
             redshiftDelivery.copy(stream.getAccountId(), region, redshift, pending.bucket, pending.key);
             return true;
         } catch (RuntimeException e) {

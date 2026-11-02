@@ -2,7 +2,9 @@ package io.github.hectorvent.floci.services.firehose;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
+import io.github.hectorvent.floci.services.iam.ServiceRoleAuthorizer;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
@@ -18,15 +20,18 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -37,6 +42,7 @@ class FirehoseRedshiftDeliveryTest {
     private RedshiftService redshift;
     private RedshiftServerlessService serverless;
     private SecretsManagerService secrets;
+    private ServiceRoleAuthorizer roleAuthorizer;
     private final List<String[]> executed = new ArrayList<>();
     private FirehoseRedshiftDelivery delivery;
 
@@ -49,7 +55,8 @@ class FirehoseRedshiftDeliveryTest {
         when(cluster.getMasterUsername()).thenReturn("admin");
         when(redshift.describeClustersForAccount("000000000000", "c1")).thenReturn(List.of(cluster));
         serverless = mock(RedshiftServerlessService.class);
-        delivery = new FirehoseRedshiftDelivery(redshift, serverless, secrets, mapper,
+        roleAuthorizer = mock(ServiceRoleAuthorizer.class);
+        delivery = new FirehoseRedshiftDelivery(redshift, serverless, secrets, roleAuthorizer, mapper,
                 (url, user, password, sql) -> executed.add(new String[] {url, user, password, sql}));
     }
 
@@ -162,6 +169,60 @@ class FirehoseRedshiftDeliveryTest {
                 """, RedshiftDestination.class);
     }
 
+    private static final String STREAM_ARN = "arn:aws:firehose:us-east-1:000000000000:deliverystream/rs";
+    private static final String LOAD_ROLE = "arn:aws:iam::000000000000:role/firehose";
+    private static final String STAGING_ROLE = "arn:aws:iam::000000000000:role/firehose-staging";
+
+    private RedshiftDestination destinationWithStagingRole() throws Exception {
+        RedshiftDestination destination = destination();
+        DeliveryStreamDescription.S3Destination s3 = new DeliveryStreamDescription.S3Destination();
+        s3.setRoleArn(STAGING_ROLE);
+        destination.setS3(s3);
+        return destination;
+    }
+
+    @Test
+    void stagingChecksTheS3ConfigurationRoleForPutObjectOnTheObject() throws Exception {
+        when(roleAuthorizer.refusal(STAGING_ROLE, "000000000000", "firehose.amazonaws.com", STREAM_ARN,
+                List.of(new ServiceRoleAuthorizer.Permission("s3:PutObject", "arn:aws:s3:::stage/k1"))))
+                .thenReturn(Optional.of("The role " + STAGING_ROLE + " does not trust firehose.amazonaws.com."));
+
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> delivery
+                .requireStagingAccess("000000000000", STREAM_ARN, destinationWithStagingRole(), "stage", "k1"));
+
+        assertTrue(e.getMessage().contains("s3://stage/k1") && e.getMessage().contains("does not trust"),
+                e.getMessage());
+    }
+
+    @Test
+    void loadChecksTheDestinationRoleForGetObjectOnTheObject() throws Exception {
+        when(roleAuthorizer.refusal(LOAD_ROLE, "000000000000", "firehose.amazonaws.com", STREAM_ARN,
+                List.of(new ServiceRoleAuthorizer.Permission("s3:GetObject", "arn:aws:s3:::stage/k1"))))
+                .thenReturn(Optional.of("The role " + LOAD_ROLE + " is not authorized to perform s3:GetObject."));
+
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> delivery
+                .requireLoadAccess("000000000000", STREAM_ARN, destinationWithStagingRole(), "stage", "k1"));
+
+        assertTrue(e.getMessage().contains("not authorized"), e.getMessage());
+    }
+
+    @Test
+    void aPermittedRoleStagesAndLoads() throws Exception {
+        delivery.requireStagingAccess("000000000000", STREAM_ARN, destinationWithStagingRole(), "stage", "k1");
+        delivery.requireLoadAccess("000000000000", STREAM_ARN, destinationWithStagingRole(), "stage", "k1");
+
+        verify(roleAuthorizer, times(2)).refusal(anyString(), eq("000000000000"), eq("firehose.amazonaws.com"),
+                eq(STREAM_ARN), any());
+    }
+
+    @Test
+    void stagingWithoutAnS3ConfigurationRoleDelegatesToAuthorizer() throws Exception {
+        delivery.requireStagingAccess("000000000000", STREAM_ARN, destination(), "stage", "k1");
+
+        verify(roleAuthorizer).refusal(eq(""), eq("000000000000"), eq("firehose.amazonaws.com"),
+                eq(STREAM_ARN), eq(List.of()));
+    }
+
     @Test
     void runsCopyWithoutAnIamRoleThroughTheProxyPortInSimpleMode() throws Exception {
         delivery.copy("000000000000", "us-east-1", destination(), "stage", "k1");
@@ -213,7 +274,8 @@ class FirehoseRedshiftDeliveryTest {
 
     @Test
     void jdbcFailureIsWrappedWithTableClusterAndSqlState() {
-        FirehoseRedshiftDelivery failing = new FirehoseRedshiftDelivery(redshift, serverless, secrets, mapper,
+        FirehoseRedshiftDelivery failing = new FirehoseRedshiftDelivery(redshift, serverless, secrets,
+                roleAuthorizer, mapper,
                 (url, user, password, sql) -> {
                     throw new SQLException("relation \"events\" does not exist", "42P01");
                 });

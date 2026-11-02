@@ -30,6 +30,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -39,6 +40,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -98,7 +100,7 @@ class FirehoseRedshiftServiceTest {
     @Test
     void recordsAreTransformedByTheRedshiftDestinationsLambdaBeforeStaging() throws Exception {
         createStream(LAMBDA_PROCESSING);
-        when(transformer.transform(any(), eq("stage"), any(), any())).thenReturn(new FirehoseLambdaTransformer.Outcome(
+        when(transformer.transform(any(), eq("stage"), any(), any(), any())).thenReturn(new FirehoseLambdaTransformer.Outcome(
                 List.of("{\"id\":2}".getBytes(StandardCharsets.UTF_8)), 0, 0, null));
 
         service.flush(STREAM);
@@ -132,14 +134,14 @@ class FirehoseRedshiftServiceTest {
 
         service.flush(STREAM);
 
-        verify(transformer, never()).transform(any(), anyString(), any(), any());
+        verify(transformer, never()).transform(any(), anyString(), any(), any(), any());
         verifyStagedTimes(1);
     }
 
     @Test
     void whenTheLambdaDropsEveryRecordNothingIsStagedOrLoaded() throws Exception {
         createStream(LAMBDA_PROCESSING);
-        when(transformer.transform(any(), eq("stage"), any(), any())).thenReturn(
+        when(transformer.transform(any(), eq("stage"), any(), any(), any())).thenReturn(
                 new FirehoseLambdaTransformer.Outcome(List.of(), 1, 0, null));
 
         service.flush(STREAM);
@@ -151,7 +153,7 @@ class FirehoseRedshiftServiceTest {
     @Test
     void backupEnabledWithLambdaTransformKeepsTheUntransformedSourceRecords() throws Exception {
         createStream(BACKUP_ENABLED + LAMBDA_PROCESSING);
-        when(transformer.transform(any(), eq("stage"), any(), any())).thenReturn(new FirehoseLambdaTransformer.Outcome(
+        when(transformer.transform(any(), eq("stage"), any(), any(), any())).thenReturn(new FirehoseLambdaTransformer.Outcome(
                 List.of("{\"id\":2}".getBytes(StandardCharsets.UTF_8)), 0, 0, null));
 
         service.flush(STREAM);
@@ -169,7 +171,7 @@ class FirehoseRedshiftServiceTest {
     @Test
     void backupEnabledWhenLambdaDropsEveryRecordStillWritesTheSourceRecordsToBackup() throws Exception {
         createStream(BACKUP_ENABLED + LAMBDA_PROCESSING);
-        when(transformer.transform(any(), eq("stage"), any(), any())).thenReturn(
+        when(transformer.transform(any(), eq("stage"), any(), any(), any())).thenReturn(
                 new FirehoseLambdaTransformer.Outcome(List.of(), 1, 0, null));
 
         service.flush(STREAM);
@@ -185,7 +187,7 @@ class FirehoseRedshiftServiceTest {
     @Test
     void backupWriteFailureWhenLambdaDropsEveryRecordLeavesTheBatchBufferedForRetry() throws Exception {
         createStream(BACKUP_ENABLED + LAMBDA_PROCESSING);
-        when(transformer.transform(any(), eq("stage"), any(), any())).thenReturn(
+        when(transformer.transform(any(), eq("stage"), any(), any(), any())).thenReturn(
                 new FirehoseLambdaTransformer.Outcome(List.of(), 1, 0, null));
         doThrow(new IllegalStateException("s3 unavailable")).when(s3Service)
                 .putObject(eq("bk"), anyString(), any(byte[].class), anyString(), anyMap(), any());
@@ -240,12 +242,12 @@ class FirehoseRedshiftServiceTest {
         RedshiftDestination valid = mapper.readValue("{" + LAMBDA_PROCESSING.substring(2) + "}",
                 RedshiftDestination.class);
         service.updateRedshiftDestination(STREAM, "1", destinationId, valid);
-        when(transformer.transform(any(), eq("stage"), any(), any())).thenReturn(new FirehoseLambdaTransformer.Outcome(
+        when(transformer.transform(any(), eq("stage"), any(), any(), any())).thenReturn(new FirehoseLambdaTransformer.Outcome(
                 List.of("{\"id\":3}".getBytes(StandardCharsets.UTF_8)), 0, 0, null));
 
         service.flush(STREAM);
 
-        verify(transformer, times(1)).transform(any(), eq("stage"), any(), any());
+        verify(transformer, times(1)).transform(any(), eq("stage"), any(), any(), any());
         ArgumentCaptor<byte[]> body = ArgumentCaptor.forClass(byte[].class);
         verify(s3Service).putObject(eq("stage"), anyString(), body.capture(), anyString(), anyMap(), any());
         assertEquals("{\"id\":3}\n", new String(body.getValue(), StandardCharsets.UTF_8));
@@ -298,6 +300,61 @@ class FirehoseRedshiftServiceTest {
 
         verify(delivery, times(1)).copy(eq("000000000000"), eq("us-east-1"), any(), eq("stage"), anyString());
         verifyStagedTimes(1);
+    }
+
+    @Test
+    void aRefusedStagingRoleStagesAndLoadsNothingAndKeepsTheRecordsBuffered() throws Exception {
+        createStream("");
+        doThrow(new IllegalStateException("role does not trust firehose.amazonaws.com"))
+                .when(delivery).requireStagingAccess(anyString(), anyString(), any(), anyString(), anyString());
+
+        service.flush(STREAM);
+
+        verifyStagedTimes(0);
+        verify(delivery, never()).copy(anyString(), anyString(), any(), anyString(), anyString());
+
+        reset(delivery);
+        service.flush(STREAM);
+
+        verifyStagedTimes(1);
+        verify(delivery, times(1)).copy(anyString(), anyString(), any(), eq("stage"), anyString());
+    }
+
+    @Test
+    void whenTransformationErrorOutputIsRefusedByStagingRoleTheBatchRemainsBuffered() throws Exception {
+        createStream(LAMBDA_PROCESSING);
+        doThrow(new IllegalStateException("Firehose cannot stage error output"))
+                .when(delivery).requireStagingAccess(anyString(), anyString(), any(), eq("stage"), eq("error/processing-failed.json"));
+        doAnswer(inv -> {
+            Consumer<String> guard = inv.getArgument(4);
+            guard.accept("error/processing-failed.json");
+            return new FirehoseLambdaTransformer.Outcome(List.of(), 0, 1, "error/processing-failed.json");
+        }).when(transformer).transform(any(), eq("stage"), any(), any(), any());
+
+        service.flush(STREAM);
+
+        verifyStagedTimes(0);
+        verify(delivery, never()).copy(anyString(), anyString(), any(), anyString(), anyString());
+    }
+
+    @Test
+    void aRefusedLoadRoleRetriesTheLoadWithoutRestagingTheBatch() throws Exception {
+        createStream("");
+        doThrow(new IllegalStateException("role is not authorized to perform s3:GetObject"))
+                .when(delivery).requireLoadAccess(anyString(), anyString(), any(), anyString(), anyString());
+
+        service.flush(STREAM);
+
+        verifyStagedTimes(1);
+        verify(delivery, never()).copy(anyString(), anyString(), any(), anyString(), anyString());
+
+        Mockito.doNothing().when(delivery)
+                .requireLoadAccess(anyString(), anyString(), any(), anyString(), anyString());
+        pastBackoff();
+        service.retryPendingRedshiftCopies();
+
+        verifyStagedTimes(1);
+        verify(delivery, times(1)).copy(anyString(), anyString(), any(), eq("stage"), anyString());
     }
 
     @Test

@@ -3,9 +3,13 @@ package io.github.hectorvent.floci.services.firehose;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.DatabaseSecretCredentials;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
+import io.github.hectorvent.floci.services.iam.ServiceRoleAuthorizer;
+import io.github.hectorvent.floci.services.iam.ServiceRoleAuthorizer.Permission;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
+import io.github.hectorvent.floci.services.redshift.proxy.RedshiftRoleAccess;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
@@ -17,6 +21,8 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.List;
+import java.util.Optional;
 import java.util.Properties;
 
 /**
@@ -30,6 +36,7 @@ public class FirehoseRedshiftDelivery {
     private static final Logger LOG = Logger.getLogger(FirehoseRedshiftDelivery.class);
     private static final int CONNECT_TIMEOUT_SECONDS = 10;
     private static final int SOCKET_TIMEOUT_SECONDS = 150;
+    private static final String FIREHOSE_PRINCIPAL = ServicePrincipals.of("firehose");
 
     /** Seam for tests; production opens a real JDBC connection. */
     interface SqlRunner {
@@ -45,22 +52,64 @@ public class FirehoseRedshiftDelivery {
     private final RedshiftService redshiftService;
     private final RedshiftServerlessService serverlessService;
     private final SecretsManagerService secretsManagerService;
+    private final ServiceRoleAuthorizer roleAuthorizer;
     private final ObjectMapper mapper;
     private final SqlRunner runner;
 
     @Inject
     public FirehoseRedshiftDelivery(RedshiftService redshiftService, RedshiftServerlessService serverlessService,
-                                    SecretsManagerService secretsManagerService, ObjectMapper mapper) {
-        this(redshiftService, serverlessService, secretsManagerService, mapper, FirehoseRedshiftDelivery::runJdbc);
+                                    SecretsManagerService secretsManagerService,
+                                    ServiceRoleAuthorizer roleAuthorizer, ObjectMapper mapper) {
+        this(redshiftService, serverlessService, secretsManagerService, roleAuthorizer, mapper,
+                FirehoseRedshiftDelivery::runJdbc);
     }
 
     FirehoseRedshiftDelivery(RedshiftService redshiftService, RedshiftServerlessService serverlessService,
-                             SecretsManagerService secretsManagerService, ObjectMapper mapper, SqlRunner runner) {
+                             SecretsManagerService secretsManagerService, ServiceRoleAuthorizer roleAuthorizer,
+                             ObjectMapper mapper, SqlRunner runner) {
         this.redshiftService = redshiftService;
         this.serverlessService = serverlessService;
         this.secretsManagerService = secretsManagerService;
+        this.roleAuthorizer = roleAuthorizer;
         this.mapper = mapper;
         this.runner = runner;
+    }
+
+    /**
+     * Refuses a batch whose intermediate object the role of the stream's {@code S3Configuration} may not write.
+     * Firehose assumes that role to stage the batch, so it has to trust {@code firehose.amazonaws.com} for this
+     * stream and allow {@code s3:PutObject} on the object.
+     *
+     * @throws IllegalStateException when the role may not stage the object
+     */
+    public void requireStagingAccess(String accountId, String streamArn, RedshiftDestination destination,
+                                     String bucket, String key) {
+        requireAccess(accountId, streamArn, destination.getS3() == null ? null : destination.getS3().getRoleArn(),
+                "s3:PutObject", bucket, key, "stage");
+    }
+
+    /**
+     * Refuses a load whose staged object the destination's {@code RoleARN} may not read, with the same trust
+     * requirement as {@link #requireStagingAccess} and {@code s3:GetObject} on the object.
+     *
+     * @throws IllegalStateException when the role may not read the object
+     */
+    public void requireLoadAccess(String accountId, String streamArn, RedshiftDestination destination,
+                                  String bucket, String key) {
+        requireAccess(accountId, streamArn, destination.getRoleArn(), "s3:GetObject", bucket, key, "load");
+    }
+
+    private void requireAccess(String accountId, String streamArn, String roleArn, String action, String bucket,
+                               String key, String step) {
+        // A missing role is not exempt: the authorizer refuses it with enforcement on and ignores it with enforcement off.
+        String role = roleArn == null ? "" : roleArn;
+        List<Permission> permissions = role.isBlank()
+                ? List.of() : List.of(new Permission(action, RedshiftRoleAccess.objectArn(role, bucket, key)));
+        Optional<String> refusal = roleAuthorizer.refusal(role, accountId, FIREHOSE_PRINCIPAL, streamArn, permissions);
+        if (refusal.isPresent()) {
+            throw new IllegalStateException("Firehose cannot " + step + " s3://" + bucket + "/" + key + ": "
+                    + refusal.get());
+        }
     }
 
     /**

@@ -80,6 +80,14 @@ class RedshiftDestinationValidatorTest {
     }
 
     @Test
+    void intermediateRoleMustBeAnIamRoleArn() throws Exception {
+        RedshiftDestination dest = valid();
+        dest.getS3().setRoleArn("not-an-arn");
+
+        assertTrue(messageOf(dest).contains("s3Configuration.roleARN"));
+    }
+
+    @Test
     void secretsManagerRoleMustBeAnIamRoleArn() throws Exception {
         RedshiftDestination dest = valid();
         RedshiftDestination.SecretsManagerConfiguration secrets = new RedshiftDestination.SecretsManagerConfiguration();

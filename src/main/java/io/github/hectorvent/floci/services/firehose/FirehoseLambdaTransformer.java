@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /**
  * Runs a flushed batch through the stream's Lambda transform before it is
@@ -94,6 +95,16 @@ public class FirehoseLambdaTransformer {
 
     public Outcome transform(DeliveryStreamDescription stream, String bucket, List<byte[]> records,
                              Instant deliveryTime) {
+        return transform(stream, bucket, records, deliveryTime, errorKey -> { });
+    }
+
+    /**
+     * Same as the four argument form, with {@code errorOutputGuard} called with the key of the error object just
+     * before it is written. A guard that throws keeps the object from being written, so a caller can refuse a write
+     * its delivery role is not allowed to make.
+     */
+    public Outcome transform(DeliveryStreamDescription stream, String bucket, List<byte[]> records,
+                             Instant deliveryTime, Consumer<String> errorOutputGuard) {
         S3Destination s3 = stream.s3Destination();
         Processor processor = lambdaProcessor(stream);
         if (processor == null) {
@@ -126,7 +137,7 @@ public class FirehoseLambdaTransformer {
 
         String errorKey = failures.isEmpty() ? null
                 : writeErrorOutput(stream, s3, bucket, failures, deliveryTime, functionArn,
-                        invocation.attemptsMade());
+                        invocation.attemptsMade(), errorOutputGuard);
         return new Outcome(delivered, dropped, failures.size(), errorKey);
     }
 
@@ -366,9 +377,10 @@ public class FirehoseLambdaTransformer {
      */
     private String writeErrorOutput(DeliveryStreamDescription stream, S3Destination s3, String bucket,
                                     List<FailedRecord> failures, Instant deliveryTime,
-                                    String functionArn, int attemptsMade) {
+                                    String functionArn, int attemptsMade, Consumer<String> errorOutputGuard) {
         String errorKey = S3ObjectKeyResolver.resolveErrorKey(s3, stream.getDeliveryStreamName(),
                 stream.getVersionId(), deliveryTime, ERROR_OUTPUT_TYPE);
+        errorOutputGuard.accept(errorKey);
         ByteArrayOutputStream body = new ByteArrayOutputStream();
         for (FailedRecord failure : failures) {
             Map<String, Object> line = new LinkedHashMap<>();
