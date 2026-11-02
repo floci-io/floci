@@ -96,7 +96,11 @@ class GuardedMessageQueue {
                     claimStandard(maxMessages, effectiveTimeout, maxReceiveCount, deadLetterTargetArn,
                             claimed, dlqCandidates, previous);
                 }
-                if (!claimed.isEmpty() || !dlqCandidates.isEmpty()) {
+                if (!dlqCandidates.isEmpty()) {
+                    List<Message> candidate = new ArrayList<>(messages);
+                    candidate.removeAll(dlqCandidates);
+                    commit(candidate);
+                } else if (!claimed.isEmpty()) {
                     persist(messages);
                 }
             } catch (RuntimeException exception) {
@@ -238,14 +242,6 @@ class GuardedMessageQueue {
             return HandleResult.HANDLE_EXPIRED;
         }
         return HandleResult.APPLIED;
-    }
-
-    void removeMessages(List<Message> toRemove) {
-        try (Guard _ = hold()) {
-            List<Message> candidate = new ArrayList<>(messages);
-            candidate.removeAll(toRemove);
-            commit(candidate);
-        }
     }
 
     void removeExpired(Instant cutoff) {
