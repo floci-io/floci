@@ -2569,6 +2569,9 @@ public class NativeDynamoDbJsonHandler {
                     required.add(SmithyValidationErrors.lengthTooShort(action.path(member), "", 1));
                 }
             }
+            if (write) {
+                addPartiQLReturnValuesError(action.op(), action.path("ReturnValuesOnConditionCheckFailure"), required);
+            }
         }
         boolean older = transactDepth(transactItems, ops) >= OLDER_VALIDATOR_DEPTH;
         if (!missing && !older) {
@@ -2579,8 +2582,9 @@ public class NativeDynamoDbJsonHandler {
             required.addFirst("Value '" + transactItems + "' at 'transactItems' failed to satisfy constraint: "
                     + "Member must have length less than or equal to " + MAX_TRANSACT_ITEMS);
         }
-        // The older validator stops at a missing member, before the operation and name checks.
-        if (!required.isEmpty()) {
+        // The older validator stops at a missing member or an unknown ReturnValuesOnConditionCheckFailure,
+        // before the operation and name checks. The newer one leaves that enum to the per-action checks.
+        if ((missing || older) && !required.isEmpty()) {
             required.addAll(memberErrors);
             throwValidationErrors(required);
         }
@@ -2633,26 +2637,45 @@ public class NativeDynamoDbJsonHandler {
         throwValidationErrors(validationErrors);
     }
 
-    // DynamoDB checks an action's ConditionExpression in full before its UpdateExpression.
+    // DynamoDB checks an action's ConditionExpression in full before its UpdateExpression. In a request too deep
+    // for the newer validator, it checks the expressions before the action's item or key.
     private void requireValidTransactAction(TransactAction action, boolean older) {
         JsonNode op = action.op();
-        String conditionExpression = textOrNull(op, "ConditionExpression");
-        String updateExpression = textOrNull(op, "UpdateExpression");
-        JsonNode exprAttrNames = op.get("ExpressionAttributeNames");
-        JsonNode exprAttrValues = op.get("ExpressionAttributeValues");
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Key"), false);
-        requireReadableValues(op.get("Put".equals(action.type()) ? "Item" : "Key"), "");
+        if (older) {
+            requireValidTransactExpressions(op, true);
+            requireTransactItemOrKey(action);
+            return;
+        }
+        requireTransactItemOrKey(action);
         List<String> onFailureErrors = new ArrayList<>();
         addPartiQLReturnValuesError(op, action.path("ReturnValuesOnConditionCheckFailure"), onFailureErrors);
         throwValidationErrors(onFailureErrors);
         // AWS checks the depth of every value, so even an unused or condition-only value fails the request.
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues, false);
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("ExpressionAttributeValues"), false);
+        requireValidTransactExpressions(op, false);
+    }
+
+    private static void requireTransactItemOrKey(TransactAction action) {
+        JsonNode op = action.op();
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Key"), false);
+        requireReadableValues(op.get("Put".equals(action.type()) ? "Item" : "Key"), "");
+    }
+
+    private void requireValidTransactExpressions(JsonNode op, boolean older) {
+        String conditionExpression = textOrNull(op, "ConditionExpression");
+        String updateExpression = textOrNull(op, "UpdateExpression");
+        JsonNode exprAttrNames = op.get("ExpressionAttributeNames");
+        JsonNode exprAttrValues = op.get("ExpressionAttributeValues");
         // An action without an expression ignores its ExpressionAttributeNames and ExpressionAttributeValues.
         if (conditionExpression == null && updateExpression == null) {
             return;
         }
-        requireReadableValues(exprAttrValues, "");
+        if (older) {
+            requireNamedExpressionValues(exprAttrValues);
+        } else {
+            requireReadableValues(exprAttrValues, "");
+        }
 
         requireNonEmptyExpression(conditionExpression, "ConditionExpression");
         // Only a request too deep for the newer validator reports the condition's size.
@@ -2675,6 +2698,23 @@ public class NativeDynamoDbJsonHandler {
 
         checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression, updateExpression));
         checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression, updateExpression));
+    }
+
+    // The older validator names the ExpressionAttributeValues key it refuses.
+    private void requireNamedExpressionValues(JsonNode exprAttrValues) {
+        if (exprAttrValues == null) {
+            return;
+        }
+        for (Map.Entry<String, JsonNode> entry : exprAttrValues.properties()) {
+            ObjectNode value = objectMapper.createObjectNode().set(entry.getKey(), entry.getValue());
+            try {
+                DynamoDbAttributeValueValidator.requireNestingWithinLimit(value, false);
+                requireReadableValues(value, "");
+            } catch (AwsException e) {
+                throw new AwsException("ValidationException", "ExpressionAttributeValues contains invalid value: "
+                        + e.getMessage() + " for key " + entry.getKey(), 400);
+            }
+        }
     }
 
     private static void requireNonEmptyExpression(String expression, String exprType) {
