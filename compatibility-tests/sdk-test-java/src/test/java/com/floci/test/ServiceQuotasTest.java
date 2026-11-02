@@ -63,4 +63,33 @@ class ServiceQuotasTest {
         assertThat(quota.adjustable()).isTrue();
         assertThat(quota.globalQuota()).isFalse();
     }
+
+    @Test
+    @DisplayName("ListServices returns services with code and name, supports pagination")
+    void listServicesReturnsServicesAndPaginates() {
+        assumeFalse(TestFixtures.isRealAws(), "Tests the emulated service catalog");
+        try (ServiceQuotasClient client = TestFixtures.serviceQuotasClient()) {
+            // List all services
+            var allServices = client.listServicesPaginator(request -> request.maxResults(100))
+                    .stream().flatMap(page -> page.services().stream()).toList();
+            assertThat(allServices).hasSizeGreaterThanOrEqualTo(10);
+            assertThat(allServices).anyMatch(s -> s.serviceCode().equals("ec2") && s.serviceName().equals("Amazon Elastic Compute Cloud (Amazon EC2)"));
+            assertThat(allServices).anyMatch(s -> s.serviceCode().equals("lambda") && s.serviceName().equals("AWS Lambda"));
+            assertThat(allServices).anyMatch(s -> s.serviceCode().equals("s3") && s.serviceName().equals("Amazon Simple Storage Service (Amazon S3)"));
+
+            // Pagination
+            var firstPage = client.listServices(request -> request.maxResults(2)).services();
+            assertThat(firstPage).hasSize(2);
+            String nextToken = client.listServices(request -> request.maxResults(2)).nextToken();
+            assertThat(nextToken).isNotNull();
+            var secondPage = client.listServices(request -> request.nextToken(nextToken)).services();
+            assertThat(secondPage.size()).isGreaterThanOrEqualTo(1);
+
+            // Services sorted by ServiceCode (case-insensitive)
+            List<String> codes = allServices.stream().map(ServiceQuota::serviceCode).toList();
+            List<String> sorted = new ArrayList<>(codes);
+            sorted.sort(String::compareToIgnoreCase);
+            assertThat(codes).isEqualTo(sorted);
+        }
+    }
 }
