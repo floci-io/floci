@@ -48,7 +48,9 @@ to continue. Truncated pages also return `NextToken`, which CLI and SDK paginato
 back without an `ExclusiveStartStreamName`. Tokens are scoped to this operation and region,
 use the same configurable lifetime as `ListShards` tokens (see the TTL setting below),
 and remain usable if the cursor stream is deleted.
-`StreamSummaries` are not currently modeled.
+Each page also returns `StreamSummaries`, one entry per name in `StreamNames` and in the same
+order, with `StreamName`, `StreamARN`, `StreamStatus`, `StreamModeDetails` and
+`StreamCreationTimestamp`.
 
 ## Local Inspection Endpoints
 
