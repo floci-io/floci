@@ -207,6 +207,22 @@ public class CodeArtifactPypiController {
                     .build();
         }
 
+        // A package whose origin configuration sets publish:BLOCK refuses every twine upload, the
+        // same way PublishPackageVersion refuses it for the generic format, ahead of the
+        // byte-identical shortcut below: a retry of bytes already stored is still a publish.
+        // pypiserver files the upload under the name its own filename parser derives and never
+        // reads the form's name field, so that derived name is the one checked, version field or
+        // not (Greptile and pgermosen's review). A filename it cannot parse is one pypiserver
+        // rejects anyway; the form's name stands in for it then.
+        String publishCheckedName = PypiserverSidecarClient.guessPackageName(file.get().filename())
+                .orElse(packageName);
+        try {
+            service.requireContainerBackedPackagePublishAllowed(handle.region(), domain, handle.owner(), repository,
+                    "pypi", null, publishCheckedName);
+        } catch (AwsException e) {
+            return Response.status(409).entity(e.getMessage()).build();
+        }
+
         Object lock = uploadLocks.computeIfAbsent(handle.repoId(), k -> new Object());
         synchronized (lock) {
             // Raised by hectorvent's review: a real twine upload to a coordinate

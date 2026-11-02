@@ -840,6 +840,75 @@ class CodeArtifactServiceTest {
         assertEquals("Published", published.packageVersion().getStatus());
     }
 
+    /**
+     * The check each native publish path (mvn deploy, npm publish, twine upload, dotnet nuget
+     * push) runs before its sidecar write: refused exactly while the package's origin
+     * configuration says publish:BLOCK, the same rule publishPackageVersion applies to generic.
+     */
+    @Test
+    void containerBackedPackagePublishIsRefusedOnlyWhilePublishIsBlocked() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+
+        service.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "maven", "com.example", "widget",
+                "BLOCK", "ALLOW");
+        AwsException blocked = assertThrows(AwsException.class, () -> service
+                .requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
+                        "widget"));
+        assertEquals("ConflictException", blocked.getErrorCode());
+        // Scoped to that one package: a sibling in the same namespace still publishes.
+        service.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
+                "other");
+
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "maven", "com.example", "widget",
+                "ALLOW", "ALLOW");
+        service.requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "maven", "com.example",
+                "widget");
+    }
+
+    /**
+     * pypi and nuget names are case/punctuation insensitive, and PutPackageOriginConfiguration
+     * keys by the normalized spelling, so a restriction set under one spelling must block a
+     * publish that names the package under another (twine sends the name as typed in the
+     * project metadata, the nuget controller lowercases the nuspec id).
+     */
+    @Test
+    void containerBackedPackagePublishBlockMatchesAnyNormalizedSpellingOfTheName() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "pypi", null, "My_Pkg", "BLOCK",
+                "BLOCK");
+        service.putPackageOriginConfiguration(REGION, "dom", null, "repo", "nuget", null, "Demo.Package", "BLOCK",
+                "BLOCK");
+
+        assertThrows(AwsException.class, () -> service.requireContainerBackedPackagePublishAllowed(REGION, "dom",
+                null, "repo", "pypi", null, "my-pkg"));
+        assertThrows(AwsException.class, () -> service.requireContainerBackedPackagePublishAllowed(REGION, "dom",
+                null, "repo", "nuget", null, "demo.package"));
+    }
+
+    /**
+     * A package first retained from an external connection defaults to publish:BLOCK (the User
+     * Guide's "Default package origin control settings"), so a later direct publish of it is
+     * refused without anyone calling PutPackageOriginConfiguration.
+     */
+    @Test
+    void containerBackedPackagePublishIsRefusedForAPackageFirstRetainedFromAnExternalConnection() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        long fence = service.currentContainerBackedPackageFence(REGION, "dom", null, "repo", "npm", "scope",
+                "left-pad");
+        service.ensureRetainedPackageOriginDefault(REGION, "dom", null, "repo", "npm", "scope", "left-pad", fence);
+
+        AwsException blocked = assertThrows(AwsException.class, () -> service
+                .requireContainerBackedPackagePublishAllowed(REGION, "dom", null, "repo", "npm", "scope",
+                        "left-pad"));
+        assertEquals("ConflictException", blocked.getErrorCode());
+    }
+
     @Test
     void createRepositoryAcceptsExistingUpstream() {
         service.createDomain(REGION, "dom", null, Map.of());

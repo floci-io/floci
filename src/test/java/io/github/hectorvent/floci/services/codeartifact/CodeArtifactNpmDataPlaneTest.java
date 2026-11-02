@@ -420,6 +420,78 @@ class CodeArtifactNpmDataPlaneTest {
     }
 
     /**
+     * Issue #7116: a package whose origin configuration sets publish:BLOCK refuses an npm publish
+     * the way PublishPackageVersion already refuses it for the generic format, ahead of the
+     * byte-identical shortcut: Verdaccio already holds this exact tarball, which would otherwise
+     * answer 200 without forwarding.
+     */
+    @Test
+    void aByteIdenticalRepublishToAPackageWhoseOriginConfigurationBlocksPublishIsRefused() throws Exception {
+        byte[] content = "tarball bytes".getBytes(StandardCharsets.UTF_8);
+        AtomicReference<Boolean> upstreamReceivedPut = new AtomicReference<>(false);
+        upstream = startUpstreamRecordingPuts(upstreamReceivedPut);
+        CodeArtifactService service = blockedPublishService(null, "my-pkg");
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        givenStoredVersion(verdaccioClient, null, "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, Map.of());
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
+                publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content));
+
+        assertEquals(409, response.statusCode());
+        assertEquals(false, upstreamReceivedPut.get());
+    }
+
+    /**
+     * The restriction needs nothing from the envelope, so a body too malformed to scan (which is
+     * otherwise forwarded unchanged for Verdaccio to reject) is refused too, scoped package
+     * included.
+     */
+    @Test
+    void anUnscannablePublishToAScopedPackageWhoseOriginConfigurationBlocksPublishIsRefused() throws Exception {
+        AtomicReference<Boolean> upstreamReceivedPut = new AtomicReference<>(false);
+        upstream = startUpstreamRecordingPuts(upstreamReceivedPut);
+        CodeArtifactService service = blockedPublishService("scope", "my-pkg");
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        startDataPlane(service, verdaccioClient);
+
+        HttpResponse response = put("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/@scope%2fmy-pkg",
+                "good-token", "{not json");
+
+        assertEquals(409, response.statusCode());
+        assertEquals(false, upstreamReceivedPut.get());
+    }
+
+    private HttpServer startUpstreamRecordingPuts(AtomicReference<Boolean> receivedPut) throws Exception {
+        return vertx.createHttpServer()
+                .requestHandler(request -> {
+                    if (request.method() == HttpMethod.PUT) {
+                        receivedPut.set(true);
+                    }
+                    request.response().setStatusCode(201).end();
+                })
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+    }
+
+    private static CodeArtifactService blockedPublishService(String namespace, String packageName) {
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        doThrow(new AwsException("ConflictException", "Package '" + packageName + "' cannot be published because "
+                + "its origin configuration blocks direct publish.", 409))
+                .when(service).requireContainerBackedPackagePublishAllowed(eq("us-east-1"), eq(DOMAIN),
+                        eq("000000000000"), eq(REPOSITORY), eq("npm"), eq(namespace), eq(packageName));
+        return service;
+    }
+
+    /**
      * Raised by Greptile's review: a real publish whose per-version {@code readme} exceeds
      * {@code NpmPublishEnvelopeScanner}'s own stricter 1,000,000-character limit makes {@code
      * checkRepublish}'s primary scan throw, the one case that used to forward unconditionally

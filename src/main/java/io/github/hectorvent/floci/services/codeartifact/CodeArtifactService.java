@@ -901,19 +901,8 @@ public class CodeArtifactService implements Resettable {
         // operation before any idempotency check below, the same way a real prerequisite failure
         // would: a retry of already-published bytes is still a PublishPackageVersion call, and
         // AWS's own documented behavior ("version 1.2 cannot be published" once Publish is set to
-        // Block) draws no bytes-already-match exception to it. accountingPackageName, not the raw
-        // packageName, so this sees the same config PutPackageOriginConfiguration/
-        // isUpstreamRetentionBlocked now key by for a format (nuget, pypi) whose names are
-        // case/punctuation normalized.
-        String originKey = packageKey(region, domain, repository, format, namespace,
-                accountingPackageName(format, packageName));
-        String publishRestriction = packageOriginConfigs.getForAccount(owner, originKey)
-                .map(PackageOriginConfig::getPublishRestriction)
-                .orElse("ALLOW");
-        if ("BLOCK".equals(publishRestriction)) {
-            throw conflict("Package '" + packageName + "' cannot be published because its origin configuration "
-                    + "blocks direct publish.", packageName, "package");
-        }
+        // Block) draws no bytes-already-match exception to it.
+        requireDirectPublishAllowed(owner, region, domain, repository, format, namespace, packageName);
         String key = packageVersionKey(region, domain, repository, format, namespace, packageName, version);
 
         CodeArtifactPackageVersion pv = packageVersions.getForAccount(owner, key).orElse(null);
@@ -2246,6 +2235,44 @@ public class CodeArtifactService implements Resettable {
         String owner = effectiveOwner(domainOwner);
         clearContainerBackedStatusOverride(owner, region, domain, repository, format, namespace, packageName,
                 version);
+    }
+
+    /**
+     * The native publish paths' counterpart to the publish:BLOCK check {@link
+     * #publishPackageVersion} runs for the generic format: {@code mvn deploy}, {@code npm publish},
+     * {@code twine upload} and {@code dotnet nuget push} each reach their own controller rather
+     * than {@code PublishPackageVersion}, so each controller calls this before its real sidecar
+     * write and before its own byte-identical republish shortcut. The restriction is per package,
+     * not per version, so it applies whether or not the request names a version at all.
+     *
+     * <p>Covers a restriction set through {@link #putPackageOriginConfiguration} and the
+     * publish:BLOCK default {@link #ensureRetainedPackageOriginDefault} writes for a package first
+     * retained from an external connection. Retention itself never passes through here: each
+     * external connection importer writes to its sidecar directly.
+     */
+    public synchronized void requireContainerBackedPackagePublishAllowed(String region, String domain,
+            String domainOwner, String repository, String format, String namespace, String packageName) {
+        requireDirectPublishAllowed(effectiveOwner(domainOwner), region, domain, repository, format, namespace,
+                packageName);
+    }
+
+    /**
+     * Keyed through {@link #accountingPackageName}, not the raw {@code packageName}, so this sees
+     * the same config {@link #putPackageOriginConfiguration} and {@link
+     * #isUpstreamRetentionBlocked} key by for a format (nuget, pypi) whose names are
+     * case/punctuation normalized.
+     */
+    private void requireDirectPublishAllowed(String owner, String region, String domain, String repository,
+            String format, String namespace, String packageName) {
+        String originKey = packageKey(region, domain, repository, format, namespace,
+                accountingPackageName(format, packageName));
+        String publishRestriction = packageOriginConfigs.getForAccount(owner, originKey)
+                .map(PackageOriginConfig::getPublishRestriction)
+                .orElse("ALLOW");
+        if ("BLOCK".equals(publishRestriction)) {
+            throw conflict("Package '" + packageName + "' cannot be published because its origin configuration "
+                    + "blocks direct publish.", packageName, "package");
+        }
     }
 
     /**

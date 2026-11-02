@@ -403,6 +403,111 @@ class CodeArtifactPypiControllerTest {
         assertEquals(false, uploadReceived.get());
     }
 
+    /**
+     * Issue #7116: a package whose origin configuration sets publish:BLOCK refuses a twine upload
+     * the way PublishPackageVersion already refuses it for the generic format, ahead of the
+     * byte-identical shortcut above: the stored file here matches the upload exactly, and it is
+     * still a 409 with nothing forwarded.
+     */
+    @Test
+    void uploadToAPackageWhoseOriginConfigurationBlocksPublishIsRefusedEvenForByteIdenticalContent() {
+        String sameContent = "same content";
+        backend.createContext("/simple/my-pkg/",
+                exchange -> respond(exchange, 200, "text/html", "<a href=\"my_pkg-1.0.tar.gz\">my_pkg-1.0.tar.gz</a>"));
+        backend.createContext("/packages/my_pkg-1.0.tar.gz",
+                exchange -> respond(exchange, 200, "application/octet-stream", sameContent));
+        AtomicBoolean uploadReceived = new AtomicBoolean();
+        backend.createContext("/", exchange -> {
+            uploadReceived.set(true);
+            respond(exchange, 200, "text/plain", "");
+        });
+        // The name pypiserver files my_pkg-1.0.tar.gz under; the service normalizes it to my-pkg.
+        doThrow(new AwsException("ConflictException", "Package 'my_pkg' cannot be published because its origin "
+                + "configuration blocks direct publish.", 409))
+                .when(service).requireContainerBackedPackagePublishAllowed(eq(REGION), eq(DOMAIN), eq(OWNER),
+                        eq(REPOSITORY), eq("pypi"), isNull(), eq("my_pkg"));
+        byte[] body = multipartWithFile("boundary123", "my-pkg", "my_pkg-1.0.tar.gz", sameContent);
+
+        Response response = controller.upload(
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+
+        assertEquals(409, response.getStatus());
+        assertEquals(false, uploadReceived.get());
+        verify(service, never()).recordContainerBackedAssetBytes(any(), any(), any(), any(), any(), any(), any(),
+                anyLong(), anyLong());
+    }
+
+    /**
+     * Raised by Greptile and pgermosen's review: without a version field nothing ties the form's
+     * name to the filename pypiserver files the upload under, so a block on the package the
+     * filename names still refuses it when the form names an unrelated package.
+     */
+    @Test
+    void uploadWithoutAVersionFieldIsCheckedAgainstThePackageItsFilenameNames() {
+        backend.createContext("/simple/other-pkg/", exchange -> respond(exchange, 404, "text/plain", ""));
+        AtomicBoolean uploadReceived = new AtomicBoolean();
+        backend.createContext("/", exchange -> {
+            uploadReceived.set(true);
+            respond(exchange, 200, "text/plain", "");
+        });
+        doThrow(new AwsException("ConflictException", "Package 'my_pkg' cannot be published because its origin "
+                + "configuration blocks direct publish.", 409))
+                .when(service).requireContainerBackedPackagePublishAllowed(eq(REGION), eq(DOMAIN), eq(OWNER),
+                        eq(REPOSITORY), eq("pypi"), isNull(), eq("my_pkg"));
+        byte[] body = multipartWithFile("boundary123", "other-pkg", "my_pkg-1.0.tar.gz", "new content");
+
+        Response response = controller.upload(
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+
+        assertEquals(409, response.getStatus());
+        assertEquals(false, uploadReceived.get());
+    }
+
+    /**
+     * pgermosen's review: pypiserver files {@code foo-1.0-bar-2.0.tar.gz} under {@code foo} even
+     * when the form names {@code foo-1.0-bar} at {@code 2.0}, so a block on {@code foo} refuses it.
+     */
+    @Test
+    void uploadIsCheckedAgainstThePackagePypiserverFilesItUnderEvenWithAVersionField() {
+        AtomicBoolean uploadReceived = new AtomicBoolean();
+        backend.createContext("/", exchange -> {
+            uploadReceived.set(true);
+            respond(exchange, 200, "text/plain", "");
+        });
+        doThrow(new AwsException("ConflictException", "Package 'foo' cannot be published because its origin "
+                + "configuration blocks direct publish.", 409))
+                .when(service).requireContainerBackedPackagePublishAllowed(eq(REGION), eq(DOMAIN), eq(OWNER),
+                        eq(REPOSITORY), eq("pypi"), isNull(), eq("foo"));
+        byte[] body = multipartWithFileAndVersion("boundary123", "foo-1.0-bar", "2.0", "foo-1.0-bar-2.0.tar.gz",
+                "new content");
+
+        Response response = controller.upload(
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+
+        assertEquals(409, response.getStatus());
+        assertEquals(false, uploadReceived.get());
+    }
+
+    /**
+     * Greptile's review: {@code demo-1.0-1-py3-none-any.whl} is a wheel of {@code demo} with build
+     * tag {@code 1}, so a block on {@code demo-1.0} must not refuse it.
+     */
+    @Test
+    void aBuildTaggedWheelIsNotRefusedByABlockOnALongerName() {
+        backend.createContext("/simple/demo/", exchange -> respond(exchange, 404, "text/plain", ""));
+        backend.createContext("/", exchange -> respond(exchange, 200, "text/plain", ""));
+        doThrow(new AwsException("ConflictException", "Package 'demo-1.0' cannot be published because its origin "
+                + "configuration blocks direct publish.", 409))
+                .when(service).requireContainerBackedPackagePublishAllowed(eq(REGION), eq(DOMAIN), eq(OWNER),
+                        eq(REPOSITORY), eq("pypi"), isNull(), eq("demo-1.0"));
+        byte[] body = multipartWithFile("boundary123", "demo", "demo-1.0-1-py3-none-any.whl", "wheel bytes");
+
+        Response response = controller.upload(
+                headers("Bearer good", "multipart/form-data; boundary=boundary123"), DOMAIN, REPOSITORY, body);
+
+        assertEquals(200, response.getStatus());
+    }
+
     @Test
     void uploadForwardsANewFileToTheBackendWhenNothingConflicts() {
         backend.createContext("/simple/my-pkg/", exchange -> respond(exchange, 404, "text/plain", ""));
