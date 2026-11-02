@@ -1045,6 +1045,7 @@ public class ElbV2DataPlane {
     }
 
     private void executeForward(HttpServerRequest req, Action action, String region, String listenerArn) {
+        ElbV2TraceHeader.update(req.headers());
         String tgArn = resolveTgArn(action);
         if (tgArn == null) {
             req.response().setStatusCode(502).end("No target group");
