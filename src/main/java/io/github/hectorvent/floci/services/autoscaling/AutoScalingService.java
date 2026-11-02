@@ -1007,13 +1007,15 @@ public class AutoScalingService implements PassedRoleLookup {
             }
             List<String> detached = asg.getInstances().stream().map(AsgInstance::getInstanceId)
                     .filter(instanceIds::contains).toList();
+            InstanceRefresh refresh = activeInstanceRefresh(asg);
             if (!detached.isEmpty()) {
                 deregisterFromTargetGroups(elbV2Service, asg, detached);
                 deregisterFromClassicLoadBalancers(elbClassicService, asg, detached);
                 // Detaching removes only the group-name tag, and only where it still names this group.
                 ec2Service.deleteSystemTag(region, detached, GROUP_NAME_TAG, name);
+                completeInstanceRefreshIfSettled(region, name, asg);
             }
-            releaseRefreshOwnership(asg, detached);
+            releaseRefreshOwnership(refresh, detached);
             asg.getInstances().removeIf(i -> instanceIds.contains(i.getInstanceId()));
             if (decrementDesiredCapacity) {
                 int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - detached.size());
@@ -1026,7 +1028,9 @@ public class AutoScalingService implements PassedRoleLookup {
     public void terminateInstanceInAutoScalingGroup(String region, String instanceId,
                                                      boolean decrementDesiredCapacity) {
         updateGroupOfInstance(region, instanceId, asg -> {
-            releaseRefreshOwnership(asg, List.of(instanceId));
+            InstanceRefresh refresh = activeInstanceRefresh(asg);
+            completeInstanceRefreshIfSettled(region, asg.getAutoScalingGroupName(), asg);
+            releaseRefreshOwnership(refresh, List.of(instanceId));
             asg.getInstances().stream()
                     .filter(i -> instanceId.equals(i.getInstanceId()))
                     .findFirst()
@@ -1174,8 +1178,7 @@ public class AutoScalingService implements PassedRoleLookup {
         }
     }
 
-    private void releaseRefreshOwnership(AutoScalingGroup asg, List<String> instanceIds) {
-        InstanceRefresh refresh = activeInstanceRefresh(asg);
+    private void releaseRefreshOwnership(InstanceRefresh refresh, List<String> instanceIds) {
         if (refresh != null && refresh.getReplacements() != null) {
             refresh.getReplacements().removeIf(replacement -> instanceIds.stream().anyMatch(instanceId ->
                     instanceId.equals(replacement.getOriginalInstanceId())
