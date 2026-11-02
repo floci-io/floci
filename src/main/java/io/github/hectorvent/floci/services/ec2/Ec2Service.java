@@ -12661,10 +12661,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                          List<String> secondaryPrivateIpAddresses,
                                                          String secondaryPrivateIpAddressCount) {
         ensureDefaultResources(region);
-        NatGateway natGateway = getRequiredNatGateway(region, natGatewayId);
-        String subnetId = natGateway.getSubnetId();
+        NatGateway requested = getRequiredNatGateway(region, natGatewayId);
+        String subnetId = requested.getSubnetId();
         Subnet subnet = requireSubnet(region, subnetId);
-        boolean privateGateway = "private".equalsIgnoreCase(natGateway.getConnectivityType());
+        boolean privateGateway = "private".equalsIgnoreCase(requested.getConnectivityType());
         List<String> eips = nullToEmpty(secondaryAllocationIds);
         if (privateGateway && !eips.isEmpty()) {
             throw new AwsException("InvalidParameterCombination",
@@ -12680,6 +12680,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         int slots = Math.max(eips.size(), ips.size()) + count;
         synchronized (privateIpAllocationLock) {
+            // Read again under the lock DeleteNatGateway takes, so a gateway deleted since the read
+            // above is refused rather than written back holding its Elastic IPs again.
+            NatGateway natGateway = getRequiredNatGateway(region, natGatewayId);
+            if ("deleted".equals(natGateway.getState())) {
+                throw new AwsException("NatGatewayNotFound", "NatGateway " + natGatewayId + " was not found", 400);
+            }
             List<NatGatewayAddress> dropped = new ArrayList<>(natGateway.getNatGatewayAddresses().stream()
                     .filter(a -> !a.isPrimary()).toList());
             NatGatewayAddress[] result = new NatGatewayAddress[slots];
@@ -12756,8 +12762,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             addresses.forEach(a -> holdNatGatewayEip(region, a));
             natGateway.setNatGatewayAddresses(addresses);
             natGateways.put(key(region, natGatewayId), natGateway);
+            return natGateway;
         }
-        return natGateway;
     }
 
     private static <T> T takeFirst(List<T> from, Predicate<T> matching) {

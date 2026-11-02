@@ -2571,6 +2571,61 @@ class Ec2ServiceTest {
     }
 
     /**
+     * A secondary-address update that read the gateway before a delete finished must not write it
+     * back: the delete runs while the update waits for the allocation lock, and another gateway
+     * takes the released primary Elastic IP meanwhile.
+     */
+    @Test
+    void aSecondaryAddressUpdateDoesNotBringBackAGatewayDeletedUnderIt() throws Exception {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        String region = "us-east-1";
+        String subnetId = service.describeSubnets(region, List.of(), Map.of()).getFirst().getSubnetId();
+        String primary = service.allocateAddress(region).getAllocationId();
+        String secondary = service.allocateAddress(region).getAllocationId();
+        String added = service.allocateAddress(region).getAllocationId();
+        String natId = service.createNatGateway(region, subnetId, primary, "public", null, List.of(secondary),
+                List.of(), null, List.of()).getNatGatewayId();
+        Field lockField = Ec2Service.class.getDeclaredField("privateIpAllocationLock");
+        lockField.setAccessible(true);
+        Object lock = lockField.get(service);
+        AtomicReference<Thread> updater = new AtomicReference<>();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<?> updating;
+            String other;
+            synchronized (lock) {
+                updating = worker.submit(() -> {
+                    updater.set(Thread.currentThread());
+                    service.updateNatGatewaySecondaryAddresses(region, natId, List.of(added), List.of(), null);
+                });
+                Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> updating.isDone()
+                        || (updater.get() != null && updater.get().getState() == Thread.State.BLOCKED));
+                assertFalse(updating.isDone(), "the update must wait for the allocation lock");
+                service.deleteNatGateway(region, natId);
+                other = service.createNatGateway(region, subnetId, primary, "public", List.of()).getNatGatewayId();
+            }
+            ExecutionException e = assertThrows(ExecutionException.class, () -> updating.get(5, TimeUnit.SECONDS));
+            assertEquals("NatGatewayNotFound", ((AwsException) e.getCause()).getErrorCode());
+
+            assertTrue(service.describeNatGateways(region, List.of(), Map.of()).stream()
+                    .noneMatch(g -> natId.equals(g.getNatGatewayId())), "the deleted gateway stays deleted");
+            NatGateway taker = service.describeNatGateways(region, List.of(other), Map.of()).getFirst();
+            assertEquals(taker.getNatGatewayAddresses().getFirst().getAssociationId(),
+                    service.describeAddresses(region, List.of(primary), Map.of()).getFirst().getAssociationId(),
+                    "the primary Elastic IP stays with the gateway that took it");
+            for (String free : List.of(secondary, added)) {
+                assertNull(service.describeAddresses(region, List.of(free), Map.of()).getFirst().getAssociationId(),
+                        free + " is not held again");
+            }
+        } finally {
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    /**
      * A gateway persisted before account isolation (unprefixed key) still holds its Elastic IP:
      * a second gateway is created failed, and ReleaseAddress answers InvalidIPAddress.InUse.
      */
