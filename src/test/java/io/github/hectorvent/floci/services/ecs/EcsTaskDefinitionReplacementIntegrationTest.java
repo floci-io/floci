@@ -24,7 +24,8 @@ class EcsTaskDefinitionReplacementIntegrationTest {
     @ParameterizedTest
     @CsvSource({"us-east-1,771661800001,false", "eu-west-2,771661800002,true",
             "cn-north-1,771661800003,false", "us-gov-west-1,771661800004,true"})
-    void deregisteringOldRevisionKeepsReplacementActive(String region, String account, boolean shortReference) {
+    void deregisteringOldRevisionKeepsReplacementActive(String region, String account, boolean shortReference)
+            throws Exception {
         String family = "replacement-" + UUID.randomUUID();
         String otherFamily = family + "-other";
         try (EcsClient client = EcsClient.builder()
@@ -33,57 +34,68 @@ class EcsTaskDefinitionReplacementIntegrationTest {
                 .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(account, "test")))
                 .httpClientBuilder(UrlConnectionHttpClient.builder()).build()) {
             String cluster = client.createCluster(request -> request.clusterName(family)).cluster().clusterArn();
-            TaskDefinition old = register(client, family, 8080);
-            TaskDefinition replacement = register(client, family, 8081);
-            TaskDefinition unrelated = register(client, otherFamily, 8082);
             String service = "replacement-service";
-            try {
-                assertEquals(1, old.revision());
-                assertEquals(2, replacement.revision());
+            // Resources close in reverse order, each only if it was created. A failure while
+            // closing one doesn't stop the rest and is suppressed onto the test's own failure.
+            try (AutoCloseable _ = () -> client.deleteCluster(request -> request.cluster(cluster));
+                    Registered old = register(client, family, 8080);
+                    Registered replacement = register(client, family, 8081);
+                    Registered unrelated = register(client, otherFamily, 8082)) {
+                assertEquals(1, old.definition().revision());
+                assertEquals(2, replacement.definition().revision());
                 client.createService(request -> request.cluster(cluster).serviceName(service)
-                        .taskDefinition(old.taskDefinitionArn()).desiredCount(0));
-                client.updateService(request -> request.cluster(cluster).service(service)
-                        .taskDefinition(replacement.taskDefinitionArn()));
+                        .taskDefinition(old.arn()).desiredCount(0));
+                try (AutoCloseable _ = () -> client.deleteService(request -> request
+                        .cluster(cluster).service(service).force(true))) {
+                    client.updateService(request -> request.cluster(cluster).service(service)
+                            .taskDefinition(replacement.arn()));
 
-                String oldReference = shortReference ? family + ":1" : old.taskDefinitionArn();
-                assertEquals("INACTIVE", client.deregisterTaskDefinition(request -> request
-                        .taskDefinition(oldReference)).taskDefinition().statusAsString());
-                assertStatus(client, old.taskDefinitionArn(), "INACTIVE");
-                assertStatus(client, replacement.taskDefinitionArn(), "ACTIVE");
-                assertStatus(client, family + ":2", "ACTIVE");
-                assertStatus(client, unrelated.taskDefinitionArn(), "ACTIVE");
-                assertEquals(replacement.taskDefinitionArn(), client.describeServices(request -> request
-                        .cluster(cluster).services(service)).services().getFirst().taskDefinition());
-                assertEquals(8081, client.describeTaskDefinition(request -> request
-                        .taskDefinition(replacement.taskDefinitionArn())).taskDefinition()
-                        .containerDefinitions().getFirst().portMappings().getFirst().hostPort());
+                    String oldReference = shortReference ? family + ":1" : old.arn();
+                    assertEquals("INACTIVE", client.deregisterTaskDefinition(request -> request
+                            .taskDefinition(oldReference)).taskDefinition().statusAsString());
+                    assertStatus(client, old.arn(), "INACTIVE");
+                    assertStatus(client, replacement.arn(), "ACTIVE");
+                    assertStatus(client, family + ":2", "ACTIVE");
+                    assertStatus(client, unrelated.arn(), "ACTIVE");
+                    assertEquals(replacement.arn(), client.describeServices(request -> request
+                            .cluster(cluster).services(service)).services().getFirst().taskDefinition());
+                    assertEquals(8081, client.describeTaskDefinition(request -> request
+                            .taskDefinition(replacement.arn())).taskDefinition()
+                            .containerDefinitions().getFirst().portMappings().getFirst().hostPort());
 
-                // Repeated cleanup of the old resource must not drift to the latest revision.
-                client.deregisterTaskDefinition(request -> request.taskDefinition(oldReference));
-                assertStatus(client, replacement.taskDefinitionArn(), "ACTIVE");
-                client.deregisterTaskDefinition(request -> request.taskDefinition(replacement.taskDefinitionArn()));
-                assertStatus(client, replacement.taskDefinitionArn(), "INACTIVE");
-                assertStatus(client, unrelated.taskDefinitionArn(), "ACTIVE");
-            } finally {
-                client.deleteService(request -> request.cluster(cluster).service(service).force(true));
-                for (TaskDefinition definition : new TaskDefinition[] {old, replacement, unrelated}) {
-                    client.deregisterTaskDefinition(request -> request.taskDefinition(definition.taskDefinitionArn()));
-                    client.deleteTaskDefinitions(request -> request.taskDefinitions(definition.taskDefinitionArn()));
+                    // Repeated cleanup of the old resource must not drift to the latest revision.
+                    client.deregisterTaskDefinition(request -> request.taskDefinition(oldReference));
+                    assertStatus(client, replacement.arn(), "ACTIVE");
+                    client.deregisterTaskDefinition(request -> request.taskDefinition(replacement.arn()));
+                    assertStatus(client, replacement.arn(), "INACTIVE");
+                    assertStatus(client, unrelated.arn(), "ACTIVE");
                 }
-                client.deleteCluster(request -> request.cluster(cluster));
             }
         }
     }
 
-    private static TaskDefinition register(EcsClient client, String family, int port) {
-        return client.registerTaskDefinition(request -> request.family(family).containerDefinitions(
-                ContainerDefinition.builder().name("app").image("example:test").memory(128)
+    private static Registered register(EcsClient client, String family, int port) {
+        return new Registered(client, client.registerTaskDefinition(request -> request.family(family)
+                .containerDefinitions(ContainerDefinition.builder().name("app").image("example:test").memory(128)
                         .portMappings(PortMapping.builder().containerPort(port).hostPort(port).build()).build()))
-                .taskDefinition();
+                .taskDefinition());
     }
 
     private static void assertStatus(EcsClient client, String reference, String expected) {
         assertEquals(expected, client.describeTaskDefinition(request -> request.taskDefinition(reference))
                 .taskDefinition().statusAsString(), reference);
+    }
+
+    private record Registered(EcsClient client, TaskDefinition definition) implements AutoCloseable {
+
+        String arn() {
+            return definition.taskDefinitionArn();
+        }
+
+        @Override
+        public void close() {
+            client.deregisterTaskDefinition(request -> request.taskDefinition(arn()));
+            client.deleteTaskDefinitions(request -> request.taskDefinitions(arn()));
+        }
     }
 }
