@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2instanceconnect;
 
 import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.acm.CertificateGenerator;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -74,7 +75,6 @@ public class InstanceConnectKeys implements Resettable {
 
     /** AWS keeps a pushed key for 60 seconds. */
     public static final Duration KEY_LIFETIME = Duration.ofSeconds(60);
-    static final String DOMAIN = "amazonaws.com";
     static final String INTERMEDIATE_CN = "Floci EC2 Instance Connect Intermediate CA";
     private static final Duration INTERMEDIATE_VALIDITY = Duration.ofDays(365);
     private static final Duration SIGNER_VALIDITY = Duration.ofDays(30);
@@ -207,7 +207,7 @@ public class InstanceConnectKeys implements Resettable {
     }
 
     public static String signerCommonName(String region) {
-        return "managed-ssh-signer." + region + "." + DOMAIN;
+        return "managed-ssh-signer." + region + "." + AwsRegions.dnsSuffixFor(region);
     }
 
     private synchronized Issued intermediate() {
