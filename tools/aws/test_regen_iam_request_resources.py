@@ -227,6 +227,27 @@ def test_a_member_holding_an_account_id_gives_the_account_of_the_types_named_by_
     assert r.with_account([{"type": "thing", "fill": {}}], FORMATS, ["a", "b"]) == [{"type": "thing", "fill": {}}]
 
 
+def test_a_file_that_is_not_json_is_reported_and_not_read(corrections, tmp_path, capsys):
+    output = tmp_path / "iam-request-resources.json"
+    output.write_text("{not json", encoding="utf-8")
+
+    for mode in ("--check", "--verify"):
+        assert r.main([mode, "--output", str(output)]) == 1
+        assert "could not be read" in capsys.readouterr().err
+
+
+def test_a_file_that_cannot_be_read_is_reported(corrections, tmp_path, capsys):
+    output = tmp_path / "iam-request-resources.json"
+    output.write_text("{}", encoding="utf-8")
+    output.chmod(0o000)
+
+    try:
+        assert r.main(["--check", "--output", str(output)]) == 1
+        assert "could not be read" in capsys.readouterr().err
+    finally:
+        output.chmod(0o600)
+
+
 def test_a_hand_edited_entry_does_not_match_botocore(corrections, tmp_path):
     write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String"}, "ListThings": {}})})
     document = r.build(DOCUMENTS, "test", tmp_path, "botocore test")
