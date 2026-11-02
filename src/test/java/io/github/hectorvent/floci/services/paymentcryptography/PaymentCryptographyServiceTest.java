@@ -307,6 +307,22 @@ class PaymentCryptographyServiceTest {
     }
 
     /**
+     * An alias ARN names the alias in the Region, the account and the partition it was minted in, so an alias ARN
+     * of another Region names no alias here and the key of this Region's alias is not the one it would select.
+     */
+    @Test
+    void anAliasArnOfAnotherRegionNamesNoAliasHere() {
+        PaymentCryptographyKey key = createKey("us-east-1");
+        service.createAlias("alias/team/card-key", key);
+        String aliasArn = "arn:aws:payment-cryptography:us-east-1:000000000000:alias/team/card-key";
+
+        assertEquals(key, service.findKey("us-east-1", aliasArn));
+        assertNull(service.findKey("us-east-1",
+                        "arn:aws:payment-cryptography:us-west-2:000000000000:alias/team/card-key"),
+                "an alias ARN of another Region selected this Region's key");
+    }
+
+    /**
      * An alias is resolved once for the request, so that the request acts on the key the permission check was
      * made on: an alias moved to another key in between would otherwise let the request act on a key no policy
      * was checked against.
