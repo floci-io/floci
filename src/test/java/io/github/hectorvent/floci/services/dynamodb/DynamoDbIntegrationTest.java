@@ -5748,7 +5748,7 @@ given()
             .body("message", equalTo("Invalid UpdateExpression: An expression attribute name "
                     + "used in the document path is not defined; attribute name: #n"));
 
-        // Both undefined; UpdateExpression's own token is reported first.
+        // Both undefined; ConditionExpression's token is reported first.
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
             .contentType(DYNAMODB_CONTENT_TYPE)
@@ -5768,8 +5768,8 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid UpdateExpression: An expression attribute value "
-                    + "used in expression is not defined; attribute value: :d"));
+            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+                    + "used in expression is not defined; attribute value: :v"));
 
         // Control: a fully-defined transaction is still accepted; seed the item first.
         given()

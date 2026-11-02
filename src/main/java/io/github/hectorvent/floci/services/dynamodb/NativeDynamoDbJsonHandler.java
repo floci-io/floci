@@ -2429,37 +2429,11 @@ public class NativeDynamoDbJsonHandler {
     private Response handleTransactWriteItems(JsonNode request, String region) {
         JsonNode transactItemsNode = requireValidTransactRequest(request, true);
 
-        for (JsonNode txItem : transactItemsNode) {
-            for (Map.Entry<String, JsonNode> action : txItem.properties()) {
-                JsonNode op = action.getValue();
-                String conditionExpression = op.has("ConditionExpression")
-                        ? op.get("ConditionExpression").asText() : null;
-                String updateExpression = op.has("UpdateExpression")
-                        ? op.get("UpdateExpression").asText() : null;
-                JsonNode opExprAttrNames = op.get("ExpressionAttributeNames");
-                JsonNode opExprAttrValues = op.get("ExpressionAttributeValues");
-                // AWS checks the depth of every value of a member before anything else,
-                // so even an unused or condition-only value fails the request.
-                DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
-                DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Key"), false);
-                DynamoDbAttributeValueValidator.requireNestingWithinLimit(opExprAttrValues, false);
-                requireReadableValues(op.get("Put".equals(action.getKey()) ? "Item" : "Key"), "");
-                // An action without an expression ignores its ExpressionAttributeValues.
-                if (conditionExpression != null || updateExpression != null) {
-                    requireReadableValues(opExprAttrValues, "");
-                }
-                DynamoDbExpressionSize.checkRead(op.path("UpdateExpression").textValue(), "UpdateExpression");
-                DynamoDbExpressionSize.checkReadWithSize(conditionExpression, "ConditionExpression");
-                ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
-                // Undefined tokens must fail here as a ValidationException, never a
-                // TransactionCanceledException with a false ConditionalCheckFailed reason.
-                requireDefinedTokens(updateExpression, "UpdateExpression", opExprAttrNames, opExprAttrValues);
-                requireDefinedTokens(conditionExpression, "ConditionExpression", opExprAttrNames, opExprAttrValues);
-                ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression",
-                        opExprAttrNames, opExprAttrValues);
-                dynamoDbService.requireAddOrDeleteOperandTypes(op.path("UpdateExpression").textValue(),
-                        opExprAttrValues, false);
-            }
+        boolean older = tooDeepForNewerValidator(transactItemsNode, TRANSACT_WRITE_OPS);
+        for (int i = 0; i < transactItemsNode.size(); i++) {
+            JsonNode txItem = transactItemsNode.get(i);
+            String type = TRANSACT_WRITE_OPS.stream().filter(txItem::hasNonNull).findFirst().orElseThrow();
+            requireValidTransactAction(new TransactAction(i, type, txItem.get(type)), older);
         }
 
         // Check 4MB total item size limit
@@ -2540,6 +2514,8 @@ public class NativeDynamoDbJsonHandler {
     // DynamoDB's newer validator gives up on a request nested this deep, and the older one answers.
     private static final int OLDER_VALIDATOR_DEPTH = 128;
 
+    private static final List<String> VALID_RETURN_VALUES_ON_CONDITION_CHECK_FAILURE = List.of("ALL_OLD", "NONE");
+
     private record TransactAction(int index, String type, JsonNode op) {
         String path(String member) {
             return "transactItems." + (index + 1) + ".member." + decapitalize(type) + "." + decapitalize(member);
@@ -2596,7 +2572,7 @@ public class NativeDynamoDbJsonHandler {
                 }
             }
         }
-        boolean older = transactDepth(transactItems, ops) >= OLDER_VALIDATOR_DEPTH;
+        boolean older = tooDeepForNewerValidator(transactItems, ops);
         if (!missing && !older) {
             requireTransactLengths(transactItems.size(), actions, token);
         }
@@ -2657,6 +2633,64 @@ public class NativeDynamoDbJsonHandler {
                     action.op().get("TableName").asText(), 1, 1024));
         }
         throwValidationErrors(validationErrors);
+    }
+
+    // DynamoDB checks an action's ConditionExpression in full before its UpdateExpression.
+    private void requireValidTransactAction(TransactAction action, boolean older) {
+        JsonNode op = action.op();
+        String conditionExpression = textOrNull(op, "ConditionExpression");
+        String updateExpression = textOrNull(op, "UpdateExpression");
+        JsonNode exprAttrNames = op.get("ExpressionAttributeNames");
+        JsonNode exprAttrValues = op.get("ExpressionAttributeValues");
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Key"), false);
+        requireReadableValues(op.get("Put".equals(action.type()) ? "Item" : "Key"), "");
+        String onFailure = op.path("ReturnValuesOnConditionCheckFailure").textValue();
+        if (onFailure != null && !VALID_RETURN_VALUES_ON_CONDITION_CHECK_FAILURE.contains(onFailure)) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(onFailure,
+                    action.path("ReturnValuesOnConditionCheckFailure"),
+                    VALID_RETURN_VALUES_ON_CONDITION_CHECK_FAILURE));
+        }
+        // AWS checks the depth of every value, so even an unused or condition-only value fails the request.
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues, false);
+        // An action without an expression ignores its ExpressionAttributeNames and ExpressionAttributeValues.
+        if (conditionExpression == null && updateExpression == null) {
+            return;
+        }
+        requireReadableValues(exprAttrValues, "");
+
+        requireNonEmptyExpression(conditionExpression, "ConditionExpression");
+        // Only a request too deep for the newer validator reports the condition's size.
+        if (older) {
+            DynamoDbExpressionSize.checkReadWithSize(conditionExpression, "ConditionExpression");
+        } else {
+            DynamoDbExpressionSize.checkRead(conditionExpression, "ConditionExpression");
+        }
+        ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
+        // Undefined tokens must fail here as a ValidationException, never a
+        // TransactionCanceledException with a false ConditionalCheckFailed reason.
+        requireDefinedTokens(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression",
+                exprAttrNames, exprAttrValues);
+
+        requireNonEmptyExpression(updateExpression, "UpdateExpression");
+        DynamoDbExpressionSize.checkRead(updateExpression, "UpdateExpression");
+        requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
+        dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, false);
+
+        checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression, updateExpression));
+        checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression, updateExpression));
+    }
+
+    private static void requireNonEmptyExpression(String expression, String exprType) {
+        if (expression != null && expression.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "Invalid " + exprType + ": The expression can not be empty;", 400);
+        }
+    }
+
+    private static boolean tooDeepForNewerValidator(JsonNode transactItems, List<String> ops) {
+        return transactDepth(transactItems, ops) >= OLDER_VALIDATOR_DEPTH;
     }
 
     // DynamoDB leaves unknown members out when it measures how deep a request nests.

@@ -1856,19 +1856,26 @@ class NativeDynamoDbJsonHandlerTest {
         return request;
     }
 
-    @Test
-    void transactWriteItemsRejectsAConditionExpressionOver4096BytesWithTheSizeBeforeTheTableLookup() {
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            0  | Invalid ConditionExpression: Expression size has exceeded the maximum allowed size;
+            60 | Invalid ConditionExpression: Expression size has exceeded the maximum allowed size;
+            61 | Invalid ConditionExpression: Expression size has exceeded the maximum allowed size; expression size: 4097
+            """)
+    void transactWriteItemsRejectsAConditionExpressionOver4096BytesBeforeTheTableLookup(int levels, String message) {
         ObjectNode put = mapper.createObjectNode();
         put.set("Item", item("userId", "u1"));
         put.put("ConditionExpression", "attribute_not_exists(" + nameOfBytes(4075) + ")");
         ObjectNode request = transactWrite("Put", put);
         ((ObjectNode) request.get("TransactItems").get(0).get("Put")).put("TableName", "Missing");
+        ObjectNode deepPut = mapper.createObjectNode().put("TableName", "Missing");
+        deepPut.set("Item", mapper.createObjectNode().set("d", nestedMaps(levels)));
+        ((ArrayNode) request.get("TransactItems")).add(mapper.createObjectNode().set("Put", deepPut));
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
         assertEquals("ValidationException", ex.getErrorCode());
-        assertEquals("Invalid ConditionExpression: Expression size has exceeded the maximum allowed size; "
-                + "expression size: 4097", ex.getMessage());
+        assertEquals(message, ex.getMessage());
     }
 
     @Test
@@ -2390,6 +2397,28 @@ class NativeDynamoDbJsonHandlerTest {
         }
 
         AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, body, "eu-west-1"));
+        assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":"SET a = :a","ExpressionAttributeValues":{":a":{"S":"x"}},"ReturnValuesOnConditionCheckFailure":"BOGUS"}}] | 1 validation error detected: Value 'BOGUS' at 'transactItems.1.member.update.returnValuesOnConditionCheckFailure' failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, NONE]
+            [{"Put":{"TableName":"Missing","Item":{},"ConditionExpression":"a = :n","ExpressionAttributeValues":{":n":{"N":"abc"}},"ReturnValuesOnConditionCheckFailure":"all_old"}}] | 1 validation error detected: Value 'all_old' at 'transactItems.1.member.put.returnValuesOnConditionCheckFailure' failed to satisfy constraint: Member must satisfy enum value set: [ALL_OLD, NONE]
+            [{"Put":{"TableName":"Missing","Item":{},"ConditionExpression":""}}] | Invalid ConditionExpression: The expression can not be empty;
+            [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":"","ConditionExpression":""}}] | Invalid ConditionExpression: The expression can not be empty;
+            [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":"SET a = :zz","ConditionExpression":"a = :yy"}}] | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :yy
+            [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":"SET a = :zz","ConditionExpression":"contains(a, a)"}}] | Invalid ConditionExpression: The first operand must be distinct from the remaining operands for this operator or function; operator: contains, first operand: [a]
+            [{"Put":{"TableName":"Missing","Item":{},"ConditionExpression":"attribute_not_exists(a)","ExpressionAttributeNames":{"#n":"n"},"ExpressionAttributeValues":{":v":{"S":"x"}}}}] | Value provided in ExpressionAttributeNames unused in expressions: keys: {#n}
+            [{"Update":{"TableName":"Missing","Key":{},"UpdateExpression":"SET a = :a","ConditionExpression":"b = :b","ExpressionAttributeValues":{":a":{"S":"x"},":b":{"S":"y"},":v":{"S":"z"}}}}] | Value provided in ExpressionAttributeValues unused in expressions: keys: {:v}
+            [{"Put":{"TableName":"Missing","Item":{}}},{"Delete":{"TableName":"Missing","Key":{},"ConditionExpression":"attribute_exists(a)","ExpressionAttributeValues":{":v":{"S":"x"}}}}] | Value provided in ExpressionAttributeValues unused in expressions: keys: {:v}
+            [{"Put":{"TableName":"Missing","Item":{},"ExpressionAttributeNames":{"#n":"n"}}}] | Requested resource not found
+            """)
+    void aTransactionChecksEachActionBeforeAnyTable(String items, String message) throws Exception {
+        ObjectNode request = mapper.createObjectNode();
+        request.set("TransactItems", mapper.readTree(items));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", request, "eu-west-1"));
         assertEquals(message, ex.getMessage());
     }
 
