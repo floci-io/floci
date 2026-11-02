@@ -53,6 +53,10 @@ public class PaymentCryptographyKey {
     /**
      * The private half of an asymmetric key, base64 of the DER of its PKCS#8
      * encoding. Empty for a public key, which has no private half.
+     *
+     * <p>It is not written to the store, for the same reason the symmetric
+     * material is not: a private key in clear in the data directory is a
+     * secret on disk.
      */
     private String keyPrivateKeyBase64;
     /**
@@ -128,6 +132,13 @@ public class PaymentCryptographyKey {
         this.keyPublicKeyBase64 = keyPublicKeyBase64;
     }
 
+    /**
+     * The private half of an asymmetric key.
+     *
+     * <p>It is held by the key and never written to the store, like the
+     * symmetric material.
+     */
+    @JsonIgnore
     public String getKeyPrivateKeyBase64() { return keyPrivateKeyBase64; }
     public void setKeyPrivateKeyBase64(String keyPrivateKeyBase64) {
         this.keyPrivateKeyBase64 = keyPrivateKeyBase64;

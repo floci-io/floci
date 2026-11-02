@@ -1,19 +1,25 @@
 package io.github.hectorvent.floci.services.paymentcryptography;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.paymentcryptography.crypto.Asn1;
+import io.github.hectorvent.floci.services.paymentcryptography.crypto.Hex;
+import io.github.hectorvent.floci.services.paymentcryptography.crypto.RsaOaep;
 import io.github.hectorvent.floci.services.paymentcryptography.crypto.X509;
 import io.github.hectorvent.floci.services.paymentcryptography.model.PaymentCryptographyKey;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.security.cert.X509Certificate;
 import java.util.Base64;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -309,6 +315,121 @@ class PaymentCryptographyKeyExchangeTest {
     }
 
     @Test
+    void aReplicatedKeyPairKeepsItsHalves() {
+        // A replica is the same key in another region, so it has to hold the halves the
+        // primary holds. A replica without them is a record of a key that has none.
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "RSA_2048");
+        attributes.put("KeyClass", "ASYMMETRIC_KEY_PAIR");
+        attributes.put("KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE");
+        PaymentCryptographyKey pair = service.createKey("us-east-1", attributes,
+                Map.of("Sign", Boolean.TRUE), true, true, Map.of(), List.of("us-west-2"));
+
+        PaymentCryptographyKey replica = service.findKey("us-west-2", pair.getKeyId());
+
+        assertNotNull(replica, "the key was not replicated");
+        assertEquals(pair.getKeyPublicKeyBase64(), replica.getKeyPublicKeyBase64());
+        assertEquals(pair.getKeyPrivateKeyBase64(), replica.getKeyPrivateKeyBase64());
+    }
+
+    @Test
+    void anImportTokenWorksForEveryImportUntilItExpires() {
+        // A caller that asks for the parameters once may import several keys under them.
+        Map<String, Object> parameters = service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048");
+        String token = (String) parameters.get("ImportToken");
+        // The cryptogram is built under the wrapping key the parameters carry, so it opens.
+        X509Certificate certificate =
+                X509.parseCertificate((String) parameters.get("WrappingKeyCertificate"));
+        String cryptogram = Hex.encodeUpper(RsaOaep.encrypt(certificate.getPublicKey(),
+                Hex.decode("00112233445566778899AABBCCDDEEFF"), "SHA-256"));
+
+        for (int i = 0; i < 2; i++) {
+            PaymentCryptographyKey imported = service.importKey("us-east-1", "KeyCryptogram",
+                    Map.of("ImportToken", token,
+                            "WrappedKeyCryptogram", cryptogram,
+                            "KeyAttributes", Map.of("KeyAlgorithm", "AES_128",
+                                    "KeyClass", "SYMMETRIC_KEY",
+                                    "KeyUsage", "TR31_K1_KEY_BLOCK_PROTECTION_KEY",
+                                    "KeyModesOfUse", Map.of("Wrap", true, "Unwrap", true))));
+            assertNotNull(imported, "the second import was refused");
+        }
+    }
+
+    @Test
+    void anImportTokenIsRefusedForAnotherKindOfMaterial() {
+        // A token is issued for one kind of material, so it cannot be spent on another.
+        Map<String, Object> parameters = service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048");
+        String token = (String) parameters.get("ImportToken");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "Tr34KeyBlock", Map.of(
+                        "ImportToken", token,
+                        "CertificateAuthorityPublicKeyIdentifier", protection.getKeyId(),
+                        "KeyBlockFormat", "X9_TR34_2012",
+                        "RandomNonce", "0102030405060708",
+                        "SigningKeyCertificate", "x",
+                        "WrappedKeyBlock", "00")));
+
+        assertEquals("ResourceNotFoundException", refused.getErrorCode());
+    }
+
+    @Test
+    void anAuthorityThatMayNotVerifyIsRefused() {
+        // The authority vouches for a certificate, so a key that may not verify may not be
+        // named as one.
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "RSA_2048");
+        attributes.put("KeyClass", "PUBLIC_KEY");
+        attributes.put("KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE");
+        attributes.put("KeyModesOfUse", Map.of("Sign", Boolean.TRUE));
+        PaymentCryptographyKey authority = service.createKey("us-east-1", attributes,
+                Map.of("Sign", Boolean.TRUE), true, true, Map.of());
+
+        Map<String, Object> parameters = service.parametersForImport("TR34_KEY_BLOCK", "RSA_2048");
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "Tr34KeyBlock", Map.of(
+                        "ImportToken", parameters.get("ImportToken"),
+                        "CertificateAuthorityPublicKeyIdentifier", authority.getKeyId(),
+                        "KeyBlockFormat", "X9_TR34_2012",
+                        "RandomNonce", "0102030405060708",
+                        "SigningKeyCertificate", "x",
+                        "WrappedKeyBlock", "00")));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void theExpiredTokensAreSwept() {
+        // A token that was issued and never quoted again would otherwise stay for the life
+        // of the process, and it holds a private key.
+        long lifetime = PaymentCryptographyKeyExchange.importTokenTtlMs;
+        try {
+            PaymentCryptographyKeyExchange.importTokenTtlMs = 0;
+            service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048");
+            service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048");
+        } finally {
+            PaymentCryptographyKeyExchange.importTokenTtlMs = lifetime;
+        }
+
+        assertEquals(1, service.issuedTokenCount(),
+                "the token that expired was not swept");
+    }
+
+    @Test
+    void thePrivateKeyIsNotWrittenToTheStore() throws Exception {
+        // The store is a file in the working directory, and a private key in clear in it is
+        // a secret on disk.
+        PaymentCryptographyKey pair = createKeyPair("RSA_2048");
+
+        String written = new ObjectMapper().writeValueAsString(pair);
+
+        assertFalse(written.contains(pair.getKeyPrivateKeyBase64()),
+                "the private key was written to the store");
+        assertFalse(written.contains("keyPrivateKeyBase64"),
+                "the private key was written to the store");
+    }
+
+    @Test
     void aFormTheServiceDoesNotKnowIsRefused() {
         PaymentCryptographyKey key = createKey("AES_256", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
 
@@ -348,7 +469,8 @@ class PaymentCryptographyKeyExchangeTest {
                 "KeyAttributes", Map.of(
                         "KeyAlgorithm", "RSA_2048",
                         "KeyClass", "PUBLIC_KEY",
-                        "KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE")));
+                        "KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
+                        "KeyModesOfUse", Map.of("Verify", Boolean.TRUE))));
     }
 
     /** The certificate of an authority that signed nothing the other side brought. */

@@ -198,6 +198,12 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         replica.setExportable(primary.isExportable());
         replica.setEnabled(primary.isEnabled());
         replica.setKeyMaterialHex(primary.getKeyMaterialHex());
+        // The halves of an asymmetric key travel with it, or the replica is a record of a
+        // key that has none.
+        replica.setKeyPublicKeyBase64(primary.getKeyPublicKeyBase64());
+        replica.setKeyPrivateKeyBase64(primary.getKeyPrivateKeyBase64());
+        replica.setKeyCertificatePem(primary.getKeyCertificatePem());
+        replica.setDeriveKeyUsage(primary.getDeriveKeyUsage());
         replica.setCreateTimestamp(primary.getCreateTimestamp());
         replica.setUsageStartTimestamp(primary.getUsageStartTimestamp());
         replica.setPrimaryRegion(primary.getPrimaryRegion());
@@ -796,6 +802,17 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                 imported.material() == null ? null
                         : PaymentCryptographyCrypto.toHex(imported.material()),
                 imported.publicKeyBase64(), imported.privateKeyBase64(), imported.certificatePem());
+    }
+
+    /**
+     * The number of exchange tokens the service holds.
+     *
+     * <p>For the test that watches the expired ones swept.
+     *
+     * @return how many tokens are held
+     */
+    int issuedTokenCount() {
+        return exchange.issuedTokenCount();
     }
 
     /** The parameters a counterparty needs to export a key to this service. */

@@ -77,12 +77,18 @@ final class PaymentCryptographyKeyExchange {
     /** The key material types that take import parameters. */
     private static final List<String> IMPORT_PARAMETER_TYPES = List.of("KEY_CRYPTOGRAM", "TR34_KEY_BLOCK");
 
+    /** The kind of material the export token is issued for. */
+    private static final String EXPORT_MATERIAL_TYPE = "TR34_KEY_BLOCK";
+
+    /** How long an export token is good for, in milliseconds. */
+    static long exportTokenTtlMs = 30L * 24 * 3600 * 1000;
+
+    /** How long an import token is good for, in milliseconds. */
+    static long importTokenTtlMs = 7L * 24 * 3600 * 1000;
+
     /** The RSA moduli the service makes a wrapping key of. */
     private static final Map<String, Integer> RSA_BITS =
             Map.of("RSA_2048", 2048, "RSA_3072", 3072, "RSA_4096", 4096);
-
-    /** How long an issued parameter is valid, in milliseconds. */
-    private static final long PARAMETER_VALIDITY_MS = 30L * 24 * 3600 * 1000;
 
     /** The export tokens the service has issued, by token. */
     private final Map<String, Issued> exportTokens = new ConcurrentHashMap<>();
@@ -109,14 +115,17 @@ final class PaymentCryptographyKeyExchange {
         private final PrivateKey privateKey;
         private final byte[] certificateDer;
         private final String algorithm;
+        /** The kind of key material the token was issued for. */
+        private final String materialType;
         private final long validUntilMs;
 
         Issued(String token, PrivateKey privateKey, byte[] certificateDer, String algorithm,
-               long validUntilMs) {
+               String materialType, long validUntilMs) {
             this.token = token;
             this.privateKey = privateKey;
             this.certificateDer = certificateDer;
             this.algorithm = algorithm;
+            this.materialType = materialType;
             this.validUntilMs = validUntilMs;
         }
     }
@@ -267,7 +276,7 @@ final class PaymentCryptographyKeyExchange {
             throw validation("KeyMaterial.Tr34KeyBlock.KeyBlockFormat is required (X9_TR34_2012)");
         }
         String token = text(material, "ExportToken");
-        Issued signing = take(exportTokens, token, "ExportToken");
+        Issued signing = take(exportTokens, token, EXPORT_MATERIAL_TYPE);
         if (signing == null) {
             throw notFound(token.isEmpty() ? "(missing)" : token);
         }
@@ -528,7 +537,7 @@ final class PaymentCryptographyKeyExchange {
         // The token is taken last, so a request that is refused for any other reason does not
         // spend it.
         String token = text(material, "ImportToken");
-        Issued issued = take(importTokens, token, "ImportToken");
+        Issued issued = take(importTokens, token, "KEY_CRYPTOGRAM");
         if (issued == null) {
             throw notFound(token.isEmpty() ? "(missing)" : token);
         }
@@ -552,7 +561,7 @@ final class PaymentCryptographyKeyExchange {
     /** A key out of a TR-34 key block. */
     private Imported importTr34(String region, Map<String, Object> material) {
         String token = text(material, "ImportToken");
-        Issued issued = take(importTokens, token, "ImportToken");
+        Issued issued = take(importTokens, token, "TR34_KEY_BLOCK");
         if (issued == null) {
             throw notFound(token.isEmpty() ? "(missing)" : token);
         }
@@ -579,6 +588,7 @@ final class PaymentCryptographyKeyExchange {
             throw validation("CertificateAuthorityPublicKeyIdentifier does not reference a "
                     + "public-key certificate");
         }
+        requireVerify(caKey, "verifying a certificate");
         if (text(material, "KeyBlockFormat").isEmpty()) {
             throw validation("KeyMaterial.Tr34KeyBlock.KeyBlockFormat is required (X9_TR34_2012)");
         }
@@ -674,6 +684,7 @@ final class PaymentCryptographyKeyExchange {
             throw validation("the certificate authority " + caKey.getArn() + " has no public key to "
                     + "verify the certificate against");
         }
+        requireVerify(caKey, "verifying a certificate");
         X509Certificate counterparty;
         try {
             counterparty = X509.parseCertificate(certText);
@@ -839,9 +850,10 @@ final class PaymentCryptographyKeyExchange {
         KeyPair pair = X509.generateRsaKeyPair(bits);
         X509.Cert certificate = X509.mintSelfSigned(pair, "floci key-export KDH",
                 Instant.ofEpochMilli(now).minus(1, ChronoUnit.HOURS),
-                Instant.ofEpochMilli(now).plus(PARAMETER_VALIDITY_MS, ChronoUnit.MILLIS));
+                Instant.ofEpochMilli(now).plusMillis(exportTokenTtlMs));
         Issued issued = new Issued(token(), pair.getPrivate(), certificate.der, algorithm,
-                now + PARAMETER_VALIDITY_MS);
+                EXPORT_MATERIAL_TYPE, now + exportTokenTtlMs);
+        sweep(exportTokens);
         exportTokens.put(issued.token, issued);
         lastExportParameters.put(key, issued);
         return exportParameters(issued);
@@ -883,7 +895,8 @@ final class PaymentCryptographyKeyExchange {
                 Instant.ofEpochMilli(now).minus(1, ChronoUnit.HOURS),
                 Instant.ofEpochMilli(now).plus(7, ChronoUnit.DAYS));
         Issued issued = new Issued(token(), pair.getPrivate(), certificate.der, wrappingAlgorithm,
-                now + 7L * 24 * 3600 * 1000);
+                materialType, now + importTokenTtlMs);
+        sweep(importTokens);
         importTokens.put(issued.token, issued);
         String certificate64 = X509.pemBase64(X509.toPem(issued.certificateDer));
         Map<String, Object> out = new LinkedHashMap<>();
@@ -1109,16 +1122,55 @@ final class PaymentCryptographyKeyExchange {
         return true;
     }
 
-    /** Take an issued parameter by its token, and forget it. */
-    private static Issued take(Map<String, Issued> tokens, String token, String name) {
+    /**
+     * The parameter a token names, when it is one this service issued for that kind of
+     * material and it has not expired.
+     *
+     * <p>A token stays usable until it expires: a caller that asks for parameters once may
+     * import several keys under them.
+     *
+     * @param tokens the tokens the service has issued
+     * @param token the token the request quotes
+     * @param materialType the kind of material the token must have been issued for
+     * @return the parameter, or null when the token is not one
+     */
+    private static Issued take(Map<String, Issued> tokens, String token, String materialType) {
         if (token == null || token.isEmpty()) {
             return null;
         }
-        Issued issued = tokens.remove(token);
-        if (issued != null && issued.validUntilMs < System.currentTimeMillis()) {
+        Issued issued = tokens.get(token);
+        if (issued == null || !issued.materialType.equals(materialType)) {
+            return null;
+        }
+        if (issued.validUntilMs < System.currentTimeMillis()) {
+            tokens.remove(token);
             return null;
         }
         return issued;
+    }
+
+    /**
+     * The number of tokens the service holds.
+     *
+     * <p>For the test that watches the expired ones swept.
+     *
+     * @return how many tokens are held
+     */
+    int issuedTokenCount() {
+        return exportTokens.size() + importTokens.size();
+    }
+
+    /**
+     * Drop the tokens that have expired.
+     *
+     * <p>A token that was issued and never quoted again would otherwise stay for the life of
+     * the process, and it holds a private key.
+     *
+     * @param tokens the tokens the service has issued
+     */
+    private static void sweep(Map<String, Issued> tokens) {
+        long now = System.currentTimeMillis();
+        tokens.values().removeIf(issued -> issued.validUntilMs < now);
     }
 
     /** A token name the counterparty quotes back. */
@@ -1126,6 +1178,23 @@ final class PaymentCryptographyKeyExchange {
         byte[] bytes = new byte[12];
         random.nextBytes(bytes);
         return "export-token-" + Hex.encode(bytes);
+    }
+
+    /**
+     * The authority has to be allowed to verify.
+     *
+     * <p>The authority vouches for a certificate, so a key that may not verify may not be
+     * named as one.
+     *
+     * @param key the authority key
+     * @param what what the authority was asked to do, in words
+     */
+    private static void requireVerify(PaymentCryptographyKey key, String what) {
+        Map<String, Boolean> modes = key.getKeyModesOfUse();
+        if (modes != null && !Boolean.TRUE.equals(modes.get("Verify"))) {
+            throw validation("the key " + key.getArn() + " does not have the mode of use Verify, "
+                    + "so it cannot be used for " + what);
+        }
     }
 
     /** The error a bad request is refused with. */
