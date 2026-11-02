@@ -11,6 +11,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -510,12 +511,18 @@ class RequestResourcesTest {
     /**
      * A Data API request runs on the cluster its {@code ClusterIdentifier} names, or on the serverless workgroup
      * stored under the name or ARN its {@code WorkgroupName} gives, whose ARN ends in the id Redshift Serverless
-     * mints; its {@code SecretArn} names neither, and a request naming its session alone names none.
+     * mints; its {@code SecretArn} names neither. A request naming its session by {@code SessionId} runs on the
+     * cluster or workgroup the caller's session runs on, as the service gives it, and names none when there is no such
+     * session, or the service gives an ARN of neither.
      */
     @Test
     void aDataApiRequestIsOnTheClusterOrTheStoredWorkgroupItNames() {
         String workgroups = "arn:aws:redshift-serverless:us-east-1:000000000000:workgroup/";
+        String cluster = "arn:aws:redshift:us-east-1:000000000000:cluster:warehouse";
         String id = "0f1e2d3c-4b5a-4978-8a9b-0c1d2e3f4a5b";
+        Map<String, String> sessions = Map.of("11111111-2222-4333-8444-555555555555", workgroups + id,
+                "66666666-7777-4888-9999-000000000000", cluster,
+                "77777777-8888-4999-8000-111111111111", "arn:aws:secretsmanager:us-east-1:000000000000:secret:db-AbCdEf");
         StoredResourceArns stored = new StoredResourceArns() {
             @Override
             public String namespace() {
@@ -527,6 +534,12 @@ class RequestResourcesTest {
                 return "workgroup".equals(type) && "us-east-1".equals(region)
                         && (List.of("analytics").equals(names) || List.of(workgroups + id).equals(names))
                         ? Optional.of(workgroups + id) : Optional.empty();
+            }
+
+            @Override
+            public Optional<String> through(String member, String value, String region) {
+                return "SessionId".equals(member) && "us-east-1".equals(region)
+                        ? Optional.ofNullable(sessions.get(value)) : Optional.empty();
             }
         };
         String secret = ",\"SecretArn\":\"arn:aws:secretsmanager:us-east-1:000000000000:secret:db-AbCdEf\"";
@@ -541,9 +554,23 @@ class RequestResourcesTest {
         assertEquals(List.of(workgroups + "*"), RequestResources.of("redshift-data:ListDatabases",
                 json("{\"Database\":\"dev\",\"WorkgroupName\":\"other\"}"), "aws", "us-east-1", "000000000000",
                 stored));
+        assertEquals(List.of(workgroups + id), RequestResources.of("redshift-data:ExecuteStatement",
+                json("{\"Sql\":\"select 1\",\"SessionId\":\"11111111-2222-4333-8444-555555555555\"}"), "aws",
+                "us-east-1", "000000000000", stored));
+        assertEquals(List.of(workgroups + id), RequestResources.of("redshift-data:ExecuteStatement",
+                json("{\"Sql\":\"select 1\",\"SessionId\":\"11111111-2222-4333-8444-555555555555\","
+                        + "\"WorkgroupName\":\"analytics\"}"), "aws", "us-east-1", "000000000000", stored));
+        assertEquals(List.of(cluster), RequestResources.of("redshift-data:BatchExecuteStatement",
+                json("{\"Sqls\":[\"select 1\"],\"SessionId\":\"66666666-7777-4888-9999-000000000000\"}"), "aws",
+                "us-east-1", "000000000000", stored));
+        for (String session : List.of(id, "77777777-8888-4999-8000-111111111111")) {
+            assertEquals(List.of(), RequestResources.of("redshift-data:ExecuteStatement",
+                    json("{\"Sql\":\"select 1\",\"SessionId\":\"" + session + "\"}"), "aws", "us-east-1",
+                    "000000000000", stored), session);
+        }
         assertEquals(List.of(), RequestResources.of("redshift-data:ExecuteStatement",
-                json("{\"Sql\":\"select 1\",\"SessionId\":\"" + id + "\"}"), "aws", "us-east-1", "000000000000",
-                stored));
+                json("{\"Sql\":\"select 1\",\"SessionId\":\"11111111-2222-4333-8444-555555555555\"}"), "aws",
+                "eu-west-1", "000000000000", stored));
     }
 
     /** A request value is a name, so a {@code ${...}} in it is kept, not read as a variable of the format. */

@@ -6,7 +6,6 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.DatabaseSecretCredentials;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.services.redshift.RedshiftCredentialBroker;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
@@ -25,7 +24,7 @@ import java.util.List;
 import java.util.Optional;
 
 @ApplicationScoped
-class RedshiftDataResourceResolver implements StoredResourceArns {
+class RedshiftDataResourceResolver {
 
     private static final Logger LOG = Logger.getLogger(RedshiftDataResourceResolver.class);
 
@@ -51,14 +50,8 @@ class RedshiftDataResourceResolver implements StoredResourceArns {
         this.serverlessService = serverlessService;
     }
 
-    @Override
-    public String namespace() {
-        return "redshift-data";
-    }
-
     /** The ARN of the serverless workgroup a request names by its name or ARN, as {@link #resolve} reads it. */
-    @Override
-    public Optional<String> find(String type, List<String> names, String region) {
+    Optional<String> find(String type, List<String> names, String region) {
         if (!"workgroup".equals(type) || names.size() != 1) {
             return Optional.empty();
         }
