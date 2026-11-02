@@ -115,16 +115,15 @@ public class ServiceQuotasService {
         if (quotaCodeFilter != null && !quotaCodeFilter.isEmpty()) {
             quotas = quotas.stream().filter(q -> q.quotaCode().equals(quotaCodeFilter)).toList();
         }
-        // Filter by QuotaAppliedAtLevel: ACCOUNT, RESOURCE, or ALL (case-insensitive)
+        // Filter by QuotaAppliedAtLevel: ACCOUNT, RESOURCE, or ALL (exact match per AppliedLevelEnum)
         if (appliedAtLevel != null && !appliedAtLevel.isBlank()) {
-            String level = appliedAtLevel.toUpperCase(Locale.ROOT);
-            if (!"ALL".equals(level) && !"ACCOUNT".equals(level) && !"RESOURCE".equals(level)) {
+            if (!"ALL".equals(appliedAtLevel) && !"ACCOUNT".equals(appliedAtLevel) && !"RESOURCE".equals(appliedAtLevel)) {
                 throw new AwsException("IllegalArgumentException",
                         "Invalid value for QuotaAppliedAtLevel: " + appliedAtLevel + ". Valid values: ACCOUNT, RESOURCE, ALL.", 400);
             }
-            if (!"ALL".equals(level)) {
+            if (!"ALL".equals(appliedAtLevel)) {
                 quotas = quotas.stream()
-                        .filter(q -> level.equalsIgnoreCase(q.appliedAtLevel()))
+                        .filter(q -> appliedAtLevel.equalsIgnoreCase(q.appliedAtLevel()))
                         .toList();
             }
         }
@@ -170,7 +169,7 @@ public class ServiceQuotasService {
         for (String name : GENERIC_QUOTA_NAMES) {
             quotas.add(new QuotaDefinition(
                     syntheticQuotaCode(serviceCode, name), name, GENERIC_QUOTA_VALUE,
-                    "organizations".equals(serviceCode), "ACCOUNT"));
+                    "organizations".equals(serviceCode)));
         }
         return quotas;
     }
