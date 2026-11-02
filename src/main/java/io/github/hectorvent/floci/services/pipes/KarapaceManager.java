@@ -113,8 +113,9 @@ class KarapaceManager implements ContainerTeardown {
     }
 
     private URI startContainer(String bootstrapServers) {
-        if (containersByTarget.containsKey(bootstrapServers)) {
-            throw new IllegalStateException("Karapace container cleanup is pending for " + bootstrapServers);
+        ManagedContainer pending = containersByTarget.get(bootstrapServers);
+        if (pending != null) {
+            stopContainer(bootstrapServers, pending);
         }
         EmulatorConfig.KafkaRestBridgeConfig bridgeConfig = config.services().pipes().kafkaRestBridge();
         String targetKey = targetKey(bootstrapServers);

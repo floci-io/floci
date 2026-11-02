@@ -17,6 +17,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -30,6 +31,7 @@ import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.github.hectorvent.floci.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
@@ -41,6 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -98,10 +101,14 @@ class KarapaceManagerTest {
 
     /** Stands in for Karapace's own {@code GET /_health}, which {@code isReady} polls. */
     private int startFakeRestServer() throws Exception {
+        return startFakeRestServer(new AtomicInteger(200));
+    }
+
+    private int startFakeRestServer(AtomicInteger healthStatus) throws Exception {
         fakeRestServer = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
         fakeRestServer.createContext("/_health", exchange -> {
             byte[] body = "{}".getBytes(StandardCharsets.UTF_8);
-            exchange.sendResponseHeaders(200, body.length);
+            exchange.sendResponseHeaders(healthStatus.get(), body.length);
             exchange.getResponseBody().write(body);
             exchange.close();
         });
@@ -376,8 +383,9 @@ class KarapaceManagerTest {
         int hostPort = startFakeRestServer();
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(portAllocator.allocate(9500, 9599)).thenReturn(hostPort);
-        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("container-1",
-                Map.of(REST_PORT, new EndpointInfo("localhost", hostPort))));
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerInfo("container-1", Map.of(REST_PORT, new EndpointInfo("localhost", hostPort))),
+                new ContainerInfo("container-2", Map.of(REST_PORT, new EndpointInfo("localhost", hostPort))));
         manager.ensureStarted("broker:9092");
         lenient().doThrow(new IllegalStateException("Docker stop failed")).doNothing()
                 .when(lifecycleManager).stopAndRemoveStrict("container-1", null);
@@ -385,10 +393,54 @@ class KarapaceManagerTest {
         manager.stopManagedContainers();
 
         verify(portAllocator, never()).release(hostPort);
-        assertThrows(IllegalStateException.class, () -> manager.ensureStarted("broker:9092"));
-        manager.stopManagedContainers();
+        assertDoesNotThrow(() -> manager.ensureStarted("broker:9092"));
         verify(lifecycleManager, times(2)).stopAndRemoveStrict("container-1", null);
         verify(portAllocator).release(hostPort);
+        manager.stopManagedContainers();
+        verify(lifecycleManager).stopAndRemoveStrict("container-2", null);
+        verify(portAllocator, times(2)).release(hostPort);
+    }
+
+    @Test
+    void failedReadinessCleanupRetriesBeforeAllocatingAReplacement() throws Exception {
+        AtomicInteger healthStatus = new AtomicInteger(503);
+        int hostPort = startFakeRestServer(healthStatus);
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(portAllocator.allocate(9500, 9599)).thenReturn(hostPort);
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerInfo("container-1", Map.of(REST_PORT, new EndpointInfo("localhost", hostPort))),
+                new ContainerInfo("container-2", Map.of(REST_PORT, new EndpointInfo("localhost", hostPort))));
+        IllegalStateException cleanupFailure = new IllegalStateException("Docker removal unavailable");
+        lenient().doThrow(cleanupFailure).doThrow(cleanupFailure).doNothing()
+                .when(lifecycleManager).stopAndRemoveStrict("container-1", null);
+
+        IllegalStateException readinessFailure = assertThrows(IllegalStateException.class,
+                () -> manager.ensureStarted("broker:9092"));
+        assertTrue(readinessFailure.getMessage().contains("did not become ready"));
+        assertEquals(1, readinessFailure.getSuppressed().length);
+        assertSame(cleanupFailure, readinessFailure.getSuppressed()[0]);
+        verify(portAllocator, never()).release(hostPort);
+
+        assertSame(cleanupFailure, assertThrows(IllegalStateException.class,
+                () -> manager.ensureStarted("broker:9092")));
+        verify(portAllocator, never()).release(hostPort);
+        verify(portAllocator).allocate(9500, 9599);
+        verify(lifecycleManager).createAndStart(any());
+
+        healthStatus.set(200);
+        assertEquals(URI.create("http://localhost:" + hostPort + "/"), manager.ensureStarted("broker:9092"));
+        InOrder cleanupOrder = inOrder(lifecycleManager, portAllocator);
+        cleanupOrder.verify(lifecycleManager, times(3)).stopAndRemoveStrict("container-1", null);
+        cleanupOrder.verify(portAllocator).release(hostPort);
+        cleanupOrder.verify(portAllocator).allocate(9500, 9599);
+        cleanupOrder.verify(lifecycleManager).createAndStart(any());
+        verify(lifecycleManager, times(3)).stopAndRemoveStrict("container-1", null);
+        verify(portAllocator).release(hostPort);
+        verify(portAllocator, times(2)).allocate(9500, 9599);
+        verify(lifecycleManager, times(2)).createAndStart(any());
+        manager.stopManagedContainers();
+        verify(lifecycleManager).stopAndRemoveStrict("container-2", null);
+        verify(portAllocator, times(2)).release(hostPort);
     }
 
     @Test
