@@ -1218,17 +1218,17 @@ class S3CopySimulatorTest {
     }
 
     @Test
-    void concatenatesPrefixObjectsInKeyOrderAndSkipsHeaderOnFirstOnly() throws Exception {
+    void concatenatesPrefixObjectsInKeyOrderAndSkipsTheHeaderOfEachObject() throws Exception {
         when(s3.objectExists("wh", "p/")).thenReturn(false);
         when(s3.listObjectsWithPrefixes(eq("wh"), eq("p/"), isNull(), anyInt(), any(), any())).thenReturn(
                 new S3Service.ListObjectsResult(List.of(
                         new S3Object("wh", "p/1", "h1|h2\n1|a\n".getBytes(StandardCharsets.US_ASCII), "text/plain"),
-                        new S3Object("wh", "p/2", "2|b\n".getBytes(StandardCharsets.US_ASCII), "text/plain")),
+                        new S3Object("wh", "p/2", "h1|h2\n2|b\n".getBytes(StandardCharsets.US_ASCII), "text/plain")),
                         List.of(), false, null));
         when(s3.getObject("wh", "p/1")).thenReturn(
                 new S3Object("wh", "p/1", "h1|h2\n1|a\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
         when(s3.getObject("wh", "p/2")).thenReturn(
-                new S3Object("wh", "p/2", "2|b\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
+                new S3Object("wh", "p/2", "h1|h2\n2|b\n".getBytes(StandardCharsets.US_ASCII), "text/plain"));
 
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "wh", "p/", "|", 1, false, false, null, null);
@@ -1594,6 +1594,23 @@ class S3CopySimulatorTest {
         S3CopySimulator.streamCopyInput(input, out);
 
         assertEquals("1|\\N\n2|\\N|x\n", copyDataPayload(out.toByteArray()));
+    }
+
+    @Test
+    void streamCopyInput_skipsTheHeaderOfEveryObject() throws Exception {
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "people", List.of(), "wh", "p/", "|", 1, false, false, null, null);
+        when(s3.getObject("wh", "p/a.txt")).thenReturn(new S3Object("wh", "p/a.txt",
+                "id|name\n1|a\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
+        when(s3.getObject("wh", "p/b.txt")).thenReturn(new S3Object("wh", "p/b.txt",
+                "id|name\n2|b\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
+        S3CopySimulator.CopyInput input =
+                new S3CopySimulator.CopyInput(spec, List.of("p/a.txt", "p/b.txt"), s3, null, null);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        S3CopySimulator.streamCopyInput(input, out);
+
+        assertEquals("1|a\n2|b\n", copyDataPayload(out.toByteArray()));
     }
 
     @Test
