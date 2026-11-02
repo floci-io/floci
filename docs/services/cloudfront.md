@@ -14,9 +14,6 @@ PUT, PATCH and DELETE).
 
 ## Supported Operations
 
-For an executable OAC example with direct-S3 and unrelated-distribution negative
-checks, see [Private S3 origin example](cloudfront-private-origin.md).
-
 ### Distributions
 
 | Operation | Method | Path |
@@ -322,6 +319,9 @@ checks, see [Private S3 origin example](cloudfront-private-origin.md).
 | `floci.services.cloudfront.allowed-private-origin-hosts` | `FLOCI_SERVICES_CLOUDFRONT_ALLOWED_PRIVATE_ORIGIN_HOSTS` | `[]` | Exact custom-origin hosts permitted to resolve to private/non-routable addresses (comma-separated in the environment variable) |
 
 ## CLI Examples
+
+For an executable OAC example with direct-S3 and unrelated-distribution negative
+checks, see [Private S3 origin example](cloudfront-private-origin.md).
 
 ```bash
 export AWS_ENDPOINT_URL=http://localhost:4566

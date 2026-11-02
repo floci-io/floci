@@ -4,7 +4,7 @@ set -euo pipefail
 
 endpoint="${AWS_ENDPOINT_URL:-http://localhost:4566}"
 export AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test AWS_DEFAULT_REGION=us-east-1
-export AWS_EC2_METADATA_DISABLED=true AWS_PAGER=""
+export AWS_DEFAULT_OUTPUT=json AWS_EC2_METADATA_DISABLED=true AWS_PAGER=""
 unset AWS_SESSION_TOKEN AWS_PROFILE
 
 for command in aws curl jq; do
@@ -20,7 +20,8 @@ bucket_created=false
 
 cleanup() {
     local id etag
-    for id in "${distributions[@]}"; do
+    # Bash before 4.4 treats an empty array as unset under set -u.
+    for id in ${distributions[@]+"${distributions[@]}"}; do
         if ! aws_local cloudfront get-distribution-config --id "$id" > "$work_dir/current.json"; then
             echo "Could not read distribution $id for cleanup" >&2
             continue
@@ -35,12 +36,16 @@ cleanup() {
         fi
     done
     if [[ -n "$oac" ]]; then
-        etag="$(aws_local cloudfront get-origin-access-control --id "$oac" --query ETag --output text)"
-        aws_local cloudfront delete-origin-access-control --id "$oac" --if-match "$etag" \
-            || echo "Could not delete origin access control $oac" >&2
+        if etag="$(aws_local cloudfront get-origin-access-control --id "$oac" --query ETag --output text)"; then
+            aws_local cloudfront delete-origin-access-control --id "$oac" --if-match "$etag" \
+                || echo "Could not delete origin access control $oac" >&2
+        else
+            echo "Could not read origin access control $oac for cleanup" >&2
+        fi
     fi
     if [[ "$bucket_created" == true ]]; then
-        aws_local s3api delete-object --bucket "$bucket" --key example.txt >/dev/null
+        aws_local s3api delete-object --bucket "$bucket" --key example.txt >/dev/null \
+            || echo "Could not delete object example.txt from bucket $bucket" >&2
         aws_local s3api delete-bucket --bucket "$bucket" || echo "Could not delete bucket $bucket" >&2
     fi
     rm -rf "$work_dir"
