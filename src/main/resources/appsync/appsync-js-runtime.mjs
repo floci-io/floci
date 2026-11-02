@@ -504,15 +504,30 @@ function blankLiterals(src) {
     let memberName = false;
     let pendingFunctionExpression = null;
     let functionBodyExpression = null;
+    let switchBodyPending = false;
+    let statementStart = true;
+    let labelCandidate = false;
+    let caseLabelDepth = null;
+    let caseTernaryDepth = 0;
+    let statementColon = false;
+    let bracketDepth = 0;
     const parens = [];
     const braces = [];
+    const switchBodies = [];
     while (i < src.length) {
       const c = src[i];
       const next = src[i + 1];
-      if (/\s/.test(c)) { i++; continue; }
+      if (/\s/.test(c)) {
+        if (/[\r\n\u2028\u2029]/.test(c)) {
+          if (lastToken === 'return') lastToken = ';';
+          if (canEndExpression || lastToken === ';') statementStart = true;
+        }
+        i++;
+        continue;
+      }
       if (c === '/' && next === '/') {
-        const end = src.indexOf('\n', i);
-        const stop = end === -1 ? src.length : end;
+        let stop = i + 2;
+        while (stop < src.length && !/[\r\n\u2028\u2029]/.test(src[stop])) stop++;
         blank(i, stop);
         i = stop;
         continue;
@@ -535,15 +550,19 @@ function blankLiterals(src) {
         i = j;
         canEndExpression = true;
         lastToken = 'value';
+        statementStart = false;
+        labelCandidate = false;
       } else if (c === '`') {
         i = scanTemplate(i);
         canEndExpression = true;
         lastToken = 'value';
+        statementStart = false;
+        labelCandidate = false;
       } else if (c === '/' && !canEndExpression) {
         let j = i + 1;
         let inClass = false;
         let closed = false;
-        while (j < src.length && src[j] !== '\n' && src[j] !== '\r') {
+        while (j < src.length && !/[\r\n\u2028\u2029]/.test(src[j])) {
           if (src[j] === '\\') { j += 2; continue; }
           if (src[j] === '[') inClass = true;
           else if (src[j] === ']') inClass = false;
@@ -558,10 +577,14 @@ function blankLiterals(src) {
         i = j;
         canEndExpression = true;
         lastToken = 'value';
+        statementStart = false;
+        labelCandidate = false;
       } else if (c === '/') {
         i += next === '=' ? 2 : 1;
         canEndExpression = false;
         lastToken = '/';
+        statementStart = false;
+        labelCandidate = false;
       } else if (c === '}' && inTemplateHole && braces.length === 0) {
         blank(i, i + 1);
         return i + 1;
@@ -572,51 +595,100 @@ function blankLiterals(src) {
         i++;
         canEndExpression = false;
         lastToken = '(';
+        statementStart = false;
+        labelCandidate = false;
       } else if (c === ')') {
         const context = parens.pop();
         if (context === 'function-expression' || context === 'function-declaration') {
           functionBodyExpression = context === 'function-expression';
         }
+        switchBodyPending = context === 'switch';
         canEndExpression = context === '';
         i++;
         lastToken = ')';
+        statementStart = controlWords.has(context);
+        labelCandidate = false;
       } else if (c === '[') {
+        bracketDepth++;
         i++;
         canEndExpression = false;
         lastToken = '[';
+        statementStart = false;
+        labelCandidate = false;
       } else if (c === ']') {
+        bracketDepth--;
         i++;
         canEndExpression = true;
         lastToken = ']';
+        statementStart = false;
+        labelCandidate = false;
       } else if (c === '{') {
-        const afterOperator = ['=', '(', '[', ',', ':', 'return', '?', '&', '|',
+        const afterOperator = ['=', '(', '[', ',', ':', 'return', 'case', '?', '??', '&', '|',
           '+', '-', '*', '/', '%', '!', '~', '^', '<', '>'].includes(lastToken);
-        braces.push(functionBodyExpression ?? afterOperator);
+        const expressionBrace = functionBodyExpression
+          ?? (afterOperator && !(lastToken === ':' && statementColon));
+        braces.push(expressionBrace);
+        switchBodies.push(switchBodyPending);
+        switchBodyPending = false;
         functionBodyExpression = null;
         i++;
         canEndExpression = false;
         lastToken = '{';
+        statementStart = !expressionBrace;
+        labelCandidate = false;
+        statementColon = false;
       } else if (c === '}') {
-        canEndExpression = braces.pop() ?? false;
+        const expressionBrace = braces.pop() ?? false;
+        switchBodies.pop();
+        canEndExpression = expressionBrace;
         i++;
         lastToken = '}';
+        statementStart = !expressionBrace;
+        labelCandidate = false;
       } else if (c === '.' || (c === '?' && next === '.')) {
         i += c === '?' ? 2 : 1;
         canEndExpression = false;
         lastToken = '.';
         memberName = true;
+        statementStart = false;
+        labelCandidate = false;
+      } else if (c === ':') {
+        const atCaseLevel = caseLabelDepth !== null
+          && caseLabelDepth.braces === braces.length
+          && caseLabelDepth.parens === parens.length
+          && caseLabelDepth.brackets === bracketDepth;
+        const caseSeparator = atCaseLevel && caseTernaryDepth === 0;
+        statementColon = caseSeparator || labelCandidate;
+        if (caseSeparator) caseLabelDepth = null;
+        if (atCaseLevel && !caseSeparator) caseTernaryDepth--;
+        i++;
+        canEndExpression = false;
+        lastToken = ':';
+        statementStart = statementColon;
+        labelCandidate = false;
       } else {
         const word = wordAt.exec(src.slice(i));
         const number = !word && numberAt.exec(src.slice(i));
         if (word) {
           const value = word[0];
+          const atStatementStart = statementStart;
           if (value === 'function' && !memberName) {
             pendingFunctionExpression = ['=', '(', '[', ',', ':', 'return', '?', '&', '|', '>']
               .includes(lastToken);
           }
           const keyword = !memberName && regexPrefixWords.has(value);
-          const forOf = value === 'of' && parens.at(-1) === 'for';
+          const forOf = value === 'of' && parens.at(-1) === 'for'
+            && canEndExpression && !memberName;
           canEndExpression = !keyword && !forOf;
+          if (atStatementStart && switchBodies.at(-1)
+            && (value === 'case' || value === 'default')) {
+            caseLabelDepth = { braces: braces.length, parens: parens.length,
+              brackets: bracketDepth };
+            caseTernaryDepth = 0;
+          }
+          labelCandidate = atStatementStart && !memberName
+            && value !== 'case' && value !== 'default';
+          statementStart = value === 'else' || value === 'do';
           lastControlWord = !memberName && controlWords.has(value) ? value : '';
           lastToken = value;
           i += value.length;
@@ -624,13 +696,29 @@ function blankLiterals(src) {
           i += number[0].length;
           canEndExpression = true;
           lastToken = 'value';
+          statementStart = false;
+          labelCandidate = false;
         } else if ((c === '+' && next === '+') || (c === '-' && next === '-')) {
           i += 2;
           lastToken = c + next;
+          statementStart = false;
+          labelCandidate = false;
+        } else if (c === '?' && next === '?') {
+          i += 2;
+          canEndExpression = false;
+          lastToken = '??';
+          statementStart = false;
+          labelCandidate = false;
         } else {
           i++;
           canEndExpression = false;
           lastToken = c;
+          if (c === '?' && caseLabelDepth !== null
+            && caseLabelDepth.braces === braces.length
+            && caseLabelDepth.parens === parens.length
+            && caseLabelDepth.brackets === bracketDepth) caseTernaryDepth++;
+          statementStart = c === ';';
+          labelCandidate = false;
         }
       }
       if (lastToken !== '.') memberName = false;
@@ -657,16 +745,15 @@ function unsupportedConstruct(description, line) {
 
 function validateAppSyncSubset(code) {
   const literals = blankLiterals(code);
+  const lineNumber = (index) => code.slice(0, index).split(/\r\n|[\r\n\u2028\u2029]/).length;
   for (const [pattern, description] of BANNED_CONSTRUCTS) {
     const match = pattern.exec(literals.scanned);
     if (match) {
-      const line = code.slice(0, match.index).split('\n').length;
-      return unsupportedConstruct(description, line);
+      return unsupportedConstruct(description, lineNumber(match.index));
     }
   }
   if (literals.regexStart !== -1) {
-    const line = code.slice(0, literals.regexStart).split('\n').length;
-    return unsupportedConstruct('regular expressions', line);
+    return unsupportedConstruct('regular expressions', lineNumber(literals.regexStart));
   }
   return null;
 }

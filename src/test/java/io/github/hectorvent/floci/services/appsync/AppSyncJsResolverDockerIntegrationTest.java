@@ -61,6 +61,12 @@ class AppSyncJsResolverDockerIntegrationTest {
               regexKeyword: String
               regexClassThenUnsupported: String
               regexDivision: String
+              forOfIdentifierDivision: String
+              regexAfterCaseBlock(n: Int): String
+              regexAfterLabelBlock: String
+              commentCr: String
+              commentLineSeparator: String
+              commentParagraphSeparator: String
               divisionAfterFunction: String
               divisionAfterObject: String
               taggedRawInvalidEscape: String
@@ -247,6 +253,47 @@ class AppSyncJsResolverDockerIntegrationTest {
             }
             """;
 
+    private static final String FOR_OF_IDENTIFIER_DIVISION_RESOLVER = """
+            export function request(ctx) {
+              const of = 8;
+              for (const value of [of / 2 / 2]) {
+                return { payload: { value: String(value) } };
+              }
+            }
+            export function response(ctx) {
+              return ctx.result.value;
+            }
+            """;
+
+    private static final String REGEX_AFTER_CASE_BLOCK_RESOLVER = """
+            export function request(ctx) {
+              switch (ctx.args.n) { case 1: {} /foo/.test("foo"); }
+              return { payload: { value: "unreachable" } };
+            }
+            """;
+
+    private static final String REGEX_AFTER_LABEL_BLOCK_RESOLVER = """
+            export function request(ctx) {
+              label: {} /foo/.test("foo");
+              return { payload: { value: "unreachable" } };
+            }
+            """;
+
+    private static final String COMMENT_CR_RESOLVER = """
+            export function request(ctx) {
+              // comment\rwhile(false) {}
+              return { payload: { value: "unreachable" } };
+            }
+            """;
+
+    private static final String COMMENT_LINE_SEPARATOR_RESOLVER =
+            "export function request(ctx) { // comment" + Character.toString(0x2028)
+                + "const pattern = /foo/; return { payload: { value: pattern.test('foo') } }; }";
+
+    private static final String COMMENT_PARAGRAPH_SEPARATOR_RESOLVER =
+            "export function request(ctx) { // comment" + Character.toString(0x2029)
+                + "return { payload: { value: this } }; }";
+
     private static final String DIVISION_AFTER_FUNCTION_RESOLVER = """
             export function request(ctx) {
               const value = function() {} / 2;
@@ -338,6 +385,14 @@ class AppSyncJsResolverDockerIntegrationTest {
         createUnitResolver(apiId, "Query", "regexClassThenUnsupported", "local",
                 REGEX_CLASS_UNSUPPORTED_RESOLVER);
         createUnitResolver(apiId, "Query", "regexDivision", "local", REGEX_DIVISION_RESOLVER);
+        createUnitResolver(apiId, "Query", "forOfIdentifierDivision", "local",
+                FOR_OF_IDENTIFIER_DIVISION_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexAfterCaseBlock", "local", REGEX_AFTER_CASE_BLOCK_RESOLVER);
+        createUnitResolver(apiId, "Query", "regexAfterLabelBlock", "local", REGEX_AFTER_LABEL_BLOCK_RESOLVER);
+        createUnitResolver(apiId, "Query", "commentCr", "local", COMMENT_CR_RESOLVER);
+        createUnitResolver(apiId, "Query", "commentLineSeparator", "local", COMMENT_LINE_SEPARATOR_RESOLVER);
+        createUnitResolver(apiId, "Query", "commentParagraphSeparator", "local",
+                COMMENT_PARAGRAPH_SEPARATOR_RESOLVER);
         createUnitResolver(apiId, "Query", "divisionAfterFunction", "local",
                 DIVISION_AFTER_FUNCTION_RESOLVER);
         createUnitResolver(apiId, "Query", "divisionAfterObject", "local",
@@ -574,6 +629,44 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200)
             .body("errors", nullValue())
             .body("data.regexDivision", equalTo("3% vs 4%"));
+    }
+
+    @Test
+    void anIdentifierNamedOfInsideAForOfIterableKeepsDivisionOperators() {
+        query("{ forOfIdentifierDivision }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.forOfIdentifierDivision", equalTo("2"));
+    }
+
+    @Test
+    void regexAfterCaseAndLabelBlocksIsRefused() {
+        query("{ regexAfterCaseBlock(n: 1) }")
+            .statusCode(200)
+            .body("data.regexAfterCaseBlock", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("regular expressions"));
+        query("{ regexAfterLabelBlock }")
+            .statusCode(200)
+            .body("data.regexAfterLabelBlock", nullValue())
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("regular expressions"));
+    }
+
+    @Test
+    void everyJavaScriptLineTerminatorEndsALineComment() {
+        query("{ commentCr }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("while loops"));
+        query("{ commentLineSeparator }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("regular expressions"));
+        query("{ commentParagraphSeparator }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("this"));
     }
 
     @Test
