@@ -2010,7 +2010,7 @@ public class RdsService implements Resettable, ResourceProvider {
         backup.setRegion(region);
         backup.setEarliestTime(cluster.getCreatedAt() != null ? cluster.getCreatedAt() : now);
         backup.setLatestTime(now);
-        backup.setBackupRetentionPeriod(CLUSTER_BACKUP_RETENTION_DAYS);
+        backup.setBackupRetentionPeriod(cluster.getBackupRetentionPeriod());
         String dataKey = clusterBackupDataKey(region, cluster.getDbClusterResourceId());
         if (cluster.getStatus() == DbInstanceStatus.DELETING && snapshotData.get(dataKey).isPresent()) {
             backup.setDataSaved(true);
