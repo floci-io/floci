@@ -12585,7 +12585,12 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             for (String securityGroupId : endpoint.getSecurityGroupIds()) {
                 GroupIdentifier group = new GroupIdentifier();
                 group.setGroupId(securityGroupId);
-                securityGroups.get(key(endpoint.getRegion(), securityGroupId))
+                // Read for the account the endpoint was read for, as natNetworkInterfacesOf reads
+                // its subnet: the explicit-account overload may run under another ambient account.
+                String groupKey = key(endpoint.getRegion(), securityGroupId);
+                (securityGroups instanceof AccountAwareStorageBackend<SecurityGroup> aware
+                        ? aware.getForAccount(ownerId, groupKey).or(() -> aware.getLegacyForAccount(ownerId, groupKey))
+                        : securityGroups.get(groupKey))
                         .ifPresent(sg -> group.setGroupName(sg.getGroupName()));
                 ni.getGroups().add(group);
             }

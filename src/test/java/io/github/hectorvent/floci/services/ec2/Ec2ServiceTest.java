@@ -4717,6 +4717,26 @@ class Ec2ServiceTest {
                 false, null, null, null, false, privateIp);
     }
 
+    @Test
+    void anInstanceConnectEndpointInterfaceNamesItsGroupsForTheAccountItIsReadFor() {
+        // The explicit-account DescribeNetworkInterfaces overload runs under whatever account the
+        // ambient request carries; the group names must come from the account named, not that one.
+        RequestContext context = new RequestContext();
+        Ec2Service service = mockedVpcNetworkService(context, Map.of(), null);
+        context.setAccountId("111122223333");
+        String vpcId = service.createVpc("us-east-1", "10.82.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet("us-east-1", vpcId, "10.82.1.0/24", "us-east-1a").getSubnetId();
+        String group = service.createSecurityGroup("us-east-1", "eice-sg", "x", vpcId).getGroupId();
+        String eniId = service.createInstanceConnectEndpoint("us-east-1", subnetId, List.of(group), null, null,
+                List.of(), null).getNetworkInterfaceIds().getFirst();
+
+        context.setAccountId("000000000000");
+        NetworkInterface ni = service.describeNetworkInterfaces("111122223333", "us-east-1", List.of(eniId),
+                Map.of()).networkInterfaces().getFirst();
+        assertEquals(List.of(Map.entry(group, "eice-sg")), ni.getGroups().stream()
+                .map(g -> Map.entry(g.getGroupId(), String.valueOf(g.getGroupName()))).toList());
+    }
+
     private static Ec2Service realVpcNetworkService(RequestContext context) {
         return realVpcNetworkService(context, Map.of());
     }
