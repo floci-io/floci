@@ -83,7 +83,9 @@ final class ExpressionEvaluator {
 
             if (isDigit(c)) {
                 int start = i;
-                while (i < len && isDigit(expression.charAt(i))) i++;
+                while (i < len && isDigit(expression.charAt(i))) {
+                    i++;
+                }
                 tokens.add(new Token(TokenType.NUMBER, expression.substring(start, i), start));
                 continue;
             }
