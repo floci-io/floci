@@ -90,7 +90,8 @@ all an id their service mints, which a request names by members the ARN does not
 members: each operation whose request has them all names the type by them (`find`), and the reader
 asks the service for the ARN they find, or else checks the ARN with its id open, as for a create; an
 Application Auto Scaling scalable target, `scalable-target/<id>`, is named by its service namespace,
-resource id and scalable dimension.
+resource id and scalable dimension, and the Redshift Serverless workgroup a Data API request runs on,
+`workgroup/<id>`, by its name or ARN.
 
 The Service Reference is live rather than a pinned dependency, so a fresh generation is not
 byte-identical. The two gates split along the sources:
@@ -129,8 +130,8 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 # are the ones its handlers mint.
 NAMESPACES = ("acm", "application-autoscaling", "athena", "bcm-data-exports", "bcm-pricing-calculator", "budgets", "ce", "cloudtrail",
               "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "cur", "ecr", "elasticloadbalancing",
-              "events", "firehose", "globalaccelerator", "kinesisanalytics", "servicediscovery", "servicequotas",
-              "states", "textract", "timestream-influxdb", "translate")
+              "events", "firehose", "globalaccelerator", "kinesisanalytics", "redshift-data", "servicediscovery",
+              "servicequotas", "states", "textract", "timestream-influxdb", "translate")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.
@@ -212,9 +213,6 @@ NOT_COVERED: dict[str, str] = {
     "rds": _LATER,
     "rds-data": _REST,
     "redshift": _LATER,
-    "redshift-data": "not read yet: a serverless workgroup's ARN ends in an id the service mints, `workgroup/<id>`, "
-                     "while its requests name the workgroup by WorkgroupName, a name or an ARN, so its resource is the "
-                     "stored ARN that name finds, a FOUND_BY type its service does not look up yet",
     "redshift-serverless": _LATER,
     "rekognition": _LATER,
     "resource-explorer-2": _REST,
@@ -446,6 +444,12 @@ FOUND_BY: dict[str, tuple[list[str], str]] = {
         "target', Application Auto Scaling User Guide), which the reference names ${ResourceId}, while its requests "
         "name the target by ServiceNamespace, ResourceId and ScalableDimension; ResourceId is the target's "
         "resource (service/<cluster>/<service>), not that id"),
+    "redshift-data:workgroup": (
+        ["WorkgroupName"],
+        "a serverless workgroup's ARN ends in the id Redshift Serverless gives it, workgroup/<id> (its Workgroup's "
+        "workgroupId, 'The unique identifier of the workgroup'; botocore's WorkgroupNameString takes an ARN ending "
+        "in workgroup/<uuid>), while a Data API request names the workgroup by WorkgroupName, 'The serverless "
+        "workgroup name or Amazon Resource Name (ARN)'"),
 }
 
 # The variables of an ARN format the account, partition and Region fill.
@@ -805,7 +809,8 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
             raise ValueError(f"CORRECTIONS serves {operation} on {sorted(unknown)}, no endpoint prefix of the clients "
                              f"it reads ({sorted(endpoints)})")
     else:
-        resources = with_found(resources_for(operation, types, formats, members), namespace_of(operation), members)
+        resources = with_found(resources_for(operation, types, formats, members), namespace_of(operation), types,
+                               members)
     resources = with_account(resources, formats, account_members(models, operation.split(":", 1)[1]))
     resources = with_arn_of(resources, formats, name_or_arn_members(models, operation.split(":", 1)[1]))
     resources = with_made(resources, operation, formats)
@@ -816,16 +821,14 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     return entry
 
 
-def with_found(resources: list[dict], namespace: str, members: dict[str, str]) -> list[dict]:
-    """The resources, each a `FOUND_BY` type fills named by the members its service finds it by instead, when the
-    request has them all, and left out when it does not: its variables are an id the request does not give."""
-    found = []
-    for resource in resources:
-        key = f"{namespace}:{resource.get('type')}"
-        if "fill" not in resource or key not in FOUND_BY:
-            found.append(resource)
-        elif all(members.get(member) == member for member in FOUND_BY[key][0]):
-            found.append({"type": resource["type"], "fill": {}, "find": list(FOUND_BY[key][0])})
+def with_found(resources: list[dict], namespace: str, types: list[str], members: dict[str, str]) -> list[dict]:
+    """The resources, a `FOUND_BY` type the action acts on named by the members its service finds it by, when the
+    request has them all, rather than by any it fills: its variables are an id the request does not give."""
+    found = [resource for resource in resources if f"{namespace}:{resource.get('type')}" not in FOUND_BY]
+    for kind in types:
+        by = FOUND_BY.get(f"{namespace}:{kind}", ([], ""))[0]
+        if by and all(members.get(member) == member for member in by):
+            found.append({"type": kind, "fill": {}, "find": list(by)})
     return found
 
 

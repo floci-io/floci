@@ -189,7 +189,13 @@ Floci does not write the `redshift_failed` manifest objects that AWS creates aft
   stream's account and region, through the workgroup proxy. A workgroup has one database, so a URL that names
   another database fails the delivery, which then follows the usual retry path. Without a `Username` the workgroup's
   admin user signs in.
-- `ProcessingConfiguration` on a Redshift destination is accepted and returned but not executed.
+- A Lambda processor in the `ProcessingConfiguration` of a Redshift destination runs before the batch is staged,
+  as it does for an S3 destination: records the function drops are not loaded, and records it fails are written to
+  the error output of the intermediate S3 configuration. The configuration is validated on create and update
+  like an S3 destination's, and a Lambda processor is described with the same default parameters (`NumberOfRetries`,
+  `RoleArn`, buffer hints). Those defaults are carried over from the probed S3 behavior and not probed for Redshift
+  specifically. With `S3BackupMode` enabled, the backup object holds the untransformed source records, even when the
+  Lambda processor drops every record.
 - The `COPY` carries no credentials, so the proxy reads the staged object as an anonymous client. With S3
   authorization enforced and a private intermediate bucket the load fails and the staged object stays in S3; use a
   bucket the anonymous principal can read, or leave enforcement off.

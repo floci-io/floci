@@ -461,6 +461,45 @@ class RequestResourcesTest {
                 stored));
     }
 
+    /**
+     * A Data API request runs on the cluster its {@code ClusterIdentifier} names, or on the serverless workgroup
+     * stored under the name or ARN its {@code WorkgroupName} gives, whose ARN ends in the id Redshift Serverless
+     * mints; its {@code SecretArn} names neither, and a request naming its session alone names none.
+     */
+    @Test
+    void aDataApiRequestIsOnTheClusterOrTheStoredWorkgroupItNames() {
+        String workgroups = "arn:aws:redshift-serverless:us-east-1:000000000000:workgroup/";
+        String id = "0f1e2d3c-4b5a-4978-8a9b-0c1d2e3f4a5b";
+        StoredResourceArns stored = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "redshift-data";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return "workgroup".equals(type) && "us-east-1".equals(region)
+                        && (List.of("analytics").equals(names) || List.of(workgroups + id).equals(names))
+                        ? Optional.of(workgroups + id) : Optional.empty();
+            }
+        };
+        String secret = ",\"SecretArn\":\"arn:aws:secretsmanager:us-east-1:000000000000:secret:db-AbCdEf\"";
+        assertEquals(List.of("arn:aws:redshift:us-east-1:000000000000:cluster:warehouse"), RequestResources.of(
+                "redshift-data:ExecuteStatement", json("{\"Sql\":\"select 1\",\"ClusterIdentifier\":\"warehouse\""
+                        + secret + "}"), "aws", "us-east-1", "000000000000", stored));
+        for (String named : List.of("analytics", workgroups + id)) {
+            assertEquals(List.of(workgroups + id), RequestResources.of("redshift-data:ListDatabases",
+                    json("{\"Database\":\"dev\",\"WorkgroupName\":\"" + named + "\"" + secret + "}"), "aws",
+                    "us-east-1", "000000000000", stored), named);
+        }
+        assertEquals(List.of(workgroups + "*"), RequestResources.of("redshift-data:ListDatabases",
+                json("{\"Database\":\"dev\",\"WorkgroupName\":\"other\"}"), "aws", "us-east-1", "000000000000",
+                stored));
+        assertEquals(List.of(), RequestResources.of("redshift-data:ExecuteStatement",
+                json("{\"Sql\":\"select 1\",\"SessionId\":\"" + id + "\"}"), "aws", "us-east-1", "000000000000",
+                stored));
+    }
+
     /** A request value is a name, so a {@code ${...}} in it is kept, not read as a variable of the format. */
     @Test
     void aValueIsTakenLiterally() {

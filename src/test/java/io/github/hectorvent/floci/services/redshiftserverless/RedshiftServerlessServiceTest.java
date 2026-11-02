@@ -436,6 +436,22 @@ class RedshiftServerlessServiceTest {
     }
 
     @Test
+    void aWorkgroupIsFoundByItsNameOrArnInItsRegion() {
+        create("find-ns");
+        String arn = createWorkgroup("find-wg", "find-ns").getWorkgroupArn();
+        assertTrue(arn.matches("arn:aws:redshift-serverless:" + REGION + ":" + ACCOUNT_ID
+                + ":workgroup/[0-9a-f-]{36}"), arn);
+        for (String named : List.of("find-wg", arn)) {
+            assertEquals(Optional.of(arn),
+                    service.findWorkgroupByNameOrArn(named, REGION).map(Workgroup::getWorkgroupArn), named);
+        }
+        assertEquals(Optional.empty(), service.findWorkgroupByNameOrArn("other-wg", REGION));
+        assertEquals(Optional.empty(), service.findWorkgroupByNameOrArn("find-wg", "eu-west-1"));
+        assertEquals(Optional.empty(), service.findWorkgroupByNameOrArn(arn.substring(0, arn.lastIndexOf('/') + 1)
+                + "00000000-0000-0000-0000-000000000000", REGION));
+    }
+
+    @Test
     void tagsSurviveAnUnrelatedNamespaceUpdate() {
         Namespace created = service.createNamespace("keep-tags-ns", "admin", null, null, null, null, null,
                 Map.of("env", "dev"), REGION);

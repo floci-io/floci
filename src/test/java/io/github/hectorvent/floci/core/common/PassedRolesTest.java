@@ -683,8 +683,8 @@ class PassedRolesTest {
                 PassedRoles.of("glue:CreateJob", json("{\"Name\":\"j\",\"Role\":\"app-role\"}"), LOOKUPS));
         assertEquals(List.of(passed("gone", "glue.amazonaws.com")),
                 PassedRoles.of("glue:CreateJob", json("{\"Name\":\"j\",\"Role\":\"gone\"}"), LOOKUPS));
-        // An identity pool's roles are the values of a map, which the Service Reference passes to no service.
-        assertEquals(List.of(new PassedRole(ROLES + "authenticated", null)), PassedRoles.of(
+        // An identity pool's roles are the values of a map, each passed to Cognito Identity.
+        assertEquals(List.of(passed("authenticated", "cognito-identity.amazonaws.com")), PassedRoles.of(
                 "cognito-identity:SetIdentityPoolRoles", json("{\"IdentityPoolId\":\"p\",\"Roles\":{\"authenticated\":\""
                         + ROLES + "authenticated\"}}"), LOOKUPS));
         // A member taking only an ARN passes nothing for a name.

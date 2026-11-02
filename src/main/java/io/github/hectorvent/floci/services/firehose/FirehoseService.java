@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.KinesisStreamSource;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.ProcessingConfiguration;
 import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
@@ -417,6 +418,10 @@ public class FirehoseService implements ResourceProvider {
         }
         DataFormatConversionValidator.validateEffective(s3Config);
         ProcessingConfigurationValidator.validateEffective(s3Config);
+        if (redshift != null) {
+            ProcessingConfigurationValidator.validateEffective(redshift.getProcessingConfiguration());
+            redshift.canonicalizeProcessors();
+        }
         if (s3Config != null) {
             s3Config.canonicalizeProcessors();
         }
@@ -545,7 +550,10 @@ public class FirehoseService implements ResourceProvider {
             if (update.getS3Backup() != null && current.getS3Backup() == null) {
                 RedshiftDestinationValidator.validateNewBackup(update.getS3Backup(), "redshiftDestinationUpdate");
             }
+            // The update's ProcessingConfiguration replaces the stored one outright, so it is what gets checked.
+            ProcessingConfigurationValidator.validateEffective(update.getProcessingConfiguration());
             mergeRedshiftDestination(current, update);
+            current.canonicalizeProcessors();
             stream.setVersionId(String.valueOf(parseVersionId(stream.getVersionId()) + 1));
             stream.setLastUpdateTimestamp(Instant.now());
             streamPut(streamKey, stream);
@@ -1152,7 +1160,7 @@ public class FirehoseService implements ResourceProvider {
             String bucket = resolveBucket(stream);
             S3Destination s3 = stream.s3Destination();
             List<byte[]> records = toFlush;
-            if (s3 != null && s3.isProcessingEnabled()) {
+            if (s3 != null && stream.isProcessingEnabled()) {
                 ensureBucket(bucket, stream);
                 FirehoseLambdaTransformer.Outcome transformed =
                         lambdaTransformer.transform(stream, bucket, records, clock.instant());
@@ -1160,6 +1168,10 @@ public class FirehoseService implements ResourceProvider {
                         records.size(), streamName, transformed.droppedRecords(), transformed.failedRecords());
                 records = transformed.records();
                 if (records.isEmpty()) {
+                    if (isRedshiftStream(stream)) {
+                        RedshiftDestination redshift = stream.getDestinations().get(0).getRedshiftDestinationDescription();
+                        writeRedshiftBackup(stream, redshift, toFlush);
+                    }
                     // Nothing survived the transform. The batch is accounted for, dropped
                     // records deliberately leaving no trace and failed ones already in the
                     // error output, so the source may advance past it.
@@ -1184,28 +1196,14 @@ public class FirehoseService implements ResourceProvider {
 
             ensureBucket(bucket, stream);
 
-            // Records are arbitrary bytes, so they are concatenated as bytes: routing
-            // them through a String would corrupt any payload that is not valid UTF-8.
-            // The appended newline is a deliberate deviation kept from before this
-            // method compressed anything: real AWS inserts no separator at all
-            // (verified: three "abc" records arrive as the 9 bytes "abcabcabc").
-            // See the deviation noted in docs/services/firehose.md.
-            ByteArrayOutputStream payload = new ByteArrayOutputStream();
-            for (byte[] data : records) {
-                payload.writeBytes(data);
-                if (data.length > 0 && data[data.length - 1] != '\n') {
-                    payload.write('\n');
-                }
-            }
-
-            byte[] rawPayload = payload.toByteArray();
+            byte[] rawPayload = concatenateRecords(records);
             byte[] body = compression.compress(rawPayload);
             s3Service.putObject(bucket, key, body, "application/octet-stream", Map.of(),
                     new PutObjectOptions().withContentEncoding(compression.contentEncoding()));
             LOG.infov("Flushed {0} records from stream {1} to s3://{2}/{3} ({4})",
                     records.size(), streamName, bucket, key, compression.wireValue());
             if (isRedshiftStream(stream)) {
-                deliverRedshiftBatch(streamName, stream, bucket, key, rawPayload, checkpoint);
+                deliverRedshiftBatch(streamName, stream, bucket, key, toFlush, checkpoint);
                 return;
             }
             // Only now: the records these iterators were read past are durable.
@@ -1223,15 +1221,12 @@ public class FirehoseService implements ResourceProvider {
      * backup write or checkpoint write is logged instead, and the load itself retries from the queue.
      */
     private void deliverRedshiftBatch(String streamName, DeliveryStreamDescription stream,
-                                     String bucket, String key, byte[] rawPayload,
+                                     String bucket, String key, List<byte[]> toFlush,
                                      Map<String, String> checkpoint) {
         RedshiftDestination redshift = stream.getDestinations().get(0).getRedshiftDestinationDescription();
-        try {
-            writeRedshiftBackup(stream, redshift, rawPayload);
-        } catch (IOException | RuntimeException e) {
-            LOG.errorv(e, "Backup write for stream {0} failed; the batch is staged in S3 and loads normally but "
-                    + "has no backup copy: {1}", streamName, describe(e));
-        }
+        writeRedshiftBackupSafely(streamName, stream, redshift, toFlush,
+                "Backup write for stream {0} failed; the batch is staged in S3 and loads normally but "
+                        + "has no backup copy: {1}");
         try {
             commitSourceIterators(streamName, checkpoint);
         } catch (RuntimeException e) {
@@ -1393,13 +1388,24 @@ public class FirehoseService implements ResourceProvider {
         return e.getMessage() != null ? e.getMessage() : e.toString();
     }
 
-    /** Writes the raw batch to the backup location under that location's own prefix, compression and bucket. */
+    private void writeRedshiftBackupSafely(String streamName, DeliveryStreamDescription stream,
+                                          RedshiftDestination redshift, List<byte[]> sourceRecords,
+                                          String failureMessage) {
+        try {
+            writeRedshiftBackup(stream, redshift, sourceRecords);
+        } catch (IOException | RuntimeException e) {
+            LOG.errorv(e, failureMessage, streamName, describe(e));
+        }
+    }
+
+    /** Writes the untransformed source records to the backup location under that location's own prefix, compression and bucket. */
     private void writeRedshiftBackup(DeliveryStreamDescription stream, RedshiftDestination redshift,
-                                     byte[] rawPayload) throws IOException {
+                                     List<byte[]> sourceRecords) throws IOException {
         S3Destination backup = redshift.getS3Backup();
         if (!"Enabled".equals(redshift.getS3BackupMode()) || backup == null || backup.bucketName() == null) {
             return;
         }
+        byte[] rawPayload = concatenateRecords(sourceRecords);
         FirehoseCompression compression = FirehoseCompression.forDelivery(backup.getCompressionFormat());
         String backupKey = S3ObjectKeyResolver.resolveKey(backup, stream.getDeliveryStreamName(),
                 stream.getVersionId(), clock.instant(), compression);
@@ -1407,6 +1413,24 @@ public class FirehoseService implements ResourceProvider {
         s3Service.putObject(backup.bucketName(), backupKey, compression.compress(rawPayload),
                 "application/octet-stream", Map.of(),
                 new PutObjectOptions().withContentEncoding(compression.contentEncoding()));
+    }
+
+    /**
+     * Records are arbitrary bytes, so they are concatenated as bytes: routing them through a String
+     * would corrupt any payload that is not valid UTF-8. The appended newline is a deliberate deviation
+     * kept from before this method compressed anything: real AWS inserts no separator at all
+     * (verified: three "abc" records arrive as the 9 bytes "abcabcabc"). See the deviation noted in
+     * docs/services/firehose.md.
+     */
+    private static byte[] concatenateRecords(List<byte[]> records) {
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        for (byte[] data : records) {
+            payload.writeBytes(data);
+            if (data.length > 0 && data[data.length - 1] != '\n') {
+                payload.write('\n');
+            }
+        }
+        return payload.toByteArray();
     }
 
     private static boolean isRedshiftStream(DeliveryStreamDescription stream) {

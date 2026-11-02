@@ -305,6 +305,22 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aStreamingStepRunsItsCommandOnTheClustersStorage() {
+        EmrStep streaming = sparkStep("Streaming program", "CONTINUE");
+        List<String> args = List.of("hadoop-streaming", "-files", "s3://bucket/mapper.py", "-mapper", "mapper.py",
+                "-reducer", "aggregate", "-input", "s3://bucket/input/", "-output", "s3://bucket/output/");
+        streaming.setArgs(new ArrayList<>(args));
+        EmrCluster cluster = service.runJobFlow(cluster("streaming", true, streaming), REGION);
+
+        fixture.runStepThread();
+
+        assertEquals("COMPLETED", service.describeStep(cluster.getId(), cluster.getSteps().get(0).getId()).getState());
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(args, job.command());
+        assertEquals(new SparkJobRunner.Storage(cluster.getId() + "-home", cluster.getId() + "-mnt"), job.storage());
+    }
+
+    @Test
     void anS3DistCpStepRunsFlocisS3DistCpOnTheClustersStorage() {
         EmrStep copy = sparkStep("copy", "CONTINUE");
         copy.setArgs(new ArrayList<>(List.of("s3-dist-cp", "--src=s3://bucket/logs/", "--dest=hdfs:///output")));
