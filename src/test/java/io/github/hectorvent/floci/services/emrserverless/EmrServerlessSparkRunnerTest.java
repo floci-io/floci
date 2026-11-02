@@ -107,12 +107,26 @@ class EmrServerlessSparkRunnerTest {
                 "--conf", "spark.hadoop.fs.s3.impl=org.apache.hadoop.fs.s3a.S3AFileSystem",
                 "--conf", "spark.hadoop.fs.AbstractFileSystem.s3.impl=org.apache.hadoop.fs.s3a.S3A",
                 "--conf", "spark.hadoop.aws.glue.endpoint=http://floci:4566",
+                "--conf", "spark.hadoop.hive.metastore.glue.catalogid=123456789012",
                 "--conf", "spark.hadoop.aws.region=eu-west-1",
                 "--conf", "spark.executor.cores=4",
                 "--conf", "spark.sql.shuffle.partitions=8",
                 "--conf", "spark.executor.cores=2",
                 "--py-files", "s3://bucket/jobs/lib.zip",
                 "s3://bucket/jobs/report.py", "s3://bucket/input/", "s3://bucket/output/"), arguments);
+    }
+
+    @Test
+    void theGlueCatalogIsTheJobsAccountUnlessTheJobNamesOneInAnotherAccount() {
+        String own = "spark.hadoop.hive.metastore.glue.catalogid=123456789012";
+        String other = "spark.hadoop.hive.metastore.glue.catalogid=111122223333";
+
+        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(job(List.of("s3://bucket/jobs/app.jar"),
+                Map.of("spark.hadoop.hive.metastore.glue.catalogid", "111122223333")), ENDPOINT);
+
+        // The job's own setting comes later, so it wins.
+        assertTrue(arguments.contains(own));
+        assertTrue(arguments.indexOf(other) > arguments.indexOf(own));
     }
 
     @Test
@@ -415,7 +429,7 @@ class EmrServerlessSparkRunnerTest {
         verify(spec).withNamedVolume(STORAGE.home(), "/home/hadoop");
         verify(spec).withNamedVolume(STORAGE.mnt(), "/mnt");
         // After Floci's S3 settings, before the cluster's spark-defaults, which win.
-        assertEquals("spark.hadoop.aws.region=eu-west-1", arguments.get(17));
+        assertEquals("spark.hadoop.aws.region=eu-west-1", arguments.get(19));
         assertEquals(List.of(
                 "--conf", "spark.hadoop.fs.defaultFS=hdfs:///",
                 "--conf", "spark.hadoop.fs.hdfs.impl=org.apache.hadoop.fs.viewfs.ViewFileSystemOverloadScheme",
@@ -423,7 +437,7 @@ class EmrServerlessSparkRunnerTest {
                 "--conf", "spark.sql.streaming.checkpointFileManagerClass="
                         + "org.apache.spark.sql.execution.streaming.FileSystemBasedCheckpointFileManager",
                 "--conf", "spark.hadoop.fs.defaultFS=file:///",
-                "s3://bucket/jobs/report.py"), arguments.subList(18, arguments.size()));
+                "s3://bucket/jobs/report.py"), arguments.subList(20, arguments.size()));
     }
 
     @Test
@@ -573,6 +587,7 @@ class EmrServerlessSparkRunnerTest {
                 "<property><name>fs.AbstractFileSystem.s3.impl</name><value>org.apache.hadoop.fs.s3a.S3A</value>"
                         + "</property>",
                 "<property><name>aws.glue.endpoint</name><value>http://floci:4566</value></property>",
+                "<property><name>hive.metastore.glue.catalogid</name><value>123456789012</value></property>",
                 "<property><name>aws.region</name><value>eu-west-1</value></property>",
                 "<property><name>fs.defaultFS</name><value>hdfs:///</value></property>",
                 "<property><name>fs.hdfs.impl</name><value>org.apache.hadoop.fs.viewfs.ViewFileSystemOverloadScheme"
@@ -805,6 +820,7 @@ class EmrServerlessSparkRunnerTest {
                 "spark.hadoop.fs.s3.impl org.apache.hadoop.fs.s3a.S3AFileSystem",
                 "spark.hadoop.fs.AbstractFileSystem.s3.impl org.apache.hadoop.fs.s3a.S3A",
                 "spark.hadoop.aws.glue.endpoint http://floci:4566",
+                "spark.hadoop.hive.metastore.glue.catalogid 123456789012",
                 "spark.hadoop.aws.region eu-west-1",
                 "spark.sql.shuffle.partitions 8"),
                 EmrServerlessSparkRunner.sparkDefaultsFile(

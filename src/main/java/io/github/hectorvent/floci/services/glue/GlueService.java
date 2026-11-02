@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.glue.model.Classifier;
@@ -433,6 +434,7 @@ public class GlueService {
     }
 
     public void createTable(String databaseName, Table table) {
+        requireValidSortColumns(sortColumnViolations("tableInput", table.getStorageDescriptor()));
         Database database = getDatabase(databaseName);
         String key = tableKey(databaseName, table.getName());
         if (tableStore.get(key).isPresent()) {
@@ -658,6 +660,7 @@ public class GlueService {
     }
 
     public synchronized void updateTable(String databaseName, Table table, String versionId, boolean skipArchive) {
+        requireValidSortColumns(sortColumnViolations("tableInput", table.getStorageDescriptor()));
         Database database = getDatabase(databaseName);
         String key = tableKey(databaseName, table.getName());
         Table existing = tableStore.get(key)
@@ -691,7 +694,7 @@ public class GlueService {
                 .toList());
         return versions.stream()
                 .map(table -> Map.<String, Object>of(
-                        "Table", withResolvedSchemaReference(table),
+                        "Table", withReadDefaults(withResolvedSchemaReference(table)),
                         "VersionId", table.getVersionId()))
                 .toList();
     }
@@ -708,7 +711,7 @@ public class GlueService {
                     .map(this::withResolvedSchemaReference)
                     .orElseThrow(() -> new AwsException("EntityNotFoundException", "Version not found.", 400));
         }
-        return Map.of("Table", version, "VersionId", version.getVersionId());
+        return Map.of("Table", withReadDefaults(version), "VersionId", version.getVersionId());
     }
 
     /**
@@ -844,6 +847,7 @@ public class GlueService {
     }
 
     public void createPartition(String databaseName, String tableName, Partition partition) {
+        requireValidSortColumns(sortColumnViolations("partitionInput", partition.getStorageDescriptor()));
         Table table = getTable(databaseName, tableName);
         String key = partitionKey(databaseName, tableName, partition.getValues());
         partition.setDatabaseName(table.getDatabaseName());
@@ -858,6 +862,12 @@ public class GlueService {
             String databaseName,
             String tableName,
             List<Partition> partitions) {
+        List<String> violations = new ArrayList<>();
+        for (int index = 0; index < partitions.size(); index++) {
+            violations.addAll(sortColumnViolations("partitionInputList." + (index + 1) + ".member",
+                    descriptorOf(partitions.get(index))));
+        }
+        requireValidSortColumns(violations);
         getTable(databaseName, tableName);
         List<BatchCreatePartitionError> errors = new ArrayList<>();
         for (Partition partition : partitions) {
@@ -896,6 +906,13 @@ public class GlueService {
             String databaseName,
             String tableName,
             List<BatchUpdatePartitionEntry> entries) {
+        List<String> violations = new ArrayList<>();
+        for (int index = 0; index < entries.size(); index++) {
+            BatchUpdatePartitionEntry entry = entries.get(index);
+            violations.addAll(sortColumnViolations("entries." + (index + 1) + ".member.partitionInput",
+                    entry == null ? null : descriptorOf(entry.partitionInput())));
+        }
+        requireValidSortColumns(violations);
         Table table = getTable(databaseName, tableName);
         List<BatchUpdatePartitionError> errors = new ArrayList<>();
         for (BatchUpdatePartitionEntry entry : entries) {
@@ -916,13 +933,56 @@ public class GlueService {
     }
 
     public List<Partition> getPartitions(String databaseName, String tableName, String expression) {
+        return getPartitions(databaseName, tableName, expression, null);
+    }
+
+    /**
+     * A segment is "a non-overlapping region of a table's partitions, allowing multiple requests to be run in
+     * parallel", so each partition falls in the one segment its values hash to, which stays the same while other
+     * partitions come and go between those requests, and a SegmentNumber past the last segment holds none. The
+     * Glue Data Catalog client for Hive and Spark asks for five.
+     */
+    public List<Partition> getPartitions(String databaseName, String tableName, String expression, Segment segment) {
+        validateSegment(segment);
         Table table = getTable(databaseName, tableName);
         String prefix = tableKey(databaseName, tableName) + ":";
         return partitionStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(partition -> segment == null || Math.floorMod(Objects.hashCode(partition.getValues()),
+                        segment.totalSegments()) == segment.segmentNumber())
                 .filter(partition -> matchesPartitionExpression(table, partition, expression))
                 .sorted(GlueService::comparePartitionValues)
                 .toList();
     }
+
+    private static void validateSegment(Segment segment) {
+        if (segment == null) {
+            return;
+        }
+        List<String> violations = new ArrayList<>();
+        if (segment.segmentNumber() == null) {
+            violations.add(SmithyValidationErrors.notNull("segment.segmentNumber"));
+        } else if (segment.segmentNumber() < 0) {
+            violations.add(SmithyValidationErrors.valueTooSmall(
+                    "segment.segmentNumber", segment.segmentNumber().toString(), 0));
+        }
+        if (segment.totalSegments() == null) {
+            violations.add(SmithyValidationErrors.notNull("segment.totalSegments"));
+        } else {
+            String violation = SmithyValidationErrors.outOfRange(
+                    "segment.totalSegments", segment.totalSegments(), 1, 10);
+            if (violation != null) {
+                violations.add(violation);
+            }
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
+    }
+
+    @RegisterForReflection
+    public record Segment(
+            @JsonProperty("SegmentNumber") Integer segmentNumber,
+            @JsonProperty("TotalSegments") Integer totalSegments) {}
 
     /**
      * Registers a partition index on a table.
@@ -1121,6 +1181,7 @@ public class GlueService {
     }
 
     public void updatePartition(String databaseName, String tableName, List<String> partitionValues, Partition partition) {
+        requireValidSortColumns(sortColumnViolations("partitionInput", partition.getStorageDescriptor()));
         Table table = getTable(databaseName, tableName);
         String key = partitionKey(databaseName, tableName, partitionValues);
         Partition existing = partitionStore.get(key)
@@ -1674,6 +1735,7 @@ public class GlueService {
         copy.setCreateTime(source.getCreateTime());
         copy.setUpdateTime(source.getUpdateTime());
         copy.setLastAccessTime(source.getLastAccessTime());
+        copy.setRetention(source.getRetention());
         copy.setPartitionKeys(copyColumns(source.getPartitionKeys()));
         copy.setStorageDescriptor(copyStorageDescriptor(source.getStorageDescriptor()));
         copy.setTableType(source.getTableType());
@@ -1682,6 +1744,98 @@ public class GlueService {
         copy.setVersionId(source.getVersionId());
         copy.setParameters(copyMap(source.getParameters()));
         return copy;
+    }
+
+    /**
+     * Glue reads back a table's Retention, and a storage descriptor's Compressed, NumberOfBuckets, SortColumns
+     * and StoredAsSubDirectories, as 0, false, 0, an empty list and false when the writer left them out, and the
+     * Glue Data Catalog client for Hive and Spark unboxes them without a null check, as it does
+     * IsRegisteredWithLakeFormation, which is false: Floci ties no table to a location registered with Lake
+     * Formation. So every table and partition a catalog action returns carries them, while the stored record keeps
+     * its nulls, which Spectrum reads as a partition taking its table's value.
+     */
+    static Table withReadDefaults(Table table) {
+        Table copy = copyTable(table);
+        if (copy.getRetention() == null) {
+            copy.setRetention(0);
+        }
+        copy.setRegisteredWithLakeFormation(false);
+        fillReadDefaults(copy.getStorageDescriptor());
+        return copy;
+    }
+
+    static Partition withReadDefaults(Partition partition) {
+        Partition copy = new Partition();
+        copy.setValues(copyStrings(partition.getValues()));
+        copy.setDatabaseName(partition.getDatabaseName());
+        copy.setTableName(partition.getTableName());
+        copy.setCreationTime(partition.getCreationTime());
+        copy.setLastAccessTime(partition.getLastAccessTime());
+        copy.setStorageDescriptor(copyStorageDescriptor(partition.getStorageDescriptor()));
+        copy.setParameters(copyMap(partition.getParameters()));
+        fillReadDefaults(copy.getStorageDescriptor());
+        return copy;
+    }
+
+    /**
+     * An Order's Column and SortOrder are required, and SortOrder is 0 or 1 (the model's IntegerFlag); the Glue Data
+     * Catalog client unboxes SortOrder on read. So a sort column breaking them fails the whole request, a batch's
+     * included, before anything is stored.
+     */
+    private static List<String> sortColumnViolations(String path, StorageDescriptor descriptor) {
+        List<String> violations = new ArrayList<>();
+        if (descriptor == null || descriptor.getSortColumns() == null) {
+            return violations;
+        }
+        List<StorageDescriptor.Order> orders = descriptor.getSortColumns();
+        for (int index = 0; index < orders.size(); index++) {
+            String member = path + ".storageDescriptor.sortColumns." + (index + 1) + ".member";
+            StorageDescriptor.Order order = orders.get(index);
+            if (order == null) {
+                violations.add(SmithyValidationErrors.notNull(member));
+                continue;
+            }
+            if (order.getColumn() == null) {
+                violations.add(SmithyValidationErrors.notNull(member + ".column"));
+            }
+            if (order.getSortOrder() == null) {
+                violations.add(SmithyValidationErrors.notNull(member + ".sortOrder"));
+            } else {
+                String violation = SmithyValidationErrors.outOfRange(member + ".sortOrder", order.getSortOrder(), 0, 1);
+                if (violation != null) {
+                    violations.add(violation);
+                }
+            }
+        }
+        return violations;
+    }
+
+    private static StorageDescriptor descriptorOf(Partition partition) {
+        return partition == null ? null : partition.getStorageDescriptor();
+    }
+
+    private static void requireValidSortColumns(List<String> violations) {
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
+    }
+
+    private static void fillReadDefaults(StorageDescriptor descriptor) {
+        if (descriptor == null) {
+            return;
+        }
+        if (descriptor.getCompressed() == null) {
+            descriptor.setCompressed(false);
+        }
+        if (descriptor.getNumberOfBuckets() == null) {
+            descriptor.setNumberOfBuckets(0);
+        }
+        if (descriptor.getSortColumns() == null) {
+            descriptor.setSortColumns(new ArrayList<>());
+        }
+        if (descriptor.getStoredAsSubDirectories() == null) {
+            descriptor.setStoredAsSubDirectories(false);
+        }
     }
 
     private static String nextVersionId(String versionId) {
@@ -1707,13 +1861,43 @@ public class GlueService {
         StorageDescriptor copy = new StorageDescriptor();
         copy.setColumns(copyColumns(source.getColumns()));
         copy.setLocation(source.getLocation());
+        copy.setAdditionalLocations(copyStrings(source.getAdditionalLocations()));
         copy.setInputFormat(source.getInputFormat());
         copy.setOutputFormat(source.getOutputFormat());
         copy.setCompressed(source.getCompressed());
         copy.setNumberOfBuckets(source.getNumberOfBuckets());
         copy.setSerdeInfo(copySerDeInfo(source.getSerdeInfo()));
+        copy.setBucketColumns(copyStrings(source.getBucketColumns()));
+        copy.setSortColumns(copySortColumns(source.getSortColumns()));
         copy.setParameters(copyMap(source.getParameters()));
+        copy.setSkewedInfo(copySkewedInfo(source.getSkewedInfo()));
+        copy.setStoredAsSubDirectories(source.getStoredAsSubDirectories());
         copy.setSchemaReference(copySchemaReference(source.getSchemaReference()));
+        return copy;
+    }
+
+    private static List<StorageDescriptor.Order> copySortColumns(List<StorageDescriptor.Order> source) {
+        if (source == null) {
+            return null;
+        }
+        List<StorageDescriptor.Order> copy = new ArrayList<>(source.size());
+        for (StorageDescriptor.Order order : source) {
+            StorageDescriptor.Order orderCopy = new StorageDescriptor.Order();
+            orderCopy.setColumn(order.getColumn());
+            orderCopy.setSortOrder(order.getSortOrder());
+            copy.add(orderCopy);
+        }
+        return copy;
+    }
+
+    private static StorageDescriptor.SkewedInfo copySkewedInfo(StorageDescriptor.SkewedInfo source) {
+        if (source == null) {
+            return null;
+        }
+        StorageDescriptor.SkewedInfo copy = new StorageDescriptor.SkewedInfo();
+        copy.setSkewedColumnNames(copyStrings(source.getSkewedColumnNames()));
+        copy.setSkewedColumnValues(copyStrings(source.getSkewedColumnValues()));
+        copy.setSkewedColumnValueLocationMaps(copyMap(source.getSkewedColumnValueLocationMaps()));
         return copy;
     }
 
@@ -1761,6 +1945,10 @@ public class GlueService {
 
     private static Map<String, String> copyMap(Map<String, String> source) {
         return source != null ? new LinkedHashMap<>(source) : null;
+    }
+
+    private static List<String> copyStrings(List<String> source) {
+        return source != null ? new ArrayList<>(source) : null;
     }
 
     private void validateRequired(String value, String fieldName) {
