@@ -158,6 +158,32 @@ class ControlTowerServiceTest {
     }
 
     @Test
+    void getLandingZoneAcceptsLandingZoneIdAsIdentifier() throws Exception {
+        LandingZone landingZone = service.getLandingZone(ACCOUNT, REGION,
+                objectMapper.readTree("{\"landingZoneIdentifier\":\"FLOCISEEDEDLZ1\"}"));
+
+        assertEquals(SEEDED_ARN, landingZone.getArn());
+    }
+
+    @Test
+    void getLandingZoneRejectsUnknownLandingZoneId() {
+        AwsException unknown = assertThrows(AwsException.class,
+                () -> service.getLandingZone(ACCOUNT, REGION,
+                        objectMapper.readTree("{\"landingZoneIdentifier\":\"other\"}")));
+        assertEquals("ResourceNotFoundException", unknown.getErrorCode());
+    }
+
+    @Test
+    void deleteLandingZoneAcceptsLandingZoneIdAsIdentifier() throws Exception {
+        service.getOrSeedLandingZone(ACCOUNT, REGION);
+
+        String opId = service.deleteLandingZone(ACCOUNT, REGION,
+                objectMapper.readTree("{\"landingZoneIdentifier\":\"FLOCISEEDEDLZ1\"}"));
+
+        assertEquals("DELETE", service.getOperationType(ACCOUNT, REGION, opId));
+    }
+
+    @Test
     void getLandingZoneReturnsSeededLandingZoneForMatchingIdentifier() throws Exception {
         LandingZone landingZone = service.getLandingZone(ACCOUNT, REGION,
                 objectMapper.readTree("{\"landingZoneIdentifier\":\"" + SEEDED_ARN + "\"}"));
