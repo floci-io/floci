@@ -30,6 +30,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.github.hectorvent.floci.testing.Ec2Requests.ec2;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
@@ -523,9 +524,8 @@ public class RedshiftOperationsTest {
             .body(containsString("<ClusterIdentifier>cluster-restored</ClusterIdentifier>"));
     }
 
-    private String ec2Id(String path, String... params) {
-        RequestSpecification req = given().contentType("application/x-www-form-urlencoded")
-                .header("Authorization", AUTH_HEADER.replace("/redshift/", "/ec2/"));
+    private String ec2Id(String path, String action, String... params) {
+        RequestSpecification req = ec2(action, "000000000000", "us-east-1");
         for (int i = 0; i < params.length; i += 2) {
             req = req.formParam(params[i], params[i + 1]);
         }
@@ -540,8 +540,8 @@ public class RedshiftOperationsTest {
     @Test
     @Order(4)
     void clusterSubnetGroupKeepsTagsVpcAndSubnetDetail() {
-        String vpc = ec2Id("CreateVpcResponse.vpc.vpcId", "Action", "CreateVpc", "CidrBlock", "10.77.0.0/16");
-        String subnet = ec2Id("CreateSubnetResponse.subnet.subnetId", "Action", "CreateSubnet", "VpcId", vpc,
+        String vpc = ec2Id("CreateVpcResponse.vpc.vpcId", "CreateVpc", "CidrBlock", "10.77.0.0/16");
+        String subnet = ec2Id("CreateSubnetResponse.subnet.subnetId", "CreateSubnet", "VpcId", vpc,
                 "CidrBlock", "10.77.1.0/24", "AvailabilityZone", "us-east-1b");
 
         assertEquals(200, redshift("CreateClusterSubnetGroup", "ClusterSubnetGroupName", "sng-tagged",
@@ -564,8 +564,8 @@ public class RedshiftOperationsTest {
         assertEquals("dev", tagged.getString("TaggedResource.Tag.Value"));
 
         // Modify keeps tags and recomputes the VPC from the new subnet list.
-        String vpc2 = ec2Id("CreateVpcResponse.vpc.vpcId", "Action", "CreateVpc", "CidrBlock", "10.78.0.0/16");
-        String subnet2 = ec2Id("CreateSubnetResponse.subnet.subnetId", "Action", "CreateSubnet", "VpcId", vpc2,
+        String vpc2 = ec2Id("CreateVpcResponse.vpc.vpcId", "CreateVpc", "CidrBlock", "10.78.0.0/16");
+        String subnet2 = ec2Id("CreateSubnetResponse.subnet.subnetId", "CreateSubnet", "VpcId", vpc2,
                 "CidrBlock", "10.78.1.0/24", "AvailabilityZone", "us-east-1c");
         assertEquals(200, redshift("ModifyClusterSubnetGroup", "ClusterSubnetGroupName", "sng-tagged",
                 "SubnetIds.SubnetIdentifier.1", subnet2).statusCode());
