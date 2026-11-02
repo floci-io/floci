@@ -808,6 +808,26 @@ class RequestResourcesTest {
                 json("{\"names\":[\"" + project + "a\",\"" + project + "b\"]}")));
     }
 
+    /**
+     * A member two resources share names both: Redshift's {@code SnapshotClusterIdentifier} fills the cluster and the
+     * snapshot's cluster, the snapshot's name open when the request gives none. GetClusterCredentials' database is
+     * named only when its {@code DbName} is given, though {@code ClusterIdentifier} fills its cluster.
+     */
+    @Test
+    void aMemberTwoResourcesShareNamesBoth() {
+        String redshift = "arn:aws:redshift:us-east-1:000000000000:";
+        assertEquals(List.of(redshift + "cluster:prod", redshift + "snapshot:prod/backup-1"),
+                of("redshift:DeleteClusterSnapshot",
+                        form("Action=DeleteClusterSnapshot&SnapshotClusterIdentifier=prod&SnapshotIdentifier=backup-1")));
+        assertEquals(List.of(redshift + "cluster:prod", redshift + "snapshot:prod/*"),
+                of("redshift:DeleteClusterSnapshot", form("Action=DeleteClusterSnapshot&SnapshotClusterIdentifier=prod")));
+        assertEquals(List.of(redshift + "dbuser:prod/analyst"), of("redshift:GetClusterCredentials",
+                form("Action=GetClusterCredentials&ClusterIdentifier=prod&DbUser=analyst")));
+        assertEquals(List.of(redshift + "dbname:prod/dev", redshift + "dbuser:prod/analyst"),
+                of("redshift:GetClusterCredentials",
+                        form("Action=GetClusterCredentials&ClusterIdentifier=prod&DbUser=analyst&DbName=dev")));
+    }
+
     @Test
     void aRequestNamingNoResourceOrOfANamespaceTheTableDoesNotReadIsCheckedOnStar() {
         assertEquals(List.of(), of("ecr:DescribeRepositories", json("{}")));

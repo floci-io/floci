@@ -1716,7 +1716,7 @@ Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazo
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
 AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator, Amazon
-Timestream for InfluxDB, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
+Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
 Amazon Rekognition, IAM Identity Center, Amazon OpenSearch Service and IAM Access Analyzer they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
@@ -1781,7 +1781,14 @@ Cost Explorer's `GetAnomalyMonitors` and `GetAnomalySubscriptions` are checked o
 `MonitorArnList` or `SubscriptionArnList` gives, and Timestream for InfluxDB's `RebootDbCluster` on the
 cluster and on each member instance its `instanceIds` names. Global
 Accelerator's `ListCustomRoutingPortMappings` is checked on its accelerator alone, not on the
-endpoint group its `EndpointGroupArn` gives, whose ARN extends the accelerator's. An EventBridge rule is on the event bus
+endpoint group its `EndpointGroupArn` gives, whose ARN extends the accelerator's. Redshift's
+`GetClusterCredentials` is checked on the `dbuser` its `ClusterIdentifier` and `DbUser` name, and on the
+`dbname` only when its `DbName` names one, so a grant on the `dbuser` alone allows it.
+`RestoreFromClusterSnapshot` is checked on the new cluster its `ClusterIdentifier` names and on the snapshot
+of the cluster its `SnapshotClusterIdentifier` names, `snapshot:*/<name>` when it names none.
+Redshift's `CreateTags`, `DeleteTags` and `DescribeTags` are checked on the resource whose ARN their
+`ResourceName` gives. Redshift members that hold another kind of ARN, such as an IAM role's, an SNS
+topic's or an ACM certificate's, are not read as a Redshift resource. An EventBridge rule is on the event bus
 its request's `EventBusName` names, by name or by ARN, and on the default bus when it names none
 or gives a null, whose rules are `rule/<name>`, with no bus; a bus ARN of another account, the
 default bus's included, names that account's rule, checked as given and as the caller's own, which
@@ -2736,6 +2743,13 @@ floci populates:
   The actions and request members come from `lambda-web-condition-keys.json`, which
   `tools/aws/regen_lambda_web_condition_keys.py` generates from the Service Reference and pinned
   botocore. Regenerate with `make lambda-web-condition-keys-sync`.
+- `redshift:DbUser`: the database user a `GetClusterCredentials` request names in `DbUser`, and the
+  same value for the `redshift:CreateClusterUser` check its `AutoCreate` adds, as the value is given,
+  so a policy can scope both actions to `dbuser:<cluster>/${redshift:DbUser}`. The actions and request
+  members come from `redshift-condition-keys.json`, which `tools/aws/regen_redshift_condition_keys.py`
+  generates from the Service Reference and pinned botocore. Regenerate with
+  `make redshift-condition-keys-sync`. `redshift:DbName` and `redshift:DurationSeconds` are not
+  populated yet.
 
 **Any other condition key is absent from the request context.** A positive scalar operator
 without `IfExists` on an absent key makes the whole statement *not apply*: it neither matches nor

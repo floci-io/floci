@@ -156,6 +156,7 @@ public class IamConditionContextResolver {
             case "iam" -> iamConditionContext(action, ctx);
             case "logs" -> logsConditionContext(action, ctx);
             case "lambda" -> lambdaConditionContext(action, ctx);
+            case "redshift" -> redshiftConditionContext(action, ctx);
             default -> null;
         };
     }
@@ -265,6 +266,18 @@ public class IamConditionContextResolver {
             case "UserName" -> iamService.get().findUser(account, name).map(IamUser::getPermissionsBoundaryArn).orElse(null);
             default -> throw new IllegalStateException("Unknown IAM condition key target: " + target);
         };
+    }
+
+    /** The {@code redshift:} keys a Redshift request carries in its own members, such as its DbUser. */
+    private Map<String, List<String>> redshiftConditionContext(String action, ContainerRequestContext ctx) {
+        Map<String, String> members = RedshiftConditionKeys.members(action);
+        if (members.isEmpty()) {
+            return null;
+        }
+        Map<String, String> form = formParameters(ctx);
+        Map<String, List<String>> conditions = new LinkedHashMap<>();
+        members.forEach((key, member) -> putIfPresent(conditions, key, form.get(member)));
+        return conditions.isEmpty() ? null : conditions;
     }
 
     public static Map<String, List<String>> withGlobalContext(Map<String, List<String>> serviceContext,

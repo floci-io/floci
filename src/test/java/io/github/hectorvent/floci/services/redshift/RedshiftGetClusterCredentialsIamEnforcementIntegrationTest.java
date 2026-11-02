@@ -117,14 +117,74 @@ class RedshiftGetClusterCredentialsIamEnforcementIntegrationTest {
         assertClusterNotFound(credentials(accessKeyId, cluster).formParam("AutoCreate", "false"));
     }
 
+    /** The Management Guide's policy grants GetClusterCredentials on one {@code dbuser} alone. */
+    @Test
+    void getClusterCredentials_grantOnTheDbUser_passesTheIamCheckForThatUserOnly() {
+        String cluster = uniqueName("gcc-dbuser");
+        String user = uniqueName("gcc-dbuser");
+        String accessKeyId = createUser(user);
+        userPolicy(user, allow("redshift:GetClusterCredentials", ARN_PREFIX + "dbuser:" + cluster + "/analyst"));
+
+        assertClusterNotFound(credentials(accessKeyId, cluster));
+        assertDenied(credentials(accessKeyId, cluster, "intruder"));
+    }
+
+    /** "If the DbName parameter is specified, the IAM policy must allow access to the resource dbname". */
+    @Test
+    void getClusterCredentials_dbName_needsAGrantOnTheDatabase() {
+        String cluster = uniqueName("gcc-dbname");
+        String user = uniqueName("gcc-dbname");
+        String accessKeyId = createUser(user);
+        userPolicy(user, allow("redshift:GetClusterCredentials", ARN_PREFIX + "dbuser:" + cluster + "/analyst"));
+        assertDenied(credentials(accessKeyId, cluster).formParam("DbName", "testdb"));
+
+        userPolicy(user, allow("redshift:GetClusterCredentials", ARN_PREFIX + "dbuser:" + cluster + "/analyst") + ","
+                + allow("redshift:GetClusterCredentials", ARN_PREFIX + "dbname:" + cluster + "/testdb"));
+        assertClusterNotFound(credentials(accessKeyId, cluster).formParam("DbName", "testdb"));
+    }
+
+    /**
+     * The Management Guide's example 8 scopes GetClusterCredentials and CreateClusterUser to
+     * {@code dbuser:<cluster>/${redshift:DbUser}}, the user the request names.
+     */
+    @Test
+    void getClusterCredentials_dbUserPolicyVariable_coversBothActions() {
+        String cluster = uniqueName("gcc-variable");
+        String user = uniqueName("gcc-variable");
+        String accessKeyId = createUser(user);
+        String ownUser = ARN_PREFIX + "dbuser:" + cluster + "/${redshift:DbUser}";
+        userPolicy(user, allow("redshift:GetClusterCredentials", ownUser) + ","
+                + allow("redshift:CreateClusterUser", ownUser));
+
+        assertClusterNotFound(credentials(accessKeyId, cluster).formParam("AutoCreate", "true"));
+    }
+
+    /** A condition on {@code redshift:DbUser} applies to both actions, CreateClusterUser's included. */
+    @Test
+    void getClusterCredentials_dbUserCondition_appliesToCreateClusterUser() {
+        String cluster = uniqueName("gcc-condition");
+        String user = uniqueName("gcc-condition");
+        String accessKeyId = createUser(user);
+        userPolicy(user, allow("redshift:GetClusterCredentials", "*") + ","
+                + "{\"Effect\":\"Allow\",\"Action\":\"redshift:CreateClusterUser\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"redshift:DbUser\":\"analyst\"}}}");
+
+        assertClusterNotFound(credentials(accessKeyId, cluster).formParam("AutoCreate", "true"));
+        assertDenied(credentials(accessKeyId, cluster, "intruder").formParam("AutoCreate", "true"));
+    }
+
     private static RequestSpecification credentials(String accessKeyId, String cluster) {
+        return credentials(accessKeyId, cluster, "analyst");
+    }
+
+    private static RequestSpecification credentials(String accessKeyId, String cluster, String dbUser) {
         return given()
                 .header("Authorization", auth(accessKeyId, "redshift"))
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "GetClusterCredentials")
                 .formParam("Version", "2012-12-01")
                 .formParam("ClusterIdentifier", cluster)
-                .formParam("DbUser", "analyst");
+                .formParam("DbUser", dbUser);
     }
 
     private static void assertDenied(RequestSpecification request) {

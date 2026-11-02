@@ -1033,7 +1033,8 @@ public class RedshiftQueryHandler {
     /**
      * Authorizes the actions GetClusterCredentials needs besides redshift:GetClusterCredentials, which
      * the API reference lists for its options: redshift:JoinGroup on each group in {@code DbGroups},
-     * and redshift:CreateClusterUser on the database user when {@code AutoCreate} is true. It runs
+     * and redshift:CreateClusterUser on the database user when {@code AutoCreate} is true, with that
+     * user as {@code redshift:DbUser}, which the Service Reference lists for CreateClusterUser. It runs
      * before the cluster lookup, so a denied caller learns nothing about the cluster.
      */
     private void authorizeCredentialOptions(String authorizationHeader, String clusterId, String dbUser,
@@ -1048,7 +1049,8 @@ public class RedshiftQueryHandler {
         }
         if (autoCreate) {
             iamEnforcementFilter.authorizeAdditionalResource(authorizationHeader, "redshift:CreateClusterUser",
-                    regionResolver.buildArn("redshift", region, "dbuser:" + clusterId + "/" + dbUser));
+                    regionResolver.buildArn("redshift", region, "dbuser:" + clusterId + "/" + dbUser),
+                    Map.of("redshift:DbUser", List.of(dbUser)));
         }
     }
 

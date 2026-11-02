@@ -117,6 +117,9 @@ jobs:
       - name: Check Lambda Web condition request members
         run: make lambda-web-condition-keys-check
 
+      - name: Check Redshift condition request members
+        run: make redshift-condition-keys-check
+
       - name: Check partitions.json against a fresh generation
         run: make aws-data-check
 
