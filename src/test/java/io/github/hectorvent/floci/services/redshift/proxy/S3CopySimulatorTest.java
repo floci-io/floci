@@ -1698,7 +1698,7 @@ class S3CopySimulatorTest {
         assertEquals(CopyRecordTransformer.ColumnKind.DATE, S3CopySimulator.kindOf("1082"));
         assertEquals(CopyRecordTransformer.ColumnKind.TIMESTAMP, S3CopySimulator.kindOf("1114"));
         assertEquals(CopyRecordTransformer.ColumnKind.TEXT, S3CopySimulator.kindOf("25"));
-        assertEquals(CopyRecordTransformer.ColumnKind.OTHER, S3CopySimulator.kindOf("1042"));
+        assertEquals(CopyRecordTransformer.ColumnKind.CHAR, S3CopySimulator.kindOf("1042"));
         assertEquals(CopyRecordTransformer.ColumnKind.TEXT, S3CopySimulator.kindOf("1043"));
         assertEquals(CopyRecordTransformer.ColumnKind.OTHER, S3CopySimulator.kindOf("1184"));
         assertEquals(CopyRecordTransformer.ColumnKind.OTHER, S3CopySimulator.kindOf("23"));
@@ -1734,6 +1734,24 @@ class S3CopySimulatorTest {
                 List.of(CopyRecordTransformer.ColumnKind.OTHER, CopyRecordTransformer.ColumnKind.DATE), out);
 
         assertEquals("1|2003-03-31\n", copyDataPayload(out.toByteArray()));
+    }
+
+    @Test
+    void streamCopyInput_loadsEmptyNonCharacterAndTemporalFieldsAsNull() throws Exception {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, CopyTemporalFormat.parse("MM/DD/YYYY", false), null, false);
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "people", List.of(), "wh", "p.txt", "|", 0, false, false, null, null,
+                false, false, false, transforms);
+        when(s3.getObject("wh", "p.txt")).thenReturn(new S3Object("wh", "p.txt",
+                "1|\n|03/31/2003\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("p.txt"), s3, null, null);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        S3CopySimulator.streamCopyInput(input, null, null,
+                List.of(CopyRecordTransformer.ColumnKind.OTHER, CopyRecordTransformer.ColumnKind.DATE), out);
+
+        assertEquals("1|\\N\n\\N|2003-03-31\n", copyDataPayload(out.toByteArray()));
     }
 
     @Test
