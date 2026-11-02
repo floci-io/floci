@@ -4,11 +4,13 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceConnectEndpoint;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
@@ -380,5 +382,50 @@ class Ec2InstanceConnectEndpointServiceTest {
                 Map.entry("vpc-id", List.of("vpc-00000000000000000")), Map.entry("bogus", List.of("x")));
         assertEquals("InvalidParameterValue", assertThrows(AwsException.class, () -> service
                 .describeInstanceConnectEndpoints(REGION, List.of(), filters)).getErrorCode());
+    }
+
+    @Test
+    void theEndpointsInterfaceResolvesInDescribeNetworkInterfacesUntilItIsDeleted() {
+        Ec2Service service = newService();
+        String vpcId = service.createVpc(REGION, "10.79.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.79.1.0/24", "us-east-1a").getSubnetId();
+        String otherSubnet = service.createSubnet(REGION, vpcId, "10.79.2.0/24", "us-east-1a").getSubnetId();
+        String group = service.createSecurityGroup(REGION, "eice-sg", "x", vpcId).getGroupId();
+        InstanceConnectEndpoint endpoint = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(group),
+                null, null, List.of(), null);
+        String eniId = endpoint.getNetworkInterfaceIds().get(0);
+
+        NetworkInterface ni = service.describeNetworkInterfaces(REGION, List.of(eniId), Map.of())
+                .networkInterfaces().get(0);
+        assertEquals(eniId, ni.getNetworkInterfaceId());
+        assertEquals(subnetId, ni.getSubnetId());
+        assertEquals(vpcId, ni.getVpcId());
+        assertEquals("us-east-1a", ni.getAvailabilityZone());
+        assertEquals(endpoint.getPrivateIpAddress(), ni.getPrivateIpAddress());
+        assertEquals(List.of(group), ni.getGroups().stream().map(GroupIdentifier::getGroupId).toList());
+        assertEquals(List.of("eice-sg"), ni.getGroups().stream().map(GroupIdentifier::getGroupName).toList());
+        assertTrue(ni.isRequesterManaged());
+        assertEquals("ec2_instance_connect_endpoint", ni.getInterfaceType());
+        assertEquals("EC2 Instance Connect Endpoint " + endpoint.getInstanceConnectEndpointId(), ni.getDescription());
+
+        // Filters see it the way they see any other interface, and only once.
+        assertEquals(List.of(eniId), service.describeNetworkInterfaces(REGION, List.of(),
+                Map.of("subnet-id", List.of(subnetId))).networkInterfaces().stream()
+                .map(NetworkInterface::getNetworkInterfaceId).toList());
+        assertEquals(List.of(eniId), service.describeNetworkInterfaces(REGION, List.of(),
+                Map.of("interface-type", List.of("ec2_instance_connect_endpoint"), "group-id", List.of(group)))
+                .networkInterfaces().stream().map(NetworkInterface::getNetworkInterfaceId).toList());
+        assertTrue(service.describeNetworkInterfaces(REGION, List.of(), Map.of("subnet-id", List.of(otherSubnet)))
+                .networkInterfaces().isEmpty());
+
+        // A tag on the interface is the interface's own and goes with it.
+        service.createTags(REGION, List.of(eniId), List.of(new Tag("Role", "eice")));
+        assertEquals(List.of("Role"), service.describeNetworkInterfaces(REGION, List.of(eniId), Map.of())
+                .networkInterfaces().get(0).getTagSet().stream().map(Tag::getKey).toList());
+
+        service.deleteInstanceConnectEndpoint(REGION, endpoint.getInstanceConnectEndpointId());
+        assertTrue(service.describeTags(REGION, Map.of("resource-id", List.of(eniId))).isEmpty());
+        assertEquals("InvalidNetworkInterfaceID.NotFound", assertThrows(AwsException.class, () -> service
+                .describeNetworkInterfaces(REGION, List.of(eniId), Map.of())).getErrorCode());
     }
 }
