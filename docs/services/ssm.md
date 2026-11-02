@@ -233,6 +233,10 @@ of a version, and KMS `Decrypt` with that context returns the plaintext. With `W
 the plaintext is returned.
 
 !!! note
+    The encryption applies to what the API returns, not to storage: Floci saves each
+    `SecureString` version's plaintext alongside its ciphertext, so the plaintext stays readable in
+    the persisted state files.
+
     A `KeyId` that Floci's KMS cannot use, which AWS would refuse on `PutParameter`, is accepted,
     and such a parameter is returned unencrypted. So is a value over KMS's 4096-byte limit (AWS
     encrypts larger Advanced parameters with envelope encryption, which Floci does not), and a

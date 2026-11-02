@@ -85,11 +85,11 @@ class SsmSecureStringCiphertextIntegrationTest {
         String name = "/ciphertext/" + UUID.randomUUID();
         putSecure(name, "stable", null);
 
-        String first = ssm.getParameter(r -> r.name(name)).parameter().value();
+        Parameter first = ssm.getParameter(r -> r.name(name)).parameter();
         String second = ssm.getParameter(r -> r.name(name)).parameter().value();
 
-        assertNotEquals("stable", first);
-        assertEquals(first, second);
+        assertEquals("stable", plaintextOf(decrypt(first.value(), first.arn())));
+        assertEquals(first.value(), second);
     }
 
     @Test

@@ -386,7 +386,7 @@ public class SsmService implements ResourceProvider {
                     Map.of("PARAMETER_ARN", parameter.getArn()), region);
             return Base64.getEncoder().encodeToString(ciphertext);
         } catch (AwsException e) {
-            LOG.debugv("Storing SecureString {0} without a ciphertext: KMS cannot encrypt under {1}: {2}",
+            LOG.warnv("Storing SecureString {0} without a ciphertext: KMS cannot encrypt under {1}: {2}",
                     parameter.getArn(), parameter.getKeyId(), e.getMessage());
             return null;
         }

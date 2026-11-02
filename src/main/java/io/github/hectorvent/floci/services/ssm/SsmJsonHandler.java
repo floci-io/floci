@@ -312,7 +312,7 @@ public class SsmJsonHandler {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("Name", h.getName());
             node.put("Version", h.getVersion());
-            node.put("Value", withDecryption || h.getEncryptedValue() == null ? h.getValue() : h.getEncryptedValue());
+            node.put("Value", responseValue(withDecryption, h.getValue(), h.getEncryptedValue()));
             node.put("Type", h.getType());
             if (h.getKeyId() != null) {
                 node.put("KeyId", h.getKeyId());
@@ -1315,11 +1315,15 @@ public class SsmJsonHandler {
     }
 
     /** A SecureString read without decryption answers the ciphertext PutParameter stored, as AWS does. */
+    private static String responseValue(boolean withDecryption, String value, String encryptedValue) {
+        return withDecryption || encryptedValue == null ? value : encryptedValue;
+    }
+
     private ObjectNode parameterToNode(Parameter p, boolean withDecryption) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Name", p.getName());
         if (p.getValue() != null) {
-            node.put("Value", withDecryption || p.getEncryptedValue() == null ? p.getValue() : p.getEncryptedValue());
+            node.put("Value", responseValue(withDecryption, p.getValue(), p.getEncryptedValue()));
         }
         node.put("Type", p.getType());
         node.put("Version", p.getVersion());
