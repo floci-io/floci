@@ -73,6 +73,21 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
         manager.release(repositoryContainerId);
     }
 
+    @Override
+    public void registerRepository(String repositoryContainerId) {
+        manager.registerRepository(repositoryContainerId);
+    }
+
+    @Override
+    public void beginUse(String repositoryContainerId) {
+        manager.beginUse(repositoryContainerId);
+    }
+
+    @Override
+    public void endUse(String repositoryContainerId) {
+        manager.endUse(repositoryContainerId);
+    }
+
     /** The public URL a Verdaccio sidecar is told to advertise for one npm repository. */
     public String publicUrl(String domain, String repository) {
         return config.effectiveBaseUrl() + "/codeartifact/npm/" + domain + "/" + repository + "/";
