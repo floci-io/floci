@@ -2210,17 +2210,17 @@ public class LambdaService implements ResourceProvider {
             throw new AwsException("InvalidParameterValueException",
                     "ParallelizationFactor must be an integer", 400);
         }
-        long value = number.longValue();
-        if (value < 1 || value > 10) {
+        // Range-checked before narrowing, so a value beyond long cannot wrap into range.
+        if (d < 1 || d > 10) {
             throw new AwsException("InvalidParameterValueException",
-                    "ParallelizationFactor must be between 1 and 10 (got " + value + ")", 400);
+                    "ParallelizationFactor must be between 1 and 10 (got " + number + ")", 400);
         }
         if (!isStreamSource(eventSourceArn)) {
             throw new AwsException("InvalidParameterValueException",
                     "ParallelizationFactor is only supported for Amazon Kinesis and Amazon DynamoDB Streams event sources",
                     400);
         }
-        return (int) value;
+        return number.intValue();
     }
 
     static boolean isStreamSource(String eventSourceArn) {
@@ -2344,7 +2344,8 @@ public class LambdaService implements ResourceProvider {
             Integer maximumRecordAge = parseMaximumRecordAgeInSeconds(request);
             changes.add(m -> m.setMaximumRecordAgeInSeconds(maximumRecordAge));
         }
-        if (request.containsKey("ParallelizationFactor")) {
+        if (request.get("ParallelizationFactor") != null) {
+            // A JSON null is an absent member and leaves the stored factor unchanged.
             Integer parallelizationFactor = parseParallelizationFactor(request, esm.getEventSourceArn());
             changes.add(m -> m.setParallelizationFactor(parallelizationFactor));
         }

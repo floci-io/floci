@@ -320,6 +320,18 @@ class EsmIntegrationTest {
                     .then()
                     .statusCode(200)
                     .body("ParallelizationFactor", equalTo(4));
+
+            given()
+                    .contentType("application/json")
+                    .body("""
+                            { "ParallelizationFactor": null, "BatchSize": 50 }
+                            """)
+                    .when()
+                    .put(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+                    .then()
+                    .statusCode(202)
+                    .body("BatchSize", equalTo(50))
+                    .body("ParallelizationFactor", equalTo(4));
         } finally {
             given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
         }
@@ -367,7 +379,7 @@ class EsmIntegrationTest {
 
     @Test
     void createEventSourceMappingRejectsParallelizationFactorOutOfRange() {
-        for (String factor : List.of("0", "11", "2.5")) {
+        for (String factor : List.of("0", "11", "2.5", "18446744073709551617")) {
             given()
                     .contentType("application/json")
                     .body("""
