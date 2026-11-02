@@ -144,6 +144,13 @@ class OpenSearchVpcEndpointIntegrationTest {
                 .when().get("/2021-01-01/opensearch/vpcEndpoints")
                 .then().statusCode(200)
                 .body("VpcEndpointSummaryList.VpcEndpointId", not(hasItem(id)));
+        // A domain of another Region is unknown to a create signed for this one.
+        given().contentType("application/json").header("Authorization", WEST_AUTH_HEADER)
+                .body("{\"DomainArn\":\"" + domainArn + "\",\"VpcOptions\":{\"SubnetIds\":[\"" + SUBNET_A + "\"]}}")
+                .when().post("/2021-01-01/opensearch/vpcEndpoints")
+                .then().statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", equalTo("Domain not found for ARN: " + domainArn));
 
         given().header("Authorization", AUTH_HEADER)
                 .when().delete("/2021-01-01/opensearch/vpcEndpoints/" + id)

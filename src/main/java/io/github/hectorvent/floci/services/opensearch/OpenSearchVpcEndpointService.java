@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.opensearch;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
@@ -87,7 +88,10 @@ public class OpenSearchVpcEndpointService {
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationException(violations);
         }
+        // The endpoint is kept in the request's Region, so a domain of another Region is refused as
+        // unknown: neither Region's ListVpcEndpointsForDomain could otherwise find the endpoint.
         Domain domain = domains.findDomainByArn(domainArn)
+                .filter(found -> region.equals(AwsArnUtils.parse(found.getArn()).region()))
                 .orElseThrow(() -> new AwsException("ValidationException",
                         "Domain not found for ARN: " + domainArn, 400));
         if (clientToken != null && !clientToken.isBlank()) {
