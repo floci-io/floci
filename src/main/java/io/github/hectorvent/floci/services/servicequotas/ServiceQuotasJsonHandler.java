@@ -53,9 +53,12 @@ public class ServiceQuotasJsonHandler {
         String quotaCode = stringOrNull(request, "QuotaCode");
         String nextToken = stringOrNull(request, "NextToken");
         Integer maxResults = integerOrNull(request, "MaxResults");
-        return Response.ok(awsDefault
-                ? service.listAwsDefaultServiceQuotas(serviceCode, quotaCode, nextToken, maxResults, region, accountId)
-                : service.listServiceQuotas(serviceCode, quotaCode, nextToken, maxResults, region, accountId)).build();
+        if (awsDefault) {
+            // ListAWSDefaultServiceQuotas does not have QuotaAppliedAtLevel in the service model
+            return Response.ok(service.listAwsDefaultServiceQuotas(serviceCode, quotaCode, nextToken, maxResults, region, accountId)).build();
+        }
+        String appliedAtLevel = stringOrNull(request, "QuotaAppliedAtLevel");
+        return Response.ok(service.listServiceQuotas(serviceCode, quotaCode, appliedAtLevel, nextToken, maxResults, region, accountId)).build();
     }
 
     private Response handleGetServiceQuota(JsonNode request, String region, String accountId, boolean awsDefault) {
