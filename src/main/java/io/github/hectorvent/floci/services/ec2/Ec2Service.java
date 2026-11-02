@@ -12684,7 +12684,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     .filter(a -> !a.isPrimary()).toList());
             NatGatewayAddress[] result = new NatGatewayAddress[slots];
             // A slot naming an Elastic IP or an address keeps the secondary that already matches it;
-            // a counted slot then keeps any other secondary with neither.
+            // the counted slots then keep the last of the other secondaries with neither. Counted
+            // addresses always follow the listed ones, so the last are the ones the subnet picked
+            // rather than listed ones the request dropped.
             for (int i = 0; i < slots; i++) {
                 String eip = i < eips.size() ? eips.get(i) : null;
                 String ip = i < ips.size() ? ips.get(i) : null;
@@ -12693,8 +12695,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                             && (ip == null || ip.equals(a.getPrivateIp())));
                 }
             }
-            for (int i = Math.max(eips.size(), ips.size()); i < slots; i++) {
-                result[i] = takeFirst(dropped, a -> a.getAllocationId() == null && !ips.contains(a.getPrivateIp()));
+            int listed = Math.max(eips.size(), ips.size());
+            List<NatGatewayAddress> unlisted = dropped.stream()
+                    .filter(a -> a.getAllocationId() == null && !ips.contains(a.getPrivateIp()))
+                    .toList();
+            List<NatGatewayAddress> counted = unlisted.subList(Math.max(0, unlisted.size() - count), unlisted.size());
+            for (int i = 0; i < counted.size(); i++) {
+                result[listed + i] = counted.get(i);
+                dropped.remove(counted.get(i));
             }
             Set<String> droppedEips = new HashSet<>();
             Set<String> droppedIps = new HashSet<>();

@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
@@ -297,6 +298,123 @@ class CloudFormationEc2NetworkingIntegrationTest {
         cloudFormation(stack, "DeleteStack", null);
         CfnStackWaits.awaitStackDeleted(stack);
         ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    /** A counted secondary survives a count change and an unrelated update, and the gateway is kept. */
+    @Test
+    void aPrivateNatGatewaysCountedSecondariesChangeInPlace() {
+        String stack = "ec2-nat-secondary-count-it";
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.47.0.0/16")), "<vpcId>", "</vpcId>");
+        String counted = ", \"ConnectivityType\": \"private\", \"SecondaryPrivateIpAddressCount\": %d%s";
+        cloudFormation(stack, "CreateStack", secondaryNatTemplate(vpcId, "10.47.0.0/24", counted.formatted(1, ""), false));
+        String natId = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId");
+        List<String> first = secondaryIps(natXml(natId));
+        assertEquals(1, first.size(), natXml(natId));
+
+        // The count unchanged next to another change: the same address.
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.47.0.0/24",
+                counted.formatted(1, ", \"Tags\": [{\"Key\": \"k\", \"Value\": \"v\"}]"), false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"));
+        assertEquals(first, secondaryIps(natXml(natId)));
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.47.0.0/24", counted.formatted(2, ""), false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"));
+        List<String> two = secondaryIps(natXml(natId));
+        assertEquals(2, two.size(), natXml(natId));
+        assertEquals(first.get(0), two.get(0), "the counted address is kept: " + two);
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.47.0.0/24", counted.formatted(1, ""), false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"));
+        List<String> one = secondaryIps(natXml(natId));
+        assertEquals(1, one.size(), natXml(natId));
+        assertTrue(two.contains(one.get(0)), "one of the two survives: " + one);
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    /**
+     * Listed addresses changing next to a count keep the address the subnet picked, not a listed
+     * one that the template dropped.
+     */
+    @Test
+    void aCountedSecondaryKeepsItsAddressWhenTheListedOnesChange() {
+        String stack = "ec2-nat-secondary-mixed-it";
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.48.0.0/16")), "<vpcId>", "</vpcId>");
+        String mixed = ", \"ConnectivityType\": \"private\", \"SecondaryPrivateIpAddresses\": [\"%s\"],"
+                + " \"SecondaryPrivateIpAddressCount\": 1";
+        cloudFormation(stack, "CreateStack", secondaryNatTemplate(vpcId, "10.48.0.0/24", mixed.formatted("10.48.0.40"), false));
+        String natId = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId");
+        List<String> before = secondaryIps(natXml(natId));
+        assertEquals("10.48.0.40", before.get(0), before.toString());
+        String picked = before.get(1);
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.48.0.0/24", mixed.formatted("10.48.0.41"), false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"));
+        assertEquals(List.of("10.48.0.41", picked), secondaryIps(natXml(natId)),
+                "the listed address is swapped and the picked one kept");
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    /** Secondary Elastic IPs moved between listed addresses, and one moved to a new address, in one update each. */
+    @Test
+    void aSecondaryElasticIpMovesToAnotherAddressInPlace() {
+        String stack = "ec2-nat-secondary-move-it";
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.49.0.0/16")), "<vpcId>", "</vpcId>");
+        String moved = PUBLIC_NAT + ", \"SecondaryAllocationIds\": [{\"Fn::GetAtt\": [\"Eip2\", \"AllocationId\"]},"
+                + " {\"Fn::GetAtt\": [\"Eip3\", \"AllocationId\"]}], \"SecondaryPrivateIpAddresses\": [\"%s\", \"%s\"]";
+        cloudFormation(stack, "CreateStack", secondaryNatTemplate(vpcId, "10.49.0.0/24",
+                moved.formatted("10.49.0.50", "10.49.0.51"), false));
+        Map<String, String> out = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue");
+        String natId = out.get("NatId");
+        String eip2 = out.get("Eip2Id");
+        String eip3 = out.get("Eip3Id");
+        assertEquals("10.49.0.50", eipPrivateIp(eip2));
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.49.0.0/24",
+                moved.formatted("10.49.0.51", "10.49.0.50"), false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"));
+        assertEquals(List.of("10.49.0.51", "10.49.0.50"), secondaryIps(natXml(natId)));
+        assertEquals("10.49.0.51", eipPrivateIp(eip2), "the swapped Elastic IP is held at its new address");
+        assertEquals("10.49.0.50", eipPrivateIp(eip3));
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.49.0.0/24",
+                moved.formatted("10.49.0.52", "10.49.0.50"), false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"));
+        assertEquals(List.of("10.49.0.52", "10.49.0.50"), secondaryIps(natXml(natId)), "10.49.0.51 is given up");
+        assertEquals("10.49.0.52", eipPrivateIp(eip2), "the same Elastic IP is held at the new address");
+        assertEquals("10.49.0.50", eipPrivateIp(eip3));
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    /** The gateway's secondary private addresses, in the order DescribeNatGateways lists them. */
+    private static List<String> secondaryIps(String natXml) {
+        return Pattern.compile(
+                        "<privateIp>([^<]+)</privateIp>\\s*(?:<publicIp>[^<]*</publicIp>\\s*)?<isPrimary>false</isPrimary>")
+                .matcher(natXml).results().map(m -> m.group(1)).toList();
+    }
+
+    /** The private address an associated Elastic IP is held at. */
+    private static String eipPrivateIp(String allocationId) {
+        String xml = ec2("DescribeAddresses", Map.of("AllocationId.1", allocationId));
+        assertTrue(xml.contains("<associationId>"), "the Elastic IP is held: " + xml);
+        return between(xml, "<privateIpAddress>", "</privateIpAddress>");
     }
 
     private static String natXml(String natGatewayId) {
