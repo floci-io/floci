@@ -4737,6 +4737,27 @@ class Ec2ServiceTest {
                 .map(g -> Map.entry(g.getGroupId(), String.valueOf(g.getGroupName()))).toList());
     }
 
+    @Test
+    void anotherAccountDoesNotSeeAnInstanceConnectEndpointsInterface() {
+        RequestContext context = new RequestContext();
+        Ec2Service service = mockedVpcNetworkService(context, Map.of(), null);
+        context.setAccountId("111122223333");
+        String vpcId = service.createVpc("us-east-1", "10.83.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet("us-east-1", vpcId, "10.83.1.0/24", "us-east-1a").getSubnetId();
+        String eniId = service.createInstanceConnectEndpoint("us-east-1", subnetId, List.of(), null, null,
+                List.of(), null).getNetworkInterfaceIds().getFirst();
+
+        context.setAccountId("444455556666");
+        assertEquals("InvalidNetworkInterfaceID.NotFound", assertThrows(AwsException.class, () -> service
+                .describeNetworkInterfaces("us-east-1", List.of(eniId), Map.of())).getErrorCode());
+        assertTrue(service.describeNetworkInterfaces("us-east-1", List.of(), Map.of()).networkInterfaces().stream()
+                .noneMatch(ni -> eniId.equals(ni.getNetworkInterfaceId())));
+
+        context.setAccountId("111122223333");
+        assertEquals(eniId, service.describeNetworkInterfaces("us-east-1", List.of(eniId), Map.of())
+                .networkInterfaces().getFirst().getNetworkInterfaceId());
+    }
+
     private static Ec2Service realVpcNetworkService(RequestContext context) {
         return realVpcNetworkService(context, Map.of());
     }
