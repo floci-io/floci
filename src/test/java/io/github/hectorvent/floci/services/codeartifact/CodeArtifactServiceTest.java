@@ -1503,6 +1503,32 @@ class CodeArtifactServiceTest {
     }
 
     @Test
+    void resolveAndBeginUseOnlyRegistersTheCurrentRepositoryId() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository first = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String oldId = first.getSidecarContainerIds().get("npm");
+
+        assertEquals(oldId, service.resolveContainerIdAndBeginUse("npm", REGION, "dom", null, "repo",
+                verdaccioClient));
+        InOrder order = inOrder(verdaccioClient);
+        order.verify(verdaccioClient).registerRepository(oldId);
+        order.verify(verdaccioClient).beginUse(oldId);
+
+        service.deleteRepository(REGION, "dom", null, "repo");
+        assertThrows(AwsException.class, () -> service.resolveContainerIdAndBeginUse("npm", REGION, "dom", null,
+                "repo", verdaccioClient));
+        verify(verdaccioClient, times(1)).registerRepository(oldId);
+
+        CodeArtifactRepository second = service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
+        String newId = second.getSidecarContainerIds().get("npm");
+        assertNotEquals(oldId, newId);
+        assertEquals(newId, service.resolveContainerIdAndBeginUse("npm", REGION, "dom", null, "repo",
+                verdaccioClient));
+        order.verify(verdaccioClient).registerRepository(newId);
+        order.verify(verdaccioClient).beginUse(newId);
+    }
+
+    @Test
     void describePackageVersionBridgesToPypiserver() {
         service.createDomain(REGION, "dom", null, Map.of());
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
@@ -6514,11 +6540,30 @@ class CodeArtifactServiceTest {
         service.createRepository(REGION, "dom", null, "repo", null, null, Map.of());
         recordReadme("dom", "repo", "npm", null, "my-pkg", "1.0.0", "old text");
 
-        service.forgetContainerBackedPackage(REGION, "dom", null, "repo", "npm", null, "my-pkg");
+        String repoId = service.ensureFormatContainerId("npm", REGION, "dom", null, "repo");
+        service.forgetContainerBackedPackage(REGION, "dom", null, "repo", repoId, "npm", null, "my-pkg");
 
         AwsException e = assertThrows(AwsException.class, () -> service.getPackageVersionReadme(REGION, "dom", null,
                 "repo", "npm", null, "my-pkg", "1.0.0"));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void oldNpmUnpublishCannotEraseARecreatedRepositorysReadme() {
+        service.createDomain(REGION, "dom", null, Map.of());
+        CodeArtifactRepository original = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        String oldId = original.getSidecarContainerIds().get("npm");
+        service.deleteRepository(REGION, "dom", null, "repo");
+        CodeArtifactRepository replacement = service.createRepository(REGION, "dom", null, "repo", null, null,
+                Map.of());
+        assertFalse(oldId.equals(replacement.getSidecarContainerIds().get("npm")));
+        recordReadme("dom", "repo", "npm", null, "my-pkg", "1.0.0", "replacement text");
+
+        service.forgetContainerBackedPackage(REGION, "dom", null, "repo", oldId, "npm", null, "my-pkg");
+
+        assertEquals("replacement text", service.getPackageVersionReadme(REGION, "dom", null, "repo", "npm",
+                null, "my-pkg", "1.0.0").readme());
     }
 
     /**

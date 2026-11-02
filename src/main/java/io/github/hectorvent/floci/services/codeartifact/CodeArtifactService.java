@@ -702,6 +702,7 @@ public class CodeArtifactService implements Resettable {
     public synchronized String resolveContainerIdAndBeginUse(String format, String region, String domain,
             String domainOwner, String repository, RepositorySidecarManager manager) {
         String id = ensureFormatContainerId(format, region, domain, domainOwner, repository);
+        manager.registerRepository(id);
         manager.beginUse(id);
         return id;
     }
@@ -4922,7 +4923,7 @@ public class CodeArtifactService implements Resettable {
      * {@link #recordContainerBackedAssetBytes} does, the same way and for the same reason.
      */
     public synchronized void forgetContainerBackedPackage(String region, String domain, String domainOwner,
-            String repository, String format, String namespace, String packageName) {
+            String repository, String repositoryContainerId, String format, String namespace, String packageName) {
         if (!isValidPackageToken(packageName) || (namespace != null && !isValidPackageToken(namespace))) {
             LOG.warnv("Ignoring a native unpublish of {0}/{1} package ''{2}'': namespace or package name contains "
                     + "a character ('#', '/', or whitespace) a real CodeArtifact package coordinate cannot have.",
@@ -4930,6 +4931,11 @@ public class CodeArtifactService implements Resettable {
             return;
         }
         String owner = effectiveOwner(domainOwner);
+        CodeArtifactRepository current = repositories.getForAccount(owner, repositoryKey(region, domain, repository))
+                .orElse(null);
+        if (current == null || !repositoryContainerId.equals(current.getSidecarContainerIds().get(format))) {
+            return;
+        }
         String key = packageKey(region, domain, repository, format, namespace, accountingPackageName(format,
                 packageName));
         String ownerScopedKey = ownerScopedKey(owner, key);

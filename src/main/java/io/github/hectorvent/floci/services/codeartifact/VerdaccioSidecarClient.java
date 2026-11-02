@@ -74,6 +74,11 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
     }
 
     @Override
+    public void registerRepository(String repositoryContainerId) {
+        manager.registerRepository(repositoryContainerId);
+    }
+
+    @Override
     public void beginUse(String repositoryContainerId) {
         manager.beginUse(repositoryContainerId);
     }

@@ -1167,6 +1167,7 @@ class CodeArtifactNpmDataPlaneTest {
                 .thenReturn(NPM_REPOSITORY_ID);
         VerdaccioSidecarManager leases = new VerdaccioSidecarManager(mock(ContainerBuilder.class),
                 mock(ContainerLifecycleManager.class), mock(EmulatorConfig.class));
+        leases.registerRepository(NPM_REPOSITORY_ID);
         VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
         doAnswer(call -> {
             leases.beginUse(call.getArgument(0));
@@ -1190,6 +1191,7 @@ class CodeArtifactNpmDataPlaneTest {
 
         ExecutorService executor = Executors.newSingleThreadExecutor();
         try {
+            // Vert.x Future is imported for HTTP calls; this is the JDK executor's Future.
             java.util.concurrent.Future<HttpResponse> response = executor.submit(() ->
                     get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token"));
             assertTrue(fetching.await(5, TimeUnit.SECONDS));

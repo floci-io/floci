@@ -15,6 +15,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -95,9 +96,17 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
         stopIfUnused(npmRepositoryId, use);
     }
 
+    /** Only a repository resolved under CodeArtifactService's deletion lock may admit an id. */
+    public void registerRepository(String npmRepositoryId) {
+        uses.putIfAbsent(npmRepositoryId, new UseState());
+    }
+
     /** Registers a call that may use this repository's sidecar before it touches the container. */
     public void beginUse(String npmRepositoryId) {
-        UseState use = uses.computeIfAbsent(npmRepositoryId, key -> new UseState());
+        UseState use = uses.get(npmRepositoryId);
+        if (use == null) {
+            throw new IllegalStateException("No Verdaccio repository lease for " + npmRepositoryId);
+        }
         synchronized (use) {
             if (use.releasing) {
                 throw new IllegalStateException("Verdaccio sidecar is being released for repository "
@@ -132,12 +141,17 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
         }
         boolean stopped = false;
         try {
-            pool.stopContainer(npmRepositoryId);
+            if (pool.isTracked(npmRepositoryId)) {
+                pool.stopContainerStrict(npmRepositoryId);
+            }
             stopped = true;
         } finally {
             synchronized (use) {
                 use.stopped = stopped;
                 use.stopping = false;
+                if (stopped) {
+                    uses.remove(npmRepositoryId, use);
+                }
             }
         }
     }
@@ -200,6 +214,32 @@ public class VerdaccioSidecarManager implements ContainerTeardown {
 
     @Override
     public void stopManagedContainers() {
-        pool.stopAll();
+        RuntimeException[] failure = new RuntimeException[1];
+        uses.forEach((id, use) -> {
+            synchronized (use) {
+                use.releasing = true;
+            }
+            try {
+                stopIfUnused(id, use);
+            } catch (RuntimeException e) {
+                if (failure[0] == null) {
+                    failure[0] = e;
+                } else {
+                    failure[0].addSuppressed(e);
+                }
+            }
+        });
+        try {
+            pool.stopAllStrictExcept(Set.copyOf(uses.keySet()));
+        } catch (RuntimeException e) {
+            if (failure[0] == null) {
+                failure[0] = e;
+            } else {
+                failure[0].addSuppressed(e);
+            }
+        }
+        if (failure[0] != null) {
+            throw failure[0];
+        }
     }
 }

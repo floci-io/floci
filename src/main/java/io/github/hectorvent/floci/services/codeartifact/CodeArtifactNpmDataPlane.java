@@ -221,7 +221,7 @@ public class CodeArtifactNpmDataPlane {
                     unpublishTarget.ifPresent(identity -> {
                         if (status == 200 || status == 201) {
                             service.forgetContainerBackedPackage(tokenScope.region(), npmRequest.domain(),
-                                    tokenScope.owner(), npmRequest.repository(), "npm", identity.namespace(),
+                                    tokenScope.owner(), npmRequest.repository(), repoId, "npm", identity.namespace(),
                                     identity.packageName());
                         }
                     }), use::done);
