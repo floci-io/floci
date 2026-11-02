@@ -10,7 +10,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Pattern;
 
 import static io.github.hectorvent.floci.testing.CfnRequests.cfn;
 import static io.restassured.RestAssured.given;
@@ -236,7 +235,7 @@ class CloudFormationEc2NetworkingIntegrationTest {
         assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
                 "Outputs", "OutputKey", "OutputValue").get("NatId"));
         nat = natXml(natId);
-        assertFalse(nat.contains(eip3) || nat.contains("<isPrimary>false</isPrimary>"), "no secondary is left: " + nat);
+        assertFalse(nat.contains(eip3) || !secondaryIps(nat).isEmpty(), "no secondary is left: " + nat);
         assertFalse(ec2("DescribeAddresses", Map.of("AllocationId.1", eip3)).contains("<associationId>"));
 
         ec2("DeleteNatGateway", Map.of("NatGatewayId", otherNat));
@@ -291,7 +290,7 @@ class CloudFormationEc2NetworkingIntegrationTest {
         assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
                 "Outputs", "OutputKey", "OutputValue").get("NatId"));
         nat = natXml(natId);
-        assertTrue(nat.contains("<privateIp>10.46.0.10</privateIp>") && !nat.contains("<isPrimary>false</isPrimary>"),
+        assertTrue(nat.contains("<privateIp>10.46.0.10</privateIp>") && secondaryIps(nat).isEmpty(),
                 "only the primary address is left: " + nat);
 
         ec2("DeleteNetworkInterface", Map.of("NetworkInterfaceId", eni));
@@ -406,16 +405,17 @@ class CloudFormationEc2NetworkingIntegrationTest {
 
     /** The gateway's secondary private addresses, in the order DescribeNatGateways lists them. */
     private static List<String> secondaryIps(String natXml) {
-        return Pattern.compile(
-                        "<privateIp>([^<]+)</privateIp>\\s*(?:<publicIp>[^<]*</publicIp>\\s*)?<isPrimary>false</isPrimary>")
-                .matcher(natXml).results().map(m -> m.group(1)).toList();
+        return XmlParser.extractElementTree(natXml, "natGatewayAddressSet").children().stream()
+                .filter(item -> "false".equals(item.child("isPrimary").text()))
+                .map(item -> item.child("privateIp").text())
+                .toList();
     }
 
     /** The private address an associated Elastic IP is held at. */
     private static String eipPrivateIp(String allocationId) {
         String xml = ec2("DescribeAddresses", Map.of("AllocationId.1", allocationId));
-        assertTrue(xml.contains("<associationId>"), "the Elastic IP is held: " + xml);
-        return between(xml, "<privateIpAddress>", "</privateIpAddress>");
+        assertTrue(XmlParser.extractFirst(xml, "associationId", null) != null, "the Elastic IP is held: " + xml);
+        return XmlParser.extractFirst(xml, "privateIpAddress", null);
     }
 
     private static String natXml(String natGatewayId) {
