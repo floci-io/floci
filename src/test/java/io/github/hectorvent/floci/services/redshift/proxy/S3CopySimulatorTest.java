@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.redshift.proxy;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.iam.IamService;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
@@ -91,6 +92,87 @@ class S3CopySimulatorTest {
         assertTrue(copyError.getMessage().contains("No default IAM role"));
         assertTrue(unloadError.getMessage().contains("No default IAM role"));
         verifyNoInteractions(s3);
+    }
+
+    private static final String KEY_COPY = "COPY people FROM 's3://bucket/data.csv' CREDENTIALS "
+            + "'aws_access_key_id=ASIAEXAMPLE;aws_secret_access_key=secret;token=tok'";
+
+    private static CopyStatementParser.S3CopyFrom keyCopy() {
+        return (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(KEY_COPY);
+    }
+
+    @Test
+    void copyWithKnownKeysReadsS3AsThoseKeys() {
+        IamService iamService = mock(IamService.class);
+        when(iamService.findSecretKey("ASIAEXAMPLE", "tok")).thenReturn(Optional.of("secret"));
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(iamService.resolveCallerContext("ASIAEXAMPLE")).thenReturn(CallerContext.of(List.of(
+                "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"}]}")));
+        when(s3.objectExists("bucket", "data.csv")).thenReturn(true);
+
+        S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(keyCopy(), s3, iamService);
+
+        assertEquals(List.of("data.csv"), input.keys());
+        verify(s3).authorizeSignedListBucket("ASIAEXAMPLE", "tok", "bucket");
+        verify(s3).authorizeSignedGetObject("ASIAEXAMPLE", "tok", "bucket", "data.csv");
+        verify(s3, never()).authorizeAnonymousGetObject(any(), any());
+    }
+
+    @Test
+    void copyWithAnUnknownOrExpiredKeyFailsInsteadOfReadingAnonymously() {
+        IamService iamService = mock(IamService.class);
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(iamService.findSecretKey("ASIAEXAMPLE", "tok")).thenReturn(Optional.empty());
+
+        S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(keyCopy(), s3, iamService));
+
+        assertEquals("XX000", error.sqlState());
+        assertTrue(error.getMessage().contains("does not exist in our records"), error.getMessage());
+        assertFalse(error.getMessage().contains("secret"), error.getMessage());
+        verify(s3, never()).authorizeAnonymousListBucket(any());
+        verify(s3, never()).authorizeAnonymousGetObject(any(), any());
+    }
+
+    @Test
+    void copyWithAWrongSecretFails() {
+        IamService iamService = mock(IamService.class);
+        when(s3.isAuthEnforced()).thenReturn(true);
+        when(iamService.findSecretKey("ASIAEXAMPLE", "tok")).thenReturn(Optional.of("another-secret"));
+
+        S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(keyCopy(), s3, iamService));
+
+        assertEquals("XX000", error.sqlState());
+        assertTrue(error.getMessage().contains("signature"), error.getMessage());
+    }
+
+    @Test
+    void copyWithKeysDeniedByTheirIdentityPolicyFails() {
+        IamService iamService = mock(IamService.class);
+        when(iamService.findSecretKey("ASIAEXAMPLE", "tok")).thenReturn(Optional.of("secret"));
+        when(iamService.resolveCallerContext("ASIAEXAMPLE")).thenReturn(CallerContext.of(List.of()));
+        when(s3.isAuthEnforced()).thenReturn(true);
+
+        S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.prepareCopy(keyCopy(), s3, iamService));
+
+        assertEquals("42501", error.sqlState());
+        assertTrue(error.getMessage().contains("ASIAEXAMPLE"), error.getMessage());
+        assertFalse(error.getMessage().contains("tok"), error.getMessage());
+        verify(s3, never()).authorizeSignedListBucket(any(), any(), any());
+    }
+
+    @Test
+    void copyIgnoresPlaceholderKeysWhenS3AuthorizationIsOff() {
+        IamService iamService = mock(IamService.class);
+        when(s3.isAuthEnforced()).thenReturn(false);
+        when(s3.objectExists("bucket", "data.csv")).thenReturn(true);
+
+        S3CopySimulator.CopyInput input = S3CopySimulator.prepareCopy(keyCopy(), s3, iamService);
+
+        assertEquals(List.of("data.csv"), input.keys());
+        verifyNoInteractions(iamService);
     }
 
     private ServerSocket listener;

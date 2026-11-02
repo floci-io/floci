@@ -420,6 +420,42 @@ class CopyStatementParserTest {
     }
 
     @Test
+    void copyKeepsTheKeysAndTokenOfACredentialsString() {
+        CopyStatementParser.S3CopyFrom c = copyFrom("COPY t FROM 's3://b/k' CREDENTIALS "
+                + "'aws_access_key_id=ASIAEXAMPLE;aws_secret_access_key=s3cr3t/+x;token=tok/+en=='");
+
+        assertEquals("ASIAEXAMPLE", c.accessKeys().accessKeyId());
+        assertEquals("s3cr3t/+x", c.accessKeys().secretAccessKey());
+        assertEquals("tok/+en==", c.accessKeys().sessionToken());
+    }
+
+    @Test
+    void copyKeepsTheKeysOfSeparateClauses() {
+        CopyStatementParser.S3CopyFrom c = copyFrom(
+                "COPY t FROM 's3://b/k' ACCESS_KEY_ID 'AKIAEXAMPLE' SECRET_ACCESS_KEY 'secret'");
+
+        assertEquals("AKIAEXAMPLE", c.accessKeys().accessKeyId());
+        assertEquals("secret", c.accessKeys().secretAccessKey());
+        assertNull(c.accessKeys().sessionToken());
+    }
+
+    @Test
+    void copyWithoutKeysHasNoAccessKeys() {
+        assertNull(copyFrom("COPY t FROM 's3://b/k' IAM_ROLE 'arn:aws:iam::000000000000:role/r'").accessKeys());
+    }
+
+    @Test
+    void accessKeysStringFormHidesTheSecretAndToken() {
+        CopyStatementParser.S3CopyFrom c = copyFrom("COPY t FROM 's3://b/k' CREDENTIALS "
+                + "'aws_access_key_id=ASIAEXAMPLE;aws_secret_access_key=s3cr3t;token=tok'");
+
+        String text = c.toString();
+        assertTrue(text.contains("ASIAEXAMPLE"));
+        assertFalse(text.contains("s3cr3t"));
+        assertFalse(text.contains("tok'") || text.contains("token=tok"));
+    }
+
+    @Test
     void copyRejectsConflictingOrIncompleteAuthorization() {
         assertNull(CopyStatementParser.parse(
                 "COPY t FROM 's3://b/k' IAM_ROLE 'arn:aws:iam::000000000000:role/r' "
