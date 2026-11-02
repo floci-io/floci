@@ -95,7 +95,7 @@ public class FirehoseLambdaTransformer {
     public Outcome transform(DeliveryStreamDescription stream, String bucket, List<byte[]> records,
                              Instant deliveryTime) {
         S3Destination s3 = stream.s3Destination();
-        Processor processor = lambdaProcessor(stream.processingConfiguration());
+        Processor processor = lambdaProcessor(stream);
         if (processor == null) {
             return new Outcome(records, 0, 0, null);
         }
@@ -137,8 +137,12 @@ public class FirehoseLambdaTransformer {
      * stream has none: the other processor types AWS models are stored and echoed but not
      * applied. The validator has already made "at most one" true.
      */
-    private static Processor lambdaProcessor(ProcessingConfiguration processing) {
-        if (processing == null || !Boolean.TRUE.equals(processing.getEnabled()) || processing.getProcessors() == null) {
+    private static Processor lambdaProcessor(DeliveryStreamDescription stream) {
+        if (stream == null || !stream.isProcessingEnabled()) {
+            return null;
+        }
+        ProcessingConfiguration processing = stream.processingConfiguration();
+        if (processing.getProcessors() == null) {
             return null;
         }
         for (Processor processor : processing.getProcessors()) {

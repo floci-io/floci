@@ -183,6 +183,15 @@ public class DeliveryStreamDescription {
     }
 
     /**
+     * True when record transformation is enabled for this stream.
+     */
+    @JsonIgnore
+    public boolean isProcessingEnabled() {
+        ProcessingConfiguration processing = processingConfiguration();
+        return processing != null && Boolean.TRUE.equals(processing.getEnabled());
+    }
+
+    /**
      * Fills the AWS defaults on every S3 configuration the stream describes: its S3 destination, or
      * a Redshift destination's intermediate and backup configurations.
      */

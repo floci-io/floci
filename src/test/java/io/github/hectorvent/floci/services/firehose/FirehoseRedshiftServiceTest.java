@@ -148,6 +148,40 @@ class FirehoseRedshiftServiceTest {
     }
 
     @Test
+    void backupEnabledWithLambdaTransformKeepsTheUntransformedSourceRecords() throws Exception {
+        createStream(BACKUP_ENABLED + LAMBDA_PROCESSING);
+        when(transformer.transform(any(), eq("stage"), any(), any())).thenReturn(new FirehoseLambdaTransformer.Outcome(
+                List.of("{\"id\":2}".getBytes(StandardCharsets.UTF_8)), 0, 0, null));
+
+        service.flush(STREAM);
+
+        verifyStagedTimes(1);
+        ArgumentCaptor<byte[]> staged = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service).putObject(eq("stage"), anyString(), staged.capture(), anyString(), anyMap(), any());
+        assertEquals("{\"id\":2}\n", new String(staged.getValue(), StandardCharsets.UTF_8));
+
+        ArgumentCaptor<byte[]> backup = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service).putObject(eq("bk"), anyString(), backup.capture(), anyString(), anyMap(), any());
+        assertEquals("{\"id\":1}\n", new String(backup.getValue(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void backupEnabledWhenLambdaDropsEveryRecordStillWritesTheSourceRecordsToBackup() throws Exception {
+        createStream(BACKUP_ENABLED + LAMBDA_PROCESSING);
+        when(transformer.transform(any(), eq("stage"), any(), any())).thenReturn(
+                new FirehoseLambdaTransformer.Outcome(List.of(), 1, 0, null));
+
+        service.flush(STREAM);
+
+        verifyStagedTimes(0);
+        verify(delivery, never()).copy(anyString(), anyString(), any(), anyString(), anyString());
+
+        ArgumentCaptor<byte[]> backup = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service).putObject(eq("bk"), anyString(), backup.capture(), anyString(), anyMap(), any());
+        assertEquals("{\"id\":1}\n", new String(backup.getValue(), StandardCharsets.UTF_8));
+    }
+
+    @Test
     void aRedshiftProcessingConfigurationWithTwoLambdaProcessorsIsRejected() throws Exception {
         String lambda = "{\"Type\": \"Lambda\", \"Parameters\": [{\"ParameterName\": \"LambdaArn\", "
                 + "\"ParameterValue\": \"arn:aws:lambda:us-east-1:000000000000:function:xform\"}]}";

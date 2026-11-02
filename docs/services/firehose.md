@@ -194,8 +194,8 @@ Floci does not write the `redshift_failed` manifest objects that AWS creates aft
   the error output of the intermediate S3 configuration. The configuration is validated on create and update
   like an S3 destination's, and a Lambda processor is described with the same default parameters (`NumberOfRetries`,
   `RoleArn`, buffer hints). Those defaults are carried over from the probed S3 behavior and not probed for Redshift
-  specifically. With `S3BackupMode` enabled, the backup object holds the records after the transform, the same bytes
-  that are staged and loaded; whether AWS backs up the source records instead has not been probed.
+  specifically. With `S3BackupMode` enabled, the backup object holds the untransformed source records, even when the
+  Lambda processor drops every record.
 - The `COPY` carries no credentials, so the proxy reads the staged object as an anonymous client. With S3
   authorization enforced and a private intermediate bucket the load fails and the staged object stays in S3; use a
   bucket the anonymous principal can read, or leave enforcement off.
