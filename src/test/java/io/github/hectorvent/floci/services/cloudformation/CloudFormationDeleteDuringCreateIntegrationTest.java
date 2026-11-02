@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.InjectMock;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -21,11 +22,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.ArgumentMatchers.any;
@@ -53,6 +57,9 @@ class CloudFormationDeleteDuringCreateIntegrationTest {
 
     @InjectMock
     LambdaService lambdaService;
+
+    @Inject
+    CloudFormationService cloudFormationService;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -114,6 +121,48 @@ class CloudFormationDeleteDuringCreateIntegrationTest {
         }
         assertTrue(cfn(Map.of("Action", "DescribeStacks", "StackName", stackId))
                 .contains("<StackStatus>DELETE_COMPLETE</StackStatus>"));
+    }
+
+    @Test
+    void deleteDuringCreateThatFailsFailsTheDeleteItsCallerAwaits() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "delete-during-create-failing-" + suffix;
+        String bucketName = "delete-during-create-" + suffix;
+        cfn(Map.of("Action", "CreateChangeSet", "StackName", stackName, "ChangeSetName", "create",
+                "ChangeSetType", "CREATE", "TemplateBody", bucketTemplate(bucketName)));
+        String stackId = stackId(stackName);
+        cfn(Map.of("Action", "ExecuteChangeSet", "StackName", stackName, "ChangeSetName", "create"));
+        assertTrue(createReceived.await(10, TimeUnit.SECONDS), "the custom resource was never created");
+        given().body("keeps the bucket").when().put("/" + bucketName + "/object.txt").then().statusCode(200);
+
+        Future<?> delete = cloudFormationService.deleteStack(stackName, "us-east-1", "000000000000");
+        releaseCreate.countDown();
+
+        try {
+            assertThrows(ExecutionException.class, () -> delete.get(10, TimeUnit.SECONDS));
+            awaitStackStatus(stackId, "DELETE_FAILED");
+        } finally {
+            given().when().delete("/" + bucketName + "/object.txt");
+            cfn(Map.of("Action", "DeleteStack", "StackName", stackName));
+        }
+    }
+
+    private static String bucketTemplate(String bucketName) {
+        return """
+                {
+                  "Resources": {
+                    "Bucket": {
+                      "Type": "AWS::S3::Bucket",
+                      "Properties": {"BucketName": "%s"}
+                    },
+                    "Probe": {
+                      "Type": "Custom::DeleteDuringCreate",
+                      "DependsOn": "Bucket",
+                      "Properties": {"ServiceToken": "%s"}
+                    }
+                  }
+                }
+                """.formatted(bucketName, SERVICE_TOKEN);
     }
 
     private static String template(String topicName, String exportName) {

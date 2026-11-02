@@ -1248,14 +1248,17 @@ public class CloudFormationService implements ResourceProvider {
         try {
             persistStack(stack);
             return submitExecution(stack, claimed[0], region, accountId);
-        } catch (AwsException e) {
-            if ("LimitExceededException".equals(e.getErrorCode())) {
-                Stack restored = restoreStack(accountId, canonicalStackName, region, snapshot[0]);
-                if (restored != null) {
-                    persistStack(restored);
+        } catch (RuntimeException e) {
+            try {
+                if (e instanceof AwsException aws && "LimitExceededException".equals(aws.getErrorCode())) {
+                    Stack restored = restoreStack(accountId, canonicalStackName, region, snapshot[0]);
+                    if (restored != null) {
+                        persistStack(restored);
+                    }
                 }
+            } finally {
+                endExecution(stack, claimed[0].done(), region, accountId);
             }
-            endExecution(stack, claimed[0].done(), region, accountId);
             throw e;
         }
     }
@@ -1289,14 +1292,18 @@ public class CloudFormationService implements ResourceProvider {
     /**
      * Ends an execution and runs the delete requested while it ran, if any. Both happen under the
      * stack's lock, so a DeleteStack either defers to the execution or finds it ended and deletes the
-     * stack itself; it never deletes alongside a running execution.
+     * stack itself; it never deletes alongside a running execution. An execution that a newer one
+     * has replaced leaves the deferred delete to the newer one, which the delete is waiting on.
+     * {@code done} fails when the deferred delete does, as the future of a delete started directly.
      */
     private void endExecution(Stack stack, CompletableFuture<Void> done, String region, String accountId) {
         String stackId = stack.getStackId();
         List<List<String>> deferred = new ArrayList<>(1);
         try {
             stacks.compute(stackKey(accountId, stack.getStackName(), region), (k, existing) -> {
-                runningExecutions.remove(stackId, done);
+                if (!runningExecutions.remove(stackId, done)) {
+                    return existing;
+                }
                 List<String> retain = deferredDeletes.remove(stackId);
                 if (retain != null && existing != null && stackId.equals(existing.getStackId())) {
                     startDelete(existing, retain);
@@ -1307,8 +1314,9 @@ public class CloudFormationService implements ResourceProvider {
             if (!deferred.isEmpty()) {
                 deleteStackResources(stack, deferred.getFirst(), region, accountId);
             }
-        } finally {
             done.complete(null);
+        } catch (RuntimeException e) {
+            done.completeExceptionally(e);
         }
     }
 
