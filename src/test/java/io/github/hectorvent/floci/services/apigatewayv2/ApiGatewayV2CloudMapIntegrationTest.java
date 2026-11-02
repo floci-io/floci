@@ -25,6 +25,7 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 
@@ -55,6 +56,7 @@ class ApiGatewayV2CloudMapIntegrationTest {
         final HttpServer server;
         final List<Received> received = new CopyOnWriteArrayList<>();
         final List<String> rawRequestTargets = new CopyOnWriteArrayList<>();
+        final List<String> forwardingHeaders = new CopyOnWriteArrayList<>();
 
         Stub(String name) throws IOException {
             this.name = name;
@@ -62,6 +64,8 @@ class ApiGatewayV2CloudMapIntegrationTest {
             server.createContext("/", exchange -> {
                 String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
                 rawRequestTargets.add(exchange.getRequestURI().getRawPath());
+                forwardingHeaders.add(exchange.getRequestHeaders().getFirst("Forwarded")
+                        + "|" + exchange.getRequestHeaders().get("X-Forwarded-For"));
                 received.add(new Received(exchange.getRequestMethod(), exchange.getRequestURI().getPath(),
                         exchange.getRequestURI().getRawQuery(), body,
                         exchange.getRequestHeaders().getFirst("X-Probe")));
@@ -182,6 +186,21 @@ class ApiGatewayV2CloudMapIntegrationTest {
         given().when().get("/execute-api/" + apiId + "/$default/orders").then().statusCode(200);
 
         assertThat(stub.rawRequestTargets, contains("/orders"));
+    }
+
+    @Test
+    void instanceReceivesTheCallersChainInForwarded() throws IOException {
+        Stub stub = startStub("only");
+        String serviceId = createService(null);
+        register(serviceId, "i-1", stub, "");
+        String apiId = createApi(serviceArn(serviceId), "VPC_LINK", createVpcLink());
+
+        given().header("X-Forwarded-For", "198.51.100.7")
+                .when().get("/execute-api/" + apiId + "/$default/orders")
+                .then().statusCode(200);
+
+        assertThat(stub.forwardingHeaders.get(0), matchesPattern(
+                "for=198\\.51\\.100\\.7,for=[^;]+;by=[^;]+;host=\"?[^;]+;proto=http\\|\\[(?!198\\.51)[^,]+\\]"));
     }
 
     @Test
