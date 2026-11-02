@@ -109,4 +109,20 @@ class CognitoCustomDomainPartitionTest {
         UserPoolDomain updated = service.updateUserPoolDomain(CUSTOM_DOMAIN, poolId, replacement, null);
         assertEquals(replacement.get("CertificateArn"), updated.getCertificateArn());
     }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "arn:aws-cn:acm:us-east-1:000000000000:certificate/abc",
+            "arn:aws:acm:us-east-1:111111111111:certificate/abc"})
+    void aCertificateFromAnotherPartitionOrAccountIsRefused(String certificateArn) {
+        CognitoService service = serviceIn("us-east-1");
+        String poolId = createPool(service, "us-east-1");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createUserPoolDomain(
+                CUSTOM_DOMAIN, poolId, Map.of("CertificateArn", certificateArn), null));
+
+        assertEquals("InvalidParameterException", error.getErrorCode());
+        assertThat(error.getMessage(), containsString("SSL certificate doesn't exist"));
+        assertTrue(service.findCustomDomain(CUSTOM_DOMAIN).isEmpty());
+    }
 }

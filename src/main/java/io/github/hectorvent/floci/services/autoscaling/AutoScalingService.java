@@ -17,6 +17,9 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.elb.ElbClassicService;
+import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
+import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.iam.PassedRoleLookup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -125,6 +128,19 @@ public class AutoScalingService implements PassedRoleLookup {
 
     @Inject
     Ec2Service ec2Service;
+
+    private final ElbV2Service elbV2Service;
+    private final ElbClassicService elbClassicService;
+
+    @Inject
+    public AutoScalingService(ElbV2Service elbV2Service, ElbClassicService elbClassicService) {
+        this.elbV2Service = elbV2Service;
+        this.elbClassicService = elbClassicService;
+    }
+
+    AutoScalingService() {
+        this(null, null);
+    }
 
     // region :: name → resource
     private Map<String, LaunchConfiguration> launchConfigs = new ConcurrentHashMap<>();
@@ -940,6 +956,39 @@ public class AutoScalingService implements PassedRoleLookup {
         }
     }
 
+    static void deregisterFromTargetGroups(ElbV2Service elb, AutoScalingGroup asg, List<String> instanceIds) {
+        List<TargetDescription> targets = instanceIds.stream().map(id -> {
+            TargetDescription target = new TargetDescription();
+            target.setId(id);
+            return target;
+        }).toList();
+        for (String targetGroup : asg.getTargetGroupARNs()) {
+            try {
+                elb.deregisterTargets(asg.getRegion(), targetGroup, targets);
+            } catch (AwsException e) {
+                if (!"TargetGroupNotFound".equals(e.getErrorCode())) {
+                    throw e;
+                }
+                LOG.debugv("ASG {0}: target group {1} is already deleted", asg.getAutoScalingGroupName(), targetGroup);
+            }
+        }
+    }
+
+    static void deregisterFromClassicLoadBalancers(ElbClassicService elb, AutoScalingGroup asg,
+                                                    List<String> instanceIds) {
+        for (String loadBalancer : asg.getLoadBalancerNames()) {
+            try {
+                elb.deregisterInstances(asg.getRegion(), loadBalancer, instanceIds);
+            } catch (AwsException e) {
+                if (!"LoadBalancerNotFound".equals(e.getErrorCode())) {
+                    throw e;
+                }
+                LOG.debugv("ASG {0}: Classic load balancer {1} is already deleted",
+                        asg.getAutoScalingGroupName(), loadBalancer);
+            }
+        }
+    }
+
     public void detachInstances(String region, String name, List<String> instanceIds,
                                  boolean decrementDesiredCapacity) {
         String key = asgKey(region, name);
@@ -958,14 +1007,18 @@ public class AutoScalingService implements PassedRoleLookup {
             }
             List<String> detached = asg.getInstances().stream().map(AsgInstance::getInstanceId)
                     .filter(instanceIds::contains).toList();
+            InstanceRefresh refresh = activeInstanceRefresh(asg);
             if (!detached.isEmpty()) {
+                deregisterFromTargetGroups(elbV2Service, asg, detached);
+                deregisterFromClassicLoadBalancers(elbClassicService, asg, detached);
                 // Detaching removes only the group-name tag, and only where it still names this group.
                 ec2Service.deleteSystemTag(region, detached, GROUP_NAME_TAG, name);
+                completeInstanceRefreshIfSettled(region, name, asg);
             }
-            releaseRefreshOwnership(asg, detached);
+            releaseRefreshOwnership(refresh, detached);
             asg.getInstances().removeIf(i -> instanceIds.contains(i.getInstanceId()));
             if (decrementDesiredCapacity) {
-                int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - instanceIds.size());
+                int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - detached.size());
                 asg.setDesiredCapacity(newDesired);
             }
             groups.put(key, asg);
@@ -975,7 +1028,9 @@ public class AutoScalingService implements PassedRoleLookup {
     public void terminateInstanceInAutoScalingGroup(String region, String instanceId,
                                                      boolean decrementDesiredCapacity) {
         updateGroupOfInstance(region, instanceId, asg -> {
-            releaseRefreshOwnership(asg, List.of(instanceId));
+            InstanceRefresh refresh = activeInstanceRefresh(asg);
+            completeInstanceRefreshIfSettled(region, asg.getAutoScalingGroupName(), asg);
+            releaseRefreshOwnership(refresh, List.of(instanceId));
             asg.getInstances().stream()
                     .filter(i -> instanceId.equals(i.getInstanceId()))
                     .findFirst()
@@ -1005,6 +1060,9 @@ public class AutoScalingService implements PassedRoleLookup {
             if (newDesired != desired) {
                 requireDesiredCapacityWithinBounds(asg, newDesired,
                         "To place into standby " + moving.size() + " instances");
+            }
+            if (!moving.isEmpty()) {
+                completeInstanceRefreshIfSettled(region, name, asg);
             }
             Instant now = Instant.now();
             List<ScalingActivity> started = new ArrayList<>();
@@ -1120,8 +1178,7 @@ public class AutoScalingService implements PassedRoleLookup {
         }
     }
 
-    private void releaseRefreshOwnership(AutoScalingGroup asg, List<String> instanceIds) {
-        InstanceRefresh refresh = activeInstanceRefresh(asg);
+    private void releaseRefreshOwnership(InstanceRefresh refresh, List<String> instanceIds) {
         if (refresh != null && refresh.getReplacements() != null) {
             refresh.getReplacements().removeIf(replacement -> instanceIds.stream().anyMatch(instanceId ->
                     instanceId.equals(replacement.getOriginalInstanceId())
@@ -1206,7 +1263,10 @@ public class AutoScalingService implements PassedRoleLookup {
     }
 
     public void completeInstanceRefreshIfSettled(String region, String asgName) {
-        AutoScalingGroup asg = requireGroup(region, asgName);
+        completeInstanceRefreshIfSettled(region, asgName, requireGroup(region, asgName));
+    }
+
+    private void completeInstanceRefreshIfSettled(String region, String asgName, AutoScalingGroup asg) {
         List<InstanceRefresh> activeRefreshes = instanceRefreshes.values().stream()
                 .filter(r -> region.equals(r.getRegion()))
                 .filter(r -> asgName.equals(r.getAutoScalingGroupName()))

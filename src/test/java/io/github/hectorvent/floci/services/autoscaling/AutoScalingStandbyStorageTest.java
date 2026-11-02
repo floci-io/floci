@@ -50,6 +50,34 @@ class AutoScalingStandbyStorageTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"persistent", "hybrid", "wal"})
+    void failedTargetCleanupRetainsStoredMembershipAcrossRestart(String mode) throws IOException {
+        AutoScalingService service = storedService(mode);
+        storeGroup(service);
+        AutoScalingGroup stored = group(service);
+        stored.setDesiredCapacity(0);
+        stored.setTargetGroupARNs(List.of("owned-target-group"));
+        service.saveAutoScalingGroupIfPresent(stored);
+        Ec2Service ec2 = mock(Ec2Service.class);
+        ElbV2Service elb = mock(ElbV2Service.class);
+        IllegalStateException failure = new IllegalStateException("target storage write failed");
+        doThrow(failure).when(elb).deregisterTargets(eq(REGION), eq("owned-target-group"), anyList());
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(service, ec2, elb);
+
+        assertSame(failure, assertThrows(IllegalStateException.class, () -> reconciler.reconcile(stored)));
+
+        service = restart(mode);
+        assertEquals(List.of("i-a", "i-b"), memberIds(service));
+        reset(elb);
+        new AutoScalingReconciler(service, ec2, elb).reconcile(group(service));
+        verify(elb).deregisterTargets(eq(REGION), eq("owned-target-group"),
+                argThat(targets -> targets.stream().map(target -> target.getId()).toList()
+                        .equals(List.of("i-a", "i-b"))));
+        service = restart(mode);
+        assertTrue(memberIds(service).isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"persistent", "hybrid", "wal"})
     void movesInterruptedByARestartFinishAfterIt(String mode) throws IOException {
         AutoScalingService service = storedService(mode);
         storeGroup(service);

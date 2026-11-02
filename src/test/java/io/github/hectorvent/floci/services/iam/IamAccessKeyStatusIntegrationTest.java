@@ -25,9 +25,12 @@ import static org.hamcrest.Matchers.equalTo;
  * implicitly based on the AWS access key ID used to sign the request", the sentence this operation
  * shares with DeleteAccessKey and ListAccessKeys.
  *
- * <p>The refusal is the rendering {@code IamService.requireStatusFromEnum} already answers for the
- * other three operations that take this shape, which names neither the offending value nor the
- * permitted set, as AWS's own recording of one of them does not.
+ * <p>Both refusals were captured from a real account on 2026-10-31, against all four operations
+ * that share this shape: a value outside the set is answered with the set named and the value left
+ * out, in the order AWS lists it rather than the order the model declares, and an omitted status is
+ * answered as the required member it is rather than as a value outside the set. Both are the
+ * model's own wording, read through the Query front door, where three hand-written renderings
+ * stood before.
  */
 @QuarkusTest
 class IamAccessKeyStatusIntegrationTest {
@@ -61,19 +64,26 @@ class IamAccessKeyStatusIntegrationTest {
                 .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
                 .body("ErrorResponse.Error.Message",
                         equalTo("1 validation error detected: Value at 'status' failed to satisfy "
-                                + "constraint: Member must satisfy enum value set"));
+                                + "constraint: Member must satisfy enum value set: "
+                                + "[Expired, Active, Inactive]"));
 
         assertStatusStillActive(userName);
     }
 
+    /**
+     * An omitted status is the required member reading as null, not a value outside the set, which
+     * is what the capture answers and what the rendering this replaced could not tell apart.
+     */
     @Test
-    void anAbsentStatusIsAnsweredTheSameWay() {
+    void anAbsentStatusNamesTheMissingMember() {
         String userName = user("absent-status");
         String accessKeyId = accessKeyFor(userName);
 
         update(ACCOUNT, Map.of("UserName", userName, "AccessKeyId", accessKeyId)).statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-                .body("ErrorResponse.Error.Message", containsString("at 'status'"));
+                .body("ErrorResponse.Error.Message",
+                        equalTo("1 validation error detected: Value at 'status' failed to satisfy "
+                                + "constraint: Member must not be null"));
 
         assertStatusStillActive(userName);
     }
@@ -89,7 +99,7 @@ class IamAccessKeyStatusIntegrationTest {
     void anAbsentAccessKeyIdNamesItself() {
         update(ACCOUNT, Map.of("UserName", user("absent-id"), "Status", "Inactive")).statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-                .body("ErrorResponse.Error.Message", containsString("Value null at 'accessKeyId'"));
+                .body("ErrorResponse.Error.Message", containsString("Value at 'accessKeyId'"));
     }
 
     @Test

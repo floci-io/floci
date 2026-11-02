@@ -207,6 +207,23 @@ class AwsArnUtilsTest {
     }
 
     @Test
+    void parseIfArnInMatchesOnlyTheServiceInTheRegionAndItsPartition() {
+        String arn = "arn:aws-cn:states:cn-north-1:000000000000:stateMachine:m";
+        assertEquals("stateMachine:m", AwsArnUtils.parseIfArnIn(arn, "states", "cn-north-1").orElseThrow().resource());
+        assertTrue(AwsArnUtils.parseIfArnIn(arn, "states", "cn-northwest-1").isEmpty());
+        assertTrue(AwsArnUtils.parseIfArnIn(arn, "sqs", "cn-north-1").isEmpty());
+        assertTrue(AwsArnUtils.parseIfArnIn("arn:aws:states:cn-north-1:000000000000:stateMachine:m",
+                "states", "cn-north-1").isEmpty());
+    }
+
+    @Test
+    void parseIfArnInIsEmptyForNonArns() {
+        assertTrue(AwsArnUtils.parseIfArnIn(null, "states", "us-east-1").isEmpty());
+        assertTrue(AwsArnUtils.parseIfArnIn("m", "states", "us-east-1").isEmpty());
+        assertTrue(AwsArnUtils.parseIfArnIn("arn:aws:states", "states", "us-east-1").isEmpty());
+    }
+
+    @Test
     void aPseudoRegionResolvesToItsPartitionWhenMinting() {
         assertEquals("arn:aws-cn:sqs:aws-cn-global:000000000000:q",
                 AwsArnUtils.Arn.of("sqs", "aws-cn-global", "000000000000", "q").toString());

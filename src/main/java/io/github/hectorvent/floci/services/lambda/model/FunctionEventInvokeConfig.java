@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 @RegisterForReflection
@@ -30,7 +31,7 @@ public class FunctionEventInvokeConfig {
 
     @JsonProperty("LastModified")
     public double getLastModifiedSeconds() {
-        return lastModifiedMillis / 1000.0;
+        return EpochSeconds.fromMillis(lastModifiedMillis);
     }
 
     // Deserialization counterpart so the timestamp survives a persisted-state reload;

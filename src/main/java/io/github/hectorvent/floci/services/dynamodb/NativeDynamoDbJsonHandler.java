@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.T
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.UpdateTableRequest;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
+import io.github.hectorvent.floci.services.dynamodb.model.ContributorInsights;
 import io.github.hectorvent.floci.services.dynamodb.model.ExportDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.ExportSummary;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
@@ -69,6 +70,12 @@ public class NativeDynamoDbJsonHandler {
     private static final int MAX_BACKUP_ARN_LENGTH = 1024;
     private static final Instant MAX_TIME_RANGE_BOUND = Instant.ofEpochMilli(99_999_999_999_999L);
     private static final int MAX_RECOVERY_PERIOD_DAYS = 35;
+    private static final List<String> CONTRIBUTOR_INSIGHTS_ACTIONS = List.of("ENABLE", "DISABLE");
+    // The order AWS prints the enum constraint in.
+    private static final List<String> CONTRIBUTOR_INSIGHTS_MODES = List.of("THROTTLED_KEYS", "ACCESSED_AND_THROTTLED_KEYS");
+    // The warm throughput a new on-demand table or index starts with.
+    private static final long ON_DEMAND_WARM_READ_UNITS = 12000;
+    private static final long ON_DEMAND_WARM_WRITE_UNITS = 4000;
 
     private final DynamoDbService dynamoDbService;
     private final NativeDynamoDbTableService tableService;
@@ -112,6 +119,9 @@ public class NativeDynamoDbJsonHandler {
             case "UpdateTimeToLive" -> handleUpdateTimeToLive(request, region);
             case "DescribeContinuousBackups" -> handleDescribeContinuousBackups(request, region);
             case "UpdateContinuousBackups" -> handleUpdateContinuousBackups(request, region);
+            case "UpdateContributorInsights" -> handleUpdateContributorInsights(request, region);
+            case "DescribeContributorInsights" -> handleDescribeContributorInsights(request, region);
+            case "ListContributorInsights" -> handleListContributorInsights(request, region);
             case "CreateBackup" -> handleCreateBackup(request, region);
             case "DescribeBackup" -> handleDescribeBackup(request, region);
             case "ListBackups" -> handleListBackups(request, region);
@@ -569,6 +579,15 @@ public class NativeDynamoDbJsonHandler {
                 + "Member must satisfy enum value set: [INDEXES, TOTAL, NONE]";
     }
 
+    private static String returnItemCollectionMetricsError(JsonNode request) {
+        JsonNode value = request.get("ReturnItemCollectionMetrics");
+        if (value == null || value.isNull() || VALID_RETURN_ITEM_COLLECTION_METRICS.contains(value.asText())) {
+            return null;
+        }
+        return "Value '" + value.asText() + "' at 'returnItemCollectionMetrics' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [SIZE, NONE]";
+    }
+
     private Response handlePutItem(JsonNode request, String region) {
         String tableName = request.has("TableName") ? request.path("TableName").asText() : null;
         DynamoDbTableNames.resolve(tableName); // validate tableName before other params
@@ -596,10 +615,10 @@ public class NativeDynamoDbJsonHandler {
         if (!validationErrors.isEmpty()) {
             throw SmithyValidationErrors.validationException(validationErrors);
         }
+        requireReadableValues(item, VALIDATION_ENVELOPE);
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(item);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
-        DynamoDbNumberUtils.requireStorable(exprAttrValues, true);
 
         JsonNode expected = request.has("Expected") ? request.get("Expected") : null;
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(expected));
@@ -611,6 +630,7 @@ public class NativeDynamoDbJsonHandler {
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}", 400);
         }
+        requireReadableValues(exprAttrValues, VALIDATION_ENVELOPE);
 
         // EAN/EAV with no expression to reference them: AWS reports "can only be specified
         // when using expressions", not the "unused in expressions" wording (#2893).
@@ -624,8 +644,6 @@ public class NativeDynamoDbJsonHandler {
         // Reject ExpressionAttributeNames/Values entries not referenced by ConditionExpression (AWS parity, #2893)
         checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression));
         checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression));
-
-        validateItemSets(item);
 
         Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, item, false, expected,
                 conditionalOperator, returnValuesOnConditionCheckFailure);
@@ -651,14 +669,13 @@ public class NativeDynamoDbJsonHandler {
         JsonNode attributesToGet = request.has("AttributesToGet") ? request.get("AttributesToGet") : null;
 
         DynamoDbAccessPathValidator.validateAttributesToGet(attributesToGet);
+        requireValidReturnConsumedCapacity(request);
+        requireReadableValues(key, "");
         if (attributesToGet != null && projectionExpression != null) {
             throw new AwsException("ValidationException",
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {AttributesToGet} Expression parameters: {ProjectionExpression}", 400);
         }
-
-        // Validate enums before table lookup
-        requireValidReturnConsumedCapacity(request);
 
         // Validate ProjectionExpression syntax and reserved words before item lookup
         if (projectionExpression != null) {
@@ -714,9 +731,9 @@ public class NativeDynamoDbJsonHandler {
         if (!delValidationErrors.isEmpty()) {
             throw SmithyValidationErrors.validationException(delValidationErrors);
         }
+        requireReadableValues(key, VALIDATION_ENVELOPE);
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
-        DynamoDbNumberUtils.requireStorable(exprAttrValues, true);
         JsonNode expectedDel = request.has("Expected") ? request.get("Expected") : null;
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(expectedDel));
 
@@ -725,6 +742,7 @@ public class NativeDynamoDbJsonHandler {
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}", 400);
         }
+        requireReadableValues(exprAttrValues, VALIDATION_ENVELOPE);
 
         // EAN/EAV with no expression to reference them: AWS reports "can only be specified
         // when using expressions", not the "unused in expressions" wording (#2893).
@@ -780,13 +798,12 @@ public class NativeDynamoDbJsonHandler {
                     + "Member must satisfy enum value set: [NONE, ALL_OLD, ALL_NEW, UPDATED_OLD, UPDATED_NEW]");
         }
         requireValidReturnConsumedCapacity(request);
+        requireReadableValues(key, VALIDATION_ENVELOPE);
         DynamoDbExpressionSize.checkWrite(updateExpression, "UpdateExpression");
         DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
-        DynamoDbNumberUtils.requireStorable(exprAttrValues, true);
         ObjectNode attributeUpdateValues = legacyValues(attributeUpdates);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(attributeUpdateValues);
-        DynamoDbNumberUtils.requireStorable(attributeUpdateValues, true);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(
                 legacyValues(request.has("Expected") ? request.get("Expected") : null));
 
@@ -800,11 +817,13 @@ public class NativeDynamoDbJsonHandler {
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}", 400);
         }
+        requireReadableValues(exprAttrValues, VALIDATION_ENVELOPE);
 
         // EAN/EAV with no expression to reference them, mirroring the PutItem guard.
         rejectExprAttrsWithoutExpression(exprAttrNames, exprAttrValues,
                 updateExpression != null || conditionExpression != null,
                 "UpdateExpression is null, ConditionExpression is null");
+        requireReadableValues(attributeUpdateValues, VALIDATION_ENVELOPE);
 
         ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
 
@@ -885,6 +904,7 @@ public class NativeDynamoDbJsonHandler {
         }
         dynamoDbService.requireItemCallKey(tableName, keyOrItem, isKeyArg, region);
         validateLegacyExpected(expected);
+        requireReadableValues(legacyValues(expected), VALIDATION_ENVELOPE);
         return existing -> evaluateLegacyExpected(existing, expected, conditionalOperator,
                 returnValuesOnConditionCheckFailure);
     }
@@ -1065,6 +1085,15 @@ public class NativeDynamoDbJsonHandler {
         return values;
     }
 
+    private static final String VALIDATION_ENVELOPE = "1 validation error detected: ";
+
+    // DynamoDB reads the values of each request member at its own stage.
+    private static void requireReadableValues(JsonNode values, String prefix) {
+        if (values != null) {
+            DynamoDbAttributeValueValidator.requireStorable(values, prefix);
+        }
+    }
+
     private static final Set<String> VALID_SELECT = Set.of(
             "ALL_ATTRIBUTES", "ALL_PROJECTED_ATTRIBUTES", "SPECIFIC_ATTRIBUTES", "COUNT");
 
@@ -1114,6 +1143,10 @@ public class NativeDynamoDbJsonHandler {
                         ? List.of("AttributesToGet", "QueryFilter", "ConditionalOperator")
                         : List.of("AttributesToGet", "QueryFilter", "ConditionalOperator", "KeyConditions"),
                 List.of("ProjectionExpression", "FilterExpression", "KeyConditionExpression"));
+        requireReadableValues(exprAttrValues, "");
+        requireReadableValues(exclusiveStartKey, "");
+        requireReadableValues(legacyValues(keyConditions), "");
+        requireReadableValues(legacyValues(queryFilter), "");
 
         if (keyConditionExpr == null && keyConditions == null) {
             throw new AwsException("ValidationException",
@@ -1130,7 +1163,6 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbExpressionSize.checkRead(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpression, "ProjectionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
-        DynamoDbNumberUtils.requireStorable(exprAttrValues, false);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(keyConditions), false);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(queryFilter), false);
         ExpressionEvaluator.validateSyntax(keyConditionExpr, "KeyConditionExpression");
@@ -1279,11 +1311,13 @@ public class NativeDynamoDbJsonHandler {
         rejectMixedParameters(request,
                 List.of("AttributesToGet", "ScanFilter", "ConditionalOperator"),
                 List.of("ProjectionExpression", "FilterExpression"));
+        requireReadableValues(exprAttrValues, "");
+        requireReadableValues(exclusiveStartKey, "");
+        requireReadableValues(legacyValues(scanFilter), "");
 
         DynamoDbExpressionSize.checkReadWithSize(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpressionScan, "ProjectionExpression");
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
-        DynamoDbNumberUtils.requireStorable(exprAttrValues, false);
         ExpressionEvaluator.validateSyntax(filterExpr, "FilterExpression");
         // DynamoDB reports filter errors before projection errors.
         requireDefinedTokens(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
@@ -1510,6 +1544,19 @@ public class NativeDynamoDbJsonHandler {
             }
         }
 
+        requireValidReturnConsumedCapacity(request);
+        // BatchWriteItem still reads a value the way a PartiQL parameter is read.
+        for (List<JsonNode> writes : items.values()) {
+            for (JsonNode writeReq : writes) {
+                for (JsonNode value : writeReq.path("PutRequest").path("Item")) {
+                    requirePartiQLParameter(value, 1);
+                }
+                for (JsonNode value : writeReq.path("DeleteRequest").path("Key")) {
+                    requirePartiQLParameter(value, 1);
+                }
+            }
+        }
+
         for (Map.Entry<String, List<JsonNode>> entry : items.entrySet()) {
             TableDefinition bwTable = dynamoDbService.requireTableForItemCall(entry.getKey(), region);
             Set<String> seen = new HashSet<>();
@@ -1528,7 +1575,6 @@ public class NativeDynamoDbJsonHandler {
 
         // The per-table write cost needs the stored images from before the batch runs.
         String returnCCBatch = request.path("ReturnConsumedCapacity").asText("NONE");
-        requireValidReturnConsumedCapacity(request);
         Map<String, DynamoDbWriteCapacity.Cost> costs = null;
         if (!"NONE".equals(returnCCBatch)) {
             costs = new LinkedHashMap<>();
@@ -1614,6 +1660,24 @@ public class NativeDynamoDbJsonHandler {
                         + ".member.Keys' failed to satisfy constraint: "
                         + "Member must have length less than or equal to 100");
             }
+        }
+
+        // DynamoDB looks at each key as sent before it reads the values in the keys.
+        for (JsonNode tableRequest : items.values()) {
+            Set<JsonNode> sent = new HashSet<>();
+            for (JsonNode key : tableRequest.path("Keys")) {
+                for (JsonNode value : key) {
+                    if (value.has("NULL")) {
+                        throw new AwsException("ValidationException",
+                                "The supplied Item contains a null AttributeValue", 400);
+                    }
+                }
+                if (!sent.add(key)) {
+                    throw new AwsException("ValidationException",
+                            "Provided list of item keys contains duplicates", 400);
+                }
+            }
+            tableRequest.path("Keys").forEach(key -> requireReadableValues(key, ""));
         }
 
         for (Map.Entry<String, JsonNode> entry : items.entrySet()) {
@@ -1942,6 +2006,136 @@ public class NativeDynamoDbJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.set("ContinuousBackupsDescription", continuousBackupsDescriptionNode(backups));
         return Response.ok(response).build();
+    }
+
+    /** AWS answers ENABLING or DISABLING here; Floci settles at once, so a describe reads ENABLED or DISABLED. */
+    private Response handleUpdateContributorInsights(JsonNode request, String region) {
+        String tableName = requireTableNameParameter(request, "TableName");
+        DynamoDbTableNames.resolveWithRegion(tableName, region);
+        List<String> violations = new ArrayList<>();
+        String indexName = contributorInsightsIndexName(request, violations);
+        JsonNode action = request.path("ContributorInsightsAction");
+        if (action.isMissingNode() || action.isNull()) {
+            violations.add(SmithyValidationErrors.notNull("contributorInsightsAction"));
+        } else if (!CONTRIBUTOR_INSIGHTS_ACTIONS.contains(action.asText())) {
+            violations.add(SmithyValidationErrors.notInEnum(action.asText(), "contributorInsightsAction",
+                    CONTRIBUTOR_INSIGHTS_ACTIONS));
+        }
+        String mode = request.hasNonNull("ContributorInsightsMode")
+                ? request.get("ContributorInsightsMode").asText() : null;
+        if (mode != null && !CONTRIBUTOR_INSIGHTS_MODES.contains(mode)) {
+            violations.add(SmithyValidationErrors.notInEnum(mode, "contributorInsightsMode",
+                    CONTRIBUTOR_INSIGHTS_MODES));
+        }
+        throwValidationErrors(violations);
+        boolean enable = "ENABLE".equals(action.asText());
+
+        DynamoDbService.ContributorInsightsTarget target =
+                dynamoDbService.updateContributorInsights(tableName, indexName, enable, mode, region);
+
+        ObjectNode response = contributorInsightsNode(target);
+        response.put("ContributorInsightsStatus", enable ? "ENABLING" : "DISABLING");
+        if (enable) {
+            response.put("ContributorInsightsMode", target.insights().getMode());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeContributorInsights(JsonNode request, String region) {
+        String tableName = requireTableNameParameter(request, "TableName");
+        DynamoDbTableNames.resolveWithRegion(tableName, region);
+        List<String> violations = new ArrayList<>();
+        String indexName = contributorInsightsIndexName(request, violations);
+        throwValidationErrors(violations);
+
+        DynamoDbService.ContributorInsightsTarget target =
+                dynamoDbService.describeContributorInsights(tableName, indexName, region);
+
+        ObjectNode response = contributorInsightsNode(target);
+        ContributorInsights insights = target.insights();
+        if (target.enabled()) {
+            ArrayNode rules = response.putArray("ContributorInsightsRuleList");
+            contributorInsightsRuleNames(target).forEach(rules::add);
+            response.put("ContributorInsightsStatus", "ENABLED");
+            response.put("ContributorInsightsMode", insights.getMode());
+        } else {
+            response.put("ContributorInsightsStatus", "DISABLED");
+        }
+        if (insights != null) {
+            response.put("LastUpdateDateTime", epochSeconds(insights.getLastUpdateDateTime()));
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleListContributorInsights(JsonNode request, String region) {
+        String tableName = request.hasNonNull("TableName") ? request.get("TableName").asText() : null;
+        if (tableName != null) {
+            DynamoDbTableNames.resolveWithRegion(tableName, region);
+        }
+        Integer maxResults = request.hasNonNull("MaxResults") ? request.get("MaxResults").asInt() : null;
+        String nextToken = request.hasNonNull("NextToken") ? request.get("NextToken").asText() : null;
+
+        DynamoDbService.ContributorInsightsPage page =
+                dynamoDbService.listContributorInsights(tableName, maxResults, nextToken, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode summaries = response.putArray("ContributorInsightsSummaries");
+        for (DynamoDbService.ContributorInsightsTarget target : page.summaries()) {
+            ObjectNode summary = contributorInsightsNode(target);
+            summary.put("ContributorInsightsStatus", "ENABLED");
+            summary.put("ContributorInsightsMode", target.insights().getMode());
+            summaries.add(summary);
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private static String contributorInsightsIndexName(JsonNode request, List<String> violations) {
+        if (!request.hasNonNull("IndexName")) {
+            return null;
+        }
+        String indexName = request.get("IndexName").asText();
+        violations.addAll(nameViolations(indexName, "indexName"));
+        return indexName;
+    }
+
+    private ObjectNode contributorInsightsNode(DynamoDbService.ContributorInsightsTarget target) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("TableName", target.tableName());
+        if (target.indexName() != null) {
+            node.put("IndexName", target.indexName());
+        }
+        return node;
+    }
+
+    /**
+     * The rules AWS creates, named {@code DynamoDBContributorInsights-<kind>-<resource>-<creation millis>}
+     * where the resource is the table name, or {@code <table>-<index>} for an index: the accessed-key
+     * rules (PKC, SKC) only in ACCESSED_AND_THROTTLED_KEYS mode, the sort-key rules (SKC, SKT) only
+     * when the table or index has a sort key.
+     */
+    private static List<String> contributorInsightsRuleNames(DynamoDbService.ContributorInsightsTarget target) {
+        List<String> kinds = new ArrayList<>();
+        if ("ACCESSED_AND_THROTTLED_KEYS".equals(target.insights().getMode())) {
+            kinds.add("PKC");
+            if (target.hasSortKey()) {
+                kinds.add("SKC");
+            }
+        }
+        kinds.add("PKT");
+        if (target.hasSortKey()) {
+            kinds.add("SKT");
+        }
+        String resource = target.indexName() != null
+                ? target.tableName() + "-" + target.indexName() : target.tableName();
+        String suffix = "-" + resource + "-" + target.insights().getRulesCreatedAt().toEpochMilli();
+        List<String> names = new ArrayList<>();
+        for (String kind : kinds) {
+            names.add("DynamoDBContributorInsights-" + kind + suffix);
+        }
+        return names;
     }
 
     private Response handleCreateBackup(JsonNode request, String region) {
@@ -2324,7 +2518,8 @@ public class NativeDynamoDbJsonHandler {
         }
         if (described.has("GlobalSecondaryIndexes")) {
             for (JsonNode gsi : described.get("GlobalSecondaryIndexes")) {
-                ((ObjectNode) gsi).remove(List.of("IndexArn", "IndexStatus", "IndexSizeBytes", "ItemCount"));
+                ((ObjectNode) gsi).remove(
+                        List.of("IndexArn", "IndexStatus", "IndexSizeBytes", "ItemCount", "WarmThroughput"));
                 ((ObjectNode) gsi.get("ProvisionedThroughput")).remove("NumberOfDecreasesToday");
             }
             features.set("GlobalSecondaryIndexes", described.get("GlobalSecondaryIndexes"));
@@ -2369,33 +2564,11 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleTransactWriteItems(JsonNode request, String region) {
-        JsonNode transactItemsNode = requireValidTransactRequest(request);
+        TransactRequest checked = requireValidTransactRequest(request, true);
+        JsonNode transactItemsNode = checked.items();
 
-        for (JsonNode txItem : transactItemsNode) {
-            for (JsonNode op : txItem) {
-                String conditionExpression = op.has("ConditionExpression")
-                        ? op.get("ConditionExpression").asText() : null;
-                String updateExpression = op.has("UpdateExpression")
-                        ? op.get("UpdateExpression").asText() : null;
-                JsonNode opExprAttrNames = op.get("ExpressionAttributeNames");
-                JsonNode opExprAttrValues = op.get("ExpressionAttributeValues");
-                // AWS checks the depth of every value of a member before anything else,
-                // so even an unused or condition-only value fails the request.
-                DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
-                DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Key"), false);
-                DynamoDbAttributeValueValidator.requireNestingWithinLimit(opExprAttrValues, false);
-                DynamoDbExpressionSize.checkRead(op.path("UpdateExpression").textValue(), "UpdateExpression");
-                DynamoDbExpressionSize.checkReadWithSize(conditionExpression, "ConditionExpression");
-                ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
-                // Undefined tokens must fail here as a ValidationException, never a
-                // TransactionCanceledException with a false ConditionalCheckFailed reason.
-                requireDefinedTokens(updateExpression, "UpdateExpression", opExprAttrNames, opExprAttrValues);
-                requireDefinedTokens(conditionExpression, "ConditionExpression", opExprAttrNames, opExprAttrValues);
-                ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression",
-                        opExprAttrNames, opExprAttrValues);
-                dynamoDbService.requireAddOrDeleteOperandTypes(op.path("UpdateExpression").textValue(),
-                        opExprAttrValues, false);
-            }
+        for (TransactAction action : checked.actions()) {
+            requireValidTransactAction(action, checked.older());
         }
 
         // Check 4MB total item size limit
@@ -2460,22 +2633,264 @@ public class NativeDynamoDbJsonHandler {
         }
     }
 
-    private static JsonNode requireValidTransactRequest(JsonNode request) {
-        JsonNode transactItems = request.path("TransactItems");
-        List<String> validationErrors = new ArrayList<>();
-        if (transactItems.isMissingNode() || transactItems.isNull() || !transactItems.isArray()) {
-            validationErrors.add("Value null at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length greater than or equal to 1");
-        } else if (transactItems.isEmpty()) {
-            validationErrors.add("Value '[]' at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length greater than or equal to 1");
-        } else if (transactItems.size() > 100) {
-            validationErrors.add("Value '" + transactItems + "' at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length less than or equal to 100");
+    // DynamoDB reads an action with more than one operation as the first one in this order.
+    private static final List<String> TRANSACT_WRITE_OPS = List.of("ConditionCheck", "Put", "Delete", "Update");
+
+    private static final int MAX_TRANSACT_ITEMS = 100;
+
+    // DynamoDB names the required members of an action in this order.
+    private static final Map<String, List<String>> TRANSACT_REQUIRED_MEMBERS = Map.of(
+            "Put", List.of("Item", "TableName"),
+            "Delete", List.of("Key", "TableName"),
+            "Update", List.of("UpdateExpression", "Key", "TableName"),
+            "ConditionCheck", List.of("ConditionExpression", "Key", "TableName"),
+            "Get", List.of("Key", "TableName"));
+
+    // DynamoDB's newer validator gives up on a request nested this deep, and the older one answers.
+    private static final int OLDER_VALIDATOR_DEPTH = 128;
+
+    private record TransactAction(int index, String type, JsonNode op) {
+        String path(String member) {
+            return "transactItems." + (index + 1) + ".member." + decapitalize(type) + "." + decapitalize(member);
         }
-        addReturnConsumedCapacityError(request, validationErrors);
+    }
+
+    private record TransactRequest(JsonNode items, List<TransactAction> actions, boolean older) {}
+
+    // DynamoDB checks the lengths with its newer validator first. It skips that validator when a
+    // required member is missing or the request is nested too deep, and the older one checks the rest.
+    private static TransactRequest requireValidTransactRequest(JsonNode request, boolean write) {
+        String token = write ? request.path("ClientRequestToken").textValue() : null;
+        List<String> memberErrors = new ArrayList<>();
+        if (token != null) {
+            addIfPresent(memberErrors, SmithyValidationErrors.lengthOutOfRange("clientRequestToken", token, 1,
+                    MAX_CLIENT_REQUEST_TOKEN_LENGTH));
+        }
+        addReturnConsumedCapacityError(request, memberErrors);
+        if (write) {
+            addIfPresent(memberErrors, returnItemCollectionMetricsError(request));
+        }
+        JsonNode transactItems = request.path("TransactItems");
+        if (transactItems.isMissingNode() || transactItems.isNull() || !transactItems.isArray()) {
+            List<String> validationErrors = new ArrayList<>();
+            validationErrors.add(SmithyValidationErrors.notNull("transactItems"));
+            validationErrors.addAll(memberErrors);
+            throwValidationErrors(validationErrors);
+        }
+        List<String> ops = write ? TRANSACT_WRITE_OPS : List.of("Get");
+        List<TransactAction> actions = new ArrayList<>();
+        List<String> required = new ArrayList<>();
+        boolean missing = false;
+        boolean noOperation = false;
+        boolean manyOperations = false;
+        for (int i = 0; i < transactItems.size(); i++) {
+            JsonNode txItem = transactItems.get(i);
+            List<String> types = ops.stream().filter(txItem::hasNonNull).toList();
+            noOperation |= types.isEmpty();
+            manyOperations |= types.size() > 1;
+            if (!write && types.isEmpty()) {
+                required.add(SmithyValidationErrors.notNull("transactItems." + (i + 1) + ".member.get"));
+                missing = true;
+            }
+            if (types.isEmpty()) {
+                continue;
+            }
+            TransactAction action = new TransactAction(i, types.getFirst(), txItem.get(types.getFirst()));
+            actions.add(action);
+            for (String member : TRANSACT_REQUIRED_MEMBERS.get(action.type())) {
+                JsonNode value = action.op().get(member);
+                if (value == null || value.isNull()) {
+                    required.add(SmithyValidationErrors.notNull(action.path(member)));
+                    missing = true;
+                } else if ("TableName".equals(member) && value.asText().isEmpty()) {
+                    required.add(SmithyValidationErrors.lengthTooShort(action.path(member), "", 1));
+                }
+            }
+            if (write) {
+                addPartiQLReturnValuesError(action.op(), action.path("ReturnValuesOnConditionCheckFailure"), required);
+            }
+        }
+        boolean older = transactDepth(transactItems, ops) >= OLDER_VALIDATOR_DEPTH;
+        if (!missing && !older) {
+            requireTransactLengths(transactItems.size(), actions, token);
+        }
+
+        if (transactItems.size() > MAX_TRANSACT_ITEMS) {
+            required.addFirst("Value '" + transactItems + "' at 'transactItems' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to " + MAX_TRANSACT_ITEMS);
+        }
+        // The older validator stops at a missing member or an unknown ReturnValuesOnConditionCheckFailure,
+        // before the operation and name checks. The newer one leaves that enum to the per-action checks.
+        if ((missing || older) && !required.isEmpty()) {
+            required.addAll(memberErrors);
+            throwValidationErrors(required);
+        }
+        List<String> tableNames = new ArrayList<>();
+        for (TransactAction action : actions) {
+            String name = action.op().get("TableName").asText();
+            if (!AwsArnUtils.looksLikeArn(name)) {
+                tableNames.addAll(nameViolations(name, action.path("TableName")));
+            }
+        }
+        boolean refuseNoOperation = write && noOperation;
+        // A request too deep for the newer validator also gets an older answer for an empty action.
+        if (older) {
+            throwValidationErrors(memberErrors);
+            if (refuseNoOperation) {
+                throw new AwsException("ValidationException",
+                        "Invalid Request: TransactWriteRequest should contain Delete or Put or Update request", 400);
+            }
+            throwValidationErrors(tableNames);
+        } else {
+            List<String> listed = refuseNoOperation
+                    ? new ArrayList<>(List.of("Value '' at 'transactItems' failed to satisfy constraint: "
+                            + "TransactWriteRequest should contain Delete or Put or Update or ConditionCheck"))
+                    : tableNames;
+            listed.addAll(memberErrors);
+            throwValidationErrors(listed);
+        }
+        if (manyOperations) {
+            throw new AwsException("ValidationException",
+                    "TransactItems can only contain one of Check, Put, Update or Delete", 400);
+        }
+        return new TransactRequest(transactItems, actions, older);
+    }
+
+    // The newer validator names a member by its 0-based position and leaves the value out.
+    private static void requireTransactLengths(int count, List<TransactAction> actions, String token) {
+        SmithyValidationErrors.Violations unquoted = SmithyValidationErrors.Violations.WITHOUT_VALUES;
+        List<String> validationErrors = new ArrayList<>();
+        if (token != null) {
+            addIfPresent(validationErrors, unquoted.lengthOutOfRange("ClientRequestToken", token, 1,
+                    MAX_CLIENT_REQUEST_TOKEN_LENGTH));
+        }
+        addIfPresent(validationErrors, SmithyValidationErrors.sizeOutOfRange("TransactItems", count, 1,
+                MAX_TRANSACT_ITEMS));
+        for (TransactAction action : actions) {
+            addIfPresent(validationErrors, unquoted.lengthOutOfRange(
+                    "TransactItems." + action.index() + ".member." + action.type() + ".TableName",
+                    action.op().get("TableName").asText(), 1, 1024));
+        }
         throwValidationErrors(validationErrors);
-        return transactItems;
+    }
+
+    // DynamoDB checks an action's ConditionExpression in full before its UpdateExpression. In a request too deep
+    // for the newer validator, it checks the expressions before the action's item or key.
+    private void requireValidTransactAction(TransactAction action, boolean older) {
+        JsonNode op = action.op();
+        if (older) {
+            requireValidTransactExpressions(op, true);
+            requireTransactItemOrKey(action);
+            return;
+        }
+        requireTransactItemOrKey(action);
+        List<String> onFailureErrors = new ArrayList<>();
+        addPartiQLReturnValuesError(op, action.path("ReturnValuesOnConditionCheckFailure"), onFailureErrors);
+        throwValidationErrors(onFailureErrors);
+        // AWS checks the depth of every value, so even an unused or condition-only value fails the request.
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("ExpressionAttributeValues"), false);
+        requireValidTransactExpressions(op, false);
+    }
+
+    private static void requireTransactItemOrKey(TransactAction action) {
+        JsonNode op = action.op();
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
+        DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Key"), false);
+        requireReadableValues(op.get("Put".equals(action.type()) ? "Item" : "Key"), "");
+    }
+
+    private void requireValidTransactExpressions(JsonNode op, boolean older) {
+        String conditionExpression = textOrNull(op, "ConditionExpression");
+        String updateExpression = textOrNull(op, "UpdateExpression");
+        JsonNode exprAttrNames = op.get("ExpressionAttributeNames");
+        JsonNode exprAttrValues = op.get("ExpressionAttributeValues");
+        // An action without an expression ignores its ExpressionAttributeNames and ExpressionAttributeValues.
+        if (conditionExpression == null && updateExpression == null) {
+            return;
+        }
+        if (older) {
+            requireNamedExpressionValues(exprAttrValues);
+        } else {
+            requireReadableValues(exprAttrValues, "");
+        }
+
+        requireNonEmptyExpression(conditionExpression, "ConditionExpression");
+        // Only a request too deep for the newer validator reports the condition's size.
+        if (older) {
+            DynamoDbExpressionSize.checkReadWithSize(conditionExpression, "ConditionExpression");
+        } else {
+            DynamoDbExpressionSize.checkRead(conditionExpression, "ConditionExpression");
+        }
+        ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
+        // Undefined tokens must fail here as a ValidationException, never a
+        // TransactionCanceledException with a false ConditionalCheckFailed reason.
+        requireDefinedTokens(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression",
+                exprAttrNames, exprAttrValues);
+
+        requireNonEmptyExpression(updateExpression, "UpdateExpression");
+        DynamoDbExpressionSize.checkRead(updateExpression, "UpdateExpression");
+        requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
+        dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, false);
+
+        checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression, updateExpression));
+        checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression, updateExpression));
+    }
+
+    // The older validator names the ExpressionAttributeValues key it refuses.
+    private void requireNamedExpressionValues(JsonNode exprAttrValues) {
+        if (exprAttrValues == null) {
+            return;
+        }
+        for (Map.Entry<String, JsonNode> entry : exprAttrValues.properties()) {
+            ObjectNode value = objectMapper.createObjectNode().set(entry.getKey(), entry.getValue());
+            try {
+                DynamoDbAttributeValueValidator.requireNestingWithinLimit(value, false);
+                requireReadableValues(value, "");
+            } catch (AwsException e) {
+                throw new AwsException("ValidationException", "ExpressionAttributeValues contains invalid value: "
+                        + e.getMessage() + " for key " + entry.getKey(), 400);
+            }
+        }
+    }
+
+    private static void requireNonEmptyExpression(String expression, String exprType) {
+        if (expression != null && expression.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "Invalid " + exprType + ": The expression can not be empty;", 400);
+        }
+    }
+
+    // DynamoDB leaves unknown members out when it measures how deep a request nests.
+    private static int transactDepth(JsonNode transactItems, List<String> ops) {
+        int deepest = 0;
+        for (JsonNode txItem : transactItems) {
+            for (String op : ops) {
+                for (String member : List.of("Item", "Key", "ExpressionAttributeValues")) {
+                    deepest = Math.max(deepest, jsonDepth(txItem.path(op).path(member)));
+                }
+            }
+        }
+        // The request, TransactItems, the action and the operation hold these members.
+        return deepest + 4;
+    }
+
+    private static int jsonDepth(JsonNode node) {
+        int deepest = 0;
+        for (JsonNode child : node) {
+            deepest = Math.max(deepest, jsonDepth(child));
+        }
+        return node.isContainerNode() ? deepest + 1 : 0;
+    }
+
+    private static String decapitalize(String name) {
+        return Character.toLowerCase(name.charAt(0)) + name.substring(1);
+    }
+
+    private static void addIfPresent(List<String> validationErrors, String error) {
+        if (error != null) {
+            validationErrors.add(error);
+        }
     }
 
     private static void addReturnConsumedCapacityError(JsonNode request, List<String> validationErrors) {
@@ -2530,7 +2945,8 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleTransactGetItems(JsonNode request, String region) {
-        JsonNode transactItemsNode = requireValidTransactRequest(request);
+        JsonNode transactItemsNode = requireValidTransactRequest(request, false).items();
+        transactItemsNode.forEach(txItem -> requireReadableValues(txItem.path("Get").path("Key"), ""));
 
         for (JsonNode txItem : transactItemsNode) {
             DynamoDbExpressionSize.checkRead(txItem.path("Get").path("ProjectionExpression").textValue(),
@@ -2793,28 +3209,16 @@ public class NativeDynamoDbJsonHandler {
         return Response.ok(response).build();
     }
 
-    /**
-     * Builds a ConsumedCapacity node if the request includes ReturnConsumedCapacity.
-     * Uses simple estimates: 0.5 RCU per item read, 1.0 WCU per item written.
-     */
-    private void validateItemSets(JsonNode item) {
-        if (item == null || !item.isObject()) return;
-        item.fields().forEachRemaining(entry -> {
-            JsonNode attr = entry.getValue();
-            checkAttrSets(attr);
-        });
-    }
-
     private void checkAttrSets(JsonNode attr) {
         if (attr == null) return;
-        if (attr.has("NULL") && !attr.get("NULL").asBoolean()) {
+        if (DynamoDbAttributeValueValidator.hasFalseNull(attr)) {
             throw new AwsException("ValidationException",
-                    "One or more parameter values were invalid: Null attribute value types must have the value of true", 400);
+                    DynamoDbAttributeValueValidator.FALSE_NULL, 400);
         }
         if (attr.has("SS")) {
             JsonNode ss = attr.get("SS");
             if (ss.isEmpty()) throw new AwsException("ValidationException",
-                    "One or more parameter values were invalid: An string set  may not be empty", 400);
+                    DynamoDbAttributeValueValidator.emptySetProblem("SS"), 400);
             Set<String> seen = new HashSet<>();
             for (JsonNode e : ss) {
                 if (!seen.add(e.asText())) throw new AwsException("ValidationException",
@@ -2823,7 +3227,7 @@ public class NativeDynamoDbJsonHandler {
         } else if (attr.has("NS")) {
             JsonNode ns = attr.get("NS");
             if (ns.isEmpty()) throw new AwsException("ValidationException",
-                    "One or more parameter values were invalid: An number set  may not be empty", 400);
+                    DynamoDbAttributeValueValidator.emptySetProblem("NS"), 400);
             Set<String> seen = new HashSet<>();
             for (JsonNode e : ns) {
                 if (!seen.add(e.asText())) throw new AwsException("ValidationException",
@@ -2832,7 +3236,7 @@ public class NativeDynamoDbJsonHandler {
         } else if (attr.has("BS")) {
             JsonNode bs = attr.get("BS");
             if (bs.isEmpty()) throw new AwsException("ValidationException",
-                    "One or more parameter values were invalid: Binary sets should not be empty", 400);
+                    DynamoDbAttributeValueValidator.emptySetProblem("BS"), 400);
             Set<String> seen = new HashSet<>();
             for (JsonNode e : bs) {
                 // A binary set names its type, and AWS leaves out the space before "of".
@@ -3299,6 +3703,7 @@ public class NativeDynamoDbJsonHandler {
                     }
                     gsiNode.set("OnDemandThroughput", gsiOdt);
                 }
+                gsiNode.set("WarmThroughput", gsiWarmThroughput(table, gsi));
 
                 gsiArray.add(gsiNode);
             }
@@ -3357,6 +3762,21 @@ public class NativeDynamoDbJsonHandler {
         }
 
         return node;
+    }
+
+    /**
+     * AWS reports a provisioned index's warm throughput as its provisioned capacity, and an on-demand
+     * one's as the values a new on-demand index starts with. An index is ACTIVE as soon as it exists here.
+     */
+    private ObjectNode gsiWarmThroughput(TableDefinition table, GlobalSecondaryIndex gsi) {
+        boolean onDemand = "PAY_PER_REQUEST".equals(table.getBillingMode());
+        ObjectNode warmThroughput = objectMapper.createObjectNode();
+        warmThroughput.put("ReadUnitsPerSecond",
+                onDemand ? ON_DEMAND_WARM_READ_UNITS : gsi.getProvisionedThroughput().getReadCapacityUnits());
+        warmThroughput.put("WriteUnitsPerSecond",
+                onDemand ? ON_DEMAND_WARM_WRITE_UNITS : gsi.getProvisionedThroughput().getWriteCapacityUnits());
+        warmThroughput.put("Status", "ACTIVE");
+        return warmThroughput;
     }
 
     /**
@@ -3593,6 +4013,7 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleExecuteStatement(JsonNode request, String region) {
+        decodePartiQLParameters(request.path("Parameters"));
         List<String> validationErrors = new ArrayList<>();
         addPartiQLReturnValuesError(request, "returnValuesOnConditionCheckFailure", validationErrors);
         addLengthError(request, "NextToken", "nextToken", MAX_NEXT_TOKEN_LENGTH, validationErrors);
@@ -3622,6 +4043,7 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleExecuteTransaction(JsonNode request, String region) {
         JsonNode stmts = request.path("TransactStatements");
+        stmts.forEach(s -> decodePartiQLParameters(s.path("Parameters")));
         List<String> validationErrors = new ArrayList<>();
         addLengthError(request, "ClientRequestToken", "clientRequestToken", MAX_CLIENT_REQUEST_TOKEN_LENGTH,
                 validationErrors);
@@ -3751,6 +4173,7 @@ public class NativeDynamoDbJsonHandler {
 
     private Response handleBatchExecuteStatement(JsonNode request, String region) {
         JsonNode stmts = request.path("Statements");
+        stmts.forEach(s -> decodePartiQLParameters(s.path("Parameters")));
         List<String> validationErrors = new ArrayList<>();
         addReturnConsumedCapacityError(request, validationErrors);
         addStatementListErrors(stmts, "statements", validationErrors);
@@ -3821,10 +4244,10 @@ public class NativeDynamoDbJsonHandler {
     // WHERE clauses are rejected per statement (characterised on real AWS,
     // eu-west-1, 2026-09-02).
     private void requireBatchSelectReadsByKey(DynamoDbPartiQLParser.Stmt.Select select, String region) {
+        TableDefinition table = dynamoDbService.requireTableForItemCall(select.table(), region);
         if (select.index() != null) {
             throw batchSelectNeedsKey();
         }
-        TableDefinition table = dynamoDbService.requireTableForItemCall(select.table(), region);
         DynamoDbPartiQLHandler.requireReadsWithinLimit(table, select.where());
         if (!DynamoDbPartiQLHandler.namesOnlyTheKey(table, select.where())) {
             throw batchSelectNeedsKey();
@@ -3847,10 +4270,43 @@ public class NativeDynamoDbJsonHandler {
         }
         List<JsonNode> params = new ArrayList<>();
         for (JsonNode parameter : node) {
-            DynamoDbAttributeValueValidator.requireParameterNestingWithinLimit(parameter);
-            checkAttrSets(parameter);
+            requirePartiQLParameter(parameter, 1);
             params.add(parameter);
         }
         return params;
+    }
+
+    // DynamoDB decodes the binary values of every statement before it checks anything else.
+    private static void decodePartiQLParameters(JsonNode parameters) {
+        for (JsonNode parameter : parameters) {
+            DynamoDbAttributeValueValidator.dropNullMembers(parameter);
+            DynamoDbAttributeValueValidator.requireBase64(parameter);
+        }
+    }
+
+    // DynamoDB reads the parameters in order and refuses the first value it cannot take. It reads the
+    // members of a map in the order of a HashMap sized for them, and a number before the type count.
+    private void requirePartiQLParameter(JsonNode value, int level) {
+        DynamoDbAttributeValueValidator.requireParameterLevelWithinLimit(level);
+        if (value.has("N")) {
+            DynamoDbNumberUtils.requirePartiQLParameterNumber(value.get("N").asText());
+        } else if (value.has("NS")) {
+            DynamoDbNumberUtils.requirePartiQLParameterNumberSet(value.get("NS"));
+        }
+        switch (DynamoDbAttributeValueValidator.typeOf(value)) {
+            case "M" -> {
+                Map<String, JsonNode> members = HashMap.newHashMap(value.get("M").size());
+                value.get("M").properties().forEach(member -> members.put(member.getKey(), member.getValue()));
+                for (JsonNode member : members.values()) {
+                    requirePartiQLParameter(member, level + 1);
+                }
+            }
+            case "L" -> {
+                for (JsonNode member : value.get("L")) {
+                    requirePartiQLParameter(member, level + 1);
+                }
+            }
+            default -> checkAttrSets(value);
+        }
     }
 }

@@ -4,13 +4,17 @@ import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtensionContext;
 
 import java.net.URI;
 import java.util.UUID;
 
 import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
+import static io.github.hectorvent.floci.testing.EnforcementFixtures.iam;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.Mockito.mock;
 
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -18,6 +22,90 @@ class EnforcementFixturesIntegrationTest {
 
     @TestHTTPResource("/")
     URI baseUri;
+
+    @Test
+    void rejectedUserCreationPreservesExistingUser() {
+        String name = "fixture-existing-user-" + UUID.randomUUID();
+        PartitionCleanup attempted = new PartitionCleanup();
+        iam(baseUri.getPort(), auth("test", "iam"), "CreateUser", "UserName", name).statusCode(200);
+        try {
+            assertThrows(AssertionError.class, () -> EnforcementFixtures.createUser(
+                    attempted, baseUri.getPort(), auth("test", "iam"), name));
+            attempted.afterEach(mock(ExtensionContext.class));
+            iam(baseUri.getPort(), auth("test", "iam"), "GetUser", "UserName", name).statusCode(200);
+        } finally {
+            EnforcementFixtures.removeUser(baseUri.getPort(), auth("test", "iam"), name);
+        }
+    }
+
+    @Test
+    void rejectedRoleCreationPreservesExistingRole() {
+        String name = "fixture-existing-role-" + UUID.randomUUID();
+        PartitionCleanup attempted = new PartitionCleanup();
+        PartitionCleanup existing = new PartitionCleanup();
+        try {
+            EnforcementFixtures.createRole(existing, baseUri.getPort(), "000000000000", "/", name, allow());
+            assertThrows(AssertionError.class, () -> EnforcementFixtures.createRole(
+                    attempted, baseUri.getPort(), "000000000000", "/", name, allow()));
+            attempted.afterEach(mock(ExtensionContext.class));
+            iam(baseUri.getPort(), auth("test", "iam"), "GetRole", "RoleName", name).statusCode(200);
+        } finally {
+            existing.afterEach(mock(ExtensionContext.class));
+        }
+    }
+
+    @Test
+    void successfulUserSetupRemovesOwnedUserAndKey() {
+        String name = "fixture-owned-user-" + UUID.randomUUID();
+        PartitionCleanup owned = new PartitionCleanup();
+        try {
+            EnforcementFixtures.createUser(owned, baseUri.getPort(), auth("test", "iam"), name);
+            iam(baseUri.getPort(), auth("test", "iam"), "GetUser", "UserName", name).statusCode(200);
+            owned.afterEach(mock(ExtensionContext.class));
+            iam(baseUri.getPort(), auth("test", "iam"), "GetUser", "UserName", name).statusCode(404);
+        } finally {
+            EnforcementFixtures.removeUser(baseUri.getPort(), auth("test", "iam"), name);
+        }
+    }
+
+    @Test
+    void successfulRoleSetupRemovesOwnedRoleAndPolicy() {
+        String name = "fixture-owned-role-" + UUID.randomUUID();
+        PartitionCleanup owned = new PartitionCleanup();
+        try {
+            EnforcementFixtures.createRole(owned, baseUri.getPort(), "000000000000", "/", name, allow());
+            iam(baseUri.getPort(), auth("test", "iam"), "GetRole", "RoleName", name).statusCode(200);
+            iam(baseUri.getPort(), auth("test", "iam"), "GetRolePolicy", "RoleName", name,
+                    "PolicyName", "p").statusCode(200);
+            owned.afterEach(mock(ExtensionContext.class));
+            iam(baseUri.getPort(), auth("test", "iam"), "GetRole", "RoleName", name).statusCode(404);
+        } finally {
+            EnforcementFixtures.removeRole(baseUri.getPort(), auth("test", "iam"), name);
+        }
+    }
+
+    @Test
+    void failedPolicySetupStillRemovesNewRole() {
+        String name = "fixture-policy-failure-" + UUID.randomUUID();
+        PartitionCleanup owned = new PartitionCleanup();
+        String oversizedPolicy = "{\"Statement\":{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\""
+                + "a".repeat(10_241) + "\"}}";
+        try {
+            assertThrows(AssertionError.class, () -> EnforcementFixtures.createRole(
+                    owned, baseUri.getPort(), "000000000000", "/", name, oversizedPolicy));
+            iam(baseUri.getPort(), auth("test", "iam"), "GetRole", "RoleName", name).statusCode(200);
+            iam(baseUri.getPort(), auth("test", "iam"), "GetRolePolicy", "RoleName", name,
+                    "PolicyName", "p").statusCode(404);
+            owned.afterEach(mock(ExtensionContext.class));
+            iam(baseUri.getPort(), auth("test", "iam"), "GetRole", "RoleName", name).statusCode(404);
+        } finally {
+            EnforcementFixtures.removeRole(baseUri.getPort(), auth("test", "iam"), name);
+        }
+    }
+
+    private static String allow() {
+        return "{\"Statement\":{\"Effect\":\"Allow\",\"Action\":\"s3:*\",\"Resource\":\"*\"}}";
+    }
 
     @Test
     void removeBucketPurgesNullVersionVersionsAndMarkersAcrossPages() {

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.elb;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegionFacts;
 import io.github.hectorvent.floci.core.common.CertificateReferenceResolver;
@@ -10,6 +11,7 @@ import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.acm.AcmCertificateReferenceProvider.CertificateReference;
 import io.github.hectorvent.floci.services.acm.AcmService;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
@@ -635,18 +637,46 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
     @Override
     public List<Reference> serverCertificateReferences() {
         List<Reference> references = new ArrayList<>();
+        for (ListenerCertificate served : listenerCertificates()) {
+            references.add(new Reference(served.certificateId(),
+                    "load balancer " + served.loadBalancer().getLoadBalancerName()));
+        }
+        return references;
+    }
+
+    /**
+     * The ACM certificates the listeners serve, each held by its load balancer, so ACM lists the load
+     * balancer in {@code InUseBy} and refuses to delete the certificate. Like
+     * {@link #serverCertificateReferences} it takes no monitor of this service.
+     */
+    public List<CertificateReference> acmCertificateReferences() {
+        List<CertificateReference> references = new ArrayList<>();
+        for (ListenerCertificate served : listenerCertificates()) {
+            ClassicLoadBalancer lb = served.loadBalancer();
+            String loadBalancerArn = AwsArnUtils.Arn.of("elasticloadbalancing", lb.getRegion(),
+                    lb.getAccountId(), "loadbalancer/" + lb.getLoadBalancerName()).toString();
+            references.add(new CertificateReference(served.certificateId(), loadBalancerArn));
+        }
+        return references;
+    }
+
+    private record ListenerCertificate(ClassicLoadBalancer loadBalancer, String certificateId) {
+    }
+
+    /** Every certificate a listener names, skipping the empty id Terraform sends for a plain listener. */
+    private List<ListenerCertificate> listenerCertificates() {
+        List<ListenerCertificate> served = new ArrayList<>();
         for (Map<String, ClassicLoadBalancer> regionLbs : loadBalancers.values()) {
             for (ClassicLoadBalancer lb : regionLbs.values()) {
                 for (ClassicListener listener : lb.getListeners()) {
-                    String certificate = listener.getSslCertificateId();
-                    if (certificate != null && !certificate.isBlank()) {
-                        references.add(new Reference(certificate,
-                                "load balancer " + lb.getLoadBalancerName()));
+                    String certificateId = listener.getSslCertificateId();
+                    if (certificateId != null && !certificateId.isBlank()) {
+                        served.add(new ListenerCertificate(lb, certificateId));
                     }
                 }
             }
         }
-        return references;
+        return served;
     }
 
     private static AwsException duplicateLoadBalancerName(String name) {
@@ -672,12 +702,18 @@ public class ElbClassicService implements ServerCertificateReferenceProvider {
     private void requireCertificates(String region, List<ClassicListener> listeners) {
         for (ClassicListener listener : listeners) {
             String certificateId = listener.getSslCertificateId();
-            if (certificateId != null && !certificateId.isBlank()
-                    && !certificates.exists(region, certificateId)) {
+            if (certificateId == null || (certificateId.isBlank() && !terminatesTls(listener))) {
+                continue;
+            }
+            if (!certificates.exists(region, certificateId)) {
                 throw new AwsException("CertificateNotFound",
                         "Server Certificate not found for the key: " + certificateId, 400);
             }
         }
+    }
+
+    private static boolean terminatesTls(ClassicListener listener) {
+        return "HTTPS".equalsIgnoreCase(listener.getProtocol()) || "SSL".equalsIgnoreCase(listener.getProtocol());
     }
 
     private static List<String> certificateIdsOf(List<ClassicListener> listeners) {

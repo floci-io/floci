@@ -8,19 +8,25 @@ import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
 import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
 import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.Part;
+import io.github.hectorvent.floci.services.s3.model.PutObjectOptions;
 import io.github.hectorvent.floci.services.s3.model.S3Checksum;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.List;
@@ -40,6 +46,79 @@ class S3MultipartServiceTest {
     void setUp() {
         s3Service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir, true);
         s3Service.createBucket("test-bucket", "us-east-1");
+    }
+
+    @Test
+    void removedMarkerHistoryIsBoundedWithoutHidingOrRepeatingUploads() throws ReflectiveOperationException {
+        MultipartUpload earlier = s3Service.initiateMultipartUpload("test-bucket", "key", null);
+        MultipartUpload marker = s3Service.initiateMultipartUpload("test-bucket", "key", null);
+        MultipartUpload later = s3Service.initiateMultipartUpload("test-bucket", "key", null);
+        s3Service.abortMultipartUpload("test-bucket", "key", marker.getUploadId());
+        for (int i = 0; i < 1000; i++) {
+            MultipartUpload retired = s3Service.initiateMultipartUpload("test-bucket", "key", null);
+            s3Service.abortMultipartUpload("test-bucket", "key", retired.getUploadId());
+        }
+        Field historyField = S3Service.class.getDeclaredField("removedMultipartPositions");
+        historyField.setAccessible(true);
+        Map<?, ?> history = (Map<?, ?>) historyField.get(s3Service);
+        assertTrue(history.size() <= 1000, "Removed uploads must not accumulate without limit");
+        S3Service.ListMultipartUploadsResult next = s3Service.listMultipartUploads(
+                "test-bucket", null, null, "key", marker.getUploadId(), 10);
+        assertEquals(List.of(later.getUploadId()), next.entries().stream()
+                .map(entry -> entry.upload().getUploadId()).toList());
+        assertFalse(next.entries().stream().anyMatch(entry -> entry.upload().getUploadId().equals(earlier.getUploadId())));
+    }
+
+    @Test
+    void listingIncludesNewUploadsAfterMarkedKeyWasDrained() {
+        MultipartUpload marker = s3Service.initiateMultipartUpload("test-bucket", "a", null);
+        MultipartUpload tail = s3Service.initiateMultipartUpload("test-bucket", "z", null);
+        S3Service.ListMultipartUploadsResult first = s3Service.listMultipartUploads(
+                "test-bucket", null, null, null, null, 1);
+        assertEquals(marker.getUploadId(), first.nextUploadIdMarker());
+        s3Service.abortMultipartUpload("test-bucket", "a", marker.getUploadId());
+        MultipartUpload later = s3Service.initiateMultipartUpload("test-bucket", "a", null);
+        S3Service.ListMultipartUploadsResult next = s3Service.listMultipartUploads(
+                "test-bucket", null, null, first.nextKeyMarker(), first.nextUploadIdMarker(), 10);
+        assertEquals(List.of(later.getUploadId(), tail.getUploadId()), next.entries().stream()
+                .map(entry -> entry.upload().getUploadId()).toList());
+        assertFalse(next.isTruncated());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"true,true", "true,false", "false,true", "false,false"})
+    void listingRetainsRemovedMarkersInInitiationOrder(boolean memory, boolean complete) {
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                tempDir.resolve("removed-markers"), memory);
+        service.createBucket("markers", "us-east-1");
+        List<MultipartUpload> uploads = new ArrayList<>();
+        for (int i = 0; i < 3; i++) {
+            uploads.add(service.initiateMultipartUpload("markers", "key", null));
+        }
+        uploads.sort(Comparator.comparing(MultipartUpload::getUploadId));
+        MultipartUpload later = uploads.get(0);
+        MultipartUpload earlier = uploads.get(1);
+        MultipartUpload marker = uploads.get(2);
+        Instant start = Instant.parse("2026-01-01T00:00:00Z");
+        earlier.setInitiated(start);
+        marker.setInitiated(start.plusSeconds(1));
+        later.setInitiated(start.plusSeconds(2));
+        S3Service.ListMultipartUploadsResult first = service.listMultipartUploads(
+                "markers", null, null, null, null, 2);
+        assertEquals(marker.getUploadId(), first.nextUploadIdMarker());
+        if (complete) {
+            service.uploadPart("markers", "key", marker.getUploadId(), 1, new byte[]{1});
+            service.completeMultipartUpload("markers", "key", marker.getUploadId(), List.of(1), null, null);
+        } else {
+            service.abortMultipartUpload("markers", "key", marker.getUploadId());
+        }
+        S3Service.ListMultipartUploadsResult next = service.listMultipartUploads(
+                "markers", null, null, first.nextKeyMarker(), first.nextUploadIdMarker(), 2);
+        assertEquals(List.of(later.getUploadId()), next.entries().stream()
+                .map(entry -> entry.upload().getUploadId()).toList());
+        assertFalse(next.isTruncated());
+        assertNull(next.nextKeyMarker());
+        assertNull(next.nextUploadIdMarker());
     }
 
     @ParameterizedTest
@@ -267,6 +346,19 @@ class S3MultipartServiceTest {
         s3Service.completeMultipartUpload("test-bucket", "untagged.bin", upload.getUploadId(), List.of(1), null, null);
 
         assertTrue(s3Service.getObjectTagging("test-bucket", "untagged.bin").isEmpty());
+    }
+
+    @Test
+    void completeMultipartUploadAppliesContentEncodingAndCacheControl() {
+        MultipartUpload upload = s3Service.initiateMultipartUpload("test-bucket", "encoded.bin", "text/plain",
+                null, null, new PutObjectOptions().withContentEncoding("gzip").withCacheControl("no-cache"));
+        s3Service.uploadPart("test-bucket", "encoded.bin", upload.getUploadId(), 1, "part1".getBytes());
+
+        s3Service.completeMultipartUpload("test-bucket", "encoded.bin", upload.getUploadId(), List.of(1), null, null);
+
+        S3Object object = s3Service.headObject("test-bucket", "encoded.bin");
+        assertEquals("gzip", object.getContentEncoding());
+        assertEquals("no-cache", object.getCacheControl());
     }
 
     @Test

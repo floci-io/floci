@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.route53.Route53Service.CreateZoneResult;
 import io.github.hectorvent.floci.services.route53.model.AliasTarget;
 import io.github.hectorvent.floci.services.route53.model.ChangeInfo;
+import io.github.hectorvent.floci.services.route53.model.DelegationSet;
 import io.github.hectorvent.floci.services.route53.model.HealthCheck;
 import io.github.hectorvent.floci.services.route53.model.HealthCheckConfig;
 import io.github.hectorvent.floci.services.route53.model.HostedZone;
@@ -25,6 +26,7 @@ import jakarta.ws.rs.core.Response;
 
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamReader;
+
 import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -44,6 +46,70 @@ public class Route53Controller {
     @Inject
     Route53Service service;
 
+    @POST
+    @Path("/delegationset")
+    public Response createReusableDelegationSet(String body) {
+        try {
+            if (!"CreateReusableDelegationSetRequest".equals(XmlParser.rootElementName(body))) {
+                throw new AwsException("InvalidInput",
+                        "The request body must be a CreateReusableDelegationSetRequest document.", 400);
+            }
+            DelegationSet set = service.createReusableDelegationSet(XmlParser.extractFirst(body, "CallerReference", null),
+                    XmlParser.extractFirst(body, "HostedZoneId", null));
+            String xml = new XmlBuilder().start("CreateReusableDelegationSetResponse", NS)
+                    .raw(xmlDelegationSet(set)).end("CreateReusableDelegationSetResponse").build();
+            return Response.created(URI.create("/2013-04-01/delegationset/" + set.id())).type(XML).entity(xml).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/delegationset/{Id}")
+    public Response getReusableDelegationSet(@PathParam("Id") String id) {
+        try {
+            String xml = new XmlBuilder().start("GetReusableDelegationSetResponse", NS)
+                    .raw(xmlDelegationSet(service.getReusableDelegationSet(id)))
+                    .end("GetReusableDelegationSetResponse").build();
+            return Response.ok(xml, XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @DELETE
+    @Path("/delegationset/{Id}")
+    public Response deleteReusableDelegationSet(@PathParam("Id") String id) {
+        try {
+            service.deleteReusableDelegationSet(id);
+            return Response.ok().build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
+    @GET
+    @Path("/delegationset")
+    public Response listReusableDelegationSets(@QueryParam("marker") String marker,
+                                               @QueryParam("maxitems") @DefaultValue("100") String maxItems) {
+        try {
+            Route53Pagination.Page<DelegationSet> page = service.pageReusableDelegationSets(marker, maxItems);
+            XmlBuilder xml = new XmlBuilder().start("ListReusableDelegationSetsResponse", NS).start("DelegationSets");
+            for (DelegationSet set : page.items()) {
+                xml.raw(xmlDelegationSet(set));
+            }
+            xml.end("DelegationSets").elem("Marker", marker == null ? "" : marker)
+                    .elem("IsTruncated", page.isTruncated());
+            if (page.isTruncated()) {
+                xml.elem("NextMarker", page.nextMarker());
+            }
+            xml.elem("MaxItems", maxItems).end("ListReusableDelegationSetsResponse");
+            return Response.ok(xml.build(), XML).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
+    }
+
     // ── Hosted Zones ──────────────────────────────────────────────────────────
 
     @POST
@@ -62,12 +128,16 @@ public class Route53Controller {
                 throw new AwsException("InvalidInput", "Name and CallerReference are required.", 400);
             }
 
-            CreateZoneResult result = service.createHostedZone(name, callerRef, comment, vpcAssociation);
+            String delegationSetId = XmlParser.extractFirst(body, "DelegationSetId", null);
+            if (delegationSetId != null && Boolean.parseBoolean(XmlParser.extractFirst(body, "PrivateZone", "false"))) {
+                throw new AwsException("InvalidInput", "A private hosted zone cannot use a reusable delegation set.", 400);
+            }
+            CreateZoneResult result = service.createHostedZone(name, callerRef, comment, vpcAssociation, delegationSetId);
             XmlBuilder xml = new XmlBuilder()
                     .start("CreateHostedZoneResponse", NS)
                     .raw(xmlHostedZone(result.zone()))
                     .raw(xmlChangeInfo(result.change()))
-                    .raw(xmlDelegationSet());
+                    .raw(xmlDelegationSet(service.getDelegationSet(result.zone())));
             if (!result.zone().getVpcAssociations().isEmpty()) {
                 xml.raw(xmlVpcAssociation(result.zone().getVpcAssociations().getFirst()));
             }
@@ -90,7 +160,7 @@ public class Route53Controller {
             String xml = new XmlBuilder()
                     .start("GetHostedZoneResponse", NS)
                     .raw(xmlHostedZone(zone))
-                    .raw(xmlDelegationSet())
+                    .raw(xmlDelegationSet(service.getDelegationSet(zone)))
                     .raw(xmlVpcAssociations(zone.getVpcAssociations()))
                     .end("GetHostedZoneResponse")
                     .build();
@@ -141,9 +211,10 @@ public class Route53Controller {
     @GET
     @Path("/hostedzone")
     public Response listHostedZones(@QueryParam("marker") String marker,
-                                     @QueryParam("maxitems") @DefaultValue("100") int maxItems) {
+                                     @QueryParam("maxitems") @DefaultValue("100") int maxItems,
+                                     @QueryParam("delegationsetid") String delegationSetId) {
         try {
-            Route53Pagination.Page<HostedZone> page = service.pageHostedZones(marker, maxItems);
+            Route53Pagination.Page<HostedZone> page = service.pageHostedZones(marker, maxItems, delegationSetId);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("ListHostedZonesResponse", NS)
@@ -169,23 +240,32 @@ public class Route53Controller {
     @GET
     @Path("/hostedzonesbyname")
     public Response listHostedZonesByName(@QueryParam("dnsname") String dnsName,
+                                           @QueryParam("hostedzoneid") String hostedZoneId,
                                            @QueryParam("maxitems") @DefaultValue("100") int maxItems) {
         try {
-            List<HostedZone> zones = service.listHostedZonesByName(dnsName, maxItems);
-            long total = service.getHostedZoneCount();
-            boolean truncated = zones.size() == maxItems && zones.size() < total;
+            if (maxItems <= 0) {
+                throw new AwsException("InvalidInput", "MaxItems must be a positive integer.", 400);
+            }
+            Route53Pagination.Page<HostedZone> page = service.pageHostedZonesByName(dnsName, hostedZoneId, maxItems);
 
             XmlBuilder xml = new XmlBuilder()
                     .start("ListHostedZonesByNameResponse", NS)
                     .start("HostedZones");
-            for (HostedZone zone : zones) {
+            for (HostedZone zone : page.items()) {
                 xml.raw(xmlHostedZone(zone));
             }
             xml.end("HostedZones")
-               .elem("IsTruncated", String.valueOf(truncated))
+               .elem("IsTruncated", String.valueOf(page.isTruncated()))
                .elem("MaxItems", String.valueOf(maxItems));
             if (dnsName != null && !dnsName.isEmpty()) {
                 xml.elem("DNSName", dnsName);
+            }
+            if (hostedZoneId != null && !hostedZoneId.isEmpty()) {
+                xml.elem("HostedZoneId", hostedZoneId);
+            }
+            if (page.isTruncated()) {
+                xml.elem("NextDNSName", page.nextItem().getName())
+                   .elem("NextHostedZoneId", page.nextMarker());
             }
             xml.end("ListHostedZonesByNameResponse");
 
@@ -618,7 +698,7 @@ public class Route53Controller {
                 .elem("Type", type)
                 .elem("Value", value)
                 .end("Limit")
-                .elem("Count", 0L)
+                .elem("Count", "MAX_REUSABLE_DELEGATION_SETS_BY_OWNER".equals(type) ? service.getReusableDelegationSetCount() : 0L)
                 .end("GetAccountLimitResponse")
                 .build();
         return Response.ok(xml, XML).build();
@@ -725,15 +805,14 @@ public class Route53Controller {
                 .build();
     }
 
-    private String xmlDelegationSet() {
-        XmlBuilder xml = new XmlBuilder()
-                .start("DelegationSet")
+    private String xmlDelegationSet(DelegationSet set) {
+        XmlBuilder xml = new XmlBuilder().start("DelegationSet")
+                .elem("Id", set.id() == null ? null : "/delegationset/" + set.id()).elem("CallerReference", set.callerReference())
                 .start("NameServers");
-        for (String ns : service.getNameServers()) {
+        for (String ns : set.nameServers()) {
             xml.elem("NameServer", ns);
         }
-        xml.end("NameServers").end("DelegationSet");
-        return xml.build();
+        return xml.end("NameServers").end("DelegationSet").build();
     }
 
     private String xmlVpcAssociation(VpcAssociation association) {

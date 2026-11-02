@@ -44,6 +44,7 @@ import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
 import io.github.hectorvent.floci.services.apigatewayv2.proxy.CloudMapInstanceResolver;
+import io.github.hectorvent.floci.services.apigatewayv2.proxy.HttpApiForwardedHeaders;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.ConnectionInfo;
 import io.github.hectorvent.floci.services.apigatewayv2.websocket.WebSocketConnectionManager;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
@@ -320,12 +321,13 @@ public class ApiGatewayExecuteController {
     public Response handleDelete(@Context HttpHeaders headers, @Context UriInfo uriInfo,
                                  @PathParam("apiId") String apiId,
                                  @PathParam("stageName") String stageName,
-                                 @PathParam("proxy") String proxy) {
+                                 @PathParam("proxy") String proxy,
+                                 byte[] body) {
         if (isWebSocketConnectionRequest(apiId, proxy)) {
             String connectionId = decodeConnectionId(proxy.substring(CONNECTIONS_PREFIX.length()));
             return handleDeleteConnection(connectionId);
         }
-        return dispatch("DELETE", apiId, stageName, proxy, headers, uriInfo, null);
+        return dispatch("DELETE", apiId, stageName, proxy, headers, uriInfo, body);
     }
 
     @PATCH
@@ -2999,14 +3001,17 @@ public class ApiGatewayExecuteController {
         Map<String, Object> authorizerContext = lambdaAuthorizerContext == null
                 ? Map.of() : objectMapper.convertValue(lambdaAuthorizerContext, MAP_TYPE);
 
-        String sourceIp = requestHeaders.getOrDefault("X-Forwarded-For", "127.0.0.1");
+        String sourceIp = routeContext.sourceIp();
+        // $request.header.* mappings keep the caller's values; only what reaches the backend changes.
+        Map<String, List<String>> backendHeaders = HttpApiForwardedHeaders.apply(multiValueHeaders, sourceIp,
+                routeContext.localIp(), headers.getHeaderString("Host"), isSecureTransport(uriInfo) ? "https" : "http");
         io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext ctx =
                 new io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext(
                         apiId, stageName, httpMethod, path,
                         pathParams.getOrDefault("proxy", ""), route.getRouteKey(),
                         UUID.randomUUID().toString(), sourceIp,
                         requestHeaders, queryParams, pathParams, body,
-                        claims, authorizerContext, multiValueHeaders, multiValueQueryParams);
+                        claims, authorizerContext, backendHeaders, multiValueQueryParams);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → HTTP_PROXY {4}",
                 httpMethod, apiId, stageName, path, effective.getIntegrationUri());

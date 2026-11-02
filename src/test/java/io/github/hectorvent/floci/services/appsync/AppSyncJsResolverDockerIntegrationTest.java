@@ -53,6 +53,7 @@ class AppSyncJsResolverDockerIntegrationTest {
               importsNode: String
               loops: String
               keywordsInText: String
+              normalizeString: String
             }
             """;
 
@@ -172,6 +173,23 @@ class AppSyncJsResolverDockerIntegrationTest {
 
     private String apiId;
     private String apiKey;
+    private static final String NORMALIZE_STRING_RESOLVER = """
+        import { util } from "@aws-appsync/utils";
+        export function request(ctx) {
+          const value = "\\u00E9";
+          return { payload: {
+            defaultForm: util.str.normalize(value),
+            nfc: util.str.normalize(value, "NFC"),
+            nfd: util.str.normalize(value, "NFD"),
+            nfkc: util.str.normalize(value, "NFKC"),
+            nfkd: util.str.normalize(value, "NFKD"),
+            lowercaseNfkd: util.str.normalize(value, "nfkd")
+          } };
+        }
+        export function response(ctx) {
+          return JSON.stringify(ctx.result);
+        }
+        """;
 
     @BeforeAll
     static void configure() {
@@ -197,6 +215,7 @@ class AppSyncJsResolverDockerIntegrationTest {
         createUnitResolver(apiId, "Query", "importsNode", "local", NODE_IMPORT_RESOLVER);
         createUnitResolver(apiId, "Query", "loops", "local", WHILE_RESOLVER);
         createUnitResolver(apiId, "Query", "keywordsInText", "local", KEYWORDS_IN_TEXT_RESOLVER);
+        createUnitResolver(apiId, "Query", "normalizeString", "local", NORMALIZE_STRING_RESOLVER);
     }
 
     @Test
@@ -262,6 +281,17 @@ class AppSyncJsResolverDockerIntegrationTest {
             .statusCode(200)
             .body("errors", nullValue())
             .body("data.ping", equalTo("pong"));
+    }
+
+    @Test
+    void utilStrNormalizeRespectsTheRequestedFormAndDefaultsToNfc() {
+        query("{ normalizeString }")
+            .statusCode(200)
+            .body("errors", nullValue())
+            .body("data.normalizeString", equalTo(
+                "{\"defaultForm\":\"é\",\"nfc\":\"é\",\"nfd\":\"é\","
+                    + "\"nfkc\":\"é\",\"nfkd\":\"é\",\"lowercaseNfkd\":\"é\"}"
+            ));
     }
 
     @Test

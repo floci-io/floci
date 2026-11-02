@@ -631,7 +631,7 @@ public class ApiGatewayV2Service {
 
     /**
      * Finds the best matching route for the given HTTP method and path.
-     * Priority: exact match > path-template match > $default.
+     * Priority: exact method and path > non-greedy path > greedy path > $default.
      */
     public Route findMatchingRoute(String region, String apiId, String httpMethod, String path) {
         List<Route> routes = getRoutes(region, apiId);
@@ -642,10 +642,18 @@ public class ApiGatewayV2Service {
             if (candidate.equals(r.getRouteKey())) return r;
         }
 
-        // 2. Path-template match (e.g. "GET /users/{id}")
+        // 2. Most-specific path-template match
+        Route bestMatch = null;
         for (Route r : routes) {
             if (r.getRouteKey() == null || r.getRouteKey().equals("$default")) continue;
-            if (routeKeyMatchesPath(r.getRouteKey(), httpMethod, path)) return r;
+            if (routeKeyMatchesPath(r.getRouteKey(), httpMethod, path)
+                    && (bestMatch == null || compareRouteSpecificity(r.getRouteKey(),
+                            bestMatch.getRouteKey()) > 0)) {
+                bestMatch = r;
+            }
+        }
+        if (bestMatch != null) {
+            return bestMatch;
         }
 
         // 3. $default catch-all
@@ -654,6 +662,39 @@ public class ApiGatewayV2Service {
         }
 
         return null;
+    }
+
+    private int compareRouteSpecificity(String firstKey, String secondKey) {
+        boolean firstGreedy = firstKey.contains("+}");
+        boolean secondGreedy = secondKey.contains("+}");
+        if (firstGreedy != secondGreedy) {
+            return firstGreedy ? -1 : 1;
+        }
+
+        String[] firstSegments = firstKey.substring(firstKey.indexOf(' ') + 1).split("/", -1);
+        String[] secondSegments = secondKey.substring(secondKey.indexOf(' ') + 1).split("/", -1);
+        for (int i = 0; i < Math.min(firstSegments.length, secondSegments.length); i++) {
+            int comparison = Integer.compare(segmentSpecificity(firstSegments[i]),
+                    segmentSpecificity(secondSegments[i]));
+            if (comparison != 0) {
+                return comparison;
+            }
+        }
+        int lengthComparison = Integer.compare(firstSegments.length, secondSegments.length);
+        if (lengthComparison != 0) {
+            return lengthComparison;
+        }
+        return Boolean.compare(!firstKey.startsWith("ANY "), !secondKey.startsWith("ANY "));
+    }
+
+    private int segmentSpecificity(String segment) {
+        if (segment.startsWith("{") && segment.endsWith("+}")) {
+            return 0;
+        }
+        if (segment.startsWith("{") && segment.endsWith("}")) {
+            return 1;
+        }
+        return 2;
     }
 
     /**

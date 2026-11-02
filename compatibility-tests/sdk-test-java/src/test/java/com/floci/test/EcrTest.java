@@ -7,6 +7,7 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.parallel.Isolated;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.ecr.model.*;
@@ -23,6 +24,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DisplayName("ECR Container Registry")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@Isolated
 class EcrTest {
 
     private static EcrClient ecr;

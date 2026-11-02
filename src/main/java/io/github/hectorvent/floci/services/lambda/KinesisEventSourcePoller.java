@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsRegions;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
@@ -422,7 +423,7 @@ public class KinesisEventSourcePoller implements Resettable {
                 kinesisNode.put("sequenceNumber", rec.getSequenceNumber());
                 kinesisNode.put("data", Base64.getEncoder().encodeToString(rec.getData()));
                 kinesisNode.put("approximateArrivalTimestamp",
-                        rec.getApproximateArrivalTimestamp().toEpochMilli() / 1000.0);
+                        EpochSeconds.fromInstant(rec.getApproximateArrivalTimestamp()));
                 ObjectNode record = objectMapper.createObjectNode();
                 record.set("kinesis", kinesisNode);
                 record.put("eventSource", "aws:kinesis");

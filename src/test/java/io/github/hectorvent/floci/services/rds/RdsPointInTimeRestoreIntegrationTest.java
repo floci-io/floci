@@ -186,6 +186,49 @@ class RdsPointInTimeRestoreIntegrationTest {
     }
 
     @Test
+    void aDeletedInstanceRestoresFromTheBackupItKeptWithItsData() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String source = "pitr-kept-" + suffix;
+        String target = "pitr-back-" + suffix;
+
+        query("CreateDBInstance")
+                .formParam("DBInstanceIdentifier", source)
+                .formParam("Engine", "postgres")
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "password123")
+                .formParam("DBName", "appdb")
+                .formParam("DBInstanceClass", "db.t3.micro")
+                .formParam("AllocatedStorage", "20")
+        .when().post("/").then().statusCode(200);
+        waitForDb(source);
+        DbInstance sourceInstance = rdsService.getDbInstance(source);
+        psql(sourceInstance.getContainerId(), "CREATE TABLE marker(v text); INSERT INTO marker VALUES ('kept-row');");
+        String dbiResourceId = sourceInstance.getDbiResourceId();
+
+        // The source's container goes with the delete, so the restore can only copy what the
+        // retained backup saved.
+        query("DeleteDBInstance")
+                .formParam("DBInstanceIdentifier", source)
+                .formParam("SkipFinalSnapshot", "true")
+                .formParam("DeleteAutomatedBackups", "false")
+        .when().post("/").then().statusCode(200);
+        query("RestoreDBInstanceToPointInTime")
+                .formParam("SourceDbiResourceId", dbiResourceId)
+                .formParam("TargetDBInstanceIdentifier", target)
+                .formParam("UseLatestRestorableTime", "true")
+        .when().post("/").then().statusCode(200)
+                .body(containsString("<DBName>appdb</DBName>"));
+        waitForDb(target);
+        assertEquals("kept-row", psql(rdsService.getDbInstance(target).getContainerId(),
+                "SELECT v FROM marker;").trim());
+
+        query("DeleteDBInstance").formParam("DBInstanceIdentifier", target)
+                .when().post("/").then().statusCode(200);
+        query("DeleteDBInstanceAutomatedBackup").formParam("DbiResourceId", dbiResourceId)
+                .when().post("/").then().statusCode(200);
+    }
+
+    @Test
     void sourceWithoutDbNameRestoresItsDefaultDatabaseUnderTheRequestedName() throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
         String source = "pitr-nodb-" + suffix;

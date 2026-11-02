@@ -60,6 +60,23 @@ its version does not discard its pool identity. Unqualified invocation retains
 the normal on-demand path, and existing authorization checks still precede
 execution.
 
+## Task-token IAM resources
+
+With IAM enforcement enabled, `SendTaskSuccess`, `SendTaskFailure`, and
+`SendTaskHeartbeat` authorize against the resource associated with the token:
+the activity ARN for an activity task, or the unqualified state-machine ARN
+for a `.waitForTaskToken` service integration, including versioned executions.
+A grant on only the version ARN does not match. A wildcard grant also matches, and
+an explicit deny on the matching resource wins. An execution ARN or an
+unrelated resource does not grant callback access.
+
+This distinction was verified with signed SDK calls against AWS using both
+Lambda callback integrations and activities. Recent completed tokens retain
+their resource so a permitted retry receives `TaskTimedOut`. Unknown tokens
+return `InvalidToken` before IAM resource evaluation. Resource lookup
+does not consume the token. The caller must own the token before its resource
+is used for IAM evaluation, including for recent completed tokens.
+
 ## Nested task credentials
 
 Nested `states:startExecution` tasks, including `.sync` and `.sync:2`, and the SDK
@@ -563,6 +580,12 @@ the wire and the task fails with `Sfn.StateMachineDoesNotExistException`.
 
 | Resource | Result | Notable failure |
 | --- | --- | --- |
+| `arn:aws:states:::aws-sdk:ecs:updateService` | `{Service}` | `Ecs.ServiceNotFoundException` |
+| `arn:aws:states:::aws-sdk:ecs:listServices` | `{ServiceArns, NextToken?}` | `Ecs.ClusterNotFoundException` |
+| `arn:aws:states:::aws-sdk:ecs:describeServices` | `{Services, Failures}` | Missing services appear in `Failures` |
+| `arn:aws:states:::aws-sdk:lambda:listEventSourceMappings` | `{EventSourceMappings}` | `Lambda.InvalidParameterValueException` |
+| `arn:aws:states:::aws-sdk:lambda:updateEventSourceMapping` | mapping metadata, including `UUID` | `Lambda.ResourceNotFoundException` |
+| `arn:aws:states:::aws-sdk:secretsmanager:describeSecret` | secret metadata, including `VersionIdsToStages` | `SecretsManager.ResourceNotFoundException` |
 | `arn:aws:states:::aws-sdk:sfn:startExecution` | `{ExecutionArn, StartDate}` | `Sfn.ExecutionAlreadyExistsException` when `Name` is reused on a Standard child |
 | `arn:aws:states:::aws-sdk:sfn:startSyncExecution` | execution envelope | `Sfn.StateMachineTypeNotSupportedException` for a Standard child |
 | `arn:aws:states:::aws-sdk:sfn:sendTaskSuccess` | `{}` | `Sfn.InvalidTokenException` when no task is waiting on the token |
@@ -580,6 +603,38 @@ Callback tokens are owned by the execution account. Foreign callbacks return
 `TaskTimedOut`. Closed-token classification retains at most 1,024 tokens for five minutes; older
 or evicted tokens return `InvalidToken`. Invalid JSON output leaves a pending token available
 for a corrected callback. Token state remains in memory.
+
+The six ECS, Lambda mapping, and Secrets Manager management tasks above delegate
+to the existing local service handlers in the execution account and state-machine
+region. They use PascalCase request/response members and ISO-8601 response
+timestamps. Opaque dictionary keys, including secret version IDs and ECS log
+options, retain their original spelling. `describeSecret` returns metadata without
+the secret value. Disabled services fail with a catchable service exception.
+
+ECS `listServices` supports the same `MaxResults` and opaque `NextToken` as the
+direct ECS API. Lambda mapping tasks currently return an unpaginated list;
+`Marker` and `MaxItems` are rejected with `Lambda.InvalidParameterValueException`
+instead of being silently ignored. These six integrations do not evaluate the
+state-machine execution role's per-action IAM policies. Name-based lookups use the
+execution scope; explicit ARNs retain the underlying service's cross-account lookup
+behavior. The underlying services' validation still applies. They implement
+request-response calls, without job-completion polling.
+
+For example, force a deployment of an existing disposable service:
+
+```json
+{
+  "StartAt": "Restart",
+  "States": {
+    "Restart": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::aws-sdk:ecs:updateService",
+      "Parameters": {"Cluster": "example", "Service": "example", "ForceNewDeployment": true},
+      "End": true
+    }
+  }
+}
+```
 
 Redshift Data API execution returns a statement `Id` before SQL completes. Follow the
 `executeStatement` task with `describeStatement`, a Choice on `Status`, and a Wait state

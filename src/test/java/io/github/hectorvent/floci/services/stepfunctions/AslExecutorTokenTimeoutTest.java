@@ -40,6 +40,7 @@ import static org.mockito.Mockito.when;
 class AslExecutorTokenTimeoutTest {
 
     private static final String OWNER = "111111111111";
+    private static final String RESOURCE = "arn:aws:states:us-east-1:" + OWNER + ":stateMachine:callback";
     private final ObjectMapper mapper = new ObjectMapper();
     private final RegionResolver resolver = mock(RegionResolver.class);
     private final StepFunctionsService service = new StepFunctionsService(mock(StorageFactory.class),
@@ -50,7 +51,7 @@ class AslExecutorTokenTimeoutTest {
     @ValueSource(strings = {"execution", "task", "heartbeat"})
     void timeoutClosesTokenBeforeCancellingFuture(String clock) throws Exception {
         when(resolver.getAccountId()).thenReturn(OWNER);
-        CompletableFuture<JsonNode> future = service.registerPendingToken("expired", OWNER);
+        CompletableFuture<JsonNode> future = service.registerPendingToken("expired", OWNER, RESOURCE);
         long now = service.lastTaskHeartbeatNanos("expired") + TimeUnit.SECONDS.toNanos(2);
         List<String> callbackResults = new ArrayList<>();
         future.whenComplete((result, error) -> {
@@ -79,7 +80,7 @@ class AslExecutorTokenTimeoutTest {
     @Test
     void callbackClaimedBeforeTimeoutDecisionKeepsItsResult() throws Exception {
         when(resolver.getAccountId()).thenReturn(OWNER);
-        CompletableFuture<JsonNode> future = service.registerPendingToken("winner", OWNER);
+        CompletableFuture<JsonNode> future = service.registerPendingToken("winner", OWNER, RESOURCE);
         AtomicInteger clockReads = new AtomicInteger();
         AslExecutor executor = executor(() -> {
             if (clockReads.incrementAndGet() == 2) {
@@ -97,7 +98,7 @@ class AslExecutorTokenTimeoutTest {
     @Test
     void heartbeatBeforeTimeoutDecisionExtendsTheWait() throws Exception {
         when(resolver.getAccountId()).thenReturn(OWNER);
-        CompletableFuture<JsonNode> future = service.registerPendingToken("heartbeat", OWNER);
+        CompletableFuture<JsonNode> future = service.registerPendingToken("heartbeat", OWNER, RESOURCE);
         long now = service.lastTaskHeartbeatNanos("heartbeat") + TimeUnit.SECONDS.toNanos(1);
         AtomicInteger clockReads = new AtomicInteger();
         AslExecutor executor = executor(() -> {
@@ -123,7 +124,7 @@ class AslExecutorTokenTimeoutTest {
     void claimedResultDoesNotWaitForCallbackCompletion(boolean failure) throws Exception {
         when(resolver.getAccountId()).thenReturn(OWNER);
         StepFunctionsService callbackService = spy(service);
-        CompletableFuture<JsonNode> future = callbackService.registerPendingToken("stalled", OWNER);
+        CompletableFuture<JsonNode> future = callbackService.registerPendingToken("stalled", OWNER, RESOURCE);
         CountDownLatch claimed = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         doAnswer(invocation -> {
@@ -168,7 +169,7 @@ class AslExecutorTokenTimeoutTest {
 
     @Test
     void discardedTokenDoesNotLookLikeAnAcceptedCallback() throws Exception {
-        CompletableFuture<JsonNode> future = service.registerPendingToken("discarded", OWNER);
+        CompletableFuture<JsonNode> future = service.registerPendingToken("discarded", OWNER, RESOURCE);
         service.discardPendingToken("discarded");
 
         assertTimeoutPreemptively(Duration.ofSeconds(1), () -> assertThrows(AslExecutor.TaskTimedOutException.class,
@@ -180,7 +181,7 @@ class AslExecutorTokenTimeoutTest {
     @ValueSource(booleans = {false, true})
     void clearPreservesClaimedOutcomeAndCompletesOutsideLock(boolean failure) throws Exception {
         when(resolver.getAccountId()).thenReturn(OWNER);
-        CompletableFuture<JsonNode> future = service.registerPendingToken("cleared", OWNER);
+        CompletableFuture<JsonNode> future = service.registerPendingToken("cleared", OWNER, RESOURCE);
         JsonNode output = mapper.readTree("{\"accepted\":true}");
         AslExecutor.FailStateException error = new AslExecutor.FailStateException("CallbackError", "cause");
         service.claimPendingTask("cleared", failure ? new TaskResult(null, error) : new TaskResult(output, null));
@@ -202,7 +203,7 @@ class AslExecutorTokenTimeoutTest {
     @ValueSource(booleans = {false, true})
     void registrationDuringResetIsRetiredUntilAllResetsFinish(boolean overlappingReset) throws Exception {
         when(resolver.getAccountId()).thenReturn(OWNER);
-        CompletableFuture<JsonNode> first = service.registerPendingToken("first", OWNER);
+        CompletableFuture<JsonNode> first = service.registerPendingToken("first", OWNER, RESOURCE);
         CountDownLatch completing = new CountDownLatch(1);
         CompletableFuture<Void> release = new CompletableFuture<>();
         List<Boolean> completionLocks = new ArrayList<>();
@@ -218,14 +219,14 @@ class AslExecutorTokenTimeoutTest {
             if (overlappingReset) {
                 service.clear();
             }
-            CompletableFuture<JsonNode> duringReset = service.registerPendingToken("during-reset", OWNER);
+            CompletableFuture<JsonNode> duringReset = service.registerPendingToken("during-reset", OWNER, RESOURCE);
             assertTrue(duringReset.isCompletedExceptionally());
             assertEquals("InvalidToken", callbackResult(() -> service.sendTaskSuccess("during-reset", "{}")));
             release.complete(null);
             reset.get(5, TimeUnit.SECONDS);
             assertEquals(List.of(false), completionLocks);
 
-            CompletableFuture<JsonNode> afterReset = service.registerPendingToken("after-reset", OWNER);
+            CompletableFuture<JsonNode> afterReset = service.registerPendingToken("after-reset", OWNER, RESOURCE);
             service.sendTaskSuccess("after-reset", "{}");
             assertEquals(mapper.readTree("{}"), afterReset.get(5, TimeUnit.SECONDS));
         } finally {

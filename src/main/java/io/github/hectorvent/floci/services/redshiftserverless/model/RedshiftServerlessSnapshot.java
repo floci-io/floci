@@ -5,13 +5,13 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
 
 /**
- * A Redshift Serverless snapshot. Floci stores snapshot metadata only and does not model async
- * cross-region copy: a snapshot created via {@code CreateSnapshot} in the standby region is
- * immediately {@code AVAILABLE} there, standing in for what a real
- * {@code SnapshotCopyConfiguration} would eventually produce.
+ * A Redshift Serverless snapshot. A cross-region copy made for a {@code SnapshotCopyConfiguration}
+ * is a snapshot of its own in the destination Region, immediately {@code AVAILABLE} there.
  */
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -32,6 +32,9 @@ public class RedshiftServerlessSnapshot {
     private Integer retentionPeriod;
     private String sqlDump;
     private Map<String, String> tags = new LinkedHashMap<>();
+    private String copiedFromSnapshotArn;
+    private Instant copiedFromSnapshotCreateTime;
+    private Set<String> copiedToRegions = new LinkedHashSet<>();
 
     public RedshiftServerlessSnapshot() {
     }
@@ -52,6 +55,9 @@ public class RedshiftServerlessSnapshot {
         this.retentionPeriod = other.retentionPeriod;
         this.sqlDump = other.sqlDump;
         this.tags = new LinkedHashMap<>(other.tags);
+        this.copiedFromSnapshotArn = other.copiedFromSnapshotArn;
+        this.copiedFromSnapshotCreateTime = other.copiedFromSnapshotCreateTime;
+        this.copiedToRegions = new LinkedHashSet<>(other.copiedToRegions);
     }
 
     public String getSnapshotName() {
@@ -174,5 +180,36 @@ public class RedshiftServerlessSnapshot {
 
     public void setTags(Map<String, String> tags) {
         this.tags = tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags);
+    }
+
+    /** ARN of the snapshot this one was copied from, or {@code null} for a snapshot taken here. Never in a response. */
+    public String getCopiedFromSnapshotArn() {
+        return copiedFromSnapshotArn;
+    }
+
+    public void setCopiedFromSnapshotArn(String copiedFromSnapshotArn) {
+        this.copiedFromSnapshotArn = copiedFromSnapshotArn;
+    }
+
+    /**
+     * Creation time of the source snapshot at the moment of the copy. A snapshot ARN is built from
+     * the name alone, so this is what tells a copy of the current source from a copy of an earlier
+     * snapshot that had the same name.
+     */
+    public Instant getCopiedFromSnapshotCreateTime() {
+        return copiedFromSnapshotCreateTime;
+    }
+
+    public void setCopiedFromSnapshotCreateTime(Instant copiedFromSnapshotCreateTime) {
+        this.copiedFromSnapshotCreateTime = copiedFromSnapshotCreateTime;
+    }
+
+    /** Regions this snapshot has already been copied to, so a deleted or expired copy is not made again. */
+    public Set<String> getCopiedToRegions() {
+        return copiedToRegions;
+    }
+
+    public void setCopiedToRegions(Set<String> copiedToRegions) {
+        this.copiedToRegions = copiedToRegions == null ? new LinkedHashSet<>() : new LinkedHashSet<>(copiedToRegions);
     }
 }

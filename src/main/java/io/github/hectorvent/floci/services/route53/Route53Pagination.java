@@ -21,13 +21,14 @@ final class Route53Pagination {
 
         int remaining = sortedItems.size() - start;
         if (pageSize <= 0 || remaining <= pageSize) {
-            return new Page<>(sortedItems.subList(start, sortedItems.size()), null);
+            return new Page<>(sortedItems.subList(start, sortedItems.size()), null, null);
         }
         int end = start + pageSize;
-        return new Page<>(sortedItems.subList(start, end), id.apply(sortedItems.get(end)));
+        T nextItem = sortedItems.get(end);
+        return new Page<>(sortedItems.subList(start, end), id.apply(nextItem), nextItem);
     }
 
-    record Page<T>(List<T> items, String nextMarker) {
+    record Page<T>(List<T> items, String nextMarker, T nextItem) {
         boolean isTruncated() {
             return nextMarker != null;
         }

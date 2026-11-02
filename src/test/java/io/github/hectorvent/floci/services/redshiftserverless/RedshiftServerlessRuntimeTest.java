@@ -14,6 +14,7 @@ import org.mockito.InOrder;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
@@ -287,12 +288,27 @@ class RedshiftServerlessRuntimeTest {
     }
 
     @Test
+    void generatePasswordRetriesUntilAllRequiredCharacterClassesArePresent() {
+        Iterator<String> candidates = List.of(
+                "abcdefghijklmnopqrstuvwxyz123456",
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ123456",
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef",
+                "AdminPassword123WithAllClassesOk"
+        ).iterator();
+
+        String password = runtime.generatePassword(candidates::next);
+
+        assertEquals("AdminPassword123WithAllClassesOk", password);
+    }
+
+    @Test
     void generatedPasswordsAreLongAlphanumericAndDifferEachTime() {
         String first = runtime.generatePassword();
         String second = runtime.generatePassword();
 
         assertEquals(32, first.length());
         assertTrue(first.matches("[A-Za-z0-9]+"), first);
+        assertTrue(first.matches(".*[A-Z].*") && first.matches(".*[a-z].*") && first.matches(".*[0-9].*"), first);
         assertNotEquals(first, second);
     }
 }

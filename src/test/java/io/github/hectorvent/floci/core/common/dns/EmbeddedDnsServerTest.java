@@ -207,6 +207,46 @@ class EmbeddedDnsServerTest {
                 withSource.resolveARecord("bucket.localhost.floci.io", "172.31.0.2"));
     }
 
+    @Test
+    void anotherSourcesRecordsWinOverRefused() {
+        DnsRecordSource refusing = name -> Optional.of(DnsAnswer.refused());
+        EmbeddedDnsServer withSources = new EmbeddedDnsServer(List.of(),
+                List.of(refusing, source("api.sapphire.internal", List.of("172.31.0.6"))));
+
+        DnsAnswer answer = withSources.resolveARecordWithOwnership(
+                "api.sapphire.internal", "172.31.0.2").orElseThrow();
+        assertEquals(List.of("172.31.0.6"), answer.addresses());
+        assertEquals(0, answer.responseCode());
+    }
+
+    @Test
+    void refusedWinsOverNxDomainInEitherOrder() {
+        DnsRecordSource refusing = name -> Optional.of(DnsAnswer.refused());
+        DnsRecordSource absent = name -> Optional.of(DnsAnswer.nxDomain());
+        for (List<DnsRecordSource> sources : List.of(List.of(refusing, absent), List.of(absent, refusing))) {
+            assertEquals(5, new EmbeddedDnsServer(List.of(), sources).resolveARecordWithOwnership(
+                    "api.sapphire.internal", "172.31.0.2").orElseThrow().responseCode());
+        }
+    }
+
+    // Current behaviour, not a decision: a plain NODATA from one source beats another source's
+    // NXDOMAIN even when that NXDOMAIN carries a Route 53 SOA, so the SOA authority is dropped.
+    // Unreachable today, since only one source answers authoritatively.
+    @Test
+    void noDataCurrentlyWinsOverNxDomainCarryingAuthority() {
+        DnsAnswer nxWithSoa = DnsAnswer.nxDomain().withAuthority("sapphire.internal",
+                new DnsRecord.Soa("ns.example. host.example. 1 7200 900 1209600 30"), 900);
+        DnsRecordSource authoritative = name -> Optional.of(nxWithSoa);
+        DnsRecordSource noData = name -> Optional.of(DnsAnswer.noData());
+        for (List<DnsRecordSource> sources : List.of(List.of(authoritative, noData),
+                List.of(noData, authoritative))) {
+            DnsAnswer answer = new EmbeddedDnsServer(List.of(), sources).resolveARecordWithOwnership(
+                    "api.sapphire.internal", "172.31.0.2").orElseThrow();
+            assertEquals(0, answer.responseCode());
+            assertNull(answer.authority());
+        }
+    }
+
     private static DnsRecordSource source(String owned, List<String> addresses) {
         return source(owned, addresses, DnsAnswer.DEFAULT_TTL_SECONDS);
     }

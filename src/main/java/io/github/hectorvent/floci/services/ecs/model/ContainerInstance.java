@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ecs.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -9,12 +10,12 @@ import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class ContainerInstance {
 
     private String containerInstanceArn;
     private String ec2InstanceId;
     private String status;
-    private int runningTasksCount;
     private int pendingTasksCount;
     private String statusReason;
     private boolean agentConnected;
@@ -37,9 +38,6 @@ public class ContainerInstance {
 
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
-
-    public int getRunningTasksCount() { return runningTasksCount; }
-    public void setRunningTasksCount(int runningTasksCount) { this.runningTasksCount = runningTasksCount; }
 
     public int getPendingTasksCount() { return pendingTasksCount; }
     public void setPendingTasksCount(int pendingTasksCount) { this.pendingTasksCount = pendingTasksCount; }

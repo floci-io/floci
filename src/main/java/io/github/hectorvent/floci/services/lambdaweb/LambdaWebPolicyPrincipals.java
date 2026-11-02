@@ -22,7 +22,7 @@ public class LambdaWebPolicyPrincipals {
 
     private static final String OTHER_ARN = "The principal arn provided does not match the actual principal arn."
             + " Please check your input and try again.";
-    private static final Pattern ACCOUNT_ID = Pattern.compile("[0-9]{12}");
+    static final Pattern ACCOUNT_ID = Pattern.compile("[0-9]{12}");
 
     private final IamService iamService;
 

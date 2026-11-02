@@ -39,6 +39,15 @@ class RdsPostgresStartupParametersIntegrationTest {
         assumeDocker();
     }
 
+    /**
+     * DriverManager only hands out a driver the caller's class loader can see. After a Quarkus
+     * restart the first connection would find none, so PgJDBC is loaded through this test's loader first.
+     */
+    @BeforeEach
+    void registerPostgresDriver() throws ClassNotFoundException {
+        Class.forName("org.postgresql.Driver");
+    }
+
     @Test
     void clientStartupParametersApplyToTheSession() throws Exception {
         String dbId = "startup-params-" + Long.toString(System.nanoTime(), 36);

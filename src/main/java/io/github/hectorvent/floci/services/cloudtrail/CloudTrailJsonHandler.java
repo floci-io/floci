@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
+import io.github.hectorvent.floci.core.common.JsonNumberCoercion;
 import io.github.hectorvent.floci.services.cloudtrail.model.AdvancedEventSelector;
 import io.github.hectorvent.floci.services.cloudtrail.model.DataResource;
 import io.github.hectorvent.floci.services.cloudtrail.model.EventSelector;
@@ -65,7 +67,9 @@ public class CloudTrailJsonHandler {
         Map<String, String> tags = parseTagsList(req.path("TagsList"));
 
         Trail trail = service.createTrail(region, name, s3BucketName, s3KeyPrefix, snsTopicArn,
-                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail, tags);
+                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail, tags,
+                textOrNull(req, "KmsKeyId"), textOrNull(req, "CloudWatchLogsLogGroupArn"),
+                textOrNull(req, "CloudWatchLogsRoleArn"));
 
         ObjectNode resp = mapper.createObjectNode();
         resp.put("Name", trail.name());
@@ -80,6 +84,9 @@ public class CloudTrailJsonHandler {
         resp.put("TrailARN", trail.trailArn());
         resp.put("LogFileValidationEnabled", trail.logFileValidationEnabled());
         resp.put("IsOrganizationTrail", trail.isOrganizationTrail());
+        putIfSet(resp, "KmsKeyId", trail.kmsKeyId());
+        putIfSet(resp, "CloudWatchLogsLogGroupArn", trail.cloudWatchLogsLogGroupArn());
+        putIfSet(resp, "CloudWatchLogsRoleArn", trail.cloudWatchLogsRoleArn());
         return Response.ok(resp).build();
     }
 
@@ -87,6 +94,17 @@ public class CloudTrailJsonHandler {
         String name = req.path("Name").asText(null);
         service.deleteTrail(region, name);
         return Response.ok(mapper.createObjectNode()).build();
+    }
+
+    /** The member's text when present (an empty string included: UpdateTrail uses it to clear a setting). */
+    private static String textOrNull(JsonNode req, String field) {
+        return req.has(field) && !req.get(field).isNull() ? req.get(field).asText() : null;
+    }
+
+    private static void putIfSet(ObjectNode node, String field, String value) {
+        if (value != null) {
+            node.put(field, value);
+        }
     }
 
     private Response updateTrail(JsonNode req, String region) {
@@ -105,7 +123,9 @@ public class CloudTrailJsonHandler {
                 ? req.path("IsOrganizationTrail").asBoolean() : null;
 
         Trail trail = service.updateTrail(region, name, s3BucketName, s3KeyPrefix, snsTopicName,
-                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail);
+                includeGlobal, isMultiRegion, enableLogFileValidation, isOrganizationTrail,
+                textOrNull(req, "KmsKeyId"), textOrNull(req, "CloudWatchLogsLogGroupArn"),
+                textOrNull(req, "CloudWatchLogsRoleArn"));
 
         ObjectNode resp = mapper.createObjectNode();
         resp.put("Name", trail.name());
@@ -120,6 +140,9 @@ public class CloudTrailJsonHandler {
         resp.put("TrailARN", trail.trailArn());
         resp.put("LogFileValidationEnabled", trail.logFileValidationEnabled());
         resp.put("IsOrganizationTrail", trail.isOrganizationTrail());
+        putIfSet(resp, "KmsKeyId", trail.kmsKeyId());
+        putIfSet(resp, "CloudWatchLogsLogGroupArn", trail.cloudWatchLogsLogGroupArn());
+        putIfSet(resp, "CloudWatchLogsRoleArn", trail.cloudWatchLogsRoleArn());
         return Response.ok(resp).build();
     }
 
@@ -205,24 +228,57 @@ public class CloudTrailJsonHandler {
         ObjectNode resp = mapper.createObjectNode();
         resp.put("IsLogging", status.logging());
         if (status.startLoggingTime() != null) {
-            resp.put("StartLoggingTime", status.startLoggingTime() / 1000.0);
+            resp.put("StartLoggingTime", EpochSeconds.fromMillis(status.startLoggingTime()));
         }
         if (status.latestDeliveryTime() != null) {
-            resp.put("LatestDeliveryTime", status.latestDeliveryTime() / 1000.0);
+            resp.put("LatestDeliveryTime", EpochSeconds.fromMillis(status.latestDeliveryTime()));
         }
         if (status.latestDeliveryError() != null) {
             resp.put("LatestDeliveryError", status.latestDeliveryError());
         }
         if (status.stopLoggingTime() != null) {
-            resp.put("StopLoggingTime", status.stopLoggingTime() / 1000.0);
+            resp.put("StopLoggingTime", EpochSeconds.fromMillis(status.stopLoggingTime()));
         }
         return Response.ok(resp).build();
     }
 
     private Response lookupEvents(JsonNode req, String region) {
+        validateMaxResults(req.path("MaxResults"));
         ObjectNode resp = mapper.createObjectNode();
         resp.putArray("Events");
         return Response.ok(resp).build();
+    }
+
+    /** An omitted or null {@code MaxResults} is optional and takes the service default. */
+    private static void validateMaxResults(JsonNode maxResults) {
+        if (maxResults.isMissingNode() || maxResults.isNull()) {
+            return;
+        }
+        int value;
+        if (maxResults.isNumber()) {
+            value = JsonNumberCoercion.truncateAndClampToInt(maxResults);
+        } else if (maxResults.isTextual()) {
+            throw serialization("STRING_VALUE can not be converted to an Integer");
+        } else if (maxResults.isArray()) {
+            throw serialization("Start of list found where not expected");
+        } else if (maxResults.isObject()) {
+            throw serialization("Start of structure or map found where not expected.");
+        } else {
+            throw serialization((maxResults.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE")
+                    + " can not be converted to an Integer");
+        }
+        if (value < 1) {
+            throw invalidMaxResults(value);
+        }
+    }
+
+    private static AwsException invalidMaxResults(int value) {
+        return new AwsException("InvalidMaxResultsException",
+                "A max results value of " + value + " is invalid. Specify max results between 1 and 1000.", 400);
+    }
+
+    private static AwsException serialization(String message) {
+        return new AwsException("SerializationException", message, 400);
     }
 
     private Response addTags(JsonNode req) {

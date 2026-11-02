@@ -667,9 +667,10 @@ class AppConfigTest {
             assertThat(deployment.configurationName()).isEqualTo("service-settings");
             assertThat(deployment.configurationLocationUri()).isEqualTo("ssm-parameter://service-settings");
 
-            // AWS documents no default Type: a profile created without one reports none.
+            // A hosted profile without an explicit Type defaults to freeform.
             assertThat(appConfig.createConfigurationProfile(CreateConfigurationProfileRequest.builder()
-                    .applicationId(monitoredAppId).name("untyped").locationUri("hosted").build()).type()).isNull();
+                    .applicationId(monitoredAppId).name("untyped").locationUri("hosted").build()).type())
+                    .isEqualTo("AWS.Freeform");
         } finally {
             try {
                 appConfig.deleteApplication(DeleteApplicationRequest.builder().applicationId(monitoredAppId).build());
@@ -747,4 +748,55 @@ class AppConfigTest {
             }
         }
     }
+
+    @Test
+    @Order(59)
+    @DisplayName("UpdateApplication preserves fields omitted by the SDK request")
+    void updateApplication() {
+        String applicationId = appConfig.createApplication(CreateApplicationRequest.builder()
+                .name(TestFixtures.uniqueName("update-app"))
+                .description("original")
+                .build()).id();
+        try {
+            UpdateApplicationResponse renamed = appConfig.updateApplication(UpdateApplicationRequest.builder()
+                    .applicationId(applicationId)
+                    .name("updated-app")
+                    .build());
+            assertThat(renamed.name()).isEqualTo("updated-app");
+            assertThat(renamed.description()).isEqualTo("original");
+
+            UpdateApplicationResponse described = appConfig.updateApplication(UpdateApplicationRequest.builder()
+                    .applicationId(applicationId)
+                    .description("updated")
+                    .build());
+            assertThat(described.name()).isEqualTo("updated-app");
+            assertThat(described.description()).isEqualTo("updated");
+
+            GetApplicationResponse retrieved = appConfig.getApplication(GetApplicationRequest.builder()
+                    .applicationId(applicationId)
+                    .build());
+            assertThat(retrieved.name()).isEqualTo("updated-app");
+            assertThat(retrieved.description()).isEqualTo("updated");
+        } finally {
+            appConfig.deleteApplication(DeleteApplicationRequest.builder().applicationId(applicationId).build());
+        }
+    }
+
+    @Test
+    @DisplayName("A non-hosted profile without a type stays untyped")
+    void nonHostedProfileWithoutTypeStaysUntyped() {
+        String applicationId = appConfig.createApplication(CreateApplicationRequest.builder()
+                .name(TestFixtures.uniqueName("external-profile")).build()).id();
+        try {
+            CreateConfigurationProfileResponse profile = appConfig.createConfigurationProfile(
+                    CreateConfigurationProfileRequest.builder().applicationId(applicationId)
+                            .name("external").locationUri("ssm-parameter://configuration").build());
+            assertThat(profile.type()).isNull();
+            assertThat(appConfig.getConfigurationProfile(GetConfigurationProfileRequest.builder()
+                    .applicationId(applicationId).configurationProfileId(profile.id()).build()).type()).isNull();
+        } finally {
+            appConfig.deleteApplication(DeleteApplicationRequest.builder().applicationId(applicationId).build());
+        }
+    }
+
 }

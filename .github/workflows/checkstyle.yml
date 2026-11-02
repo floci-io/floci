@@ -20,6 +20,10 @@ on:
       - 'tools/checkstyle/**'
       - 'pom.xml'
       - '.github/workflows/checkstyle.yml'
+  # Runs each merge queue entry against main plus the PRs queued ahead of it. paths does not
+  # apply to merge_group, so a queued PR is always checked.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -37,7 +41,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           java-version: '25'
           distribution: 'temurin'

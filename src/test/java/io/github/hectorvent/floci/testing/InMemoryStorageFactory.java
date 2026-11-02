@@ -31,6 +31,13 @@ public final class InMemoryStorageFactory extends StorageFactory {
         this.accountId = accountId;
     }
 
+    /** Registers a backing store before constructing the services that use this factory. */
+    public <V> InMemoryStorageFactory withStore(String fileName, StorageBackend<String, V> store) {
+        stores.put(fileName, store instanceof AccountAwareStorageBackend<V> scoped
+                ? scoped : new AccountAwareStorageBackend<>(store, null, accountId));
+        return this;
+    }
+
     @Override
     public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
                                                     TypeReference<Map<String, V>> typeReference) {

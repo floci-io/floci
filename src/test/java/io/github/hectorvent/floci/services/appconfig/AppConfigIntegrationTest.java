@@ -376,7 +376,8 @@ class AppConfigIntegrationTest {
                 .when().post("/applications/" + appId + "/environments/" + envId + "/deployments")
                 .then()
                 .statusCode(201)
-                .body("State", equalTo("COMPLETE"))
+                .body("State", equalTo("BAKING"))
+                .body("PercentageComplete", equalTo(100.0f))
                 .body("DeploymentStrategyId", equalTo("AppConfig.AllAtOnce"));
     }
 
@@ -391,7 +392,8 @@ class AppConfigIntegrationTest {
                 .body("Items[0].DeploymentNumber", equalTo(3))
                 .body("Items[0].ConfigurationProfileId", equalTo(profileId))
                 .body("Items[0].ConfigurationVersion", equalTo("1"))
-                .body("Items[0].State", equalTo("COMPLETE"))
+                .body("Items[0].State", equalTo("BAKING"))
+                .body("Items[0].PercentageComplete", equalTo(100.0f))
                 .body("Items[0].ConfigurationName", equalTo("test-profile"))
                 .body("Items[0].Type", equalTo("AWS.Freeform"))
                 .extract().path("NextToken");
@@ -1150,6 +1152,72 @@ class AppConfigIntegrationTest {
         getLatestVariantFlagsAccepting("application/ion; type=\"AWS.AppConfig.Other\", */*;q=0.1")
                 .header("Content-Type", startsWith("application/json"))
                 .body("values.promo._variants[0].name", equalTo("uk"));
+    }
+
+    @Test @Order(56)
+    void updateApplicationPreservesOmittedFields() {
+        String applicationId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"update-app\",\"Description\":\"original\"}")
+                .when().post("/applications")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"updated-app\"}")
+                .when().patch("/applications/" + applicationId)
+                .then().statusCode(200)
+                .body("Id", equalTo(applicationId))
+                .body("Name", equalTo("updated-app"))
+                .body("Description", equalTo("original"));
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"Description\":\"updated\"}")
+                .when().patch("/applications/updated-app")
+                .then().statusCode(200)
+                .body("Id", equalTo(applicationId))
+                .body("Name", equalTo("updated-app"))
+                .body("Description", equalTo("updated"));
+
+        given()
+                .when().delete("/applications/" + applicationId)
+                .then().statusCode(204);
+    }
+
+    @Test @Order(57)
+    void updateApplicationRejectsNonStringFieldsWithoutChangingTheApplication() {
+        String applicationId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"validation-app\",\"Description\":\"original\"}")
+                .when().post("/applications")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":123}")
+                .when().patch("/applications/" + applicationId)
+                .then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"should-not-stick\",\"Description\":false}")
+                .when().patch("/applications/" + applicationId)
+                .then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+
+        given()
+                .when().get("/applications/" + applicationId)
+                .then().statusCode(200)
+                .body("Name", equalTo("validation-app"))
+                .body("Description", equalTo("original"));
+
+        given()
+                .when().delete("/applications/" + applicationId)
+                .then().statusCode(204);
     }
 
     /** Polls a new session on a feature flag profile with variants, deployed on first use. */

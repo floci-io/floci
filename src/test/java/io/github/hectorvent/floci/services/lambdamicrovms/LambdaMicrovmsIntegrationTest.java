@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.lambdamicrovms;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -14,6 +17,7 @@ import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -30,8 +34,9 @@ class LambdaMicrovmsIntegrationTest {
 
     @Test
     @Order(1)
-    void createImage() {
-        imageArn = given()
+    void createImage() throws Exception {
+        long beforeMillis = System.currentTimeMillis();
+        Response response = given()
                 .contentType("application/json")
                 .body("""
                         {
@@ -48,7 +53,16 @@ class LambdaMicrovmsIntegrationTest {
                 .body("name", equalTo(IMAGE))
                 .body("state", equalTo("CREATING"))
                 .body("imageVersion", equalTo("1.0"))
-                .extract().path("imageArn");
+                .extract().response();
+        JsonNode responseBody = new ObjectMapper().readTree(response.asString());
+        imageArn = responseBody.path("imageArn").asText();
+        JsonNode createdAtNode = responseBody.path("createdAt");
+        assertTrue(createdAtNode.isNumber(), "createdAt must be a JSON number");
+        double createdAt = createdAtNode.asDouble();
+        long afterMillis = System.currentTimeMillis();
+        assertTrue(createdAt >= beforeMillis / 1000.0
+                && createdAt <= afterMillis / 1000.0,
+                "createdAt=" + createdAt + ", requestMillis=" + beforeMillis + ".." + afterMillis);
     }
 
     @Test

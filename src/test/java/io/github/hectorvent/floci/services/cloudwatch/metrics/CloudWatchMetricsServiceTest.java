@@ -282,6 +282,95 @@ class CloudWatchMetricsServiceTest {
     }
 
     @Test
+    void listMetricsPagesDistinctDimensionsAndScopesTheCursor() {
+        List<MetricDatum> datums = new ArrayList<>();
+        for (int i = 0; i < 501; i++) {
+            MetricDatum datum = datum("Latency", 1);
+            datum.setDimensions(List.of(new Dimension("A", "one"), new Dimension("B", "two"),
+                    new Dimension("C", "host-" + i)));
+            datums.add(datum);
+        }
+        service.putMetricData(NAMESPACE, datums, REGION);
+
+        List<Dimension> filters = List.of(new Dimension("A", "one"), new Dimension("B", "two"));
+        PaginatedResult<CloudWatchMetricsService.MetricIdentity> first =
+                service.listMetricsPage(NAMESPACE, "Latency", filters, null, REGION);
+        assertEquals(500, first.items().size());
+        assertNotNull(first.nextToken());
+        PaginatedResult<CloudWatchMetricsService.MetricIdentity> second =
+                service.listMetricsPage(NAMESPACE, "Latency", List.of(filters.get(1), filters.get(0)),
+                        first.nextToken(), REGION);
+        assertEquals(1, second.items().size());
+        assertNull(second.nextToken());
+        List<CloudWatchMetricsService.MetricIdentity> all = new ArrayList<>(first.items());
+        all.addAll(second.items());
+        assertEquals(501, all.stream().map(metric -> metric.dimensions().get(2).value()).distinct().count());
+
+        PaginatedResult<CloudWatchMetricsService.MetricIdentity> filtered = service.listMetricsPage(
+                NAMESPACE, "Latency", List.of(new Dimension("C", "host-500")), null, REGION);
+        assertEquals(1, filtered.items().size());
+        assertNull(filtered.nextToken());
+        AwsException changedFilter = assertThrows(AwsException.class, () -> service.listMetricsPage(
+                NAMESPACE, "Latency", List.of(new Dimension("A", "other")), first.nextToken(), REGION));
+        assertEquals("InvalidParameterValue", changedFilter.getErrorCode());
+        AwsException changedRegion = assertThrows(AwsException.class, () -> service.listMetricsPage(
+                NAMESPACE, "Latency", filters, first.nextToken(), "us-west-2"));
+        assertEquals("InvalidParameterValue", changedRegion.getErrorCode());
+        AwsException malformed = assertThrows(AwsException.class, () -> service.listMetricsPage(
+                NAMESPACE, "Latency", filters, "not-a-token", REGION));
+        assertEquals("InvalidParameterValue", malformed.getErrorCode());
+    }
+
+    @Test
+    void listMetricsPageBoundaryPreservesDifferentOrdersOfRepeatedDimensionNames() {
+        List<Dimension> firstDimensions = List.of(new Dimension("A", "one"), new Dimension("A", "two"));
+        List<Dimension> secondDimensions = firstDimensions.reversed();
+        String metricName = "repeated-dimension";
+        CloudWatchMetricsService.MetricIdentity firstIdentity =
+                new CloudWatchMetricsService.MetricIdentity(NAMESPACE, metricName, firstDimensions);
+        while (CloudWatchMetricsService.metricCursor(firstIdentity).charAt(0) < '8') {
+            metricName += "-next";
+            firstIdentity = new CloudWatchMetricsService.MetricIdentity(NAMESPACE, metricName, firstDimensions);
+        }
+        CloudWatchMetricsService.MetricIdentity secondIdentity =
+                new CloudWatchMetricsService.MetricIdentity(NAMESPACE, metricName, secondDimensions);
+        String boundaryCursor = CloudWatchMetricsService.metricCursor(firstIdentity);
+        assertNotEquals(boundaryCursor, CloudWatchMetricsService.metricCursor(secondIdentity));
+
+        List<MetricDatum> datums = new ArrayList<>();
+        MetricDatum first = datum(metricName, 1);
+        first.setDimensions(firstDimensions);
+        datums.add(first);
+        MetricDatum second = datum(metricName, 1);
+        second.setDimensions(secondDimensions);
+        datums.add(second);
+        for (int i = 0; datums.size() < 501; i++) {
+            String fillerName = "filler-" + i;
+            CloudWatchMetricsService.MetricIdentity filler =
+                    new CloudWatchMetricsService.MetricIdentity(NAMESPACE, fillerName, List.of());
+            if (CloudWatchMetricsService.metricCursor(filler).compareTo(boundaryCursor) < 0) {
+                datums.add(datum(fillerName, 1));
+            }
+        }
+        service.putMetricData(NAMESPACE, datums, REGION);
+
+        PaginatedResult<CloudWatchMetricsService.MetricIdentity> firstPage =
+                service.listMetricsPage(NAMESPACE, null, null, null, REGION);
+        PaginatedResult<CloudWatchMetricsService.MetricIdentity> secondPage =
+                service.listMetricsPage(NAMESPACE, null, null, firstPage.nextToken(), REGION);
+        assertEquals(500, firstPage.items().size());
+        assertEquals(1, secondPage.items().size());
+        assertNull(secondPage.nextToken());
+        assertEquals(metricName, secondPage.items().getFirst().metricName());
+    }
+
+    @Test
+    void listMetricsFilterScopeAllowsMissingValuesForRepeatedNames() {
+        List<Dimension> filters = List.of(new Dimension("A", null), new Dimension("A", "one"));
+        assertTrue(service.listMetricsPage(NAMESPACE, null, filters, null, REGION).items().isEmpty());
+    }
+
+    @Test
     void putMetricDataWithStatisticValues() {
         MetricDatum d = new MetricDatum();
         d.setMetricName("AggregatedMetric");

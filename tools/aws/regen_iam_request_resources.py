@@ -75,14 +75,28 @@ element lacking it (`PutEvents` publishes each entry to its bus), or from a stru
 a variable no member gives may be `fixed` to the one value its handler uses (a CodePipeline custom action
 type's owner, `Custom`), and an ARN member's value may be read
 only up to a character `before` which its handler drops the rest (`StartExecution`'s
-`<stateMachineArn>#<test case>`). `CLIENTS_NOT_READ` are SDK clients the reference lists for a
+`<stateMachineArn>#<test case>`). A resource there may also apply only to the requests of the client whose
+`endpoint` prefix it names, where two clients give an operation of one name and nothing in a request tells them
+apart (EventBridge's `CreateEventBus` and EventBridge V2's); Floci reads that from the service serving the
+request, never from a member a caller could add. `CLIENTS_NOT_READ` are SDK clients the reference lists for a
 namespace's operations whose requests Floci does not serve, each with its reason.
 `UNQUALIFIED` are the resource types whose ARN a request may give with a qualifier, one more `:<name>`
 past its format, and whose service checks it without one: Step Functions checks a version or an alias
 on its state machine's ARN. `MINTED_IDS` are the resource types whose service follows the name their
 format ends in with an id it mints, `/<id>`, which the format leaves out and a request naming one by
 its name does not give: EventBridge's connections and API destinations, whose stored ARN the reader
-asks the service for, or else checks with that id open.
+asks the service for, or else checks with that id open. `FOUND_BY` are the resource types whose ARN is
+all an id their service mints, which a request names by members the ARN does not hold, with those
+members: each operation whose request has them all names the type by them (`find`), and the reader
+asks the service for the ARN they find, or else checks the ARN with its id open, as for a create; an
+Application Auto Scaling scalable target, `scalable-target/<id>`, is named by its service namespace,
+resource id and scalable dimension, and the Redshift Serverless workgroup a Data API request runs on,
+`workgroup/<id>`, by its name or ARN. `THROUGH` are the members naming a resource the reference gives no
+type, through which a request names a resource of one it does, with those types: each operation whose
+request has the member, and whose action acts on one of them, names its resource through it (`through`),
+and the reader asks the service for the ARN of the caller's resource at the other end, or else names
+none; a Data API session, by its `SessionId`, runs on the cluster or the serverless workgroup it was
+opened on.
 
 The Service Reference is live rather than a pinned dependency, so a fresh generation is not
 byte-identical. The two gates split along the sources:
@@ -111,7 +125,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from regen_iam_authorized_actions import authorized_actions_from, fetch_references
-from regen_iam_passed_roles import NAMESPACE_RE, OPERATION_RE, _shown, load_models, namespace_of
+from regen_iam_passed_roles import (
+    NAMESPACE_RE,
+    OPERATION_RE,
+    _shown,
+    load_models,
+    namespace_of,
+)
 from regen_partitions import resolve_botocore_data
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -119,23 +139,21 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 
 # The namespaces read, in batches: each moves here from NOT_COVERED with the tests that show its ARNs
 # are the ones its handlers mint.
-NAMESPACES = ("acm", "budgets", "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "cur", "ecr",
-              "elasticloadbalancing", "events", "firehose", "kinesisanalytics", "servicediscovery", "servicequotas",
-              "states", "textract", "translate")
+NAMESPACES = ("acm", "application-autoscaling", "athena", "bcm-data-exports", "bcm-pricing-calculator", "budgets", "ce", "cloudtrail",
+              "codebuild", "codepipeline", "cognito-identity", "cognito-idp", "cur", "ecr", "elasticloadbalancing",
+              "events", "firehose", "globalaccelerator", "kinesisanalytics", "payment-cryptography", "redshift-data",
+              "servicediscovery", "servicequotas", "states", "textract", "timestream-influxdb", "translate")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.
 CLIENTS_NOT_READ: dict[str, str] = {
-    "eventbridgev2": "EventBridge V2, the AWSEventsV2 target over Smithy RPC v2 CBOR on the eventsv2 endpoint, which "
-                     "Floci does not serve; its operations share EventBridge's names and name their resources by "
-                     "other members",
     "kinesisanalytics": "Kinesis Data Analytics v1, SQL applications on the KinesisAnalytics_20150814 target, which "
                         "Floci does not serve (it serves v2, kinesisanalyticsv2); its operations share v2's names and "
                         "name their resources by other members",
 }
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
-HAND_BUILT = ("apigateway", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes",
+HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes",
               "resource-groups", "s3", "scheduler", "secretsmanager", "sns", "sqs", "ssm", "sts")
 
 _LATER = "not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
@@ -148,35 +166,28 @@ NOT_COVERED: dict[str, str] = {
     "airflow": _REST,
     "app-integrations": _REST,
     "appconfig": _REST,
-    "application-autoscaling": "not read yet: a scalable target's ARN ends in an id the service mints, "
-                               "`scalable-target/<id>`, while its requests name the target by ServiceNamespace, "
-                               "ResourceId and ScalableDimension, so its resource is the stored ARN those three "
-                               "find, which RequestResources has no lookup for yet; read as a member, ResourceId "
-                               "would fill that id",
     "appsync": _REST,
     "aps": _REST,
-    "athena": _LATER,
     "autoscaling": "not read yet: AWS's group and launch configuration ARNs carry an id the service mints, "
                    "`autoScalingGroup:<id>:autoScalingGroupName/<name>`, while Floci mints `autoScalingGroup:<name>`, "
                    "which other services (ECS capacity providers) read back; the mint is fixed first",
     "aws-marketplace": _LATER,
     "backup": _REST,
     "batch": _REST,
-    "bcm-data-exports": _LATER,
-    "bcm-pricing-calculator": _LATER,
-    "bedrock": _LATER,
     "bedrock-agentcore": _REST,
-    "ce": _LATER,
     "cloudformation": _LATER,
     "cloudfront": _REST,
     "cloudhsm": "not read yet: its ARN formats end in ${CloudHsmClusterInstanceName} and "
                 "${CloudHsmBackupInstanceName}, names, while its requests give ClusterId and BackupId, ids, which the "
                 "rule does not fill a name from, so nearly every operation needs a correction",
-    "cloudtrail": _LATER,
     "cloudwatch": _LATER,
     "codeartifact": _REST,
-    "codedeploy": _LATER,
     "codeguru-reviewer": _REST,
+    "codedeploy": "not read yet: the Service Reference gives an on-premises instance's ARN as "
+                  "`instance:${InstanceName}`, while the CodeDeploy permissions reference gives "
+                  "arn:aws:codedeploy:region:account-id:instance/instance-ID and AWS's GetOnPremisesInstance example "
+                  "answers instance/<name>_<id>, an id the service mints after the name; reading it needs that format "
+                  "corrected",
     "comprehend": _LATER,
     "config": _LATER,
     "connect": _REST,
@@ -196,7 +207,6 @@ NOT_COVERED: dict[str, str] = {
     "es": _REST,
     "execute-api": _REST,
     "fis": _REST,
-    "globalaccelerator": _LATER,
     "glue": _LATER,
     "guardduty": _REST,
     "identitystore": _LATER,
@@ -214,7 +224,6 @@ NOT_COVERED: dict[str, str] = {
     "rds": _LATER,
     "rds-data": _REST,
     "redshift": _LATER,
-    "redshift-data": _LATER,
     "redshift-serverless": _LATER,
     "rekognition": _LATER,
     "resource-explorer-2": _REST,
@@ -225,7 +234,11 @@ NOT_COVERED: dict[str, str] = {
     "s3vectors": _REST,
     "sagemaker": _LATER,
     "securityhub": _REST,
-    "servicecatalog": _LATER,
+    "servicecatalog": "not read yet: CreatePortfolioShare, UpdatePortfolioShare and DeletePortfolioShare give in "
+                      "AccountId the account a portfolio is shared with, which the rule reads as the portfolio's; a "
+                      "portfolio or product imported from another account keeps its owner's account in its ARN while "
+                      "requests name it by its id alone; and AppRegistry's applications and attribute groups are "
+                      "named in the path",
     "ses": _LATER,
     "signin": _REST,
     "sso": _LATER,
@@ -233,7 +246,6 @@ NOT_COVERED: dict[str, str] = {
     "swf": "not read yet: the Service Reference gives a domain's ARN no Region, `swf::<account>:/domain/<name>`, "
            "while the SWF Developer Guide gives it as arn:aws:swf:Region:AccountID:/domain/DomainName, as Floci mints "
            "it; reading it needs that format corrected",
-    "timestream-influxdb": _LATER,
     "transcribe": _LATER,
     "transfer": _LATER,
     "verifiedpermissions": "not read yet: a policyStoreId may name its store by an alias, `policy-store-alias/<name>`, "
@@ -244,8 +256,17 @@ NOT_COVERED: dict[str, str] = {
 }
 
 # An operation's resources where the rule gets them wrong: the resources, and why. A resource's `when` names the
-# values of a member it applies for, null for the member absent.
+# values of a member it applies for, null for the member absent. Its `endpoint` names the endpoint prefix of the one
+# client whose requests it applies to, where two clients share the operation's name and nothing a request gives tells
+# them apart (EventBridge's `events` and EventBridge V2's `eventsv2`): Floci applies it only to a request the service
+# of that endpoint serves, never by a member a caller could add to a request of the other.
 CORRECTIONS: dict[str, tuple[list[dict], str]] = {
+    **{f"states:{operation}": ([{"type": kind, "fill": {}, "find": ["taskToken"]}
+                                for kind in ("activity", "statemachine")],
+                              "AWS callback policy probes on 2026-11-02 authorize an activity token against its "
+                              "activity and an integration token against its unqualified state machine, despite "
+                              "the action table listing no resource types; the token's service resolves the ARN")
+       for operation in ("SendTaskSuccess", "SendTaskFailure", "SendTaskHeartbeat")},
     "elasticloadbalancing:CreateLoadBalancer": ([
         {"type": "loadbalancer", "fill": {"LoadBalancerName": "LoadBalancerName"}},
         {"type": "loadbalancer/app/", "fill": {"LoadBalancerName": "Name"}, "when": {"Type": ["application", None]}},
@@ -313,19 +334,101 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
        for operation, rule in (("DeleteRule", "Name"), ("DescribeRule", "Name"), ("DisableRule", "Name"),
                                ("EnableRule", "Name"), ("ListTargetsByRule", "Rule"), ("PutRule", "Name"),
                                ("PutTargets", "Rule"), ("RemoveTargets", "Rule"))},
-    "events:DescribeEventBus": ([{"type": "event-bus", "fill": {"EventBusName": "Name"}, "absent": {"Name": "default"}}],
+    "events:DescribeEventBus": ([{"types": ["event-busv2"], "arn": "EventBusArn", "endpoint": "eventsv2"},
+                                 {"type": "event-bus", "fill": {"EventBusName": "Name"}, "absent": {"Name": "default"},
+                                  "endpoint": "events"}],
                                 "a request naming no event bus describes the default one ('If you omit this, the "
-                                "default event bus is displayed')"),
-    "events:PutEvents": ([{"type": "event-bus", "fill": {"EventBusName": "Entries[].EventBusName"},
-                           "absent": {"Entries[].EventBusName": "default"}}],
+                                "default event bus is displayed'); EventBridge V2's request names its bus by "
+                                "EventBusArn alone"),
+    "events:PutEvents": ([{"types": ["event-busv2"], "arn": "EventBusArn", "endpoint": "eventsv2"},
+                          {"type": "event-bus", "fill": {"EventBusName": "Entries[].EventBusName"},
+                           "absent": {"Entries[].EventBusName": "default"}, "endpoint": "events"}],
                          "each entry goes to the event bus its EventBusName names, the default one when it names "
                          "none ('If you omit this, the default event bus is used'), and publishing is authorized "
                          "against the bus for every entry in the request; the rule reads no member of a list's "
-                         "structures"),
+                         "structures. EventBridge V2's request names by EventBusArn the one bus every entry goes to"),
+    "events:CreateEventBus": ([{"types": ["event-bus", "event-busv2"], "arn": "DeadLetterConfig.Arn",
+                                "endpoint": "events"},
+                               {"type": "event-bus", "fill": {"EventBusName": "Name"}, "endpoint": "events"},
+                               {"type": "event-busv2", "fill": {"EventBusName": "Name"}, "endpoint": "eventsv2"}],
+                              "EventBridge's request and EventBridge V2's both name the bus they create by Name, and "
+                              "nothing a request gives tells them apart; the API serving it does, an event-bus "
+                              "for EventBridge and an event-busv2, whose id V2 mints, for V2"),
+    **{f"events:{operation}": ([*extra, {"types": [v2], "arn": arn, "endpoint": "eventsv2"},
+                                {"type": v1, "fill": {variable: "Name"}, "endpoint": "events"}],
+                               f"EventBridge's request names the {v1} by Name, EventBridge V2's by {arn}; the rule "
+                               "fills a type's variables only when no member holds its ARN, so with both clients "
+                               "read it drops EventBridge's Name")
+       for operation, v1, v2, variable, arn, extra in (
+           ("DeleteEventBus", "event-bus", "event-busv2", "EventBusName", "EventBusArn", []),
+           ("UpdateEventBus", "event-bus", "event-busv2", "EventBusName", "EventBusArn",
+            [{"types": ["event-bus", "event-busv2"], "arn": "DeadLetterConfig.Arn", "endpoint": "events"}]),
+           ("DescribeEventSource", "event-source", "event-sourcev2", "EventSourceName", "EventSourceArn", []))},
     **{f"states:{operation}": ([{"types": ["statemachine"], "arn": "stateMachineArn", "before": "#"}],
                               "Floci takes Step Functions Local's <stateMachineArn>#<test case> and runs the machine "
                               "the part before the # names, so that part is the one checked")
        for operation in ("StartExecution", "StartSyncExecution")},
+    **{f"athena:{operation}": ([{"type": "workgroup", "fill": {"WorkGroupName": "WorkGroup"},
+                                 "absent": {"WorkGroup": "primary"}}],
+                               "a request naming no workgroup acts in the primary one (ListQueryExecutions: 'If a "
+                               "workgroup is not specified, returns a list of query execution IDs for the primary "
+                               "workgroup', ListNamedQueries alike; the user guide has users without their own "
+                               "workgroup 'continue running queries in the primary workgroup'), and Floci's "
+                               "GetWorkGroup answers the primary one for a request naming none")
+       for operation in ("GetWorkGroup", "ListNamedQueries", "ListQueryExecutions", "StartQueryExecution")},
+    "athena:GetDataCatalog": ([{"type": "datacatalog", "fill": {"DataCatalogName": "Name"},
+                                "absent": {"Name": "AwsDataCatalog"}}],
+                              "Floci's GetDataCatalog answers the account's Glue Data Catalog, AwsDataCatalog, for a "
+                              "request naming no catalog, so that is the one checked"),
+    **{f"athena:{operation}": ([{"type": "datacatalog", "fill": {"DataCatalogName": "CatalogName"},
+                                 "absent": {"CatalogName": "AwsDataCatalog"}},
+                                {"type": "datacatalog", "fill": {}, "fixed": {"DataCatalogName": "AwsDataCatalog"}}],
+                               "Floci's handler reads the account's Glue Data Catalog, AwsDataCatalog, whichever "
+                               "catalog CatalogName names, so that one is checked as well as the one named, and a "
+                               "request naming none is read as naming it")
+       for operation in ("GetTableMetadata", "ListDatabases", "ListTableMetadata")},
+    **{f"ce:{operation}": ([], "Floci serves no billing views: it answers the account's costs whichever view "
+                               "BillingViewArn names, so the request is checked on `*`, as one naming no view, and a "
+                               "grant scoped to a view does not reach them")
+       for operation in ("GetCostAndUsage", "GetCostAndUsageComparisons", "GetCostAndUsageWithResources",
+                         "GetCostCategories", "GetCostComparisonDrivers", "GetCostForecast", "GetDimensionValues",
+                         "GetTags", "GetUsageForecast")},
+    "bcm-data-exports:CreateExport": ([], "its Export.ExportArn is the ARN 'for this export', the one the request "
+                                          "creates, never a billing view's or a table's, although its pattern takes "
+                                          "any bcm-data-exports ARN, a table's included; the request names its table "
+                                          "in its query statement and its table configurations' keys, which the rule "
+                                          "does not read"),
+    **{f"cloudtrail:{operation}": ([{"type": "trail", "fill": {"TrailName": "Name"}}],
+                                   "the request names the trail by a bare Name, 'the name or the CloudTrail ARN of "
+                                   "the trail', which the rule reads only for an operation named after the type")
+       for operation in ("GetTrailStatus", "StartLogging", "StopLogging")},
+    **{f"cloudtrail:{operation}": ([{"types": ["channel", "dashboard", "eventdatastore", "trail"], "arn": member}],
+                                   f"the request names the resource by its ARN in {member} ('the ARN of the trail, "
+                                   "event data store, dashboard, or channel'), whose name does not end in Arn")
+       for operation, member in (("AddTags", "ResourceId"), ("ListTags", "ResourceIdList[]"),
+                                 ("RemoveTags", "ResourceId"))},
+    **{f"cloudtrail:{operation}": ([{"type": "dashboard", "fill": {"DashboardName": "DashboardId"}}],
+                                   "the request names the dashboard by DashboardId, 'The name or ARN for the "
+                                   "dashboard', which the rule does not take for a name")
+       for operation in ("DeleteDashboard", "GetDashboard", "StartDashboardRefresh", "UpdateDashboard")},
+    **{f"ce:{operation}": ([{"types": [kind], "arn": f"{member}[]"}],
+                           f"the request names the {noun} by the ARNs in {member} ('A list of cost anomaly {noun} "
+                           "ARNs'), whose name does not end in Arn" + extra)
+       for operation, member, kind, noun, extra in (
+           ("GetAnomalyMonitors", "MonitorArnList", "anomalymonitor", "monitor", ""),
+           ("GetAnomalySubscriptions", "SubscriptionArnList", "anomalysubscription", "subscription",
+            "; its MonitorArn narrows them to a monitor's, an anomaly monitor's ARN, never a subscription's"))},
+    "timestream-influxdb:RebootDbCluster": ([
+        {"type": "db-cluster", "fill": {"DbClusterId": "dbClusterId"}},
+        {"type": "db-instance", "fill": {"DbInstanceIdentifier": "instanceIds[]"}},
+    ], "the request names the cluster's instances to reboot by instanceIds ('A list of service-generated unique DB "
+       "Instance Ids belonging to the DB Cluster to reboot'), ids the rule does not take for an identifier"),
+    "globalaccelerator:ListCustomRoutingPortMappings": ([{"types": ["accelerator"], "arn": "AcceleratorArn"}],
+                                                        "its EndpointGroupArn narrows the mappings to an endpoint "
+                                                        "group of the accelerator, whose ARN extends the "
+                                                        "accelerator's (accelerator/<id>/listener/<id>/"
+                                                        "endpoint-group/<id>) and so matches the accelerator's "
+                                                        "format, which the action acts on alone"),
 }
 
 # Resource types whose ARN a request may give with a qualifier, one more `:<name>` past its format, which their
@@ -345,6 +448,38 @@ MINTED_IDS: dict[str, str] = {
     "events:api-destination": "EventBridge mints an API destination's ARN as api-destination/<name>/<id> "
                               "(botocore's ApiDestinationArn pattern ends in api-destination/<name>/<id>), "
                               "as it does a connection's",
+}
+
+# Resource types whose ARN is all an id their service mints, which a request names by members the ARN does not
+# hold, the members in the order the service reads them, and why: an operation whose request has them all names the
+# type by them, and the reader asks the service for the ARN they find.
+FOUND_BY: dict[str, tuple[list[str], str]] = {
+    "application-autoscaling:ScalableTarget": (
+        ["ServiceNamespace", "ResourceId", "ScalableDimension"],
+        "a scalable target's ARN ends in its unique id, scalable-target/<id> ('The unique ID "
+        "(1234abcd56ab78cd901ef1234567890ab123) is a value assigned by Application Auto Scaling to the scalable "
+        "target', Application Auto Scaling User Guide), which the reference names ${ResourceId}, while its requests "
+        "name the target by ServiceNamespace, ResourceId and ScalableDimension; ResourceId is the target's "
+        "resource (service/<cluster>/<service>), not that id"),
+    "redshift-data:workgroup": (
+        ["WorkgroupName"],
+        "a serverless workgroup's ARN ends in the id Redshift Serverless gives it, workgroup/<id> (its Workgroup's "
+        "workgroupId, 'The unique identifier of the workgroup'; botocore's WorkgroupNameString takes an ARN ending "
+        "in workgroup/<uuid>), while a Data API request names the workgroup by WorkgroupName, 'The serverless "
+        "workgroup name or Amazon Resource Name (ARN)'"),
+}
+
+# Members naming a resource of their service's own the reference gives no type, through which a request names a
+# resource of one it does, the types that resource may be of, and why: an operation whose request has the member,
+# and whose action acts on one of those types, names it through the member, and the reader asks the service for the
+# ARN of the caller's resource at the other end.
+THROUGH: dict[str, tuple[list[str], str]] = {
+    "redshift-data:SessionId": (
+        ["cluster", "workgroup"],
+        "a Data API session runs on the cluster or the serverless workgroup it was opened on (ListSessions filters "
+        "sessions 'by session status, compute target (cluster or serverless workgroup), or database'), and its "
+        "SessionId 'can then be used in subsequent ExecuteStatement and BatchExecuteStatement operations' "
+        "(Amazon Redshift Management Guide), which then run there"),
 }
 
 # The variables of an ARN format the account, partition and Region fill.
@@ -543,6 +678,12 @@ def with_account(resources: list[dict], formats: dict[str, str], accounts: list[
             and "${Account}" in formats.get(resource["type"], "") else resource for resource in resources]
 
 
+def _kinds(resource: dict) -> list[str]:
+    """The resource types a resource names, as the strings they are: the types it acts on, or the one it names."""
+    named: list = list(resource.get("types") or [resource.get("type")])
+    return [kind for kind in named if isinstance(kind, str)]
+
+
 def kind_of(name: str) -> str:
     """Whether a name ends as a name, an id, or an identifier (which is either), or neither."""
     lower = name.lower()
@@ -614,23 +755,26 @@ RESOURCE_PART_RE = re.compile(r"^arn:\$\{Partition}:[^:]*:[^:]*:[^:]*:([A-Za-z][
 def with_made(resources: list[dict], operation: str, formats: dict[str, str]) -> list[dict]:
     """The resources, those a create makes marked `made` when it names others too (the pipeline a webhook connects
     to, the namespace a service is created in), so that its tags are checked on what it makes alone: of a type, or
-    with an ARN format's leading resource word, related to the operation's name past its verb."""
+    with an ARN format's leading resource word, related to the operation's name past its verb. A member that may hold
+    an ARN of several types is made only when every one of them is: one that may name the parent too (a subscriber's
+    `EventBusArn`) names a resource the create does not make."""
     name = operation.split(":", 1)[1]
     if not CREATING_RE.match(name):
         return resources
     created = stem(CREATING_RE.sub("", name))
 
+    def is_created(kind: str) -> bool:
+        word = RESOURCE_PART_RE.match(formats.get(kind, ""))
+        return related(created, stem(kind)) or (word is not None and related(created, stem(word.group(1))))
+
     def makes(resource: dict) -> bool:
-        for kind in resource.get("types") or [resource.get("type")]:
-            word = RESOURCE_PART_RE.match(formats.get(kind, ""))
-            if related(created, stem(kind)) or (word is not None and related(created, stem(word.group(1)))):
-                return True
-        return False
+        return all(is_created(kind) for kind in _kinds(resource))
 
     made = [makes(resource) for resource in resources]
     if all(made) or not any(made):
         return resources
-    return [dict(resource, made=True) if is_made else resource for resource, is_made in zip(resources, made)]
+    return [dict(resource, made=True) if is_made else resource
+            for resource, is_made in zip(resources, made, strict=True)]
 
 
 def child_id(child: str, parent: str) -> str | None:
@@ -696,8 +840,15 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     members = request_members(models, operation.split(":", 1)[1])
     if operation in CORRECTIONS:
         resources = CORRECTIONS[operation][0]
+        endpoints = {model["metadata"]["endpointPrefix"] for model in models.values()}
+        unknown = {resource["endpoint"] for resource in resources if "endpoint" in resource} - endpoints
+        if unknown:
+            raise ValueError(f"CORRECTIONS serves {operation} on {sorted(unknown)}, no endpoint prefix of the clients "
+                             f"it reads ({sorted(endpoints)})")
     else:
-        resources = resources_for(operation, types, formats, members)
+        resources = with_through(with_found(resources_for(operation, types, formats, members),
+                                            namespace_of(operation), types, members),
+                                 namespace_of(operation), types, members)
     resources = with_account(resources, formats, account_members(models, operation.split(":", 1)[1]))
     resources = with_arn_of(resources, formats, name_or_arn_members(models, operation.split(":", 1)[1]))
     resources = with_made(resources, operation, formats)
@@ -706,6 +857,29 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     if creates:
         entry["creates"] = creates
     return entry
+
+
+def with_found(resources: list[dict], namespace: str, types: list[str], members: dict[str, str]) -> list[dict]:
+    """The resources, a `FOUND_BY` type the action acts on named by the members its service finds it by, when the
+    request has them all, rather than by any it fills: its variables are an id the request does not give."""
+    found = [resource for resource in resources if f"{namespace}:{resource.get('type')}" not in FOUND_BY]
+    for kind in types:
+        by = FOUND_BY.get(f"{namespace}:{kind}", ([], ""))[0]
+        if by and all(members.get(member) == member for member in by):
+            found.append({"type": kind, "fill": {}, "find": list(by)})
+    return found
+
+
+def with_through(resources: list[dict], namespace: str, types: list[str], members: dict[str, str]) -> list[dict]:
+    """The resources, and the one of the `THROUGH` types the action acts on that each member of the request naming
+    a resource of its service's own runs on."""
+    through = []
+    for key, (kinds, _) in sorted(THROUGH.items()):
+        member = key.split(":", 1)[1]
+        on = [kind for kind in types if kind in kinds]
+        if key.startswith(f"{namespace}:") and on and members.get(member) == member:
+            through.append({"types": on, "through": member})
+    return resources + through
 
 
 def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> dict:
@@ -725,6 +899,11 @@ def build(documents: list[dict], provenance: str, data: Path, botocore: str) -> 
     missing += [f"MINTED_IDS names {namespace}:{kind}, whose ARN format does not end in its one variable"
                 for namespace, kinds in minted.items() for kind in kinds
                 if kind in formats.get(namespace, {}) and not ONE_VARIABLE_RE.match(_resource(formats[namespace][kind]))]
+    missing += [f"FOUND_BY names {key}, no resource type with an ARN format of a namespace the file reads"
+                for key in sorted(FOUND_BY) if key.split(":", 1)[1] not in formats.get(key.split(":", 1)[0], {})]
+    missing += [f"THROUGH names {key.split(':', 1)[0]}:{kind}, no resource type with an ARN format of a namespace the "
+                f"file reads" for key, (kinds, _) in sorted(THROUGH.items()) for kind in kinds
+                if kind not in formats.get(key.split(":", 1)[0], {})]
     if missing:
         raise ValueError("; ".join(missing))
     operations = {}
@@ -821,6 +1000,8 @@ FILL_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|\[]\.[A-Za-z][A-Za-z0-9_]
 ARN_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_]*(\[])?)?$")
 # A format's resource that is a literal and one variable, at its end.
 ONE_VARIABLE_RE = re.compile(r"^[^$]*\$\{\w+}$")
+# The keys a resource found by members does not take: it is read no other way, in the caller's account.
+FOUND_ONLY = {"absent", "arnOf", "account", "fixed", "before"}
 
 
 def validate(document: dict) -> list[str]:
@@ -882,23 +1063,39 @@ def validate(document: dict) -> list[str]:
 
 
 def _resource_problems(operation: str, resource: object, types: set[str], formats: dict[str, str]) -> list[str]:
-    if not isinstance(resource, dict) or not ({"types", "arn"} <= set(resource) <= {"types", "arn", "before", "made"}
+    if not isinstance(resource, dict) or not ({"types", "arn"} <= set(resource) <= {"types", "arn", "before", "made",
+                                                                                     "endpoint"}
+                                              or {"types", "through"} <= set(resource) <= {"types", "through", "endpoint"}
                                               or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "absent", "arnOf", "account",
-                                                                                       "fixed", "made", "before"}):
+                                                                                       "fixed", "made", "before", "find", "endpoint"}):
         return [f"{operation} names {resource!r}, which is neither an ARN member nor a type's variables"]
+    if "endpoint" in resource and not (isinstance(resource["endpoint"], str) and resource["endpoint"]):
+        return [f"{operation} serves {resource!r} on {resource['endpoint']!r}, which is no endpoint prefix"]
     if resource.get("made", True) is not True:
         return [f"{operation} marks {resource!r} made by {resource['made']!r}, which is not true"]
     before = resource.get("before", "#")
     if not isinstance(before, str) or len(before) != 1:
         return [f"{operation} reads its members before {before!r}, which is no one character"]
-    kinds = resource.get("types") or [resource.get("type")]
-    if not all(isinstance(kind, str) and kind in types and kind in formats for kind in kinds):
-        return [f"{operation} names {kinds}, not resource types its action acts on with an ARN format"]
+    named = resource.get("types") or [resource.get("type")]
+    kinds = _kinds(resource)
+    corrected = resource in CORRECTIONS.get(operation, ([], ""))[0]
+    if len(kinds) != len(named) or not all((kind in types or corrected) and kind in formats for kind in kinds):
+        return [f"{operation} names {named}, not resource types its action acts on with an ARN format"]
     if "arn" in resource:
         if not isinstance(resource["arn"], str) or not ARN_PATH_RE.match(resource["arn"]):
             return [f"{operation} reads an ARN at {resource['arn']!r}, which is no member"]
         return []
+    if "through" in resource:
+        through = resource["through"]
+        if not isinstance(through, str) or not PATH_RE.match(through) or through.endswith("[]"):
+            return [f"{operation} names {kinds} through {through!r}, which is no member of one value"]
+        return []
     fill = resource["fill"]
+    find = resource.get("find", [])
+    if not isinstance(find, list) or ("find" in resource and (not find or fill or set(resource) & FOUND_ONLY)) \
+            or not all(isinstance(path, str) and PATH_RE.match(path) and not path.endswith("[]") for path in find):
+        return [f"{operation} finds {kinds[0]} by {find!r}, which are no members of one value each, or beside a fill "
+                f"or members reading it otherwise"]
     variables = set(VARIABLE_RE.findall(formats[kinds[0]])) - KNOWN_VARIABLES
     if not isinstance(fill, dict) or set(fill) - variables or not all(
             isinstance(path, str) and FILL_PATH_RE.match(path) for path in fill.values()):
@@ -1010,7 +1207,11 @@ def main(argv: list[str] | None = None) -> int:
         if not args.output.exists():
             print(f"error: {args.output} does not exist", file=sys.stderr)
             return 1
-        document = json.loads(args.output.read_text(encoding="utf-8"))
+        try:
+            document = json.loads(args.output.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            print(f"error: {_shown(args.output)} could not be read ({e})", file=sys.stderr)
+            return 1
         problems = validate(document)
         if not problems and args.check:
             data, _ = resolve_botocore_data(args.botocore_data)

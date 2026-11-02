@@ -102,6 +102,15 @@ public class CloudFormationService implements ResourceProvider {
                     + " to review their current state before your next update.";
     private static final String FORCE_WITH_SKIPS = "ForceRollback and ResourcesToSkip are mutually exclusive";
     private static final String CONTINUE_STACK_MISSING = "Stack: %s does not exist";
+    private static final String RETAIN_NOT_UNIQUE = "The logical IDs specified for the resources to retain are not"
+            + " all unique. Specify unique logical IDs for all of the resources that you want to retain.";
+    private static final String RETAIN_STACK_NOT_DELETE_FAILED = "Invalid operation on stack [%s]. When you delete"
+            + " a stack, specify which resources to retain only when the stack is in the DELETE_FAILED state.";
+    private static final String RETAIN_INVALID_STATE = "The specified resources to retain must be in a valid state."
+            + " Do not specify resources that are in the DELETE_COMPLETE state.";
+    private static final String RETAIN_DIFFERS_FROM_DELETE = "A delete stack operation is already in progress for"
+            + " stack [%s]. Do not submit another delete stack request specifying different resources to retain"
+            + " or resources to retain in a different order.";
     /** The StackName pattern ContinueUpdateRollback and DescribeStacks validate a name against. */
     private static final Pattern STACK_NAME =
             Pattern.compile("[a-zA-Z][-a-zA-Z0-9]*|arn:[-a-zA-Z0-9:/._+]*");
@@ -1289,20 +1298,27 @@ public class CloudFormationService implements ResourceProvider {
 
     // ── DeleteStack ───────────────────────────────────────────────────────────
 
-    public void deleteStack(String stackName, String region) {
-        deleteStack(stackName, region, regionResolver.getAccountId());
+    public void deleteStack(String stackName, List<String> retainResources, String region) {
+        deleteStack(stackName, retainResources, region, regionResolver.getAccountId());
+    }
+
+    public Future<?> deleteStack(String stackName, String region, String accountId) {
+        return deleteStack(stackName, List.of(), region, accountId);
     }
 
     /**
      * Deletes a stack, removing its resources from {@code accountId}'s namespace. The account must
      * match the one the resources were provisioned into (the caller's account for a single-stack
-     * deployment, or the target account for a StackSet instance).
+     * deployment, or the target account for a StackSet instance). {@code retainResources} names
+     * resources of a {@code DELETE_FAILED} stack that the delete leaves in place, as AWS allows
+     * only from that status.
      *
      * @return a future that completes when the resources have been removed; already-gone stacks
      *         complete immediately. Callers that need synchronous deletion (e.g. StackSet instance
      *         removal) can await it.
      */
-    public Future<?> deleteStack(String stackName, String region, String accountId) {
+    public Future<?> deleteStack(String stackName, List<String> retainResources, String region, String accountId) {
+        validateRetainResources(retainResources);
         purgeExpiredDeletedStacks();
         Stack stack = resolveStack(stackName, region, accountId);
         if (stack == null) {
@@ -1325,10 +1341,18 @@ public class CloudFormationService implements ResourceProvider {
         // deletion already running, and starts no second one; a stack that took this name since it
         // was resolved is a different stack, and is left alone.
         String stackId = stack.getStackId();
+        List<String> retain = List.copyOf(retainResources);
         Future<?>[] submitted = new Future<?>[1];
         stacks.compute(stackKey(accountId, stack.getStackName(), region), (k, existing) -> {
-            if (existing == null || !existing.getStackId().equals(stackId)
-                    || isBeingDeleted(existing.getStatus())) {
+            if (existing == null || !existing.getStackId().equals(stackId)) {
+                return existing;
+            }
+            if (isBeingDeleted(existing.getStatus())) {
+                // A retry of the running delete is a no-op; one that would retain otherwise is refused.
+                if ("DELETE_IN_PROGRESS".equals(existing.getStatus()) && !retain.equals(existing.getRetainResources())) {
+                    throw new AwsException("ValidationError",
+                            RETAIN_DIFFERS_FROM_DELETE.formatted(existing.getStackId()), 400);
+                }
                 return existing;
             }
             if (existing.isEnableTerminationProtection()) {
@@ -1337,13 +1361,26 @@ public class CloudFormationService implements ResourceProvider {
                         "Stack [" + existing.getStackId()
                                 + "] cannot be deleted while TerminationProtection is enabled", 400);
             }
+            if (!retain.isEmpty()) {
+                if (!"DELETE_FAILED".equals(existing.getStatus())) {
+                    throw new AwsException("ValidationError",
+                            RETAIN_STACK_NOT_DELETE_FAILED.formatted(existing.getStackId()), 400);
+                }
+                for (String logicalId : retain) {
+                    StackResource resource = existing.getResources().get(logicalId);
+                    if (resource == null || "DELETE_COMPLETE".equals(resource.getStatus())) {
+                        throw new AwsException("ValidationError", RETAIN_INVALID_STATE, 400);
+                    }
+                }
+            }
             StackMutationSnapshot snapshot = snapshot(existing);
+            existing.setRetainResources(retain);
             existing.setStatus("DELETE_IN_PROGRESS");
             addEvent(existing, existing.getStackName(), existing.getStackId(),
                     "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
             try {
                 submitted[0] = submitOperation(() -> RequestScopes.runAs(accountId, region,
-                        () -> deleteStackResources(existing, region, accountId)));
+                        () -> deleteStackResources(existing, retain, region, accountId)));
             } catch (AwsException e) {
                 restore(existing, snapshot);
                 throw e;
@@ -1351,6 +1388,21 @@ public class CloudFormationService implements ResourceProvider {
             return existing;
         });
         return submitted[0] != null ? submitted[0] : CompletableFuture.completedFuture(null);
+    }
+
+    /**
+     * Refuses a malformed {@code RetainResources} as AWS does, before the stack is looked up: a
+     * logical id outside 1 to 255 characters, then one named twice.
+     */
+    private static void validateRetainResources(List<String> retainResources) {
+        if (retainResources.stream().anyMatch(id -> id.isEmpty() || id.codePointCount(0, id.length()) > 255)) {
+            throw SmithyValidationErrors.validationError("Value '" + retainResources + "' at 'resourcesToRetain'"
+                    + " failed to satisfy constraint: Member must satisfy constraint: [Member must have length"
+                    + " less than or equal to 255, Member must have length greater than or equal to 1]");
+        }
+        if (new HashSet<>(retainResources).size() != retainResources.size()) {
+            throw new AwsException("ValidationError", RETAIN_NOT_UNIQUE, 400);
+        }
     }
 
     // ── ContinueUpdateRollback ────────────────────────────────────────────────
@@ -2612,6 +2664,7 @@ public class CloudFormationService implements ResourceProvider {
                         "Stack [" + child.getStackId()
                                 + "] cannot be deleted while TerminationProtection is enabled", 400);
             }
+            child.setRetainResources(List.of());
             child.setStatus("DELETE_IN_PROGRESS");
             addEvent(child, child.getStackName(), child.getStackId(),
                     "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
@@ -3553,6 +3606,11 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     void deleteStackResources(Stack stack, String region, String accountId) {
+        deleteStackResources(stack, List.of(), region, accountId);
+    }
+
+    /** Deletes the stack's resources, except those {@code retainResources} names or a policy retains. */
+    void deleteStackResources(Stack stack, List<String> retainResources, String region, String accountId) {
         try {
             List<StackResource> resources = resourcesInCreationOrder(stack, region);
             Collections.reverse(resources); // Dependents go before what they depend on
@@ -3566,6 +3624,13 @@ public class CloudFormationService implements ResourceProvider {
                 failedResources.add(displacedFailure.logicalId());
             }
             for (StackResource resource : resources) {
+                if (retainResources.contains(resource.getLogicalId())) {
+                    resource.setStatus("DELETE_SKIPPED");
+                    resource.setStatusReason(null);
+                    addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                            resource.getResourceType(), "DELETE_SKIPPED", null);
+                    continue;
+                }
                 if (resource.getPhysicalId() == null || !isDeletableOnStackDelete(resource)) {
                     continue;
                 }

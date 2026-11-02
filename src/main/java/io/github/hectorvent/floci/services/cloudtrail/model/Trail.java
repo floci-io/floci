@@ -20,5 +20,18 @@ public record Trail(
         @JsonProperty("LogFileValidationEnabled") boolean logFileValidationEnabled,
         @JsonProperty("HasCustomEventSelectors") boolean hasCustomEventSelectors,
         @JsonProperty("HasInsightSelectors") boolean hasInsightSelectors,
-        @JsonProperty("IsOrganizationTrail") boolean isOrganizationTrail) {
+        @JsonProperty("IsOrganizationTrail") boolean isOrganizationTrail,
+        @JsonProperty("KmsKeyId") String kmsKeyId,
+        @JsonProperty("CloudWatchLogsLogGroupArn") String cloudWatchLogsLogGroupArn,
+        @JsonProperty("CloudWatchLogsRoleArn") String cloudWatchLogsRoleArn) {
+
+    /** A trail without encryption or CloudWatch Logs delivery. */
+    public Trail(String name, String trailArn, String s3BucketName, String s3KeyPrefix, String snsTopicArn,
+                 boolean includeGlobalServiceEvents, boolean isMultiRegionTrail, String homeRegion,
+                 boolean logFileValidationEnabled, boolean hasCustomEventSelectors, boolean hasInsightSelectors,
+                 boolean isOrganizationTrail) {
+        this(name, trailArn, s3BucketName, s3KeyPrefix, snsTopicArn, includeGlobalServiceEvents, isMultiRegionTrail,
+                homeRegion, logFileValidationEnabled, hasCustomEventSelectors, hasInsightSelectors,
+                isOrganizationTrail, null, null, null);
+    }
 }

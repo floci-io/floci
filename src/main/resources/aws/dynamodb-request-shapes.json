@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_dynamodb_shapes.py",
-    "botocore": "botocore 1.43.113 (local/aws/botocore)"
+    "botocore": "botocore 1.43.118 (local/aws/botocore)"
   },
   "operations": {
     "BatchExecuteStatement": "BatchExecuteStatementInput",
@@ -523,6 +523,19 @@
       "members": {
         "TableName": "TableArn"
       }
+    },
+    "DisassociateReplicationGroupMemberAction": {
+      "type": "structure",
+      "members": {
+        "RegionName": "RegionName",
+        "DisassociationMode": "DisassociationMode"
+      }
+    },
+    "DisassociationMode": {
+      "type": "string"
+    },
+    "DisassociationProtectionEnabled": {
+      "type": "boolean"
     },
     "DoubleObject": {
       "type": "double"
@@ -1173,7 +1186,8 @@
       "members": {
         "Create": "CreateReplicationGroupMemberAction",
         "Update": "UpdateReplicationGroupMemberAction",
-        "Delete": "DeleteReplicationGroupMemberAction"
+        "Delete": "DeleteReplicationGroupMemberAction",
+        "Disassociate": "DisassociateReplicationGroupMemberAction"
       }
     },
     "ReplicationGroupUpdateList": {
@@ -1595,6 +1609,7 @@
         "OnDemandThroughput": "OnDemandThroughput",
         "WarmThroughput": "WarmThroughput",
         "GlobalTableSettingsReplicationMode": "GlobalTableSettingsReplicationMode",
+        "DisassociationProtectionEnabled": "DisassociationProtectionEnabled",
         "VectorIndexUpdates": "VectorIndexUpdateList"
       }
     },

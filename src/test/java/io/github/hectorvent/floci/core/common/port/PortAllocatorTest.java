@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common.port;
 
+import io.github.hectorvent.floci.testing.StartGate;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -9,15 +10,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.function.IntPredicate;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class PortAllocatorTest {
@@ -35,22 +30,13 @@ class PortAllocatorTest {
     }
 
     @Test
-    void concurrentAllocationsAreUnique() throws InterruptedException {
+    void concurrentAllocationsAreUnique() throws Exception {
         PortAllocator allocator = new PortAllocator(9200, 9299, w -> { }, ALWAYS_BINDABLE);
         int threads = 50;
         Set<Integer> ports = ConcurrentHashMap.newKeySet();
-        CountDownLatch latch = new CountDownLatch(threads);
-        ExecutorService executor = Executors.newFixedThreadPool(threads);
-
-        for (int i = 0; i < threads; i++) {
-            executor.submit(() -> {
-                ports.add(allocator.allocate());
-                latch.countDown();
-            });
-        }
-
-        latch.await();
-        executor.shutdown();
+        StartGate.Results<Boolean> results = StartGate.runConcurrently(threads,
+                index -> ports.add(allocator.allocate()));
+        assertTrue(results.errors().isEmpty(), () -> "Allocation workers failed: " + results.errors());
         assertEquals(threads, ports.size(), "All allocated ports must be unique");
     }
 

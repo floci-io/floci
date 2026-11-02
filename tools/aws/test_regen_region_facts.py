@@ -128,6 +128,13 @@ GUIDE_GOVCLOUD_APIGATEWAY = (
     "The Amazon Route\u00a053 Hosted Zone ID for the regional endpoint in the AWS GovCloud (US-West) Region is"
     " Z1K6XKP9SAGWDV. The Amazon Route\u00a053 Hosted Zone ID for the regional endpoint in the AWS GovCloud (US-East)"
     " Region is Z3SE9ATJYCRCZJ.\n")
+RDS_CLI_EXAMPLE = '''
+"Endpoint": {
+    "Address": "mydbinstancecf.abcexample.us-east-1.rds.amazonaws.com",
+    "Port": 3306,
+    "HostedZoneId": "Z2R2ITUGPM61AM"
+}
+'''
 BOTOCORE_CLOUDFRONT = json.dumps({"shapes": {
     "Distribution": {"members": {"DomainName": {"shape": "string", "documentation":
         "<p>The distribution's CloudFront domain name. For example: <code>d111111abcdef8.cloudfront.net</code>.</p>"}}},
@@ -155,6 +162,7 @@ def write_sources(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
         (cdk, r.CDK_FACT_TABLES, TS_FACTS), (cdk, r.CDK_CLOUDFRONT_TARGET, TS_CLOUDFRONT), (cdk, r.CDK_VPC_ENDPOINT, TS_VPCE),
         (guides, r.CLOUDFRONT_SUFFIX_SENTENCES["aws-cn"][0], GUIDE_CHINA_CLOUDFRONT),
         (guides, r.APIGATEWAY_REGIONAL_ZONE_PAGE, GUIDE_GOVCLOUD_APIGATEWAY),
+        (guides, r.RDS_ZONE_SENTENCES["us-east-1"][0], RDS_CLI_EXAMPLE),
         (botocore, r.BOTOCORE_CLOUDFRONT, BOTOCORE_CLOUDFRONT),
     ] + [(guides, r.CONSOLE_HOST_SENTENCES[partition][0], body) for partition, body in GUIDES.items()]:
         path = root / rel
@@ -264,12 +272,23 @@ def test_api_gateway_regional_zones_resolve_the_region_by_its_description():
         r.parse_apigateway_regional_zones(west_only, PARTITIONS)
 
 
+def test_rds_example_requires_one_zone_for_the_matching_region():
+    page, pattern = r.RDS_ZONE_SENTENCES["us-east-1"]
+    assert r.parse_guide_sentence(RDS_CLI_EXAMPLE, pattern, page) == "Z2R2ITUGPM61AM"
+    with pytest.raises(ValueError, match="expected one value"):
+        r.parse_guide_sentence(RDS_CLI_EXAMPLE.replace("us-east-1", "eu-west-1"), pattern, page)
+    with pytest.raises(ValueError, match="expected one value"):
+        r.parse_guide_sentence(RDS_CLI_EXAMPLE + RDS_CLI_EXAMPLE.replace("Z2R2ITUGPM61AM", "ZOTHER"), pattern, page)
+
+
 def test_build_merges_sources_with_terraform_winning_the_s3_conflicts(tmp_path):
     tf, cdk, guides, botocore = write_sources(tmp_path)
     document = r.build(tf, cdk, guides, botocore, PARTITIONS)
     regions = document["regions"]
+    assert document["_source"]["rds"] == "https://docs.aws.amazon.com/cli/v1/reference/rds/describe-db-instances.html"
     assert regions["us-east-1"] == {"albHostedZoneId": "Z35SXDOTRQ7X7K", "classicElbHostedZoneId": "Z35SXDOTRQ7X7K",
-                                    "nlbHostedZoneId": "Z26RNL4JYFTOTI", "s3WebsiteHostedZoneId": "Z3AQBSTGFYJSTF"}
+                                    "nlbHostedZoneId": "Z26RNL4JYFTOTI", "s3WebsiteHostedZoneId": "Z3AQBSTGFYJSTF",
+                                    "rdsHostedZoneId": "Z2R2ITUGPM61AM"}
     assert regions["af-south-1"]["s3WebsiteHostedZoneId"] == "Z83WF9RJE8B12"
     assert regions["us-isof-south-1"] == {"s3WebsiteHostedZoneId": "Z03376072I8GXC2DXUFXI",
                                           "vpcEndpointExceptionPrefix": "gov.ic.hci.csp",

@@ -93,6 +93,8 @@ class AppConfigServiceTest {
 
         Application application = new Application();
         application.setId("app");
+        application.setName("orders");
+        application.setDescription("Order processing");
         applicationStore.put("app", application);
         when(applicationStore.get("app")).thenReturn(Optional.of(application));
         Environment environment = new Environment();
@@ -105,6 +107,53 @@ class AppConfigServiceTest {
         profile.setApplicationId("app");
         when(profileStore.get("profile")).thenReturn(Optional.of(profile));
         service = new AppConfigService(storageFactory, mock(EmulatorConfig.class));
+    }
+
+    @Test
+    void updateApplicationPreservesOmittedFields() {
+        Application updated = service.updateApplication("app", Map.of("Name", "orders-v2"));
+
+        assertEquals("orders-v2", updated.getName());
+        assertEquals("Order processing", updated.getDescription());
+        verify(applicationStore).put("app", updated);
+    }
+
+    @Test
+    void updateApplicationRejectsNonStringFieldsWithoutWriting() {
+        clearInvocations(applicationStore);
+
+        AwsException nameError = assertThrows(AwsException.class,
+                () -> service.updateApplication("app", Map.of("Name", 123)));
+        AwsException descriptionError = assertThrows(AwsException.class,
+                () -> service.updateApplication("app", Map.of("Name", "renamed", "Description", false)));
+
+        assertEquals("BadRequestException", nameError.getErrorCode());
+        assertEquals(400, nameError.getHttpStatus());
+        assertEquals("BadRequestException", descriptionError.getErrorCode());
+        assertEquals(400, descriptionError.getHttpStatus());
+        assertEquals("orders", service.getApplication("app").getName());
+        assertEquals("Order processing", service.getApplication("app").getDescription());
+        verify(applicationStore, never()).put(anyString(), any(Application.class));
+    }
+
+    @Test
+    void onlyHostedProfilesReceiveTheOmittedTypeDefault() {
+        assertEquals("AWS.Freeform", service.createConfigurationProfile("app",
+                Map.of("Name", "hosted", "LocationUri", "hosted")).getType());
+        assertNull(service.createConfigurationProfile("app",
+                Map.of("Name", "external", "LocationUri", "ssm-parameter://configuration")).getType());
+    }
+
+    @Test
+    void nonHostedProfilesRetainAnExplicitType() {
+        assertEquals("AWS.Freeform", service.createConfigurationProfile("app",
+                Map.of("Name", "explicit", "LocationUri", "ssm-parameter://configuration",
+                        "Type", "AWS.Freeform")).getType());
+    }
+
+    @Test
+    void readingLegacyProfilesDoesNotBackfillType() {
+        assertNull(service.getConfigurationProfile("app", "profile").getType());
     }
 
     @Test

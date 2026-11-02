@@ -45,12 +45,13 @@ class RdsPgBouncerIntegrationTest {
     @Inject ContainerLogStreamer logs;
 
     @BeforeEach
-    void requireDocker() {
+    void requireDocker() throws ClassNotFoundException {
         try {
             docker.pingCmd().exec();
         } catch (Exception e) {
             assumeTrue(false, "Docker is not available: " + e.getMessage());
         }
+        Class.forName("org.postgresql.Driver");
     }
 
     @ParameterizedTest

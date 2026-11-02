@@ -113,18 +113,30 @@ public class Inspector2Controller {
     @POST
     @Path("/enable")
     public Response enable(@Context HttpHeaders headers, String body) {
-        JsonNode request = parse(body);
-        Map<String, InspectorState> enabled = service.enable(region(headers), requestContext.getAccountId(), request);
+        Map<String, InspectorState> enabled = service.enable(
+                region(headers), requestContext.getAccountId(), parse(body));
+        return Response.ok(accountOperationResponse(enabled)).build();
+    }
+
+    @POST
+    @Path("/disable")
+    public Response disable(@Context HttpHeaders headers, String body) {
+        Map<String, InspectorState> disabled = service.disable(
+                region(headers), requestContext.getAccountId(), parse(body));
+        return Response.ok(accountOperationResponse(disabled)).build();
+    }
+
+    private ObjectNode accountOperationResponse(Map<String, InspectorState> states) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode accounts = response.putArray("accounts");
-        enabled.forEach((accountId, state) -> {
+        states.forEach((accountId, state) -> {
             ObjectNode account = accounts.addObject();
             account.put("accountId", accountId);
             account.put("status", state.getStatus());
             account.set("resourceStatus", resourceStatus(state));
         });
         response.putArray("failedAccounts");
-        return Response.ok(response).build();
+        return response;
     }
 
     @POST

@@ -36,6 +36,19 @@ class AthenaGetWorkGroupIntegrationTest {
     }
 
     @Test
+    void getWorkGroupNamingNullReturnsPrimary() {
+        given()
+            .header("X-Amz-Target", "AmazonAthena.GetWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"WorkGroup\": null }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("WorkGroup.Name", equalTo("primary"));
+    }
+
+    @Test
     void getWorkGroupReturnsCreatedWorkGroupDetails() {
         given()
             .header("X-Amz-Target", "AmazonAthena.CreateWorkGroup")

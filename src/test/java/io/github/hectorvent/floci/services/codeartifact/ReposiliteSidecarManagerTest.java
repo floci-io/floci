@@ -1,5 +1,9 @@
 package io.github.hectorvent.floci.services.codeartifact;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.RemoveContainerCmd;
+import com.github.dockerjava.api.command.StopContainerCmd;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -14,6 +18,7 @@ import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.equalTo;
@@ -22,7 +27,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -113,7 +120,7 @@ class ReposiliteSidecarManagerTest {
 
         manager.stopManagedContainers();
 
-        verify(lifecycleManager).stopAndRemove("running-reposilite", null);
+        verify(lifecycleManager).stopAndRemoveStrict("running-reposilite", null);
     }
 
     @Test
@@ -123,6 +130,89 @@ class ReposiliteSidecarManagerTest {
         manager.stopManagedContainers();
 
         verifyNoInteractions(lifecycleManager);
+    }
+
+    @Test
+    void successfulStopPreventsUnusedRepositoryReleaseFromContactingTheRemovedSidecar() throws Exception {
+        AtomicInteger requests = new AtomicInteger();
+        fakeSidecar = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        fakeSidecar.createContext("/", exchange -> {
+            requests.incrementAndGet();
+            byte[] response = "{}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, response.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(response);
+            }
+        });
+        fakeSidecar.start();
+        when(codeArtifact.mavenUrl()).thenReturn(Optional.empty());
+        ReposiliteSidecarManager manager = manager();
+        setField(manager, "containerId", "removed-reposilite");
+        setField(manager, "resolvedUrl", "http://127.0.0.1:" + fakeSidecar.getAddress().getPort());
+        ReposiliteSidecarClient client = new ReposiliteSidecarClient(manager, new ObjectMapper());
+
+        manager.stopManagedContainers();
+        client.releaseRepository("unused-maven-repository");
+
+        assertEquals(0, requests.get());
+        assertFalse(manager.isStarted());
+        assertNull(getField(manager, "containerId"));
+        assertNull(getField(manager, "resolvedUrl"));
+        verifyNoInteractions(containerBuilder);
+    }
+
+    @Test
+    void successfulStopIsIdempotent() throws Exception {
+        ReposiliteSidecarManager manager = manager();
+        setField(manager, "containerId", "removed-reposilite");
+        setField(manager, "resolvedUrl", "http://127.0.0.1:1");
+
+        manager.stopManagedContainers();
+        manager.stopManagedContainers();
+
+        verify(lifecycleManager, times(1)).stopAndRemoveStrict("removed-reposilite", null);
+    }
+
+    @Test
+    void failedStopRetainsTheManagedEndpointForCleanupRetry() throws Exception {
+        DockerClient docker = mock(DockerClient.class);
+        ContainerLifecycleManager lifecycle = new ContainerLifecycleManager(docker, null, null, null);
+        StopContainerCmd stop = mock(StopContainerCmd.class);
+        when(docker.stopContainerCmd("retained-reposilite")).thenReturn(stop);
+        when(stop.withTimeout(5)).thenReturn(stop);
+        RemoveContainerCmd remove = mock(RemoveContainerCmd.class);
+        when(docker.removeContainerCmd("retained-reposilite")).thenReturn(remove);
+        when(remove.withForce(true)).thenReturn(remove);
+        ReposiliteSidecarManager manager = new ReposiliteSidecarManager(
+                containerBuilder, lifecycle, config, "unused-managed-secret");
+        setField(manager, "containerId", "retained-reposilite");
+        setField(manager, "resolvedUrl", "http://127.0.0.1:1");
+        IllegalStateException failure = new IllegalStateException("cleanup failed");
+        doThrow(failure).doNothing().when(remove).exec();
+
+        assertEquals(failure, assertThrows(IllegalStateException.class, manager::stopManagedContainers).getCause());
+        assertEquals("retained-reposilite", getField(manager, "containerId"));
+        assertEquals("http://127.0.0.1:1", getField(manager, "resolvedUrl"));
+        assertTrue(manager.isStarted());
+        manager.stopManagedContainers();
+        verify(remove, times(2)).exec();
+        assertFalse(manager.isStarted());
+        assertNull(getField(manager, "containerId"));
+    }
+
+    @Test
+    void stoppingManagedContainersPreservesAnExternalEndpoint() throws Exception {
+        String url = startFakeSidecar(200, "{\"status\":\"UP\"}");
+        when(codeArtifact.mavenUrl()).thenReturn(Optional.of(url));
+        when(codeArtifact.mavenToken()).thenReturn(Optional.of("alice:s3cr3t"));
+        ReposiliteSidecarManager manager = manager();
+        assertEquals(url, manager.ensureReady());
+
+        manager.stopManagedContainers();
+
+        assertTrue(manager.isStarted());
+        assertEquals(url, manager.ensureReady());
+        verifyNoInteractions(lifecycleManager, containerBuilder);
     }
 
     private ReposiliteSidecarManager manager() {

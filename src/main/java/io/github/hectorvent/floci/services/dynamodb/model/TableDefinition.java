@@ -60,6 +60,8 @@ public class TableDefinition {
     // concurrency on subsequent Put/DeleteResourcePolicy calls. Null when no policy is attached.
     private String resourcePolicy;
     private String resourcePolicyRevisionId;
+    // Null until the first UpdateContributorInsights call on the table itself.
+    private ContributorInsights contributorInsights;
 
     public TableDefinition() {
         this.keySchema = new ArrayList<>();
@@ -245,6 +247,11 @@ public class TableDefinition {
 
     public String getResourcePolicyRevisionId() { return resourcePolicyRevisionId; }
     public void setResourcePolicyRevisionId(String resourcePolicyRevisionId) { this.resourcePolicyRevisionId = resourcePolicyRevisionId; }
+
+    public ContributorInsights getContributorInsights() { return contributorInsights; }
+    public void setContributorInsights(ContributorInsights contributorInsights) {
+        this.contributorInsights = contributorInsights;
+    }
 
     @JsonIgnore
     public String getPartitionKeyName() {

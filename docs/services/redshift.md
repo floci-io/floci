@@ -155,7 +155,7 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `ModifyEventSubscription` | Update the specified subscription filters, topic or enabled state |
 | `DeleteEventSubscription` | Delete an event notification subscription |
 | `DescribeEventSubscriptions` | List event subscriptions filtered by name or tags |
-| `EnableSnapshotCopy` | Record cross-region snapshot copy on a cluster (`RetentionPeriod` defaults to 7, `ManualSnapshotRetentionPeriod` to -1); `DescribeClusters` then reports `ClusterSnapshotCopyStatus`. A `DestinationRegion` that is not an AWS region is refused with `UnknownSnapshotCopyRegionFault`. No snapshot is copied |
+| `EnableSnapshotCopy` | Record cross-region snapshot copy on a cluster (`RetentionPeriod` defaults to 7, `ManualSnapshotRetentionPeriod` to -1); `DescribeClusters` then reports `ClusterSnapshotCopyStatus`. A `DestinationRegion` that is not an AWS region is refused with `UnknownSnapshotCopyRegionFault`. A background sweep then copies the cluster's snapshots to that Region, see [Cross-region snapshot copy](#cross-region-snapshot-copy) |
 | `DisableSnapshotCopy` | Clear a cluster's snapshot copy configuration |
 | `ModifySnapshotCopyRetentionPeriod` | Change the automated (or, with `Manual`, the manual) snapshot copy retention period |
 | `CreateSnapshotSchedule` | Create a UTC rate or cron schedule that takes automated snapshots on associated clusters, with optional tags |
@@ -305,6 +305,18 @@ and [COPY authorization parameters](https://docs.aws.amazon.com/redshift/latest/
   `SnapshotCopyGrantNotFoundFault`, which the Redshift model pins at HTTP 400.
   `CreateTags`/`DeleteTags`/`DescribeTags` do not list that fault at all and return
   `ResourceNotFoundFault` (HTTP 404) for any missing resource, grants included.
+
+## Cross-region snapshot copy
+
+`EnableSnapshotCopy` makes a background sweep (`FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_SWEEP_INTERVAL_SECONDS`, 60 by default) copy the cluster's snapshots to the destination Region.
+
+- **Only newer snapshots are copied.** A snapshot taken before copy was enabled stays where it is, as does a snapshot of a cluster whose copy was later disabled.
+- **A copy is a separate snapshot in the destination Region.** It keeps the source's identifier, cluster identifier and type, gets an ARN in the destination Region, reports `SourceRegion`, and carries the copy grant's `KmsKeyId` when the cluster has one. `DescribeClusterSnapshots`, `DeleteClusterSnapshot`, `RestoreFromClusterSnapshot` and the tagging actions use the copy when the request's Region has one, and the snapshot itself otherwise.
+- **The dump is copied to its own file.** Copies live under `<persistent-path>/redshift-dumps/<account>/copies/<region>/`.
+- **Copies are independent of the source.** Deleting the source snapshot leaves the copy, and deleting a copy does not bring it back: the source remembers the Regions it was carried to. A copy interrupted by a restart is finished by the next sweep without a second dump.
+- **Hybrid storage can lose a copy after a crash.** The copy is written before the source is marked, but hybrid storage flushes in the background and does not report a failed write. If the copy's write fails and the source's succeeds, a crash before the next flush leaves the source marked as copied without a copy, and later sweeps skip it. Persistent and WAL storage report the failed write before the source is marked, so a crash there leaves the snapshot to be copied again.
+- **Retention.** Copied automated snapshots follow the cluster's current `RetentionPeriod`, so `ModifySnapshotCopyRetentionPeriod` changes existing ones. Copied manual snapshots keep the `ManualSnapshotRetentionPeriod` they were copied with; `-1` keeps them until deleted. Retention counts from the source snapshot's creation time.
+- **The cluster store has no Region.** A cluster restored from a copy is created in the same store as every other cluster, as before.
 
 ## Automated snapshots
 
@@ -481,6 +493,8 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
 | `FLOCI_SERVICES_REDSHIFT_AUTOMATED_SNAPSHOTS_ENABLED` | `true` | Run background automated snapshot and retention sweeps |
 | `FLOCI_SERVICES_REDSHIFT_CLOUDWATCH_METRICS_ENABLED` | `true` | Publish the `AWS/Redshift` metrics of available clusters to CloudWatch once a minute, see [CloudWatch metrics](#cloudwatch-metrics) |
 | `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_SWEEP_INTERVAL_SECONDS` | `60` | Delay between background snapshot sweeps |
+| `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_ENABLED` | `true` | Run the background sweep that copies snapshots of copy-enabled clusters to their destination Region |
+| `FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_SWEEP_INTERVAL_SECONDS` | `60` | Delay between snapshot copy sweeps |
 | `FLOCI_SERVICES_REDSHIFT_IMAGE_VERSION` | `postgres:15-alpine` | PostgreSQL Docker image backing each cluster |
 | `FLOCI_SERVICES_REDSHIFT_DEFAULT_PORT` | `5439` | Reported Redshift port hint (the real host port is dynamic and comes from `DescribeClusters`) |
 | `FLOCI_SERVICES_REDSHIFT_PROXY_BASE_PORT` | `7100` | Lowest host port the per-cluster auth proxies bind |
@@ -664,10 +678,16 @@ Creating an external schema or table
 inside a transaction, including a Data API batch (which runs as one transaction), is rejected before changing the catalogs: AWS does not allow `CREATE EXTERNAL TABLE` inside a transaction block (SQLSTATE `25001`).
 Cold loads and reloads require database privileges to maintain the materialized table and catalog;
 ordinary users with schema USAGE and table SELECT can read an existing committed cache entry.
-The current floci-duck transfer uses account-scoped development credentials. Cold loads and reloads
-with `FLOCI_SERVICES_S3_ENFORCE_AUTH=true` are not supported by that transfer path yet.
-Role association and trust are still checked before cached reads; S3 policy checks follow the
-configured enforcement mode. This is a Floci limitation, not AWS behavior.
+Role association and trust are checked before every read, cached or not, and S3 policy checks follow
+the configured enforcement mode. With `FLOCI_SERVICES_S3_ENFORCE_AUTH=true` the floci-duck transfer of
+a cold load or reload is signed with the role's own short-lived session (access key, secret key and
+session token), so the role's identity policy and the bucket policy are evaluated for the transfer
+itself, and a deny stops it with SQLSTATE `42501`. The transfer writes its result to Floci's internal
+scratch bucket; because AWS Spectrum performs no S3 write and realistic role policies, permissions
+boundaries or SCPs follow AWS's read-only permissions on source data, this internal scratch write
+is authorized ahead of the role's policies directly for the minted transfer session key and scratch key,
+verifying Floci's internal tag on the bucket. Reads of the scratch bucket and every other bucket stay under
+normal policy evaluation.
 
 Writes to external relations are rejected. AWS prohibits external UPDATE/DELETE but supports
 some external INSERT operations; external INSERT is an intentional Floci limitation here. Use
@@ -746,7 +766,7 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   compatible with output from `UNLOAD ... MANIFEST`. Missing files marked `mandatory: true` abort the load.
   When `mandatory` is omitted, it defaults to `false`. All entries in the manifest must reside in the same S3
   bucket as the manifest file itself; cross-bucket manifest entries are rejected as an intentional deviation.
-- `IGNOREHEADER` and `HEADER` skip lines from the first resolved object only.
+- `IGNOREHEADER` and `HEADER` skip lines from the start of every resolved object, as AWS does for a parallel load of several files.
 - `GZIP` is the only input compression recognized; `BZIP2`, `LZOP` and `ZSTD` are not.
 - `IAM_ROLE '<role-arn>'` is supported. The role must be associated with the cluster (at
   `CreateCluster` or through `ModifyClusterIamRoles`; connections opened before a change keep the
@@ -772,8 +792,52 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   over Extended Query the COPY fails with an error that names this requirement. A field-level option
   buffers each decompressed object in memory, so an object over 64 MiB, or a heap budget shared
   across connections that is used up, fails the COPY instead of exhausting the emulator.
-- Any other clause (`FIXEDWIDTH`, `PARQUET`, `AVRO`, `ORC`, `MAXERROR`,
-  `DATEFORMAT`, `TIMEFORMAT`, `ENCODING`, `ESCAPE`, `ENCRYPTED`, `MASTER_SYMMETRIC_KEY`,
+- `DATEFORMAT [AS] 'format'` reads the fields of `DATE` columns and `TIMEFORMAT [AS] 'format'` those of
+  `TIMESTAMP` columns, using the dateparts and timeparts `YY`, `YYYY`, `MM`, `MON`, `DD`, `HH`/`HH24`, `HH12`,
+  `MI`, `SS` (with up to six fractional digits) and `AM`/`PM`, with any other punctuation as separators.
+  `TIMEFORMAT` also takes `'epochsecs'` and `'epochmillisecs'`, read as UTC. A `DATEFORMAT` may name a time
+  of day, which is dropped; a `TIMEFORMAT` without one gives midnight. A format that names a time zone, or
+  any other text, is not recognized and the statement is forwarded to PostgreSQL. A value that does not
+  match its format fails the COPY, whatever `MAXERROR` says; the message names the column and the format, and
+  Floci writes no `stl_load_errors` row. `ACCEPTANYDATE` loads such a value as
+  `NULL` instead; when no format is given it reads the ISO form of a date, with an optional time of day, and
+  turns anything else into `NULL`. An empty unquoted field of a `DATE`, `TIMESTAMP` or other non-character column
+  is loaded as `NULL`, as in AWS, without requiring `ACCEPTANYDATE` or `EMPTYASNULL`. Numeric parts with no
+  separator between them, as in `YYYYMMDD`, need their
+  full width, a part may be named once, and `HH12` needs `AM` or `PM`; any other format string is not
+  recognized.
+  Like `TRUNCATECOLUMNS`, these and the empty non-character rule read column types from the catalog, so
+  they apply only with the options that query column types (`DATEFORMAT`, `TIMEFORMAT`, `FILLRECORD`), over the
+  Simple Query protocol, and are not combined with `FORMAT AS JSON`; a plain `COPY` without those options does
+  not read the catalog. Floci deviations: `'auto'` is accepted but converts
+  nothing, leaving every value to PostgreSQL, which reads ISO 8601, Julian and `YYYYMMDD HHMISS` but not every
+  form Redshift recognizes (for example `BC` dates and `YYYY.DDD`), and with it `ACCEPTANYDATE` cannot turn a
+  value into `NULL`, so a value PostgreSQL rejects fails the COPY; `TIMESTAMPTZ` columns are read by
+  PostgreSQL whatever the format, since AWS requires `'auto'` for a format other than its default there; a
+  two-digit `YY` year below 70 means 20YY and otherwise 19YY, which AWS does not document.
+- `FILLRECORD` loads a text or CSV record that stops short of the last columns: the missing columns of a
+  `VARCHAR` or `TEXT` type get a zero-length string, as in AWS, and every other missing column gets
+  `NULL`. With `EMPTYASNULL`, or `NULL AS ''`, which behaves the same, the missing character columns get `NULL`
+  too. A column that does not allow `NULL` fails the COPY as it would without `FILLRECORD`, and a record with
+  too many fields still fails. The number and types of the columns come from the catalog (generated columns
+  left out), or from the column list, in which a name that matches no column counts as a non-character column.
+  A domain over a character type counts as a non-character column. It works only over the Simple Query
+  protocol, and it is not combined with `FORMAT AS JSON`.
+- `MAXERROR [AS] n` (0 to 100000) lets the load go on past records that cannot be converted. With `n` of 0 or 1 the
+  COPY fails at the first error, as it does without the option. With a larger `n` Floci asks the backend to skip
+  the failing records (`ON_ERROR ignore`) and to fail the COPY, rolling it back, once `n` of them have been
+  skipped (`REJECT_LIMIT n - 1`). This uses the PostgreSQL `COPY` options of the same names, so it needs a
+  PostgreSQL 18 backend (set `floci.services.redshift.image-version`, for example `postgres:18-alpine`); the
+  default backend rejects the option as unknown and the COPY fails with that error. The COPY fails when the
+  `n`-th record is rejected, counted across all the files of the load. Floci deviations: only a value that the
+  backend cannot convert to its column type is skipped, whereas Redshift also skips a record with too many or too
+  few fields, a `NOT NULL` violation and other errors, which still fail the COPY here. So do a value that does
+  not match a `DATEFORMAT` or `TIMEFORMAT` (use `ACCEPTANYDATE` to load it as `NULL`), a quoted field without its
+  closing quote under `REMOVEQUOTES`, and a line that `FORMAT AS JSON 'auto'` cannot read, since Floci rejects
+  those before the backend sees them. The backend reports the count of skipped records in its own notice, not
+  Redshift's `Load into table ... completed` message, and no `stl_load_errors` row is written.
+- Any other clause (`FIXEDWIDTH`, `PARQUET`, `AVRO`, `ORC`,
+  `ENCODING`, `ESCAPE`, `ENCRYPTED`, `MASTER_SYMMETRIC_KEY`,
   `KMS_KEY_ID`, and so on) is not recognized: the statement is forwarded unchanged and PostgreSQL
   returns its own error.
 - A multi-statement query whose COPY is followed by another statement is not intercepted; send the
@@ -891,8 +955,8 @@ These views expose the documented Redshift column names, types, and ordering map
 - Real Redshift SQL semantics: the data plane is stock PostgreSQL. Redshift-only table DDL keywords (DISTSTYLE / DISTKEY / SORTKEY / ENCODE) are stripped so CREATE TABLE / ALTER TABLE executes (see [SQL Interceptor](#sql-interceptor)), but the distribution/sort behavior they request is not; SUPER and Spectrum features outside the documented [Phase 1 subset](#redshift-spectrum-phase-1) are not emulated.
 - Multi-node clusters: `NodeType` and `NumberOfNodes` are stored as metadata; every cluster is a single PostgreSQL container.
 - Parameter groups apply no real engine settings; values are stored and echoed back only.
-- Subnet groups, VPC routing, and security groups are metadata only.
-- Resize, pause/resume, and IAM authentication. Cross-region snapshot copy is stored and reported, but no snapshot is copied to another region.
+- Subnet groups, VPC routing, and security groups are metadata only. A subnet group still records its tags, and takes its VPC and each subnet's availability zone from EC2 when the subnets exist there; subnets EC2 does not know are kept as given.
+- Resize, pause/resume, and IAM authentication.
 - Cross-account role ARNs are not supported for COPY or UNLOAD.
 - The auth proxy validates the master user's password and any live `GetClusterCredentials` credential. Other non-master users pass straight through to PostgreSQL, which remains the authority for their credentials.
 - A cluster using `ManageMasterPassword` keeps its generated password in sync with the

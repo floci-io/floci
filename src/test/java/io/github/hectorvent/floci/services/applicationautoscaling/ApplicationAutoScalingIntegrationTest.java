@@ -35,8 +35,13 @@ class ApplicationAutoScalingIntegrationTest {
 
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String TARGET_PREFIX = "AnyScaleFrontendService.";
+    private static final String CLOUDWATCH_TARGET = "GraniteServiceVersion20100801.";
+    private static final String CLOUDWATCH_JSON_CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String RESOURCE_ID = "service/aas-it-cluster/aas-it-service";
     private static final String PAGED_RESOURCE_ID = "service/aas-it-cluster/aas-it-service-paged";
+    private static final String ALARM_RESOURCE_ID = "service/aas-it-cluster/aas-it-alarm-service";
+    private static final String ALARM_CLUSTER = "aas-it-cluster";
+    private static final String ALARM_SERVICE = "aas-it-alarm-service";
     private static final String DIMENSION = "ecs:service:DesiredCount";
 
     private static String scalableTargetArn;
@@ -48,6 +53,10 @@ class ApplicationAutoScalingIntegrationTest {
 
     private static RequestSpecification call(String action) {
         return given().header("X-Amz-Target", TARGET_PREFIX + action).contentType(CONTENT_TYPE);
+    }
+
+    private static RequestSpecification cloudwatchCall(String action) {
+        return given().header("X-Amz-Target", CLOUDWATCH_TARGET + action).contentType(CLOUDWATCH_JSON_CONTENT_TYPE);
     }
 
     @Test
@@ -217,6 +226,14 @@ class ApplicationAutoScalingIntegrationTest {
             .body("Alarms", hasSize(2))
             .body("Alarms[0].AlarmName", startsWith("TargetTracking-" + RESOURCE_ID))
             .body("Alarms[0].AlarmARN", startsWith("arn:aws:cloudwatch:"));
+
+        cloudwatchCall("DescribeAlarms")
+            .body("{ \"AlarmNamePrefix\": \"TargetTracking-" + RESOURCE_ID + "\" }")
+        .when().post("/").then().statusCode(200)
+            .body("MetricAlarms.find { it.MetricName == 'RequestCountPerTarget' }.Namespace",
+                equalTo("AWS/ApplicationELB"))
+            .body("MetricAlarms.find { it.MetricName == 'RequestCountPerTarget' }.Statistic",
+                equalTo("Sum"));
     }
 
     @Test
@@ -407,5 +424,133 @@ class ApplicationAutoScalingIntegrationTest {
             .body("{ \"ServiceNamespace\": \"ecs\", \"MaxResults\": 11 }")
         .when().post("/").then().statusCode(400)
             .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    @Order(18)
+    void customizedTargetTrackingAlarmsWatchTheMetricIdentityTheCallerGave() {
+        call("RegisterScalableTarget")
+            .body("""
+                {
+                  "ServiceNamespace": "ecs",
+                  "ResourceId": "%s",
+                  "ScalableDimension": "%s",
+                  "MinCapacity": 1,
+                  "MaxCapacity": 3
+                }
+                """.formatted(ALARM_RESOURCE_ID, DIMENSION))
+        .when().post("/").then().statusCode(200);
+
+        call("PutScalingPolicy")
+            .body("""
+                {
+                  "PolicyName": "aas-it-custom-metric",
+                  "PolicyType": "TargetTrackingScaling",
+                  "ServiceNamespace": "ecs",
+                  "ResourceId": "%s",
+                  "ScalableDimension": "%s",
+                  "TargetTrackingScalingPolicyConfiguration": {
+                    "TargetValue": 10.0,
+                    "CustomizedMetricSpecification": {
+                      "Namespace": "App/Workers",
+                      "MetricName": "JobsPerTask",
+                      "Statistic": "Average",
+                      "Dimensions": [{ "Name": "ServiceName", "Value": "web" }]
+                    }
+                  }
+                }
+                """.formatted(ALARM_RESOURCE_ID, DIMENSION))
+        .when().post("/").then().statusCode(200);
+
+        cloudwatchCall("DescribeAlarms")
+            .body("{ \"AlarmNamePrefix\": \"TargetTracking-" + ALARM_RESOURCE_ID + "\" }")
+        .when().post("/").then().statusCode(200)
+            .body("MetricAlarms.findAll { it.MetricName == 'JobsPerTask' }.size()", equalTo(2))
+            .body("MetricAlarms.find { it.MetricName == 'JobsPerTask' }.Namespace", equalTo("App/Workers"))
+            .body("MetricAlarms.find { it.MetricName == 'JobsPerTask' }.Statistic", equalTo("Average"))
+            .body("MetricAlarms.find { it.MetricName == 'JobsPerTask' }.Dimensions.size()", equalTo(1))
+            .body("MetricAlarms.find { it.MetricName == 'JobsPerTask' }.Dimensions[0].Name", equalTo("ServiceName"))
+            .body("MetricAlarms.find { it.MetricName == 'JobsPerTask' }.Dimensions[0].Value", equalTo("web"))
+            // The metric the alarm watches must be the caller's, not the ECS-shaped fallback.
+            .body("MetricAlarms.findAll { it.Namespace == 'AWS/ECS' }.size()", equalTo(0));
+
+        call("DeregisterScalableTarget")
+            .body("""
+                { "ServiceNamespace": "ecs", "ResourceId": "%s", "ScalableDimension": "%s" }
+                """.formatted(ALARM_RESOURCE_ID, DIMENSION))
+        .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    @Order(19)
+    void ecsPredefinedTargetTrackingAlarmsWatchTheRealMetricTheServicePublishes() {
+        call("RegisterScalableTarget")
+            .body("""
+                {
+                  "ServiceNamespace": "ecs",
+                  "ResourceId": "%s",
+                  "ScalableDimension": "%s",
+                  "MinCapacity": 1,
+                  "MaxCapacity": 3
+                }
+                """.formatted(ALARM_RESOURCE_ID, DIMENSION))
+        .when().post("/").then().statusCode(200);
+
+        for (String policy : List.of("""
+                {
+                  "PolicyName": "aas-it-cpu",
+                  "PolicyType": "TargetTrackingScaling",
+                  "ServiceNamespace": "ecs",
+                  "ResourceId": "%s",
+                  "ScalableDimension": "%s",
+                  "TargetTrackingScalingPolicyConfiguration": {
+                    "TargetValue": 70.0,
+                    "PredefinedMetricSpecification": {
+                      "PredefinedMetricType": "ECSServiceAverageCPUUtilization"
+                    }
+                  }
+                }
+                """, """
+                {
+                  "PolicyName": "aas-it-memory",
+                  "PolicyType": "TargetTrackingScaling",
+                  "ServiceNamespace": "ecs",
+                  "ResourceId": "%s",
+                  "ScalableDimension": "%s",
+                  "TargetTrackingScalingPolicyConfiguration": {
+                    "TargetValue": 80.0,
+                    "PredefinedMetricSpecification": {
+                      "PredefinedMetricType": "ECSServiceAverageMemoryUtilization"
+                    }
+                  }
+                }
+                """)) {
+            call("PutScalingPolicy").body(policy.formatted(ALARM_RESOURCE_ID, DIMENSION))
+                    .when().post("/").then().statusCode(200);
+        }
+
+        cloudwatchCall("DescribeAlarms")
+            .body("{ \"AlarmNamePrefix\": \"TargetTracking-" + ALARM_RESOURCE_ID + "\" }")
+        .when().post("/").then().statusCode(200)
+            .body("MetricAlarms.findAll { it.MetricName == 'CPUUtilization' }.size()", equalTo(2))
+            .body("MetricAlarms.find { it.MetricName == 'CPUUtilization' }.Namespace", equalTo("AWS/ECS"))
+            .body("MetricAlarms.find { it.MetricName == 'CPUUtilization' }.Dimensions.size()", equalTo(2))
+            .body("MetricAlarms.find { it.MetricName == 'CPUUtilization' }.Dimensions[0].Name", equalTo("ClusterName"))
+            .body("MetricAlarms.find { it.MetricName == 'CPUUtilization' }.Dimensions[0].Value", equalTo(ALARM_CLUSTER))
+            .body("MetricAlarms.find { it.MetricName == 'CPUUtilization' }.Dimensions[1].Name", equalTo("ServiceName"))
+            .body("MetricAlarms.find { it.MetricName == 'CPUUtilization' }.Dimensions[1].Value", equalTo(ALARM_SERVICE))
+            .body("MetricAlarms.findAll { it.MetricName == 'MemoryUtilization' }.size()", equalTo(2))
+            .body("MetricAlarms.find { it.MetricName == 'MemoryUtilization' }.Namespace", equalTo("AWS/ECS"))
+            .body("MetricAlarms.find { it.MetricName == 'MemoryUtilization' }.Dimensions[0].Name", equalTo("ClusterName"))
+            .body("MetricAlarms.find { it.MetricName == 'MemoryUtilization' }.Dimensions[1].Name", equalTo("ServiceName"))
+            // Nothing watches the policy type name itself, as real AWS would never publish it.
+            .body("MetricAlarms.findAll { it.MetricName == 'ECSServiceAverageCPUUtilization' }.size()", equalTo(0))
+            .body("MetricAlarms.findAll { it.MetricName == 'ECSServiceAverageMemoryUtilization' }.size()", equalTo(0));
+
+        call("DeregisterScalableTarget")
+            .body("""
+                { "ServiceNamespace": "ecs", "ResourceId": "%s", "ScalableDimension": "%s" }
+                """.formatted(ALARM_RESOURCE_ID, DIMENSION))
+        .when().post("/").then().statusCode(200);
     }
 }

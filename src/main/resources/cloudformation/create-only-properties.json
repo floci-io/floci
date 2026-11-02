@@ -273,6 +273,13 @@
     "SubnetId"
   ],
   "AWS::EC2::InternetGateway": [],
+  "AWS::EC2::KeyPair": [
+    "KeyName",
+    "KeyType",
+    "KeyFormat",
+    "PublicKeyMaterial",
+    "Tags"
+  ],
   "AWS::EC2::LaunchTemplate": [
     "LaunchTemplateName"
   ],

@@ -81,6 +81,28 @@ class DynamoDbPartiQLNumberLiteralIntegrationTest {
             .body("message", equalTo(NOT_WELL_FORMED));
     }
 
+    @Test
+    @Order(4)
+    void aDecimalIsRoundedAndALiteralOutOfRangeIsRefusedBeforeAnyTableIsRead() {
+        statement("INSERT INTO \"%s\" VALUE {'pk': 0.123456789123456789123456789123456789125}".formatted(TABLE))
+            .statusCode(200);
+        getItem("0.12345678912345678912345678912345678912")
+            .body("Item.pk.N", equalTo("0.12345678912345678912345678912345678912"));
+
+        statement("SELECT * FROM \"%s-never-created\" WHERE pk = 1e126".formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(
+                    "Number overflow. Attempting to store a number with magnitude larger than supported range under root"));
+        String read = JsonNodeFactory.instance.textNode("SELECT * FROM \"%s\" WHERE pk = 1".formatted(TABLE)).toString();
+        String write = JsonNodeFactory.instance.textNode(
+                "INSERT INTO \"%s\" VALUE {'pk': 2, 'l': [1e-131]}".formatted(TABLE)).toString();
+        ddb("ExecuteTransaction", "{\"TransactStatements\":[{\"Statement\":" + read + "},{\"Statement\":" + write + "}]}")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[1]: Number underflow. "
+                    + "Attempting to store a number with magnitude smaller than supported range under root[0]"));
+    }
+
     private static ValidatableResponse select(String literal) {
         return statement("SELECT * FROM \"%s\" WHERE pk = %s".formatted(TABLE, literal));
     }

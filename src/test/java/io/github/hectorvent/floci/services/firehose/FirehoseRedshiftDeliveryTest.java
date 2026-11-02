@@ -2,10 +2,14 @@ package io.github.hectorvent.floci.services.firehose;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.firehose.model.RedshiftDestination;
+import io.github.hectorvent.floci.services.iam.ServiceRoleAuthorizer;
 import io.github.hectorvent.floci.services.redshift.RedshiftService;
 import io.github.hectorvent.floci.services.redshift.model.Cluster;
 import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService.WorkgroupTarget;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import org.junit.jupiter.api.BeforeEach;
@@ -16,23 +20,29 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class FirehoseRedshiftDeliveryTest {
 
     private final ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
     private RedshiftService redshift;
+    private RedshiftServerlessService serverless;
     private SecretsManagerService secrets;
+    private ServiceRoleAuthorizer roleAuthorizer;
     private final List<String[]> executed = new ArrayList<>();
     private FirehoseRedshiftDelivery delivery;
 
@@ -44,8 +54,110 @@ class FirehoseRedshiftDeliveryTest {
         when(cluster.getEndpoint()).thenReturn(new Endpoint("host.docker.internal", 41234));
         when(cluster.getMasterUsername()).thenReturn("admin");
         when(redshift.describeClustersForAccount("000000000000", "c1")).thenReturn(List.of(cluster));
-        delivery = new FirehoseRedshiftDelivery(redshift, secrets, mapper,
+        serverless = mock(RedshiftServerlessService.class);
+        roleAuthorizer = mock(ServiceRoleAuthorizer.class);
+        delivery = new FirehoseRedshiftDelivery(redshift, serverless, secrets, roleAuthorizer, mapper,
                 (url, user, password, sql) -> executed.add(new String[] {url, user, password, sql}));
+    }
+
+    private RedshiftDestination serverlessDestination() throws Exception {
+        RedshiftDestination destination = destination();
+        destination.setClusterJdbcUrl(
+                "jdbc:redshift://wg1.000000000000.us-east-1.redshift-serverless.amazonaws.com:5439/analytics");
+        destination.setUsername(null);
+        return destination;
+    }
+
+    private void workgroup(String database) {
+        when(serverless.getWorkgroupTarget("wg1", "us-east-1")).thenReturn(new WorkgroupTarget(
+                "arn:aws:redshift-serverless:us-east-1:000000000000:workgroup/id1", "wg1", "host.docker.internal",
+                5432, database, "workgroupadmin", "ignored", "workgroupadmin", List.of(), null,
+                new Endpoint("localhost", 41300)));
+    }
+
+    @Test
+    void serverlessUrlLoadsIntoTheWorkgroupItsDatabaseAndItsAdminUser() throws Exception {
+        workgroup("analytics");
+
+        delivery.copy("000000000000", "us-east-1", serverlessDestination(), "stage", "k1");
+
+        assertEquals(1, executed.size());
+        assertEquals("jdbc:postgresql://127.0.0.1:41300/analytics?preferQueryMode=simple",
+                executed.get(0)[0]);
+        assertEquals("workgroupadmin", executed.get(0)[1]);
+        assertEquals("Secret123", executed.get(0)[2]);
+        verifyNoInteractions(redshift);
+    }
+
+    @Test
+    void serverlessDestinationKeepsAnExplicitUsername() throws Exception {
+        workgroup("analytics");
+        RedshiftDestination destination = serverlessDestination();
+        destination.setUsername("loader");
+
+        delivery.copy("000000000000", "us-east-1", destination, "stage", "k1");
+
+        assertEquals("loader", executed.get(0)[1]);
+    }
+
+    @Test
+    void serverlessUrlNamingAnotherDatabaseFailsTheDelivery() throws Exception {
+        workgroup("dev");
+
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> delivery.copy("000000000000", "us-east-1", serverlessDestination(), "stage", "k1"));
+
+        assertTrue(e.getMessage().contains("analytics") && e.getMessage().contains("dev"), e.getMessage());
+        assertTrue(executed.isEmpty());
+    }
+
+    @Test
+    void unknownWorkgroupSurfacesAsAwsException() throws Exception {
+        when(serverless.getWorkgroupTarget("wg1", "us-east-1"))
+                .thenThrow(new AwsException("ResourceNotFoundException", "Workgroup wg1 not found", 400));
+
+        assertThrows(AwsException.class,
+                () -> delivery.copy("000000000000", "us-east-1", serverlessDestination(), "stage", "k"));
+        assertTrue(executed.isEmpty());
+    }
+
+    @Test
+    void workgroupWithoutARuntimeSurfacesAsAwsException() throws Exception {
+        when(serverless.getWorkgroupTarget("wg1", "us-east-1")).thenThrow(
+                new AwsException("ValidationException", "Workgroup runtime is not available", 400));
+
+        assertThrows(AwsException.class,
+                () -> delivery.copy("000000000000", "us-east-1", serverlessDestination(), "stage", "k"));
+    }
+
+    @Test
+    void serverlessSecretSignsInWithItsStoredCredentials() throws Exception {
+        workgroup("analytics");
+        RedshiftDestination destination = serverlessDestination();
+        RedshiftDestination.SecretsManagerConfiguration cfg = new RedshiftDestination.SecretsManagerConfiguration();
+        cfg.setEnabled(true);
+        cfg.setSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:admin-AbCdEf");
+        destination.setSecretsManagerConfiguration(cfg);
+        SecretVersion version = mock(SecretVersion.class);
+        when(version.getSecretString()).thenReturn("{\"username\":\"admin\",\"password\":\"pw-managed\"}");
+        when(secrets.getSecretValue(eq("arn:aws:secretsmanager:us-east-1:000000000000:secret:admin-AbCdEf"), any(), any(), eq("us-east-1"))).thenReturn(version);
+
+        delivery.copy("000000000000", "us-east-1", destination, "stage", "k1");
+
+        assertEquals("admin", executed.get(0)[1]);
+        assertEquals("pw-managed", executed.get(0)[2]);
+    }
+
+    @Test
+    void serverlessWithoutAnyCredentialsFailsTheDelivery() throws Exception {
+        workgroup("analytics");
+        RedshiftDestination destination = serverlessDestination();
+        destination.setPassword(null);
+
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> delivery.copy("000000000000", "us-east-1", destination, "stage", "k1"));
+
+        assertTrue(e.getMessage().contains("workgroup wg1"), e.getMessage());
     }
 
     private RedshiftDestination destination() throws Exception {
@@ -55,6 +167,60 @@ class FirehoseRedshiftDeliveryTest {
                  "Username": "admin", "Password": "Secret123",
                  "CopyCommand": {"DataTableName": "events", "CopyOptions": "json 'auto'"}}
                 """, RedshiftDestination.class);
+    }
+
+    private static final String STREAM_ARN = "arn:aws:firehose:us-east-1:000000000000:deliverystream/rs";
+    private static final String LOAD_ROLE = "arn:aws:iam::000000000000:role/firehose";
+    private static final String STAGING_ROLE = "arn:aws:iam::000000000000:role/firehose-staging";
+
+    private RedshiftDestination destinationWithStagingRole() throws Exception {
+        RedshiftDestination destination = destination();
+        DeliveryStreamDescription.S3Destination s3 = new DeliveryStreamDescription.S3Destination();
+        s3.setRoleArn(STAGING_ROLE);
+        destination.setS3(s3);
+        return destination;
+    }
+
+    @Test
+    void stagingChecksTheS3ConfigurationRoleForPutObjectOnTheObject() throws Exception {
+        when(roleAuthorizer.refusal(STAGING_ROLE, "000000000000", "firehose.amazonaws.com", STREAM_ARN,
+                List.of(new ServiceRoleAuthorizer.Permission("s3:PutObject", "arn:aws:s3:::stage/k1"))))
+                .thenReturn(Optional.of("The role " + STAGING_ROLE + " does not trust firehose.amazonaws.com."));
+
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> delivery
+                .requireStagingAccess("000000000000", STREAM_ARN, destinationWithStagingRole(), "stage", "k1"));
+
+        assertTrue(e.getMessage().contains("s3://stage/k1") && e.getMessage().contains("does not trust"),
+                e.getMessage());
+    }
+
+    @Test
+    void loadChecksTheDestinationRoleForGetObjectOnTheObject() throws Exception {
+        when(roleAuthorizer.refusal(LOAD_ROLE, "000000000000", "firehose.amazonaws.com", STREAM_ARN,
+                List.of(new ServiceRoleAuthorizer.Permission("s3:GetObject", "arn:aws:s3:::stage/k1"))))
+                .thenReturn(Optional.of("The role " + LOAD_ROLE + " is not authorized to perform s3:GetObject."));
+
+        IllegalStateException e = assertThrows(IllegalStateException.class, () -> delivery
+                .requireLoadAccess("000000000000", STREAM_ARN, destinationWithStagingRole(), "stage", "k1"));
+
+        assertTrue(e.getMessage().contains("not authorized"), e.getMessage());
+    }
+
+    @Test
+    void aPermittedRoleStagesAndLoads() throws Exception {
+        delivery.requireStagingAccess("000000000000", STREAM_ARN, destinationWithStagingRole(), "stage", "k1");
+        delivery.requireLoadAccess("000000000000", STREAM_ARN, destinationWithStagingRole(), "stage", "k1");
+
+        verify(roleAuthorizer, times(2)).refusal(anyString(), eq("000000000000"), eq("firehose.amazonaws.com"),
+                eq(STREAM_ARN), any());
+    }
+
+    @Test
+    void stagingWithoutAnS3ConfigurationRoleDelegatesToAuthorizer() throws Exception {
+        delivery.requireStagingAccess("000000000000", STREAM_ARN, destination(), "stage", "k1");
+
+        verify(roleAuthorizer).refusal(eq(""), eq("000000000000"), eq("firehose.amazonaws.com"),
+                eq(STREAM_ARN), eq(List.of()));
     }
 
     @Test
@@ -108,7 +274,8 @@ class FirehoseRedshiftDeliveryTest {
 
     @Test
     void jdbcFailureIsWrappedWithTableClusterAndSqlState() {
-        FirehoseRedshiftDelivery failing = new FirehoseRedshiftDelivery(redshift, secrets, mapper,
+        FirehoseRedshiftDelivery failing = new FirehoseRedshiftDelivery(redshift, serverless, secrets,
+                roleAuthorizer, mapper,
                 (url, user, password, sql) -> {
                     throw new SQLException("relation \"events\" does not exist", "42P01");
                 });

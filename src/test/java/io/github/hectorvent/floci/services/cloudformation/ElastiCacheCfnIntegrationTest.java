@@ -190,6 +190,32 @@ class ElastiCacheCfnIntegrationTest {
     }
 
     @Test
+    void updatingAUserToTheBuiltInDefaultIdRollsBackAndLeavesTheDefaultUserAlone() {
+        String stack = "elasticache-cfn-builtin-default-it";
+        String template = """
+            {"Resources": {"User": {"Type": "AWS::ElastiCache::User",
+              "Properties": {"UserId": "@@ID@@", "UserName": "default", "Engine": "redis",
+                             "AccessString": "off -@all", "NoPasswordRequired": true}}}}
+            """;
+        cloudFormation(stack, "CreateStack", template.replace("@@ID@@", "cfn-it-named-default"));
+        describeStacks(stack, "CREATE_COMPLETE");
+
+        // a new UserId replaces the user, and the built-in default already holds that id
+        cloudFormation(stack, "UpdateStack", template.replace("@@ID@@", "default"));
+        describeStacks(stack, "UPDATE_ROLLBACK_COMPLETE");
+
+        try (ElastiCacheClient client = client()) {
+            assertEquals("on ~* +@all", client.describeUsers(r -> r.userId("default")).users().getFirst()
+                    .accessString());
+            assertEquals("off -@all", client.describeUsers(r -> r.userId("cfn-it-named-default")).users()
+                    .getFirst().accessString());
+        }
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    @Test
     void cacheClusterExposesEndpoints() throws Exception {
         Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker is required for the cache data plane");
         cloudFormation(DATA_STACK, "CreateStack", DATA_TEMPLATE);

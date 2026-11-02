@@ -473,8 +473,8 @@ public class EcrRegistryDataPlane {
                     storageRepositoryName, repository, backendUri,
                     tag(path)));
         }
-        // A loopback host is the address Floci itself hands the Docker daemon for the ECS and
-        // Lambda images it pulls, path style in either URI style (see rewriteImageUri).
+        // A loopback host is the address Floci itself hands the Docker daemon for the ECS, Lambda
+        // and EMR Serverless images it pulls, path style in either URI style (see rewriteImageUri).
         if (!"path".equalsIgnoreCase(uriStyle) && !isLoopbackHost(host)) {
             return Optional.empty();
         }

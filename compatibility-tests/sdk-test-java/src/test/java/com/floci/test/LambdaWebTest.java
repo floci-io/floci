@@ -156,10 +156,11 @@ class LambdaWebTest {
                 .extracting(f -> f.functionName()).contains(FUNCTION_NAME);
         assertThat(lambdaWeb.getWebAccountSettings(r -> {}).accountQuotas().maxEndpointsPerFunction()).isEqualTo(10);
 
-        String foreignRegion = functionArn.replace(":" + TestFixtures.region().id() + ":", ":eu-west-1:");
+        String otherRegion = "eu-west-1".equals(TestFixtures.region().id()) ? "us-west-2" : "eu-west-1";
+        String foreignRegion = functionArn.replace(":" + TestFixtures.region().id() + ":", ":" + otherRegion + ":");
         assertThatThrownBy(() -> lambdaWeb.getWebFunction(r -> r.functionName(foreignRegion)))
                 .isInstanceOf(ValidationException.class)
-                .hasMessageContaining("The operation is only allowed in the function's home region eu-west-1.");
+                .hasMessageContaining("The operation is only allowed in the function's home region " + otherRegion + ".");
         assertThatThrownBy(() -> lambdaWeb.getWebFunction(r -> r.functionName("sdk-test-no-such-web-fn")))
                 .isInstanceOf(ResourceNotFoundException.class)
                 .hasMessageContaining("does not exist.");

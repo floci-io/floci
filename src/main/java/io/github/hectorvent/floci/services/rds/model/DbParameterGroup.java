@@ -16,6 +16,7 @@ public class DbParameterGroup {
     private String description;
     private String region;
     private Map<String, String> parameters = new HashMap<>();
+    private Map<String, String> applyMethods = new HashMap<>();
 
     public DbParameterGroup() {}
 
@@ -40,6 +41,13 @@ public class DbParameterGroup {
 
     public Map<String, String> getParameters() { return parameters; }
     public void setParameters(Map<String, String> parameters) { this.parameters = parameters; }
+
+    public Map<String, String> getApplyMethods() { return applyMethods; }
+
+    /** Normalizes null: a record persisted before apply methods were stored deserializes without them. */
+    public void setApplyMethods(Map<String, String> applyMethods) {
+        this.applyMethods = applyMethods == null ? new HashMap<>() : new HashMap<>(applyMethods);
+    }
 
     public Map<String, String> getTags() { return tags; }
 

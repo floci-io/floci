@@ -19,6 +19,7 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -28,6 +29,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ElbV2HealthCheckerTest {
@@ -257,6 +259,42 @@ class ElbV2HealthCheckerTest {
         assertEquals("healthy", healthy.state());
         assertNull(healthy.reason());
         assertNull(healthy.description());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void periodicProbeRetainsIntervalAndNetworkAdmissionThreshold() {
+        Vertx scheduled = mock(Vertx.class);
+        when(scheduled.executeBlocking(any(Callable.class))).thenReturn(Future.succeededFuture(200));
+        AtomicReference<Handler<Long>> periodic = new AtomicReference<>();
+        doAnswer(invocation -> {
+            Handler<Long> callback = invocation.getArgument(1);
+            callback.handle(1L);
+            return 1L;
+        }).when(scheduled).setTimer(anyLong(), any());
+        doAnswer(invocation -> {
+            assertEquals(5000L, invocation.<Long>getArgument(0));
+            periodic.set(invocation.getArgument(1));
+            return 2L;
+        }).when(scheduled).setPeriodic(anyLong(), any());
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().elbv2().mock()).thenReturn(false);
+        ElbV2HealthChecker checker = new ElbV2HealthChecker(scheduled, config, mock(Ec2Service.class));
+        TargetGroup group = targetGroup(8080, "200", 2, 1);
+        group.setProtocol("TCP");
+        group.setHealthCheckIntervalSeconds(5);
+        TargetDescription target = target("127.0.0.1", 8080);
+
+        checker.startMonitoring(group);
+        checker.addTargets(group.getTargetGroupArn(), List.of(target), group);
+        assertEquals("initial", checker.getState(group.getTargetGroupArn(), target.getId(), target.getPort()));
+        assertEquals("Elb.InitialHealthChecking",
+                checker.getHealth(group.getTargetGroupArn(), target.getId(), target.getPort()).reason());
+        periodic.get().handle(2L);
+        assertEquals("healthy", checker.getState(group.getTargetGroupArn(), target.getId(), target.getPort()));
+        checker.stopMonitoring(group.getTargetGroupArn());
+        verify(scheduled).cancelTimer(2L);
+        assertEquals("initial", checker.getState(group.getTargetGroupArn(), target.getId(), target.getPort()));
     }
 
     private ElbV2HealthChecker healthChecker() {

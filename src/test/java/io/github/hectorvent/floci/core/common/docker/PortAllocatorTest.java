@@ -1,16 +1,17 @@
 package io.github.hectorvent.floci.core.common.docker;
 
+import io.github.hectorvent.floci.testing.StartGate;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.BrokenBarrierException;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -50,37 +51,28 @@ class PortAllocatorTest {
     void concurrentAllocationsAreUnique() throws Exception {
         PortAllocator allocator = new PortAllocator();
         int threads = 20;
-        // Range must be at least as wide as the thread count
         int base = 19900;
         int max = base + threads - 1;
-
         Set<Integer> ports = ConcurrentHashMap.newKeySet();
-        CountDownLatch ready = new CountDownLatch(threads);
-        CountDownLatch go = new CountDownLatch(1);
-        ExecutorService executor = Executors.newFixedThreadPool(threads);
-        List<Future<?>> futures = new ArrayList<>();
-
-        for (int i = 0; i < threads; i++) {
-            futures.add(executor.submit(() -> {
-                ready.countDown();
-                try { go.await(); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                int p = allocator.allocate(base, max);
-                ports.add(p);
-            }));
+        CyclicBarrier ready = new CyclicBarrier(threads);
+        try {
+            StartGate.Results<Boolean> results = StartGate.runConcurrently(threads, index -> {
+                try {
+                    ready.await(10, TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError("Allocation worker interrupted before all workers were ready", e);
+                } catch (BrokenBarrierException | TimeoutException e) {
+                    throw new AssertionError("Allocation workers did not all reach the readiness barrier", e);
+                }
+                return ports.add(allocator.allocate(base, max));
+            });
+            assertTrue(results.errors().isEmpty(), () -> "Allocation workers failed: " + results.errors());
+            assertEquals(threads, ports.size(),
+                    "Concurrent allocations must all return unique ports; got duplicates: " + ports);
+        } finally {
+            ports.forEach(allocator::release);
         }
-
-        ready.await();   // all threads are lined up
-        go.countDown();  // release them simultaneously
-
-        for (Future<?> f : futures) {
-            f.get();
-        }
-        executor.shutdown();
-
-        assertEquals(threads, ports.size(),
-                "Concurrent allocations must all return unique ports; got duplicates: " + ports);
-
-        ports.forEach(allocator::release);
     }
 
     @Test
@@ -146,4 +138,5 @@ class PortAllocatorTest {
         assertEquals(List.of(19900), tried);
         assertEquals(19900, allocator.allocate(19900, 19901), "the chosen port must be released");
     }
+
 }

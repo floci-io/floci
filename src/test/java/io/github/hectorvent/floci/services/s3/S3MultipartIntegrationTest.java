@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.services.s3.model.S3Checksum;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.config.DecoderConfig;
+import io.restassured.config.RestAssuredConfig;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -215,6 +217,8 @@ class S3MultipartIntegrationTest {
         .then()
             .statusCode(200)
             .header("Content-Disposition", equalTo("attachment; filename=\"multipart.bin\""))
+            .header("Content-Encoding", nullValue())
+            .header("Cache-Control", nullValue())
             .header("x-amz-server-side-encryption", equalTo("AES256"))
             .header("x-amz-meta-owner", equalTo("team-a"))
             .header("x-amz-storage-class", equalTo("STANDARD_IA"))
@@ -324,6 +328,8 @@ class S3MultipartIntegrationTest {
     @Order(13)
     void uploadPartCopy() {
         String source = "ABCDEFGHIJ" + "a".repeat(5 * 1024 * 1024);
+        String copiedPart2 = source.substring(2, 5 * 1024 * 1024 + 2);
+        String copiedPart3 = "CDEF";
         // Put a source object
         given()
             .body(source)
@@ -334,6 +340,7 @@ class S3MultipartIntegrationTest {
 
         // Initiate multipart upload for destination
         String copyUploadId = given()
+            .header("x-amz-checksum-algorithm", "SHA256")
             .when()
                 .post("/" + BUCKET + "/copy-dest.bin?uploads")
             .then()
@@ -349,6 +356,7 @@ class S3MultipartIntegrationTest {
             .statusCode(200)
             .body(containsString("<CopyPartResult"))
             .body(containsString("<ETag>"))
+            .body("CopyPartResult.ChecksumSHA256", equalTo(sha256Base64(source)))
             .extract().xmlPath().getString("CopyPartResult.ETag");
 
         // Copy a 5 MiB range so this non-final part meets the multipart minimum.
@@ -361,6 +369,7 @@ class S3MultipartIntegrationTest {
             .statusCode(200)
             .body(containsString("<CopyPartResult"))
             .body(containsString("<ETag>"))
+            .body("CopyPartResult.ChecksumSHA256", equalTo(sha256Base64(copiedPart2)))
             .extract().xmlPath().getString("CopyPartResult.ETag");
 
         // Percent-encoded bucket/key separator: the AWS SDK for .NET encodes the whole
@@ -374,15 +383,17 @@ class S3MultipartIntegrationTest {
             .statusCode(200)
             .body(containsString("<CopyPartResult"))
             .body(containsString("<ETag>"))
+            .body("CopyPartResult.ChecksumSHA256", equalTo(sha256Base64(copiedPart3)))
             .extract().xmlPath().getString("CopyPartResult.ETag");
 
         // Complete the upload
         String completeXml = """
                 <CompleteMultipartUpload>
-                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
-                    <Part><PartNumber>2</PartNumber><ETag>%s</ETag></Part>
-                    <Part><PartNumber>3</PartNumber><ETag>%s</ETag></Part>
-                </CompleteMultipartUpload>""".formatted(copyPart1ETag, copyPart2ETag, copyPart3ETag);
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag><ChecksumSHA256>%s</ChecksumSHA256></Part>
+                    <Part><PartNumber>2</PartNumber><ETag>%s</ETag><ChecksumSHA256>%s</ChecksumSHA256></Part>
+                    <Part><PartNumber>3</PartNumber><ETag>%s</ETag><ChecksumSHA256>%s</ChecksumSHA256></Part>
+                </CompleteMultipartUpload>""".formatted(copyPart1ETag, sha256Base64(source),
+                copyPart2ETag, sha256Base64(copiedPart2), copyPart3ETag, sha256Base64(copiedPart3));
         given()
             .contentType("application/xml")
             .body(completeXml)
@@ -399,7 +410,7 @@ class S3MultipartIntegrationTest {
             .get("/" + BUCKET + "/copy-dest.bin")
         .then()
             .statusCode(200)
-            .body(equalTo(source + source.substring(2, 5 * 1024 * 1024 + 2) + "CDEF"));
+            .body(equalTo(source + copiedPart2 + copiedPart3));
     }
 
     @Test
@@ -1373,6 +1384,7 @@ class S3MultipartIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<CopyPartResult"))
+            .body(not(containsString("<Checksum")))
             .header("x-amz-server-side-encryption", equalTo("aws:kms"))
             .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeyId));
 
@@ -1559,6 +1571,60 @@ class S3MultipartIntegrationTest {
 
     @Test
     @Order(40)
+    void completedObjectKeepsContentEncodingAndCacheControl() {
+        String key = "encoded-multipart.bin";
+        String encodedUploadId = given()
+            .header("Content-Type", "text/plain")
+            .header("Content-Encoding", "gzip,aws-chunked")
+            .header("Cache-Control", "no-cache")
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploads")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        String eTag = given()
+            .body(PART_1)
+        .when()
+            .put("/" + BUCKET + "/" + key + "?uploadId=" + encodedUploadId + "&partNumber=1")
+        .then()
+            .statusCode(200)
+            .extract().header("ETag");
+
+        given()
+            .contentType("application/xml")
+            .body(singlePartCompleteXml(eTag, ""))
+        .when()
+            .post("/" + BUCKET + "/" + key + "?uploadId=" + encodedUploadId)
+        .then()
+            .statusCode(200)
+            .body(containsString("<CompleteMultipartUploadResult"));
+
+        given()
+        .when()
+            .head("/" + BUCKET + "/" + key)
+        .then()
+            .statusCode(200)
+            .header("Content-Encoding", equalTo("gzip"))
+            .header("Cache-Control", equalTo("no-cache"))
+            // RestAssured appends a default charset to the Content-Type it sends
+            .header("Content-Type", startsWith("text/plain"));
+
+        RestAssuredConfig noDecompress = RestAssuredConfig.config()
+                .decoderConfig(DecoderConfig.decoderConfig().noContentDecoders());
+        given()
+            .config(noDecompress)
+        .when()
+            .get("/" + BUCKET + "/" + key)
+        .then()
+            .statusCode(200)
+            .header("Content-Encoding", equalTo("gzip"))
+            .header("Cache-Control", equalTo("no-cache"))
+            .body(equalTo(PART_1));
+    }
+
+    @Test
+    @Order(41)
     void cleanUp() {
         given().when().delete("/" + BUCKET + "/copy-of-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/" + KEY).then().statusCode(204);
@@ -1577,6 +1643,7 @@ class S3MultipartIntegrationTest {
         given().when().delete("/" + BUCKET + "/range-source.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/one-part-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/one-part-composite.bin").then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/encoded-multipart.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET).then().statusCode(204);
     }
 

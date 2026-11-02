@@ -3,10 +3,13 @@ package io.github.hectorvent.floci.services.iam;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
+import io.github.hectorvent.floci.services.redshift.model.Endpoint;
+import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessRuntime;
 import io.github.hectorvent.floci.testing.EnforcementFixtures;
 import io.github.hectorvent.floci.testing.IamEnforcementProfile;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
+import io.quarkus.test.InjectMock;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -18,6 +21,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -29,9 +33,13 @@ import static io.github.hectorvent.floci.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.Mockito.when;
 
 /**
  * A request of a service whose ARNs the vendored table of request resources gives is checked on the resource it
@@ -47,6 +55,9 @@ class IamRequestResourceEnforcementIntegrationTest {
     private static final String REGION = "us-east-1";
     private static final String ELB = "arn:aws:elasticloadbalancing:" + REGION + ":" + ACCOUNT + ":";
     private static final String EVENTS = "arn:aws:events:" + REGION + ":" + ACCOUNT + ":";
+    private static final String TARGETS = "arn:aws:application-autoscaling:" + REGION + ":" + ACCOUNT + ":scalable-target/";
+    private static final String REDSHIFT = "arn:aws:redshift:" + REGION + ":" + ACCOUNT + ":";
+    private static final String WORKGROUPS = "arn:aws:redshift-serverless:" + REGION + ":" + ACCOUNT + ":workgroup/";
     /** The AWS Load Balancer Controller's create, tag-on-create and listener statements (its policy v2.14.0). */
     private static final String CONTROLLER_CREATE = "{\"Effect\":\"Allow\",\"Action\":[\"elasticloadbalancing:CreateLoadBalancer\","
             + "\"elasticloadbalancing:CreateTargetGroup\"],\"Resource\":\"*\","
@@ -71,6 +82,10 @@ class IamRequestResourceEnforcementIntegrationTest {
 
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
+
+    /** A serverless workgroup's PostgreSQL container is not needed to check a request on it, so none starts. */
+    @InjectMock
+    RedshiftServerlessRuntime runtime;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -410,6 +425,80 @@ class IamRequestResourceEnforcementIntegrationTest {
         putEvents(user, "", ",\"EventBusName\":null").statusCode(200).body("FailedEntryCount", equalTo(0));
     }
 
+    /**
+     * EventBridge V2 is authorized as the same {@code events} actions, on the bus or subscriber its request's ARN
+     * names: a grant on one V2 bus publishes to it and to no other, the default bus never standing in for it, a deny
+     * on it holds, a subscriber is checked on its own ARN rather than {@code *}, and a new bus on its name.
+     */
+    @Test
+    void anEventBridgeV2RequestIsCheckedOnTheBusOrSubscriberItsArnNames() throws IOException {
+        String bus = createEventBusV2("res-v2-" + suffix());
+        String other = createEventBusV2("res-v2-other-" + suffix());
+        User user = user("res-v2");
+
+        user.policy(allowOn("events:PutEvents", bus));
+        eventsV2(user, "PutEvents", putEventsV2(bus)).statusCode(200).body(not(containsString("ErrorCode")));
+        refusedCbor(eventsV2(user, "PutEvents", putEventsV2(other)), "events:PutEvents");
+        user.policy(allowOn("events:PutEvents", EVENTS + "event-bus/default"));
+        refusedCbor(eventsV2(user, "PutEvents", putEventsV2(bus)), "events:PutEvents");
+        user.policy(allowOn("events:PutEvents", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"events:PutEvents\","
+                + "\"Resource\":\"" + bus + "\"}");
+        refusedCbor(eventsV2(user, "PutEvents", putEventsV2(bus)), "events:PutEvents");
+        eventsV2(user, "PutEvents", putEventsV2(other)).statusCode(200);
+
+        String subscriber = EVENTS + "subscriber/res-v2-sub/" + suffix();
+        user.policy(allowOn("events:DescribeSubscriber", subscriber));
+        eventsV2(user, "DescribeSubscriber", Map.of("SubscriberArn", subscriber)).statusCode(404)
+                .body(containsString("ResourceNotFoundException"));
+        refusedCbor(eventsV2(user, "DescribeSubscriber", Map.of("SubscriberArn", subscriber + "0")),
+                "events:DescribeSubscriber");
+
+        String created = "res-v2-new-" + suffix();
+        user.policy(allowOn("events:CreateEventBus", EVENTS + "event-busv2/" + created + "/*"));
+        refusedCbor(eventsV2(user, "CreateEventBus", Map.of("Name", created + "-other", "ClientToken", suffix())),
+                "events:CreateEventBus");
+        String createdArn = CBOR_MAPPER.readTree(eventsV2(user, "CreateEventBus",
+                Map.of("Name", created, "ClientToken", suffix())).statusCode(200).extract().asByteArray())
+                .path("EventBusArn").asText();
+        cleanup.register(() -> deleteEventBusV2(createdArn));
+        assertTrue(createdArn.startsWith(EVENTS + "event-busv2/" + created + "/"), createdArn);
+
+        // A subscriber's tags are checked on the subscriber it makes, not on the bus it names.
+        String tagged = "res-v2-tagged-" + suffix();
+        String role = "arn:aws:iam::" + ACCOUNT + ":role/res-v2-delivery";
+        user.policy(allowOn("iam:PassRole", role) + "," + allowOn("events:CreateSubscriber", bus) + ","
+                + allowOn("events:CreateSubscriber", EVENTS + "subscriber/" + tagged + "/*") + ","
+                + allowOn("events:TagResource", EVENTS + "subscriber/*"));
+        Map<String, Object> subscriberRequest = Map.of("Name", tagged, "EventBusArn", bus,
+                "InvokeConfiguration", Map.of("TargetArn", "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":res-v2-queue",
+                        "RoleArn", role),
+                "Tags", Map.of("team", "orders"));
+        String subscriberArn = CBOR_MAPPER.readTree(eventsV2(user, "CreateSubscriber", subscriberRequest)
+                .statusCode(200).extract().asByteArray()).path("SubscriberArn").asText();
+        cleanup.register(() -> deleteSubscriberV2(subscriberArn));
+        user.policy(allowOn("iam:PassRole", role) + "," + allowOn("events:CreateSubscriber", bus) + ","
+                + allowOn("events:CreateSubscriber", EVENTS + "subscriber/*") + ","
+                + allowOn("events:TagResource", bus));
+        refusedCbor(eventsV2(user, "CreateSubscriber", Map.of("Name", tagged + "-other", "EventBusArn", bus,
+                "InvokeConfiguration", subscriberRequest.get("InvokeConfiguration"), "Tags", Map.of("team", "orders"))),
+                "events:TagResource");
+
+        // An EventBridge request adding the ARN of a V2 bus the caller may delete is still checked on its own bus.
+        String locked = "res-v1-locked-" + suffix();
+        admin("events").header("X-Amz-Target", "AWSEvents.CreateEventBus").contentType("application/x-amz-json-1.1")
+                .body("{\"Name\":\"" + locked + "\"}").post("/").then().statusCode(200);
+        cleanup.register(() -> admin("events").header("X-Amz-Target", "AWSEvents.DeleteEventBus")
+                .contentType("application/x-amz-json-1.1").body("{\"Name\":\"" + locked + "\"}").post("/"));
+        user.policy(allowOn("events:DeleteEventBus", bus) + "," + allowOn("events:DescribeEventBus", bus));
+        for (String operation : List.of("DeleteEventBus", "DescribeEventBus")) {
+            refusedJson(user.json("events", "AWSEvents." + operation, "1.1")
+                    .body("{\"Name\":\"" + locked + "\",\"EventBusArn\":\"" + bus + "\"}").post("/").then(),
+                    "events:" + operation);
+        }
+        admin("events").header("X-Amz-Target", "AWSEvents.DescribeEventBus").contentType("application/x-amz-json-1.1")
+                .body("{\"Name\":\"" + locked + "\"}").post("/").then().statusCode(200);
+    }
+
     @Test
     void aUserPoolIsCheckedOnTheArnItsIdNames() {
         String id = admin("cognito-idp").header("X-Amz-Target", "AWSCognitoIdentityProviderService.CreateUserPool")
@@ -426,6 +515,49 @@ class IamRequestResourceEnforcementIntegrationTest {
         user.policy(allowOn("cognito-idp:DescribeUserPool", arn));
         describeUserPool(user, id).statusCode(200);
         refusedJson(describeUserPool(user, id + "x"), "cognito-idp:DescribeUserPool");
+    }
+
+    /**
+     * A key is named by its id or by an alias, and an alias names the key it points at, so a request naming a key by
+     * an alias is checked on the key the alias names, as the handler resolves it: a grant on that key allows it, a
+     * grant on the alias alone does not, and a deny on the key holds.
+     */
+    @Test
+    void aKeyNamedByAnAliasIsCheckedOnTheKeyTheAliasNames() {
+        String key = createPaymentKey();
+        String alias = "alias/res-card-" + suffix();
+        createPaymentAlias(alias, key).statusCode(200);
+
+        User user = user("res-key");
+        user.policy(allowOn("payment-cryptography:GetKey", key));
+        getPaymentKey(user, alias).statusCode(200);
+        getPaymentKey(user, key).statusCode(200);
+        refusedJson(getPaymentKey(user, "alias/res-other-" + suffix()), "payment-cryptography:GetKey");
+
+        user.policy(allowOn("payment-cryptography:GetKey", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"payment-cryptography:GetKey\",\"Resource\":\"" + key + "\"}");
+        refusedJson(getPaymentKey(user, alias), "payment-cryptography:GetKey");
+    }
+
+    /**
+     * A tagging request names its key by the ARN of one, as the reference takes it there, so a request naming it by
+     * its id names no key for the check and is refused: a deny on the key is not skipped by naming it another way.
+     */
+    @Test
+    void aTaggingRequestNamesItsKeyByItsArn() {
+        String key = createPaymentKey();
+        String id = key.substring(key.lastIndexOf('/') + 1);
+
+        User user = user("res-key-tag");
+        user.policy(allowOn("payment-cryptography:TagResource", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"payment-cryptography:TagResource\",\"Resource\":\"" + key + "\"}");
+        // The key's own ARN is checked on the key, and the deny holds.
+        refusedJson(tagPaymentKey(user, key), "payment-cryptography:TagResource");
+        // Its id names no ARN for the check, so the request is refused rather than tagging the denied key.
+        tagPaymentKey(user, id).statusCode(400).body(containsString("ValidationException"));
+        admin("payment-cryptography").header("X-Amz-Target", "PaymentCryptographyControlPlane.ListTagsForResource")
+                .contentType("application/x-amz-json-1.0").body("{\"ResourceArn\":\"" + key + "\"}")
+                .post("/").then().statusCode(200).body("Tags", hasSize(0));
     }
 
     /** A repository is checked on the ARN its name gives, whether or not it exists. */
@@ -779,6 +911,269 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An Athena query is checked on the workgroup its request names, the primary one when it names none, where Athena
+     * runs and lists it.
+     */
+    @Test
+    void aQueryNamingNoWorkgroupIsCheckedOnThePrimaryOne() {
+        String primary = "arn:aws:athena:" + REGION + ":" + ACCOUNT + ":workgroup/primary";
+        User user = user("res-athena");
+        user.policy(allowOn("athena:ListQueryExecutions", primary) + "," + allowOn("athena:GetWorkGroup", primary) + ","
+                + allowOn("athena:StartQueryExecution", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"athena:StartQueryExecution\",\"Resource\":\"" + primary + "\"}");
+        send(user, "athena", "AmazonAthena.ListQueryExecutions", "1.1", "{}").statusCode(200);
+        send(user, "athena", "AmazonAthena.GetWorkGroup", "1.1", "{}").statusCode(200);
+        send(user, "athena", "AmazonAthena.GetWorkGroup", "1.1", "{\"WorkGroup\":null}").statusCode(200)
+                .body("WorkGroup.Name", equalTo("primary"));
+        refusedJson(send(user, "athena", "AmazonAthena.ListQueryExecutions", "1.1", "{\"WorkGroup\":\"res-other\"}"),
+                "athena:ListQueryExecutions");
+        refusedJson(send(user, "athena", "AmazonAthena.StartQueryExecution", "1.1", "{\"QueryString\":\"SELECT 1\"}"),
+                "athena:StartQueryExecution");
+    }
+
+    /**
+     * An Athena catalog read is checked on the catalog its {@code CatalogName} names and on {@code AwsDataCatalog},
+     * the Glue Data Catalog Floci reads whichever it names, so a grant on another catalog alone does not reach it.
+     */
+    @Test
+    void aCatalogReadIsCheckedOnTheGlueCatalogFlociReads() {
+        String catalogs = "arn:aws:athena:" + REGION + ":" + ACCOUNT + ":datacatalog/";
+        User both = user("res-catalogs");
+        both.policy(allowOn("athena:ListDatabases", catalogs + "AwsDataCatalog") + ","
+                + allowOn("athena:ListDatabases", catalogs + "res-allowed"));
+        send(both, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"res-allowed\"}").statusCode(200);
+        refusedJson(send(both, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"res-other\"}"),
+                "athena:ListDatabases");
+        User named = user("res-catalog");
+        named.policy(allowOn("athena:ListDatabases", catalogs + "res-allowed"));
+        refusedJson(send(named, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":\"res-allowed\"}"),
+                "athena:ListDatabases");
+    }
+
+    /**
+     * An Athena catalog request naming no catalog, or a JSON null, is checked on {@code AwsDataCatalog}, the one
+     * {@code GetDataCatalog} answers and the catalog reads read, so a grant on it reaches them and a deny on it applies.
+     */
+    @Test
+    void aCatalogRequestNamingNoCatalogIsCheckedOnTheGlueOne() {
+        String glue = "arn:aws:athena:" + REGION + ":" + ACCOUNT + ":datacatalog/AwsDataCatalog";
+        User user = user("res-glue-catalog");
+        user.policy(allowOn("athena:GetDataCatalog", glue) + "," + allowOn("athena:ListDatabases", glue));
+        send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{}").statusCode(200)
+                .body("DataCatalog.Name", equalTo("AwsDataCatalog"));
+        send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":null}").statusCode(200)
+                .body("DataCatalog.Name", equalTo("AwsDataCatalog"));
+        send(user, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":null}").statusCode(200);
+        refusedJson(send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":\"res-other\"}"),
+                "athena:GetDataCatalog");
+        User denied = user("res-glue-denied");
+        denied.policy(allowOn("athena:GetDataCatalog", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"athena:GetDataCatalog\",\"Resource\":\"" + glue + "\"}");
+        refusedJson(send(denied, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{}"), "athena:GetDataCatalog");
+    }
+
+    /**
+     * A Data Exports export is checked on its ARN, and a create not on the ARN its {@code Export.ExportArn} gives,
+     * which is the new export's own, so a table's there checks nothing.
+     */
+    @Test
+    void anExportIsCheckedOnItsArnNotOnATableItsExportArnGives() {
+        String name = "res-export-" + suffix();
+        String arn = adminJson("bcm-data-exports", "AWSBillingAndCostManagementDataExports.CreateExport")
+                .body("{\"Export\":" + export(name, null) + "}").post("/").then().statusCode(200).extract()
+                .path("ExportArn");
+        cleanup.register(() -> adminJson("bcm-data-exports", "AWSBillingAndCostManagementDataExports.DeleteExport")
+                .body("{\"ExportArn\":\"" + arn + "\"}").post("/"));
+        String table = "arn:aws:bcm-data-exports:" + REGION + ":" + ACCOUNT + ":table/COST_AND_USAGE_REPORT";
+
+        User user = user("res-export");
+        user.policy(allowOn("bcm-data-exports:GetExport", arn) + "," + allowOn("bcm-data-exports:CreateExport", table));
+        send(user, "bcm-data-exports", "AWSBillingAndCostManagementDataExports.GetExport", "1.1",
+                "{\"ExportArn\":\"" + arn + "\"}").statusCode(200);
+        refusedJson(send(user, "bcm-data-exports", "AWSBillingAndCostManagementDataExports.GetExport", "1.1",
+                "{\"ExportArn\":\"" + arn + "-other\"}"), "bcm-data-exports:GetExport");
+        refusedJson(send(user, "bcm-data-exports", "AWSBillingAndCostManagementDataExports.CreateExport", "1.1",
+                "{\"Export\":" + export(name + "-other", table) + "}"), "bcm-data-exports:CreateExport");
+    }
+
+    /** A Pricing Calculator workload estimate is checked on {@code workload-estimate/<id>}, with no Region. */
+    @Test
+    void aWorkloadEstimateIsCheckedOnTheArnItsIdGives() {
+        String id = adminJson("bcm-pricing-calculator", "AWSBCMPricingCalculator.CreateWorkloadEstimate", "1.0")
+                .body("{\"name\":\"res-estimate\",\"clientToken\":\"" + suffix() + "\"}").post("/").then()
+                .statusCode(200).extract().path("id");
+        cleanup.register(() -> adminJson("bcm-pricing-calculator", "AWSBCMPricingCalculator.DeleteWorkloadEstimate",
+                "1.0").body("{\"identifier\":\"" + id + "\"}").post("/"));
+
+        User user = user("res-estimate");
+        user.policy(allowOn("bcm-pricing-calculator:GetWorkloadEstimate",
+                "arn:aws:bcm-pricing-calculator::" + ACCOUNT + ":workload-estimate/" + id));
+        send(user, "bcm-pricing-calculator", "AWSBCMPricingCalculator.GetWorkloadEstimate", "1.0",
+                "{\"identifier\":\"" + id + "\"}").statusCode(200);
+        refusedJson(send(user, "bcm-pricing-calculator", "AWSBCMPricingCalculator.GetWorkloadEstimate", "1.0",
+                "{\"identifier\":\"" + UUID.randomUUID() + "\"}"), "bcm-pricing-calculator:GetWorkloadEstimate");
+    }
+
+    /**
+     * A Cost Explorer anomaly monitor or subscription is checked on its ARN, which carries no Region, and a list of
+     * them on each ARN its list gives.
+     */
+    @Test
+    void anAnomalyMonitorOrSubscriptionIsCheckedOnItsArn() {
+        String arn = adminJson("ce", "AWSInsightsIndexService.CreateAnomalyMonitor").body("{\"AnomalyMonitor\":"
+                + "{\"MonitorName\":\"res-monitor\",\"MonitorType\":\"DIMENSIONAL\",\"MonitorDimension\":\"SERVICE\"}}")
+                .post("/").then().statusCode(200).extract().path("MonitorArn");
+        cleanup.register(() -> adminJson("ce", "AWSInsightsIndexService.DeleteAnomalyMonitor")
+                .body("{\"MonitorArn\":\"" + arn + "\"}").post("/"));
+        assertTrue(arn.startsWith("arn:aws:ce::" + ACCOUNT + ":anomalymonitor/"), arn);
+        String subscription = adminJson("ce", "AWSInsightsIndexService.CreateAnomalySubscription")
+                .body("{\"AnomalySubscription\":{\"SubscriptionName\":\"res-subscription\",\"Frequency\":\"DAILY\","
+                        + "\"MonitorArnList\":[\"" + arn + "\"],\"Subscribers\":[{\"Address\":\"alerts@example.com\","
+                        + "\"Type\":\"EMAIL\"}],\"ThresholdExpression\":{\"Dimensions\":{\"Key\":"
+                        + "\"ANOMALY_TOTAL_IMPACT_ABSOLUTE\",\"Values\":[\"100\"],\"MatchOptions\":"
+                        + "[\"GREATER_THAN_OR_EQUAL\"]}}}}")
+                .post("/").then().statusCode(200).extract().path("SubscriptionArn");
+        cleanup.register(() -> adminJson("ce", "AWSInsightsIndexService.DeleteAnomalySubscription")
+                .body("{\"SubscriptionArn\":\"" + subscription + "\"}").post("/"));
+        String otherMonitor = arn.substring(0, arn.lastIndexOf('/') + 1) + UUID.randomUUID();
+        String otherSubscription = subscription.substring(0, subscription.lastIndexOf('/') + 1) + UUID.randomUUID();
+
+        User user = user("res-monitor");
+        user.policy(allowOn("ce:UpdateAnomalyMonitor", arn) + "," + allowOn("ce:GetAnomalyMonitors", arn) + ","
+                + allowOn("ce:GetAnomalySubscriptions", subscription));
+        send(user, "ce", "AWSInsightsIndexService.UpdateAnomalyMonitor", "1.1", "{\"MonitorArn\":\"" + arn
+                + "\",\"MonitorName\":\"res-renamed\"}").statusCode(200);
+        refusedJson(send(user, "ce", "AWSInsightsIndexService.UpdateAnomalyMonitor", "1.1", "{\"MonitorArn\":\""
+                + otherMonitor + "\",\"MonitorName\":\"res-renamed\"}"), "ce:UpdateAnomalyMonitor");
+        send(user, "ce", "AWSInsightsIndexService.GetAnomalyMonitors", "1.1", "{\"MonitorArnList\":[\"" + arn
+                + "\"]}").statusCode(200);
+        refusedJson(send(user, "ce", "AWSInsightsIndexService.GetAnomalyMonitors", "1.1", "{\"MonitorArnList\":[\""
+                + arn + "\",\"" + otherMonitor + "\"]}"), "ce:GetAnomalyMonitors");
+        send(user, "ce", "AWSInsightsIndexService.GetAnomalySubscriptions", "1.1", "{\"SubscriptionArnList\":[\""
+                + subscription + "\"]}").statusCode(200);
+        refusedJson(send(user, "ce", "AWSInsightsIndexService.GetAnomalySubscriptions", "1.1",
+                "{\"SubscriptionArnList\":[\"" + otherSubscription + "\"]}"), "ce:GetAnomalySubscriptions");
+    }
+
+    /**
+     * A Cost Explorer cost read is checked on {@code *}, not on the billing view its {@code BillingViewArn} gives:
+     * Floci serves no billing views and answers the account's costs whichever it names.
+     */
+    @Test
+    void aBillingViewGrantDoesNotReachTheAccountsCosts() {
+        String view = "arn:aws:billing::" + ACCOUNT + ":billingview/res-view";
+        User user = user("res-view");
+        user.policy(allowOn("ce:GetCostAndUsage", view));
+        refusedJson(send(user, "ce", "AWSInsightsIndexService.GetCostAndUsage", "1.1", "{\"TimePeriod\":{\"Start\":"
+                + "\"2026-01-01\",\"End\":\"2026-02-01\"},\"Granularity\":\"MONTHLY\",\"Metrics\":[\"UnblendedCost\"],"
+                + "\"BillingViewArn\":\"" + view + "\"}"), "ce:GetCostAndUsage");
+    }
+
+    /**
+     * A trail is checked on {@code trail/<name>}: its status on the one its bare {@code Name} names, by its name or its
+     * ARN, and its tags on the one the ARN in its {@code ResourceId} gives.
+     */
+    @Test
+    void aTrailIsCheckedOnTheArnItsNameGives() {
+        String name = "res-trail-" + suffix();
+        String other = name + "-other";
+        for (String trail : List.of(name, other)) {
+            adminJson("cloudtrail", "CloudTrail_20131101.CreateTrail")
+                    .body("{\"Name\":\"" + trail + "\",\"S3BucketName\":\"res-trail-logs\"}").post("/").then()
+                    .statusCode(200);
+            cleanup.register(() -> adminJson("cloudtrail", "CloudTrail_20131101.DeleteTrail")
+                    .body("{\"Name\":\"" + trail + "\"}").post("/"));
+        }
+        String arn = "arn:aws:cloudtrail:" + REGION + ":" + ACCOUNT + ":trail/" + name;
+
+        User user = user("res-trail");
+        user.policy(allowOn("cloudtrail:GetTrailStatus", arn) + "," + allowOn("cloudtrail:AddTags", arn));
+        send(user, "cloudtrail", "CloudTrail_20131101.GetTrailStatus", "1.1", "{\"Name\":\"" + name + "\"}")
+                .statusCode(200);
+        send(user, "cloudtrail", "CloudTrail_20131101.GetTrailStatus", "1.1", "{\"Name\":\"" + arn + "\"}")
+                .statusCode(200);
+        refusedJson(send(user, "cloudtrail", "CloudTrail_20131101.GetTrailStatus", "1.1",
+                "{\"Name\":\"" + other + "\"}"), "cloudtrail:GetTrailStatus");
+        String tags = "\",\"TagsList\":[{\"Key\":\"a\",\"Value\":\"b\"}]}";
+        send(user, "cloudtrail", "CloudTrail_20131101.AddTags", "1.1", "{\"ResourceId\":\"" + arn + tags)
+                .statusCode(200);
+        refusedJson(send(user, "cloudtrail", "CloudTrail_20131101.AddTags", "1.1",
+                "{\"ResourceId\":\"" + arn + "-other" + tags), "cloudtrail:AddTags");
+    }
+
+    /** A CloudTrail dashboard is checked on the one its {@code DashboardId}, a name or an ARN, names. */
+    @Test
+    void aDashboardIsCheckedOnTheOneItsIdNames() {
+        String dashboard = "arn:aws:cloudtrail:" + REGION + ":" + ACCOUNT + ":dashboard/res-denied";
+        User user = user("res-dashboard");
+        user.policy(allowOn("cloudtrail:GetDashboard", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"cloudtrail:GetDashboard\",\"Resource\":\"" + dashboard + "\"}");
+        refusedJson(send(user, "cloudtrail", "CloudTrail_20131101.GetDashboard", "1.1",
+                "{\"DashboardId\":\"res-denied\"}"), "cloudtrail:GetDashboard");
+        refusedJson(send(user, "cloudtrail", "CloudTrail_20131101.GetDashboard", "1.1",
+                "{\"DashboardId\":\"" + dashboard + "\"}"), "cloudtrail:GetDashboard");
+        send(user, "cloudtrail", "CloudTrail_20131101.GetDashboard", "1.1", "{\"DashboardId\":\"res-other\"}")
+                .body(not(containsString("not authorized")));
+    }
+
+    /**
+     * A Global Accelerator accelerator is checked on its ARN, which carries no Region, and listing its custom routing
+     * port mappings on it alone, not on the endpoint group whose ARN extends it.
+     */
+    @Test
+    void anAcceleratorIsCheckedOnItsArnNotOnAnEndpointGroupOfIt() {
+        String arn = adminJson("globalaccelerator", "GlobalAccelerator_V20180706.CreateAccelerator")
+                .body("{\"Name\":\"res-accelerator\",\"IdempotencyToken\":\"" + suffix() + "\",\"Enabled\":false}")
+                .post("/").then().statusCode(200).extract().path("Accelerator.AcceleratorArn");
+        cleanup.register(() -> adminJson("globalaccelerator", "GlobalAccelerator_V20180706.DeleteAccelerator")
+                .body("{\"AcceleratorArn\":\"" + arn + "\"}").post("/"));
+        assertTrue(arn.startsWith("arn:aws:globalaccelerator::" + ACCOUNT + ":accelerator/"), arn);
+
+        User user = user("res-accelerator");
+        user.policy(allowOn("globalaccelerator:DescribeAccelerator", arn) + ","
+                + allowOn("globalaccelerator:ListCustomRoutingPortMappings", arn));
+        send(user, "globalaccelerator", "GlobalAccelerator_V20180706.DescribeAccelerator", "1.1",
+                "{\"AcceleratorArn\":\"" + arn + "\"}").statusCode(200);
+        refusedJson(send(user, "globalaccelerator", "GlobalAccelerator_V20180706.DescribeAccelerator", "1.1",
+                "{\"AcceleratorArn\":\"" + arn + "-other\"}"), "globalaccelerator:DescribeAccelerator");
+        send(user, "globalaccelerator", "GlobalAccelerator_V20180706.ListCustomRoutingPortMappings", "1.1",
+                "{\"AcceleratorArn\":\"" + arn + "\",\"EndpointGroupArn\":\"" + arn
+                        + "/listener/0123abcd/endpoint-group/0123456789ab\"}")
+                .body(not(containsString("not authorized")));
+    }
+
+    /** A Timestream for InfluxDB parameter group is checked on {@code db-parameter-group/<id>}, the id it was given. */
+    @Test
+    void aParameterGroupIsCheckedOnTheArnItsIdGives() {
+        String id = adminJson("timestream-influxdb", "AmazonTimestreamInfluxDB.CreateDbParameterGroup", "1.0")
+                .body("{\"name\":\"res-group-" + suffix() + "\"}").post("/").then().statusCode(200).extract()
+                .path("id");
+        String arn = "arn:aws:timestream-influxdb:" + REGION + ":" + ACCOUNT + ":db-parameter-group/" + id;
+
+        User user = user("res-group");
+        user.policy(allowOn("timestream-influxdb:GetDbParameterGroup", arn));
+        send(user, "timestream-influxdb", "AmazonTimestreamInfluxDB.GetDbParameterGroup", "1.0",
+                "{\"identifier\":\"" + id + "\"}").statusCode(200).body("arn", equalTo(arn));
+        refusedJson(send(user, "timestream-influxdb", "AmazonTimestreamInfluxDB.GetDbParameterGroup", "1.0",
+                "{\"identifier\":\"res" + suffix() + "\"}"), "timestream-influxdb:GetDbParameterGroup");
+    }
+
+    /** A Timestream for InfluxDB cluster reboot is checked on each member instance its {@code instanceIds} names. */
+    @Test
+    void aClusterRebootIsCheckedOnTheInstancesItNames() {
+        User user = user("res-reboot");
+        user.policy(allowOn("timestream-influxdb:RebootDbCluster", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"timestream-influxdb:RebootDbCluster\",\"Resource\":\"arn:aws:timestream-influxdb:" + REGION + ":"
+                + ACCOUNT + ":db-instance/resdenied\"}");
+        refusedJson(send(user, "timestream-influxdb", "AmazonTimestreamInfluxDB.RebootDbCluster", "1.0",
+                "{\"dbClusterId\":\"rescluster\",\"instanceIds\":[\"resallowed\",\"resdenied\"]}"),
+                "timestream-influxdb:RebootDbCluster");
+        send(user, "timestream-influxdb", "AmazonTimestreamInfluxDB.RebootDbCluster", "1.0",
+                "{\"dbClusterId\":\"rescluster\",\"instanceIds\":[\"resallowed\"]}")
+                .body(containsString("ResourceNotFoundException"));
+    }
+
+    /**
      * A budget is checked on {@code budget/<name>}, with no Region, the ARN Budgets tags it under, and an update on the
      * budget its {@code NewBudget} names, not on one its billing view ARN gives.
      */
@@ -865,6 +1260,129 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + "-other\"]}"), "translate:TranslateDocument");
     }
 
+    /**
+     * A scalable target, named by its service namespace, resource id and scalable dimension, is checked on the ARN
+     * Application Auto Scaling registered it under, which ends in the id it assigned, so a grant on that ARN allows
+     * it, one on another target's does not, and a deny on it holds; registering a new one is checked with its id
+     * open, and its tags by its ARN. Before, these were checked on {@code *}.
+     */
+    @Test
+    void aScalableTargetIsCheckedOnTheArnItWasRegisteredUnder() {
+        String target = scalableTarget("service/res-" + suffix() + "/web");
+        String arn = registerScalableTarget(target);
+        assertTrue(arn.startsWith(TARGETS), arn);
+
+        User user = user("res-target");
+        user.policy(allowOn("application-autoscaling:RegisterScalableTarget", arn));
+        scaling(user, "RegisterScalableTarget", target + ",\"MaxCapacity\":3}").statusCode(200);
+        user.policy(allowOn("application-autoscaling:RegisterScalableTarget", TARGETS + "other"));
+        refusedJson(scaling(user, "RegisterScalableTarget", target + ",\"MaxCapacity\":3}"),
+                "application-autoscaling:RegisterScalableTarget");
+        // Its tags on an update are checked on the target too.
+        user.policy(allowOn("application-autoscaling:RegisterScalableTarget", arn) + ","
+                + allowOn("application-autoscaling:TagResource", TARGETS + "other"));
+        refusedJson(scaling(user, "RegisterScalableTarget", target + ",\"Tags\":{\"team\":\"a\"}}"),
+                "application-autoscaling:TagResource");
+        user.policy(allowOn("application-autoscaling:RegisterScalableTarget", arn) + ","
+                + allowOn("application-autoscaling:TagResource", arn));
+        scaling(user, "RegisterScalableTarget", target + ",\"Tags\":{\"team\":\"a\"}}").statusCode(200);
+        // A new target has no id yet, so it is checked on scalable-target/*, which a grant on another does not cover.
+        String other = scalableTarget("service/res-" + suffix() + "/api");
+        refusedJson(scaling(user, "RegisterScalableTarget", other + ",\"MinCapacity\":1,\"MaxCapacity\":2}"),
+                "application-autoscaling:RegisterScalableTarget");
+        user.policy(allowOn("application-autoscaling:RegisterScalableTarget", TARGETS + "*"));
+        cleanup.register(() -> adminJson("application-autoscaling", "AnyScaleFrontendService.DeregisterScalableTarget")
+                .body(other + "}").post("/"));
+        scaling(user, "RegisterScalableTarget", other + ",\"MinCapacity\":1,\"MaxCapacity\":2}").statusCode(200);
+        // A deny on the target holds, on a policy put on it and on its tags read by its ARN, and on no other target.
+        user.policy(allowOn("application-autoscaling:*", "*") + ",{\"Effect\":\"Deny\",\"Action\":["
+                + "\"application-autoscaling:PutScalingPolicy\",\"application-autoscaling:ListTagsForResource\"],"
+                + "\"Resource\":\"" + arn + "\"}");
+        refusedJson(scaling(user, "PutScalingPolicy", target.replace("{", "{\"PolicyName\":\"p\","
+                + "\"PolicyType\":\"StepScaling\",") + "}"), "application-autoscaling:PutScalingPolicy");
+        refusedJson(scaling(user, "ListTagsForResource", "{\"ResourceARN\":\"" + arn + "\"}"),
+                "application-autoscaling:ListTagsForResource");
+        scaling(user, "DeregisterScalableTarget", other + "}").statusCode(200);
+    }
+
+    /** The members naming an ECS service's desired count as a scalable target, an open JSON object. */
+    private static String scalableTarget(String resourceId) {
+        return "{\"ServiceNamespace\":\"ecs\",\"ResourceId\":\"" + resourceId + "\","
+                + "\"ScalableDimension\":\"ecs:service:DesiredCount\"";
+    }
+
+    /** Registers the scalable target as the admin and gives its ARN. */
+    private String registerScalableTarget(String target) {
+        String arn = adminJson("application-autoscaling", "AnyScaleFrontendService.RegisterScalableTarget")
+                .body(target + ",\"MinCapacity\":1,\"MaxCapacity\":2}").post("/").then().statusCode(200)
+                .extract().path("ScalableTargetARN");
+        cleanup.register(() -> adminJson("application-autoscaling", "AnyScaleFrontendService.DeregisterScalableTarget")
+                .body(target + "}").post("/"));
+        return arn;
+    }
+
+    private static ValidatableResponse scaling(User user, String operation, String body) {
+        return user.json("application-autoscaling", "AnyScaleFrontendService." + operation, "1.1").body(body).post("/")
+                .then();
+    }
+
+    /**
+     * A Data API request is checked on the cluster it names, or on the serverless workgroup its name or ARN finds,
+     * whose ARN ends in the id Redshift Serverless gave it; one naming a workgroup there is none of is checked with
+     * that id open. Before, these were checked on {@code *}.
+     */
+    @Test
+    void aDataApiRequestIsCheckedOnTheClusterOrWorkgroupItNames() {
+        when(runtime.start(any(String.class), any(String.class), any(String.class), any(String.class),
+                any(String.class), any(String.class), any(Endpoint.class), anyBoolean(), any()))
+                .thenReturn(new RedshiftServerlessRuntime.Backend("127.0.0.1", 55432));
+        String name = "res-wg-" + suffix();
+        String arn = createWorkgroup(name);
+        assertTrue(arn.startsWith(WORKGROUPS), arn);
+
+        User user = user("res-data");
+        user.policy(allowOn("redshift-data:ListDatabases", arn) + ","
+                + allowOn("redshift-data:ListDatabases", REDSHIFT + "cluster:res-cluster"));
+        // Authorized, a database the workgroup does not have, or a cluster Floci does not have, is refused by the
+        // Data API, not by IAM.
+        for (String named : List.of(name, arn)) {
+            listDatabases(user, "\"WorkgroupName\":\"" + named + "\"").statusCode(400)
+                    .body(containsString("does not exist in workgroup"));
+        }
+        listDatabases(user, "\"ClusterIdentifier\":\"res-cluster\",\"DbUser\":\"admin\"").statusCode(400)
+                .body(containsString("was not found"));
+        refusedJson(listDatabases(user, "\"ClusterIdentifier\":\"res-other\",\"DbUser\":\"admin\""),
+                "redshift-data:ListDatabases");
+        refusedJson(listDatabases(user, "\"WorkgroupName\":\"res-wg-missing\""), "redshift-data:ListDatabases");
+        // A deny on the workgroup holds, whether a request names it by its name or by its ARN.
+        user.policy(allowOn("redshift-data:*", "*") + ",{\"Effect\":\"Deny\","
+                + "\"Action\":\"redshift-data:ListDatabases\",\"Resource\":\"" + arn + "\"}");
+        for (String named : List.of(name, arn)) {
+            refusedJson(listDatabases(user, "\"WorkgroupName\":\"" + named + "\""), "redshift-data:ListDatabases");
+        }
+    }
+
+    /** Creates a serverless workgroup and its namespace as the admin and gives the workgroup's ARN. */
+    private String createWorkgroup(String name) {
+        adminJson("redshift-serverless", "RedshiftServerless.CreateNamespace")
+                .body("{\"namespaceName\":\"" + name + "-ns\",\"adminUsername\":\"admin\","
+                        + "\"adminUserPassword\":\"Secret123!\"}").post("/").then().statusCode(200);
+        cleanup.register(() -> adminJson("redshift-serverless", "RedshiftServerless.DeleteNamespace")
+                .body("{\"namespaceName\":\"" + name + "-ns\"}").post("/"));
+        String arn = adminJson("redshift-serverless", "RedshiftServerless.CreateWorkgroup")
+                .body("{\"workgroupName\":\"" + name + "\",\"namespaceName\":\"" + name + "-ns\"}").post("/").then()
+                .statusCode(200).extract().path("workgroup.workgroupArn");
+        cleanup.register(() -> adminJson("redshift-serverless", "RedshiftServerless.DeleteWorkgroup")
+                .body("{\"workgroupName\":\"" + name + "\"}").post("/"));
+        return arn;
+    }
+
+    /** A ListDatabases of a database no workgroup or cluster has, on the target the members name. */
+    private static ValidatableResponse listDatabases(User user, String members) {
+        return user.json("redshift-data", "RedshiftData.ListDatabases", "1.1")
+                .body("{\"Database\":\"res-none\"," + members + "}").post("/").then();
+    }
+
     /** A monthly cost budget of the name, with a billing view ARN when one is given. */
     private static String budget(String name, String billingViewArn) {
         return "{\"BudgetName\":\"" + name + "\",\"BudgetType\":\"COST\",\"TimeUnit\":\"MONTHLY\",\"BudgetLimit\":"
@@ -907,8 +1425,27 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .body("{\"ApplicationName\":\"" + name + "\"}").post("/").then();
     }
 
+    /** The user's JSON-protocol request to the target, {@code <prefix>.<operation>}, with the body. */
+    private static ValidatableResponse send(User user, String service, String target, String version, String body) {
+        return user.json(service, target, version).body(body).post("/").then();
+    }
+
+    /** A Data Exports export of the name reading the cost and usage table, with an export ARN when one is given. */
+    private static String export(String name, String exportArn) {
+        return "{\"Name\":\"" + name + "\"," + (exportArn == null ? "" : "\"ExportArn\":\"" + exportArn + "\",")
+                + "\"DataQuery\":{\"QueryStatement\":\"SELECT * FROM COST_AND_USAGE_REPORT\"},"
+                + "\"DestinationConfigurations\":{\"S3Destination\":{\"S3Bucket\":\"my-bucket\",\"S3Prefix\":\"out/\","
+                + "\"S3Region\":\"" + REGION + "\",\"S3OutputConfigurations\":{\"Format\":\"PARQUET\",\"Compression\":"
+                + "\"PARQUET\",\"OutputType\":\"CUSTOM\",\"Overwrite\":\"OVERWRITE_REPORT\"}}},"
+                + "\"RefreshCadence\":{\"Frequency\":\"SYNCHRONOUS\"}}";
+    }
+
     private static RequestSpecification adminJson(String service, String target) {
-        return admin(service).header("X-Amz-Target", target).contentType("application/x-amz-json-1.1");
+        return adminJson(service, target, "1.1");
+    }
+
+    private static RequestSpecification adminJson(String service, String target, String version) {
+        return admin(service).header("X-Amz-Target", target).contentType("application/x-amz-json-" + version);
     }
 
     private static ValidatableResponse describeDeliveryStream(User user, String name) {
@@ -1020,6 +1557,54 @@ class IamRequestResourceEnforcementIntegrationTest {
                 .post("/").then();
     }
 
+    private String createEventBusV2(String name) throws IOException {
+        String arn = CBOR_MAPPER.readTree(admin("events").header("smithy-protocol", "rpc-v2-cbor")
+                .contentType("application/cbor").accept("application/cbor")
+                .body(CBOR_MAPPER.writeValueAsBytes(Map.of("Name", name)))
+                .post("/service/AWSEventsV2/operation/CreateEventBus").then().statusCode(200).extract().asByteArray())
+                .path("EventBusArn").asText();
+        cleanup.register(() -> deleteEventBusV2(arn));
+        return arn;
+    }
+
+    private static void deleteEventBusV2(String arn) {
+        try {
+            admin("events").header("smithy-protocol", "rpc-v2-cbor").contentType("application/cbor")
+                    .accept("application/cbor").body(CBOR_MAPPER.writeValueAsBytes(Map.of("EventBusArn", arn)))
+                    .post("/service/AWSEventsV2/operation/DeleteEventBus");
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static void deleteSubscriberV2(String arn) {
+        try {
+            admin("events").header("smithy-protocol", "rpc-v2-cbor").contentType("application/cbor")
+                    .accept("application/cbor").body(CBOR_MAPPER.writeValueAsBytes(Map.of("SubscriberArn", arn)))
+                    .post("/service/AWSEventsV2/operation/DeleteSubscriber");
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /** One event published to the EventBridge V2 bus. */
+    private static Map<String, Object> putEventsV2(String bus) {
+        return Map.of("EventBusArn", bus, "Entries", List.of(Map.of("Source", "res.test", "DetailType", "t",
+                "Detail", "{}")));
+    }
+
+    private static ValidatableResponse eventsV2(User user, String operation, Map<String, ?> body) throws IOException {
+        return user.cbor("events").body(CBOR_MAPPER.writeValueAsBytes(body))
+                .post("/service/AWSEventsV2/operation/" + operation).then();
+    }
+
+    /** An RPC v2 CBOR service refuses with {@code AccessDeniedException}, a 403, naming the missing permission. */
+    private static void refusedCbor(ValidatableResponse response, String action) throws IOException {
+        JsonNode error = CBOR_MAPPER.readTree(response.statusCode(403).extract().asByteArray());
+        assertEquals("AccessDeniedException", error.path("__type").asText());
+        assertTrue(error.path("message").asText().contains(action), error.toString());
+    }
+
     private static String publishVersion(String arn) {
         return admin("states").header("X-Amz-Target", "AWSStepFunctions.PublishStateMachineVersion")
                 .contentType("application/x-amz-json-1.0").body("{\"stateMachineArn\":\"" + arn + "\"}")
@@ -1048,6 +1633,35 @@ class IamRequestResourceEnforcementIntegrationTest {
     private static ValidatableResponse startExecution(User user, String arn) {
         return user.json("states", "AWSStepFunctions.StartExecution", "1.0")
                 .body("{\"stateMachineArn\":\"" + arn + "\"}").post("/").then();
+    }
+
+    /** A key of the account, made as the administrator. */
+    private String createPaymentKey() {
+        return admin("payment-cryptography").header("X-Amz-Target", "PaymentCryptographyControlPlane.CreateKey")
+                .contentType("application/x-amz-json-1.0").body("{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\","
+                        + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                        + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}},\"Exportable\":true}")
+                .post("/").then().statusCode(200).extract().path("Key.KeyArn");
+    }
+
+    /** An alias naming a key, made as the administrator. */
+    private static ValidatableResponse createPaymentAlias(String alias, String key) {
+        return admin("payment-cryptography").header("X-Amz-Target", "PaymentCryptographyControlPlane.CreateAlias")
+                .contentType("application/x-amz-json-1.0")
+                .body("{\"AliasName\":\"" + alias + "\",\"KeyArn\":\"" + key + "\"}").post("/").then();
+    }
+
+    /** A tagging request naming its key the way the request gives it. */
+    private static ValidatableResponse tagPaymentKey(User user, String resource) {
+        return user.json("payment-cryptography", "PaymentCryptographyControlPlane.TagResource", "1.0")
+                .body("{\"ResourceArn\":\"" + resource + "\",\"Tags\":[{\"Key\":\"owner\",\"Value\":\"team\"}]}")
+                .post("/").then();
+    }
+
+    /** A read of the key a request names by its id, its alias or its ARN. */
+    private static ValidatableResponse getPaymentKey(User user, String identifier) {
+        return user.json("payment-cryptography", "PaymentCryptographyControlPlane.GetKey", "1.0")
+                .body("{\"KeyIdentifier\":\"" + identifier + "\"}").post("/").then();
     }
 
     private static ValidatableResponse describeUserPool(User user, String id) {

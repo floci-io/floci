@@ -2,8 +2,9 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.ArrayList;
 import java.util.Base64;
@@ -38,21 +39,6 @@ class DynamoDbSetOrderTest {
     }
 
     @Test
-    void sortSetsInReachesMapsAndLists() throws Exception {
-        ObjectNode item = (ObjectNode) MAPPER.readTree("""
-                {"pk":{"S":"a"},"ss":{"SS":["b","a"]},
-                 "m":{"M":{"deep":{"SS":["b","a",""]},"nums":{"NS":["10","9"]}}},
-                 "l":{"L":[{"NS":["2","1"]},{"M":{"inner":{"BS":["gA==","AQ=="]}}}]}}
-                """);
-        DynamoDbSetOrder.sortSetsIn(item);
-        assertEquals(MAPPER.readTree("""
-                {"pk":{"S":"a"},"ss":{"SS":["a","b"]},
-                 "m":{"M":{"deep":{"SS":["","a","b"]},"nums":{"NS":["9","10"]}}},
-                 "l":{"L":[{"NS":["1","2"]},{"M":{"inner":{"BS":["AQ==","gA=="]}}}]}}
-                """), item);
-    }
-
-    @Test
     void membersThatDoNotParseKeepAPlace() {
         assertEquals(List.of("abc", "0", "1"), sorted("NS", List.of("1", "abc", "0")));
         assertEquals(List.of("AQ==", "not base64"), sorted("BS", List.of("not base64", "AQ==")));
@@ -62,6 +48,20 @@ class DynamoDbSetOrderTest {
     void aMemberListThatIsNotAnArrayIsLeftAlone() throws Exception {
         JsonNode members = MAPPER.readTree("\"x\"");
         assertSame(members, DynamoDbSetOrder.sorted("SS", members));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SS | b,a,b            | a,b,b
+            SS | c,b,c,a,z        | b,c,c,a,z
+            SS | 😀,\uFFFD,\uFFFD | \uFFFD,😀,\uFFFD
+            NS | 2,1,1.0,3        | 1,2,1.0,3
+            BS | /w==,AA==,AA==   | AA==,/w==,AA==
+            SS | b,a,c            |
+            """)
+    void aRepeatStopsTheSortAndLeavesTheRestAsSent(String setType, String sent, String held) {
+        List<JsonNode> order = DynamoDbSetOrder.orderAtFirstRepeat(setType, MAPPER.valueToTree(sent.split(",")));
+        assertEquals(held, order == null ? null : String.join(",", order.stream().map(JsonNode::asText).toList()));
     }
 
     private static List<String> sorted(String setType, List<String> members) {

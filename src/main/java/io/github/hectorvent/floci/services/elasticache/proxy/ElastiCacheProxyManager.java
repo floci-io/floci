@@ -64,6 +64,14 @@ public class ElastiCacheProxyManager {
         }
     }
 
+    /** Applies a changed access string of {@code username} to the open sessions of the group's proxy. */
+    public void refreshUser(String groupId, String username) {
+        ElastiCacheAuthProxy proxy = proxies.get(groupId);
+        if (proxy != null) {
+            proxy.refreshUser(username);
+        }
+    }
+
     public void stopAll() {
         proxies.values().forEach(ElastiCacheAuthProxy::stop);
         proxies.clear();

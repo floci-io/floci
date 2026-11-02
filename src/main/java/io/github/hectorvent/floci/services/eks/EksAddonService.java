@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -36,6 +37,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 @ApplicationScoped
 public class EksAddonService {
@@ -133,7 +135,7 @@ public class EksAddonService {
 
         List<String> associationArns = createOrLinkPodIdentityAssociations(cluster, addonName, request.podIdentityAssociations());
 
-        double now = Instant.now().toEpochMilli() / 1000.0;
+        double now = EpochSeconds.fromInstant(Instant.now());
         String addonArn = generateAddonArn(cluster, addonName);
         Optional<AddonInfo> addonInfo = catalog.findAddon(addonName);
         String owner = addonInfo.map(AddonInfo::owner).orElse("aws");
@@ -256,7 +258,7 @@ public class EksAddonService {
             params.add(new UpdateParam("PodIdentityAssociations", serializeAssociations(request.podIdentityAssociations())));
         }
 
-        double now = Instant.now().toEpochMilli() / 1000.0;
+        double now = EpochSeconds.fromInstant(Instant.now());
         Addon updatedAddon = new Addon(
                 current.addonArn(),
                 current.addonName(),
@@ -323,7 +325,7 @@ public class EksAddonService {
                 "DELETING",
                 current.health(),
                 current.createdAt(),
-                Instant.now().toEpochMilli() / 1000.0,
+                EpochSeconds.fromInstant(Instant.now()),
                 current.serviceAccountRoleArn(),
                 current.configurationValues(),
                 current.tags(),
@@ -457,6 +459,31 @@ public class EksAddonService {
 
     private static String resolveAddonNamespace(String addonName) {
         return "kube-system";
+    }
+
+    /**
+     * Applies {@code change} to the tags of the add-on {@code addonArn} names on {@code cluster} and
+     * returns them, or empty when the cluster has no add-on with that ARN. This is how TagResource,
+     * UntagResource and ListTagsForResource reach an add-on.
+     */
+    public synchronized Optional<Map<String, String>> retag(Cluster cluster, String addonName, String addonArn,
+                                                            UnaryOperator<Map<String, String>> change) {
+        String storageKey = prefix(cluster) + addonName.toLowerCase(Locale.ROOT);
+        Optional<StoredAddon> found = storage.get(storageKey)
+                .filter(stored -> addonArn.equals(stored.addon().addonArn()));
+        if (found.isEmpty()) {
+            return Optional.empty();
+        }
+        Addon current = found.get().addon();
+        Map<String, String> tags = Map.copyOf(change.apply(current.tags() == null ? Map.of() : current.tags()));
+        if (!tags.equals(current.tags())) {
+            Addon retagged = new Addon(current.addonArn(), current.addonName(), current.addonVersion(),
+                    current.clusterName(), current.status(), current.health(), current.createdAt(),
+                    current.modifiedAt(), current.serviceAccountRoleArn(), current.configurationValues(), tags,
+                    current.podIdentityAssociations(), current.owner(), current.publisher());
+            storage.put(storageKey, new StoredAddon(retagged, found.get().clientRequestToken()));
+        }
+        return Optional.of(tags);
     }
 
     private static String prefix(Cluster cluster) {

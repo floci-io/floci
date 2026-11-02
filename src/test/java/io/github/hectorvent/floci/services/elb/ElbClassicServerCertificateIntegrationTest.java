@@ -7,12 +7,14 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.config.EncoderConfig;
 import io.restassured.http.ContentType;
+import io.restassured.parsing.Parser;
 import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -56,6 +58,14 @@ class ElbClassicServerCertificateIntegrationTest {
                 .body("{\"DomainName\": \"elb-" + suffix() + ".example.com\", \"ValidationMethod\": \"DNS\"}")
             .when().post("/").then().statusCode(200)
                 .extract().path("CertificateArn");
+    }
+
+    private static ValidatableResponse acm(String target, String certificateArn) {
+        return given().header("Authorization", ACM_AUTH)
+                .header("X-Amz-Target", "CertificateManager." + target)
+                .contentType("application/x-amz-json-1.1").config(RestAssured.config().encoderConfig(EncoderConfig.encoderConfig().encodeContentTypeAs("application/x-amz-json-1.1", ContentType.TEXT)))
+                .body("{\"CertificateArn\": \"" + certificateArn + "\"}")
+            .when().post("/").then().using().defaultParser(Parser.JSON);
     }
 
     private static ValidatableResponse deleteCertificate(String name) {
@@ -143,6 +153,52 @@ class ElbClassicServerCertificateIntegrationTest {
             .when().post("/").then().statusCode(200);
 
         deleteCertificate(certName).statusCode(200);
+    }
+
+    @Test
+    void createLoadBalancerRejectsABlankCertificateId() {
+        createLoadBalancer("elb-cert-blank-" + suffix(), "")
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("CertificateNotFound"));
+    }
+
+    @Test
+    void createLoadBalancerAcceptsAnHttpListenerWithAnEmptyCertificateId() {
+        given().header("Authorization", ELB_AUTH)
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Version", CLASSIC_VERSION)
+                .formParam("LoadBalancerName", "elb-cert-http-" + suffix())
+                .formParam("Subnets.member.1", Ec2Service.defaultSubnetId("us-east-1", "a"))
+                .formParam("Listeners.member.1.Protocol", "HTTP")
+                .formParam("Listeners.member.1.LoadBalancerPort", "80")
+                .formParam("Listeners.member.1.InstanceProtocol", "HTTP")
+                .formParam("Listeners.member.1.InstancePort", "8080")
+                .formParam("Listeners.member.1.SSLCertificateId", "")
+            .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    void acmCertificateInUseCannotBeDeletedUntilTheListenerIsGone() {
+        String lb = "elb-acm-in-use-" + suffix();
+        String arn = requestAcmCertificate();
+        createLoadBalancer(lb, arn).statusCode(200);
+
+        acm("DescribeCertificate", arn)
+            .statusCode(200)
+            .body("Certificate.InUseBy",
+                    contains("arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/" + lb));
+        acm("DeleteCertificate", arn)
+            .statusCode(400)
+            .body("__type", equalTo("ResourceInUseException"));
+
+        given().header("Authorization", ELB_AUTH)
+                .formParam("Action", "DeleteLoadBalancerListeners")
+                .formParam("Version", CLASSIC_VERSION)
+                .formParam("LoadBalancerName", lb)
+                .formParam("LoadBalancerPorts.member.1", "443")
+            .when().post("/").then().statusCode(200);
+
+        acm("DeleteCertificate", arn).statusCode(200);
     }
 
     @Test

@@ -466,6 +466,45 @@ class DynamoDbCfnProvisionerTest {
         verifyNoInteractions(dynamoDb);
     }
 
+    @Test
+    void aBooleanTimeToLiveFailsTemplateValidationBeforeTheTableIsCreated() throws Exception {
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        JsonNode props = props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":false}");
+        ProvisionContext ctx = ctx();
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        assertEquals("Property [TimeToLiveSpecification] expected type: JSONObject, found: String", e.getMessage());
+        verifyNoInteractions(dynamoDb);
+    }
+
+    @Test
+    void aListTimeToLiveFailsTemplateValidationBeforeTheTableIsCreated() throws Exception {
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        JsonNode props = props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":[]}");
+        ProvisionContext ctx = ctx();
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+
+        assertEquals("Property [TimeToLiveSpecification] expected type: JSONObject, found: JSONArray",
+                e.getMessage());
+        verifyNoInteractions(dynamoDb);
+    }
+
+    @Test
+    void anUpdateWithANonObjectTimeToLiveLeavesTheDeclaredOneEnabled() throws Exception {
+        existingTable(withTimeToLive(table(false), "expiresAt"));
+        StackResource r = resource("AWS::DynamoDB::Table", "Orders");
+        r.setPhysicalId(TABLE_NAME);
+        JsonNode props = props("{\"TableName\":\"orders\",\"TimeToLiveSpecification\":\"off\"}");
+        ProvisionContext ctx = updateCtx(TABLE_NAME, TTL_PROPS);
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx));
+
+        verify(dynamoDb, never()).updateTimeToLive(anyString(), any(), anyBoolean(), anyString());
+    }
+
     /** CloudFormation renames a TTL attribute by disabling it in one update and enabling the new one in a later one. */
     @Test
     void updateThatRenamesAnEnabledTimeToLiveAttributeFailsBeforeChangingAnything() throws Exception {

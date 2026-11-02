@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.stepfunctions.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
@@ -29,7 +30,7 @@ public class Execution {
     private transient Set<ExecutionStatusSubscription> statusSubscriptions;
 
     public Execution() {
-        this.startDate = System.currentTimeMillis() / 1000.0;
+        this.startDate = EpochSeconds.fromMillis(System.currentTimeMillis());
     }
 
     public String getExecutionArn() { return executionArn; }

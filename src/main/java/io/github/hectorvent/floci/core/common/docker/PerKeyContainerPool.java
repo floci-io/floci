@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.core.common.docker;
 
 import org.jboss.logging.Logger;
 
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -122,14 +124,28 @@ public class PerKeyContainerPool {
      * registration, orphaning it since nothing calls stop for the key again.
      */
     public void stopContainer(String key) {
+        stopContainer(key, false);
+    }
+
+    /** Stops one key only after Docker confirms that its container is gone. */
+    public void stopContainerStrict(String key) {
+        stopContainer(key, true);
+    }
+
+    private void stopContainer(String key, boolean strict) {
         if (key == null) {
             return;
         }
         Object lock = startLocks.computeIfAbsent(key, k -> new Object());
         synchronized (lock) {
-            StartedContainer container = containers.remove(key);
+            StartedContainer container = containers.get(key);
             if (container != null) {
-                lifecycleManager.stopAndRemove(container.containerId(), null);
+                if (strict) {
+                    lifecycleManager.stopAndRemoveStrict(container.containerId(), null);
+                } else {
+                    lifecycleManager.stopAndRemove(container.containerId(), null);
+                }
+                containers.remove(key, container);
             }
         }
     }
@@ -149,5 +165,28 @@ public class PerKeyContainerPool {
             }
         });
         containers.clear();
+    }
+
+    /** Stops unprotected containers, retaining failed removals for a later teardown retry. */
+    public void stopAllStrictExcept(Set<String> protectedKeys) {
+        generation.incrementAndGet();
+        RuntimeException failure = null;
+        for (String key : List.copyOf(containers.keySet())) {
+            if (protectedKeys.contains(key)) {
+                continue;
+            }
+            try {
+                stopContainerStrict(key);
+            } catch (RuntimeException e) {
+                if (failure == null) {
+                    failure = e;
+                } else {
+                    failure.addSuppressed(e);
+                }
+            }
+        }
+        if (failure != null) {
+            throw failure;
+        }
     }
 }

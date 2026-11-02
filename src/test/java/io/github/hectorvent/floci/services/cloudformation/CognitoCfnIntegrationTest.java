@@ -15,6 +15,8 @@ import static io.github.hectorvent.floci.testing.RestAssuredJsonUtils.awsAction;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -438,6 +440,221 @@ class CognitoCfnIntegrationTest {
         cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolId + "\"}")
             .then()
             .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    /**
+     * EnabledMfas is not a CreateUserPool member: CloudFormation applies it with
+     * SetUserPoolMfaConfig, so GetUserPoolMfaConfig reports the factors the template enabled.
+     */
+    @Test
+    void enabledMfasTurnsOnTheListedFactors() throws Exception {
+        String stack = "cognito-cfn-enabled-mfas-it";
+        cloudFormation(stack, "CreateStack", """
+            {
+              "Resources": {
+                "TotpPool": {
+                  "Type": "AWS::Cognito::UserPool",
+                  "Properties": {
+                    "UserPoolName": "cognito-cfn-totp-pool",
+                    "MfaConfiguration": "ON",
+                    "EnabledMfas": ["SOFTWARE_TOKEN_MFA"]
+                  }
+                },
+                "SmsEmailPool": {
+                  "Type": "AWS::Cognito::UserPool",
+                  "Properties": {
+                    "UserPoolName": "cognito-cfn-sms-email-pool",
+                    "MfaConfiguration": "OPTIONAL",
+                    "EnabledMfas": ["SMS_MFA", "EMAIL_OTP"],
+                    "SmsAuthenticationMessage": "Your code is {####}",
+                    "SmsConfiguration": {"SnsCallerArn": "arn:aws:iam::000000000000:role/sms", "ExternalId": "ext"},
+                    "EmailAuthenticationMessage": "Your email code is {####}",
+                    "EmailAuthenticationSubject": "Sign-in code"
+                  }
+                }
+              },
+              "Outputs": {
+                "TotpPoolId": {"Value": {"Ref": "TotpPool"}},
+                "SmsEmailPoolId": {"Value": {"Ref": "SmsEmailPool"}}
+              }
+            }
+            """);
+        String stacks = describeStacks(stack, "CREATE_COMPLETE");
+
+        cognitoAction("GetUserPoolMfaConfig", "{\"UserPoolId\": \"" + outputValue(stacks, "TotpPoolId") + "\"}")
+            .then().statusCode(200)
+            .body("MfaConfiguration", equalTo("ON"))
+            .body("SoftwareTokenMfaConfiguration.Enabled", equalTo(true));
+
+        cognitoAction("GetUserPoolMfaConfig", "{\"UserPoolId\": \"" + outputValue(stacks, "SmsEmailPoolId") + "\"}")
+            .then().statusCode(200)
+            .body("MfaConfiguration", equalTo("OPTIONAL"))
+            .body("SmsMfaConfiguration.SmsAuthenticationMessage", equalTo("Your code is {####}"))
+            .body("SmsMfaConfiguration.SmsConfiguration.ExternalId", equalTo("ext"))
+            .body("EmailMfaConfiguration.Message", equalTo("Your email code is {####}"))
+            .body("EmailMfaConfiguration.Subject", equalTo("Sign-in code"));
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    /** An update leaves exactly the factors the new template lists, as CloudFormation does on AWS. */
+    @Test
+    void anUpdateDropsTheFactorsEnabledMfasNoLongerLists() throws Exception {
+        String stack = "cognito-cfn-enabled-mfas-update-it";
+        cloudFormation(stack, "CreateStack", enabledMfasTemplate(
+            "\"MfaConfiguration\": \"ON\", \"EnabledMfas\": [\"SOFTWARE_TOKEN_MFA\"]"));
+        String poolId = outputValue(describeStacks(stack, "CREATE_COMPLETE"), "PoolId");
+
+        cloudFormation(stack, "UpdateStack", enabledMfasTemplate(
+            "\"MfaConfiguration\": \"OPTIONAL\", \"EnabledMfas\": [\"SMS_MFA\"], "
+                + "\"SmsConfiguration\": {\"SnsCallerArn\": \"arn:aws:iam::000000000000:role/sms\"}"));
+        describeStacks(stack, "UPDATE_COMPLETE");
+        cognitoAction("GetUserPoolMfaConfig", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("MfaConfiguration", equalTo("OPTIONAL"))
+            .body("SoftwareTokenMfaConfiguration", nullValue())
+            .body("SmsMfaConfiguration.SmsConfiguration.SnsCallerArn", equalTo("arn:aws:iam::000000000000:role/sms"));
+
+        cloudFormation(stack, "UpdateStack", enabledMfasTemplate("\"MfaConfiguration\": \"OFF\""));
+        describeStacks(stack, "UPDATE_COMPLETE");
+        cognitoAction("GetUserPoolMfaConfig", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("MfaConfiguration", equalTo("OFF"))
+            .body("SoftwareTokenMfaConfiguration", nullValue())
+            .body("SmsMfaConfiguration", nullValue());
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    /** Once SMS_MFA is enabled, only MfaConfiguration OFF turns it off, per the template reference. */
+    @Test
+    void anUpdateKeepsSmsMfaUntilMfaIsTurnedOff() throws Exception {
+        String stack = "cognito-cfn-enabled-mfas-keep-sms-it";
+        String smsConfiguration = "\"SmsConfiguration\": {\"SnsCallerArn\": \"arn:aws:iam::000000000000:role/sms\"}";
+        cloudFormation(stack, "CreateStack", enabledMfasTemplate(
+            "\"MfaConfiguration\": \"OPTIONAL\", \"EnabledMfas\": [\"SMS_MFA\", \"SOFTWARE_TOKEN_MFA\"], "
+                + smsConfiguration));
+        String poolId = outputValue(describeStacks(stack, "CREATE_COMPLETE"), "PoolId");
+
+        cloudFormation(stack, "UpdateStack", enabledMfasTemplate(
+            "\"MfaConfiguration\": \"OPTIONAL\", \"EnabledMfas\": [\"SOFTWARE_TOKEN_MFA\"], "
+                + "\"SmsAuthenticationMessage\": \"New code {####}\", "
+                + "\"SmsConfiguration\": {\"SnsCallerArn\": \"arn:aws:iam::000000000000:role/sms-v2\"}"));
+        describeStacks(stack, "UPDATE_COMPLETE");
+        cognitoAction("GetUserPoolMfaConfig", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("MfaConfiguration", equalTo("OPTIONAL"))
+            .body("SoftwareTokenMfaConfiguration.Enabled", equalTo(true))
+            .body("SmsMfaConfiguration.SmsAuthenticationMessage", equalTo("New code {####}"))
+            .body("SmsMfaConfiguration.SmsConfiguration.SnsCallerArn", equalTo("arn:aws:iam::000000000000:role/sms-v2"));
+        cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("UserPool.SmsAuthenticationMessage", equalTo("New code {####}"))
+            .body("UserPool.SmsConfiguration.SnsCallerArn", equalTo("arn:aws:iam::000000000000:role/sms-v2"));
+
+        cloudFormation(stack, "UpdateStack", enabledMfasTemplate("\"MfaConfiguration\": \"OFF\""));
+        describeStacks(stack, "UPDATE_COMPLETE");
+        assertMfa(poolId, "OFF", false, false);
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    /** OFF with a listed factor is refused by SetUserPoolMfaConfig after the pool exists. */
+    @Test
+    void aRefusedEnabledMfasOnCreateRemovesThePool() throws Exception {
+        String stack = "cognito-cfn-mfa-refused-create-it";
+        String poolName = "cognito-cfn-mfa-refused-create-pool";
+        cloudFormation(stack, "CreateStack", enabledMfasTemplate(poolName,
+            "\"MfaConfiguration\": \"OFF\", \"EnabledMfas\": [\"SOFTWARE_TOKEN_MFA\"]", ""));
+        awaitStackStatus(stack, "ROLLBACK_COMPLETE");
+
+        cognitoAction("ListUserPools", "{\"MaxResults\": 60}")
+            .then().statusCode(200)
+            .body("UserPools.Name", not(hasItem(poolName)));
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    @Test
+    void aRefusedEnabledMfasOnUpdatePutsThePoolBack() throws Exception {
+        String stack = "cognito-cfn-mfa-refused-update-it";
+        String poolName = "cognito-cfn-mfa-refused-update-pool";
+        cloudFormation(stack, "CreateStack", enabledMfasTemplate(poolName,
+            "\"MfaConfiguration\": \"ON\", \"EnabledMfas\": [\"SOFTWARE_TOKEN_MFA\"]", ""));
+        String poolId = outputValue(describeStacks(stack, "CREATE_COMPLETE"), "PoolId");
+
+        cloudFormation(stack, "UpdateStack", enabledMfasTemplate(poolName + "-v2",
+            "\"MfaConfiguration\": \"OFF\", \"EnabledMfas\": [\"SOFTWARE_TOKEN_MFA\"]", ""));
+        awaitStackStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
+
+        cognitoAction("DescribeUserPool", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("UserPool.Name", equalTo(poolName));
+        assertMfa(poolId, "ON", true, false);
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    @Test
+    void aLaterFailurePutsTheReplacedFactorsBack() throws Exception {
+        String stack = "cognito-cfn-mfa-later-failure-it";
+        String poolName = "cognito-cfn-mfa-later-failure-pool";
+        cloudFormation(stack, "CreateStack", enabledMfasTemplate(poolName,
+            "\"MfaConfiguration\": \"ON\", \"EnabledMfas\": [\"SOFTWARE_TOKEN_MFA\"]", ""));
+        String poolId = outputValue(describeStacks(stack, "CREATE_COMPLETE"), "PoolId");
+
+        String failingSecret = """
+            ,
+                "BadSecret": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "DependsOn": "Pool",
+                  "Properties": {
+                    "Name": "cognito-cfn-mfa-later-failure",
+                    "SecretString": "explicit",
+                    "GenerateSecretString": {"PasswordLength": 32}
+                  }
+                }""";
+        cloudFormation(stack, "UpdateStack", enabledMfasTemplate(poolName,
+            "\"MfaConfiguration\": \"OPTIONAL\", \"EnabledMfas\": [\"SMS_MFA\"], "
+                + "\"SmsConfiguration\": {\"SnsCallerArn\": \"arn:aws:iam::000000000000:role/sms\"}",
+            failingSecret));
+        awaitStackStatus(stack, "UPDATE_ROLLBACK_COMPLETE");
+
+        assertMfa(poolId, "ON", true, false);
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    private static void assertMfa(String poolId, String mode, boolean softwareToken, boolean sms) {
+        cognitoAction("GetUserPoolMfaConfig", "{\"UserPoolId\": \"" + poolId + "\"}")
+            .then().statusCode(200)
+            .body("MfaConfiguration", equalTo(mode))
+            .body("SoftwareTokenMfaConfiguration.Enabled", softwareToken ? equalTo(true) : nullValue())
+            .body("SmsMfaConfiguration", sms ? notNullValue() : nullValue());
+    }
+
+    private static String enabledMfasTemplate(String mfaProperties) {
+        return enabledMfasTemplate("cognito-cfn-mfa-update-pool", mfaProperties, "");
+    }
+
+    private static String enabledMfasTemplate(String poolName, String mfaProperties, String extraResources) {
+        return """
+            {
+              "Resources": {
+                "Pool": {
+                  "Type": "AWS::Cognito::UserPool",
+                  "Properties": {"UserPoolName": "%s", %s}
+                }%s
+              },
+              "Outputs": {"PoolId": {"Value": {"Ref": "Pool"}}}
+            }
+            """.formatted(poolName, mfaProperties, extraResources);
     }
 
     private static String deletionProtectionTemplate(String deletionProtection) {

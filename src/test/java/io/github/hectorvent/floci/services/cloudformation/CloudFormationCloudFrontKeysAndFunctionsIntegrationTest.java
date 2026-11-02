@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -65,15 +66,14 @@ class CloudFormationCloudFrontKeysAndFunctionsIntegrationTest {
         assertEquals(functionArn, output(describe, "FunctionArn"));
         assertEquals(functionArn, output(describe, "FunctionMetadataArn"));
         assertEquals("LIVE", output(describe, "FunctionStage"));
-        assertEquals("v1", cloudFrontService.describeFunction(functionName, "LIVE").getFunctionCode());
+        assertFunctionCode(functionName, "LIVE", "v1");
         assertEquals(Map.of("Env", "test"), cloudFrontService.listTagsForResource(functionArn));
 
         String otherStack = stackName + "-other";
         stackCall("CreateStack", otherStack, template(suffix + "-other", rsaPublicKeyPem(), "other",
                 functionName, "other code"));
         assertStatus(otherStack, "ROLLBACK_COMPLETE");
-        assertEquals("v1", cloudFrontService.describeFunction(functionName, null).getFunctionCode(),
-                "a second stack cannot take the name, and its rollback keeps the first function");
+        assertFunctionCode(functionName, "DEVELOPMENT", "v1");
 
         stackCall("UpdateStack", stackName, template(suffix, pem, "second", functionName, "v2"));
         assertStatus(stackName, "UPDATE_COMPLETE");
@@ -82,8 +82,8 @@ class CloudFormationCloudFrontKeysAndFunctionsIntegrationTest {
         assertEquals("second", cloudFrontService.getPublicKey(publicKeyId).getComment());
         assertEquals(keyGroupId, output(describe, "KeyGroupRef"));
         assertEquals(functionArn, output(describe, "FunctionRef"), "a code change keeps the function");
-        assertEquals("v2", cloudFrontService.describeFunction(functionName, null).getFunctionCode());
-        assertEquals("v2", cloudFrontService.describeFunction(functionName, "LIVE").getFunctionCode());
+        assertFunctionCode(functionName, "DEVELOPMENT", "v2");
+        assertFunctionCode(functionName, "LIVE", "v2");
 
         String renamed = functionName + "-renamed";
         stackCall("UpdateStack", stackName, template(suffix, pem, "second", renamed, "v2"));
@@ -105,6 +105,16 @@ class CloudFormationCloudFrontKeysAndFunctionsIntegrationTest {
     private void assertFunctionGone(String name) {
         AwsException e = assertThrows(AwsException.class, () -> cloudFrontService.describeFunction(name, null));
         assertEquals("NoSuchFunctionExists", e.getErrorCode());
+    }
+
+    private void assertFunctionCode(String name, String stage, String expected) {
+        given()
+            .queryParam("Stage", stage)
+        .when()
+            .get("/2020-05-31/function/" + name)
+        .then()
+            .statusCode(200)
+            .body(equalTo(expected));
     }
 
     private static String rsaPublicKeyPem() throws Exception {

@@ -25,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
+	"github.com/aws/aws-sdk-go-v2/service/lambdaweb"
 	"github.com/aws/aws-sdk-go-v2/service/neptune"
 	"github.com/aws/aws-sdk-go-v2/service/pipes"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
@@ -89,6 +90,11 @@ func DynamoDBClient() *dynamodb.Client {
 // LambdaClient returns a new Lambda client.
 func LambdaClient() *lambda.Client {
 	return lambda.NewFromConfig(Config())
+}
+
+// LambdaWebClient returns a new Lambda Web Functions client.
+func LambdaWebClient() *lambdaweb.Client {
+	return lambdaweb.NewFromConfig(Config())
 }
 
 // GlueClient returns a new Glue client.

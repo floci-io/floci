@@ -8,6 +8,8 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -15,12 +17,19 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.xml.HasXPath.hasXPath;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 
 /** Verifies CloudFront REST XML payload roots against the AWS service model. */
 @QuarkusTest
 class CloudFrontManagementProtocolTest {
 
     private static final String API = "/2020-05-31/";
+
+    private static final String FUNCTION_CODE = "function handler(event) { return event.request; }";
+
+    private static String encodedFunctionCode() {
+        return Base64.getEncoder().encodeToString(FUNCTION_CODE.getBytes(StandardCharsets.UTF_8));
+    }
 
     @ParameterizedTest(name = "{0} returns {1}")
     @CsvSource({
@@ -163,9 +172,9 @@ class CloudFrontManagementProtocolTest {
                     <Comment>routing function</Comment>
                     <Runtime>python3</Runtime>
                   </FunctionConfig>
-                  <FunctionCode>function handler(event) { return event.request; }</FunctionCode>
+                  <FunctionCode>%s</FunctionCode>
                 </CreateFunctionRequest>
-                """.formatted(name);
+                """.formatted(name, encodedFunctionCode());
 
         given()
             .contentType("application/xml")
@@ -195,9 +204,9 @@ class CloudFrontManagementProtocolTest {
                     <Comment>routing function</Comment>
                     <Runtime>cloudfront-js-2.0</Runtime>
                   </FunctionConfig>
-                  <FunctionCode>function handler(event) { return event.request; }</FunctionCode>
+                  <FunctionCode>%s</FunctionCode>
                 </CreateFunctionRequest>
-                """.formatted(name);
+                """.formatted(name, encodedFunctionCode());
 
         String developmentEtag = given()
             .contentType("application/xml")
@@ -256,7 +265,8 @@ class CloudFrontManagementProtocolTest {
         .then()
             .statusCode(200)
             .contentType("application/octet-stream")
-            .body(equalTo("function handler(event) { return event.request; }"));
+            .header("ETag", equalTo(developmentEtag))
+            .body(equalTo(FUNCTION_CODE));
 
         given()
             .header("If-Match", developmentEtag)
@@ -300,6 +310,83 @@ class CloudFrontManagementProtocolTest {
         given().header("If-Match", updatedEtag)
                 .when().delete(API + "function/" + name)
                 .then().statusCode(204);
+    }
+
+    @Test
+    void getFunctionReturnsTheDecodedFunctionCodeAfterAnUpdate() {
+        String name = "get-code-" + UUID.randomUUID();
+        byte[] updatedCode = "function handler(event) { return event.response; }"
+                .getBytes(StandardCharsets.UTF_8);
+        String createBody = """
+                <CreateFunctionRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <Name>%s</Name>
+                  <FunctionConfig>
+                    <Comment>routing function</Comment>
+                    <Runtime>cloudfront-js-2.0</Runtime>
+                  </FunctionConfig>
+                  <FunctionCode>%s</FunctionCode>
+                </CreateFunctionRequest>
+                """.formatted(name, encodedFunctionCode());
+
+        String etag = given()
+            .contentType("application/xml")
+            .body(createBody)
+        .when()
+            .post(API + "function")
+        .then()
+            .statusCode(201)
+            .extract().header("ETag");
+
+        byte[] createdCode = given()
+            .queryParam("Stage", "DEVELOPMENT")
+        .when()
+            .get(API + "function/" + name)
+        .then()
+            .statusCode(200)
+            .contentType("application/octet-stream")
+            .header("ETag", equalTo(etag))
+            .extract().asByteArray();
+
+        assertArrayEquals(FUNCTION_CODE.getBytes(StandardCharsets.UTF_8), createdCode);
+
+        String updateBody = """
+                <UpdateFunctionRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <FunctionConfig>
+                    <Comment>routing function</Comment>
+                    <Runtime>cloudfront-js-2.0</Runtime>
+                  </FunctionConfig>
+                  <FunctionCode>%s</FunctionCode>
+                </UpdateFunctionRequest>
+                """.formatted(Base64.getEncoder().encodeToString(updatedCode));
+
+        String updatedEtag = given()
+            .contentType("application/xml")
+            .header("If-Match", etag)
+            .body(updateBody)
+        .when()
+            .put(API + "function/" + name)
+        .then()
+            .statusCode(200)
+            .extract().header("ETtag");
+
+        byte[] served = given()
+            .queryParam("Stage", "DEVELOPMENT")
+        .when()
+            .get(API + "function/" + name)
+        .then()
+            .statusCode(200)
+            .contentType("application/octet-stream")
+            .header("ETag", equalTo(updatedEtag))
+            .extract().asByteArray();
+
+        assertArrayEquals(updatedCode, served);
+
+        given()
+            .header("If-Match", updatedEtag)
+        .when()
+            .delete(API + "function/" + name)
+        .then()
+            .statusCode(204);
     }
 
     @Test
@@ -350,6 +437,100 @@ class CloudFrontManagementProtocolTest {
         .then()
             .statusCode(400)
             .body(hasXPath("//*[local-name()='Code']/text()", equalTo("InvalidArgument")));
+    }
+
+    @ParameterizedTest(name = "{0} name is the root Name, not an item Name")
+    @CsvSource({"cache-policy, CachePolicy", "origin-request-policy, OriginRequestPolicy"})
+    void policyNameIgnoresItemNamesThatPrecedeIt(String endpoint, String type) {
+        String name = "name-order-" + UUID.randomUUID();
+        String items = """
+                <Quantity>1</Quantity><Items><Name>Session-ID</Name></Items>""";
+        String params = """
+                <HeadersConfig><HeaderBehavior>whitelist</HeaderBehavior>
+                  <Headers><Quantity>1</Quantity><Items><Name>X-Hdr</Name></Items></Headers></HeadersConfig>
+                <CookiesConfig><CookieBehavior>whitelist</CookieBehavior>
+                  <Cookies>%s</Cookies></CookiesConfig>
+                <QueryStringsConfig><QueryStringBehavior>whitelist</QueryStringBehavior>
+                  <QueryStrings>%s</QueryStrings></QueryStringsConfig>
+                """.formatted(items, items);
+        String config = endpoint.equals("cache-policy")
+                ? "<ParametersInCacheKeyAndForwardedToOrigin>"
+                  + "<EnableAcceptEncodingGzip>false</EnableAcceptEncodingGzip>" + params
+                  + "</ParametersInCacheKeyAndForwardedToOrigin><MinTTL>0</MinTTL>"
+                : params;
+        String body = "<" + type + "Config xmlns=\"http://cloudfront.amazonaws.com/doc/2020-05-31/\">"
+                + config + "<Comment>real-comment</Comment><Name>" + name + "</Name></" + type + "Config>";
+        Response created = given().contentType("application/xml").body(body)
+                .when().post(API + endpoint);
+        created.then().statusCode(201);
+        String id = XmlParser.extractFirst(created.asString(), "Id", null);
+        String etag = created.header("ETag");
+        try {
+            given().when().get(API + endpoint + "/" + id + "/config").then().statusCode(200)
+                    .body(hasXPath("/*/*[local-name()='Name']/text()", equalTo(name)))
+                    .body(hasXPath("/*/*[local-name()='Comment']/text()", equalTo("real-comment")));
+            given().when().get(API + endpoint).then().statusCode(200)
+                    .body(hasXPath("//*[local-name()='" + type + "Summary']/*[local-name()='" + type
+                            + "']/*[local-name()='" + type + "Config']/*[local-name()='Name' and text()='"
+                            + name + "']"));
+        } finally {
+            given().header("If-Match", etag).when().delete(API + endpoint + "/" + id)
+                    .then().statusCode(204);
+        }
+    }
+
+    @ParameterizedTest(name = "{0} keeps the Comment's surrounding whitespace")
+    @ValueSource(strings = {"cache-policy", "origin-request-policy", "response-headers-policy"})
+    void policyCommentRoundTripsWithSurroundingWhitespace(String endpoint) {
+        String name = "padded-" + UUID.randomUUID();
+        String comment = "\n  padded comment  \n";
+        String body = switch (endpoint) {
+            case "cache-policy" -> cachePolicyBody(name, comment, "3600", "session");
+            case "origin-request-policy" -> originRequestPolicyBody(name, comment, "X-Hdr");
+            default -> "<ResponseHeadersPolicyConfig xmlns=\"http://cloudfront.amazonaws.com/doc/2020-05-31/\">"
+                    + "<Name>" + name + "</Name><Comment>" + comment + "</Comment></ResponseHeadersPolicyConfig>";
+        };
+        Response created = given().contentType("application/xml").body(body)
+                .when().post(API + endpoint);
+        created.then().statusCode(201);
+        String id = XmlParser.extractFirst(created.asString(), "Id", null);
+        try {
+            given().when().get(API + endpoint + "/" + id + "/config").then().statusCode(200)
+                    .body(hasXPath("/*/*[local-name()='Comment']/text()", equalTo(comment)));
+        } finally {
+            given().header("If-Match", created.header("ETag")).when().delete(API + endpoint + "/" + id)
+                    .then().statusCode(204);
+        }
+    }
+
+    @ParameterizedTest(name = "{0} keeps the Name's surrounding whitespace")
+    @ValueSource(strings = {"cache-policy", "origin-request-policy"})
+    void policyNameRoundTripsWithSurroundingWhitespace(String endpoint) {
+        String name = "  padded-" + UUID.randomUUID() + "  ";
+        String body = endpoint.equals("cache-policy")
+                ? cachePolicyBody(name, "c", "3600", "session")
+                : originRequestPolicyBody(name, "c", "X-Hdr");
+        Response created = given().contentType("application/xml").body(body)
+                .when().post(API + endpoint);
+        created.then().statusCode(201);
+        String id = XmlParser.extractFirst(created.asString(), "Id", null);
+        try {
+            given().when().get(API + endpoint + "/" + id + "/config").then().statusCode(200)
+                    .body(hasXPath("/*/*[local-name()='Name']/text()", equalTo(name)));
+        } finally {
+            given().header("If-Match", created.header("ETag")).when().delete(API + endpoint + "/" + id)
+                    .then().statusCode(204);
+        }
+    }
+
+    @Test
+    void responseHeadersPolicyRejectsNameWithSurroundingWhitespace() {
+        // Name pattern [A-Za-z0-9_-]{1,128} has no spaces; trimming would wrongly accept it.
+        given().contentType("application/xml")
+                .body("<ResponseHeadersPolicyConfig xmlns=\"http://cloudfront.amazonaws.com/doc/2020-05-31/\">"
+                        + "<Name>  padded-" + UUID.randomUUID() + "  </Name></ResponseHeadersPolicyConfig>")
+                .when().post(API + "response-headers-policy")
+                .then().statusCode(400);
     }
 
     @Test

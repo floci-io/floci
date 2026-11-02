@@ -40,7 +40,7 @@ class BedrockServiceTest {
     @BeforeEach
     void setUp() {
         kmsService = mock(KmsService.class);
-        service = new BedrockService(new InMemoryStorage<>(),
+        service = new BedrockService(new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new RegionResolver(REGION, ACCOUNT), mapper, kmsService);
     }
 
@@ -560,5 +560,90 @@ class BedrockServiceTest {
         assertThrows(AwsException.class,
                 () -> service.getGuardrail(created.getGuardrailId(), null, "eu-west-1"));
         assertTrue(service.listGuardrails(null, null, null, "eu-west-1").items().isEmpty());
+    }
+
+    private static final String PROFILE_ARN_US_EAST_2 =
+            "arn:aws:bedrock:us-east-2:" + ACCOUNT + ":guardrail-profile/us.guardrail.v1:0";
+
+    private static String rootPolicy(String resourceArn, String action) {
+        return """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"%s","Resource":"%s"}]}
+                """.formatted(ACCOUNT, action, resourceArn);
+    }
+
+    @Test
+    void guardrailResourcePolicyLivesOnTheDraftAndNotOnItsVersions() {
+        Guardrail created = create("with-policy");
+        String policy = rootPolicy(created.getGuardrailArn(), "bedrock:ApplyGuardrail");
+
+        assertNull(service.getResourcePolicy(created.getGuardrailArn(), REGION));
+        service.putResourcePolicy(created.getGuardrailArn(), policy, REGION);
+        Guardrail version = service.createGuardrailVersion(created.getGuardrailId(), null, REGION);
+
+        assertEquals(policy, service.getResourcePolicy(created.getGuardrailArn(), REGION));
+        assertNull(version.getResourcePolicy());
+        service.deleteResourcePolicy(created.getGuardrailArn(), REGION);
+        assertNull(service.getResourcePolicy(created.getGuardrailArn(), REGION));
+    }
+
+    @Test
+    void guardrailResourcePolicyIsFoundByItsExactArnOnly() {
+        Guardrail created = create("exact-arn");
+        String policy = rootPolicy(created.getGuardrailArn(), "bedrock:ApplyGuardrail");
+
+        for (String other : List.of(created.getGuardrailId(),
+                created.getGuardrailArn().replace(ACCOUNT, "111122223333"),
+                created.getGuardrailArn().replace(":guardrail/", ":custom-model/"))) {
+            AwsException e = assertThrows(AwsException.class, () -> service.getResourcePolicy(other, REGION));
+            assertEquals("ResourceNotFoundException", e.getErrorCode(), other);
+        }
+        AwsException otherRegion = assertThrows(AwsException.class,
+                () -> service.putResourcePolicy(created.getGuardrailArn(), policy, "eu-west-1"));
+        assertEquals("ResourceNotFoundException", otherRegion.getErrorCode());
+    }
+
+    @Test
+    void guardrailProfilePolicyIsKeptUnderTheRegionThatStoredIt() {
+        String policy = rootPolicy(PROFILE_ARN_US_EAST_2, "bedrock:ApplyGuardrail");
+
+        service.putResourcePolicy(PROFILE_ARN_US_EAST_2, policy, REGION);
+
+        assertEquals(policy, service.getResourcePolicy(PROFILE_ARN_US_EAST_2, REGION));
+        assertEquals("{}", service.getResourcePolicy(PROFILE_ARN_US_EAST_2, "us-east-2"));
+    }
+
+    @Test
+    void deletingAGuardrailProfilePolicyLeavesTheEmptyPolicy() {
+        assertEquals("{}", service.getResourcePolicy(PROFILE_ARN_US_EAST_2, REGION));
+        service.putResourcePolicy(PROFILE_ARN_US_EAST_2, rootPolicy(PROFILE_ARN_US_EAST_2, "bedrock:ApplyGuardrail"),
+                REGION);
+
+        service.deleteResourcePolicy(PROFILE_ARN_US_EAST_2, REGION);
+
+        assertEquals("{}", service.getResourcePolicy(PROFILE_ARN_US_EAST_2, REGION));
+    }
+
+    @Test
+    void guardrailProfilePolicyAllowsOnlyApplyGuardrail() {
+        AwsException e = assertThrows(AwsException.class, () -> service.putResourcePolicy(PROFILE_ARN_US_EAST_2,
+                rootPolicy(PROFILE_ARN_US_EAST_2, "bedrock:GetGuardrail"), REGION));
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void guardrailProfileOfAnotherAccountOrPartitionOrWithAMalformedIdIsNotFound() {
+        String chinaProfile = "arn:aws-cn:bedrock:cn-north-1:" + ACCOUNT + ":guardrail-profile/cn.guardrail.v1:0";
+        for (String arn : List.of(PROFILE_ARN_US_EAST_2.replace(ACCOUNT, "111122223333"),
+                PROFILE_ARN_US_EAST_2.replace(":" + ACCOUNT + ":", "::"),
+                PROFILE_ARN_US_EAST_2.replace("us.guardrail.v1:0", "not-a-profile"),
+                chinaProfile,
+                chinaProfile.replace("arn:aws-cn:", "arn:aws:"))) {
+            AwsException e = assertThrows(AwsException.class, () -> service.getResourcePolicy(arn, REGION));
+            assertEquals("ResourceNotFoundException", e.getErrorCode(), arn);
+            AwsException put = assertThrows(AwsException.class, () -> service.putResourcePolicy(arn,
+                    rootPolicy(arn, "bedrock:ApplyGuardrail"), REGION));
+            assertEquals("ResourceNotFoundException", put.getErrorCode(), arn);
+        }
     }
 }

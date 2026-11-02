@@ -248,6 +248,9 @@ service you need already has a `*CfnProvisioner`, add your type there; otherwise
     `src/test/resources/cloudformation/getatt-attribute-gaps.tsv` with the reason.
     `CfnSchemaCoverageTest` requires every unset attribute to be either fixed or recorded, so
     "not emulated" stays distinguishable from "forgotten".
+    A new type also needs its row in `schema-surface.tsv` (same directory): run
+    `make cfn-schema-surface-sync`. A writable property the provisioner never reads goes in
+    `writable-property-gaps.tsv`.
 
 `SqsCfnProvisioner` is the smallest reference implementation; `Ec2LaunchTemplateCfnProvisioner`
 shows update-in-place and replacement handling; `LogsCfnProvisioner` shows a full reconcile-vs-replace
@@ -349,8 +352,13 @@ DNS suffix; a literal that really is partition-invariant goes in
 
 The partition catalog itself (`src/main/resources/aws/partitions.json`: ids, DNS suffixes,
 regions, opt-in flags, global endpoints) is generated from botocore's published data by
-`make aws-data-sync` and checked by `make aws-data-check` in CI; never hand-edit it. Bump
-`tools/aws/requirements.txt` when regenerating from a newer botocore. The same target
+`make aws-data-sync` and checked by `make aws-data-check` in CI; never hand-edit it. Move to
+a newer botocore with `make botocore-bump VERSION=<release>`: it sets the pin in
+`tools/aws/requirements.txt`, moves `local/aws/botocore` to that release's tag, then regenerates
+and checks only the botocore-derived data, so the bump and its regenerated files land in one pull
+request with nothing from the other `local/aws` sources: the region flags `partitions.json` takes
+from `local/aws/aws-cdk` stay as they are until a `make aws-data-sync`. Dependabot does not track
+botocore for that reason: its bump alone fails `make aws-data-check`. `make aws-data-sync` also
 regenerates the IAM managed-policy catalog (`src/main/resources/iam/managed-polic*`) from the
 `local/aws/iam-dataset` checkout; without that checkout, as in CI, `make aws-data-check` only
 verifies the catalog's shape.

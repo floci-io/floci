@@ -7,6 +7,7 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dsql.DsqlClient;
 import software.amazon.awssdk.services.dsql.model.ClusterStatus;
@@ -44,6 +45,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @DisplayName("Aurora DSQL")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@ResourceLock("port-5432")
 class DsqlCompatTest {
 
     private static final Region REGION = TestFixtures.region();

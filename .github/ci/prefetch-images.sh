@@ -112,7 +112,7 @@ GRAPHQL_IMAGE="$(grep -oE 'graphql-image: *"[^"]+"' src/main/resources/applicati
 grep -qE '/appsync/|AppSyncCfnIntegrationTest' "$SHARD_FILE" && [ -n "$GRAPHQL_IMAGE" ] && pull "$GRAPHQL_IMAGE"
 # The Node sidecar that evaluates APPSYNC_JS resolver code; the pin lives in application.yml too.
 # Matched on the one class that starts it rather than on /appsync/, since every other test in that
-# package is a unit test: a path match would have all four shards pull an image one of them uses.
+# package is a unit test: a path match would have every shard pull an image one of them uses.
 JS_RUNTIME_IMAGE="$(grep -oE 'image: *"node:[^"]+"' src/main/resources/application.yml | grep -oE '"[^"]+"' | tr -d '"')"
 grep -q 'AppSyncJsResolverDockerIntegrationTest' "$SHARD_FILE" && [ -n "$JS_RUNTIME_IMAGE" ] && pull "$JS_RUNTIME_IMAGE"
 # RdsAwsIntegrationTest is the one class that starts SQL Server (about 1.5 GB); the pin lives in
@@ -121,7 +121,7 @@ SQLSERVER_IMAGE="$(grep -oE 'default-sql-server-image: *"[^"]+"' src/main/resour
 grep -q 'RdsAwsIntegrationTest' "$SHARD_FILE" && [ -n "$SQLSERVER_IMAGE" ] && pull "$SQLSERVER_IMAGE"
 # Postgres is the most-pulled image in CI: Redshift pins it in application.yml, RDS adapts
 # postgres:<version>-alpine to the engine version its tests request (16.3), and the CloudFormation
-# provisioner tests reach it through Redshift. It was pulled inline in all four shards.
+# provisioner tests reach it through Redshift. It was pulled inline in every shard.
 REDSHIFT_PG_IMAGE="$(grep -oE 'image-version: *postgres:[^ ]+' src/main/resources/application.yml | awk '{print $2}')"
 grep -qE '/redshift/|/cloudformation/' "$SHARD_FILE" && [ -n "$REDSHIFT_PG_IMAGE" ] && pull "$REDSHIFT_PG_IMAGE"
 grep -qE '/rds/|/rdsdata/' "$SHARD_FILE" && pull postgres:16.3-alpine

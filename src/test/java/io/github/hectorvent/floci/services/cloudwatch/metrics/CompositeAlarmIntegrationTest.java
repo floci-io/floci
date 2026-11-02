@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
@@ -208,13 +209,83 @@ class CompositeAlarmIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void evaluationReasonsAndRefusalsUseCloudWatchTexts(boolean json) throws Exception {
+        String prefix = "wire-fidelity-" + Long.toString(System.nanoTime(), 36);
+        String child = prefix + "-child";
+        String parent = prefix + "-parent";
+        String other = prefix + "-other";
+        String arn = "arn:aws-cn:cloudwatch:cn-north-1:000000000000:alarm:";
+        // TreatMissingData=ignore keeps the alarm evaluator from resetting the state this test sets.
+        call(json, "PutMetricAlarm", Map.of("AlarmName", child, "Namespace", "Wire/Fidelity", "MetricName", "Errors",
+                "Statistic", "Sum", "Period", 60, "EvaluationPeriods", 1, "Threshold", 1,
+                "ComparisonOperator", "GreaterThanThreshold", "TreatMissingData", "ignore")).then().statusCode(200);
+        call(json, "PutCompositeAlarm", Map.of("AlarmName", parent, "AlarmRule", "ALARM(\"" + child + "\")"))
+                .then().statusCode(200);
+        Map<String, String> created = composite(json, parent);
+        assertEquals("OK", created.get("StateValue"));
+        assertEquals(arn + parent + " was created and its alarm rule evaluates to OK", created.get("StateReason"));
+        JsonNode triggering = MAPPER.readTree(created.get("StateReasonData")).path("triggeringAlarms");
+        assertEquals(1, triggering.size(), created.get("StateReasonData"));
+        assertEquals(arn + child, triggering.path(0).path("arn").asText());
+        assertEquals("INSUFFICIENT_DATA", triggering.path(0).path("state").path("value").asText());
+        assertTrue(triggering.path(0).path("state").path("timestamp").asText()
+                .matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}\\+0000"), created.get("StateReasonData"));
+
+        call(json, "SetAlarmState", Map.of("AlarmName", child, "StateValue", "ALARM", "StateReason", "breached"))
+                .then().statusCode(200);
+        Map<String, String> transitioned = composite(json, parent);
+        assertEquals("ALARM", transitioned.get("StateValue"));
+        assertTrue(transitioned.get("StateReason").matches("\\Q" + arn + child + " transitioned to ALARM at \\E"
+                + "[A-Z][a-z]+day \\d{2} [A-Z][a-z]+, \\d{4} \\d{2}:\\d{2}:\\d{2} UTC"), transitioned.get("StateReason"));
+
+        call(json, "PutCompositeAlarm", Map.of("AlarmName", parent, "AlarmRule", "OK(\"" + child + "\")"))
+                .then().statusCode(200);
+        Map<String, String> updated = composite(json, parent);
+        assertEquals("OK", updated.get("StateValue"));
+        assertEquals(arn + parent + " was updated and its new alarm rule evaluates to OK", updated.get("StateReason"));
+
+        Response missing = call(json, "PutCompositeAlarm", Map.of("AlarmName", other,
+                "AlarmRule", "ALARM(" + prefix + "-missing)"));
+        missing.then().statusCode(400);
+        assertEquals("Could not save the composite alarm as alarms [" + arn + prefix
+                + "-missing] in the alarm rule do not exist", errorMessage(json, missing));
+        Response referenced = call(json, "DeleteAlarms", Map.of("AlarmNames", List.of(child)));
+        referenced.then().statusCode(400);
+        assertEquals("Cannot delete " + child + " as there are composite alarm(s) depending on it.",
+                errorMessage(json, referenced));
+        call(json, "PutCompositeAlarm", Map.of("AlarmName", other, "AlarmRule", "TRUE")).then().statusCode(200);
+        Response two = call(json, "DeleteAlarms", Map.of("AlarmNames", List.of(parent, other)));
+        two.then().statusCode(400);
+        assertEquals("Cannot delete [2] Composite Alarms as only one composite alarm delete is allowed in single request",
+                errorMessage(json, two));
+        assertEquals("OK", composite(json, parent).get("StateValue"));
+        for (String name : List.of(parent, other, child)) {
+            call(json, "DeleteAlarms", Map.of("AlarmNames", List.of(name))).then().statusCode(200);
+        }
+    }
+
+    private Map<String, String> composite(boolean json, String name) throws JsonProcessingException {
+        Response response = call(json, "DescribeAlarms", Map.of("AlarmNames", List.of(name),
+                "AlarmTypes", List.of("CompositeAlarm")));
+        response.then().statusCode(200);
+        Map<String, String> fields = new LinkedHashMap<>();
+        for (String field : List.of("StateValue", "StateReason", "StateReasonData")) {
+            fields.put(field, json ? response.jsonPath().getString("CompositeAlarms[0]." + field)
+                    : response.xmlPath().getString("DescribeAlarmsResponse.DescribeAlarmsResult.CompositeAlarms.member."
+                            + field));
+        }
+        return fields;
+    }
+
     private String errorMessage(boolean json, Response response) {
         return json ? response.jsonPath().getString("message") : response.xmlPath().getString("ErrorResponse.Error.Message");
     }
 
     private Response call(boolean json, String operation, Map<String, ?> body)
             throws JsonProcessingException {
-        if ("PutCompositeAlarm".equals(operation)) {
+        if ("PutCompositeAlarm".equals(operation) || "PutMetricAlarm".equals(operation)) {
             String name = body.get("AlarmName").toString();
             cleanup.register(() -> given().port(baseUri.getPort()).contentType("application/x-amz-json-1.0")
                     .header("Authorization", SCOPE)

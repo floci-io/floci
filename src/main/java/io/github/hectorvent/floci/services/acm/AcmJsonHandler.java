@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.acm.model.Certificate;
 import io.github.hectorvent.floci.services.acm.model.CertificateOptions;
@@ -385,19 +386,19 @@ public class AcmJsonHandler {
         }
 
         if (cert.getCreatedAt() != null) {
-            node.put("CreatedAt", cert.getCreatedAt().toEpochMilli() / 1000.0);
+            node.put("CreatedAt", EpochSeconds.fromInstant(cert.getCreatedAt()));
         }
         if (cert.getIssuedAt() != null) {
-            node.put("IssuedAt", cert.getIssuedAt().toEpochMilli() / 1000.0);
+            node.put("IssuedAt", EpochSeconds.fromInstant(cert.getIssuedAt()));
         }
         if (cert.getImportedAt() != null) {
-            node.put("ImportedAt", cert.getImportedAt().toEpochMilli() / 1000.0);
+            node.put("ImportedAt", EpochSeconds.fromInstant(cert.getImportedAt()));
         }
         if (cert.getNotBefore() != null) {
-            node.put("NotBefore", cert.getNotBefore().toEpochMilli() / 1000.0);
+            node.put("NotBefore", EpochSeconds.fromInstant(cert.getNotBefore()));
         }
         if (cert.getNotAfter() != null) {
-            node.put("NotAfter", cert.getNotAfter().toEpochMilli() / 1000.0);
+            node.put("NotAfter", EpochSeconds.fromInstant(cert.getNotAfter()));
         }
 
         ArrayNode inUseBy = objectMapper.createArrayNode();
@@ -492,19 +493,19 @@ public class AcmJsonHandler {
         node.set("ExtendedKeyUsages", extKeyUsages);
 
         if (cert.getCreatedAt() != null) {
-            node.put("CreatedAt", cert.getCreatedAt().toEpochMilli() / 1000.0);
+            node.put("CreatedAt", EpochSeconds.fromInstant(cert.getCreatedAt()));
         }
         if (cert.getIssuedAt() != null) {
-            node.put("IssuedAt", cert.getIssuedAt().toEpochMilli() / 1000.0);
+            node.put("IssuedAt", EpochSeconds.fromInstant(cert.getIssuedAt()));
         }
         if (cert.getImportedAt() != null) {
-            node.put("ImportedAt", cert.getImportedAt().toEpochMilli() / 1000.0);
+            node.put("ImportedAt", EpochSeconds.fromInstant(cert.getImportedAt()));
         }
         if (cert.getNotBefore() != null) {
-            node.put("NotBefore", cert.getNotBefore().toEpochMilli() / 1000.0);
+            node.put("NotBefore", EpochSeconds.fromInstant(cert.getNotBefore()));
         }
         if (cert.getNotAfter() != null) {
-            node.put("NotAfter", cert.getNotAfter().toEpochMilli() / 1000.0);
+            node.put("NotAfter", EpochSeconds.fromInstant(cert.getNotAfter()));
         }
 
         node.put("RenewalEligibility", "INELIGIBLE");

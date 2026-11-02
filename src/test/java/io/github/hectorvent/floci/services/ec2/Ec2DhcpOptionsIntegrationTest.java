@@ -1,25 +1,32 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.AttributeValue;
 import software.amazon.awssdk.services.ec2.model.DhcpOptions;
+import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -475,6 +482,57 @@ class Ec2DhcpOptionsIntegrationTest {
                 client.deleteDhcpOptions(request -> request.dhcpOptionsId(id));
             }
         }
+    }
+
+    @ParameterizedTest
+    @MethodSource("validDnsServerLists")
+    void dnsServersRoundTripThroughAwsSdk(List<String> servers) {
+        try (Ec2Client client = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1)) {
+            DhcpOptions created = client.createDhcpOptions(request -> request
+                    .dhcpConfigurations(configuration -> configuration.key("domain-name-servers")
+                            .values(servers))).dhcpOptions();
+            try {
+                assertEquals(servers, created.dhcpConfigurations().getFirst().values().stream()
+                        .map(AttributeValue::value).toList());
+                DhcpOptions described = client.describeDhcpOptions(request -> request
+                        .dhcpOptionsIds(created.dhcpOptionsId())).dhcpOptions().getFirst();
+                assertEquals(servers, described.dhcpConfigurations().getFirst().values().stream()
+                        .map(AttributeValue::value).toList());
+            } finally {
+                client.deleteDhcpOptions(request -> request.dhcpOptionsId(created.dhcpOptionsId()));
+            }
+        }
+    }
+
+    static Stream<List<String>> validDnsServerLists() {
+        return Stream.of(
+                List.of("AmazonProvidedDNS"),
+                List.of("AmazonProvidedDNS", "8.8.8.8"),
+                List.of("8.8.8.8", "AmazonProvidedDNS"),
+                List.of("AmazonProvidedDNS", "10.0.0.1", "10.0.0.2", "10.0.0.3",
+                        "2001:db8::1", "2001:db8::2", "2001:db8::3", "2001:db8::4"),
+                List.of("10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4",
+                        "2001:db8::1", "2001:db8::2", "2001:db8::3", "2001:db8::4"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidDnsServerLists")
+    void invalidDnsServersStillFailWithInvalidParameterValue(List<String> servers) {
+        try (Ec2Client client = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1)) {
+            Ec2Exception failure = assertThrows(Ec2Exception.class, () -> client.createDhcpOptions(request -> request
+                    .dhcpConfigurations(configuration -> configuration.key("domain-name-servers").values(servers))));
+            assertEquals(400, failure.statusCode());
+            assertEquals("InvalidParameterValue", failure.awsErrorDetails().errorCode());
+        }
+    }
+
+    static Stream<List<String>> invalidDnsServerLists() {
+        return Stream.of(
+                List.of("AmazonProvidedDNS", "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"),
+                List.of("AmazonProvidedDNS", "2001:db8::1", "2001:db8::2", "2001:db8::3",
+                        "2001:db8::4", "2001:db8::5"),
+                List.of("AmazonProvidedDNS", "not-an-ip"),
+                List.of("amazonprovideddns", "10.0.0.1"));
     }
 
     private String createOptions(String domain) {

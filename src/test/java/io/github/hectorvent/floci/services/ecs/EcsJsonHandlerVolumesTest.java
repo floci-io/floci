@@ -160,6 +160,87 @@ class EcsJsonHandlerVolumesTest {
     }
 
     @Test
+    void registerTaskDefinitionOmitsReadOnlyFromMountPointsAndVolumesFromThatNeverSentIt() throws Exception {
+        String requestJson = """
+                {
+                  "family": "td",
+                  "containerDefinitions": [
+                    {
+                      "name": "a",
+                      "image": "nginx",
+                      "memory": 128,
+                      "essential": true,
+                      "mountPoints": [
+                        {"sourceVolume": "v", "containerPath": "/a"}
+                      ]
+                    },
+                    {
+                      "name": "b",
+                      "image": "nginx",
+                      "memory": 128,
+                      "essential": false,
+                      "volumesFrom": [
+                        {"sourceContainer": "a"}
+                      ]
+                    }
+                  ],
+                  "volumes": [{"name": "v"}]
+                }
+                """;
+        JsonNode request = objectMapper.readTree(requestJson);
+
+        Response response = handler.handle("RegisterTaskDefinition", request, "us-east-1");
+        JsonNode td = objectMapper.valueToTree(response.getEntity()).path("taskDefinition");
+        JsonNode containerA = td.path("containerDefinitions").get(0);
+        JsonNode containerB = td.path("containerDefinitions").get(1);
+
+        assertTrue(containerA.path("mountPoints").get(0).path("readOnly").isMissingNode(),
+                "a mountPoint registered without readOnly must not gain one");
+        assertTrue(containerB.path("volumesFrom").get(0).path("readOnly").isMissingNode(),
+                "a volumesFrom entry registered without readOnly must not gain one");
+    }
+
+    @Test
+    void registerTaskDefinitionEchoesAnExplicitReadOnlyOnMountPointsAndVolumesFrom() throws Exception {
+        String requestJson = """
+                {
+                  "family": "td-explicit-readonly",
+                  "containerDefinitions": [
+                    {
+                      "name": "app",
+                      "image": "nginx",
+                      "memory": 128,
+                      "essential": true,
+                      "mountPoints": [
+                        {"sourceVolume": "v", "containerPath": "/ro", "readOnly": true},
+                        {"sourceVolume": "v", "containerPath": "/rw", "readOnly": false}
+                      ],
+                      "volumesFrom": [
+                        {"sourceContainer": "other", "readOnly": true},
+                        {"sourceContainer": "other2", "readOnly": false}
+                      ]
+                    }
+                  ],
+                  "volumes": [{"name": "v"}]
+                }
+                """;
+        JsonNode request = objectMapper.readTree(requestJson);
+
+        Response response = handler.handle("RegisterTaskDefinition", request, "us-east-1");
+        JsonNode td = objectMapper.valueToTree(response.getEntity()).path("taskDefinition");
+        JsonNode definition = td.path("containerDefinitions").get(0);
+        JsonNode mps = definition.path("mountPoints");
+        JsonNode volumesFrom = definition.path("volumesFrom");
+
+        assertTrue(mps.get(0).path("readOnly").asBoolean(), "explicit readOnly true must round-trip");
+        assertFalse(mps.get(1).path("readOnly").asBoolean(), "explicit readOnly false must round-trip");
+        assertTrue(volumesFrom.get(0).path("readOnly").asBoolean(),
+                "explicit volumesFrom readOnly true must round-trip");
+        assertFalse(volumesFrom.get(1).path("readOnly").asBoolean(),
+                "explicit volumesFrom readOnly false must round-trip");
+    }
+
+    @Test
     void registerTaskDefinitionRoundTripsEfsVolumeConfiguration() throws Exception {
         String requestJson = """
                 {

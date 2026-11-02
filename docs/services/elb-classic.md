@@ -86,8 +86,11 @@ opened and no traffic is forwarded. Only the control plane and health checking a
   satisfied.
 - A listener's `SSLCertificateId` must name an existing certificate: an IAM server certificate ARN
   or an ACM certificate ARN. `CreateLoadBalancer` and `CreateLoadBalancerListeners` reject a
-  missing one with `CertificateNotFound`. An IAM server certificate a listener references cannot
-  be deleted: `DeleteServerCertificate` returns `DeleteConflict` until the listener is removed.
+  missing one with `CertificateNotFound`, and a blank one on an HTTPS or SSL listener; an HTTP or
+  TCP listener may carry a blank one, as Terraform sends. A certificate a listener references cannot be
+  deleted until the listener is removed: `DeleteServerCertificate` returns `DeleteConflict`, and
+  ACM's `DeleteCertificate` returns `ResourceInUseException` and lists the load balancer under
+  `InUseBy`.
 
 ## Configuration
 

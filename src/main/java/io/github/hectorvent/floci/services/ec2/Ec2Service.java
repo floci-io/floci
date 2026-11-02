@@ -2715,7 +2715,26 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             putTags(region, attachmentId, new ArrayList<>(attachmentTags));
         }
         transitGatewayVpcAttachments.put(key(region, attachmentId), attachment);
+        String propagationTableId = gateway.getOptions().getPropagationDefaultRouteTableId();
+        if ("enable".equals(gateway.getOptions().getDefaultRouteTablePropagation()) && propagationTableId != null) {
+            storePropagation(region, propagationTableId, attachmentId, vpcId);
+        }
         return attachment;
+    }
+
+    private TransitGatewayRouteTablePropagation storePropagation(
+            String region, String routeTableId, String attachmentId, String vpcId) {
+        TransitGatewayRouteTablePropagation propagation = new TransitGatewayRouteTablePropagation();
+        propagation.setTransitGatewayRouteTableId(routeTableId);
+        propagation.setTransitGatewayAttachmentId(attachmentId);
+        propagation.setResourceId(vpcId);
+        propagation.setResourceType("vpc");
+        // Verified live: propagation reports the settled state at once, where association
+        // reports associating first.
+        propagation.setState("enabled");
+        propagation.setRegion(region);
+        transitGatewayPropagations.put(propagationKey(region, routeTableId, attachmentId), propagation);
+        return propagation;
     }
 
     /**
@@ -3301,17 +3320,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 throw new AwsException("TransitGatewayRouteTablePropagation.Duplicate", "Propagation "
                         + attachmentId + " already exists in Transit Gateway Route Table " + routeTableId + ".", 400);
             }
-            TransitGatewayRouteTablePropagation propagation = new TransitGatewayRouteTablePropagation();
-            propagation.setTransitGatewayRouteTableId(routeTableId);
-            propagation.setTransitGatewayAttachmentId(attachmentId);
-            propagation.setResourceId(attachment.getVpcId());
-            propagation.setResourceType("vpc");
-            // Verified live: propagation reports the settled state at once, where association
-            // reports associating first.
-            propagation.setState("enabled");
-            propagation.setRegion(region);
-            transitGatewayPropagations.put(propagationKey(region, routeTableId, attachmentId), propagation);
-            return propagation;
+            return storePropagation(region, routeTableId, attachmentId, attachment.getVpcId());
         }
     }
 
@@ -4669,10 +4678,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * The in-use half of {@link #claimRequestedPrivateIp}, without the lease. CreateNetworkInterface
-     * uses it alone: an interface has no container to hold the address on the VPC network, and
-     * DeleteNetworkInterface returns no lease, so one taken here would keep the address from
-     * automatic allocation after the interface is gone. {@link #assignPrivateIp} already steps
-     * around addresses stored interfaces hold. Callers must hold {@link #privateIpAllocationLock}.
+     * and CreateNatGateway use it alone: neither an interface nor a NAT gateway has a container to
+     * hold the address on the VPC network, and DeleteNetworkInterface and DeleteNatGateway return
+     * no lease, so one taken here would keep the address from automatic allocation after its
+     * holder is gone. {@link #assignPrivateIp} already steps around addresses stored interfaces and
+     * NAT gateways hold. Callers must hold {@link #privateIpAllocationLock}.
      *
      * @return whether the address lies in a Docker-backed range, where a lease could be taken
      */
@@ -6039,16 +6049,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return false;
         }
         return switch (optionKey) {
-            case "domain-name-servers" -> values.size() <= 4 &&
-                    (values.equals(List.of("AmazonProvidedDNS")) || values.stream().allMatch(this::isLiteralIp));
+            case "domain-name-servers" -> values.stream()
+                    .allMatch(value -> "AmazonProvidedDNS".equals(value) || isLiteralIp(value))
+                    && withinDhcpAddressLimits(values);
             case "ntp-servers" -> values.size() <= 8 && values.stream().allMatch(this::isLiteralIp)
-                    && values.stream().filter(value -> !value.contains(":")).count() <= 4
-                    && values.stream().filter(value -> value.contains(":")).count() <= 4;
+                    && withinDhcpAddressLimits(values);
             case "netbios-name-servers" -> values.size() <= 4 && values.stream().allMatch(this::isLiteralIp);
             case "netbios-node-type" -> values.size() == 1 && Set.of("1", "2", "4", "8").contains(values.getFirst());
             case "ipv6-address-preferred-lease-time" -> values.size() == 1 && validIpv6LeaseTime(values.getFirst());
             default -> true;
         };
+    }
+
+    private static boolean withinDhcpAddressLimits(List<String> values) {
+        return values.stream().filter(value -> !value.contains(":")).count() <= 4
+                && values.stream().filter(value -> value.contains(":")).count() <= 4;
     }
 
     private boolean isLiteralIp(String value) {
@@ -6392,7 +6407,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
     }
 
-    private void requireSupportedFilters(Collection<String> filterNames, Set<String> supportedFilters) {
+    static void requireSupportedFilters(Collection<String> filterNames, Set<String> supportedFilters) {
         filterNames.stream()
                 .filter(name -> !supportedFilters.contains(name)
                         && !(supportedFilters.contains("tag-key") && name.startsWith("tag:")))
@@ -9239,10 +9254,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * {@code available} immediately, consistent with what CreateImage and RegisterImage already
      * report. A caller that waits for {@code available} therefore returns on its first poll.
      *
+     * <p>Tags: "Default: Your user-defined AMI tags are not copied." With {@code copyImageTags}
+     * the copy gets the caller's tags on the source, less the {@code aws:} system tags, which AWS
+     * does not copy either. Floci keeps each account's tags apart and does not model shared
+     * ({@code ec2:SharedTag/}) tags, so no other account's tag is visible to the caller or copied.
+     * {@code requestedImageTags} are the image tags the request's TagSpecification will add after
+     * the copy; with the copied ones they must stay within the per-resource limit, which is
+     * checked before anything is created so a refused copy leaves no AMI or snapshot behind.
+     *
      * @see <a href="https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_CopyImage.html">CopyImage</a>
      */
     public Image copyImage(String destinationRegion, String sourceRegion, String sourceImageId,
-                           String name, String description) {
+                           String name, String description, boolean copyImageTags,
+                           List<Tag> requestedImageTags) {
         if (sourceImageId == null || sourceImageId.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter SourceImageId", 400);
         }
@@ -9275,11 +9299,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         "The image id '[" + sourceImageId + "]' does not exist in region " + sourceRegion, 400);
             }
 
+            List<Tag> copiedTags = copyImageTags ? copiedImageTags(sourceRegion, source) : List.of();
+            if (!copiedTags.isEmpty() && requestedImageTags != null && !requestedImageTags.isEmpty()) {
+                Set<String> userKeys = userTagKeys(copiedTags);
+                userKeys.addAll(userTagKeys(requestedImageTags));
+                requireWithinTagLimit(userKeys);
+            }
             // Fresh snapshot ids: two AMIs sharing one snapshot would make deleting either appear
             // to take the other's backing with it, and the copy's snapshots live in the
             // destination region anyway.
             Image copy = registerImage(destinationRegion, name, description, source.getArchitecture(),
                     source.getRootDeviceName(), sourceImageMappings(source));
+            if (!copiedTags.isEmpty()) {
+                copy.setTags(new ArrayList<>(copiedTags));
+                putTags(destinationRegion, copy.getImageId(), new ArrayList<>(copiedTags));
+            }
             copy.setVirtualizationType(source.getVirtualizationType());
             copy.setRootDeviceType(source.getRootDeviceType());
             copy.setPlatform(source.getPlatform());
@@ -9300,6 +9334,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             registeredImages.put(key(destinationRegion, copy.getImageId()), copy);
             return copy;
         }
+    }
+
+    /**
+     * The caller's tags on the source in its own region, as CreateTags and DeleteTags keep them,
+     * less the system tags. Looked up by the source's own id: tags that CreateTags filed under a
+     * catalog alias stay with the alias.
+     */
+    private List<Tag> copiedImageTags(String sourceRegion, Image source) {
+        List<Tag> sourceTags = tagsOf(sourceRegion, source.getImageId())
+                .orElseGet(() -> source.getTags() == null ? List.of() : source.getTags());
+        return sourceTags.stream()
+                .filter(tag -> !isAwsTagKey(tag.getKey()))
+                .map(tag -> new Tag(tag.getKey(), tag.getValue()))
+                .toList();
     }
 
     /** Rejects an AMI id that has been deregistered; unknown ids fall through to the resolver. */
@@ -9981,8 +10029,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return matchesTagFilter(image.getTags(), name, values, Ec2Service::matchesFilterValue);
     }
 
-    private boolean matchesTagFilter(List<Tag> resourceTags, String filterName, List<String> values,
-                                     BiPredicate<List<String>, String> valueMatcher) {
+    static boolean matchesTagFilter(List<Tag> resourceTags, String filterName, List<String> values,
+                                    BiPredicate<List<String>, String> valueMatcher) {
         List<Tag> tags = resourceTags == null ? List.of() : resourceTags;
         if (filterName.startsWith("tag:")) {
             String key = filterName.substring("tag:".length());
@@ -10041,7 +10089,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         };
     }
 
-    private static boolean matchesFilterValue(List<String> patterns, String value) {
+    static boolean matchesFilterValue(List<String> patterns, String value) {
         if (patterns == null || patterns.isEmpty()) {
             return true;
         }
@@ -12303,8 +12351,49 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     // ─── NAT Gateways ─────────────────────────────────────────────────────────
 
+    /**
+     * Refuses a regional NAT gateway, which spans its VPC instead of sitting in one subnet. Floci
+     * creates only zonal gateways, so it refuses the request before looking at the subnet, which a
+     * regional request does not name. A value that is neither mode fails as AWS fails it, rather
+     * than creating a zonal gateway.
+     */
+    public static void requireZonalNatGateway(String availabilityMode) {
+        requireParameterValue("AvailabilityMode", isSet(availabilityMode) ? availabilityMode : null,
+                "zonal", "regional");
+        if ("regional".equals(availabilityMode)) {
+            throw new AwsException("UnsupportedOperation",
+                    "NAT gateways with AvailabilityMode regional are not supported.", 400);
+        }
+    }
+
+    /**
+     * Refuses the secondary-address parameters. Floci gives a NAT gateway its primary address only,
+     * so a gateway created with them would report fewer addresses than it was asked for.
+     */
+    public static void requireNoSecondaryNatGatewayAddresses(List<String> secondaryAllocationIds,
+                                                             List<String> secondaryPrivateIpAddresses,
+                                                             String secondaryPrivateIpAddressCount) {
+        if (!secondaryAllocationIds.isEmpty() || !secondaryPrivateIpAddresses.isEmpty()
+                || isSet(secondaryPrivateIpAddressCount)) {
+            throw new AwsException("UnsupportedOperation",
+                    "NAT gateways with secondary addresses are not supported.", 400);
+        }
+    }
+
     public NatGateway createNatGateway(String region, String subnetId, String allocationId,
                                        String connectivityType, List<Tag> natGatewayTags) {
+        return createNatGateway(region, subnetId, allocationId, connectivityType, null, natGatewayTags);
+    }
+
+    /**
+     * @param privateIpAddress PrivateIpAddress: the private address of the gateway's interface, or
+     *                         null to let the subnet pick one. It is checked as RunInstances checks
+     *                         its own: an assignable address of the subnet that no other resource
+     *                         holds.
+     */
+    public NatGateway createNatGateway(String region, String subnetId, String allocationId,
+                                       String connectivityType, String privateIpAddress,
+                                       List<Tag> natGatewayTags) {
         ensureDefaultResources(region);
         Subnet subnet = requireSubnet(region, subnetId);
         boolean privateGateway = "private".equalsIgnoreCase(connectivityType);
@@ -12318,6 +12407,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (isSet(allocationId)) {
             getRequiredAddress(region, allocationId);
         }
+        String requestedPrivateIp = isSet(privateIpAddress)
+                ? validateRequestedPrivateIp(privateIpAddress, subnet, null, 1) : null;
 
         NatGateway natGateway = new NatGateway();
         natGateway.setNatGatewayId("nat-" + randomHex(17));
@@ -12343,8 +12434,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 }
             }
             if (!"failed".equals(natGateway.getState())) {
-                NatGatewayAddress gatewayAddress =
-                        natGatewayAddress(region, natGateway.getNatGatewayId(), subnetId, allocationId);
+                NatGatewayAddress gatewayAddress = natGatewayAddress(region, natGateway.getNatGatewayId(),
+                        subnetId, allocationId, requestedPrivateIp);
                 natGateway.getNatGatewayAddresses().add(gatewayAddress);
                 // The Elastic IP is now held by the gateway's interface, so DescribeAddresses has to
                 // say so: an allocation that looks free is one Terraform and the console would offer
@@ -12373,12 +12464,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * aws_nat_gateway exposes all three as resource outputs (public_ip, private_ip,
      * network_interface_id), and Gruntwork's VPC modules re-export nat_gateway_public_ips, so an
      * address carrying only an allocation id propagates empty values into dependent modules.
+     * Callers must hold {@link #privateIpAllocationLock}.
+     *
+     * @param requestedPrivateIp the request's PrivateIpAddress, already checked by
+     *                           {@link #validateRequestedPrivateIp}, or null. It takes no lease on
+     *                           the VPC network (see {@link #requireRequestedPrivateIpFree}).
      */
     private NatGatewayAddress natGatewayAddress(String region, String natGatewayId, String subnetId,
-                                                String allocationId) {
+                                                String allocationId, String requestedPrivateIp) {
         NatGatewayAddress address = new NatGatewayAddress();
         address.setNetworkInterfaceId(eniIdFromSeed("nat|" + natGatewayId));
-        address.setPrivateIp(assignPrivateIp(region, subnetId));
+        if (requestedPrivateIp != null) {
+            requireRequestedPrivateIpFree(region, subnetId, requestedPrivateIp);
+            address.setPrivateIp(requestedPrivateIp);
+        } else {
+            address.setPrivateIp(assignPrivateIp(region, subnetId));
+        }
         if (isSet(allocationId)) {
             address.setAllocationId(allocationId);
             address.setAssociationId("eipassoc-" + randomHex(17));
@@ -14456,6 +14557,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (requestedIp != null) {
                 requireRequestedPrivateIpFree(region, subnetId, requestedIp);
             }
+            // Secondaries are folded and checked before the primary is allocated, so a refused one
+            // leaves no lease behind on the VPC network. Their range is not checked, as before.
+            Set<String> secondaries = new LinkedHashSet<>();
+            for (String extra : privateIpAddresses == null ? List.<String>of() : privateIpAddresses) {
+                if (extra == null || extra.isBlank()) {
+                    continue;
+                }
+                String ip = canonicalIpv4(extra).orElse(extra);
+                if (!ip.equals(requestedIp) && secondaries.add(ip)) {
+                    requireRequestedPrivateIpFree(region, subnetId, ip);
+                }
+            }
             String primaryIp = requestedIp != null ? requestedIp : assignPrivateIp(region, subnetId);
             String primaryDns = AwsRegions.ec2PrivateIpDnsName(primaryIp, region);
 
@@ -14481,17 +14594,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             primary.setPrivateDnsName(primaryDns);
             primary.setPrimary(true);
             ipList.add(primary);
-            if (privateIpAddresses != null) {
-                for (String extra : privateIpAddresses) {
-                    if (extra == null || extra.isBlank() || extra.equals(primaryIp)) {
-                        continue;
-                    }
-                    NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
-                    secondary.setPrivateIpAddress(extra);
-                    secondary.setPrivateDnsName(AwsRegions.ec2PrivateIpDnsName(extra, region));
-                    secondary.setPrimary(false);
-                    ipList.add(secondary);
+            for (String extra : secondaries) {
+                if (extra.equals(primaryIp)) {
+                    continue;
                 }
+                NetworkInterfacePrivateIpAddress secondary = new NetworkInterfacePrivateIpAddress();
+                secondary.setPrivateIpAddress(extra);
+                secondary.setPrivateDnsName(AwsRegions.ec2PrivateIpDnsName(extra, region));
+                secondary.setPrimary(false);
+                ipList.add(secondary);
             }
             ni.setPrivateIpAddresses(ipList);
 

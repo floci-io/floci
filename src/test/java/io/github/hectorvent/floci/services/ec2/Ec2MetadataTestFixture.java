@@ -11,9 +11,13 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.net.http.HttpTimeoutException;
 import java.time.Clock;
 import java.time.Duration;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
@@ -96,7 +100,7 @@ final class Ec2MetadataTestFixture implements AutoCloseable {
     }
 
     HttpResponse<String> putToken(String ttl) throws Exception {
-        return client.send(HttpRequest.newBuilder(URI.create(endpoint + "/latest/api/token"))
+        return sendResponse(client, HttpRequest.newBuilder(URI.create(endpoint + "/latest/api/token"))
                         .timeout(Duration.ofSeconds(5)).header(TTL_HEADER, ttl).PUT(HttpRequest.BodyPublishers.noBody()).build(),
                 HttpResponse.BodyHandlers.ofString());
     }
@@ -112,7 +116,7 @@ final class Ec2MetadataTestFixture implements AutoCloseable {
         if (token != null) {
             request.header(TOKEN_HEADER, token);
         }
-        return client.send(request.build(), HttpResponse.BodyHandlers.ofString());
+        return sendResponse(client, request.build(), HttpResponse.BodyHandlers.ofString());
     }
 
     <T> HttpResponse<T> get(String path, String token, HttpResponse.BodyHandler<T> bodyHandler) throws Exception {
@@ -121,6 +125,27 @@ final class Ec2MetadataTestFixture implements AutoCloseable {
         if (token != null) {
             request.header(TOKEN_HEADER, token);
         }
-        return client.send(request.GET().build(), bodyHandler);
+        return sendResponse(client, request.GET().build(), bodyHandler);
     }
+
+    static <T> HttpResponse<T> sendResponse(HttpClient client, HttpRequest request,
+                                           HttpResponse.BodyHandler<T> bodyHandler) throws Exception {
+        Duration timeout = request.timeout().orElseThrow();
+        CompletableFuture<HttpResponse<T>> response = client.sendAsync(request, bodyHandler);
+        try {
+            return response.get(timeout.toNanos(), TimeUnit.NANOSECONDS);
+        } catch (TimeoutException expired) {
+            HttpTimeoutException failure = new HttpTimeoutException("IMDS response body did not complete within " + timeout);
+            failure.initCause(expired);
+            throw failure;
+        } catch (ExecutionException failure) {
+            if (failure.getCause() instanceof Exception cause) {
+                throw cause;
+            }
+            throw failure;
+        } finally {
+            response.cancel(true);
+        }
+    }
+
 }

@@ -393,6 +393,9 @@ MEMBER_SERVICES = {
         "taskRoleArn": ECS_TASKS,
         "infrastructureRoleArn": ECS_INFRASTRUCTURE,
     },
+    # "Amazon EMR uses this role" for the session. The reference also lists
+    # managed-compute.elasticmapreduce, but the request cannot say which compute it runs on.
+    "elasticmapreduce:StartSession": {"ExecutionRoleArn": "elasticmapreduce"},
     # rds-preview is the principal of RDS's preview environment; PassedRoles' RDS cases pass to rds.
     "rds:*": {"*": "rds"},
 }

@@ -332,4 +332,103 @@ class ConfigurationRecorderIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("NoSuchConfigurationRecorderException"));
     }
+
+    @Test
+    @Order(16)
+    void recordingStrategyRoundTrips() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "PutConfigurationRecorder")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigurationRecorder": {"name": "default", "roleARN": "arn:aws:iam::123456789012:role/r",
+                    "recordingGroup": {"allSupported": true, "includeGlobalResourceTypes": true,
+                        "recordingStrategy": {"useOnly": "ALL_SUPPORTED_RESOURCE_TYPES"}}}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeConfigurationRecorders")
+            .contentType(CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ConfigurationRecorders[0].recordingGroup.recordingStrategy.useOnly",
+                equalTo("ALL_SUPPORTED_RESOURCE_TYPES"))
+            .body("ConfigurationRecorders[0].recordingGroup.allSupported", equalTo(true));
+    }
+
+    @Test
+    @Order(17)
+    void exclusionsAndRecordingModeRoundTrip() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "PutConfigurationRecorder")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigurationRecorder": {"name": "default", "roleARN": "arn:aws:iam::123456789012:role/r",
+                    "recordingGroup": {"allSupported": false, "includeGlobalResourceTypes": false,
+                        "exclusionByResourceTypes": {"resourceTypes": ["AWS::EC2::Instance"]},
+                        "recordingStrategy": {"useOnly": "EXCLUSION_BY_RESOURCE_TYPES"}},
+                    "recordingMode": {"recordingFrequency": "DAILY",
+                        "recordingModeOverrides": [{"description": "continuous buckets",
+                            "resourceTypes": ["AWS::S3::Bucket"], "recordingFrequency": "CONTINUOUS"}]}}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeConfigurationRecorders")
+            .contentType(CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ConfigurationRecorders[0].recordingGroup.exclusionByResourceTypes.resourceTypes",
+                contains("AWS::EC2::Instance"))
+            .body("ConfigurationRecorders[0].recordingGroup.recordingStrategy.useOnly",
+                equalTo("EXCLUSION_BY_RESOURCE_TYPES"))
+            .body("ConfigurationRecorders[0].recordingMode.recordingFrequency", equalTo("DAILY"))
+            .body("ConfigurationRecorders[0].recordingMode.recordingModeOverrides", hasSize(1))
+            .body("ConfigurationRecorders[0].recordingMode.recordingModeOverrides[0].description",
+                equalTo("continuous buckets"))
+            .body("ConfigurationRecorders[0].recordingMode.recordingModeOverrides[0].resourceTypes",
+                contains("AWS::S3::Bucket"))
+            .body("ConfigurationRecorders[0].recordingMode.recordingModeOverrides[0].recordingFrequency",
+                equalTo("CONTINUOUS"));
+    }
+
+    @Test
+    @Order(18)
+    void absentFieldsAreNotSynthesized() {
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "PutConfigurationRecorder")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {"ConfigurationRecorder": {"name": "default", "roleARN": "arn:aws:iam::123456789012:role/r",
+                    "recordingGroup": {"allSupported": true, "includeGlobalResourceTypes": false}}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeConfigurationRecorders")
+            .contentType(CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ConfigurationRecorders[0].recordingGroup", not(hasKey("recordingStrategy")))
+            .body("ConfigurationRecorders[0].recordingGroup", not(hasKey("exclusionByResourceTypes")))
+            .body("ConfigurationRecorders[0]", not(hasKey("recordingMode")));
+    }
 }

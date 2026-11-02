@@ -86,8 +86,19 @@ class S3BlockPublicAccessIntegrationTest {
     }
 
     @Test
-    void aPublicBucketPolicyIsAcceptedWithoutBlockPublicPolicy() {
+    void aPublicBucketPolicyIsRefusedWithoutBlockPublicPolicyConfigured() {
         String bucket = createBucket();
+
+        given().body(PUBLIC_POLICY.formatted(bucket))
+                .when().put("/" + bucket + "?policy")
+                .then().statusCode(403)
+                .body(containsString("AccessDenied"));
+    }
+
+    @Test
+    void aPublicBucketPolicyIsAcceptedOnceBlockPublicPolicyIsDeleted() {
+        String bucket = createBucket();
+        deleteBucketPublicAccessBlock(bucket);
 
         given().body(PUBLIC_POLICY.formatted(bucket))
                 .when().put("/" + bucket + "?policy")
@@ -97,6 +108,7 @@ class S3BlockPublicAccessIntegrationTest {
     @Test
     void blockPublicPolicyDoesNotRemoveAPolicyStoredBeforeItWasSet() {
         String bucket = createBucket();
+        deleteBucketPublicAccessBlock(bucket);
         given().body(PUBLIC_POLICY.formatted(bucket))
                 .when().put("/" + bucket + "?policy")
                 .then().statusCode(200);
@@ -195,6 +207,10 @@ class S3BlockPublicAccessIntegrationTest {
                 .when().put("/" + bucket + "?ownershipControls")
                 .then().statusCode(200);
         return bucket;
+    }
+
+    private static void deleteBucketPublicAccessBlock(String bucket) {
+        given().when().delete("/" + bucket + "?publicAccessBlock").then().statusCode(204);
     }
 
     private static void putBucketPublicAccessBlock(String bucket, boolean blockPublicAcls,

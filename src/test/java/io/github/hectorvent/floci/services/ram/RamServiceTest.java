@@ -151,6 +151,27 @@ class RamServiceTest {
     }
 
     @Test
+    void getResourceSharesPageDoesNotConfuseMissingNameWithLiteralNull() {
+        ResourceShare first = service.createResourceShare("first", List.of(), List.of(),
+                false, "us-east-1", OWNER);
+        ResourceShare second = service.createResourceShare("second", List.of(), List.of(),
+                false, "us-east-1", OWNER);
+        List<String> arns = List.of(first.getResourceShareArn(), second.getResourceShareArn());
+        PaginatedResult<ResourceShare> page = service.getResourceSharesPage(
+                OWNER, "SELF", null, arns, null, "us-east-1", 1, null);
+        assertNotNull(page.nextToken());
+
+        AwsException invalid = assertThrows(AwsException.class, () -> service.getResourceSharesPage(
+                OWNER, "SELF", "null", arns, null, "us-east-1", 1, page.nextToken()));
+        assertEquals("InvalidNextTokenException", invalid.getErrorCode());
+
+        AwsException wrongOperation = assertThrows(AwsException.class, () -> associations(
+                OWNER, "us-east-1", "RESOURCE", null, List.of(first.getResourceShareArn()),
+                null, null, 1, page.nextToken()));
+        assertEquals("InvalidNextTokenException", wrongOperation.getErrorCode());
+    }
+
+    @Test
     void getResourceShareAssociationsRejectsInvalidInput() {
         assertInvalidParameter(() -> associations(OWNER, "us-east-1", null, null,
                 List.of(), null, null, null, null));
@@ -162,6 +183,9 @@ class RamServiceTest {
                 List.of(), null, null, 0, null));
         assertInvalidParameter(() -> associations(OWNER, "us-east-1", "RESOURCE", null,
                 List.of(), null, null, 501, null));
+        AwsException emptyToken = assertThrows(AwsException.class, () -> associations(
+                OWNER, "us-east-1", "RESOURCE", null, List.of(), null, null, null, ""));
+        assertEquals("InvalidNextTokenException", emptyToken.getErrorCode());
         AwsException malformedArn = assertThrows(AwsException.class, () -> associations(
                 OWNER, "us-east-1", "RESOURCE", null, List.of("not-an-arn"),
                 null, null, null, null));

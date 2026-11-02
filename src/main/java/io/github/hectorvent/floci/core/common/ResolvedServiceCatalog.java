@@ -125,7 +125,8 @@ public class ResolvedServiceCatalog {
                     "s3express", "s3",
                     "iot-jobs-data", "iot",
                     "monitoring", "cloudwatch",
-                    "awsssoportal", "sso");
+                    "awsssoportal", "sso",
+                    "eventsv2", "events");
 
     private final ServiceCatalog catalog;
 
@@ -250,6 +251,12 @@ public class ResolvedServiceCatalog {
                         "eventbridge", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("AWSEvents."), Set.of("events"), Set.of(), Set.of()),
+                // Signs as events too, which stays EventBridge's scope: it is routed by its RPC v2 path alone,
+                // and its eventsv2 key aliases to the events IAM namespace its actions live under.
+                descriptor("eventsv2", "eventbridgev2", config.services().eventbridgev2().enabled(), true,
+                        "eventbridgev2", config.storage().mode(), 5000L, null, ServiceProtocol.CBOR,
+                        protocols(ServiceProtocol.CBOR),
+                        Set.of(), Set.of(), Set.of("AWSEventsV2"), Set.of()),
                 descriptor("servicediscovery", "cloudmap", config.services().cloudmap().enabled(), true,
                         "cloudmap", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -283,6 +290,16 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.QUERY, ServiceProtocol.JSON, ServiceProtocol.CBOR),
                         Set.of("GraniteServiceVersion20100801."), Set.of("monitoring"),
                         Set.of("GraniteServiceVersion20100801"), Set.of(), "CloudWatchVersion20130116."),
+                descriptor("paymentcryptography", "paymentcryptography",
+                        config.services().paymentcryptography().enabled(), true,
+                        "paymentcryptography",
+                        storageMode(config.storage().services().paymentcryptography().mode(),
+                                config.storage().mode()),
+                        config.storage().services().paymentcryptography().flushIntervalMs(), null,
+                        ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("PaymentCryptographyControlPlane."), Set.of("payment-cryptography"),
+                        Set.of(), Set.of()),
                 descriptor("secretsmanager", "secretsmanager", config.services().secretsmanager().enabled(), true,
                         "secretsmanager", storageMode(config.storage().services().secretsmanager().mode(), config.storage().mode()),
                         config.storage().services().secretsmanager().flushIntervalMs(), null, ServiceProtocol.JSON,
@@ -829,6 +846,11 @@ public class ResolvedServiceCatalog {
     }
 
     public Optional<ServiceDescriptor> byCredentialScope(String credentialScope) {
+        // IoT also accepts execute-api signatures, but its explicit REST routes identify IoT.
+        // Without a matched service route, this signing scope belongs to API Gateway.
+        if ("execute-api".equals(credentialScope)) {
+            return catalog.byExternalKey("apigateway");
+        }
         return catalog.byCredentialScope(credentialScope);
     }
 

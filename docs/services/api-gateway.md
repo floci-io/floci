@@ -755,6 +755,16 @@ curl http://{apiId}.execute-api.{region}.localhost.floci.io:4566/{stageName}/{pa
 APIs created or updated with `disableExecuteApiEndpoint` reject requests to
 this default hostname with `404 Not Found`, matching AWS HTTP API behavior.
 
+HTTP API route selection prefers an exact method-and-path key. Otherwise, a
+matching non-greedy path outranks a greedy `{proxy+}` path; among comparable
+templates, literal segments outrank `{parameter}` segments at the first
+position where they differ. For `/pets/dog`, `GET /pets/dog` wins over
+`GET /pets/{pet}`, which wins over `GET /pets/{proxy+}`. Among greedy routes,
+a longer literal prefix such as `GET /pets/dogs/{proxy+}` wins over
+`GET /pets/{proxy+}`. For equally specific paths, a method-specific route
+wins over `ANY`; `$default` handles requests no other route matches. Route
+selection determines which route's authorizer and integration handle the request.
+
 HTTP API Lambda REQUEST authorizers resolve header, query string, context, and
 stage variable sources once, in configured order. Format `2.0` carries the values
 in an `identitySource` array; format `1.0` carries them as comma-separated
@@ -846,6 +856,20 @@ The `integrationUri` names the backend:
 
 The request path is forwarded as received. The stage name is not added to it, and `tlsConfig` is not
 applied: the call to a Cloud Map instance uses plain HTTP.
+
+`$context.identity.sourceIp` is the address of the TCP connection to Floci, whatever `X-Forwarded-For`
+the client sent. An HTTP API `HTTP_PROXY` backend receives a `Forwarded` header holding the client's
+`X-Forwarded-For` entries and the client address, for example
+`Forwarded: for=198.51.100.7,for=192.0.2.43;by=10.0.0.1;host=api.example.test;proto=https`, and an
+`X-Forwarded-For` naming only the address Floci accepted the request on. A client's own `Forwarded`
+header is replaced. `$request.header.X-Forwarded-For` mappings still see the client's value. The
+[API Gateway important notes](https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-known-issues.html)
+say HTTP APIs translate `X-Forwarded-*` into `Forwarded` and append the egress IP, Host and protocol.
+They do not give the syntax or the `X-Forwarded-For` value, which follow third-party descriptions of
+observed behavior. Floci translates only `X-Forwarded-For`: `X-Forwarded-Host`, `X-Forwarded-Proto` and
+`X-Forwarded-Port` reach the backend as the client sent them.
+An ALB HTTP or HTTPS listener integration goes through the listener, which adds its own hop. An NLB TCP
+listener relays the request unchanged and does not add a hop.
 
 ### Supported Operations
 

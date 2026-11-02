@@ -72,6 +72,7 @@ class ApiGatewayPathArnEnforcementIntegrationTest {
         get(user, "/restapis/x/%2E%2E/" + apiId + "/stages").statusCode(200);
         assertReached(getAsWritten(user, "/restapis//" + apiId + "/stages"));
         assertReached(getAsWritten(user, "/restapis/x/%2E%2E//" + apiId + "/stages"));
+        assertReached(getAsWritten(user, "/restapis/" + apiId + "//%2E%2E/stages"));
 
         policy(user, allow("apigateway:GET", "arn:aws:apigateway:*::/restapis"));
         refused(get(user, "/restapis/" + apiId + "/stages"));
@@ -83,6 +84,7 @@ class ApiGatewayPathArnEnforcementIntegrationTest {
         refused(get(user, "/restapis/x/%2E%2E/" + apiId + "/stages"));
         assertRefused(getAsWritten(user, "/restapis//" + apiId + "/stages"));
         assertRefused(getAsWritten(user, "/restapis/x/%2E%2E//" + apiId + "/stages"));
+        assertRefused(getAsWritten(user, "/restapis/" + apiId + "//%2E%2E/stages"));
         get(user, "/restapis").statusCode(200);
     }
 

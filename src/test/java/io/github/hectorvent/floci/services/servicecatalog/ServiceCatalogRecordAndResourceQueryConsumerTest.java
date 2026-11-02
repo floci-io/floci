@@ -1,33 +1,33 @@
 package io.github.hectorvent.floci.services.servicecatalog;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
+import jakarta.inject.Inject;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
  * Wire-level tests for {@code DescribeRecord}, {@code ListRecordHistory},
  * {@code ListResourcesForTagOption}, {@code ListStackInstancesForProvisionedProduct}
  * and {@code ListServiceActionsForProvisioningArtifact}.
  *
- * <p>New class, not appended to an existing one, so falsifiability isolates per
- * operation (CS-001). {@code describeRecord} looked up records via a
- * {@code Type: "RECORD"} association row that nothing ever wrote — every
- * record-producing operation generated a throwaway random {@code RecordId} in the
- * handler layer and discarded it, so {@code DescribeRecord} 404'd unconditionally.
- * Fixed for {@code ImportAsProvisionedProduct}'s path (the one this session already
- * covers): the service now persists a {@code RECORD} row and returns its id, and the
- * handler uses that id instead of generating its own. Other record-producing
- * operations (e.g. {@code ExecuteProvisionedProductServiceAction},
- * {@code TerminateProvisionedProduct}) still generate unpersisted record ids and
- * remain undescribable — documented as a limitation, not fixed here (out of this
- * op-family's scope; same fix pattern applies when those ops are tested).
+ * <p>Record tests use the AWS JSON wire path so the returned IDs can be checked
+ * against both history and {@code DescribeRecord}.
  */
 @QuarkusTest
 class ServiceCatalogRecordAndResourceQueryConsumerTest {
@@ -35,6 +35,9 @@ class ServiceCatalogRecordAndResourceQueryConsumerTest {
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/servicecatalog/aws4_request";
+
+    @Inject
+    StorageFactory storageFactory;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -97,20 +100,81 @@ class ServiceCatalogRecordAndResourceQueryConsumerTest {
     // ---------- ListRecordHistory ----------
 
     @Test
-    void listRecordHistory_includesImportedProduct() {
+    void listRecordHistory_includesEachRecordForProvisionedProduct() {
         String productId = createProduct("ab-record-history-product");
         String artifactId = firstArtifactId(productId);
-        String provisionedId = call("ImportAsProvisionedProduct", "{\"ProductId\":\"" + productId
+        Response imported = call("ImportAsProvisionedProduct", "{\"ProductId\":\"" + productId
                 + "\",\"ProvisioningArtifactId\":\"" + artifactId + "\",\"ProvisionedProductName\":\""
                 + "ab-record-history-pp\",\"PhysicalId\":\"phys-ab-record-history\","
                 + "\"IdempotencyToken\":\"tok-ab-record-history\"}")
-                .then().statusCode(200)
-                .extract().path("RecordDetail.ProvisionedProductId");
+                .then().statusCode(200).extract().response();
+        String provisionedId = imported.path("RecordDetail.ProvisionedProductId");
+        String importedRecordId = imported.path("RecordDetail.RecordId");
+        String updatedRecordId = call("UpdateProvisionedProduct", "{\"ProvisionedProductId\":\""
+                + provisionedId + "\",\"UpdateToken\":\"tok-ab-record-history-update\"}")
+                .then().statusCode(200).extract().path("RecordDetail.RecordId");
 
         call("ListRecordHistory", "{}")
         .then()
             .statusCode(200)
-            .body("RecordDetails.ProvisionedProductId", hasItem(provisionedId));
+            .body("RecordDetails.findAll { it.ProvisionedProductId == '" + provisionedId
+                    + "' }.RecordId", containsInAnyOrder(importedRecordId, updatedRecordId))
+            .body("RecordDetails.findAll { it.ProvisionedProductId == '" + provisionedId
+                    + "' }.RecordType", containsInAnyOrder("IMPORT", "UPDATE_PROVISIONED_PRODUCT"))
+            .body("RecordDetails.find { it.RecordId == '" + importedRecordId + "' }.Type", nullValue());
+
+        call("DescribeRecord", "{\"Id\":\"" + importedRecordId + "\"}")
+                .then().statusCode(200).body("RecordDetail.RecordId", equalTo(importedRecordId));
+        call("DescribeRecord", "{\"Id\":\"" + updatedRecordId + "\"}")
+                .then().statusCode(200).body("RecordDetail.RecordId", equalTo(updatedRecordId));
+    }
+
+    @Test
+    void provisionProductRecordIsStableAndListed() {
+        String productId = createProduct("ab-provision-history-product");
+        String artifactId = firstArtifactId(productId);
+        String request = "{\"ProductId\":\"" + productId + "\",\"ProvisioningArtifactId\":\"" + artifactId
+                + "\",\"ProvisionedProductName\":\"ab-provision-history-pp\"}";
+        String recordId = call("ProvisionProduct", request)
+                .then().statusCode(200).extract().path("RecordDetail.RecordId");
+        call("ProvisionProduct", request)
+                .then().statusCode(200).body("RecordDetail.RecordId", equalTo(recordId));
+        call("ListRecordHistory", "{}")
+                .then().statusCode(200)
+                .body("RecordDetails.findAll { it.RecordId == '" + recordId + "' }.size()", equalTo(1))
+                .body("RecordDetails.find { it.RecordId == '" + recordId + "' }.RecordType",
+                        equalTo("PROVISION_PRODUCT"));
+        call("DescribeRecord", "{\"Id\":\"" + recordId + "\"}")
+                .then().statusCode(200).body("RecordDetail.RecordId", equalTo(recordId));
+    }
+
+    @Test
+    void legacyProductWithOnlyUpdateRecordRetainsSyntheticCreationHistory() {
+        String productId = createProduct("ab-legacy-history-product");
+        String artifactId = firstArtifactId(productId);
+        Response imported = call("ImportAsProvisionedProduct", "{\"ProductId\":\"" + productId
+                + "\",\"ProvisioningArtifactId\":\"" + artifactId + "\",\"ProvisionedProductName\":\""
+                + "ab-legacy-history-pp\",\"PhysicalId\":\"phys-ab-legacy-history\","
+                + "\"IdempotencyToken\":\"tok-ab-legacy-history\"}")
+                .then().statusCode(200).extract().response();
+        String provisionedId = imported.path("RecordDetail.ProvisionedProductId");
+        String importedRecordId = imported.path("RecordDetail.RecordId");
+        AccountAwareStorageBackend<ObjectNode> records = storageFactory.create("servicecatalog",
+                "servicecatalog-associations.json", new TypeReference<Map<String, ObjectNode>>() {});
+        assertEquals(1, records.deleteAllAccountsMatching(
+                record -> importedRecordId.equals(record.path("RecordId").asText())));
+
+        String updatedRecordId = call("UpdateProvisionedProduct", "{\"ProvisionedProductId\":\""
+                + provisionedId + "\",\"UpdateToken\":\"tok-ab-legacy-history-update\"}")
+                .then().statusCode(200).extract().path("RecordDetail.RecordId");
+        call("ListRecordHistory", "{}")
+                .then().statusCode(200)
+                .body("RecordDetails.findAll { it.ProvisionedProductId == '" + provisionedId
+                        + "' }.size()", equalTo(2))
+                .body("RecordDetails.find { it.ProvisionedProductId == '" + provisionedId
+                        + "' && !it.RecordId }.Status", equalTo("SUCCEEDED"))
+                .body("RecordDetails.find { it.RecordId == '" + updatedRecordId + "' }.RecordType",
+                        equalTo("UPDATE_PROVISIONED_PRODUCT"));
     }
 
     // ---------- ListResourcesForTagOption ----------

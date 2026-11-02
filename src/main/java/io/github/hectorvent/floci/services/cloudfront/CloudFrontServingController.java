@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayExecuteApiHostFilter;
@@ -47,6 +48,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.PushbackInputStream;
 import java.net.IDN;
+import java.net.InetAddress;
 import java.net.URI;
 import java.net.http.HttpRequest;
 import java.nio.charset.StandardCharsets;
@@ -118,9 +120,11 @@ public class CloudFrontServingController {
     private final ApiGatewayV2Service apiGatewayV2Service;
     private final ApiGatewayExecuteApiHostFilter executeApiHostFilter;
     private final String flociHostname;
+    private final int flociPort;
     private final LambdaWebIamAuth lambdaWebIamAuth;
     private final CurrentVertxRequest currentVertxRequest;
     private final HttpServer httpServer;
+    private final TlsProxyServer tlsProxyServer;
     private final CloudFrontOriginHttpClient httpClient;
     private final CloudFrontOriginHttpClient flociClient = CloudFrontOriginHttpClient.toFloci();
 
@@ -130,7 +134,7 @@ public class CloudFrontServingController {
                                        ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
                                        ApiGatewayExecuteApiHostFilter executeApiHostFilter,
                                        EmulatorConfig emulatorConfig, CurrentVertxRequest currentVertxRequest,
-                                       HttpServer httpServer) {
+                                       HttpServer httpServer, TlsProxyServer tlsProxyServer) {
         this.service = service;
         this.s3Service = s3Service;
         this.lambdaWebService = lambdaWebService;
@@ -138,9 +142,11 @@ public class CloudFrontServingController {
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.executeApiHostFilter = executeApiHostFilter;
         this.flociHostname = emulatorConfig.hostname().orElse("localhost");
+        this.flociPort = emulatorConfig.port();
         this.lambdaWebIamAuth = lambdaWebIamAuth;
         this.currentVertxRequest = currentVertxRequest;
         this.httpServer = httpServer;
+        this.tlsProxyServer = tlsProxyServer;
         this.httpClient = new CloudFrontOriginHttpClient(
                 emulatorConfig.services().cloudfront().allowedPrivateOriginHosts().orElse(List.of()));
     }
@@ -318,8 +324,8 @@ public class CloudFrontServingController {
         List<String> trustedKeyGroups =
                 CloudFrontRequestRouter.trustedKeyGroupsFor(config, normalized);
         if (!trustedKeyGroups.isEmpty()) {
-            CloudFrontSignatureVerifier.Result verdict =
-                    verifySignedRequest(dist, rawViewerPath, trustedKeyGroups);
+            CloudFrontSignatureVerifier.Result verdict = verifySignedRequest(
+                    dist, currentVertxRequest.getCurrent().request(), rawViewerPath, trustedKeyGroups);
             if (!verdict.allowed()) {
                 LOG.debugv("CloudFront denied a request for distribution {0}, path {1}: {2}",
                         dist.getId(), rawViewerPath, verdict.reason());
@@ -376,11 +382,9 @@ public class CloudFrontServingController {
      */
     private CloudFrontSignatureVerifier.Result verifySignedRequest(
             Distribution distribution,
+            HttpServerRequest request,
             String rawViewerPath,
             List<String> trustedKeyGroups) {
-        io.vertx.core.http.HttpServerRequest request =
-                currentVertxRequest.getCurrent().request();
-
         Map<String, String> query = new LinkedHashMap<>();
         for (String name : request.params().names()) {
             query.put(name, request.getParam(name));
@@ -511,16 +515,16 @@ public class CloudFrontServingController {
         String forwardUri = CloudFrontRequestRouter.resolveForwardUri(
                 origin.getOriginPath(), rawViewerPath, config.getDefaultRootObject());
         CloudFrontOriginRequestBuilder.OriginRequest originRequest =
-                CloudFrontOriginRequestBuilder.build(viewerRequest(method, viewerScheme),
+                CloudFrontOriginRequestBuilder.build(
+                        viewerRequest(currentVertxRequest.getCurrent().request(), method, viewerScheme),
                         forwarding(config, normalized), distribution.getDomainName());
         return fetchFromCustomOrigin(
                 distribution, origin, forwardUri, originRequest, viewerScheme, method, viewerBody);
     }
 
     /** The live viewer request, with CloudFront's signing parameters removed from its query. */
-    private CloudFrontOriginRequestBuilder.ViewerRequest viewerRequest(
-            String method, String viewerScheme) {
-        HttpServerRequest request = currentVertxRequest.getCurrent().request();
+    private static CloudFrontOriginRequestBuilder.ViewerRequest viewerRequest(
+            HttpServerRequest request, String method, String viewerScheme) {
         List<CloudFrontOriginRequestBuilder.Header> headers = new ArrayList<>();
         for (Map.Entry<String, String> header : request.headers()) {
             headers.add(new CloudFrontOriginRequestBuilder.Header(header.getKey(), header.getValue()));
@@ -784,58 +788,20 @@ public class CloudFrontServingController {
                                                  String viewerScheme, String method, ViewerBody viewerBody) {
         boolean includeBody = !"HEAD".equals(method);
         try {
-            // Floci serves its own Web Function and execute-api endpoints, whatever port and protocol the origin names.
-            String webEndpoint = webFunctionEndpoint(origin);
-            String executeApiHost = webEndpoint == null ? executeApiHost(origin) : null;
-            boolean inProcess = webEndpoint != null || executeApiHost != null;
-            if (inProcess && originRequest.headers().stream()
-                    .anyMatch(header -> "Host".equalsIgnoreCase(header.name()))) {
-                // CloudFront checks the endpoint's certificate against the forwarded viewer Host, which it never names.
-                LOG.debugv("CloudFront forwards the viewer Host to in-process origin {0}", origin.getId());
-                return OriginResponse.error(502, "Bad Gateway.");
+            CustomOriginTarget target = customOriginTarget(distribution, origin, forwardUri, originRequest,
+                    viewerScheme, currentVertxRequest.getCurrent().request().localAddress());
+            if (target.refusal() != null) {
+                return target.refusal();
             }
-            // Dot segments would be resolved after the host filter's check and escape the API's stage.
-            String originPath = executeApiHost != null
-                    ? CloudFrontRequestRouter.normalizePath(rawPath(forwardUri)) : forwardUri;
-            if (executeApiHost != null && !executeApiHostFilter.routes(executeApiHost, originPath)) {
-                byte[] notFound = ApiGatewayExecuteApiHostFilter.NOT_FOUND_BODY.getBytes(StandardCharsets.UTF_8);
-                return new OriginResponse(404, MediaType.APPLICATION_JSON, notFound, notFound.length, Map.of());
-            }
-            URI target = inProcess
-                    ? flociListenerUri(originPath, originRequest.rawQuery())
-                    : buildCustomOriginUri(origin, viewerScheme, forwardUri, originRequest.rawQuery());
             HttpRequest.Builder rb = HttpRequest.newBuilder()
-                    .uri(target);
-            // Origin custom headers: CloudFront adds these to every request it forwards to the origin
-            // (overriding any same-named viewer header), which is how a distribution restricts an origin
-            // to CloudFront-only traffic via a shared secret header.
-            Map<String, String> originHeaders = new LinkedHashMap<>();
-            List<Map<String, String>> customHeaders = origin.getCustomHeaders();
-            if (customHeaders != null) {
-                for (Map<String, String> header : customHeaders) {
-                    String name = header.get("HeaderName");
-                    String value = header.get("HeaderValue");
-                    if (name != null && value != null) {
-                        originHeaders.put(name, value);
-                    }
-                }
-            }
-            if (executeApiHost != null) {
-                originHeaders.put("Host", executeApiHost);
-            }
-            if (webEndpoint != null) {
-                originHeaders.put("Host", webEndpoint);
-                if (alwaysAmzAuth(origin)) {
-                    originHeaders.putAll(lambdaWebIamAuth.cloudFrontSignature(distribution.getArn()));
-                }
-            }
+                    .uri(target.uri());
             rb.method(method, HttpRequest.BodyPublishers.noBody());
             // Both bodies are streamed, so neither has to fit in memory: the viewer's goes out with its
             // own Content-Length, or chunked as it came, and the origin's comes back as it arrives.
             ViewerBody requestBody = originRequestBody(method, viewerBody);
-            CloudFrontOriginHttpClient.OpenResponse resp = (inProcess ? flociClient : httpClient).open(
+            CloudFrontOriginHttpClient.OpenResponse resp = target.client().open(
                     rb.build(), originRequest.headers(),
-                    originHeaders, requestBody != null ? requestBody.stream() : null,
+                    target.originHeaders(), requestBody != null ? requestBody.stream() : null,
                     requestBody != null ? requestBody.length() : -1, originTimeouts(origin));
             String ct = resp.headers().firstValue("content-type").orElse(DEFAULT_CONTENT_TYPE);
             long contentLength = resp.contentLength();
@@ -852,11 +818,148 @@ public class CloudFrontServingController {
         } catch (CloudFrontOriginTimeoutException e) {
             LOG.warnv("CloudFront custom origin timed out for host {0}", safeOriginName(origin));
             return OriginResponse.error(504, ORIGIN_TIMEOUT_MESSAGE);
+        } catch (CloudFrontOriginHttpClient.BlockedOriginHostException e) {
+            LOG.warnv("CloudFront custom origin host {0} resolves to a private or reserved address;"
+                    + " list it in floci.services.cloudfront.allowed-private-origin-hosts to allow it",
+                    safeOriginName(origin));
+            return OriginResponse.error(502, "Bad Gateway.");
         } catch (Exception e) {
             // Do not log the target URI: forwarded query strings can contain credentials or tokens.
             LOG.warnv("CloudFront custom origin fetch failed for host {0}: {1}",
                     safeOriginName(origin), e.getClass().getSimpleName());
             return OriginResponse.error(502, "Bad Gateway.");
+        }
+    }
+
+    /**
+     * Where a request to a custom origin goes: its URI, the client that reaches it, and the origin
+     * headers that replace every same-named forwarded header. A non-null {@code refusal} is the
+     * answer the viewer gets instead, as the origin cannot be asked.
+     */
+    private record CustomOriginTarget(URI uri, CloudFrontOriginHttpClient client,
+                                      Map<String, String> originHeaders, OriginResponse refusal) {
+
+        static CustomOriginTarget refused(OriginResponse refusal) {
+            return new CustomOriginTarget(null, null, Map.of(), refusal);
+        }
+    }
+
+    private CustomOriginTarget customOriginTarget(Distribution distribution, Origin origin, String forwardUri,
+                                                  CloudFrontOriginRequestBuilder.OriginRequest originRequest,
+                                                  String viewerScheme, SocketAddress localAddress) {
+        // Floci serves its own Web Function and execute-api endpoints, whatever port and protocol the origin names.
+        String webEndpoint = webFunctionEndpoint(origin);
+        String executeApiHost = webEndpoint == null ? executeApiHost(origin) : null;
+        String selfHost = webEndpoint == null && executeApiHost == null ? selfHost(origin, viewerScheme) : null;
+        boolean inProcess = webEndpoint != null || executeApiHost != null || selfHost != null;
+        if (inProcess && originRequest.headers().stream()
+                .anyMatch(header -> "Host".equalsIgnoreCase(header.name()))) {
+            // CloudFront checks the endpoint's certificate against the forwarded viewer Host, which it never
+            // names, and a self origin would route the distribution's own Host back to the distribution.
+            LOG.debugv("CloudFront forwards the viewer Host to in-process origin {0}", origin.getId());
+            return CustomOriginTarget.refused(OriginResponse.error(502, "Bad Gateway."));
+        }
+        // Dot segments would be resolved after the host filter's check and escape the API's stage.
+        String originPath = executeApiHost != null ? CloudFrontRequestRouter.normalizePath(rawPath(forwardUri))
+                : selfHost != null ? selfOriginPath(origin, rawPath(forwardUri)) : forwardUri;
+        if (executeApiHost != null && !executeApiHostFilter.routes(executeApiHost, originPath)) {
+            byte[] notFound = ApiGatewayExecuteApiHostFilter.NOT_FOUND_BODY.getBytes(StandardCharsets.UTF_8);
+            return CustomOriginTarget.refused(
+                    new OriginResponse(404, MediaType.APPLICATION_JSON, notFound, notFound.length, Map.of()));
+        }
+        URI target = inProcess
+                ? flociListenerUri(localAddress, originPath, originRequest.rawQuery())
+                : buildCustomOriginUri(origin, viewerScheme, forwardUri, originRequest.rawQuery());
+        // Origin custom headers: CloudFront adds these to every request it forwards to the origin
+        // (overriding any same-named viewer header), which is how a distribution restricts an origin
+        // to CloudFront-only traffic via a shared secret header.
+        Map<String, String> originHeaders = new LinkedHashMap<>();
+        List<Map<String, String>> customHeaders = origin.getCustomHeaders();
+        if (customHeaders != null) {
+            for (Map<String, String> header : customHeaders) {
+                String name = header.get("HeaderName");
+                String value = header.get("HeaderValue");
+                if (name != null && value != null) {
+                    originHeaders.put(name, value);
+                }
+            }
+        }
+        if (executeApiHost != null) {
+            originHeaders.put("Host", executeApiHost);
+        }
+        if (selfHost != null) {
+            originHeaders.put("Host", selfHost);
+        }
+        if (webEndpoint != null) {
+            originHeaders.put("Host", webEndpoint);
+            if (alwaysAmzAuth(origin)) {
+                originHeaders.putAll(lambdaWebIamAuth.cloudFrontSignature(distribution.getArn()));
+            }
+        }
+        return new CustomOriginTarget(target, inProcess ? flociClient : httpClient, originHeaders, null);
+    }
+
+    /**
+     * A custom origin a viewer's WebSocket handshake is tunneled to: the URI and the address it
+     * resolved to, the headers the origin request carries before the upgrade fields, and the origin's
+     * connection, response and response completion timeouts for the handshake.
+     */
+    record WebSocketOrigin(URI uri, InetAddress address,
+                           List<CloudFrontOriginRequestBuilder.Header> headers,
+                           Duration connectTimeout, Duration responseTimeout,
+                           Duration responseCompletionTimeout) {
+    }
+
+    /**
+     * Resolves the origin of a viewer's WebSocket handshake as {@link #serve} resolves an ordinary GET:
+     * the same distribution, allowed methods, signed-request check, cache behavior, origin request
+     * policy and origin custom headers. It is null when the handshake is to be answered as an ordinary
+     * GET instead, which gives the viewer the answer CloudFront gives: an unknown or disabled
+     * distribution, a refused method or signature, an S3 origin, or a custom origin that cannot be
+     * asked. Reads the request's headers only, so it can run off the event loop.
+     */
+    WebSocketOrigin webSocketOrigin(HttpServerRequest request) {
+        try {
+            Distribution dist = service.findByHost(RequestHost.of(request));
+            DistributionConfig config = dist != null ? dist.getConfig() : null;
+            if (config == null || !config.isEnabled()) {
+                return null;
+            }
+            String rawViewerPath = rawViewerPath(request.uri());
+            String normalized = CloudFrontRequestRouter.normalizePath(decodedViewerPath(rawViewerPath));
+            if (!CloudFrontRequestRouter.matchAllowedMethods(config, normalized).contains("GET")) {
+                return null;
+            }
+            List<String> trustedKeyGroups = CloudFrontRequestRouter.trustedKeyGroupsFor(config, normalized);
+            if (!trustedKeyGroups.isEmpty()
+                    && !verifySignedRequest(dist, request, rawViewerPath, trustedKeyGroups).allowed()) {
+                return null;
+            }
+            Origin origin = CloudFrontRequestRouter.findOrigin(config,
+                    CloudFrontRequestRouter.matchTargetOriginId(config, normalized));
+            if (origin == null || CloudFrontRequestRouter.isS3Origin(origin)) {
+                return null;
+            }
+            String viewerScheme = request.scheme();
+            String forwardUri = CloudFrontRequestRouter.resolveForwardUri(
+                    origin.getOriginPath(), rawViewerPath, config.getDefaultRootObject());
+            CloudFrontOriginRequestBuilder.OriginRequest originRequest =
+                    CloudFrontOriginRequestBuilder.build(viewerRequest(request, "GET", viewerScheme),
+                            forwarding(config, normalized), dist.getDomainName());
+            CustomOriginTarget target = customOriginTarget(dist, origin, forwardUri, originRequest,
+                    viewerScheme, request.localAddress());
+            if (target.refusal() != null) {
+                return null;
+            }
+            InetAddress address = target.client().resolve(target.uri().getHost());
+            CloudFrontOriginHttpClient.OriginTimeouts timeouts = originTimeouts(origin);
+            return new WebSocketOrigin(target.uri(), address,
+                    CloudFrontOriginHttpClient.originRequestHeaders(originRequest.headers(), target.originHeaders()),
+                    timeouts.connectTimeout(), timeouts.responseTimeout(), timeouts.responseCompletionTimeout());
+        } catch (IOException | RuntimeException e) {
+            // The ordinary GET meets the same failure and answers it as CloudFront does.
+            LOG.debugv("CloudFront answers a WebSocket handshake as a GET: {0}", e.getClass().getSimpleName());
+            return null;
         }
     }
 
@@ -873,6 +976,42 @@ public class CloudFrontServingController {
         } catch (IllegalArgumentException e) {
             return null;
         }
+    }
+
+    /**
+     * The origin's host when it names this Floci: its hostname, {@code localhost} or a loopback
+     * address, on the port Floci listens on for the protocol the request would use. Such an origin,
+     * typically a path-style S3 bucket, is served in-process, so the private-address guard that
+     * protects the other custom origins does not refuse it.
+     */
+    private String selfHost(Origin origin, String viewerScheme) {
+        String host;
+        try {
+            host = normalizeOriginHost(origin.getDomainName());
+        } catch (IllegalArgumentException ignored) {
+            // An invalid domain cannot name Floci; the normal origin fetch rejects it.
+            return null;
+        }
+        boolean flociHost = host.equalsIgnoreCase(flociHostname) || host.equalsIgnoreCase("localhost")
+                || host.equals("127.0.0.1") || host.equals("::1");
+        if (!flociHost) {
+            return null;
+        }
+        int port = buildCustomOriginUri(origin, viewerScheme, "/", null).getPort();
+        return port == flociPort || port == httpServer.getPort() || tlsProxyServer.reservesPort(port)
+                ? origin.getDomainName().trim() : null;
+    }
+
+    /**
+     * The path a self origin is asked for. CloudFront sends the viewer's path to the origin as it
+     * came, but Floci's listener resolves dot segments, so they would climb out of the bucket the
+     * origin path names. Resolving them within the viewer's part first keeps the request inside it.
+     */
+    private static String selfOriginPath(Origin origin, String forwardPath) {
+        String prefix = CloudFrontRequestRouter.joinPath(origin.getOriginPath(), "");
+        prefix = prefix.substring(0, prefix.length() - 1);
+        String viewerPath = forwardPath.substring(prefix.length());
+        return CloudFrontRequestRouter.normalizePath(prefix + CloudFrontRequestRouter.normalizePath(viewerPath));
     }
 
     /**
@@ -910,8 +1049,7 @@ public class CloudFrontServingController {
      * The plain HTTP port at the address the viewer reached Floci at, which also serves the Web
      * Function endpoints. A viewer over TLS reached the HTTPS port instead.
      */
-    private URI flociListenerUri(String forwardUri, String rawQuery) {
-        SocketAddress local = currentVertxRequest.getCurrent().request().localAddress();
+    private URI flociListenerUri(SocketAddress local, String forwardUri, String rawQuery) {
         String host = local.hostAddress().indexOf(':') >= 0 ? "[" + local.hostAddress() + "]" : local.hostAddress();
         return buildCustomOriginUri("http", host, httpServer.getPort(), forwardUri, rawQuery);
     }

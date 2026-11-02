@@ -159,7 +159,7 @@ class SecretsManagerRotationLockTest {
         // is building DescribeSecret's VersionIdsToStages from the same map. Park the reader one
         // entry into that iteration, add the version, and let the reader continue.
         SecretsManagerJsonHandler handler = new SecretsManagerJsonHandler(service, new ObjectMapper(),
-                mock(IamEnforcementFilter.class));
+                mock(IamEnforcementFilter.class), mock(SecretsManagerEventPublisher.class));
         ParkingIterationVersions versions = new ParkingIterationVersions(secret.getVersions());
         secret.setVersions(versions);
         assertTrue(secret.getVersions() instanceof ConcurrentMap,

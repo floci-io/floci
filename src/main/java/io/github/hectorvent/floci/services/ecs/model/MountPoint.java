@@ -9,5 +9,5 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  * host source path is bind-mounted into the container at {@code containerPath}.
  */
 @RegisterForReflection
-public record MountPoint(String sourceVolume, String containerPath, boolean readOnly) {
+public record MountPoint(String sourceVolume, String containerPath, Boolean readOnly) {
 }

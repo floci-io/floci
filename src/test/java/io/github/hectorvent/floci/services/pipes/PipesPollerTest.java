@@ -741,7 +741,7 @@ class PipesPollerTest {
                   },
                   "FilterCriteria": {
                     "Filters": [
-                      {"Pattern": "{\\\"key\\\": [{\\\"exists\\\": false}]}"}
+                      {"Pattern": "{\\\"key\\\": [null]}"}
                     ]
                   }
                 }
@@ -767,5 +767,13 @@ class PipesPollerTest {
                 .mapToLong(KafkaOffsetDto::offset)
                 .findFirst()
                 .orElseThrow();
+    }
+
+    @Test
+    void kinesisStreamNameReadsTheStreamOfAStreamOrConsumerArn() {
+        assertEquals("orders", PipesPoller.kinesisStreamName("arn:aws:kinesis:us-east-1:111111111111:stream/orders"));
+        assertEquals("orders", PipesPoller.kinesisStreamName(
+                "arn:aws-cn:kinesis:cn-north-1:111111111111:stream/orders/consumer/reader:1700000000"));
+        assertEquals("orders", PipesPoller.kinesisStreamName("orders"));
     }
 }

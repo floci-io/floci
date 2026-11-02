@@ -554,4 +554,28 @@ class AthenaIntegrationTest {
             .statusCode(200)
             .body("QueryExecution.Status.State", equalTo("SUCCEEDED"));
     }
+
+    @Test
+    @Order(17)
+    void startQueryExecutionNamingNullRunsInPrimary() {
+        String id = given()
+            .header("X-Amz-Target", "AmazonAthena.StartQueryExecution")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"QueryString\": \"SELECT 1\", \"WorkGroup\": null }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("QueryExecutionId");
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.GetQueryExecution")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"QueryExecutionId\": \"" + id + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("QueryExecution.WorkGroup", equalTo("primary"));
+    }
 }

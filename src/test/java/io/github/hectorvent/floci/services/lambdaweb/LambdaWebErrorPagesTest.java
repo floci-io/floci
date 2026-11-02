@@ -46,6 +46,12 @@ class LambdaWebErrorPagesTest {
         assertEquals("Thu, 15 Oct 26 23:32:32 GMT", LambdaWebErrorPages.edgeDate(Instant.parse("2026-10-15T23:32:32Z")));
     }
 
+    @Test
+    void platformDateHasATwoDigitDay() {
+        assertEquals("Sun, 01 Nov 2026 02:33:33 GMT",
+                LambdaWebErrorPages.platformDate(Instant.parse("2026-11-01T02:33:33Z")));
+    }
+
     private static int length(LambdaWebErrorPages.Page page) {
         return LambdaWebErrorPages.html(page, REQUEST_ID).getBytes(StandardCharsets.UTF_8).length;
     }

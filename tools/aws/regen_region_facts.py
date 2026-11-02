@@ -45,6 +45,9 @@ China and GovCloud user guides for what neither transcribes, are the sources her
   resolved through the region descriptions in `partitions.json`. No source in `local/aws` gives
   the zone for any other region.
 
+- The RDS hosted zone id for us-east-1 comes from the AWS CLI describe-db-instances example
+  (`RDS_CLI_EXAMPLE_URL` -> rds/describe-db-instances.txt).
+
 Nothing is hand-typed. When the checkouts are absent (CI), `--check` only verifies the vendored
 file parses and keeps its shape; a regeneration needs `local/aws`.
 
@@ -76,6 +79,7 @@ CDK_FACT_TABLES = "packages/aws-cdk-lib/region-info/build-tools/fact-tables.ts"
 CDK_CLOUDFRONT_TARGET = "packages/aws-cdk-lib/aws-route53-targets/lib/cloudfront-target.ts"
 CDK_VPC_ENDPOINT = "packages/aws-cdk-lib/aws-ec2/lib/vpc-endpoint.ts"
 BOTOCORE_CLOUDFRONT = "cloudfront/2020-05-31/service-2.json"
+RDS_CLI_EXAMPLE_URL = "https://docs.aws.amazon.com/cli/v1/reference/rds/describe-db-instances.html"
 
 GO_ROW_RE = re.compile(r'^\s*endpoints\.([A-Za-z0-9]+)RegionID:\s*"([A-Z0-9]+)",')
 TS_ROW_RE = re.compile(r"^\s*'([a-z0-9-]+)':\s*'([A-Z0-9]+)',")
@@ -116,9 +120,15 @@ APIGATEWAY_REGIONAL_ZONE_PARTITION = "aws-us-gov"
 APIGATEWAY_REGIONAL_ZONE_SENTENCE = re.compile(
     r"The Amazon Route\s53 Hosted Zone ID for the regional endpoint in the (AWS GovCloud \([A-Za-z-]+\)) Region"
     r" is (Z[0-9A-Z]+)\.")
+RDS_ZONE_SENTENCES = {
+    "us-east-1": ("rds/describe-db-instances.txt", re.compile(
+        r'"Address":\s*"[^"\s]+\.us-east-1\.rds\.amazonaws\.com",\s*'
+        r'"Port":\s*[0-9]+,\s*"HostedZoneId":\s*"(Z[A-Z0-9]+)"')),
+}
 GUIDE_PAGES = sorted({page for page, _ in CONSOLE_HOST_SENTENCES.values()}
                      | {page for page, _ in CLOUDFRONT_SUFFIX_SENTENCES.values()}
-                     | {APIGATEWAY_REGIONAL_ZONE_PAGE})
+                     | {APIGATEWAY_REGIONAL_ZONE_PAGE}
+                     | {page for page, _ in RDS_ZONE_SENTENCES.values()})
 GO_PARTITION_IDS = {"AwsCn": "aws-cn", "AwsUsGov": "aws-us-gov", "AwsIso": "aws-iso", "AwsIsoB": "aws-iso-b",
                     "AwsIsoE": "aws-iso-e", "AwsIsoF": "aws-iso-f", "Aws": "aws"}
 
@@ -304,13 +314,15 @@ def build(terraform: Path, cdk: Path, guides: Path, botocore_data: Path, partiti
     apigateway_zones = parse_apigateway_regional_zones(
         (guides / APIGATEWAY_REGIONAL_ZONE_PAGE).read_text(encoding="utf-8"), partitions_doc)
 
+    rds_zones = parse_guide_sentences(guides, RDS_ZONE_SENTENCES)
+
     partition_ids = [p["id"] for p in partitions_doc["partitions"]]
     region_partition = {r["id"]: p for p in partitions_doc["partitions"] for r in p["regions"]}
     dns_suffix = {p["id"]: p["dnsSuffix"] for p in partitions_doc["partitions"]}
 
     s3_website = dict(s3_cdk)
     s3_website.update(s3_tf)  # Terraform cites the website-endpoint table; it wins on conflicts
-    region_ids = sorted(set(alb) | set(nlb) | set(s3_website) | set(vpce_services) | set(apigateway_zones))
+    region_ids = sorted(set(alb) | set(nlb) | set(s3_website) | set(vpce_services) | set(apigateway_zones) | set(rds_zones))
     regions = {}
     for region in region_ids:
         if region not in region_partition:
@@ -330,6 +342,8 @@ def build(terraform: Path, cdk: Path, guides: Path, botocore_data: Path, partiti
             entry["vpcEndpointCnSuffixServices"] = vpce_cn_suffix[region]
         if region in apigateway_zones:
             entry["apiGatewayRegionalHostedZoneId"] = apigateway_zones[region]
+        if region in rds_zones:
+            entry["rdsHostedZoneId"] = rds_zones[region]
         regions[region] = entry
 
     partitions = {}
@@ -348,9 +362,10 @@ def build(terraform: Path, cdk: Path, guides: Path, botocore_data: Path, partiti
     return {
         "_source": {
             "generator": "tools/aws/regen_region_facts.py",
+            "rds": RDS_CLI_EXAMPLE_URL,
             "terraform": f"terraform-provider-aws {TF_ELB}, {TF_ELBV2}, {TF_S3}, {TF_CLIENT}",
             "cdk": f"aws-cdk {CDK_FACT_TABLES}, {CDK_CLOUDFRONT_TARGET}, {CDK_VPC_ENDPOINT}",
-            "docs": "aws-docs/partition-guides (snapshots of the China and GovCloud user guides) " + ", ".join(GUIDE_PAGES),
+            "docs": "aws-docs/partition-guides (snapshots of AWS guides and CLI examples) " + ", ".join(GUIDE_PAGES),
             "botocore": f"botocore {BOTOCORE_CLOUDFRONT} (Distribution$DomainName, DistributionSummary$DomainName)",
             "s3WebsiteConflicts": "terraform wins over the CDK where they disagree (it cites the S3 website-endpoint table)",
         },
