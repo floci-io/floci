@@ -60,6 +60,23 @@ its version does not discard its pool identity. Unqualified invocation retains
 the normal on-demand path, and existing authorization checks still precede
 execution.
 
+## Task-token IAM resources
+
+With IAM enforcement enabled, `SendTaskSuccess`, `SendTaskFailure`, and
+`SendTaskHeartbeat` authorize against the resource associated with the token:
+the activity ARN for an activity task, or the unqualified state-machine ARN
+for a `.waitForTaskToken` service integration, including versioned executions.
+A grant on only the version ARN does not match. A wildcard grant also matches, and
+an explicit deny on the matching resource wins. An execution ARN or an
+unrelated resource does not grant callback access.
+
+This distinction was verified with signed SDK calls against AWS using both
+Lambda callback integrations and activities. Recent completed tokens retain
+their resource so a permitted retry receives `TaskTimedOut`. Unknown tokens
+return `InvalidToken` before IAM resource evaluation. Resource lookup
+does not consume the token. The caller must own the token before its resource
+is used for IAM evaluation, including for recent completed tokens.
+
 ## Nested task credentials
 
 Nested `states:startExecution` tasks, including `.sync` and `.sync:2`, and the SDK
