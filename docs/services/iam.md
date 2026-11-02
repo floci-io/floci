@@ -1603,8 +1603,8 @@ Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs, Secrets Manager and STS. 
 Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
-AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator and Amazon
-Timestream for InfluxDB they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator, Amazon
+Timestream for InfluxDB and the Amazon Redshift Data API they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. A member holding
@@ -1670,7 +1670,11 @@ none yet, as for its create. An Application Auto Scaling scalable target, whose 
 Application Auto Scaling assigns it, `scalable-target/<id>`, while its requests name it by
 `ServiceNamespace`, `ResourceId` and `ScalableDimension`, is checked on the ARN it is stored under, and
 on `scalable-target/*` when there is none yet, as for a `RegisterScalableTarget` registering a new one;
-its tag operations name it by its ARN. EventBridge V2's API, which Floci does not serve, is not read. A
+its tag operations name it by its ARN. A Redshift Data API request is checked on the cluster its
+`ClusterIdentifier` names, or on the ARN of the Redshift Serverless workgroup its `WorkgroupName`
+names by name or by ARN, which ends in the id Redshift Serverless gives it, `workgroup/<id>`, and on
+`workgroup/*` when there is no such workgroup; one naming only its session, by `SessionId`, is
+checked on `*`. EventBridge V2's API, which Floci does not serve, is not read. A
 state machine's version or alias
 (`stateMachine:<name>:<qualifier>`) is checked on the state machine's ARN, as Step Functions
 authorizes it, so a grant or a deny on `stateMachine:<name>` covers its versions and aliases, and

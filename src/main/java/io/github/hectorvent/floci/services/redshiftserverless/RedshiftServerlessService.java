@@ -1226,14 +1226,20 @@ public class RedshiftServerlessService implements Resettable {
         }
     }
 
+    /** The workgroup a workgroup name or ARN names in the Region, as the Data API reads either; empty when none. */
+    public Optional<Workgroup> findWorkgroupByNameOrArn(String nameOrArn, String region) {
+        return AwsArnUtils.looksLikeArn(nameOrArn) ? workgroupByArn(nameOrArn, region)
+                : findWorkgroup(nameOrArn, region);
+    }
+
     private Workgroup resolveWorkgroup(String nameOrArn, String region) {
         if (nameOrArn == null || nameOrArn.isBlank()) {
             throw ServerlessSupport.validation("workgroupName is required.");
         }
         if (!AwsArnUtils.looksLikeArn(nameOrArn)) {
-            return getWorkgroup(nameOrArn, region);
+            validateWorkgroupName(nameOrArn);
         }
-        return workgroupByArn(nameOrArn, region).orElseThrow(() -> workgroupNotFound(nameOrArn));
+        return findWorkgroupByNameOrArn(nameOrArn, region).orElseThrow(() -> workgroupNotFound(nameOrArn));
     }
 
     /**
