@@ -769,7 +769,7 @@ class Ec2KeyPairCfnProvisionerTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ssm().maxParameterHistory()).thenReturn(5);
         return new SsmService(factory, config, new RegionResolver(REGION, ACCOUNT_ID),
-                null, null, mock(SsmEventPublisher.class));
+                null, null, mock(SsmEventPublisher.class), null);
     }
 
     private static StackResource resource() {
