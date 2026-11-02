@@ -42,6 +42,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -175,6 +176,28 @@ class FirehoseRedshiftServiceTest {
 
         verifyStagedTimes(0);
         verify(delivery, never()).copy(anyString(), anyString(), any(), anyString(), anyString());
+
+        ArgumentCaptor<byte[]> backup = ArgumentCaptor.forClass(byte[].class);
+        verify(s3Service).putObject(eq("bk"), anyString(), backup.capture(), anyString(), anyMap(), any());
+        assertEquals("{\"id\":1}\n", new String(backup.getValue(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void backupWriteFailureWhenLambdaDropsEveryRecordLeavesTheBatchBufferedForRetry() throws Exception {
+        createStream(BACKUP_ENABLED + LAMBDA_PROCESSING);
+        when(transformer.transform(any(), eq("stage"), any(), any())).thenReturn(
+                new FirehoseLambdaTransformer.Outcome(List.of(), 1, 0, null));
+        doThrow(new IllegalStateException("s3 unavailable")).when(s3Service)
+                .putObject(eq("bk"), anyString(), any(byte[].class), anyString(), anyMap(), any());
+
+        service.flush(STREAM);
+
+        verifyStagedTimes(0);
+        verify(delivery, never()).copy(anyString(), anyString(), any(), anyString(), anyString());
+
+        // The failed backup kept the batch buffered: a second flush retries the backup write
+        reset(s3Service);
+        service.flush(STREAM);
 
         ArgumentCaptor<byte[]> backup = ArgumentCaptor.forClass(byte[].class);
         verify(s3Service).putObject(eq("bk"), anyString(), backup.capture(), anyString(), anyMap(), any());

@@ -1170,9 +1170,7 @@ public class FirehoseService implements ResourceProvider {
                 if (records.isEmpty()) {
                     if (isRedshiftStream(stream)) {
                         RedshiftDestination redshift = stream.getDestinations().get(0).getRedshiftDestinationDescription();
-                        writeRedshiftBackupSafely(streamName, stream, redshift, toFlush,
-                                "Backup write for stream {0} failed; the batch was dropped by transform "
-                                        + "and has no backup copy: {1}");
+                        writeRedshiftBackup(stream, redshift, toFlush);
                     }
                     // Nothing survived the transform. The batch is accounted for, dropped
                     // records deliberately leaving no trace and failed ones already in the

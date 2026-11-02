@@ -183,7 +183,11 @@ public class DeliveryStreamDescription {
     }
 
     /**
-     * True when record transformation is enabled for this stream.
+     * True when a transformation applies to deliveries: the configuration is present
+     * and Enabled is explicitly true. An omitted Enabled leaves it disabled, the
+     * opposite of the conversion block below. Probed rather than carried over from
+     * there (2026-09-11): DescribeDeliveryStream echoes an omitted Enabled as false
+     * here and as true on the conversion block.
      */
     @JsonIgnore
     public boolean isProcessingEnabled() {
@@ -325,21 +329,6 @@ public class DeliveryStreamDescription {
         }
         public CloudWatchLoggingOptions getCloudWatchLoggingOptions() { return cloudWatchLoggingOptions; }
         public void setCloudWatchLoggingOptions(CloudWatchLoggingOptions options) { this.cloudWatchLoggingOptions = options; }
-
-        /**
-         * True when a transformation applies to deliveries: the configuration is present
-         * and Enabled is explicitly true. An omitted Enabled leaves it disabled, the
-         * opposite of the conversion block below. Probed rather than carried over from
-         * there (2026-09-11): DescribeDeliveryStream echoes an omitted Enabled as false
-         * here and as true on the conversion block.
-         *
-         * Ignored for serialization for the same reason as the accessor below.
-         */
-        @JsonIgnore
-        public boolean isProcessingEnabled() {
-            return processingConfiguration != null
-                    && Boolean.TRUE.equals(processingConfiguration.getEnabled());
-        }
 
         /**
          * True when data format conversion applies to deliveries: the configuration is

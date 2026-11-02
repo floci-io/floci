@@ -27,7 +27,6 @@ import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -363,7 +362,6 @@ class FirehoseProcessingConfigurationTest {
 
         S3Destination stored = service.describeDeliveryStream("stream").s3Destination();
         assertEquals(false, stored.getProcessingConfiguration().getEnabled());
-        assertFalse(stored.isProcessingEnabled());
     }
 
     /**
@@ -399,7 +397,6 @@ class FirehoseProcessingConfigurationTest {
         stored.applyDefaults();
 
         assertEquals(false, processing.getEnabled());
-        assertFalse(stored.isProcessingEnabled());
     }
 
     private static String parameterValue(List<ProcessorParameter> parameters, String name) {
