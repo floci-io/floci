@@ -1,11 +1,12 @@
 package io.github.hectorvent.floci.services.redshift;
 
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessService;
+import io.github.hectorvent.floci.testing.DockerAvailability;
+import io.github.hectorvent.floci.testing.QueryRequests;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ExtractableResponse;
 import io.restassured.response.Response;
-import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.awaitility.Awaitility;
 import org.junit.jupiter.api.AfterAll;
@@ -43,8 +44,6 @@ class RedshiftServerlessZeroEtlIntegrationTest {
     // Not "dev", to show the landing table goes to the namespace's own database.
     private static final String DATABASE = "warehouse";
     private static final String REGION = "us-east-1";
-    private static final String AUTH_HEADER =
-            "AWS4-HMAC-SHA256 Credential=test/20261102/us-east-1/redshift/aws4_request";
 
     @Inject
     RedshiftServerlessService serverless;
@@ -56,8 +55,8 @@ class RedshiftServerlessZeroEtlIntegrationTest {
 
     /** Creates the resources once, after Quarkus has pointed RestAssured at the test server. */
     @BeforeEach
-    void ensureResources() {
-        Assumptions.assumeTrue(dockerAvailable(), "Docker is required for Redshift Serverless zero-ETL tests");
+    void ensureResources() throws InterruptedException {
+        Assumptions.assumeTrue(DockerAvailability.isAvailable(), "Docker is required for Redshift Serverless zero-ETL tests");
         RestAssuredJsonUtils.configureAwsContentTypes();
         if (created) {
             return;
@@ -94,7 +93,7 @@ class RedshiftServerlessZeroEtlIntegrationTest {
 
     @Test
     void aTableReplicatesIntoTheNamespaceWorkgroup() throws SQLException {
-        String response = query("Action", "CreateIntegration", "IntegrationName", "zetl-serverless",
+        String response = redshift("CreateIntegration", "IntegrationName", "zetl-serverless",
                 "SourceArn", tableArn, "TargetArn", namespaceArn)
                 .then().statusCode(200)
                 .body(containsString("<SourceArn>" + tableArn + "</SourceArn>"))
@@ -107,7 +106,7 @@ class RedshiftServerlessZeroEtlIntegrationTest {
         try {
             awaitLanded(landingTable, "before-integration", true);
             Awaitility.await().atMost(Duration.ofSeconds(30)).pollInterval(Duration.ofMillis(500))
-                    .untilAsserted(() -> query("Action", "DescribeIntegrations", "IntegrationArn", integrationArn)
+                    .untilAsserted(() -> redshift("DescribeIntegrations", "IntegrationArn", integrationArn)
                             .then().statusCode(200)
                             .body(containsString("<Status>active</Status>"))
                             .body(containsString("<SourceArn>" + tableArn + "</SourceArn>"))
@@ -116,13 +115,13 @@ class RedshiftServerlessZeroEtlIntegrationTest {
             putItem("after-integration");
             awaitLanded(landingTable, "after-integration", false);
         } finally {
-            query("Action", "DeleteIntegration", "IntegrationArn", integrationArn).then().statusCode(200);
+            redshift("DeleteIntegration", "IntegrationArn", integrationArn).then().statusCode(200);
         }
     }
 
     @Test
     void aTableThatDoesNotExistIsIntegrationSourceNotFound() {
-        query("Action", "CreateIntegration", "IntegrationName", "zetl-no-source",
+        redshift("CreateIntegration", "IntegrationName", "zetl-no-source",
                 "SourceArn", tableArn.replace(TABLE, "no-such-table"), "TargetArn", namespaceArn)
                 .then().statusCode(404)
                 .body(containsString("IntegrationSourceNotFoundFault"));
@@ -132,7 +131,7 @@ class RedshiftServerlessZeroEtlIntegrationTest {
     void aNamespaceThatDoesNotExistIsIntegrationTargetNotFound() {
         String otherNamespace = namespaceArn.substring(0, namespaceArn.lastIndexOf('/') + 1)
                 + "00000000-0000-0000-0000-000000000000";
-        query("Action", "CreateIntegration", "IntegrationName", "zetl-no-target",
+        redshift("CreateIntegration", "IntegrationName", "zetl-no-target",
                 "SourceArn", tableArn, "TargetArn", otherNamespace)
                 .then().statusCode(404)
                 .body(containsString("IntegrationTargetNotFoundFault"));
@@ -180,25 +179,9 @@ class RedshiftServerlessZeroEtlIntegrationTest {
                 .then().statusCode(200).extract();
     }
 
-    /** The Authorization header routes a Query request to Redshift. */
-    private static Response query(String... formParams) {
-        RequestSpecification spec = given()
-                .contentType("application/x-www-form-urlencoded")
-                .header("Authorization", AUTH_HEADER)
-                .formParam("Version", "2012-12-01");
-        for (int i = 0; i < formParams.length; i += 2) {
-            spec = spec.formParam(formParams[i], formParams[i + 1]);
-        }
-        return spec.when().post("/");
-    }
-
-    private static boolean dockerAvailable() {
-        try {
-            Process process = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")
-                    .redirectErrorStream(true).start();
-            return process.waitFor() == 0;
-        } catch (Exception e) {
-            return false;
-        }
+    private static Response redshift(String action, String... params) {
+        return QueryRequests.request("test", "redshift", action, params)
+                .formParam("Version", "2012-12-01")
+                .when().post("/");
     }
 }
