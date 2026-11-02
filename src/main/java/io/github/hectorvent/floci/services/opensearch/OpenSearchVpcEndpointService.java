@@ -206,7 +206,8 @@ public class OpenSearchVpcEndpointService {
 
     /**
      * The requested subnets and security groups, with the VPC and zones EC2 knows the subnets by. A
-     * subnet EC2 does not know is kept as given and left unresolved.
+     * subnet EC2 does not know is kept as given and left unresolved. Without security groups the
+     * endpoint takes the VPC's default one, as AWS does, when EC2 knows the VPC and still has it.
      */
     private VpcOptions resolved(VpcOptions requested, String region) {
         VpcOptions options = new VpcOptions();
@@ -228,6 +229,10 @@ public class OpenSearchVpcEndpointService {
                 }
             }
             options.setAvailabilityZones(new ArrayList<>(zones));
+            if (options.getSecurityGroupIds().isEmpty() && options.getVpcId() != null) {
+                ec2Service.defaultSecurityGroupOf(region, options.getVpcId())
+                        .ifPresent(group -> options.setSecurityGroupIds(new ArrayList<>(List.of(group.getGroupId()))));
+            }
         }
         return options;
     }

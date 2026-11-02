@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.opensearch;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.ValidatableResponse;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
@@ -41,6 +42,9 @@ class OpenSearchVpcEndpointIntegrationTest {
     // The seeded default subnets, so EC2 can name their VPC and zones.
     private static final String SUBNET_A = Ec2Service.defaultSubnetId("us-east-1", "a");
     private static final String SUBNET_B = Ec2Service.defaultSubnetId("us-east-1", "b");
+
+    @Inject
+    Ec2Service ec2Service;
 
     @AfterEach
     void cleanup() {
@@ -153,6 +157,25 @@ class OpenSearchVpcEndpointIntegrationTest {
                 .when().delete("/2021-01-01/opensearch/vpcEndpoints/" + id)
                 .then().statusCode(409)
                 .body("__type", containsString("ResourceNotFoundException"));
+    }
+
+    @Test
+    void anEndpointWithoutSecurityGroupsTakesTheVpcsDefaultOneOnCreateAndUpdate() {
+        String domainArn = createVpcDomain().extract().path("DomainStatus.ARN");
+        ValidatableResponse created = given().contentType("application/json").header("Authorization", AUTH_HEADER)
+                .body("{\"DomainArn\":\"" + domainArn + "\",\"VpcOptions\":{\"SubnetIds\":[\"" + SUBNET_A + "\"]}}")
+                .when().post("/2021-01-01/opensearch/vpcEndpoints")
+                .then().statusCode(200);
+        String vpcId = created.extract().path("VpcEndpoint.VpcOptions.VPCId");
+        String id = created.extract().path("VpcEndpoint.VpcEndpointId");
+        String defaultGroup = ec2Service.defaultSecurityGroupOf("us-east-1", vpcId).orElseThrow().getGroupId();
+        created.body("VpcEndpoint.VpcOptions.SecurityGroupIds", contains(defaultGroup));
+
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+                .body("{\"VpcEndpointId\":\"" + id + "\",\"VpcOptions\":{\"SubnetIds\":[\"" + SUBNET_B + "\"]}}")
+                .when().post("/2021-01-01/opensearch/vpcEndpoints/update")
+                .then().statusCode(200)
+                .body("VpcEndpoint.VpcOptions.SecurityGroupIds", contains(defaultGroup));
     }
 
     @Test

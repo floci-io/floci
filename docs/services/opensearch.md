@@ -143,7 +143,7 @@ services:
 - **VPC endpoints:**
     - An id reads `aos-` followed by 12 hexadecimal digits, and endpoints are scoped to an account and a Region like domains.
     - `CreateVpcEndpoint`, `UpdateVpcEndpoint` and `DeleteVpcEndpoint` answer `CREATING`, `UPDATING` and `DELETING`, and the next read sees the endpoint `ACTIVE` or gone: the change takes effect at once.
-    - `VPCId` and `AvailabilityZones` are filled from the EC2 subnets the request names; a subnet EC2 does not know stays unresolved. Without `SecurityGroupIds` the endpoint has none, where AWS uses the VPC's default security group.
+    - `VPCId` and `AvailabilityZones` are filled from the EC2 subnets the request names; a subnet EC2 does not know stays unresolved. Without `SecurityGroupIds` the endpoint takes the VPC's default security group, as in AWS.
     - `Endpoint` is the domain's own address, since Floci serves a domain at one address; no network interface is created.
     - A list returns every endpoint in one page, without `NextToken`. A domain name that names no domain lists nothing.
     - An unknown domain ARN on `CreateVpcEndpoint` is a `ValidationException`, and an unknown id on `UpdateVpcEndpoint` or `DeleteVpcEndpoint` a `ResourceNotFoundException`, as the API reference lists for each operation. Deleting a domain does not delete its VPC endpoints.
