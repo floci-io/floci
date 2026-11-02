@@ -171,6 +171,9 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
         private final List<Shard> shards = new CopyOnWriteArrayList<>();
         private final Map<String, List<Record>> records = new ConcurrentHashMap<>();
         private final Set<String> closed = ConcurrentHashMap.newKeySet();
+        /** Shards of one named stream, for tests that tell a table's streams apart. */
+        private final Map<String, List<Shard>> streamShards = new ConcurrentHashMap<>();
+        private final Set<String> expired = ConcurrentHashMap.newKeySet();
         private final CheckpointLifetime lifetime;
 
         FakeStreamReader(CheckpointLifetime lifetime) {
@@ -182,24 +185,39 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
             return records.computeIfAbsent(shardId, ignored -> new CopyOnWriteArrayList<>());
         }
 
+        List<Record> shard(String streamArn, String shardId, String parentShardId) {
+            streamShards.computeIfAbsent(streamArn, ignored -> new CopyOnWriteArrayList<>())
+                    .add(new Shard(shardId, parentShardId, null, null));
+            return records.computeIfAbsent(streamArn + " " + shardId, ignored -> new CopyOnWriteArrayList<>());
+        }
+
         void close(String shardId) {
             closed.add(shardId);
         }
 
+        void expire(String streamArn) {
+            expired.add(streamArn);
+        }
+
         @Override
         public ShardsPage describeStream(Stream stream, String exclusiveStartShardId, Integer limit) {
-            return new ShardsPage(stream, List.copyOf(shards), null);
+            if (expired.contains(stream.arn())) {
+                throw new AwsException("ResourceNotFoundException", "Stream not found: " + stream.arn(), 400);
+            }
+            return new ShardsPage(stream, List.copyOf(streamShards.getOrDefault(stream.arn(), shards)), null);
         }
 
         @Override
         public Cursor getShardIterator(Stream stream, String shardId, Position position, String sequenceNumber) {
-            iteratorRequests.add(shardId + ":" + position + ":" + sequenceNumber);
+            iteratorRequests.add((streamShards.containsKey(stream.arn()) ? stream.arn() + " " : "")
+                    + shardId + ":" + position + ":" + sequenceNumber);
             return new Cursor(stream, shardId, position == Position.TRIM_HORIZON ? "" : sequenceNumber);
         }
 
         @Override
         public RecordsPage getRecords(Cursor cursor, int limit) {
-            List<Record> held = new ArrayList<>(records.get(cursor.shardId()));
+            List<Record> held = new ArrayList<>(records.getOrDefault(cursor.stream().arn() + " " + cursor.shardId(),
+                    records.get(cursor.shardId())));
             String after = cursor.token();
             if (!after.isEmpty() && !held.isEmpty() && after.compareTo(held.get(0).sequenceNumber()) < 0) {
                 throw new AwsException("TrimmedDataAccessException",
@@ -662,7 +680,7 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
     }
 
     @Test
-    void aTableSourceFollowsTheTablesLatestStreamAndDropsTheCheckpointsOfAnother() {
+    void aTableSourceDrainsItsStreamBeforeMovingToTheTablesLatestAndDropsItsCheckpoints() {
         FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
         RedshiftService redshiftService = mock(RedshiftService.class);
         RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
@@ -670,20 +688,87 @@ class RedshiftDynamoDbZeroEtlConsumerTest {
         TableDefinition table = createTableAs("111111111111", tableName, true);
         Integration integration = tableSourceIntegration(table);
         integration.setBackfillCompleted(true);
-        // Progress made on the stream the table had before its streams were turned off and on again.
-        integration.setSourceStreamArn(table.getTableArn() + "/stream/2026-01-01T00:00:00.000");
+        // Progress made on the stream the table had before its streams were turned off and on again,
+        // which still holds a record the integration has not read.
+        String previous = table.getTableArn() + "/stream/2026-01-01T00:00:00.000";
+        integration.setSourceStreamArn(previous);
         integration.setShardSequenceNumbers(Map.of(SHARD_ID, "s1"));
+        DynamoDbStreamReader.Record unread = streamRecord("s2");
+        streams.shard(previous, SHARD_ID, null).addAll(List.of(streamRecord("s1"), unread));
         DynamoDbStreamReader.Record first = streamRecord("s1");
         DynamoDbStreamReader.Record second = streamRecord("s2");
-        streams.shard(SHARD_ID, null).addAll(List.of(first, second));
+        streams.shard(table.getStreamArn(), SHARD_ID, null).addAll(List.of(first, second));
+        RedshiftDynamoDbZeroEtlConsumer consumer =
+                new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, redshiftService, writer);
+
+        consumer.pollOnce(integration);
+        assertEquals(previous, integration.getSourceStreamArn());
+        verify(writer).writeBatch(integration.getAccountId(), WAREHOUSE_ARN, "floci_zetl_orders",
+                List.of(unread.awsRecord()));
+
+        consumer.pollOnce(integration);
+        assertEquals(table.getStreamArn(), integration.getSourceStreamArn());
+        assertTrue(integration.getShardSequenceNumbers().isEmpty());
+        verify(redshiftService).updateIntegrationSourceStream(integration.getAccountId(),
+                integration.getIntegrationArn(), table.getStreamArn());
+
+        consumer.pollOnce(integration);
+        assertEquals(List.of(
+                previous + " " + SHARD_ID + ":AFTER_SEQUENCE_NUMBER:s1",
+                previous + " " + SHARD_ID + ":AFTER_SEQUENCE_NUMBER:s2",
+                table.getStreamArn() + " " + SHARD_ID + ":TRIM_HORIZON:null"), streams.iteratorRequests);
+        verify(writer).writeBatch(integration.getAccountId(), WAREHOUSE_ARN, "floci_zetl_orders",
+                List.of(first.awsRecord(), second.awsRecord()));
+        assertEquals(Map.of(SHARD_ID, "s2"), integration.getShardSequenceNumbers());
+    }
+
+    @Test
+    void aTableSourceKeepsReadingItsStreamWhileTheTableHasStreamsTurnedOff() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftService redshiftService = mock(RedshiftService.class);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        String tableName = "orders-stream-off-" + System.nanoTime();
+        // A backend that reports no stream for a table whose streams are off, as DynamoDB Local does.
+        TableDefinition table = createTableAs("111111111111", tableName, false);
+        Integration integration = tableSourceIntegration(table);
+        integration.setBackfillCompleted(true);
+        String disabled = table.getTableArn() + "/stream/2026-01-01T00:00:00.000";
+        integration.setSourceStreamArn(disabled);
+        DynamoDbStreamReader.Record last = streamRecord("s1");
+        streams.shard(disabled, SHARD_ID, null).add(last);
+        RedshiftDynamoDbZeroEtlConsumer consumer =
+                new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, redshiftService, writer);
+
+        consumer.pollOnce(integration);
+        consumer.pollOnce(integration);
+
+        assertEquals(disabled, integration.getSourceStreamArn());
+        verify(writer).writeBatch(integration.getAccountId(), WAREHOUSE_ARN, "floci_zetl_orders",
+                List.of(last.awsRecord()));
+        assertEquals(Map.of(SHARD_ID, "s1"), integration.getShardSequenceNumbers());
+        verify(redshiftService, never()).updateIntegrationSourceStream(any(), any(), any());
+    }
+
+    @Test
+    void aTableSourceMovesOnWhenItsReplacedStreamHasExpired() {
+        FakeStreamReader streams = new FakeStreamReader(CheckpointLifetime.PROCESS);
+        RedshiftService redshiftService = mock(RedshiftService.class);
+        RedshiftZeroEtlWriter writer = mock(RedshiftZeroEtlWriter.class);
+        String tableName = "orders-stream-expired-" + System.nanoTime();
+        TableDefinition table = createTableAs("111111111111", tableName, true);
+        Integration integration = tableSourceIntegration(table);
+        integration.setBackfillCompleted(true);
+        String expired = table.getTableArn() + "/stream/2026-01-01T00:00:00.000";
+        integration.setSourceStreamArn(expired);
+        integration.setShardSequenceNumbers(Map.of(SHARD_ID, "s1"));
+        streams.expire(expired);
 
         new RedshiftDynamoDbZeroEtlConsumer(streams, dynamoDb, redshiftService, writer).pollOnce(integration);
 
         assertEquals(table.getStreamArn(), integration.getSourceStreamArn());
-        assertEquals(List.of(SHARD_ID + ":TRIM_HORIZON:null"), streams.iteratorRequests);
-        verify(writer).writeBatch(integration.getAccountId(), WAREHOUSE_ARN, "floci_zetl_orders",
-                List.of(first.awsRecord(), second.awsRecord()));
-        assertEquals(Map.of(SHARD_ID, "s2"), integration.getShardSequenceNumbers());
+        assertTrue(integration.getShardSequenceNumbers().isEmpty());
+        verify(redshiftService).updateIntegrationSourceStream(integration.getAccountId(),
+                integration.getIntegrationArn(), table.getStreamArn());
     }
 
     @Test

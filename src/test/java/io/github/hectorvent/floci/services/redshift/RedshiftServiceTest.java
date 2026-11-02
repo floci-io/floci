@@ -955,6 +955,7 @@ class RedshiftServiceTest {
     void createsAnIntegrationFromATableToAServerlessNamespaceAsAwsTakesThem() {
         TableDefinition table = new TableDefinition();
         table.setTableName("orders");
+        table.setTableArn(ORDERS_TABLE_ARN);
         table.setStreamArn(ORDERS_TABLE_ARN + "/stream/2026-09-18T00:00:00.000");
         when(zeroEtlTables.describeTable(any(), eq("orders"))).thenReturn(table);
         when(zeroEtlServerless.findNamespaceByArn(NAMESPACE_ARN, "us-east-1")).thenReturn(Optional.of(new Namespace()));
@@ -975,6 +976,7 @@ class RedshiftServiceTest {
     void aTableThatNeverHadAStreamIsAcceptedAsTheSource() {
         TableDefinition table = new TableDefinition();
         table.setTableName("orders");
+        table.setTableArn(ORDERS_TABLE_ARN);
         when(zeroEtlTables.describeTable(any(), eq("orders"))).thenReturn(table);
         when(zeroEtlServerless.findNamespaceByArn(NAMESPACE_ARN, "us-east-1")).thenReturn(Optional.of(new Namespace()));
         when(integrationBackend.scan(any())).thenReturn(List.of());
@@ -983,6 +985,24 @@ class RedshiftServiceTest {
                 null, null, Map.of(), Map.of(), "us-east-1");
 
         assertNull(integration.getSourceStreamArn());
+    }
+
+    @Test
+    void aTableArnOfAnotherAccountOrWithASuffixIsNotTheCallersSameNamedTable() {
+        TableDefinition table = new TableDefinition();
+        table.setTableName("orders");
+        table.setTableArn(ORDERS_TABLE_ARN);
+        when(zeroEtlTables.describeTable(any(), eq("orders"))).thenReturn(table);
+
+        for (String sourceArn : List.of("arn:aws:dynamodb:us-east-1:222222222222:table/orders",
+                ORDERS_TABLE_ARN + "/bogus")) {
+            AwsException error = assertThrows(AwsException.class, () -> service.createIntegration(
+                    "orders-to-warehouse", sourceArn, NAMESPACE_ARN, null, null, Map.of(), Map.of(), "us-east-1"));
+
+            assertEquals("IntegrationSourceNotFoundFault", error.getErrorCode(), sourceArn);
+            assertEquals(404, error.getHttpStatus());
+        }
+        verify(integrationBackend, never()).put(any(), any());
     }
 
     @Test
@@ -1003,6 +1023,7 @@ class RedshiftServiceTest {
     void aMissingTargetNamespaceIsIntegrationTargetNotFound() {
         TableDefinition table = new TableDefinition();
         table.setTableName("orders");
+        table.setTableArn(ORDERS_TABLE_ARN);
         when(zeroEtlTables.describeTable(any(), eq("orders"))).thenReturn(table);
         when(zeroEtlServerless.findNamespaceByArn(NAMESPACE_ARN, "us-east-1")).thenReturn(Optional.empty());
 
@@ -1022,6 +1043,7 @@ class RedshiftServiceTest {
     void aTargetThatIsNeitherANamespaceNorAClusterIsRefused(String targetArn) {
         TableDefinition table = new TableDefinition();
         table.setTableName("orders");
+        table.setTableArn(ORDERS_TABLE_ARN);
         when(zeroEtlTables.describeTable(any(), eq("orders"))).thenReturn(table);
 
         AwsException error = assertThrows(AwsException.class, () -> service.createIntegration(

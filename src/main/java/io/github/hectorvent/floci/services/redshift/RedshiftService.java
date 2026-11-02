@@ -813,6 +813,23 @@ public class RedshiftService implements ManagedSecretRotator {
         throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
     }
 
+    /** Records that the integration now reads {@code sourceStreamArn}, from its trim horizon. */
+    public synchronized void updateIntegrationSourceStream(String accountId, String integrationArn,
+                                                           String sourceStreamArn) {
+        for (String key : integrations.keysForAccount(accountId)) {
+            Optional<Integration> stored = integrations.getForAccount(accountId, key);
+            if (stored.isEmpty() || !integrationArn.equals(stored.get().getIntegrationArn())) {
+                continue;
+            }
+            Integration integration = stored.get();
+            integration.setSourceStreamArn(sourceStreamArn);
+            integration.setShardSequenceNumbers(null);
+            integrations.putForAccount(accountId, key, integration);
+            return;
+        }
+        throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
+    }
+
     public void updateIntegrationBackfillProgress(String accountId, String integrationArn,
                                                   String backfillLastEvaluatedKey, boolean backfillCompleted) {
         updateIntegrationBackfillProgressLocked(accountId, integrationArn, backfillLastEvaluatedKey,

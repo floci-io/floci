@@ -377,10 +377,10 @@ Set `FLOCI_SERVICES_REDSHIFT_CLOUDWATCH_METRICS_ENABLED=false` to turn publishin
 
 As in AWS, `SourceArn` is a DynamoDB table ARN and `TargetArn` is a Redshift Serverless namespace
 ARN. Floci also accepts a DynamoDB stream ARN as the source and a provisioned cluster ARN
-(`arn:aws:redshift:<region>:<account>:cluster:<identifier>`) as the target. A source table or stream
-that does not exist is refused with `IntegrationSourceNotFoundFault`, and a namespace that does not
-exist with `IntegrationTargetNotFoundFault`. A provisioned cluster target that does not exist is
-refused with `ClusterNotFound`.
+(`arn:aws:redshift:<region>:<account>:cluster:<identifier>`) as the target. A source table that
+does not exist is refused with `IntegrationSourceNotFoundFault`, and a namespace that does not exist
+with `IntegrationTargetNotFoundFault`. A source stream that does not exist is refused with DynamoDB's
+`ResourceNotFoundException`, and a provisioned cluster target that does not exist with `ClusterNotFound`.
 
 ```bash
 aws --endpoint-url http://localhost:4566 redshift create-integration \

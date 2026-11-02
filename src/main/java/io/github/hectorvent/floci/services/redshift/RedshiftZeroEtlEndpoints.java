@@ -26,19 +26,32 @@ public class RedshiftZeroEtlEndpoints {
         this.serverless = serverless;
     }
 
-    /** The table a table ARN names, read as {@code accountId} in the ARN's Region. */
+    /**
+     * The table a table ARN names, read as {@code accountId} in the ARN's Region. The table must have
+     * exactly that ARN, so a table of another account, or an ARN with more after the table name, is
+     * not mistaken for the caller's table of the same name.
+     */
     public TableDefinition sourceTable(String accountId, String tableArn) {
         String region = AwsArnUtils.parse(tableArn).region();
+        TableDefinition table;
         try {
-            return RequestScopes.callAs(accountId, region, () ->
+            table = RequestScopes.callAs(accountId, region, () ->
                     dynamoDb.tables().describeTable(new Scope(accountId, region), tableName(tableArn)));
         } catch (AwsException e) {
             if ("ResourceNotFoundException".equals(e.getErrorCode())) {
-                throw new AwsException("IntegrationSourceNotFoundFault",
-                        "The specified integration source can't be found.", 404);
+                throw sourceNotFound();
             }
             throw e;
         }
+        if (!tableArn.equals(table.getTableArn())) {
+            throw sourceNotFound();
+        }
+        return table;
+    }
+
+    private static AwsException sourceNotFound() {
+        return new AwsException("IntegrationSourceNotFoundFault",
+                "The specified integration source can't be found.", 404);
     }
 
     /** Refuses a namespace ARN that names no namespace of the caller. */
