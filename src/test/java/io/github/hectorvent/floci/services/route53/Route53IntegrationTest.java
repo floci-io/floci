@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.Locale;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
@@ -163,6 +165,8 @@ class Route53IntegrationTest {
     @Test
     @Order(7)
     void listResourceRecordSets_autoCreatedSOAandNS() {
+        String firstNameserver = zoneId.toLowerCase(Locale.ROOT) + ".ns-1.awsdns-01.org.";
+        String fourthNameserver = zoneId.toLowerCase(Locale.ROOT) + ".ns-4.awsdns-04.co.uk.";
         String body = given()
                 .when().get("/2013-04-01/hostedzone/" + zoneId + "/rrset")
                 .then()
@@ -174,8 +178,8 @@ class Route53IntegrationTest {
         assertThat(body, containsString("<Type>SOA</Type>"));
         assertThat(body, containsString("<Type>NS</Type>"));
         assertThat(body, containsString(
-                "<Value>ns-1.awsdns-01.org. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400</Value>"));
-        assertThat(body, containsString("<Value>ns-4.awsdns-04.co.uk.</Value>"));
+                "<Value>" + firstNameserver + " awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400</Value>"));
+        assertThat(body, containsString("<Value>" + fourthNameserver + "</Value>"));
     }
 
     @Test
@@ -249,14 +253,14 @@ class Route53IntegrationTest {
                           <Type>SOA</Type>
                           <TTL>900</TTL>
                           <ResourceRecords>
-                            <ResourceRecord><Value>ns-1.awsdns-01.org. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400</Value></ResourceRecord>
+                            <ResourceRecord><Value>%s awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400</Value></ResourceRecord>
                           </ResourceRecords>
                         </ResourceRecordSet>
                       </Change>
                     </Changes>
                   </ChangeBatch>
                 </ChangeResourceRecordSetsRequest>
-                """;
+                """.formatted(zoneId.toLowerCase(Locale.ROOT) + ".ns-1.awsdns-01.org.");
 
         given()
                 .contentType(XML)

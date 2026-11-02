@@ -111,20 +111,63 @@ class Route53DelegationSetsServiceTest {
     }
 
     @Test
-    void legacyPublicZonesParticipateInConflictsBeforeTheirFirstRead() throws Exception {
+    void legacyPublicZonesUsePersistedNameServersForConflictChecks() throws Exception {
         seedLegacyZone();
         try (Fixture fixture = fixture("persistent", "original")) {
-            DelegationSet set = fixture.service().createReusableDelegationSet("set", null);
+            DelegationSet set = fixture.service().createReusableDelegationSet("set", "ZLEGACY");
             assertError("ConflictingDomainExists", () -> fixture.service()
                     .createHostedZone("child.legacy.example.", "child", null, null, set.id()));
         }
     }
 
     @Test
+    void independentZonesAndReusableSetsHaveDistinctNameServers() {
+        try (Fixture fixture = fixture("memory", "unique")) {
+            Route53Service service = fixture.service();
+            HostedZone firstZone = service.createHostedZone("first.example.", "first-zone", null, null).zone();
+            HostedZone secondZone = service.createHostedZone("second.example.", "second-zone", null, null).zone();
+            DelegationSet firstSet = service.createReusableDelegationSet("first-set", null);
+            DelegationSet secondSet = service.createReusableDelegationSet("second-set", null);
+            List<List<String>> assignments = List.of(service.getDelegationSet(firstZone).nameServers(),
+                    service.getDelegationSet(secondZone).nameServers(), firstSet.nameServers(), secondSet.nameServers());
+            for (int i = 0; i < assignments.size(); i++) {
+                assertEquals(4, assignments.get(i).size());
+                for (int j = i + 1; j < assignments.size(); j++) {
+                    assertTrue(assignments.get(i).stream().noneMatch(assignments.get(j)::contains));
+                }
+            }
+        }
+    }
+
+    @Test
+    void ordinaryZoneAssignmentSurvivesStorageReloadAndConfigurationChange() {
+        String zoneId;
+        List<String> original;
+        try (Fixture fixture = fixture("persistent", "original")) {
+            zoneId = fixture.service().createHostedZone("stable.example.", "stable", null, null).zone().getId();
+            original = fixture.service().getAssignedNameServers(zoneId);
+        }
+        try (Fixture reloaded = fixture("persistent", "changed")) {
+            Route53Service service = reloaded.service();
+            assertEquals(original, service.getAssignedNameServers(zoneId));
+            List<ResourceRecordSet> records = service.listResourceRecordSets(zoneId, null, null, 100);
+            assertEquals(original.stream().map(name -> name + ".").toList(), records.stream()
+                    .filter(record -> "NS".equals(record.getType())).findFirst().orElseThrow().getRecords().stream()
+                    .map(ResourceRecord::getValue).toList());
+            assertTrue(records.stream().filter(record -> "SOA".equals(record.getType())).findFirst().orElseThrow()
+                    .getRecords().getFirst().getValue().startsWith(original.getFirst() + ". "));
+            String next = service.createHostedZone("new.example.", "new", null, null).zone().getId();
+            assertTrue(service.getAssignedNameServers(next).stream().noneMatch(original::contains));
+        }
+    }
+
+    @Test
     void promotionAfterConfigurationChangePreservesTheOriginalZoneAssignment() {
         String zoneId;
+        List<String> original;
         try (Fixture fixture = fixture("persistent", "original")) {
             zoneId = fixture.service().createHostedZone("original.example.", "original", null, null).zone().getId();
+            original = fixture.service().getAssignedNameServers(zoneId);
             ResourceRecordSet ns = fixture.service().listResourceRecordSets(zoneId, null, null, 100).stream()
                     .filter(record -> "NS".equals(record.getType())).findFirst().orElseThrow();
             ns.setRecords(List.of(new ResourceRecord("custom.nameserver.test.")));
@@ -132,8 +175,7 @@ class Route53DelegationSetsServiceTest {
         }
         try (Fixture fixture = fixture("persistent", "changed")) {
             DelegationSet set = fixture.service().createReusableDelegationSet("promoted", zoneId);
-            assertEquals(List.of("original-1.test", "original-2.test", "original-3.test", "original-4.test"),
-                    set.nameServers());
+            assertEquals(original, set.nameServers());
         }
     }
 

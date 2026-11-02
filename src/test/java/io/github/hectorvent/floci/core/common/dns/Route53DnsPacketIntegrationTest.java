@@ -85,7 +85,7 @@ class Route53DnsPacketIntegrationTest {
     void delegationNamesAndSoaUseTheStoredZone() throws Exception {
         String name = uniqueName() + ".example";
         String id = createZone(name);
-        List<String> expected = route53.getNameServers();
+        List<String> expected = route53.getAssignedNameServers(id);
         byte[] request = request(name, 2);
         byte[] response = query(request);
         assertHeader(response, 0, true, 4, 0);

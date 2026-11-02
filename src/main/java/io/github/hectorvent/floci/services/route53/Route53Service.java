@@ -31,6 +31,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -137,7 +138,7 @@ public class Route53Service implements Resettable {
         }
         String id = "N" + generateZoneId().substring(1);
         DelegationSet set = new DelegationSet(id, callerReference,
-                source == null ? nameServers : assignedNameServers(source));
+                source == null ? newNameServers(id) : assignedNameServers(source));
         delegationSetStore.put(id, set);
         if (source != null) {
             source.setDelegationSetId(id);
@@ -162,8 +163,13 @@ public class Route53Service implements Resettable {
     }
 
     public DelegationSet getDelegationSet(HostedZone zone) {
-        return zone.getDelegationSetId() == null ? new DelegationSet(null, null, nameServers)
+        return zone.getDelegationSetId() == null ? new DelegationSet(null, null, assignedNameServers(zone))
                 : getReusableDelegationSet(zone.getDelegationSetId());
+    }
+
+    private List<String> newNameServers(String id) {
+        String label = id.toLowerCase(Locale.ROOT);
+        return nameServers.stream().map(name -> label + "." + name).toList();
     }
 
     public long getReusableDelegationSetCount() {
@@ -245,7 +251,8 @@ public class Route53Service implements Resettable {
         HostedZone zone = new HostedZone(id, normalizedName, callerReference, comment, vpcAssociation);
         zone.setOwnerAccountId(callerAccountId);
         zone.setDelegationSetId(set == null ? null : set.id());
-        zone.setDelegationNameServers(set == null ? nameServers : set.nameServers());
+        zone.setDelegationNameServers(set != null ? set.nameServers()
+                : vpcAssociation != null ? nameServers : newNameServers(id));
         if (vpcAssociation != null) {
             vpcAssociation.setOwnerAccountId(callerAccountId);
         }
@@ -731,6 +738,10 @@ public class Route53Service implements Resettable {
 
     public List<String> getNameServers() {
         return nameServers;
+    }
+
+    public List<String> getAssignedNameServers(String hostedZoneId) {
+        return getDelegationSet(getHostedZone(hostedZoneId)).nameServers();
     }
 
     public String getDefaultAccountId() {

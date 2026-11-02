@@ -94,7 +94,7 @@ class Route53DelegationSetHostedZonesIntegrationTest {
     void relatedPublicNamesCannotShareNameServersButSiblingDomainsCan() {
         try (Route53Client client = client("741686000013")) {
             DelegationSet set = createSet(client);
-            String zone = createZone(client, "a.example.com.", null).hostedZone().id();
+            String zone = createZone(client, "a.example.com.", set.id()).hostedZone().id();
             try {
                 for (String name : List.of("A.EXAMPLE.COM", "child.a.example.com.", "example.com.")) {
                     assertError("ConflictingDomainExists", () -> createZone(client, name, set.id()));
@@ -104,6 +104,34 @@ class Route53DelegationSetHostedZonesIntegrationTest {
             } finally {
                 client.deleteHostedZone(r -> r.id(zone));
                 client.deleteReusableDelegationSet(r -> r.id(set.id()));
+            }
+        }
+    }
+
+    @Test
+    void relatedPublicNamesCanUseIndependentNameServers() {
+        try (Route53Client client = client("741686000015")) {
+            DelegationSet firstSet = createSet(client);
+            DelegationSet secondSet = createSet(client);
+            String parent = createZone(client, "parent.example.com.", null).hostedZone().id();
+            String child = null;
+            String grandchild = null;
+            try {
+                child = createZone(client, "child.parent.example.com.", firstSet.id()).hostedZone().id();
+                grandchild = createZone(client, "grandchild.child.parent.example.com.", secondSet.id())
+                        .hostedZone().id();
+            } finally {
+                if (grandchild != null) {
+                    String id = grandchild;
+                    client.deleteHostedZone(r -> r.id(id));
+                }
+                if (child != null) {
+                    String id = child;
+                    client.deleteHostedZone(r -> r.id(id));
+                }
+                client.deleteHostedZone(r -> r.id(parent));
+                client.deleteReusableDelegationSet(r -> r.id(firstSet.id()));
+                client.deleteReusableDelegationSet(r -> r.id(secondSet.id()));
             }
         }
     }

@@ -120,29 +120,41 @@ class Route53ServiceTest {
         Route53Service service = newService(nameserverSuffix);
         String zoneId = service.createHostedZone("authority.example", "authority", null, null).zone().getId();
         List<ResourceRecordSet> records = service.listResourceRecordSets(zoneId, null, null, 100);
+        List<String> assigned = service.getAssignedNameServers(zoneId);
 
         assertAll(
-                () -> assertEquals(List.of("ns-1.awsdns-00.com. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400"),
+                () -> assertEquals(List.of(assigned.getFirst() + ". awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400"),
                         valuesOf(records, "SOA"), "SOA"),
-                () -> assertEquals(List.of("ns-1.awsdns-00.com.", "ns-2.awsdns-00.net.", "ns-3.awsdns-00.org.",
-                        "ns-4.awsdns-00.co.uk."), valuesOf(records, "NS"), "NS"),
+                () -> assertEquals(assigned.stream().map(name -> name + ".").toList(), valuesOf(records, "NS"), "NS"),
                 () -> assertEquals(List.of("ns-1.awsdns-00.com", "ns-2.awsdns-00.net", "ns-3.awsdns-00.org",
-                        "ns-4.awsdns-00.co.uk"), service.getNameServers(), "delegation set"));
+                        "ns-4.awsdns-00.co.uk"), assigned.stream().map(name -> name.substring(name.indexOf('.') + 1))
+                        .toList(), "configured suffixes"),
+                () -> assertEquals(List.of("ns-1.awsdns-00.com", "ns-2.awsdns-00.net", "ns-3.awsdns-00.org",
+                        "ns-4.awsdns-00.co.uk"), service.getNameServers(), "configured bases"));
     }
 
     @ParameterizedTest(name = "configured names ending in {0}")
     @ValueSource(strings = {"", ".", " ", ".\t", ".\u2003"})
     void apexNsQueryIsAnswered(String nameserverSuffix) {
         Route53Service service = newService(nameserverSuffix);
-        service.createHostedZone("authority.example", "authority", null, null);
+        String zoneId = service.createHostedZone("authority.example", "authority", null, null).zone().getId();
 
         DnsAnswer answer = new Route53DnsRecordSource(service).resolveAuthoritative("authority.example", 2)
                 .orElseThrow();
 
         assertEquals(0, answer.responseCode(), "rcode");
-        assertEquals(List.of(new DnsRecord.Ns("ns-1.awsdns-00.com."), new DnsRecord.Ns("ns-2.awsdns-00.net."),
-                new DnsRecord.Ns("ns-3.awsdns-00.org."), new DnsRecord.Ns("ns-4.awsdns-00.co.uk.")),
+        assertEquals(service.getAssignedNameServers(zoneId).stream().map(name -> new DnsRecord.Ns(name + ".")).toList(),
                 answer.records(), "answers");
+    }
+
+    @Test
+    void privateZonesKeepTheirConfiguredNameServers() {
+        Route53Service service = newService();
+        String zoneId = service.createHostedZone("private.example", "private", null,
+                new VpcAssociation("vpc-123", "us-east-1")).zone().getId();
+        assertEquals(service.getNameServers(), service.getAssignedNameServers(zoneId));
+        assertEquals(service.getNameServers().stream().map(name -> name + ".").toList(),
+                valuesOf(service.listResourceRecordSets(zoneId, null, null, 100), "NS"));
     }
 
     @Test
