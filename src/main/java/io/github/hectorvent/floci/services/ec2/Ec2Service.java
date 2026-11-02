@@ -12507,22 +12507,44 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             requireRequestedPrivateIpFree(region, subnetId, ip);
         }
-        List<NatGatewayAddress> result = new ArrayList<>();
+        List<String> eips = new ArrayList<>();
+        eips.add(allocationId);
+        eips.addAll(secondaryEips);
+        List<String> ips = new ArrayList<>();
+        ips.add(requestedPrivateIp);
+        ips.addAll(requestedSecondaryIps);
+        NatGatewayAddress[] slots = new NatGatewayAddress[
+                1 + Math.max(secondaryEips.size(), requestedSecondaryIps.size()) + secondaryCount];
+        fillNatGatewaySlots(region, natGatewayId, subnetId, slots, eips, ips, pending);
+        slots[0].setPrimary(true);
+        return new ArrayList<>(List.of(slots));
+    }
+
+    /**
+     * Builds an address for every empty slot from the Elastic IP and private address at the same
+     * position of {@code eips} and {@code ips}, either of which may be shorter than {@code slots}
+     * or hold null. A slot with no private address takes the next free one; if any slot fails, the
+     * addresses taken here are given back. Every address built is secondary. Callers must hold
+     * {@link #privateIpAllocationLock} and have checked the requested addresses free.
+     *
+     * @param pending addresses already spoken for, which automatic assignment must not hand out
+     */
+    private void fillNatGatewaySlots(String region, String natGatewayId, String subnetId, NatGatewayAddress[] slots,
+                                     List<String> eips, List<String> ips, Set<String> pending) {
         List<String> assigned = new ArrayList<>();
-        int secondaries = Math.max(secondaryEips.size(), requestedSecondaryIps.size()) + secondaryCount;
         try {
-            for (int i = -1; i < secondaries; i++) {
-                String eip = i < 0 ? allocationId : i < secondaryEips.size() ? secondaryEips.get(i) : null;
-                String ip = i < 0 ? requestedPrivateIp
-                        : i < requestedSecondaryIps.size() ? requestedSecondaryIps.get(i) : null;
+            for (int i = 0; i < slots.length; i++) {
+                if (slots[i] != null) {
+                    continue;
+                }
+                String ip = i < ips.size() ? ips.get(i) : null;
                 if (ip == null) {
                     ip = assignPrivateIp(region, subnetId, pending);
                     pending.add(ip);
                     assigned.add(ip);
                 }
-                NatGatewayAddress address = natGatewayAddress(region, natGatewayId, eip, ip);
-                address.setPrimary(i < 0);
-                result.add(address);
+                slots[i] = natGatewayAddress(region, natGatewayId, i < eips.size() ? eips.get(i) : null, ip);
+                slots[i].setPrimary(false);
             }
         } catch (AwsException e) {
             if (vpcNetworkManager != null) {
@@ -12530,7 +12552,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             throw e;
         }
-        return result;
     }
 
     /**
@@ -12733,28 +12754,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     requireRequestedPrivateIpFree(region, subnetId, ip);
                 }
             }
-            List<String> assigned = new ArrayList<>();
-            try {
-                Set<String> pending = new HashSet<>(ips);
-                for (int i = 0; i < slots; i++) {
-                    if (result[i] != null) {
-                        continue;
-                    }
-                    String ip = i < ips.size() ? ips.get(i) : null;
-                    if (ip == null) {
-                        ip = assignPrivateIp(region, subnetId, pending);
-                        pending.add(ip);
-                        assigned.add(ip);
-                    }
-                    result[i] = natGatewayAddress(region, natGatewayId, i < eips.size() ? eips.get(i) : null, ip);
-                    result[i].setPrimary(false);
-                }
-            } catch (AwsException e) {
-                if (vpcNetworkManager != null) {
-                    assigned.forEach(ip -> vpcNetworkManager.releasePrivateIp(region, subnetId, ip));
-                }
-                throw e;
-            }
+            fillNatGatewaySlots(region, natGatewayId, subnetId, result, eips, ips, new HashSet<>(ips));
             dropped.forEach(a -> releaseNatGatewayEip(region, a));
             List<NatGatewayAddress> addresses = new ArrayList<>(natGateway.getNatGatewayAddresses().stream()
                     .filter(NatGatewayAddress::isPrimary).toList());
