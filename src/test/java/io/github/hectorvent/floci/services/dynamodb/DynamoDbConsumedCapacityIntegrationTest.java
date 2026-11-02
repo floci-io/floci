@@ -601,8 +601,8 @@ class DynamoDbConsumedCapacityIntegrationTest {
         rejected("TransactWriteItems", """
             {"TransactItems": [], "ReturnConsumedCapacity": "INVALID"}
             """)
-            .body("message", equalTo("2 validation errors detected: Value '[]' at 'transactItems' failed to "
-                    + "satisfy constraint: Member must have length greater than or equal to 1; " + invalid));
+            .body("message", equalTo("1 validation error detected: Value at 'TransactItems' failed to "
+                    + "satisfy constraint: Member must have length greater than or equal to 1"));
 
         send("TransactGetItems", """
             {
