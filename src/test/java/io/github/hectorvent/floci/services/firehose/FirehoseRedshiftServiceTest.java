@@ -301,6 +301,44 @@ class FirehoseRedshiftServiceTest {
     }
 
     @Test
+    void aRefusedStagingRoleStagesAndLoadsNothingAndKeepsTheRecordsBuffered() throws Exception {
+        createStream("");
+        doThrow(new IllegalStateException("role does not trust firehose.amazonaws.com"))
+                .when(delivery).requireStagingAccess(anyString(), anyString(), any(), anyString(), anyString());
+
+        service.flush(STREAM);
+
+        verifyStagedTimes(0);
+        verify(delivery, never()).copy(anyString(), anyString(), any(), anyString(), anyString());
+
+        reset(delivery);
+        service.flush(STREAM);
+
+        verifyStagedTimes(1);
+        verify(delivery, times(1)).copy(anyString(), anyString(), any(), eq("stage"), anyString());
+    }
+
+    @Test
+    void aRefusedLoadRoleRetriesTheLoadWithoutRestagingTheBatch() throws Exception {
+        createStream("");
+        doThrow(new IllegalStateException("role is not authorized to perform s3:GetObject"))
+                .when(delivery).requireLoadAccess(anyString(), anyString(), any(), anyString(), anyString());
+
+        service.flush(STREAM);
+
+        verifyStagedTimes(1);
+        verify(delivery, never()).copy(anyString(), anyString(), any(), anyString(), anyString());
+
+        Mockito.doNothing().when(delivery)
+                .requireLoadAccess(anyString(), anyString(), any(), anyString(), anyString());
+        pastBackoff();
+        service.retryPendingRedshiftCopies();
+
+        verifyStagedTimes(1);
+        verify(delivery, times(1)).copy(anyString(), anyString(), any(), eq("stage"), anyString());
+    }
+
+    @Test
     void failedCopyIsLoggedAndNotRestagedOrRebuffered() throws Exception {
         createStream("");
         copyFails();

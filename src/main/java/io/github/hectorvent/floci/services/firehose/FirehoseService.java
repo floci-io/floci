@@ -1194,6 +1194,10 @@ public class FirehoseService implements ResourceProvider {
             String key = S3ObjectKeyResolver.resolveKey(s3, stream.getDeliveryStreamName(),
                     stream.getVersionId(), clock.instant(), compression);
 
+            if (isRedshiftStream(stream) && redshiftDelivery != null) {
+                redshiftDelivery.requireStagingAccess(stream.getAccountId(), stream.getDeliveryStreamARN(),
+                        stream.getDestinations().get(0).getRedshiftDestinationDescription(), bucket, key);
+            }
             ensureBucket(bucket, stream);
 
             byte[] rawPayload = concatenateRecords(records);
@@ -1350,6 +1354,8 @@ public class FirehoseService implements ResourceProvider {
         try {
             String region = AwsArnUtils.regionOrDefault(stream.getDeliveryStreamARN(),
                     regionResolver.getDefaultRegion());
+            redshiftDelivery.requireLoadAccess(stream.getAccountId(), stream.getDeliveryStreamARN(), redshift,
+                    pending.bucket, pending.key);
             redshiftDelivery.copy(stream.getAccountId(), region, redshift, pending.bucket, pending.key);
             return true;
         } catch (RuntimeException e) {

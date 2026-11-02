@@ -171,6 +171,15 @@ set to `Enabled`, which needs an `S3BackupConfiguration`, each batch is also wri
 and compression. The backup is written after the batch is staged and queued, and a failed backup write is logged without
 holding the load back or re-staging the batch, so that batch then has no backup copy.
 
+With [IAM enforcement](iam.md) on, a batch is staged and loaded only if the roles involved are allowed to. The role of the
+intermediate `S3Configuration` must trust `firehose.amazonaws.com` (a trust policy condition on `aws:SourceArn` is matched
+against the delivery stream ARN) and allow `s3:PutObject` on the staged object, and the destination `RoleARN` must trust
+the same principal and allow `s3:GetObject` on it. Identity policies, permissions boundaries and SCPs all count, and a
+role of another account is refused. A refused staging write keeps the records buffered and tries again at the next
+flush, exactly like a failed S3 write. A refused load follows the usual retry path against the object already staged,
+so the batch is not staged twice, and once the `RetryOptions` window is over the batch is given up and its staged object
+is kept, as for any failed load. With enforcement off, no role is checked. The S3 backup write is not checked yet.
+
 A JDBC connection that stops answering is dropped after 150 seconds.
 
 Compression of the intermediate objects is not added to the `COPY` for you: as on AWS, put `GZIP` in `CopyOptions`
@@ -196,7 +205,8 @@ Floci does not write the `redshift_failed` manifest objects that AWS creates aft
   `RoleArn`, buffer hints). Those defaults are carried over from the probed S3 behavior and not probed for Redshift
   specifically. With `S3BackupMode` enabled, the backup object holds the untransformed source records, even when the
   Lambda processor drops every record.
-- The `COPY` carries no credentials, so the proxy reads the staged object as an anonymous client. With S3
+- The role checks above are authorization only: the `COPY` still carries no credentials, so the proxy reads the staged
+  object as an anonymous client. With S3
   authorization enforced and a private intermediate bucket the load fails and the staged object stays in S3; use a
   bucket the anonymous principal can read, or leave enforcement off.
 - `CopyOptions` are validated for shape only. The `COPY` emulation does not implement every Redshift option
