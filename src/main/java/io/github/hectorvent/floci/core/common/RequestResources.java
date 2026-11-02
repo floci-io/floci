@@ -362,12 +362,15 @@ public final class RequestResources {
         for (RequestResourceMembers.Member member : resource.find()) {
             List<String> values = values(form, body, member);
             if (isNull(body, member) || values.size() != 1) {
+                if (stored != null) {
+                    stored.findByMembers(resource.types().getFirst(), List.of(), region);
+                }
                 return;
             }
             names.add(values.getFirst());
         }
         String type = resource.types().getFirst();
-        Optional<String> found = stored == null ? Optional.empty() : stored.find(type, names, region);
+        Optional<String> found = stored == null ? Optional.empty() : stored.findByMembers(type, names, region);
         arns.add(found.orElseGet(() -> render(formats.get(type).format(), Map.of(), partition, region, accountId)));
     }
 

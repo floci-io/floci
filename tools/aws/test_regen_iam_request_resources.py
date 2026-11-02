@@ -652,3 +652,22 @@ def test_the_vendored_file_is_well_formed():
     # The v2 API's Type picks the load balancer it creates, application when it gives none.
     assert operations["elasticloadbalancing:CreateLoadBalancer"]["resources"][1] == {
         "type": "loadbalancer/app/", "fill": {"LoadBalancerName": "Name"}, "when": {"Type": ["application", None]}}
+
+
+@pytest.mark.parametrize("operation", ["SendTaskSuccess", "SendTaskFailure", "SendTaskHeartbeat"])
+def test_callback_resources_are_resolved_from_the_token(operation):
+    resources, reason = r.CORRECTIONS[f"states:{operation}"]
+    assert resources == [{"type": kind, "fill": {}, "find": ["taskToken"]}
+                         for kind in ("activity", "statemachine")]
+    assert "2026-11-02" in reason
+    assert "no resource types" in reason
+
+
+def test_measured_callback_correction_retains_action_metadata_and_rejects_unlisted_resources():
+    formats = {"activity": "arn:${Partition}:states:${Region}:${Account}:activity:${ActivityName}",
+               "statemachine": "arn:${Partition}:states:${Region}:${Account}:stateMachine:${StateMachineName}"}
+    resource = {"type": "activity", "fill": {}, "find": ["taskToken"]}
+    assert not r._resource_problems("states:SendTaskSuccess", resource, [], formats)
+    assert r._resource_problems("states:SendTaskSuccess", {**resource, "find": ["otherToken"]}, [], formats)
+    assert r._resource_problems("states:OtherOperation", resource, [], formats)
+    assert r._resource_problems("states:SendTaskSuccess", resource, [], {})

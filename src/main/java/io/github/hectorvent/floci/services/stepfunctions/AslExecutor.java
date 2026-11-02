@@ -976,7 +976,8 @@ public class AslExecutor {
 
         // Registered after the input template resolved, so a template failure leaves no token behind.
         CompletableFuture<JsonNode> tokenFuture = needsToken ? sfnService.get().registerPendingToken(taskToken,
-                AwsArnUtils.parse(sm.getStateMachineArn()).accountId()) : null;
+                AwsArnUtils.parse(sm.getStateMachineArn()).accountId(),
+                isActivity ? resource : sm.getStateMachineArn()) : null;
         TaskEventProfile profile = taskEventProfile(resource, isActivity);
         JsonNode taskResult;
         // Read before the scheduled event is built, so a large input or a slow history callback

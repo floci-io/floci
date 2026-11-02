@@ -42,4 +42,13 @@ public interface StoredResourceArns {
     default Optional<String> through(String member, String value, String region) {
         return Optional.empty();
     }
+
+    /**
+     * Resolves an explicit {@code find} selector. An empty list indicates an incomplete selector, which a service
+     * may reject before IAM evaluation. This is distinct from an ordinary name filling an ARN's variables:
+     * callback tokens require validation, but state-machine names do not name callback tokens.
+     */
+    default Optional<String> findByMembers(String type, List<String> names, String region) {
+        return find(type, names, region);
+    }
 }

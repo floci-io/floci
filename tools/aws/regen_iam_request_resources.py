@@ -261,6 +261,12 @@ NOT_COVERED: dict[str, str] = {
 # them apart (EventBridge's `events` and EventBridge V2's `eventsv2`): Floci applies it only to a request the service
 # of that endpoint serves, never by a member a caller could add to a request of the other.
 CORRECTIONS: dict[str, tuple[list[dict], str]] = {
+    **{f"states:{operation}": ([{"type": kind, "fill": {}, "find": ["taskToken"]}
+                                for kind in ("activity", "statemachine")],
+                              "AWS callback policy probes on 2026-11-02 authorize an activity token against its "
+                              "activity and an integration token against its unqualified state machine, despite "
+                              "the action table listing no resource types; the token's service resolves the ARN")
+       for operation in ("SendTaskSuccess", "SendTaskFailure", "SendTaskHeartbeat")},
     "elasticloadbalancing:CreateLoadBalancer": ([
         {"type": "loadbalancer", "fill": {"LoadBalancerName": "LoadBalancerName"}},
         {"type": "loadbalancer/app/", "fill": {"LoadBalancerName": "Name"}, "when": {"Type": ["application", None]}},
@@ -1072,7 +1078,8 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
         return [f"{operation} reads its members before {before!r}, which is no one character"]
     named = resource.get("types") or [resource.get("type")]
     kinds = _kinds(resource)
-    if len(kinds) != len(named) or not all(kind in types and kind in formats for kind in kinds):
+    corrected = resource in CORRECTIONS.get(operation, ([], ""))[0]
+    if len(kinds) != len(named) or not all((kind in types or corrected) and kind in formats for kind in kinds):
         return [f"{operation} names {named}, not resource types its action acts on with an ARN format"]
     if "arn" in resource:
         if not isinstance(resource["arn"], str) or not ARN_PATH_RE.match(resource["arn"]):

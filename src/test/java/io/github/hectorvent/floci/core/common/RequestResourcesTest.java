@@ -13,6 +13,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
@@ -390,6 +391,30 @@ class RequestResourcesTest {
         assertEquals(List.of(events + "event-bus/locked"), of("events:CreateEventBus",
                 v1("{\"Name\":\"locked\",\"ClientToken\":\"t\"}")));
         assertEquals(List.of(v2Bus), of("events:DeleteEventBus", v2(withV2Arn)));
+    }
+
+    @Test
+    void incompleteStoredSelectorsRetainNoResourceThroughTheDefaultLookup() {
+        for (String operation : List.of("events:DescribeConnection", "application-autoscaling:DeleteScalingPolicy",
+                "redshift-data:ListSchemas")) {
+            AtomicInteger lookups = new AtomicInteger();
+            StoredResourceArns stored = new StoredResourceArns() {
+                @Override
+                public String namespace() {
+                    return operation.substring(0, operation.indexOf(':'));
+                }
+
+                @Override
+                public Optional<String> find(String type, List<String> names, String region) {
+                    assertEquals(List.of(), names);
+                    lookups.incrementAndGet();
+                    return Optional.empty();
+                }
+            };
+            assertEquals(List.of(), RequestResources.of(operation, json("{}"), "aws", "us-east-1",
+                    "000000000000", stored), operation);
+            assertEquals(operation.startsWith("events:") ? 0 : 1, lookups.get(), operation);
+        }
     }
 
     /**

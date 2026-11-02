@@ -256,9 +256,9 @@ class RequestResourceMembersTest {
 
     /**
      * Each resource alone, from a request naming it and nothing else, gives exactly its ARN, in the account its
-     * account member names when it has one, with those of the operation's resources every request names, a create's
-     * new resource no member names (Cloud Map's {@code CreateService}); one named through another resource of its
-     * service's own, the ARN its service gives for that.
+     * account member names when it has one, with those sharing its explicit member selector and those the operation
+     * always names, such as a create's new resource (Cloud Map's {@code CreateService}); one named through another
+     * resource of its service's own, the ARN its service gives for that.
      */
     @TestFactory
     Stream<DynamicTest> everyResourceOfTheTableIsReadFromAJsonBodyAndAForm() {
@@ -292,8 +292,11 @@ class RequestResourceMembersTest {
                         form.append('&').append(parameter(member)).append('=').append(encoded(value));
                     });
                     List<String> named = operation.getValue().stream()
-                            .filter(other -> other == resource || named(other) && (other.endpoint() == null
-                                    || resource.endpoint() == null || other.endpoint().equals(resource.endpoint())))
+                            .filter(other -> (other == resource || named(other)
+                                    || !other.find().isEmpty() && other.find().equals(resource.find())
+                                    && other.when().equals(resource.when()) && other.unless().equals(resource.unless()))
+                                    && (other.endpoint() == null || resource.endpoint() == null
+                                    || other.endpoint().equals(resource.endpoint())))
                             .map(other -> other == resource ? expected : expected(
                                     table.formats().get(namespace).get(other.types().getFirst()).format(), other,
                                     "000000000000"))
