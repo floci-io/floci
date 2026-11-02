@@ -74,6 +74,9 @@ class ElbV2LambdaTargetDataPlaneIntegrationTest {
                 "        return {\"statusCode\": 200, \"body\": \"x\" * (1024 * 1024)}\n" +
                 "    if event.get(\"path\") == \"/response-oversized\":\n" +
                 "        return {\"statusCode\": 200, \"headers\": {\"Content-Length\": \"1048577\"}, \"body\": \"x\" * (1024 * 1024 + 1)}\n" +
+                "    if event.get(\"path\") == \"/forwarded-headers\":\n" +
+                "        names = [\"x-forwarded-for\", \"x-forwarded-proto\", \"x-forwarded-port\"]\n" +
+                "        return {\"statusCode\": 200, \"body\": \"|\".join(event[\"headers\"].get(n, \"\") for n in names)}\n" +
                 "    return {\"statusCode\": 200, \"body\": \"ok\"}\n"
             ).getBytes(StandardCharsets.UTF_8));
             zos.closeEntry();
@@ -285,6 +288,18 @@ class ElbV2LambdaTargetDataPlaneIntegrationTest {
             .then()
                 .statusCode(421)
                 .body(equalTo("unexpected host"));
+    }
+
+    @Test
+    @Order(11)
+    void eventCarriesTheForwardedHeaders() {
+        listenerRequest(lbDnsName)
+                .header("X-Forwarded-For", "198.51.100.7")
+            .when()
+                .get("/forwarded-headers")
+            .then()
+                .statusCode(200)
+                .body(equalTo("198.51.100.7, 127.0.0.1|http|" + LISTENER_PORT));
     }
 
     /**

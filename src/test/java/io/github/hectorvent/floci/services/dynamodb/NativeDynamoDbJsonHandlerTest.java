@@ -2330,6 +2330,69 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals(message, ex.getMessage());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            TransactWriteItems | {"TransactItems":[{"Put":{"TableName":"Tbl","Item":{}}},{"Update":{"TableName":"bad!name","Key":{},"UpdateExpression":"SET a = :a"}}]} | 1 validation error detected: Value 'bad!name' at 'transactItems.2.member.update.tableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            TransactWriteItems | {"TransactItems":[{"ConditionCheck":{"TableName":"a!","Key":{},"ConditionExpression":"x"}}],"ReturnConsumedCapacity":"BOGUS","ReturnItemCollectionMetrics":"BOGUS2"} | 4 validation errors detected: Value 'a!' at 'transactItems.1.member.conditionCheck.tableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+; Value 'a!' at 'transactItems.1.member.conditionCheck.tableName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]; Value 'BOGUS2' at 'returnItemCollectionMetrics' failed to satisfy constraint: Member must satisfy enum value set: [SIZE, NONE]
+            TransactWriteItems | {"TransactItems":[],"ClientRequestToken":"0123456789012345678901234567890123456"} | 2 validation errors detected: Value at 'ClientRequestToken' failed to satisfy constraint: Member must have length less than or equal to 36; Value at 'TransactItems' failed to satisfy constraint: Member must have length greater than or equal to 1
+            TransactWriteItems | {"TransactItems":[{"Put":{"TableName":"bad!name","Item":{}}},{"Delete":{"TableName":"","Key":{}}}],"ReturnConsumedCapacity":"BOGUS"} | 1 validation error detected: Value at 'TransactItems.1.member.Delete.TableName' failed to satisfy constraint: Member must have length greater than or equal to 1
+            TransactWriteItems | {"TransactItems":[{"Put":{"TableName":""}}],"ClientRequestToken":"0123456789012345678901234567890123456","ReturnConsumedCapacity":"BOGUS"} | 4 validation errors detected: Value null at 'transactItems.1.member.put.item' failed to satisfy constraint: Member must not be null; Value '' at 'transactItems.1.member.put.tableName' failed to satisfy constraint: Member must have length greater than or equal to 1; Value '0123456789012345678901234567890123456' at 'clientRequestToken' failed to satisfy constraint: Member must have length less than or equal to 36; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]
+            TransactWriteItems | {"TransactItems":[{"Update":{}},{"Put":{"TableName":"bad!name","Item":{}}}]} | 3 validation errors detected: Value null at 'transactItems.1.member.update.updateExpression' failed to satisfy constraint: Member must not be null; Value null at 'transactItems.1.member.update.key' failed to satisfy constraint: Member must not be null; Value null at 'transactItems.1.member.update.tableName' failed to satisfy constraint: Member must not be null
+            TransactWriteItems | {"TransactItems":[{"Put":{"TableName":"bad!name","Item":{}}},{"Foo":{}}],"ReturnConsumedCapacity":"BOGUS"} | 2 validation errors detected: Value '' at 'transactItems' failed to satisfy constraint: TransactWriteRequest should contain Delete or Put or Update or ConditionCheck; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]
+            TransactWriteItems | {"TransactItems":[{"Put":{"TableName":"Tbl"}},{"Put":null}]} | 1 validation error detected: Value null at 'transactItems.1.member.put.item' failed to satisfy constraint: Member must not be null
+            TransactWriteItems | {"TransactItems":[{"Put":{"TableName":"Tbl","Item":{}},"Delete":{"TableName":"bad!name","Key":{}}}],"ReturnItemCollectionMetrics":"BOGUS2"} | 1 validation error detected: Value 'BOGUS2' at 'returnItemCollectionMetrics' failed to satisfy constraint: Member must satisfy enum value set: [SIZE, NONE]
+            TransactWriteItems | {"TransactItems":[{"Put":{"TableName":"Tbl","Item":{}},"Delete":{"TableName":"bad!name","Key":{}}}]} | TransactItems can only contain one of Check, Put, Update or Delete
+            TransactGetItems   | {"TransactItems":[{"Get":{"TableName":"Tbl","Key":{}}},{"Get":{"TableName":"bad!name","Key":{}}}]} | 1 validation error detected: Value 'bad!name' at 'transactItems.2.member.get.tableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            TransactGetItems   | {"TransactItems":[{"Get":{"TableName":""}},{"Put":{}}],"ReturnConsumedCapacity":"BOGUS"} | 4 validation errors detected: Value null at 'transactItems.1.member.get.key' failed to satisfy constraint: Member must not be null; Value '' at 'transactItems.1.member.get.tableName' failed to satisfy constraint: Member must have length greater than or equal to 1; Value null at 'transactItems.2.member.get' failed to satisfy constraint: Member must not be null; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]
+            TransactWriteItems | {"TransactItems":null,"ClientRequestToken":"0123456789012345678901234567890123456","ReturnConsumedCapacity":"BOGUS","ReturnItemCollectionMetrics":"BOGUS2"} | 4 validation errors detected: Value null at 'transactItems' failed to satisfy constraint: Member must not be null; Value '0123456789012345678901234567890123456' at 'clientRequestToken' failed to satisfy constraint: Member must have length less than or equal to 36; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]; Value 'BOGUS2' at 'returnItemCollectionMetrics' failed to satisfy constraint: Member must satisfy enum value set: [SIZE, NONE]
+            TransactGetItems   | {"ReturnConsumedCapacity":"BOGUS"} | 2 validation errors detected: Value null at 'transactItems' failed to satisfy constraint: Member must not be null; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]
+            """)
+    void aTransactionReportsItsMemberErrorsTogether(String operation, String request, String message) throws Exception {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle(operation, mapper.readTree(request), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            61 | {"TransactItems":[{},{"Delete":{"TableName":"bad!name","Key":{}}}]}     | Invalid Request: TransactWriteRequest should contain Delete or Put or Update request
+            61 | {"TransactItems":[{}],"ReturnConsumedCapacity":"BOGUS"}                 | 1 validation error detected: Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]
+            61 | {"TransactItems":[{"Put":{"TableName":"","Item":{}}}]}                  | 1 validation error detected: Value '' at 'transactItems.1.member.put.tableName' failed to satisfy constraint: Member must have length greater than or equal to 1
+            60 | {"TransactItems":[{"Put":{"TableName":"","Item":{}}}]}                  | 1 validation error detected: Value at 'TransactItems.0.member.Put.TableName' failed to satisfy constraint: Member must have length greater than or equal to 1
+            60 | {"TransactItems":[{}],"ReturnConsumedCapacity":"BOGUS"}                 | 2 validation errors detected: Value '' at 'transactItems' failed to satisfy constraint: TransactWriteRequest should contain Delete or Put or Update or ConditionCheck; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]
+            """)
+    void aTransactionNestedTooDeepForTheNewerValidatorIsCheckedByTheOlderOne(int levels, String request,
+            String message) throws Exception {
+        ObjectNode body = (ObjectNode) mapper.readTree(request);
+        ObjectNode put = mapper.createObjectNode().put("TableName", "Tbl");
+        put.set("Item", mapper.createObjectNode().set("d", nestedMaps(levels)));
+        ((ArrayNode) body.get("TransactItems")).add(mapper.createObjectNode().set("Put", put));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", body, "eu-west-1"));
+        assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            TransactWriteItems | {"TransactItems":[]}                                   | 1 validation error detected: Value at 'TransactItems' failed to satisfy constraint: Member must have length greater than or equal to 1
+            TransactGetItems   | {"TransactItems":[]}                                   | 1 validation error detected: Value at 'TransactItems' failed to satisfy constraint: Member must have length greater than or equal to 1
+            TransactWriteItems | {"TransactItems":[{"Put":{"TableName":"","Item":{}}}]} | 1 validation error detected: Value at 'TransactItems.0.member.Put.TableName' failed to satisfy constraint: Member must have length greater than or equal to 1
+            """)
+    void aTransactionNestedDeepInUnknownMembersIsCheckedByTheNewerValidator(String operation, String request,
+            String message) throws Exception {
+        ObjectNode body = (ObjectNode) mapper.readTree(request);
+        body.set("Foo", nestedMaps(63));
+        for (JsonNode action : body.get("TransactItems")) {
+            action.forEach(op -> ((ObjectNode) op).set("Foo", nestedMaps(63)));
+            ((ObjectNode) action).set("Foo", nestedMaps(63));
+        }
+
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, body, "eu-west-1"));
+        assertEquals(message, ex.getMessage());
+    }
+
     @Test
     void updateItemRejectsAnAttributeUpdatesValueWithALeafAtLevel33BeforeTheTableLookup() {
         ObjectNode request = updateUserRequest();
@@ -2752,9 +2815,10 @@ class NativeDynamoDbJsonHandlerTest {
     void transactWriteItemsCancelsOnAConditionCheckKeyMissingItsAttribute() throws Exception {
         createUsersTable("eu-west-1");
 
-        Response response = handler.handle("TransactWriteItems",
-                transactWriteOf(transactMember("ConditionCheck", "Users", "Key", mapper.createObjectNode())),
-                "eu-west-1");
+        ObjectNode check = transactMember("ConditionCheck", "Users", "Key", mapper.createObjectNode());
+        ((ObjectNode) check.get("ConditionCheck")).put("ConditionExpression", "attribute_exists(userId)");
+
+        Response response = handler.handle("TransactWriteItems", transactWriteOf(check), "eu-west-1");
 
         assertEquals("The provided key element does not match the schema", onlyValidationErrorMessage(response));
     }

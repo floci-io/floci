@@ -121,6 +121,9 @@ class LambdaWebDataPlaneDockerIntegrationTest {
               if (req.url === '/date/none') { res.sendDate = false; res.end('none'); return; }
               if (req.url === '/date/stale') { res.setHeader('Date', STALE_DATE); res.end('stale'); return; }
               if (req.url === '/date/lower') { res.setHeader('date', STALE_DATE); res.end('lower'); return; }
+              if (req.url === '/type/none') { res.end('none'); return; }
+              if (req.url === '/type/empty') { res.end(); return; }
+              if (req.url === '/type/lower') { res.setHeader('content-type', 'application/x-custom'); res.end('lower'); return; }
               if (req.url.startsWith('/crash')) { setTimeout(() => process.exit(1), 50); return; }
               if (req.url.startsWith('/exit')) { res.end('bye', () => process.exit(0)); return; }
               let body = '';
@@ -245,18 +248,26 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         String own = "Date: [A-Z][a-z]{2}, \\d{2} [A-Z][a-z]{2} \\d{4} \\d{2}:\\d{2}:\\d{2} GMT";
         String stale = "Thu, 01 Jan 2015 00:00:00 GMT";
 
-        List<String> none = dateLines(domain, "/date/none");
+        List<String> none = headerLines(domain, "/date/none", "date");
         assertEquals(1, none.size(), none.toString());
         assertTrue(none.getFirst().matches(own), none.toString());
 
-        List<String> replaced = dateLines(domain, "/date/stale");
+        List<String> replaced = headerLines(domain, "/date/stale", "date");
         assertEquals(1, replaced.size(), replaced.toString());
         assertTrue(replaced.getFirst().matches(own) && !replaced.getFirst().endsWith(stale), replaced.toString());
 
-        List<String> lowercase = dateLines(domain, "/date/lower");
+        List<String> lowercase = headerLines(domain, "/date/lower", "date");
         assertEquals(2, lowercase.size(), lowercase.toString());
         assertTrue(lowercase.getFirst().matches(own), lowercase.toString());
         assertEquals("date: " + stale, lowercase.get(1));
+
+        // An answer without a Content-Type gets text/plain unless its Content-Length is 0, as on AWS. An app's
+        // content-type goes out as Content-Type.
+        String plain = "Content-Type: text/plain; charset=utf-8";
+        assertEquals(List.of(plain), headerLines(domain, "/type/none", "content-type"));
+        assertEquals(List.of(plain), headerLines(domain, "/status/204", "content-type"));
+        assertEquals(List.of(), headerLines(domain, "/type/empty", "content-type"));
+        assertEquals(List.of("Content-Type: application/x-custom"), headerLines(domain, "/type/lower", "content-type"));
     }
 
     @Test
@@ -922,11 +933,13 @@ class LambdaWebDataPlaneDockerIntegrationTest {
         }
     }
 
-    /** The date header lines of the answer to {@code path}, in their case and order. */
-    private static List<String> dateLines(String domain, String path) throws Exception {
+    /** The {@code name} header lines of the answer to {@code path}, in their case and order. */
+    private static List<String> headerLines(String domain, String path, String name) throws Exception {
         String response = raw("GET " + path + " HTTP/1.1\r\nHost: " + domain + "\r\nConnection: close\r\n\r\n");
         String head = response.substring(0, response.indexOf("\r\n\r\n"));
-        return List.of(head.split("\r\n")).stream().filter(line -> line.regionMatches(true, 0, "date:", 0, 5)).toList();
+        String prefix = name + ":";
+        return List.of(head.split("\r\n")).stream()
+                .filter(line -> line.regionMatches(true, 0, prefix, 0, prefix.length())).toList();
     }
 
     private static byte[] zip(String indexJs) throws IOException {

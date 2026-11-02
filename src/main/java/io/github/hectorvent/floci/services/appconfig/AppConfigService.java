@@ -122,11 +122,25 @@ public class AppConfigService {
         applicationStore.get(applicationId).ifPresent(application -> applicationStore.delete(applicationId));
     }
 
+    /** Updates only the application fields present in an UpdateApplication request. */
+    public synchronized Application updateApplication(String applicationIdentifier, Map<String, Object> request) {
+        if (request.containsKey("Name") && !(request.get("Name") instanceof String)) {
+            throw new AwsException("BadRequestException", "Name must be a string", 400);
+        }
+        if (request.containsKey("Description") && !(request.get("Description") instanceof String)) {
+            throw new AwsException("BadRequestException", "Description must be a string", 400);
+        }
+        Application app = resolveApplication(applicationIdentifier);
+        String name = request.containsKey("Name") ? (String) request.get("Name") : app.getName();
+        String description = request.containsKey("Description")
+                ? (String) request.get("Description") : app.getDescription();
+        return updateApplication(app.getId(), name, description);
+    }
+
     /**
      * Sets the name and description of the application whose ID is {@code applicationId}, as a
      * CloudFormation update of {@code AWS::AppConfig::Application} does: both are written, so a null
-     * description clears it. Floci serves no UpdateApplication route; the CloudFormation provisioner
-     * is the only caller.
+     * description clears it.
      */
     public synchronized Application updateApplication(String applicationId, String name, String description) {
         Application app = copy(requireApplicationById(applicationId));
