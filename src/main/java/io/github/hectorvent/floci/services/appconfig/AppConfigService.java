@@ -130,15 +130,11 @@ public class AppConfigService {
         if (request.containsKey("Description") && !(request.get("Description") instanceof String)) {
             throw new AwsException("BadRequestException", "Description must be a string", 400);
         }
-        Application app = copy(resolveApplication(applicationIdentifier));
-        if (request.containsKey("Name")) {
-            app.setName((String) request.get("Name"));
-        }
-        if (request.containsKey("Description")) {
-            app.setDescription((String) request.get("Description"));
-        }
-        applicationStore.put(app.getId(), app);
-        return app;
+        Application app = resolveApplication(applicationIdentifier);
+        String name = request.containsKey("Name") ? (String) request.get("Name") : app.getName();
+        String description = request.containsKey("Description")
+                ? (String) request.get("Description") : app.getDescription();
+        return updateApplication(app.getId(), name, description);
     }
 
     /**
