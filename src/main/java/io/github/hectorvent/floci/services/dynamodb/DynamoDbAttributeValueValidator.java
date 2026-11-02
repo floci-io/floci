@@ -23,6 +23,8 @@ final class DynamoDbAttributeValueValidator {
 
     private static final String INVALID = "One or more parameter values were invalid: ";
 
+    static final String FALSE_NULL = INVALID + "Null attribute value types must have the value of true";
+
     // Rust's Debug format also escapes these Other_Grapheme_Extend characters.
     private static final Set<Integer> SPACING_GRAPHEME_EXTENDERS = Set.of(
             0x09BE, 0x09D7, 0x0B3E, 0x0B57, 0x0BBE, 0x0BD7, 0x0CC2, 0x0CD5, 0x0CD6, 0x0D3E, 0x0D57,
@@ -60,7 +62,7 @@ final class DynamoDbAttributeValueValidator {
 
     private static String problemOf(JsonNode value) {
         if (hasFalseNull(value)) {
-            return INVALID + "Null attribute value types must have the value of true";
+            return FALSE_NULL;
         }
         if (value.path("N").isTextual()) {
             String problem = DynamoDbNumberUtils.itemNumberProblem(value.get("N").asText());
@@ -83,11 +85,7 @@ final class DynamoDbAttributeValueValidator {
     // A number set is read in full before its members are compared by value.
     private static String setProblem(String setType, JsonNode members) {
         if (members.isEmpty()) {
-            return INVALID + switch (setType) {
-                case "NS" -> "An number set  may not be empty";
-                case "BS" -> "Binary sets should not be empty";
-                default -> "An string set  may not be empty";
-            };
+            return emptySetProblem(setType);
         }
         if ("NS".equals(setType)) {
             for (JsonNode member : members) {
@@ -107,6 +105,14 @@ final class DynamoDbAttributeValueValidator {
                     + "]of type BS contains duplicates.";
             default -> "Input collection [" + joined(held, ", ", DynamoDbAttributeValueValidator::debugString)
                     + "] contains duplicates.";
+        };
+    }
+
+    static String emptySetProblem(String setType) {
+        return INVALID + switch (setType) {
+            case "NS" -> "An number set  may not be empty";
+            case "BS" -> "Binary sets should not be empty";
+            default -> "An string set  may not be empty";
         };
     }
 

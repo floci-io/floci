@@ -2853,12 +2853,12 @@ public class NativeDynamoDbJsonHandler {
         if (attr == null) return;
         if (DynamoDbAttributeValueValidator.hasFalseNull(attr)) {
             throw new AwsException("ValidationException",
-                    "One or more parameter values were invalid: Null attribute value types must have the value of true", 400);
+                    DynamoDbAttributeValueValidator.FALSE_NULL, 400);
         }
         if (attr.has("SS")) {
             JsonNode ss = attr.get("SS");
             if (ss.isEmpty()) throw new AwsException("ValidationException",
-                    "One or more parameter values were invalid: An string set  may not be empty", 400);
+                    DynamoDbAttributeValueValidator.emptySetProblem("SS"), 400);
             Set<String> seen = new HashSet<>();
             for (JsonNode e : ss) {
                 if (!seen.add(e.asText())) throw new AwsException("ValidationException",
@@ -2867,7 +2867,7 @@ public class NativeDynamoDbJsonHandler {
         } else if (attr.has("NS")) {
             JsonNode ns = attr.get("NS");
             if (ns.isEmpty()) throw new AwsException("ValidationException",
-                    "One or more parameter values were invalid: An number set  may not be empty", 400);
+                    DynamoDbAttributeValueValidator.emptySetProblem("NS"), 400);
             Set<String> seen = new HashSet<>();
             for (JsonNode e : ns) {
                 if (!seen.add(e.asText())) throw new AwsException("ValidationException",
@@ -2876,7 +2876,7 @@ public class NativeDynamoDbJsonHandler {
         } else if (attr.has("BS")) {
             JsonNode bs = attr.get("BS");
             if (bs.isEmpty()) throw new AwsException("ValidationException",
-                    "One or more parameter values were invalid: Binary sets should not be empty", 400);
+                    DynamoDbAttributeValueValidator.emptySetProblem("BS"), 400);
             Set<String> seen = new HashSet<>();
             for (JsonNode e : bs) {
                 // A binary set names its type, and AWS leaves out the space before "of".
