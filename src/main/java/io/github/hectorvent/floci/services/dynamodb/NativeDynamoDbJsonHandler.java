@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.T
 import io.github.hectorvent.floci.services.dynamodb.NativeDynamoDbTableService.UpdateTableRequest;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
+import io.github.hectorvent.floci.services.dynamodb.model.ContributorInsights;
 import io.github.hectorvent.floci.services.dynamodb.model.ExportDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.ExportSummary;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
@@ -69,6 +70,9 @@ public class NativeDynamoDbJsonHandler {
     private static final int MAX_BACKUP_ARN_LENGTH = 1024;
     private static final Instant MAX_TIME_RANGE_BOUND = Instant.ofEpochMilli(99_999_999_999_999L);
     private static final int MAX_RECOVERY_PERIOD_DAYS = 35;
+    private static final List<String> CONTRIBUTOR_INSIGHTS_ACTIONS = List.of("ENABLE", "DISABLE");
+    // The order AWS prints the enum constraint in.
+    private static final List<String> CONTRIBUTOR_INSIGHTS_MODES = List.of("THROTTLED_KEYS", "ACCESSED_AND_THROTTLED_KEYS");
     // The warm throughput a new on-demand table or index starts with.
     private static final long ON_DEMAND_WARM_READ_UNITS = 12000;
     private static final long ON_DEMAND_WARM_WRITE_UNITS = 4000;
@@ -115,6 +119,9 @@ public class NativeDynamoDbJsonHandler {
             case "UpdateTimeToLive" -> handleUpdateTimeToLive(request, region);
             case "DescribeContinuousBackups" -> handleDescribeContinuousBackups(request, region);
             case "UpdateContinuousBackups" -> handleUpdateContinuousBackups(request, region);
+            case "UpdateContributorInsights" -> handleUpdateContributorInsights(request, region);
+            case "DescribeContributorInsights" -> handleDescribeContributorInsights(request, region);
+            case "ListContributorInsights" -> handleListContributorInsights(request, region);
             case "CreateBackup" -> handleCreateBackup(request, region);
             case "DescribeBackup" -> handleDescribeBackup(request, region);
             case "ListBackups" -> handleListBackups(request, region);
@@ -1999,6 +2006,136 @@ public class NativeDynamoDbJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.set("ContinuousBackupsDescription", continuousBackupsDescriptionNode(backups));
         return Response.ok(response).build();
+    }
+
+    /** AWS answers ENABLING or DISABLING here; Floci settles at once, so a describe reads ENABLED or DISABLED. */
+    private Response handleUpdateContributorInsights(JsonNode request, String region) {
+        String tableName = requireTableNameParameter(request, "TableName");
+        DynamoDbTableNames.resolveWithRegion(tableName, region);
+        List<String> violations = new ArrayList<>();
+        String indexName = contributorInsightsIndexName(request, violations);
+        JsonNode action = request.path("ContributorInsightsAction");
+        if (action.isMissingNode() || action.isNull()) {
+            violations.add(SmithyValidationErrors.notNull("contributorInsightsAction"));
+        } else if (!CONTRIBUTOR_INSIGHTS_ACTIONS.contains(action.asText())) {
+            violations.add(SmithyValidationErrors.notInEnum(action.asText(), "contributorInsightsAction",
+                    CONTRIBUTOR_INSIGHTS_ACTIONS));
+        }
+        String mode = request.hasNonNull("ContributorInsightsMode")
+                ? request.get("ContributorInsightsMode").asText() : null;
+        if (mode != null && !CONTRIBUTOR_INSIGHTS_MODES.contains(mode)) {
+            violations.add(SmithyValidationErrors.notInEnum(mode, "contributorInsightsMode",
+                    CONTRIBUTOR_INSIGHTS_MODES));
+        }
+        throwValidationErrors(violations);
+        boolean enable = "ENABLE".equals(action.asText());
+
+        DynamoDbService.ContributorInsightsTarget target =
+                dynamoDbService.updateContributorInsights(tableName, indexName, enable, mode, region);
+
+        ObjectNode response = contributorInsightsNode(target);
+        response.put("ContributorInsightsStatus", enable ? "ENABLING" : "DISABLING");
+        if (enable) {
+            response.put("ContributorInsightsMode", target.insights().getMode());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeContributorInsights(JsonNode request, String region) {
+        String tableName = requireTableNameParameter(request, "TableName");
+        DynamoDbTableNames.resolveWithRegion(tableName, region);
+        List<String> violations = new ArrayList<>();
+        String indexName = contributorInsightsIndexName(request, violations);
+        throwValidationErrors(violations);
+
+        DynamoDbService.ContributorInsightsTarget target =
+                dynamoDbService.describeContributorInsights(tableName, indexName, region);
+
+        ObjectNode response = contributorInsightsNode(target);
+        ContributorInsights insights = target.insights();
+        if (target.enabled()) {
+            ArrayNode rules = response.putArray("ContributorInsightsRuleList");
+            contributorInsightsRuleNames(target).forEach(rules::add);
+            response.put("ContributorInsightsStatus", "ENABLED");
+            response.put("ContributorInsightsMode", insights.getMode());
+        } else {
+            response.put("ContributorInsightsStatus", "DISABLED");
+        }
+        if (insights != null) {
+            response.put("LastUpdateDateTime", epochSeconds(insights.getLastUpdateDateTime()));
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleListContributorInsights(JsonNode request, String region) {
+        String tableName = request.hasNonNull("TableName") ? request.get("TableName").asText() : null;
+        if (tableName != null) {
+            DynamoDbTableNames.resolveWithRegion(tableName, region);
+        }
+        Integer maxResults = request.hasNonNull("MaxResults") ? request.get("MaxResults").asInt() : null;
+        String nextToken = request.hasNonNull("NextToken") ? request.get("NextToken").asText() : null;
+
+        DynamoDbService.ContributorInsightsPage page =
+                dynamoDbService.listContributorInsights(tableName, maxResults, nextToken, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode summaries = response.putArray("ContributorInsightsSummaries");
+        for (DynamoDbService.ContributorInsightsTarget target : page.summaries()) {
+            ObjectNode summary = contributorInsightsNode(target);
+            summary.put("ContributorInsightsStatus", "ENABLED");
+            summary.put("ContributorInsightsMode", target.insights().getMode());
+            summaries.add(summary);
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private static String contributorInsightsIndexName(JsonNode request, List<String> violations) {
+        if (!request.hasNonNull("IndexName")) {
+            return null;
+        }
+        String indexName = request.get("IndexName").asText();
+        violations.addAll(nameViolations(indexName, "indexName"));
+        return indexName;
+    }
+
+    private ObjectNode contributorInsightsNode(DynamoDbService.ContributorInsightsTarget target) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("TableName", target.tableName());
+        if (target.indexName() != null) {
+            node.put("IndexName", target.indexName());
+        }
+        return node;
+    }
+
+    /**
+     * The rules AWS creates, named {@code DynamoDBContributorInsights-<kind>-<resource>-<creation millis>}
+     * where the resource is the table name, or {@code <table>-<index>} for an index: the accessed-key
+     * rules (PKC, SKC) only in ACCESSED_AND_THROTTLED_KEYS mode, the sort-key rules (SKC, SKT) only
+     * when the table or index has a sort key.
+     */
+    private static List<String> contributorInsightsRuleNames(DynamoDbService.ContributorInsightsTarget target) {
+        List<String> kinds = new ArrayList<>();
+        if ("ACCESSED_AND_THROTTLED_KEYS".equals(target.insights().getMode())) {
+            kinds.add("PKC");
+            if (target.hasSortKey()) {
+                kinds.add("SKC");
+            }
+        }
+        kinds.add("PKT");
+        if (target.hasSortKey()) {
+            kinds.add("SKT");
+        }
+        String resource = target.indexName() != null
+                ? target.tableName() + "-" + target.indexName() : target.tableName();
+        String suffix = "-" + resource + "-" + target.insights().getRulesCreatedAt().toEpochMilli();
+        List<String> names = new ArrayList<>();
+        for (String kind : kinds) {
+            names.add("DynamoDBContributorInsights-" + kind + suffix);
+        }
+        return names;
     }
 
     private Response handleCreateBackup(JsonNode request, String region) {

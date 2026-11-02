@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
+import io.github.hectorvent.floci.services.dynamodb.model.ContributorInsights;
 import io.github.hectorvent.floci.services.dynamodb.model.ExportDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.ExportSummary;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
@@ -2933,6 +2934,122 @@ public class DynamoDbService {
         table.setTtlEnabled(enabled);
         tableStore.put(storageKey, table);
         LOG.infov("Updated TTL for table {0}: enabled={1}, attr={2}", canonicalTableName, enabled, ttlAttributeName);
+    }
+
+    // --- Contributor Insights ---
+
+    private static final String DEFAULT_CONTRIBUTOR_INSIGHTS_MODE = "ACCESSED_AND_THROTTLED_KEYS";
+    private static final int MAX_CONTRIBUTOR_INSIGHTS_PAGE_SIZE = 100;
+
+    /**
+     * A table or global secondary index as the Contributor Insights operations see it. {@code arn}
+     * orders and pages ListContributorInsights; {@code insights} is null until the first update.
+     */
+    public record ContributorInsightsTarget(String tableName, String indexName, String arn, boolean hasSortKey,
+                                            ContributorInsights insights) {
+        public boolean enabled() {
+            return insights != null && insights.isEnabled();
+        }
+    }
+
+    public record ContributorInsightsPage(List<ContributorInsightsTarget> summaries, String nextToken) {}
+
+    public ContributorInsightsTarget describeContributorInsights(String tableName, String indexName, String region) {
+        String canonicalTableName = canonicalTableName(region, tableName);
+        TableDefinition table = tableStore.get(regionKey(region, canonicalTableName))
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+        return contributorInsightsTarget(table, indexName);
+    }
+
+    /**
+     * Enabling a disabled table or index creates its rules again. Enabling an enabled one keeps its
+     * rules and switches the mode only when the request names one.
+     */
+    public ContributorInsightsTarget updateContributorInsights(String tableName, String indexName, boolean enable,
+                                                               String mode, String region) {
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
+        TableDefinition table = tableStore.get(storageKey)
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+        ContributorInsightsTarget target = contributorInsightsTarget(table, indexName);
+        ContributorInsights insights = target.insights();
+        if (insights == null) {
+            insights = new ContributorInsights();
+            if (indexName == null) {
+                table.setContributorInsights(insights);
+            } else {
+                table.findGsi(indexName).orElseThrow().setContributorInsights(insights);
+            }
+        }
+        Instant now = clock.instant();
+        if (enable && !insights.isEnabled()) {
+            insights.setRulesCreatedAt(now);
+            insights.setMode(mode != null ? mode : DEFAULT_CONTRIBUTOR_INSIGHTS_MODE);
+        } else if (enable && mode != null) {
+            insights.setMode(mode);
+        }
+        insights.setEnabled(enable);
+        insights.setLastUpdateDateTime(now);
+        tableStore.put(storageKey, table);
+        LOG.infov("Updated Contributor Insights for table {0} index {1}: enabled={2}, mode={3}",
+                canonicalTableName, indexName, enable, insights.getMode());
+        return new ContributorInsightsTarget(target.tableName(), target.indexName(), target.arn(),
+                target.hasSortKey(), insights);
+    }
+
+    /** The tables and global secondary indexes with Contributor Insights enabled, in ARN order. */
+    public ContributorInsightsPage listContributorInsights(String tableName, Integer maxResults, String nextToken,
+                                                           String region) {
+        if (maxResults != null && MAX_CONTRIBUTOR_INSIGHTS_PAGE_SIZE < maxResults) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.valueTooLarge(
+                    "maxResults", String.valueOf(maxResults), MAX_CONTRIBUTOR_INSIGHTS_PAGE_SIZE));
+        }
+        // A token is the ARN of the last table or index of the previous page.
+        if (nextToken != null && !AwsArnUtils.isArnFor(nextToken, "dynamodb")) {
+            throw new AwsException("ValidationException", "The provided next token is invalid", 400);
+        }
+        List<TableDefinition> tables;
+        if (tableName != null) {
+            String canonicalTableName = canonicalTableName(region, tableName);
+            tables = List.of(tableStore.get(regionKey(region, canonicalTableName))
+                    .orElseThrow(() -> resourceNotFoundException(canonicalTableName)));
+        } else {
+            tables = tableStore.scan(k -> k.startsWith(region + "::"));
+        }
+        List<ContributorInsightsTarget> enabled = new ArrayList<>();
+        for (TableDefinition table : tables) {
+            enabled.add(contributorInsightsTarget(table, null));
+            for (GlobalSecondaryIndex gsi : table.getGlobalSecondaryIndexes()) {
+                enabled.add(contributorInsightsTarget(table, gsi.getIndexName()));
+            }
+        }
+        enabled.removeIf(target -> !target.enabled());
+        enabled.sort(Comparator.comparing(ContributorInsightsTarget::arn));
+
+        int start = 0;
+        if (nextToken != null) {
+            while (start < enabled.size() && enabled.get(start).arn().compareTo(nextToken) <= 0) {
+                start++;
+            }
+        }
+        int limit = maxResults != null && maxResults > 0 ? maxResults : MAX_CONTRIBUTOR_INSIGHTS_PAGE_SIZE;
+        int end = Math.min(start + limit, enabled.size());
+        List<ContributorInsightsTarget> page = List.copyOf(enabled.subList(start, end));
+        return new ContributorInsightsPage(page, end < enabled.size() ? page.getLast().arn() : null);
+    }
+
+    /** Contributor Insights covers a table and its global secondary indexes, never a local one. */
+    private static ContributorInsightsTarget contributorInsightsTarget(TableDefinition table, String indexName) {
+        if (indexName == null) {
+            return new ContributorInsightsTarget(table.getTableName(), null, table.getTableArn(),
+                    table.getSortKeyName() != null, table.getContributorInsights());
+        }
+        GlobalSecondaryIndex gsi = table.findGsi(indexName)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Requested resource not found: Index: " + indexName + " not found for table: "
+                        + table.getTableName(), 400));
+        return new ContributorInsightsTarget(table.getTableName(), indexName, gsi.getIndexArn(),
+                gsi.getSortKeyName() != null, gsi.getContributorInsights());
     }
 
     /** The restore window is null while point-in-time recovery is disabled. */
