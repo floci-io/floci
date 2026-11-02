@@ -113,6 +113,24 @@ class Ec2InstanceConnectEndpointServiceTest {
     }
 
     @Test
+    void aNatGatewayCannotTakeTheAddressAnEndpointHolds() {
+        Ec2Service service = newService();
+        String vpcId = service.createVpc(REGION, "10.75.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.75.1.0/24", "us-east-1a").getSubnetId();
+        InstanceConnectEndpoint endpoint = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(),
+                null, null, List.of(), null);
+        String held = endpoint.getPrivateIpAddress();
+
+        assertEquals("InvalidIPAddress.InUse", assertThrows(AwsException.class, () -> service
+                .createNatGateway(REGION, subnetId, null, "private", held, List.of())).getErrorCode());
+
+        // Once the endpoint is gone the address is free again, so the refusal above was the endpoint's.
+        service.deleteInstanceConnectEndpoint(REGION, endpoint.getInstanceConnectEndpointId());
+        assertEquals(held, service.createNatGateway(REGION, subnetId, null, "private", held, List.of())
+                .getNatGatewayAddresses().get(0).getPrivateIp());
+    }
+
+    @Test
     void aReplayedClientTokenReturnsTheFirstEndpoint() {
         Ec2Service service = newService();
         String vpcId = service.createVpc(REGION, "10.75.0.0/16", false).getVpcId();
