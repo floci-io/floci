@@ -968,6 +968,25 @@ public class RedshiftService implements ManagedSecretRotator {
         return clusters.scan(k -> true);
     }
 
+    /** The caller's cluster an ARN names, when the ARN is exactly that cluster's in this Region. */
+    public Optional<Cluster> findClusterByArn(String clusterArn) {
+        if (clusterArn == null || !clusterArn.contains(":cluster:")) {
+            return Optional.empty();
+        }
+        String identifier = clusterArn.substring(clusterArn.indexOf(":cluster:") + ":cluster:".length());
+        return clusters.get(identifier).filter(cluster -> clusterArn.equals(clusterArn(identifier)));
+    }
+
+    /** Sets, or with {@code null} removes, the resource policy of the caller's cluster an ARN names. */
+    public synchronized Optional<Cluster> setClusterResourcePolicy(String clusterArn, String policy) {
+        Optional<Cluster> cluster = findClusterByArn(clusterArn);
+        cluster.ifPresent(found -> {
+            found.setResourcePolicy(policy);
+            clusters.put(found.getClusterIdentifier(), found);
+        });
+        return cluster;
+    }
+
     public List<Cluster> describeClustersForAccount(String accountId, String identifier) {
         if (identifier != null) {
             Optional<Cluster> cluster = clusters.getForAccount(accountId, identifier);

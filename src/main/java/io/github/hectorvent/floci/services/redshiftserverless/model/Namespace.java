@@ -178,4 +178,15 @@ public class Namespace {
     public void setTags(Map<String, String> tags) {
         this.tags = tags;
     }
+
+    /** The Redshift resource policy {@code PutResourcePolicy} set, kept with the namespace so it goes with it. */
+    private String resourcePolicy;
+
+    public String getResourcePolicy() {
+        return resourcePolicy;
+    }
+
+    public void setResourcePolicy(String resourcePolicy) {
+        this.resourcePolicy = resourcePolicy;
+    }
 }

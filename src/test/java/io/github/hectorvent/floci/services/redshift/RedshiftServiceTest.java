@@ -344,6 +344,23 @@ class RedshiftServiceTest {
         verifyNoInteractions(cm);
     }
 
+    @Test
+    void aClusterIsFoundOnlyByItsOwnArnAndKeepsTheResourcePolicySetOnIt() {
+        Cluster cluster = lifecycleCluster("available");
+        String arn = "arn:aws:redshift:us-east-1:111111111111:cluster:warehouse";
+
+        assertTrue(service.findClusterByArn(arn).isPresent());
+        for (String other : List.of("arn:aws:redshift:us-east-1:222222222222:cluster:warehouse",
+                "arn:aws:redshift:eu-west-1:111111111111:cluster:warehouse",
+                "arn:aws:redshift:us-east-1:111111111111:snapshot:warehouse/nightly")) {
+            assertTrue(service.findClusterByArn(other).isEmpty(), other);
+        }
+
+        service.setClusterResourcePolicy(arn, "{\"Version\":\"2012-10-17\"}");
+        assertEquals("{\"Version\":\"2012-10-17\"}", cluster.getResourcePolicy());
+        verify(clusterBackend).put("warehouse", cluster);
+    }
+
     private Cluster lifecycleCluster(String status) {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("warehouse");
