@@ -3,6 +3,18 @@
 **Protocol:** JSON 1.0 (`X-Amz-Target: DynamoDB_20120810.*`)
 **Endpoint:** `POST http://localhost:4566/`
 
+## ListTables authorization
+
+With IAM enforcement enabled, `ListTables` evaluates the regional table collection
+`arn:<partition>:dynamodb:<region>:<account>:table/*`. A matching allow permits listing;
+a matching explicit deny overrides it. A grant for one table or a table-name prefix
+does not permit listing, and a grant in another account or Region does not apply.
+The listing is not filtered to the caller's individually authorized tables.
+
+This resource matching was checked against live AWS with isolated role sessions.
+Pagination and ignored table selectors do not change the collection being authorized.
+Other DynamoDB operations retain their own authorization resources.
+
 ## Supported Actions
 
 | Action | Description |

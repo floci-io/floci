@@ -855,6 +855,28 @@ class ResourceArnBuilderTest {
     // ── DynamoDB ─────────────────────────────────────────────────────────────────
 
     @Test
+    void listTablesUsesTheCollectionInTheRequestPartitionRegionAndAccount() {
+        for (String body : List.of("{}", "{\"ExclusiveStartTableName\":\"page-start\"}",
+                "{\"TableName\":\"decoy\",\"ResourceArn\":\"decoy\"}")) {
+            setJsonBody(body);
+            assertEquals(List.of("arn:aws-cn:dynamodb:cn-north-1:123456789012:table/*"),
+                    builder.buildResources("dynamodb", "dynamodb:ListTables", ctx,
+                            "cn-north-1", "123456789012", "aws-cn"));
+        }
+    }
+
+    @Test
+    void listTablesDoesNotChangeOtherTablelessOperations() {
+        setJsonBody("{}");
+        assertEquals(List.of("*"), builder.buildResources("dynamodb", "dynamodb:DescribeLimits",
+                ctx, "us-east-1", ACCOUNT, "aws"));
+        setJsonBody("{\"TableName\":\"Orders\"}");
+        assertEquals(List.of("arn:aws:dynamodb:us-east-1:000000000000:table/Orders"),
+                builder.buildResources("dynamodb", "dynamodb:DescribeTable",
+                        ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    @Test
     void dynamoDbBuildsArnFromShortTableName() {
         setJsonBody("{\"TableName\":\"FgacTable\"}");
         String arn = builder.build("dynamodb", ctx, "us-east-1", "000000000000");

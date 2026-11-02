@@ -197,7 +197,10 @@ public class ResourceArnBuilder {
             case "lambda"         -> List.of(buildLambdaArn(path, ctx, region, accountId));
             case "sqs"            -> List.of(buildSqsArn(ctx, region, accountId));
             case "sns"            -> List.of(buildSnsArn(ctx, region, accountId));
-            case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
+            // ListTables authorizes the regional collection, regardless of request-body selectors.
+            case "dynamodb"       -> "dynamodb:ListTables".equals(operation)
+                    ? List.of(new AwsArnUtils.Arn(partition, "dynamodb", region, accountId, "table/*").toString())
+                    : buildDynamoDbArns(ctx, region, accountId);
             case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
             case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
             case "iam"            -> buildIamArns(ctx, region, accountId);
