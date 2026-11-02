@@ -2,12 +2,16 @@ package io.github.hectorvent.floci.services.codeartifact;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
+import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpClient;
+import io.vertx.core.http.HttpClientRequest;
 import io.vertx.core.http.HttpClientResponse;
 import io.vertx.core.http.HttpMethod;
 import io.vertx.core.http.HttpServer;
@@ -46,10 +50,13 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -823,6 +830,60 @@ class CodeArtifactNpmDataPlaneTest {
         }
     }
 
+    @Test
+    void aQueuedPublishReleasesItsUseWhenTheClientDisconnects() throws Exception {
+        byte[] content = "tarball bytes".getBytes(StandardCharsets.UTF_8);
+        String envelope = publishEnvelope("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content);
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:1");
+        CountDownLatch entered = new CountDownLatch(4);
+        CountDownLatch release = new CountDownLatch(1);
+        ObjectNode document = storedDocument("my-pkg", "1.0.0", "my-pkg-1.0.0.tgz", content, Map.of());
+        when(verdaccioClient.fetchPackageDocument(anyString(), isNull(), eq("my-pkg"))).thenAnswer(call -> {
+            entered.countDown();
+            assertTrue(release.await(5, TimeUnit.SECONDS));
+            return Optional.of(document);
+        });
+        when(verdaccioClient.storedTarballIntegrity(anyString(), isNull(), eq("my-pkg"),
+                eq("my-pkg-1.0.0.tgz"))).thenReturn(Optional.of(integrity(content)));
+        startDataPlane(service, verdaccioClient);
+
+        String path = "/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg";
+        ExecutorService executor = Executors.newFixedThreadPool(4);
+        try {
+            List<CompletableFuture<HttpResponse>> held = new ArrayList<>();
+            for (int i = 0; i < 4; i++) {
+                held.add(CompletableFuture.supplyAsync(() -> putUnchecked(path, envelope), executor));
+            }
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            RequestOptions options = new RequestOptions().setHost("127.0.0.1").setPort(dataPlane.actualPort())
+                    .setMethod(HttpMethod.PUT).setURI(path);
+            HttpClientRequest queued = client.request(options).toCompletionStage().toCompletableFuture()
+                    .get(2, TimeUnit.SECONDS);
+            queued.putHeader("Authorization", "Bearer good-token");
+            queued.send(envelope);
+            verify(verdaccioClient, timeout(5_000).times(5)).beginUse(NPM_REPOSITORY_ID);
+            assertTrue(queued.reset());
+            verify(verdaccioClient, timeout(5_000)).endUse(NPM_REPOSITORY_ID);
+
+            release.countDown();
+            for (CompletableFuture<HttpResponse> response : held) {
+                assertEquals(200, response.get(10, TimeUnit.SECONDS).statusCode());
+            }
+            verify(verdaccioClient, timeout(5_000).times(5)).endUse(NPM_REPOSITORY_ID);
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+            executor.awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
     private static String publishEnvelope(String name, String version, String filename, byte[] content) {
         return publishEnvelopeWithDistTags(name, version, filename, content, null);
     }
@@ -1097,6 +1158,57 @@ class CodeArtifactNpmDataPlaneTest {
         assertEquals(false, upstreamReceivedRequest.get());
     }
 
+    @Test
+    void repositoryDeleteDuringExternalFetchClosesAdmissionAfterTheFetchCompletes() throws Exception {
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        VerdaccioSidecarManager leases = new VerdaccioSidecarManager(mock(ContainerBuilder.class),
+                mock(ContainerLifecycleManager.class), mock(EmulatorConfig.class));
+        leases.registerRepository(NPM_REPOSITORY_ID);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        doAnswer(call -> {
+            leases.beginUse(call.getArgument(0));
+            return null;
+        }).when(verdaccioClient).beginUse(NPM_REPOSITORY_ID);
+        doAnswer(call -> {
+            leases.endUse(call.getArgument(0));
+            return null;
+        }).when(verdaccioClient).endUse(NPM_REPOSITORY_ID);
+        CountDownLatch fetching = new CountDownLatch(1);
+        CountDownLatch allowFetch = new CountDownLatch(1);
+        CodeArtifactNpmExternalConnectionImporter importer = mock(CodeArtifactNpmExternalConnectionImporter.class);
+        ObjectNode merged = JSON.createObjectNode().put("name", "my-pkg");
+        when(importer.mergedPackument("us-east-1", DOMAIN, "000000000000", REPOSITORY,
+                NPM_REPOSITORY_ID, null, "my-pkg", true)).thenAnswer(call -> {
+                    fetching.countDown();
+                    assertTrue(allowFetch.await(5, TimeUnit.SECONDS));
+                    return Optional.of(merged);
+                });
+        startDataPlane(service, verdaccioClient, importer, true);
+
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try {
+            // Vert.x Future is imported for HTTP calls; this is the JDK executor's Future.
+            java.util.concurrent.Future<HttpResponse> response = executor.submit(() ->
+                    get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token"));
+            assertTrue(fetching.await(5, TimeUnit.SECONDS));
+            leases.release(NPM_REPOSITORY_ID);
+            assertThrows(IllegalStateException.class, () -> leases.beginUse(NPM_REPOSITORY_ID));
+            verify(verdaccioClient, never()).endUse(NPM_REPOSITORY_ID);
+
+            allowFetch.countDown();
+            assertEquals(200, response.get(5, TimeUnit.SECONDS).statusCode());
+            verify(verdaccioClient, timeout(5_000)).endUse(NPM_REPOSITORY_ID);
+        } finally {
+            allowFetch.countDown();
+            executor.shutdownNow();
+            executor.awaitTermination(5, TimeUnit.SECONDS);
+        }
+    }
+
     /**
      * Raised by Greptile's review: a real {@code npm install} sends {@code pacote}'s own corgi-
      * preferring {@code Accept}, confirmed against its source, and must keep resolving the real
@@ -1311,6 +1423,13 @@ class CodeArtifactNpmDataPlaneTest {
     private void startDataPlane(CodeArtifactService service, VerdaccioSidecarClient verdaccioClient,
                                  CodeArtifactNpmExternalConnectionImporter externalConnectionImporter,
                                  boolean codeArtifactEnabled) throws Exception {
+        doAnswer(call -> {
+            String id = service.ensureFormatContainerId(call.getArgument(0), call.getArgument(1),
+                    call.getArgument(2), call.getArgument(3), call.getArgument(4));
+            verdaccioClient.beginUse(id);
+            return id;
+        }).when(service).resolveContainerIdAndBeginUse(eq("npm"), anyString(), anyString(), anyString(),
+                anyString(), eq(verdaccioClient));
         when(verdaccioClient.publicUrl(DOMAIN, REPOSITORY)).thenReturn("http://localhost:4566/codeartifact/npm/"
                 + DOMAIN + "/" + REPOSITORY + "/");
         ServiceConfigAccess serviceConfigAccess = mock(ServiceConfigAccess.class);

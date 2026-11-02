@@ -748,6 +748,40 @@ class AppConfigTest {
             }
         }
     }
+
+    @Test
+    @Order(59)
+    @DisplayName("UpdateApplication preserves fields omitted by the SDK request")
+    void updateApplication() {
+        String applicationId = appConfig.createApplication(CreateApplicationRequest.builder()
+                .name(TestFixtures.uniqueName("update-app"))
+                .description("original")
+                .build()).id();
+        try {
+            UpdateApplicationResponse renamed = appConfig.updateApplication(UpdateApplicationRequest.builder()
+                    .applicationId(applicationId)
+                    .name("updated-app")
+                    .build());
+            assertThat(renamed.name()).isEqualTo("updated-app");
+            assertThat(renamed.description()).isEqualTo("original");
+
+            UpdateApplicationResponse described = appConfig.updateApplication(UpdateApplicationRequest.builder()
+                    .applicationId(applicationId)
+                    .description("updated")
+                    .build());
+            assertThat(described.name()).isEqualTo("updated-app");
+            assertThat(described.description()).isEqualTo("updated");
+
+            GetApplicationResponse retrieved = appConfig.getApplication(GetApplicationRequest.builder()
+                    .applicationId(applicationId)
+                    .build());
+            assertThat(retrieved.name()).isEqualTo("updated-app");
+            assertThat(retrieved.description()).isEqualTo("updated");
+        } finally {
+            appConfig.deleteApplication(DeleteApplicationRequest.builder().applicationId(applicationId).build());
+        }
+    }
+
     @Test
     @DisplayName("A non-hosted profile without a type stays untyped")
     void nonHostedProfileWithoutTypeStaysUntyped() {

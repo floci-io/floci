@@ -371,6 +371,41 @@ class StepFunctionsDescribeMapRunIntegrationTest {
         assertEquals(50.0, response.jsonPath().getDouble("toleratedFailurePercentage"));
     }
 
+    /** A decimal percentage is reported as declared, not truncated to an integer. */
+    @Test
+    @Order(14)
+    void describeMapRunReportsADecimalToleratedFailurePercentage() throws Exception {
+        String definition = """
+                {
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Fan",
+                  "States": {
+                    "Fan": {
+                      "Type": "Map",
+                      "End": true,
+                      "Items": [{"n": 1}, {"n": 2}],
+                      "ToleratedFailurePercentage": 12.5,
+                      "ItemProcessor": {
+                        "ProcessorConfig": {"Mode": "DISTRIBUTED", "ExecutionType": "STANDARD"},
+                        "StartAt": "Keep",
+                        "States": {"Keep": {"Type": "Pass", "End": true}}
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String smArn = createStateMachine("describe-map-run-decimal-percentage", definition);
+        String execArn = startExecution(smArn, "{}");
+        Response describe = waitForTerminalState(execArn);
+        assertEquals("SUCCEEDED", describe.jsonPath().getString("status"),
+                "cause: " + describe.jsonPath().getString("cause"));
+
+        Response response = describeMapRun(mapRunArnFromHistory(execArn));
+        response.then().statusCode(200);
+        assertEquals(12.5, response.jsonPath().getDouble("toleratedFailurePercentage"));
+    }
+
     private static String distributedMap(String items, String bucket, Integer maxConcurrency) {
         return """
                 {

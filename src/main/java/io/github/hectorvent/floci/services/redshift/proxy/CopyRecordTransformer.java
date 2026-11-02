@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.IntConsumer;
 
 /**
  * Applies the COPY options that change field content to the bytes of one S3 object before they
@@ -21,7 +22,7 @@ final class CopyRecordTransformer {
 
     /** What a COPY column holds, as far as the date and time formats are concerned. */
     enum ColumnKind {
-        DATE, TIMESTAMP, OTHER
+        DATE, TIMESTAMP, TEXT, OTHER
     }
 
     private record Field(int tokenEnd, byte[] value, boolean quoted) {
@@ -33,6 +34,7 @@ final class CopyRecordTransformer {
     private final byte[] nullMarker;
     private final List<Integer> columnMaxBytes;
     private final List<ColumnKind> columnKinds;
+    private final boolean emptyNullString;
 
     CopyRecordTransformer(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes) {
         this(spec, columnMaxBytes, null);
@@ -41,6 +43,7 @@ final class CopyRecordTransformer {
     CopyRecordTransformer(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes,
                           List<ColumnKind> columnKinds) {
         this.columnKinds = columnKinds;
+        this.emptyNullString = spec.nullAs() != null && spec.nullAs().isEmpty();
         this.transforms = spec.transforms();
         this.csv = spec.csv();
         String delimiterText = spec.delimiter() != null ? spec.delimiter() : (spec.csv() ? "," : "|");
@@ -51,16 +54,32 @@ final class CopyRecordTransformer {
     }
 
     byte[] apply(byte[] input) {
+        return apply(input, null);
+    }
+
+    byte[] apply(byte[] input, IntConsumer onOutputBytes) {
         byte[] data = transforms.invalidCharReplacement() != null
                 ? sanitizeUtf8(input, (byte) transforms.invalidCharReplacement().charValue())
                 : input;
         if (!transforms.fieldLevel()) {
+            if (onOutputBytes != null) {
+                onOutputBytes.accept(data.length);
+            }
             return data;
+        }
+        if (data.length == 0) {
+            if (onOutputBytes != null) {
+                onOutputBytes.accept(0);
+            }
+            return new byte[0];
         }
         ByteArrayOutputStream out = new ByteArrayOutputStream(data.length + 16);
         int position = 0;
         while (position < data.length) {
             position = transformRecord(data, position, out);
+            if (onOutputBytes != null) {
+                onOutputBytes.accept(out.size());
+            }
         }
         return out.toByteArray();
     }
@@ -120,14 +139,17 @@ final class CopyRecordTransformer {
             writeField(field, column, out);
             position = field.tokenEnd();
             if (position >= data.length) {
+                fillMissingColumns(column + 1, out);
                 out.write(NEWLINE);
                 return data.length;
             }
             if (data[position] == NEWLINE) {
+                fillMissingColumns(column + 1, out);
                 out.write(NEWLINE);
                 return position + 1;
             }
             if (isCrlfAt(data, position)) {
+                fillMissingColumns(column + 1, out);
                 out.write(NEWLINE);
                 return Math.min(position + 2, data.length);
             }
@@ -240,6 +262,28 @@ final class CopyRecordTransformer {
     }
 
     /**
+     * FILLRECORD: a record that stops short of the last columns gets the rest of them. A character column is
+     * filled with a zero-length string and any other column with NULL; EMPTYASNULL and {@code NULL AS ''} make an
+     * empty string NULL, so they NULL the character columns too. CSV needs the empty string quoted.
+     */
+    private void fillMissingColumns(int fieldsWritten, ByteArrayOutputStream out) {
+        if (!transforms.fillRecord() || columnKinds == null) {
+            return;
+        }
+        for (int column = fieldsWritten; column < columnKinds.size(); column++) {
+            out.write(delimiter);
+            boolean emptyString = columnKinds.get(column) == ColumnKind.TEXT
+                    && !transforms.emptyAsNull() && !emptyNullString;
+            if (!emptyString) {
+                out.writeBytes(nullMarker);
+            } else if (csv) {
+                out.write(DOUBLE_QUOTE);
+                out.write(DOUBLE_QUOTE);
+            }
+        }
+    }
+
+    /**
      * Rewrites a DATE or TIMESTAMP field from the DATEFORMAT or TIMEFORMAT to the ISO text PostgreSQL reads.
      * Returns the field as it is when no format applies to its column, and null when ACCEPTANYDATE turns a
      * value that does not match into NULL; without it such a value fails the COPY, as it does with the
@@ -253,7 +297,7 @@ final class CopyRecordTransformer {
         CopyTemporalFormat format = switch (kind) {
             case DATE -> transforms.dateFormat();
             case TIMESTAMP -> transforms.timeFormat();
-            case OTHER -> null;
+            case TEXT, OTHER -> null;
         };
         if (format == null || !format.converts()) {
             return value;

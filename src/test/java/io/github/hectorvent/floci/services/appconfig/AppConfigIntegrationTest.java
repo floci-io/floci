@@ -1154,6 +1154,72 @@ class AppConfigIntegrationTest {
                 .body("values.promo._variants[0].name", equalTo("uk"));
     }
 
+    @Test @Order(56)
+    void updateApplicationPreservesOmittedFields() {
+        String applicationId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"update-app\",\"Description\":\"original\"}")
+                .when().post("/applications")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"updated-app\"}")
+                .when().patch("/applications/" + applicationId)
+                .then().statusCode(200)
+                .body("Id", equalTo(applicationId))
+                .body("Name", equalTo("updated-app"))
+                .body("Description", equalTo("original"));
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"Description\":\"updated\"}")
+                .when().patch("/applications/updated-app")
+                .then().statusCode(200)
+                .body("Id", equalTo(applicationId))
+                .body("Name", equalTo("updated-app"))
+                .body("Description", equalTo("updated"));
+
+        given()
+                .when().delete("/applications/" + applicationId)
+                .then().statusCode(204);
+    }
+
+    @Test @Order(57)
+    void updateApplicationRejectsNonStringFieldsWithoutChangingTheApplication() {
+        String applicationId = given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"validation-app\",\"Description\":\"original\"}")
+                .when().post("/applications")
+                .then().statusCode(201)
+                .extract().path("Id");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":123}")
+                .when().patch("/applications/" + applicationId)
+                .then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"should-not-stick\",\"Description\":false}")
+                .when().patch("/applications/" + applicationId)
+                .then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+
+        given()
+                .when().get("/applications/" + applicationId)
+                .then().statusCode(200)
+                .body("Name", equalTo("validation-app"))
+                .body("Description", equalTo("original"));
+
+        given()
+                .when().delete("/applications/" + applicationId)
+                .then().statusCode(204);
+    }
+
     /** Polls a new session on a feature flag profile with variants, deployed on first use. */
     private static ValidatableResponse getLatestVariantFlagsAccepting(String accept) {
         if (variantFlagsSessionBody == null) {

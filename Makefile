@@ -25,6 +25,9 @@
 # by tools/aws/regen_ecs_shapes.py.
 # src/main/resources/aws/ecr-request-shapes.json, the ECR request constraints, is generated
 # from botocore's ECR model by tools/aws/regen_ecr_shapes.py.
+# src/main/resources/aws/payment-cryptography-request-shapes.json, the Payment Cryptography
+# request constraints, is generated from botocore's model by
+# tools/aws/regen_payment_cryptography_shapes.py.
 # src/main/resources/aws/rds-ca-certificates.json, each Region's RDS certificate authorities, is
 # generated from the certificate bundles AWS publishes by tools/aws/regen_rds_ca_certificates.py.
 # src/main/resources/aws/iam-request-shapes.json, the IAM request constraints of the operations
@@ -74,6 +77,7 @@ PREFIX ?= $(HOME)/.local
         iam-action-resources-sync iam-action-resources-check iam-action-resources-verify \
         iam-action-resources-test iam-authorized-actions-sync iam-authorized-actions-check \
         cfn-property-types-sync cfn-property-types-check cfn-property-types-verify cfn-property-types-test \
+        cfn-schema-surface-sync cfn-schema-surface-verify cfn-schema-surface-test \
         iam-authorized-actions-verify iam-authorized-actions-test iam-passed-roles-sync iam-passed-roles-check \
         iam-passed-roles-verify iam-passed-roles-test iam-passed-network-connectors-sync \
         iam-passed-network-connectors-check iam-passed-network-connectors-verify \
@@ -245,17 +249,20 @@ botocore-bump: ## Bump the botocore pin to VERSION, move local/aws/botocore to t
 	$(MAKE) --no-print-directory aws-data-sync-botocore
 	$(MAKE) --no-print-directory aws-data-check-botocore
 
-aws-data-sync: aws-data-sync-botocore ## Regenerate src/main/resources/aws/*.json and the IAM managed-policy catalog from local/aws (commit the result)
+aws-data-sync: ## Regenerate src/main/resources/aws/*.json and the IAM managed-policy catalog from local/aws (commit the result)
+	$(PYTHON) tools/aws/regen_partitions.py
+	$(MAKE) --no-print-directory aws-data-sync-botocore
 	$(PYTHON) tools/aws/regen_region_facts.py
 	$(PYTHON) tools/aws/regen_rds_ca_certificates.py
 	$(PYTHON) tools/aws/regen_managed_policies.py
 
 aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, so a bump picks up nothing from the other local/aws sources
-	$(PYTHON) tools/aws/regen_partitions.py
+	$(PYTHON) tools/aws/regen_partitions.py --carry-region-flags
 	$(PYTHON) tools/aws/regen_dynamodb_shapes.py
 	$(PYTHON) tools/aws/regen_redshift_serverless_shapes.py
 	$(PYTHON) tools/aws/regen_resource_groups_shapes.py
 	$(PYTHON) tools/aws/regen_ecr_shapes.py
+	$(PYTHON) tools/aws/regen_payment_cryptography_shapes.py
 	$(PYTHON) tools/aws/regen_iam_shapes.py
 	$(PYTHON) tools/aws/regen_sts_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_types.py
@@ -268,6 +275,12 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_iam_paginators.py
 
 aws-data-check: aws-data-check-botocore ## CI gate: the vendored AWS data must match a fresh generation
+	@$(PYTHON) tools/aws/regen_partitions.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/partitions.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
 	@$(PYTHON) tools/aws/regen_region_facts.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/region-facts.json is out of date or malformed."; \
@@ -294,7 +307,7 @@ aws-data-check: aws-data-check-botocore ## CI gate: the vendored AWS data must m
 	}
 
 aws-data-check-botocore: ## The AWS data derived from botocore must match a fresh generation
-	@$(PYTHON) tools/aws/regen_partitions.py --check || { \
+	@$(PYTHON) tools/aws/regen_partitions.py --check --carry-region-flags || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/partitions.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
@@ -331,6 +344,12 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 	@$(PYTHON) tools/aws/regen_ecr_shapes.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/ecr-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_payment_cryptography_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/payment-cryptography-request-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}
@@ -721,6 +740,25 @@ cfn-property-types-verify: ## CI gate (online): the vendored CloudFormation prop
 
 cfn-property-types-test: ## Run the CloudFormation property type generator's unit tests
 	$(PYTHON) -m pytest tools/aws/test_regen_cfn_property_types.py -q
+
+cfn-schema-surface-sync: ## Regenerate src/test/resources/cloudformation/schema-surface.tsv from AWS's resource schemas (commit the result)
+	$(PYTHON) tools/aws/regen_cfn_schema_surface.py
+
+cfn-schema-surface-verify: ## CI gate (online): the committed CloudFormation schema surface must still match AWS's schemas
+	@$(PYTHON) tools/aws/regen_cfn_schema_surface.py --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not read AWS's CloudFormation resource schemas, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: AWS has changed a resource schema the CloudFormation schema surface comes from."; \
+		echo "       Run 'make cfn-schema-surface-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+cfn-schema-surface-test: ## Run the CloudFormation schema surface generator's unit tests
+	$(PYTHON) -m pytest tools/aws/test_regen_cfn_schema_surface.py -q
 
 .PHONY: dynamodb-condition-keys-sync dynamodb-condition-keys-check dynamodb-condition-keys-verify
 dynamodb-condition-keys-sync: ## Regenerate DynamoDB IAM condition keys from AWS and botocore

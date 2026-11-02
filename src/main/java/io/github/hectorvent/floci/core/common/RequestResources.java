@@ -374,22 +374,23 @@ public final class RequestResources {
     }
 
     /**
-     * The ARN of a resource of a type whose service follows its name with an id it mints: the one {@code stored}
-     * finds the caller's resource of that name under in the Region, or else the ARN with that id open; any other
-     * type's as rendered.
+     * The ARN of a resource the namespace's service stores under the name the request gives: the one {@code stored}
+     * finds the caller's resource of that name under in the Region.
+     *
+     * <p>The service is asked for every type of the namespace, not only for the ones whose ARN carries an id it
+     * mints, so a service may answer for a type whose ARN it does not mint: a key an alias names is the key the
+     * alias points at. A type whose service follows its name with an id it mints has that id open when the service
+     * stores none, and any other type's is as rendered.
      */
     private static String withId(String arn, RequestResourceMembers.ArnFormat format, String type,
                                  Map<String, String> filling, StoredResourceArns stored, String region) {
-        if (!format.minted()) {
-            return arn;
-        }
         if (stored != null && filling.size() == 1) {
             Optional<String> found = stored.find(type, List.of(filling.values().iterator().next()), region);
             if (found.isPresent()) {
                 return found.get();
             }
         }
-        return arn + "/*";
+        return format.minted() ? arn + "/*" : arn;
     }
 
     /**

@@ -1134,8 +1134,8 @@ public class ResourceArnBuilder {
      * The resource a Lambda tag route acts on, from the ARN it names. Tagging looks a function up by the
      * ARN's Region and name, and a MicroVM image or network connector by the ARN's Region and trailing
      * name, in the caller's own account whatever account the ARN names, so that resource is the one
-     * checked. The MicroVM tag handler takes any target holding {@code :microvm-image:} or
-     * {@code :network-connector:}, an {@code arn:} prefix or not, so the target is read as it reads it.
+     * checked. The MicroVM tag handler takes only a Lambda ARN naming an image or a connector with no
+     * version, so the target is read through {@link LambdaMicrovmsService#taggedResource}, as it reads it.
      * Any other ARN, an event source mapping's included, has to name its resource exactly or is
      * refused, so it is checked as written.
      */

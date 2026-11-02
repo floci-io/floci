@@ -87,7 +87,9 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -3673,12 +3675,14 @@ public class AslExecutor {
                 ? resolveToleranceField(stateDef, "ToleratedFailureCount", Integer.MAX_VALUE, mapInput,
                         jsonata, context, variables)
                 : 0;
-        int percentage = hasPercentage
-                ? resolveToleranceField(stateDef, "ToleratedFailurePercentage", 100, mapInput, jsonata,
-                        context, variables)
-                : 0;
+        BigDecimal percentage = hasPercentage
+                ? resolveTolerancePercentage(stateDef, mapInput, jsonata, context, variables)
+                : BigDecimal.ZERO;
 
-        int fromPercentage = (int) ((long) itemCount * percentage / 100);
+        // The run fails once the failed share exceeds the percentage, so the absorbed count is the
+        // floor of itemCount * percentage / 100. BigDecimal keeps a decimal percentage exact.
+        int fromPercentage = BigDecimal.valueOf(itemCount).multiply(percentage)
+                .divide(BigDecimal.valueOf(100), 0, RoundingMode.FLOOR).intValue();
         int threshold;
         if (hasCount && hasPercentage) {
             threshold = Math.min(count, fromPercentage);
@@ -3687,7 +3691,28 @@ public class AslExecutor {
         } else {
             threshold = fromPercentage;
         }
-        return new ToleratedFailures(true, count, percentage, threshold);
+        return new ToleratedFailures(true, count, percentage.doubleValue(), threshold);
+    }
+
+    /**
+     * The guide asks for "a value between zero and 100" when ToleratedFailurePercentage is a literal, and
+     * DescribeMapRun models it as a float, so a literal may be a decimal such as {@code 100.0} or
+     * {@code 12.5}. Its Path must resolve to an integer and its JSONata expression must evaluate to one, so
+     * those forms keep the integer check.
+     */
+    private BigDecimal resolveTolerancePercentage(JsonNode stateDef, JsonNode mapInput, boolean jsonata,
+                                                  JsonNode context, ObjectNode variables) {
+        String field = "ToleratedFailurePercentage";
+        JsonNode literal = stateDef.get(field);
+        if (stateDef.has(field + "Path") || literal == null || !literal.isNumber()) {
+            return BigDecimal.valueOf(resolveToleranceField(stateDef, field, 100, mapInput, jsonata, context,
+                    variables));
+        }
+        BigDecimal value = literal.decimalValue();
+        if (value.signum() < 0 || value.compareTo(BigDecimal.valueOf(100)) > 0) {
+            throw new FailStateException("States.Runtime", field + " must be a number between 0 and 100", field);
+        }
+        return value;
     }
 
     /** A tolerance is a percentage or a count, so it shares the Map integer resolver and adds a ceiling. */

@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbResponses;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamsJsonHandler;
 import io.github.hectorvent.floci.services.marketplace.MarketplaceJsonHandler;
 import io.github.hectorvent.floci.services.networkfirewall.NetworkFirewallJsonHandler;
+import io.github.hectorvent.floci.services.paymentcryptography.PaymentCryptographyJsonHandler;
 import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsJsonHandler;
@@ -62,6 +63,7 @@ public class AwsJsonController {
     private final CloudControlJsonHandler cloudControlJsonHandler;
     private final SwfJsonHandler swfJsonHandler;
     private final NetworkFirewallJsonHandler networkFirewallJsonHandler;
+    private final PaymentCryptographyJsonHandler paymentCryptographyJsonHandler;
     private final MarketplaceJsonHandler marketplaceJsonHandler;
     private final VerifiedPermissionsJsonHandler verifiedPermissionsJsonHandler;
     private final BcmPricingCalculatorJsonHandler bcmPricingCalculatorJsonHandler;
@@ -78,6 +80,7 @@ public class AwsJsonController {
                              CloudControlJsonHandler cloudControlJsonHandler,
                              SwfJsonHandler swfJsonHandler,
                              NetworkFirewallJsonHandler networkFirewallJsonHandler,
+                             PaymentCryptographyJsonHandler paymentCryptographyJsonHandler,
                              MarketplaceJsonHandler marketplaceJsonHandler,
                              VerifiedPermissionsJsonHandler verifiedPermissionsJsonHandler,
                              BcmPricingCalculatorJsonHandler bcmPricingCalculatorJsonHandler,
@@ -95,6 +98,7 @@ public class AwsJsonController {
         this.cloudControlJsonHandler = cloudControlJsonHandler;
         this.swfJsonHandler = swfJsonHandler;
         this.networkFirewallJsonHandler = networkFirewallJsonHandler;
+        this.paymentCryptographyJsonHandler = paymentCryptographyJsonHandler;
         this.marketplaceJsonHandler = marketplaceJsonHandler;
         this.verifiedPermissionsJsonHandler = verifiedPermissionsJsonHandler;
         this.bcmPricingCalculatorJsonHandler = bcmPricingCalculatorJsonHandler;
@@ -187,6 +191,10 @@ public class AwsJsonController {
                                         action, request, region, regionResolver.getAccountId());
                 case "network-firewall" -> networkFirewallJsonHandler.handle(
                         action, request, region, regionResolver.getAccountId());
+                // The control plane of Payment Cryptography is an awsJson 1.0 service: the
+                // AWS SDK sends application/x-amz-json-1.0 and targets
+                // PaymentCryptographyControlPlane.<Operation>.
+                case "paymentcryptography" -> paymentCryptographyJsonHandler.handle(action, request, region);
                 case "marketplace" -> marketplaceJsonHandler.handle(action, request, region);
                 case "verifiedpermissions" -> verifiedPermissionsJsonHandler.handle(action, request, region);
                 case "bcm-pricing-calculator" -> bcmPricingCalculatorJsonHandler.handle(action, request, region);

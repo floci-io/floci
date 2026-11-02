@@ -414,6 +414,12 @@ public class LambdaController {
         if (esm.getMaximumRecordAgeInSeconds() != null) {
             node.put("MaximumRecordAgeInSeconds", esm.getMaximumRecordAgeInSeconds());
         }
+        // AWS returns ParallelizationFactor on every stream mapping, 1 when none was set.
+        if (esm.getParallelizationFactor() != null) {
+            node.put("ParallelizationFactor", esm.getParallelizationFactor());
+        } else if (LambdaService.isStreamSource(esm.getEventSourceArn())) {
+            node.put("ParallelizationFactor", 1);
+        }
 
         if (esm.getDestinationConfig() != null && esm.getDestinationConfig().getOnFailure() != null) {
             ObjectNode destinationConfig = node.putObject("DestinationConfig");

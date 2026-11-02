@@ -590,7 +590,11 @@ public class LambdaWebDataPlane {
         headers.set("Connection", "close");
     }
 
-    /** The platform writes its own {@code Date} in place of the app's, but lets a {@code date} in lowercase pass. */
+    /**
+     * The platform writes its own {@code Date} in place of the app's, but lets a {@code date} in lowercase pass. It
+     * writes {@code text/plain} for an app that sends no {@code Content-Type}, even on a 204 or a HEAD, but not with a
+     * {@code Content-Length} of 0.
+     */
     static void copyResponseHeaders(MultiMap headers, HttpServerResponse out) {
         out.headers().add("Date", LambdaWebErrorPages.platformDate(Instant.now()));
         Set<String> dropped = new HashSet<>(DROPPED_RESPONSE_HEADERS);
@@ -600,9 +604,13 @@ public class LambdaWebDataPlane {
             }
         }
         for (Map.Entry<String, String> header : headers) {
-            if (!"Date".equals(header.getKey()) && !dropped.contains(header.getKey().toLowerCase(Locale.ROOT))) {
-                out.headers().add(header.getKey(), header.getValue());
+            String name = header.getKey();
+            if (!"Date".equals(name) && !dropped.contains(name.toLowerCase(Locale.ROOT))) {
+                out.headers().add("Content-Type".equalsIgnoreCase(name) ? "Content-Type" : name, header.getValue());
             }
+        }
+        if (!headers.contains("Content-Type") && !"0".equals(headers.get("Content-Length"))) {
+            out.headers().add("Content-Type", "text/plain; charset=utf-8");
         }
     }
 

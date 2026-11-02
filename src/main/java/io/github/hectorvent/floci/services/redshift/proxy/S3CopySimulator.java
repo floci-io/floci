@@ -332,11 +332,11 @@ public final class S3CopySimulator {
             boolean noColumnList = spec.columns() == null || spec.columns().isEmpty();
             boolean discoverForJson = spec.jsonAuto() && noColumnList;
             boolean truncate = spec.transforms().truncateColumns();
-            boolean temporal = spec.transforms().temporal();
+            boolean columnTypes = spec.transforms().needsColumnTypes();
             List<String> discoveredColumns = null;
             List<Integer> columnMaxBytes = null;
             List<CopyRecordTransformer.ColumnKind> columnKinds = null;
-            if (discoverForJson || truncate || temporal) {
+            if (discoverForJson || truncate || columnTypes) {
                 List<ColumnInfo> catalog = discoverColumnInfo(client, backend, spec, txStatus, onStatusChange);
                 if (catalog == null) {
                     return true;
@@ -347,7 +347,7 @@ public final class S3CopySimulator {
                 if (truncate) {
                     columnMaxBytes = alignMaxBytes(spec, catalog);
                 }
-                if (temporal) {
+                if (columnTypes) {
                     columnKinds = alignKinds(spec, catalog);
                 }
             }
@@ -491,10 +491,10 @@ public final class S3CopySimulator {
                     "COPY ... TRUNCATECOLUMNS needs catalog column lengths, which are only available over "
                             + "the Simple Query protocol; connect with preferQueryMode=simple", null);
         }
-        if (spec.transforms().temporal() && columnKinds == null) {
+        if (spec.transforms().needsColumnTypes() && columnKinds == null) {
             throw new S3TransferException(SQLSTATE_INTERNAL,
-                    "COPY ... DATEFORMAT and TIMEFORMAT need catalog column types, which are only available over "
-                            + "the Simple Query protocol; connect with preferQueryMode=simple", null);
+                    "COPY ... DATEFORMAT, TIMEFORMAT and FILLRECORD need catalog column types, which are only "
+                            + "available over the Simple Query protocol; connect with preferQueryMode=simple", null);
         }
         byte[] buffer = new byte[CHUNK];
         for (int i = 0; i < keys.size(); i++) {
@@ -519,7 +519,8 @@ public final class S3CopySimulator {
                     JsonLinesToCsvConverter.convert(in, targetCols, copyDataOut, spec.jsonAutoIgnoreCase());
                     copyDataOut.flush();
                 } else {
-                    if (i == 0 && spec.headerLines() > 0) {
+                    // Every object has its own header, as in a parallel load of several files.
+                    if (spec.headerLines() > 0) {
                         skipLines(in, spec.headerLines());
                     }
                     InputStream source = in;
@@ -545,15 +546,36 @@ public final class S3CopySimulator {
         backendOut.flush();
     }
 
+    private static void checkTransformObjectLimit(long bytes) {
+        if (bytes > COPY_TRANSFORM_MAX_OBJECT_BYTES) {
+            throw new S3TransferException(SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
+                    "COPY object exceeds the " + COPY_TRANSFORM_MAX_OBJECT_BYTES
+                            + "-byte limit for the field-level options "
+                            + "(EMPTYASNULL, BLANKSASNULL, REMOVEQUOTES, ACCEPTINVCHARS, TRUNCATECOLUMNS, "
+                            + "DATEFORMAT, TIMEFORMAT, FILLRECORD)", null);
+        }
+    }
+
+    private static void acquireTransformHeap(int[] heldMib, int wantedMib) {
+        while (heldMib[0] < wantedMib) {
+            if (!COPY_TRANSFORM_HEAP_MIB.tryAcquire(1)) {
+                throw new S3TransferException(SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED,
+                        "COPY memory budget exhausted; retry shortly", null);
+            }
+            heldMib[0]++;
+        }
+    }
+
     /**
-     * Reads one decompressed object into heap and transforms it. The read is bounded by a per-object
-     * ceiling and by a budget shared across connections, so a large or highly compressed object fails
-     * its own statement instead of exhausting the emulator heap.
+     * Reads one decompressed object into heap and transforms it. The read and transformed output are
+     * bounded by a per-object ceiling and by a budget shared across connections, so a large or highly
+     * compressed object, or short rows expanded by FILLRECORD, fail their own statement instead of
+     * exhausting the emulator heap.
      */
     private static byte[] transformObject(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes,
                                           List<CopyRecordTransformer.ColumnKind> columnKinds,
                                           InputStream in) throws IOException {
-        int heldMib = 0;
+        int[] heldMib = new int[]{0};
         try {
             ByteArrayOutputStream buffered = new ByteArrayOutputStream();
             byte[] chunk = new byte[CHUNK];
@@ -561,26 +583,23 @@ public final class S3CopySimulator {
             int read;
             while ((read = in.read(chunk)) != -1) {
                 total += read;
-                if (total > COPY_TRANSFORM_MAX_OBJECT_BYTES) {
-                    throw new S3TransferException(SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
-                            "COPY object exceeds the " + COPY_TRANSFORM_MAX_OBJECT_BYTES
-                                    + "-byte limit for the field-level options "
-                                    + "(EMPTYASNULL, BLANKSASNULL, REMOVEQUOTES, ACCEPTINVCHARS, TRUNCATECOLUMNS, "
-                                    + "DATEFORMAT, TIMEFORMAT)", null);
-                }
-                int wantedMib = (int) ((total * COPY_TRANSFORM_HEAP_FACTOR) / (1024 * 1024)) + 1;
-                while (heldMib < wantedMib) {
-                    if (!COPY_TRANSFORM_HEAP_MIB.tryAcquire(1)) {
-                        throw new S3TransferException(SQLSTATE_CONFIGURATION_LIMIT_EXCEEDED,
-                                "COPY memory budget exhausted; retry shortly", null);
-                    }
-                    heldMib++;
-                }
+                checkTransformObjectLimit(total);
+                acquireTransformHeap(heldMib, (int) ((total * COPY_TRANSFORM_HEAP_FACTOR) / (1024 * 1024)) + 1);
                 buffered.write(chunk, 0, read);
             }
-            return new CopyRecordTransformer(spec, columnMaxBytes, columnKinds).apply(buffered.toByteArray());
+            long inputTotal = total;
+            return new CopyRecordTransformer(spec, columnMaxBytes, columnKinds).apply(
+                    buffered.toByteArray(),
+                    outputSize -> {
+                        checkTransformObjectLimit(outputSize);
+                        acquireTransformHeap(heldMib,
+                                (inputTotal == 0 && outputSize == 0) ? 0
+                                        : (int) ((inputTotal + 2L * outputSize) / (1024 * 1024)) + 1);
+                    });
         } finally {
-            COPY_TRANSFORM_HEAP_MIB.release(heldMib);
+            if (heldMib[0] > 0) {
+                COPY_TRANSFORM_HEAP_MIB.release(heldMib[0]);
+            }
         }
     }
 
@@ -620,13 +639,20 @@ public final class S3CopySimulator {
         return aligned;
     }
 
-    /** 1082 = date, 1114 = timestamp. A timestamptz (1184) is read by PostgreSQL as it stands. */
-    private static CopyRecordTransformer.ColumnKind kindOf(String typeOid) {
+    /**
+     * 1082 = date, 1114 = timestamp, and 25 = text, 1043 = varchar for the character columns.
+     * CHAR (1042 = bpchar) is left as OTHER so missing columns load as NULL, matching AWS FILLRECORD.
+     * A timestamptz (1184) is read by PostgreSQL as it stands.
+     */
+    static CopyRecordTransformer.ColumnKind kindOf(String typeOid) {
         if ("1082".equals(typeOid)) {
             return CopyRecordTransformer.ColumnKind.DATE;
         }
         if ("1114".equals(typeOid)) {
             return CopyRecordTransformer.ColumnKind.TIMESTAMP;
+        }
+        if ("25".equals(typeOid) || "1043".equals(typeOid)) {
+            return CopyRecordTransformer.ColumnKind.TEXT;
         }
         return CopyRecordTransformer.ColumnKind.OTHER;
     }
@@ -656,7 +682,7 @@ public final class S3CopySimulator {
         String query = "SELECT a.attname, CASE WHEN a.atttypid IN (1042, 1043) AND a.atttypmod > 4 "
                 + "THEN a.atttypmod - 4 END, a.atttypid FROM pg_catalog.pg_attribute a "
                 + "WHERE a.attrelid = to_regclass('" + quoteLiteral(spec.targetTable()) + "') "
-                + "AND a.attnum > 0 AND NOT a.attisdropped "
+                + "AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '' "
                 + "ORDER BY a.attnum";
 
         OutputStream backendOut = backend.getOutputStream();

@@ -424,6 +424,52 @@ class RequestResourcesTest {
     }
 
     /**
+     * A key is named by its id or by an alias, and an alias names the key it points at, so a request naming a key by
+     * an alias is checked on the key the alias names, as the handler resolves it: an allow scoped to that key passes
+     * and a deny scoped to it holds, whichever of the two names the request used. The alias itself is checked on its
+     * own ARN, and the tagging operations on the key their {@code ResourceArn} names.
+     */
+    @Test
+    void aKeyIsCheckedOnTheKeyItsNameNames() {
+        String key = "arn:aws:payment-cryptography:us-east-1:000000000000:key/abc123";
+        String alias = "arn:aws:payment-cryptography:us-east-1:000000000000:alias/team/card-key";
+        StoredResourceArns stored = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "payment-cryptography";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                if (!"us-east-1".equals(region)) {
+                    return Optional.empty();
+                }
+                return switch (type) {
+                    case "key" -> List.of("alias/team/card-key").equals(names) || List.of("abc123").equals(names)
+                            ? Optional.of(key) : Optional.empty();
+                    case "alias" -> List.of("alias/team/card-key").equals(names) ? Optional.of(alias) : Optional.empty();
+                    default -> Optional.empty();
+                };
+            }
+        };
+        // A key named by an alias is checked on the key the alias points at.
+        assertEquals(List.of(key), RequestResources.of("payment-cryptography:GetKey",
+                json("{\"KeyIdentifier\":\"alias/team/card-key\"}"), "aws", "us-east-1", "000000000000", stored));
+        // A key named by its id is checked on that key.
+        assertEquals(List.of(key), RequestResources.of("payment-cryptography:GetKey",
+                json("{\"KeyIdentifier\":\"abc123\"}"), "aws", "us-east-1", "000000000000", stored));
+        // A key named by its ARN is checked on that ARN.
+        assertEquals(List.of(key), RequestResources.of("payment-cryptography:GetKey",
+                json("{\"KeyIdentifier\":\"" + key + "\"}"), "aws", "us-east-1", "000000000000", stored));
+        // The alias operations are checked on the alias they name.
+        assertEquals(List.of(alias), RequestResources.of("payment-cryptography:GetAlias",
+                json("{\"AliasName\":\"alias/team/card-key\"}"), "aws", "us-east-1", "000000000000", stored));
+        // The tagging operations are checked on the key their ResourceArn names.
+        assertEquals(List.of(key), RequestResources.of("payment-cryptography:TagResource",
+                json("{\"ResourceArn\":\"" + key + "\"}"), "aws", "us-east-1", "000000000000", stored));
+    }
+
+    /**
      * A scalable target's ARN is all the id Application Auto Scaling mints, while its requests name it by its service
      * namespace, resource id and scalable dimension: it is the one stored under those, or else has its id open, as a
      * new one has; a request leaving one out names none, and one naming it by its ARN names it as given.
