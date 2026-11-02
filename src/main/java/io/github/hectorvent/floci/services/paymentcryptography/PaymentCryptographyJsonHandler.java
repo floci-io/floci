@@ -106,6 +106,10 @@ public class PaymentCryptographyJsonHandler {
         }
         // A key may be created disabled, and it may be created with tags.
         boolean enabled = request.has("Enabled") ? request.path("Enabled").asBoolean(true) : true;
+        if (request.hasNonNull("DeriveKeyUsage")) {
+            // The usage a derivation key derives for sits beside the attributes, not in them.
+            declared.put("DeriveKeyUsage", request.path("DeriveKeyUsage").asText());
+        }
         PaymentCryptographyKey key = service.createKey(region, declared, modesOfUse(attributes),
                 request.path("Exportable").asBoolean(false), enabled, tagsOf(request),
                 stringsOf(request, "ReplicationRegions"));
@@ -260,76 +264,122 @@ public class PaymentCryptographyJsonHandler {
     // ---- the key exchange ----------------------------------------------------
 
     /**
-     * The key as it leaves the service, in a TR-31 key block under a key block protection key.
+     * The key as it leaves the service, in the form the request names.
+     *
+     * <p>The {@code KeyMaterial} union names one form, and the form says how the key is
+     * protected: a TR-31 block under a key the service holds, an RSA-OAEP cryptogram under
+     * the receiver's certificate, a TR-34 block the service signs, a block under a key the
+     * two parties agreed, or an AS2805 cryptogram.
      */
     private Map<String, Object> exportKey(JsonNode request, String region) {
         String keyIdentifier = request.path("ExportKeyIdentifier").asText();
         if (keyIdentifier.isEmpty()) {
             throw new AwsException("ValidationException", "ExportKeyIdentifier is required", 400);
         }
-        JsonNode material = request.path("KeyMaterial").path("Tr31KeyBlock");
-        String wrappingKey = material.path("WrappingKeyIdentifier").asText();
-        if (wrappingKey.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "KeyMaterial.Tr31KeyBlock.WrappingKeyIdentifier is required", 400);
-        }
-        PaymentCryptographyService.KeyExport export = service.exportKey(region, keyIdentifier, wrappingKey);
-        Map<String, Object> wrapped = new LinkedHashMap<>();
-        wrapped.put("WrappingKeyArn", export.wrappingKeyArn());
-        wrapped.put("WrappedKeyMaterialFormat", "TR31_KEY_BLOCK");
-        wrapped.put("KeyMaterial", export.block());
-        wrapped.put("KeyCheckValue", export.keyCheckValue());
-        wrapped.put("KeyCheckValueAlgorithm", export.keyCheckValueAlgorithm());
-        return Map.of("WrappedKey", wrapped);
+        JsonNode material = request.path("KeyMaterial");
+        String form = soleForm(material, PaymentCryptographyKeyExchange.EXPORT_FORMS);
+        return service.exportKey(region, keyIdentifier, form, members(material.path(form)));
     }
 
     /**
-     * The key that comes into the service out of a TR-31 key block.
+     * The key that comes into the service, in the form the request names.
      */
     private Map<String, Object> importKey(JsonNode request, String region) {
-        JsonNode material = request.path("KeyMaterial").path("Tr31KeyBlock");
-        String wrappingKey = material.path("WrappingKeyIdentifier").asText();
-        if (wrappingKey.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "KeyMaterial.Tr31KeyBlock.WrappingKeyIdentifier is required", 400);
-        }
-        String block = material.path("WrappedKeyBlock").asText();
-        if (block.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "KeyMaterial.Tr31KeyBlock.WrappedKeyBlock is required", 400);
-        }
-        PaymentCryptographyKey key = service.importKey(region, wrappingKey, block);
+        JsonNode material = request.path("KeyMaterial");
+        String form = soleForm(material, PaymentCryptographyKeyExchange.IMPORT_FORMS);
+        PaymentCryptographyKey key = service.importKey(region, form, members(material.path(form)));
         return Map.of("Key", keyObject(key));
     }
 
     /**
-     * The parameters of an export, which are a signing key and a certificate.
-     *
-     * <p>They are the certificates of the key the service mints for the export, and this
-     * service does not mint certificates yet, so the operation says so.
+     * The parameters of an export: a signing key and the certificate that names it.
      */
     private Map<String, Object> getParametersForExport(JsonNode request, String region) {
-        throw new AwsException("ValidationException",
-                "GetParametersForExport is not served: it answers with a certificate, and this service does "
-                        + "not mint certificates yet", 400);
+        String materialType = request.path("KeyMaterialType").asText();
+        if (materialType.isEmpty()) {
+            throw new AwsException("ValidationException", "KeyMaterialType is required", 400);
+        }
+        String algorithm = request.path("SigningKeyAlgorithm").asText();
+        if (algorithm.isEmpty()) {
+            throw new AwsException("ValidationException", "SigningKeyAlgorithm is required", 400);
+        }
+        boolean reuse = request.path("ReuseLastGeneratedToken").asBoolean(false);
+        return service.parametersForExport(materialType, algorithm, reuse);
     }
 
-    /** The parameters of an import, which are a wrapping key and a certificate. */
+    /** The parameters of an import: a wrapping key and the certificate that names it. */
     private Map<String, Object> getParametersForImport(JsonNode request, String region) {
-        throw new AwsException("ValidationException",
-                "GetParametersForImport is not served: it answers with a certificate, and this service does "
-                        + "not mint certificates yet", 400);
+        String materialType = request.path("KeyMaterialType").asText();
+        if (materialType.isEmpty()) {
+            throw new AwsException("ValidationException", "KeyMaterialType is required", 400);
+        }
+        String algorithm = request.path("WrappingKeyAlgorithm").asText();
+        return service.parametersForImport(materialType, algorithm);
+    }
+
+    /** The certificate of an asymmetric key. */
+    private Map<String, Object> getPublicKeyCertificate(JsonNode request, String region) {
+        PaymentCryptographyKey key = requiredKey(request, region, KEY_IDENTIFIER);
+        return service.publicKeyCertificate(key);
     }
 
     /**
-     * The certificate of an asymmetric key.
+     * The one form of the key material union the request names.
      *
-     * <p>This service makes symmetric keys only, so there is no key to certify.
+     * <p>The union holds a member per form, and a request names exactly one of them. Several
+     * at once is not the same as none: the request says which one it meant, and it cannot be
+     * more than one.
      */
-    private Map<String, Object> getPublicKeyCertificate(JsonNode request, String region) {
-        throw new AwsException("ValidationException",
-                "GetPublicKeyCertificate is not served: this service makes symmetric keys only, and there is "
-                        + "no asymmetric key to certify", 400);
+    private static String soleForm(JsonNode material, List<String> forms) {
+        List<String> named = new ArrayList<>();
+        for (String form : forms) {
+            if (material.has(form) && !material.path(form).isNull()) {
+                named.add(form);
+            }
+        }
+        if (named.size() > 1) {
+            throw new AwsException("ValidationException",
+                    "KeyMaterial must specify exactly one variant (" + String.join(", ", forms) + ")",
+                    400);
+        }
+        if (named.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "KeyMaterial must specify exactly one variant (" + String.join(", ", forms) + ")",
+                    400);
+        }
+        return named.get(0);
+    }
+
+    /** The members of a form, as the service reads them. */
+    private static Map<String, Object> members(JsonNode node) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (node == null || !node.isObject()) {
+            return out;
+        }
+        node.fields().forEachRemaining(entry -> out.put(entry.getKey(), value(entry.getValue())));
+        return out;
+    }
+
+    /** One member of a form, as the service reads it. */
+    private static Object value(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (node.isObject()) {
+            return members(node);
+        }
+        if (node.isArray()) {
+            List<Object> values = new ArrayList<>();
+            node.forEach(child -> values.add(value(child)));
+            return values;
+        }
+        if (node.isBoolean()) {
+            return node.asBoolean();
+        }
+        if (node.isNumber()) {
+            return node.asText();
+        }
+        return node.asText();
     }
 
     // ---- tags ---------------------------------------------------------------
@@ -471,6 +521,9 @@ public class PaymentCryptographyJsonHandler {
         attributes.put("KeyUsage", key.getKeyUsage());
         attributes.put("KeyModesOfUse", answeredModes(key));
         out.put("KeyAttributes", attributes);
+        if (key.getDeriveKeyUsage() != null && !key.getDeriveKeyUsage().isEmpty()) {
+            out.put("DeriveKeyUsage", key.getDeriveKeyUsage());
+        }
         out.put("KeyCheckValue", key.getKeyCheckValue());
         out.put("KeyCheckValueAlgorithm", key.getKeyCheckValueAlgorithm());
         out.put("KeyState", key.getKeyState());

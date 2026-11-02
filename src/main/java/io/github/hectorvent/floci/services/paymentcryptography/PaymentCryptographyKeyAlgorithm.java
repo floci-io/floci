@@ -14,11 +14,31 @@ import java.util.List;
  */
 enum PaymentCryptographyKeyAlgorithm {
 
-    TDES_2KEY(16, false),
-    TDES_3KEY(24, false),
-    AES_128(16, true),
-    AES_192(24, true),
-    AES_256(32, true);
+    TDES_2KEY(16, false, false, false),
+    TDES_3KEY(24, false, false, false),
+    AES_128(16, true, false, false),
+    AES_192(24, true, false, false),
+    AES_256(32, true, false, false),
+    /**
+     * An EC key agreement key on NIST P-256, the curve the cardholder-device flow uses.
+     * The length is the size of the curve, not of a key block.
+     */
+    ECC_NIST_P256(32, false, true, false),
+    /** An EC key agreement key on NIST P-384. */
+    ECC_NIST_P384(48, false, true, false),
+    /** An EC key agreement key on NIST P-521. */
+    ECC_NIST_P521(66, false, true, false),
+    /**
+     * An RSA key pair with a 2048-bit modulus.
+     *
+     * <p>A TR-34 exchange needs one: the authority that certifies the signing key is an RSA
+     * certificate.
+     */
+    RSA_2048(256, false, false, true),
+    /** An RSA key pair with a 3072-bit modulus. */
+    RSA_3072(384, false, false, true),
+    /** An RSA key pair with a 4096-bit modulus. */
+    RSA_4096(512, false, false, true);
 
     /** How many bytes of material the key holds. */
     final int bytes;
@@ -26,9 +46,42 @@ enum PaymentCryptographyKeyAlgorithm {
     /** Whether the key is an AES key rather than a TDES one. */
     final boolean aes;
 
-    PaymentCryptographyKeyAlgorithm(int bytes, boolean aes) {
+    /** Whether the key is an EC key, which has a key pair rather than key material. */
+    final boolean ecc;
+
+    /** Whether the key is an RSA key, which has a key pair and no symmetric material. */
+    final boolean rsa;
+
+    PaymentCryptographyKeyAlgorithm(int bytes, boolean aes, boolean ecc, boolean rsa) {
         this.bytes = bytes;
         this.aes = aes;
+        this.ecc = ecc;
+        this.rsa = rsa;
+    }
+
+    /** Whether the key holds material a symmetric cipher can use. */
+    boolean symmetric() {
+        return !ecc && !rsa;
+    }
+
+    /** The generated key length in bytes. */
+    int bytes() {
+        return bytes;
+    }
+
+    /** Whether the key is an AES key rather than a TDES one. */
+    boolean isAes() {
+        return aes;
+    }
+
+    /** Whether the key is an EC key, which has a key pair rather than key material. */
+    boolean isEcc() {
+        return ecc;
+    }
+
+    /** Whether the key is an RSA key, which has a key pair and no symmetric material. */
+    boolean isRsa() {
+        return rsa;
     }
 
     /** The algorithm of that name, or null when the service does not make it. */
@@ -48,9 +101,21 @@ enum PaymentCryptographyKeyAlgorithm {
     static String supportedOf(boolean aes) {
         StringBuilder sb = new StringBuilder();
         for (PaymentCryptographyKeyAlgorithm algorithm : values()) {
-            if (algorithm.aes != aes) {
+            if (algorithm.aes != aes || !algorithm.symmetric()) {
                 continue;
             }
+            if (sb.length() > 0) {
+                sb.append(", ");
+            }
+            sb.append(algorithm.name());
+        }
+        return sb.toString();
+    }
+
+    /** Every algorithm the service makes, for a message that names them all. */
+    static String supportedAll() {
+        StringBuilder sb = new StringBuilder();
+        for (PaymentCryptographyKeyAlgorithm algorithm : values()) {
             if (sb.length() > 0) {
                 sb.append(", ");
             }
@@ -83,11 +148,17 @@ enum PaymentCryptographyKeyAlgorithm {
     /**
      * The reason an algorithm is refused for a usage, in words a caller can act on.
      *
+     * <p>An asymmetric algorithm is not refused for a usage: a key pair has no material a
+     * symmetric usage would bind it to, and the usage that names it is the asymmetric one.
+     *
      * @param usage the TR-31 usage name of the key
      * @param algorithm the algorithm of the key
      * @return the message, or null when the combination is allowed
      */
     static String refusal(String usage, PaymentCryptographyKeyAlgorithm algorithm) {
+        if (algorithm == null || !algorithm.symmetric()) {
+            return null;
+        }
         if (allowedOf(usage).contains(algorithm)) {
             return null;
         }

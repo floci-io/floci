@@ -34,14 +34,38 @@ class PaymentCryptographyServiceTest {
                 new PaymentCryptographyRequestContext());
     }
 
+    /**
+     * The TR-31 key block a key leaves the service in.
+     */
+    private String exportTr31(String region, String keyId, String wrappingKeyId) {
+        return (String) ((Map<?, ?>) exportTr31Answer(region, keyId, wrappingKeyId)
+                .get("WrappedKey")).get("KeyMaterial");
+    }
+
+    /**
+     * The whole answer of an export, which carries the block and what wrapped it.
+     */
+    private Map<String, Object> exportTr31Answer(String region, String keyId, String wrappingKeyId) {
+        return service.exportKey(region, keyId, "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", wrappingKeyId));
+    }
+
+    /**
+     * The key that comes into the service out of a TR-31 key block.
+     */
+    private PaymentCryptographyKey importTr31(String region, String wrappingKeyId, String block) {
+        return service.importKey(region, "Tr31KeyBlock", Map.of(
+                "WrappingKeyIdentifier", wrappingKeyId,
+                "WrappedKeyBlock", block));
+    }
+
     private PaymentCryptographyKey createKey(String region) {
         Map<String, Object> attributes = new LinkedHashMap<>();
         attributes.put("KeyAlgorithm", "AES_256");
         attributes.put("KeyClass", "SYMMETRIC_KEY");
         attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
         Map<String, Boolean> modes = new LinkedHashMap<>();
-        modes.put("Encrypt", Boolean.TRUE);
-        modes.put("Decrypt", Boolean.TRUE);
+        modes.put("Encrypt", Boolean.TRUE);        modes.put("Decrypt", Boolean.TRUE);
         return service.createKey(region, attributes, modes, true, true, Map.of());
     }
 
@@ -317,15 +341,16 @@ class PaymentCryptographyServiceTest {
         PaymentCryptographyKey protection = createKey("us-east-1");
         PaymentCryptographyKey key = createKey("us-east-1");
 
-        PaymentCryptographyService.KeyExport export = service.exportKey("us-east-1", key.getKeyId(),
+        Map<String, Object> answer = exportTr31Answer("us-east-1", key.getKeyId(),
                 protection.getKeyId());
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+        String export = (String) wrapped.get("KeyMaterial");
 
-        assertEquals(protection.getArn(), export.wrappingKeyArn());
-        assertEquals(key.getKeyCheckValue(), export.keyCheckValue());
-        assertTrue(export.block().length() > 32, "the block is only its header");
+        assertEquals(protection.getArn(), wrapped.get("WrappingKeyArn"));
+        assertEquals(key.getKeyCheckValue(), wrapped.get("KeyCheckValue"));
+        assertTrue(export.length() > 32, "the block is only its header");
 
-        PaymentCryptographyKey imported = service.importKey("us-east-1", protection.getKeyId(),
-                export.block());
+        PaymentCryptographyKey imported = importTr31("us-east-1", protection.getKeyId(), export);
 
         assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
         assertEquals(key.getKeyCheckValue(), imported.getKeyCheckValue());
@@ -344,14 +369,12 @@ class PaymentCryptographyServiceTest {
                 attributes("TDES_2KEY", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
                 Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
 
-        PaymentCryptographyService.KeyExport export = service.exportKey("us-east-1", key.getKeyId(),
-                protection.getKeyId());
+        String export = exportTr31("us-east-1", key.getKeyId(), protection.getKeyId());
 
-        assertTrue(export.block().startsWith("B"), "a TDES protection key gives a type B block");
-        assertEquals("T", export.block().substring(7, 8), "the block carries a TDES key");
+        assertTrue(export.startsWith("B"), "a TDES protection key gives a type B block");
+        assertEquals("T", export.substring(7, 8), "the block carries a TDES key");
 
-        PaymentCryptographyKey imported = service.importKey("us-east-1", protection.getKeyId(),
-                export.block());
+        PaymentCryptographyKey imported = importTr31("us-east-1", protection.getKeyId(), export);
 
         assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
         assertEquals(key.getKeyCheckValue(), imported.getKeyCheckValue());
@@ -366,11 +389,10 @@ class PaymentCryptographyServiceTest {
                 attributes("AES_256", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
                 Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
 
-        PaymentCryptographyService.KeyExport export = service.exportKey("us-east-1", key.getKeyId(),
-                protection.getKeyId());
+        String export = exportTr31("us-east-1", key.getKeyId(), protection.getKeyId());
 
-        assertTrue(export.block().startsWith("D"), "an AES protection key gives a type D block");
-        assertEquals("A", export.block().substring(7, 8), "the block carries an AES key");
+        assertTrue(export.startsWith("D"), "an AES protection key gives a type D block");
+        assertEquals("A", export.substring(7, 8), "the block carries an AES key");
     }
 
     @Test
@@ -386,7 +408,7 @@ class PaymentCryptographyServiceTest {
                 Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
 
         AwsException refused = assertThrows(AwsException.class,
-                () -> service.exportKey("us-east-1", key.getKeyId(), protection.getKeyId()));
+                () -> exportTr31("us-east-1", key.getKeyId(), protection.getKeyId()));
 
         assertEquals("ValidationException", refused.getErrorCode());
         assertTrue(refused.getMessage().contains("at least as strong"), refused.getMessage());
@@ -401,10 +423,9 @@ class PaymentCryptographyServiceTest {
                 attributes("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
                 Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
 
-        PaymentCryptographyService.KeyExport export = service.exportKey("us-east-1", key.getKeyId(),
-                protection.getKeyId());
+        String export = exportTr31("us-east-1", key.getKeyId(), protection.getKeyId());
 
-        assertTrue(export.block().startsWith("D"), "an AES protection key gives a type D block");
+        assertTrue(export.startsWith("D"), "an AES protection key gives a type D block");
     }
 
     @Test
@@ -457,11 +478,9 @@ class PaymentCryptographyServiceTest {
                     attributes(usage[1], usage[0]),
                     Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
 
-            PaymentCryptographyService.KeyExport export = service.exportKey("us-east-1",
-                    key.getKeyId(), protection.getKeyId());
+            String export = exportTr31("us-east-1", key.getKeyId(), protection.getKeyId());
 
-            PaymentCryptographyKey imported = service.importKey("us-east-1", protection.getKeyId(),
-                    export.block());
+            PaymentCryptographyKey imported = importTr31("us-east-1", protection.getKeyId(), export);
 
             assertEquals(usage[0], imported.getKeyUsage(), usage[0] + " did not survive the round trip");
         }
@@ -477,7 +496,7 @@ class PaymentCryptographyServiceTest {
         PaymentCryptographyKey key = service.createKey("us-east-1", attributes, Map.of(), false, true, Map.of());
 
         AwsException refused = assertThrows(AwsException.class,
-                () -> service.exportKey("us-east-1", key.getKeyId(), protection.getKeyId()));
+                () -> exportTr31("us-east-1", key.getKeyId(), protection.getKeyId()));
 
         assertEquals("ValidationException", refused.getErrorCode());
     }
@@ -487,11 +506,10 @@ class PaymentCryptographyServiceTest {
         PaymentCryptographyKey protection = createKey("us-east-1");
         PaymentCryptographyKey other = createKey("us-east-1");
         PaymentCryptographyKey key = createKey("us-east-1");
-        PaymentCryptographyService.KeyExport export = service.exportKey("us-east-1", key.getKeyId(),
-                protection.getKeyId());
+        String export = exportTr31("us-east-1", key.getKeyId(), protection.getKeyId());
 
         AwsException refused = assertThrows(AwsException.class,
-                () -> service.importKey("us-east-1", other.getKeyId(), export.block()));
+                () -> importTr31("us-east-1", other.getKeyId(), export));
 
         assertEquals("ValidationException", refused.getErrorCode());
     }
@@ -499,13 +517,45 @@ class PaymentCryptographyServiceTest {
     @Test
     void aKeyThatAsksForMaterialTheServiceDoesNotMakeIsRefused() {
         Map<String, Object> attributes = new LinkedHashMap<>();
-        attributes.put("KeyAlgorithm", "RSA_2048");
+        attributes.put("KeyAlgorithm", "AES_512");
         attributes.put("KeyClass", "SYMMETRIC_KEY");
         attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
 
         AwsException bad = assertThrows(AwsException.class,
                 () -> service.createKey("us-east-1", attributes, Map.of(), true, true, Map.of()));
         assertEquals("ValidationException", bad.getErrorCode());
+    }
+
+    @Test
+    void aKeyPairIsMadeWithAPublicHalfAndAPrivateOne() {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "RSA_2048");
+        attributes.put("KeyClass", "ASYMMETRIC_KEY_PAIR");
+        attributes.put("KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE");
+
+        PaymentCryptographyKey key = service.createKey("us-east-1", attributes,
+                Map.of("Sign", Boolean.TRUE, "Verify", Boolean.TRUE), true, true, Map.of());
+
+        assertEquals("RSA_2048", key.getKeyAlgorithm());
+        assertNotNull(key.getKeyPublicKeyBase64(), "the key has no public half");
+        assertNotNull(key.getKeyPrivateKeyBase64(), "the key has no private half");
+        assertNull(key.getKeyMaterialHex(), "a key pair has no material");
+        assertEquals("000000", key.getKeyCheckValue());
+    }
+
+    @Test
+    void anEcKeyPairIsMadeOnItsCurve() {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "ECC_NIST_P256");
+        attributes.put("KeyClass", "ASYMMETRIC_KEY_PAIR");
+        attributes.put("KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE");
+
+        PaymentCryptographyKey key = service.createKey("us-east-1", attributes,
+                Map.of("DeriveKey", Boolean.TRUE), true, true, Map.of());
+
+        assertEquals("ECC_NIST_P256", key.getKeyAlgorithm());
+        assertNotNull(key.getKeyPublicKeyBase64(), "the key has no public half");
+        assertNotNull(key.getKeyPrivateKeyBase64(), "the key has no private half");
     }
 
     @Test

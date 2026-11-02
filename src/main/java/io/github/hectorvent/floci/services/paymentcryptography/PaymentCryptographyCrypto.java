@@ -72,6 +72,16 @@ final class PaymentCryptographyCrypto {
         return toHex(value).toUpperCase(Locale.ROOT);
     }
 
+    /** The check value of a key of that algorithm, from the key's bytes. */
+    static String checkValue(byte[] key, PaymentCryptographyKeyAlgorithm algorithm) {
+        byte[] mac = algorithm.aes
+                ? cmac(key, ZERO_BLOCK)
+                : Ciphers.tdesEcbEncrypt(new byte[8], key);
+        byte[] value = new byte[3];
+        System.arraycopy(mac, 0, value, 0, 3);
+        return toHex(value).toUpperCase(Locale.ROOT);
+    }
+
     /** The check value of an AES key: the leftmost three bytes of the CMAC of sixteen zero bytes. */
     static String checkValue(String keyHex) {
         byte[] mac = cmac(fromHex(keyHex), ZERO_BLOCK);

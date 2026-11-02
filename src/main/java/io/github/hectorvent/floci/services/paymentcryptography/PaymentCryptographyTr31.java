@@ -176,6 +176,44 @@ final class PaymentCryptographyTr31 {
         return header;
     }
 
+    /**
+     * The 16-character header of a block, for a block the service writes itself.
+     *
+     * <p>A TR-34 block carries a TR-31 header in the clear, and the header has to be written
+     * the same way a TR-31 block's is.
+     *
+     * @param type the block type, {@code B} for TDEA and {@code D} for AES
+     * @param usage the two characters of the usage code
+     * @param mode the mode of use character
+     * @param exportability the exportability character
+     * @param blockLength the length of the whole block, in characters
+     * @param algorithm the algorithm of the key the block carries, {@code A} or {@code T}
+     * @return the header, sixteen characters
+     */
+    static String headerFor(String type, String usage, String mode, String exportability,
+                            int blockLength, String algorithm) {
+        return header16(type, usage, mode, exportability, blockLength, algorithm);
+    }
+
+    /**
+     * The length of a whole block, in characters.
+     *
+     * <p>The header's length field counts the header, the length encoded key and the MAC,
+     * so the key's own length is not what it says.
+     *
+     * @param type the block type, {@code B} for TDEA and {@code D} for AES
+     * @param clearKey the key the block carries
+     * @return the length of the block, in characters
+     */
+    static int blockLength(String type, byte[] clearKey) {
+        boolean aes = "D".equals(type);
+        int blockSize = aes ? 16 : 8;
+        int macHexChars = aes ? 32 : 16;
+        int lengthEncoded = 2 + clearKey.length;
+        int padding = (blockSize - (lengthEncoded % blockSize)) % blockSize;
+        return 16 + (lengthEncoded + padding) * 2 + macHexChars;
+    }
+
     /** The algorithm the header of a block names for the key it carries. */
     static String algorithmInHeader(String block) {
         return block.substring(7, 8);
