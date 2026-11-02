@@ -420,6 +420,52 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
+    void aKeyOfEveryUsageTheServiceMakesLeavesAsItsOwnUsage() {
+        // A key block carries the usage of the key it carries, so every usage the service
+        // makes has to have a code. A usage without one could not leave the service at all,
+        // and the counterparty could not tell what it had.
+        List<String[]> usages = List.of(
+                new String[] {"TR31_B0_BASE_DERIVATION_KEY", "AES_256"},
+                new String[] {"TR31_C0_CARD_VERIFICATION_KEY", "AES_256"},
+                new String[] {"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY", "AES_256"},
+                new String[] {"TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS", "AES_256"},
+                new String[] {"TR31_E1_EMV_MKEY_CONFIDENTIALITY", "AES_256"},
+                new String[] {"TR31_E2_EMV_MKEY_INTEGRITY", "AES_256"},
+                new String[] {"TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS", "AES_256"},
+                new String[] {"TR31_E5_EMV_MKEY_CARD_PERSONALIZATION", "AES_256"},
+                new String[] {"TR31_E6_EMV_MKEY_OTHER", "AES_256"},
+                new String[] {"TR31_K0_KEY_ENCRYPTION_KEY", "AES_256"},
+                new String[] {"TR31_K1_KEY_BLOCK_PROTECTION_KEY", "AES_256"},
+                // The ISO 9797 MACs are defined over Triple DES.
+                new String[] {"TR31_M1_ISO_9797_1_MAC_KEY", "TDES_2KEY"},
+                new String[] {"TR31_M3_ISO_9797_3_MAC_KEY", "TDES_2KEY"},
+                new String[] {"TR31_M6_ISO_9797_5_CMAC_KEY", "AES_256"},
+                new String[] {"TR31_M7_HMAC_KEY", "AES_256"},
+                new String[] {"TR31_P0_PIN_ENCRYPTION_KEY", "AES_256"},
+                new String[] {"TR31_P1_PIN_GENERATION_KEY", "AES_256"},
+                new String[] {"TR31_V1_IBM3624_PIN_VERIFICATION_KEY", "AES_256"},
+                new String[] {"TR31_V2_VISA_PIN_VERIFICATION_KEY", "AES_256"});
+
+        PaymentCryptographyKey protection = service.createKey("us-east-1",
+                attributes("AES_256", "TR31_K1_KEY_BLOCK_PROTECTION_KEY"),
+                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE), true, true, Map.of());
+
+        for (String[] usage : usages) {
+            PaymentCryptographyKey key = service.createKey("us-east-1",
+                    attributes(usage[1], usage[0]),
+                    Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
+
+            PaymentCryptographyService.KeyExport export = service.exportKey("us-east-1",
+                    key.getKeyId(), protection.getKeyId());
+
+            PaymentCryptographyKey imported = service.importKey("us-east-1", protection.getKeyId(),
+                    export.block());
+
+            assertEquals(usage[0], imported.getKeyUsage(), usage[0] + " did not survive the round trip");
+        }
+    }
+
+    @Test
     void aKeyThatIsNotExportableDoesNotLeaveTheService() {
         PaymentCryptographyKey protection = createKey("us-east-1");
         Map<String, Object> attributes = new LinkedHashMap<>();

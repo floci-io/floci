@@ -644,7 +644,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             throw new AwsException("ValidationException", tooWeak, 400);
         }
         String usage = usageCode(key.getKeyUsage());
-        String mode = modeCode(key.getKeyUsage());
+        String mode = modeCode(key);
         String block = PaymentCryptographyTr31.wrap(
                 PaymentCryptographyCrypto.fromHex(key.getKeyMaterialHex()),
                 PaymentCryptographyCrypto.fromHex(protection.getKeyMaterialHex()),
@@ -704,7 +704,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         attributes.put("KeyAlgorithm", algorithm);
         attributes.put("KeyClass", "SYMMETRIC_KEY");
         attributes.put("KeyUsage", usage);
-        return makeKey(region, attributes, modesFor(mode), exportable, true, Map.of(),
+        return makeKey(region, attributes, modesFor(mode, isKeyEncryptionKey(usage)),
+                exportable, true, Map.of(),
                 PaymentCryptographyCrypto.toHex(material));
     }
 
@@ -713,17 +714,34 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                              String keyCheckValueAlgorithm) {
     }
 
-    /** The usages a key block may carry, and the modes of use each of them has. */
-    private static final Map<String, String> USAGE_NAMES = Map.of(
-            "D0", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
-            "M6", "TR31_M6_ISO_9797_5_CMAC_KEY",
-            "S0", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE");
-
-    /** The mode of use code each usage has in a key block. */
-    private static final Map<String, String> USAGE_MODES = Map.of(
-            "D0", "B",
-            "M6", "C",
-            "S0", "D");
+    /**
+     * The usages a key block may carry, and the modes of use each of them has.
+     *
+     * <p>A key block carries the usage of the key it carries, so every usage the service
+     * makes has to have a code, or a key of that usage cannot leave the service and the
+     * counterparty cannot tell what it has.
+     */
+    private static final Map<String, String> USAGE_NAMES = Map.ofEntries(
+            Map.entry("B0", "TR31_B0_BASE_DERIVATION_KEY"),
+            Map.entry("C0", "TR31_C0_CARD_VERIFICATION_KEY"),
+            Map.entry("D0", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
+            Map.entry("E0", "TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS"),
+            Map.entry("E1", "TR31_E1_EMV_MKEY_CONFIDENTIALITY"),
+            Map.entry("E2", "TR31_E2_EMV_MKEY_INTEGRITY"),
+            Map.entry("E4", "TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS"),
+            Map.entry("E5", "TR31_E5_EMV_MKEY_CARD_PERSONALIZATION"),
+            Map.entry("E6", "TR31_E6_EMV_MKEY_OTHER"),
+            Map.entry("K0", "TR31_K0_KEY_ENCRYPTION_KEY"),
+            Map.entry("K1", "TR31_K1_KEY_BLOCK_PROTECTION_KEY"),
+            Map.entry("M1", "TR31_M1_ISO_9797_1_MAC_KEY"),
+            Map.entry("M3", "TR31_M3_ISO_9797_3_MAC_KEY"),
+            Map.entry("M6", "TR31_M6_ISO_9797_5_CMAC_KEY"),
+            Map.entry("M7", "TR31_M7_HMAC_KEY"),
+            Map.entry("P0", "TR31_P0_PIN_ENCRYPTION_KEY"),
+            Map.entry("P1", "TR31_P1_PIN_GENERATION_KEY"),
+            Map.entry("V1", "TR31_V1_IBM3624_PIN_VERIFICATION_KEY"),
+            Map.entry("V2", "TR31_V2_VISA_PIN_VERIFICATION_KEY"),
+            Map.entry("S0", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE"));
 
     /** The TR-31 usage code of a usage name, such as {@code D0}. */
     private static String usageCode(String usageName) {
@@ -806,25 +824,92 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         return usage;
     }
 
-    /** The modes of use a mode of use code of a key block stands for. */
-    private static Map<String, Boolean> modesFor(String mode) {
+    /**
+     * The modes of use a mode of use code of a key block stands for.
+     *
+     * <p>A key encryption key wraps and unwraps rather than encrypts and decrypts, so the
+     * same character means the other modes for one.
+     *
+     * @param mode the mode of use character of the block
+     * @param isKek true when the block carries a key encryption key
+     */
+    private static Map<String, Boolean> modesFor(String mode, boolean isKek) {
         return switch (mode) {
-            case "B" -> Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE);
+            case "B" -> isKek
+                    ? Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE)
+                    : Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE);
+            case "E" -> isKek
+                    ? Map.of("Wrap", Boolean.TRUE)
+                    : Map.of("Encrypt", Boolean.TRUE);
+            case "D" -> isKek
+                    ? Map.of("Unwrap", Boolean.TRUE)
+                    : Map.of("Decrypt", Boolean.TRUE);
+            case "G" -> Map.of("Generate", Boolean.TRUE);
+            case "V" -> Map.of("Verify", Boolean.TRUE);
             case "C" -> Map.of("Generate", Boolean.TRUE, "Verify", Boolean.TRUE);
-            case "D" -> Map.of("Sign", Boolean.TRUE, "Verify", Boolean.TRUE);
+            case "X" -> Map.of("DeriveKey", Boolean.TRUE);
+            case "N" -> Map.of("NoRestrictions", Boolean.TRUE);
             default -> throw new AwsException("ValidationException",
                     "the mode of use " + mode + " of the key block is not one this service serves", 400);
         };
     }
 
-    /** The mode of use code of a usage name. */
-    private static String modeCode(String usageName) {
-        for (Map.Entry<String, String> entry : USAGE_MODES.entrySet()) {
-            if (USAGE_NAMES.get(entry.getKey()).equals(usageName)) {
-                return entry.getValue();
-            }
+    /**
+     * The mode of use character a key block carries.
+     *
+     * <p>The character is read off the key's own modes, because that is what it says: a key
+     * that encrypts and decrypts is a {@code B}, one that only encrypts is an {@code E}. A key
+     * encryption key wraps and unwraps rather than encrypts and decrypts, so its modes are read
+     * that way.
+     *
+     * @param key the key the block carries
+     * @return the character
+     */
+    private static String modeCode(PaymentCryptographyKey key) {
+        Map<String, Boolean> modes = key.getKeyModesOfUse();
+        boolean isKek = isKeyEncryptionKey(key.getKeyUsage());
+        boolean encrypt = isKek
+                ? enabled(modes, "Wrap") || enabled(modes, "Encrypt")
+                : enabled(modes, "Encrypt");
+        boolean decrypt = isKek
+                ? enabled(modes, "Unwrap") || enabled(modes, "Decrypt")
+                : enabled(modes, "Decrypt");
+        boolean generate = enabled(modes, "Generate");
+        boolean verify = enabled(modes, "Verify");
+        boolean derive = enabled(modes, "DeriveKey");
+        if (encrypt && decrypt) {
+            return "B";
         }
-        return "B";
+        if (encrypt) {
+            return "E";
+        }
+        if (decrypt) {
+            return "D";
+        }
+        if (generate && verify) {
+            return "C";
+        }
+        if (generate) {
+            return "G";
+        }
+        if (verify) {
+            return "V";
+        }
+        if (derive) {
+            return "X";
+        }
+        return "N";
+    }
+
+    /** Whether a mode of use is on. A key with no modes at all has every one of them. */
+    private static boolean enabled(Map<String, Boolean> modes, String mode) {
+        return modes == null || Boolean.TRUE.equals(modes.get(mode));
+    }
+
+    /** Whether a usage is a key encryption key's, whose modes wrap and unwrap. */
+    private static boolean isKeyEncryptionKey(String usageName) {
+        return "TR31_K0_KEY_ENCRYPTION_KEY".equals(usageName)
+                || "TR31_K1_KEY_BLOCK_PROTECTION_KEY".equals(usageName);
     }
 
     /** Whether a key may wrap another key. */
