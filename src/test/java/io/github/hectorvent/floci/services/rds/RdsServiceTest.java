@@ -1259,6 +1259,31 @@ class RdsServiceTest {
     }
 
     @Test
+    void retainedInstanceBackupDeleteRetryReusesSavedDump() {
+        InMemoryStorage<String, DbInstance> instances = spy(new InMemoryStorage<>());
+        RdsService service = newService(containerManager, proxyManager, instances,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        service.createDbInstance("retry-backup", "postgres", "13", "admin", "password",
+                "dbname", "db.t3.micro", 20, false, null, null, null, null, false);
+        when(containerManager.createPostgresSnapshot("cont-id", "admin"))
+                .thenReturn("saved-dump").thenThrow(new IllegalStateException("container is gone"));
+        IllegalStateException failure = new IllegalStateException("delete wrote then failed");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw failure;
+        }).doCallRealMethod().when(instances).delete("us-east-1::retry-backup");
+
+        assertSame(failure, assertThrows(IllegalStateException.class,
+                () -> service.deleteDbInstance("retry-backup", "us-east-1", false)));
+        assertEquals(DbInstanceStatus.DELETING, service.getDbInstance("retry-backup").getStatus());
+        assertDoesNotThrow(() -> service.deleteDbInstance("retry-backup", "us-east-1", false));
+        verify(containerManager).createPostgresSnapshot("cont-id", "admin");
+        assertTrue(service.describeDbInstanceAutomatedBackups("us-east-1", null, "retry-backup", null,
+                List.of(), List.of(), List.of(), null, null).backups().getFirst().isDataSaved());
+    }
+
+    @Test
     void failedClusterStorageDeleteRetainsRecordAndPortForRetry() {
         when(rdsConfig.proxyMaxPort()).thenReturn(7000);
         InMemoryStorage<String, DbCluster> clusters = spy(new InMemoryStorage<>());
@@ -1291,6 +1316,31 @@ class RdsServiceTest {
         restarted.deleteDbCluster("old-cluster");
         assertEquals(7000, restarted.createDbCluster("new-cluster", "postgres", "17.5", "admin",
                 "password", "dbname", false, null, null, null, false).getProxyPort());
+    }
+
+    @Test
+    void retainedClusterBackupDeleteRetryReusesSavedDump() {
+        InMemoryStorage<String, DbCluster> clusters = spy(new InMemoryStorage<>());
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), clusters, new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
+        service.createDbCluster("retry-backup", "postgres", "17.5", "admin", "password",
+                "dbname", false, null, null, null, false);
+        when(containerManager.createPostgresSnapshot("cont-id", "admin"))
+                .thenReturn("saved-dump").thenThrow(new IllegalStateException("container is gone"));
+        IllegalStateException failure = new IllegalStateException("delete wrote then failed");
+        doAnswer(invocation -> {
+            invocation.callRealMethod();
+            throw failure;
+        }).doCallRealMethod().when(clusters).delete("us-east-1::retry-backup");
+
+        assertSame(failure, assertThrows(IllegalStateException.class,
+                () -> service.deleteDbCluster("retry-backup", "us-east-1", false)));
+        assertEquals(DbInstanceStatus.DELETING, service.getDbCluster("retry-backup").getStatus());
+        assertDoesNotThrow(() -> service.deleteDbCluster("retry-backup", "us-east-1", false));
+        verify(containerManager).createPostgresSnapshot("cont-id", "admin");
+        assertTrue(service.describeDbClusterAutomatedBackups("us-east-1", null, "retry-backup",
+                List.of(), List.of(), List.of(), null, null).backups().getFirst().isDataSaved());
     }
 
     @ParameterizedTest

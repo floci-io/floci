@@ -1783,11 +1783,17 @@ public class RdsService implements Resettable, ResourceProvider {
         DbInstanceAutomatedBackup backup = activeInstanceBackupOf(instance, region, now);
         backup.setStatus(DbInstanceAutomatedBackup.RETAINED);
         backup.setInstance(instance);
-        String dump = saveBackupData(instance.getEngine(), instance.getContainerId(), instance.getMasterUsername(),
-                "DB instance " + instance.getDbInstanceIdentifier(), "InvalidDBInstanceState");
-        if (dump != null) {
-            snapshotData.put(instanceBackupDataKey(region, instance.getDbiResourceId()), dump);
+        String dataKey = instanceBackupDataKey(region, instance.getDbiResourceId());
+        // A delete retry may no longer have the container that produced the first dump.
+        if (instance.getStatus() == DbInstanceStatus.DELETING && snapshotData.get(dataKey).isPresent()) {
             backup.setDataSaved(true);
+        } else {
+            String dump = saveBackupData(instance.getEngine(), instance.getContainerId(), instance.getMasterUsername(),
+                    "DB instance " + instance.getDbInstanceIdentifier(), "InvalidDBInstanceState");
+            if (dump != null) {
+                snapshotData.put(dataKey, dump);
+                backup.setDataSaved(true);
+            }
         }
         return backup;
     }
@@ -1803,11 +1809,16 @@ public class RdsService implements Resettable, ResourceProvider {
         backup.setEarliestTime(cluster.getCreatedAt() != null ? cluster.getCreatedAt() : now);
         backup.setLatestTime(now);
         backup.setBackupRetentionPeriod(CLUSTER_BACKUP_RETENTION_DAYS);
-        String dump = saveBackupData(cluster.getEngine(), cluster.getContainerId(), cluster.getMasterUsername(),
-                "DB cluster " + cluster.getDbClusterIdentifier(), "InvalidDBClusterStateFault");
-        if (dump != null) {
-            snapshotData.put(clusterBackupDataKey(region, cluster.getDbClusterResourceId()), dump);
+        String dataKey = clusterBackupDataKey(region, cluster.getDbClusterResourceId());
+        if (cluster.getStatus() == DbInstanceStatus.DELETING && snapshotData.get(dataKey).isPresent()) {
             backup.setDataSaved(true);
+        } else {
+            String dump = saveBackupData(cluster.getEngine(), cluster.getContainerId(), cluster.getMasterUsername(),
+                    "DB cluster " + cluster.getDbClusterIdentifier(), "InvalidDBClusterStateFault");
+            if (dump != null) {
+                snapshotData.put(dataKey, dump);
+                backup.setDataSaved(true);
+            }
         }
         return backup;
     }
