@@ -348,4 +348,20 @@ class Ec2InstanceConnectEndpointServiceTest {
         }
         return permission;
     }
+
+    @Test
+    void changingAReturnedOrRequestedTagLeavesTheCreationParametersAlone() {
+        Ec2Service service = newService();
+        String vpcId = service.createVpc(REGION, "10.81.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.81.1.0/24", "us-east-1a").getSubnetId();
+        Tag requested = new Tag("Name", "kthw");
+        String id = service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null,
+                List.of(requested), "token-81").getInstanceConnectEndpointId();
+        requested.setValue("changed-after-create");
+        service.describeInstanceConnectEndpoints(REGION, List.of(), Map.of()).get(0)
+                .getCreationTags().get(0).setValue("changed-on-a-copy");
+
+        assertEquals(id, service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null,
+                List.of(new Tag("Name", "kthw")), "token-81").getInstanceConnectEndpointId());
+    }
 }

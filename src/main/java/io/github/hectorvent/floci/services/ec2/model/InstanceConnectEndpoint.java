@@ -57,8 +57,17 @@ public class InstanceConnectEndpoint {
         region = other.region;
         privateIpAddress = other.privateIpAddress;
         clientToken = other.clientToken;
-        creationTags = new ArrayList<>(other.creationTags);
-        tags = new ArrayList<>(other.tags);
+        creationTags = copyTags(other.creationTags);
+        tags = copyTags(other.tags);
+    }
+
+    /** A list of new Tag objects equal to {@code source}'s, so neither side can change the other's. */
+    public static List<Tag> copyTags(List<Tag> source) {
+        List<Tag> copy = new ArrayList<>(source.size());
+        for (Tag tag : source) {
+            copy.add(new Tag(tag.getKey(), tag.getValue()));
+        }
+        return copy;
     }
 
     public String getInstanceConnectEndpointId() { return instanceConnectEndpointId; }
