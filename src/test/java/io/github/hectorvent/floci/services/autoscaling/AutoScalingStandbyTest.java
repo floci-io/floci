@@ -153,6 +153,36 @@ class AutoScalingStandbyTest {
         assertEquals(decrement ? 1 : 2, group().getDesiredCapacity());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void emptyStandbyDoesNotSettleRefresh(boolean decrement) {
+        InstanceRefresh refresh = warmingRefresh(REGION, GROUP, "i-a");
+
+        assertEquals(200, enterStandby(decrement).getStatus());
+
+        assertEquals("Warming", refresh.getReplacements().getFirst().getPhase());
+        assertEquals("InProgress", refresh.getStatus());
+        assertNull(refresh.getEndTime());
+        assertEquals(2, group().getDesiredCapacity());
+        assertEquals("InService", group().getInstances().getFirst().getLifecycleState());
+        assertTrue(service.describeScalingActivities(REGION, GROUP).isEmpty());
+    }
+
+    @Test
+    void rejectedLifecycleStandbyDoesNotSettleRefresh() {
+        InstanceRefresh refresh = warmingRefresh(REGION, GROUP, "i-b");
+        group().getInstances().getFirst().setLifecycleState("Standby");
+
+        assertEquals(400, enterStandby(true, "i-a").getStatus());
+
+        assertEquals("Warming", refresh.getReplacements().getFirst().getPhase());
+        assertEquals("InProgress", refresh.getStatus());
+        assertNull(refresh.getEndTime());
+        assertEquals("Standby", group().getInstances().getFirst().getLifecycleState());
+        assertEquals(2, group().getDesiredCapacity());
+        assertTrue(service.describeScalingActivities(REGION, GROUP).isEmpty());
+    }
+
     @Test
     void standbySettlesOnlyReadyRefreshMembers() {
         InstanceRefresh refresh = warmingRefresh(REGION, GROUP, "i-a");

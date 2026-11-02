@@ -1057,7 +1057,9 @@ public class AutoScalingService implements PassedRoleLookup {
                 requireDesiredCapacityWithinBounds(asg, newDesired,
                         "To place into standby " + moving.size() + " instances");
             }
-            completeInstanceRefreshIfSettled(region, name);
+            if (!moving.isEmpty()) {
+                completeInstanceRefreshIfSettled(region, name, asg);
+            }
             Instant now = Instant.now();
             List<ScalingActivity> started = new ArrayList<>();
             for (AsgInstance instance : moving) {
@@ -1258,7 +1260,10 @@ public class AutoScalingService implements PassedRoleLookup {
     }
 
     public void completeInstanceRefreshIfSettled(String region, String asgName) {
-        AutoScalingGroup asg = requireGroup(region, asgName);
+        completeInstanceRefreshIfSettled(region, asgName, requireGroup(region, asgName));
+    }
+
+    private void completeInstanceRefreshIfSettled(String region, String asgName, AutoScalingGroup asg) {
         List<InstanceRefresh> activeRefreshes = instanceRefreshes.values().stream()
                 .filter(r -> region.equals(r.getRegion()))
                 .filter(r -> asgName.equals(r.getAutoScalingGroupName()))
