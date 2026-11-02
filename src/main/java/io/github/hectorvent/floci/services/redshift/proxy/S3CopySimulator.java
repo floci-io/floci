@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.Semaphore;
+import java.util.function.Function;
 import java.util.function.IntConsumer;
 import java.util.stream.Collectors;
 import java.util.zip.GZIPInputStream;
@@ -193,7 +194,13 @@ public final class S3CopySimulator {
 
     static void streamCopyInput(CopyInput input, List<String> discoveredColumns,
                                 List<Integer> columnMaxBytes, OutputStream backendOut) throws IOException {
-        streamObjects(input.spec(), discoveredColumns, columnMaxBytes, input.s3(), input.iamService(),
+        streamCopyInput(input, discoveredColumns, columnMaxBytes, null, backendOut);
+    }
+
+    static void streamCopyInput(CopyInput input, List<String> discoveredColumns,
+                                List<Integer> columnMaxBytes, List<CopyRecordTransformer.ColumnKind> columnKinds,
+                                OutputStream backendOut) throws IOException {
+        streamObjects(input.spec(), discoveredColumns, columnMaxBytes, columnKinds, input.s3(), input.iamService(),
                 input.roleSession(), input.keys(), backendOut);
     }
 
@@ -325,9 +332,11 @@ public final class S3CopySimulator {
             boolean noColumnList = spec.columns() == null || spec.columns().isEmpty();
             boolean discoverForJson = spec.jsonAuto() && noColumnList;
             boolean truncate = spec.transforms().truncateColumns();
+            boolean temporal = spec.transforms().temporal();
             List<String> discoveredColumns = null;
             List<Integer> columnMaxBytes = null;
-            if (discoverForJson || truncate) {
+            List<CopyRecordTransformer.ColumnKind> columnKinds = null;
+            if (discoverForJson || truncate || temporal) {
                 List<ColumnInfo> catalog = discoverColumnInfo(client, backend, spec, txStatus, onStatusChange);
                 if (catalog == null) {
                     return true;
@@ -337,6 +346,9 @@ public final class S3CopySimulator {
                 }
                 if (truncate) {
                     columnMaxBytes = alignMaxBytes(spec, catalog);
+                }
+                if (temporal) {
+                    columnKinds = alignKinds(spec, catalog);
                 }
             }
 
@@ -374,7 +386,7 @@ public final class S3CopySimulator {
             // a CopyFail to the backend, whose ErrorResponse/ReadyForQuery is relayed to the client;
             // or, if the backend is unreachable, one synthesized ErrorResponse/ReadyForQuery.
             try {
-                streamCopyInput(input, discoveredColumns, columnMaxBytes, backendOut);
+                streamCopyInput(input, discoveredColumns, columnMaxBytes, columnKinds, backendOut);
                 writeCopyDone(backendOut);
                 drainToReadyForQuery(backendDecoder, client, onStatusChange);
             } catch (RuntimeException | IOException e) {
@@ -469,13 +481,19 @@ public final class S3CopySimulator {
     }
 
     private static void streamObjects(CopyStatementParser.S3CopyFrom spec, List<String> discoveredColumns,
-                                      List<Integer> columnMaxBytes, S3Service s3, IamService iamService, RedshiftRoleAccess.RoleSession roleSession,
+                                      List<Integer> columnMaxBytes, List<CopyRecordTransformer.ColumnKind> columnKinds,
+                                      S3Service s3, IamService iamService, RedshiftRoleAccess.RoleSession roleSession,
                                       List<String> keys, OutputStream backendOut) throws IOException {
         if (spec.transforms().truncateColumns() && columnMaxBytes == null) {
             // Extended Query fixes the statement at Parse time, so there is no catalog round trip to
             // learn column lengths; same limitation and remedy as FORMAT AS JSON 'auto'.
             throw new S3TransferException(SQLSTATE_INTERNAL,
                     "COPY ... TRUNCATECOLUMNS needs catalog column lengths, which are only available over "
+                            + "the Simple Query protocol; connect with preferQueryMode=simple", null);
+        }
+        if (spec.transforms().temporal() && columnKinds == null) {
+            throw new S3TransferException(SQLSTATE_INTERNAL,
+                    "COPY ... DATEFORMAT and TIMEFORMAT need catalog column types, which are only available over "
                             + "the Simple Query protocol; connect with preferQueryMode=simple", null);
         }
         byte[] buffer = new byte[CHUNK];
@@ -506,7 +524,7 @@ public final class S3CopySimulator {
                     }
                     InputStream source = in;
                     if (spec.transforms().any()) {
-                        source = new ByteArrayInputStream(transformObject(spec, columnMaxBytes, in));
+                        source = new ByteArrayInputStream(transformObject(spec, columnMaxBytes, columnKinds, in));
                     }
                     int read;
                     boolean endsWithNewline = false;
@@ -533,6 +551,7 @@ public final class S3CopySimulator {
      * its own statement instead of exhausting the emulator heap.
      */
     private static byte[] transformObject(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes,
+                                          List<CopyRecordTransformer.ColumnKind> columnKinds,
                                           InputStream in) throws IOException {
         int heldMib = 0;
         try {
@@ -546,7 +565,8 @@ public final class S3CopySimulator {
                     throw new S3TransferException(SQLSTATE_PROGRAM_LIMIT_EXCEEDED,
                             "COPY object exceeds the " + COPY_TRANSFORM_MAX_OBJECT_BYTES
                                     + "-byte limit for the field-level options "
-                                    + "(EMPTYASNULL, BLANKSASNULL, REMOVEQUOTES, ACCEPTINVCHARS, TRUNCATECOLUMNS)", null);
+                                    + "(EMPTYASNULL, BLANKSASNULL, REMOVEQUOTES, ACCEPTINVCHARS, TRUNCATECOLUMNS, "
+                                    + "DATEFORMAT, TIMEFORMAT)", null);
                 }
                 int wantedMib = (int) ((total * COPY_TRANSFORM_HEAP_FACTOR) / (1024 * 1024)) + 1;
                 while (heldMib < wantedMib) {
@@ -558,30 +578,57 @@ public final class S3CopySimulator {
                 }
                 buffered.write(chunk, 0, read);
             }
-            return new CopyRecordTransformer(spec, columnMaxBytes).apply(buffered.toByteArray());
+            return new CopyRecordTransformer(spec, columnMaxBytes, columnKinds).apply(buffered.toByteArray());
         } finally {
             COPY_TRANSFORM_HEAP_MIB.release(heldMib);
         }
     }
 
-    record ColumnInfo(String name, Integer maxBytes) {
+    record ColumnInfo(String name, Integer maxBytes, CopyRecordTransformer.ColumnKind kind) {
+        ColumnInfo(String name, Integer maxBytes) {
+            this(name, maxBytes, CopyRecordTransformer.ColumnKind.OTHER);
+        }
     }
 
     /** Positional max character length per COPY column; null entries mean no limit. */
     static List<Integer> alignMaxBytes(CopyStatementParser.S3CopyFrom spec, List<ColumnInfo> catalog) {
+        return align(spec, catalog, ColumnInfo::maxBytes);
+    }
+
+    /** Positional kind per COPY column; a name the table does not have counts as an ordinary column. */
+    static List<CopyRecordTransformer.ColumnKind> alignKinds(CopyStatementParser.S3CopyFrom spec,
+                                                             List<ColumnInfo> catalog) {
+        return align(spec, catalog, ColumnInfo::kind).stream()
+                .map(kind -> kind == null ? CopyRecordTransformer.ColumnKind.OTHER : kind)
+                .toList();
+    }
+
+    private static <T> List<T> align(CopyStatementParser.S3CopyFrom spec, List<ColumnInfo> catalog,
+                                     Function<ColumnInfo, T> attribute) {
         if (spec.columns() == null || spec.columns().isEmpty()) {
-            return catalog.stream().map(ColumnInfo::maxBytes).toList();
+            return catalog.stream().map(attribute).toList();
         }
-        Map<String, Integer> byName = new HashMap<>();
+        Map<String, T> byName = new HashMap<>();
         for (ColumnInfo info : catalog) {
-            byName.put(info.name(), info.maxBytes());
+            byName.put(info.name(), attribute.apply(info));
         }
-        List<Integer> aligned = new ArrayList<>();
+        List<T> aligned = new ArrayList<>();
         for (String column : spec.columns()) {
             String key = column.startsWith("\"") ? unquoteIdentifier(column) : column.toLowerCase(Locale.ROOT);
             aligned.add(byName.get(key));
         }
         return aligned;
+    }
+
+    /** 1082 = date, 1114 = timestamp. A timestamptz (1184) is read by PostgreSQL as it stands. */
+    private static CopyRecordTransformer.ColumnKind kindOf(String typeOid) {
+        if ("1082".equals(typeOid)) {
+            return CopyRecordTransformer.ColumnKind.DATE;
+        }
+        if ("1114".equals(typeOid)) {
+            return CopyRecordTransformer.ColumnKind.TIMESTAMP;
+        }
+        return CopyRecordTransformer.ColumnKind.OTHER;
     }
 
     private static List<String> parseDataRow(byte[] body) {
@@ -607,7 +654,7 @@ public final class S3CopySimulator {
                                                        char txStatus, IntConsumer onStatusChange) throws IOException {
         // 1042 = bpchar, 1043 = varchar; atttypmod carries the declared length plus a 4-byte header.
         String query = "SELECT a.attname, CASE WHEN a.atttypid IN (1042, 1043) AND a.atttypmod > 4 "
-                + "THEN a.atttypmod - 4 END FROM pg_catalog.pg_attribute a "
+                + "THEN a.atttypmod - 4 END, a.atttypid FROM pg_catalog.pg_attribute a "
                 + "WHERE a.attrelid = to_regclass('" + quoteLiteral(spec.targetTable()) + "') "
                 + "AND a.attnum > 0 AND NOT a.attisdropped "
                 + "ORDER BY a.attnum";
@@ -627,7 +674,8 @@ public final class S3CopySimulator {
                     Integer maxBytes = values.size() >= 2 && values.get(1) != null
                             ? Integer.valueOf(values.get(1))
                             : null;
-                    cols.add(new ColumnInfo(values.get(0), maxBytes));
+                    String typeOid = values.size() >= 3 ? values.get(2) : null;
+                    cols.add(new ColumnInfo(values.get(0), maxBytes, kindOf(typeOid)));
                 }
             } else if (type == 'E') {
                 forward(client, msg);

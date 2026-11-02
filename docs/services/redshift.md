@@ -792,8 +792,27 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   over Extended Query the COPY fails with an error that names this requirement. A field-level option
   buffers each decompressed object in memory, so an object over 64 MiB, or a heap budget shared
   across connections that is used up, fails the COPY instead of exhausting the emulator.
+- `DATEFORMAT [AS] 'format'` reads the fields of `DATE` columns and `TIMEFORMAT [AS] 'format'` those of
+  `TIMESTAMP` columns, using the dateparts and timeparts `YY`, `YYYY`, `MM`, `MON`, `DD`, `HH`/`HH24`, `HH12`,
+  `MI`, `SS` (with up to six fractional digits) and `AM`/`PM`, with any other punctuation as separators.
+  `TIMEFORMAT` also takes `'epochsecs'` and `'epochmillisecs'`, read as UTC. A `DATEFORMAT` may name a time
+  of day, which is dropped; a `TIMEFORMAT` without one gives midnight. A format that names a time zone, or
+  any other text, is not recognized and the statement is forwarded to PostgreSQL. A value that does not
+  match its format fails the COPY, as it does with Redshift's default `MAXERROR` of 0; the message names the
+  column and the format, and Floci writes no `stl_load_errors` row. `ACCEPTANYDATE` loads such a value as
+  `NULL` instead; when no format is given it reads the ISO form of a date, with an optional time of day, and
+  turns anything else into `NULL`. Numeric parts with no separator between them, as in `YYYYMMDD`, need their
+  full width, a part may be named once, and `HH12` needs `AM` or `PM`; any other format string is not
+  recognized.
+  Like `TRUNCATECOLUMNS`, these read column types from the catalog, so they work only over the Simple Query
+  protocol and are not combined with `FORMAT AS JSON`. Floci deviations: `'auto'` is accepted but converts
+  nothing, leaving every value to PostgreSQL, which reads ISO 8601, Julian and `YYYYMMDD HHMISS` but not every
+  form Redshift recognizes (for example `BC` dates and `YYYY.DDD`), and with it `ACCEPTANYDATE` cannot turn a
+  value into `NULL`, so a value PostgreSQL rejects fails the COPY; `TIMESTAMPTZ` columns are read by
+  PostgreSQL whatever the format, since AWS requires `'auto'` for a format other than its default there; a
+  two-digit `YY` year below 70 means 20YY and otherwise 19YY, which AWS does not document.
 - Any other clause (`FIXEDWIDTH`, `PARQUET`, `AVRO`, `ORC`, `MAXERROR`,
-  `DATEFORMAT`, `TIMEFORMAT`, `ENCODING`, `ESCAPE`, `ENCRYPTED`, `MASTER_SYMMETRIC_KEY`,
+  `FILLRECORD`, `ENCODING`, `ESCAPE`, `ENCRYPTED`, `MASTER_SYMMETRIC_KEY`,
   `KMS_KEY_ID`, and so on) is not recognized: the statement is forwarded unchanged and PostgreSQL
   returns its own error.
 - A multi-statement query whose COPY is followed by another statement is not intercepted; send the

@@ -8,6 +8,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CopyRecordTransformerTest {
 
@@ -24,6 +25,76 @@ class CopyRecordTransformerTest {
         byte[] out = new CopyRecordTransformer(spec, null)
                 .apply(input.getBytes(StandardCharsets.UTF_8));
         return new String(out, StandardCharsets.UTF_8);
+    }
+
+    private static final List<CopyRecordTransformer.ColumnKind> KINDS = List.of(
+            CopyRecordTransformer.ColumnKind.OTHER,
+            CopyRecordTransformer.ColumnKind.DATE,
+            CopyRecordTransformer.ColumnKind.TIMESTAMP);
+
+    private static CopyStatementParser.CopyTransforms temporal(String dateFormat, String timeFormat, boolean any) {
+        return new CopyStatementParser.CopyTransforms(false, false, false, false, null,
+                dateFormat == null ? null : CopyTemporalFormat.parse(dateFormat, false),
+                timeFormat == null ? null : CopyTemporalFormat.parse(timeFormat, true), any);
+    }
+
+    private static String applyTemporal(boolean csv, CopyStatementParser.CopyTransforms transforms, String input) {
+        String delimiter = csv ? "," : "|";
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "b", "k", delimiter, 0, false, csv, null, null, false, false, false, transforms);
+        return new String(new CopyRecordTransformer(spec, null, KINDS).apply(input.getBytes(StandardCharsets.UTF_8)),
+                StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void dateAndTimestampColumnsAreRewrittenAndOthersLeftAlone() {
+        assertEquals("03/31/2003|2003-03-31|2003-03-31 18:45:05\n",
+                applyTemporal(false, temporal("MM/DD/YYYY", "MM/DD/YYYY HH:MI:SS", false),
+                        "03/31/2003|03/31/2003|03/31/2003 18:45:05\n"));
+    }
+
+    @Test
+    void aFormatOnlyAppliesToItsOwnKindOfColumn() {
+        assertEquals("a|2003-03-31|03/31/2003 18:45:05\n",
+                applyTemporal(false, temporal("YYYY-MM-DD", null, false), "a|2003-03-31|03/31/2003 18:45:05\n"));
+    }
+
+    @Test
+    void nullMarkersAndEmptyFieldsAreNotConverted() {
+        assertEquals("1|\\N|\n",
+                applyTemporal(false, temporal("MM/DD/YYYY", "MM/DD/YYYY", false), "1|\\N|\n"));
+    }
+
+    @Test
+    void aQuotedCsvFieldIsConvertedAndKeepsItsQuotes() {
+        assertEquals("a,\"2003-03-31\",2003-03-31 00:00:00\n",
+                applyTemporal(true, temporal("MM/DD/YYYY", "MM/DD/YYYY", false), "a,\"03/31/2003\",03/31/2003\n"));
+    }
+
+    @Test
+    void aValueThatDoesNotMatchFailsTheCopy() {
+        S3CopySimulator.S3TransferException failure = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> applyTemporal(false, temporal("MM/DD/YYYY", null, false), "a|2003-03-31|x\n"));
+
+        assertTrue(failure.getMessage().contains("date"), failure.getMessage());
+        assertTrue(failure.getMessage().contains("column 2"), failure.getMessage());
+    }
+
+    @Test
+    void acceptAnyDateLoadsAValueThatDoesNotMatchAsNull() {
+        assertEquals("a|\\N|\\N\n",
+                applyTemporal(false, temporal("MM/DD/YYYY", "MM/DD/YYYY", true), "a|00/00/00|2003-03-31 18:45:05\n"));
+    }
+
+    @Test
+    void acceptAnyDateWithoutAFormatLoadsIsoValuesAndNullsTheRest() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null,
+                CopyTemporalFormat.defaultIso(), CopyTemporalFormat.defaultIso(), true);
+
+        assertEquals("a|2020-01-01|2020-01-01 00:00:00\n",
+                applyTemporal(false, transforms, "a|2020-01-01|2020-01-01\n"));
+        assertEquals("a|\\N|\\N\n", applyTemporal(false, transforms, "a|00/00/00|00/00/00 00:00:00\n"));
     }
 
     @Test

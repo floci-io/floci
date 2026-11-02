@@ -227,7 +227,7 @@ class CopyStatementParserTest {
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' JSON 's3://mybucket/jsonpaths.json'"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' FIXEDWIDTH 'a:1,b:2'"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' GZIP MAXERROR 10"));
-        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' DATEFORMAT 'YYYY-MM-DD'"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' FILLRECORD"));
     }
 
 
@@ -488,6 +488,46 @@ class CopyStatementParserTest {
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' TRUNCATECOLUMNS TRUNCATECOLUMNS"));
         assertNull(CopyStatementParser.parse(
                 "COPY t FROM 's3://b/k' FORMAT AS JSON 'auto' TRUNCATECOLUMNS"));
+    }
+
+    @Test
+    void copyParsesDateAndTimeFormats() {
+        CopyStatementParser.CopyTransforms transforms = copyFrom(
+                "COPY t FROM 's3://b/k' DATEFORMAT AS 'MM/DD/YYYY' TIMEFORMAT 'epochsecs'").transforms();
+
+        assertEquals("MM/DD/YYYY", transforms.dateFormat().spec());
+        assertEquals("epochsecs", transforms.timeFormat().spec());
+        assertTrue(transforms.temporal());
+        assertFalse(transforms.acceptAnyDate());
+    }
+
+    @Test
+    void autoDateFormatsAreAcceptedButConvertNothing() {
+        CopyStatementParser.CopyTransforms transforms =
+                copyFrom("COPY t FROM 's3://b/k' DATEFORMAT 'auto' TIMEFORMAT 'auto'").transforms();
+
+        assertFalse(transforms.temporal());
+        assertFalse(transforms.fieldLevel());
+    }
+
+    @Test
+    void acceptAnyDateFallsBackToTheIsoForm() {
+        CopyStatementParser.CopyTransforms transforms =
+                copyFrom("COPY t FROM 's3://b/k' ACCEPTANYDATE").transforms();
+
+        assertTrue(transforms.acceptAnyDate());
+        assertEquals("YYYY-MM-DD[ HH:MI:SS]", transforms.dateFormat().spec());
+        assertEquals("YYYY-MM-DD[ HH:MI:SS]", transforms.timeFormat().spec());
+    }
+
+    @Test
+    void copyRejectsInvalidDateFormatOptions() {
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' DATEFORMAT 'nonsense'"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' TIMEFORMAT 'YYYY-MM-DD HH:MI:SS TZ'"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' DATEFORMAT 'epochsecs'"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' DATEFORMAT 'MM/DD/YYYY' DATEFORMAT 'auto'"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' ACCEPTANYDATE ACCEPTANYDATE"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' DATEFORMAT 'MM/DD/YYYY'  FORMAT AS JSON 'auto'"));
     }
 
     @Test
