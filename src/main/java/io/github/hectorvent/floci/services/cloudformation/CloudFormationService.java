@@ -1209,9 +1209,13 @@ public class CloudFormationService implements ResourceProvider {
                         "Stack with id " + stackNameOrArn + " does not exist", 400);
             }
             ChangeSet cs = getChangeSetOrThrow(existing, changeSetName, region, accountId);
-            if (isBeingDeleted(existing.getStatus())) {
+            // A delete deferred to the running execution has been accepted, so the stack is being
+            // deleted even before that execution ends and the delete reports DELETE_IN_PROGRESS.
+            String deletingStatus = deferredDeletes.containsKey(existing.getStackId())
+                    ? "DELETE_IN_PROGRESS" : existing.getStatus();
+            if (isBeingDeleted(deletingStatus)) {
                 throw new AwsException("InvalidChangeSetStatus", "ChangeSet [" + cs.getChangeSetId()
-                        + "] cannot be executed while its stack is in status [" + existing.getStatus() + "]", 400);
+                        + "] cannot be executed while its stack is in status [" + deletingStatus + "]", 400);
             }
             String executionStatus = cs.getExecutionStatus();
             boolean eligible = requireAvailable
