@@ -119,7 +119,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from regen_iam_authorized_actions import authorized_actions_from, fetch_references
-from regen_iam_passed_roles import NAMESPACE_RE, OPERATION_RE, _shown, load_models, namespace_of
+from regen_iam_passed_roles import (
+    NAMESPACE_RE,
+    OPERATION_RE,
+    _shown,
+    load_models,
+    namespace_of,
+)
 from regen_partitions import resolve_botocore_data
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -644,6 +650,12 @@ def with_account(resources: list[dict], formats: dict[str, str], accounts: list[
             and "${Account}" in formats.get(resource["type"], "") else resource for resource in resources]
 
 
+def _kinds(resource: dict) -> list[str]:
+    """The resource types a resource names, as the strings they are: the types it acts on, or the one it names."""
+    named: list = list(resource.get("types") or [resource.get("type")])
+    return [kind for kind in named if isinstance(kind, str)]
+
+
 def kind_of(name: str) -> str:
     """Whether a name ends as a name, an id, or an identifier (which is either), or neither."""
     lower = name.lower()
@@ -728,12 +740,13 @@ def with_made(resources: list[dict], operation: str, formats: dict[str, str]) ->
         return related(created, stem(kind)) or (word is not None and related(created, stem(word.group(1))))
 
     def makes(resource: dict) -> bool:
-        return all(is_created(kind) for kind in resource.get("types") or [resource.get("type")])
+        return all(is_created(kind) for kind in _kinds(resource))
 
     made = [makes(resource) for resource in resources]
     if all(made) or not any(made):
         return resources
-    return [dict(resource, made=True) if is_made else resource for resource, is_made in zip(resources, made)]
+    return [dict(resource, made=True) if is_made else resource
+            for resource, is_made in zip(resources, made, strict=True)]
 
 
 def child_id(child: str, parent: str) -> str | None:
@@ -1019,9 +1032,10 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
     before = resource.get("before", "#")
     if not isinstance(before, str) or len(before) != 1:
         return [f"{operation} reads its members before {before!r}, which is no one character"]
-    kinds = resource.get("types") or [resource.get("type")]
-    if not all(isinstance(kind, str) and kind in types and kind in formats for kind in kinds):
-        return [f"{operation} names {kinds}, not resource types its action acts on with an ARN format"]
+    named = resource.get("types") or [resource.get("type")]
+    kinds = _kinds(resource)
+    if len(kinds) != len(named) or not all(kind in types and kind in formats for kind in kinds):
+        return [f"{operation} names {named}, not resource types its action acts on with an ARN format"]
     if "arn" in resource:
         if not isinstance(resource["arn"], str) or not ARN_PATH_RE.match(resource["arn"]):
             return [f"{operation} reads an ARN at {resource['arn']!r}, which is no member"]
@@ -1143,7 +1157,11 @@ def main(argv: list[str] | None = None) -> int:
         if not args.output.exists():
             print(f"error: {args.output} does not exist", file=sys.stderr)
             return 1
-        document = json.loads(args.output.read_text(encoding="utf-8"))
+        try:
+            document = json.loads(args.output.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            print(f"error: {_shown(args.output)} could not be read ({e})", file=sys.stderr)
+            return 1
         problems = validate(document)
         if not problems and args.check:
             data, _ = resolve_botocore_data(args.botocore_data)
