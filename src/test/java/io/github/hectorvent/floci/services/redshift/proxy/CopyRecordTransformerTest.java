@@ -93,6 +93,8 @@ class CopyRecordTransformerTest {
                 applyTemporal("-", false, temporal("YYYYMMDD", null, false), "a-20200102-c\n"));
         assertEquals("a:b:2020-01-02 12\\:30\\:00\n",
                 applyTemporal(":", false, temporal(null, "YYYYMMDD HHMISS", false), "a:b:20200102 123000\n"));
+        assertEquals("a 2003-03-31 2023-11-14\\ 22:13:20\n",
+                applyTemporal(" ", false, temporal("YYYY-MM-DD", "epochsecs", false), "a 2003-03-31 1700000000\n"));
     }
 
     @Test
@@ -101,6 +103,8 @@ class CopyRecordTransformerTest {
                 applyTemporal("-", true, temporal("YYYYMMDD", null, false), "a-20200102-c\n"));
         assertEquals("a:b:\"2020-01-02 12:30:00\"\n",
                 applyTemporal(":", true, temporal(null, "YYYYMMDD HHMISS", false), "a:b:20200102 123000\n"));
+        assertEquals("a 2003-03-31 \"2023-11-14 22:13:20\"\n",
+                applyTemporal(" ", true, temporal("YYYY-MM-DD", "epochsecs", false), "a 2003-03-31 1700000000\n"));
     }
 
     @Test
