@@ -240,12 +240,8 @@ class LambdaWebDataPlaneDockerIntegrationTest {
                 .body("headers.authorization", nullValue())
                 .body("headers.x-amz-security-token", nullValue())
                 .body("headers.x-amz-date", equalTo("20260101T000000Z"));
-    }
 
-    @Test
-    @Timeout(180)
-    void thePlatformWritesItsOwnDateInPlaceOfTheApps() throws Exception {
-        String domain = createFunction(30);
+        // The platform writes its own Date in place of the app's, as on AWS. A lowercase date passes beside it.
         String own = "Date: [A-Z][a-z]{2}, \\d{2} [A-Z][a-z]{2} \\d{4} \\d{2}:\\d{2}:\\d{2} GMT";
         String stale = "Thu, 01 Jan 2015 00:00:00 GMT";
 
