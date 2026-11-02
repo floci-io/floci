@@ -832,7 +832,8 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   The key's identity policy must allow `s3:ListBucket` and `s3:GetObject`, and any bucket policy must not deny
   the request (`42501` otherwise). With S3 authorization off the keys are ignored, so placeholder keys keep
   working, and a statement with no authorization clause reads S3 as an unsigned request. The keys are not
-  stored. Combining key credentials with `IAM_ROLE`, or giving only one of the pair, is
+  stored, and the statement text keeps them out of Floci's own messages. Combining key credentials with
+  `IAM_ROLE`, or giving only one of the pair, is
   not intercepted, and neither is a blank key, secret, token or role.
 - `EMPTYASNULL`, `BLANKSASNULL`, `REMOVEQUOTES` (not with `CSV` or `JSON`), `ACCEPTINVCHARS [AS 'c']`
   (default `?`, one ASCII character) and `TRUNCATECOLUMNS` rewrite field content before loading. Field

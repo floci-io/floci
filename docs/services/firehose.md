@@ -150,10 +150,13 @@ unterminated quote. One closing `;` at the very end is the exception (the API re
 
 A flush writes the batch to the intermediate S3 location, then runs
 `COPY <DataTableName> [(<DataTableColumns>)] FROM 's3://<bucket>/<key>' <CopyOptions>` against the cluster. A single
-closing `;` in `CopyOptions` is dropped from the statement. The `COPY` names no `IAM_ROLE`: AWS gives the cluster
-temporary credentials of the stream's `RoleARN`, and Floci instead lets the proxy read the staged object from its own
-S3, so `RoleARN` is validated and stored but not used for the load (an `IAM_ROLE` would have to exist in IAM and be
-associated with the cluster). The `COPY` goes through the cluster's wire proxy, so it behaves like a `COPY` sent by any
+closing `;` in `CopyOptions` is dropped from the statement. The `COPY` names no `IAM_ROLE`: as on AWS, the cluster is
+given temporary credentials of the stream's `RoleARN`, which need not be associated with it. When IAM knows the role,
+Floci mints a fresh short-lived session for every attempt, passes it as `CREDENTIALS 'aws_access_key_id=...;aws_secret_access_key=...;token=...'`
+and releases it afterwards, so the proxy reads the staged object as that role (see
+[Redshift COPY from S3](redshift.md#copy-from-s3)). The secret and token are masked in any error the delivery
+reports. When IAM does not know the role, which only passes with enforcement off, the `COPY` carries no credentials.
+The `COPY` goes through the cluster's wire proxy, so it behaves like a `COPY` sent by any
 other client (see [Redshift COPY from S3](redshift.md#copy-from-s3)). Credentials come from `Username` and `Password`,
 or from the secret in `SecretsManagerConfiguration` when `Enabled` is true (the secret JSON needs `username` and
 `password`). An empty `DataTableColumns` omits the column list, so the proxy discovers the table columns.
@@ -205,10 +208,6 @@ Floci does not write the `redshift_failed` manifest objects that AWS creates aft
   `RoleArn`, buffer hints). Those defaults are carried over from the probed S3 behavior and not probed for Redshift
   specifically. With `S3BackupMode` enabled, the backup object holds the untransformed source records, even when the
   Lambda processor drops every record.
-- The role checks above are authorization only: the `COPY` still carries no credentials, so the proxy reads the staged
-  object as an anonymous client. With S3
-  authorization enforced and a private intermediate bucket the load fails and the staged object stays in S3; use a
-  bucket the anonymous principal can read, or leave enforcement off.
 - `CopyOptions` are validated for shape only. The `COPY` emulation does not implement every Redshift option
   (`LZOP`, `BZIP2`, `ZSTD`, `PARQUET` and others): such a statement is forwarded to PostgreSQL and fails, and the staged
   object stays in S3; retrying failed loads will follow in a separate change. Firehose never writes an `LZOP` object,
