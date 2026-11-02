@@ -19,7 +19,6 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Answers;
 import org.mockito.Mockito;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -37,7 +36,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.zip.GZIPInputStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -126,16 +124,14 @@ class NodeAppSyncJsRuntimeTest {
     }
 
     @Test
-    void launchCommandCarriesBothScannerAssetsWithinTheShellArgumentLimit() throws IOException {
+    void launchCommandCarriesOnlyTheServerWithinTheShellArgumentLimit() throws IOException {
         String command = runtime.startCommand();
         assertTrue(command.length() < 128 * 1024, "container command exceeds Linux MAX_ARG_STRLEN");
 
         String[] sections = command.split("echo ");
-        assertEquals(3, sections.length);
-        assertTrue(sections[1].contains("| base64 -d | gzip -d > /tmp/acorn.mjs"));
-        assertTrue(sections[2].contains("| base64 -d | gzip -d > /tmp/floci-appsync-js-runtime.mjs"));
-        assertEquals(resource("appsync/acorn.mjs"), inflate(sections[1]));
-        assertEquals(resource("appsync/appsync-js-runtime.mjs"), inflate(sections[2]));
+        assertEquals(2, sections.length);
+        assertTrue(sections[1].contains("| base64 -d > /tmp/floci-appsync-js-runtime.mjs"));
+        assertEquals(resource("appsync/appsync-js-runtime.mjs"), decode(sections[1]));
     }
 
     private static String resource(String path) throws IOException {
@@ -144,12 +140,9 @@ class NodeAppSyncJsRuntimeTest {
         }
     }
 
-    private static String inflate(String section) throws IOException {
+    private static String decode(String section) {
         String encoded = section.substring(0, section.indexOf(' '));
-        try (GZIPInputStream in = new GZIPInputStream(
-                new ByteArrayInputStream(Base64.getDecoder().decode(encoded)))) {
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        }
+        return new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
     }
 
     @Test
@@ -158,8 +151,7 @@ class NodeAppSyncJsRuntimeTest {
         when(jsRuntime.containerName()).thenReturn("appsync-js-runtime-test");
         when(jsRuntime.dockerNetwork()).thenReturn(Optional.of("js-net"));
         when(containerBuilder.resolveDockerNetwork(Optional.of("js-net"))).thenReturn(Optional.of("js-net"));
-        String digest = Digests.sha256Hex(resource("appsync/appsync-js-runtime.mjs") + "\0"
-                + resource("appsync/acorn.mjs")).substring(0, 16);
+        String digest = Digests.sha256Hex(resource("appsync/appsync-js-runtime.mjs")).substring(0, 16);
         Container survivor = mock(Container.class);
         when(survivor.getId()).thenReturn("survivor");
         when(survivor.getLabels()).thenReturn(Map.of("io.floci.appsync.js-runtime.script", digest));
@@ -175,7 +167,7 @@ class NodeAppSyncJsRuntimeTest {
     }
 
     @Test
-    void aSidecarWithTheOldParserDigestIsReplaced() throws IOException {
+    void aSidecarWithAnOldScriptDigestIsReplaced() throws IOException {
         when(jsRuntime.url()).thenReturn(Optional.empty());
         when(jsRuntime.image()).thenReturn("node:22-alpine");
         when(jsRuntime.containerName()).thenReturn("appsync-js-runtime-test");
@@ -184,24 +176,22 @@ class NodeAppSyncJsRuntimeTest {
         when(jsRuntime.dockerNetwork()).thenReturn(Optional.empty());
         when(containerDetector.isRunningInContainer()).thenReturn(false);
 
-        String serverOnlyDigest = Digests.sha256Hex(resource("appsync/appsync-js-runtime.mjs"))
-                .substring(0, 16);
         Container stale = mock(Container.class);
-        when(stale.getId()).thenReturn("old-parser");
+        when(stale.getId()).thenReturn("old-script");
         when(stale.getLabels()).thenReturn(Map.of(
-                "io.floci.appsync.js-runtime.script", serverOnlyDigest));
+                "io.floci.appsync.js-runtime.script", "old-script-digest"));
         when(lifecycleManager.findByName(anyString())).thenReturn(Optional.of(stale));
 
         ContainerBuilder.Builder builder =
                 mock(ContainerBuilder.Builder.class, withSettings().defaultAnswer(Answers.RETURNS_SELF));
         when(containerBuilder.newContainer(anyString())).thenReturn(builder);
         when(builder.build()).thenReturn(new ContainerSpec("test-image"));
-        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("new-parser",
+        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerInfo("new-script",
                 Map.of(4600, new EndpointInfo("127.0.0.1", server.getAddress().getPort()))));
 
         runtime.ensureStarted();
 
-        verify(lifecycleManager).stopAndRemove("old-parser", null);
+        verify(lifecycleManager).stopAndRemove("old-script", null);
         verify(lifecycleManager, never()).adopt(anyString(), any(), any());
         verify(lifecycleManager).createAndStart(any());
     }

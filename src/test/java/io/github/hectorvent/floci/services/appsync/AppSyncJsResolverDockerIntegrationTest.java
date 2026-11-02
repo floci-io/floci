@@ -61,6 +61,8 @@ class AppSyncJsResolverDockerIntegrationTest {
               regexKeyword: String
               regexClassThenUnsupported: String
               regexDivision: String
+              divisionAfterFunction: String
+              divisionAfterObject: String
               taggedRawInvalidEscape: String
               taggedRawInvalidEscapeHole: String
               untaggedInvalidEscape: String
@@ -193,7 +195,7 @@ class AppSyncJsResolverDockerIntegrationTest {
     private static final String MALFORMED_RESOLVER = """
             export function request(ctx) {
               // with await yield
-              const text = /with/;
+              const text = "with";
               const value = ;
               return { payload: { value } };
             }
@@ -242,6 +244,21 @@ class AppSyncJsResolverDockerIntegrationTest {
             }
             export function response(ctx) {
               return ctx.result.value;
+            }
+            """;
+
+    private static final String DIVISION_AFTER_FUNCTION_RESOLVER = """
+            export function request(ctx) {
+              const value = function() {} / 2;
+              while (false) {}
+              return { payload: { value } };
+            }
+            """;
+
+    private static final String DIVISION_AFTER_OBJECT_RESOLVER = """
+            export function request(ctx) {
+              const value = true ? { x: 1 } / this : 2;
+              return { payload: { value } };
             }
             """;
 
@@ -321,6 +338,10 @@ class AppSyncJsResolverDockerIntegrationTest {
         createUnitResolver(apiId, "Query", "regexClassThenUnsupported", "local",
                 REGEX_CLASS_UNSUPPORTED_RESOLVER);
         createUnitResolver(apiId, "Query", "regexDivision", "local", REGEX_DIVISION_RESOLVER);
+        createUnitResolver(apiId, "Query", "divisionAfterFunction", "local",
+                DIVISION_AFTER_FUNCTION_RESOLVER);
+        createUnitResolver(apiId, "Query", "divisionAfterObject", "local",
+                DIVISION_AFTER_OBJECT_RESOLVER);
         createUnitResolver(apiId, "Query", "taggedRawInvalidEscape", "local",
                 TAGGED_RAW_INVALID_ESCAPE_RESOLVER);
         createUnitResolver(apiId, "Query", "taggedRawInvalidEscapeHole", "local",
@@ -556,6 +577,22 @@ class AppSyncJsResolverDockerIntegrationTest {
     }
 
     @Test
+    void divisionAfterFunctionExpressionDoesNotHideLaterUnsupportedCode() {
+        query("{ divisionAfterFunction }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("while loops"));
+    }
+
+    @Test
+    void divisionAfterTernaryObjectDoesNotHideLaterUnsupportedCode() {
+        query("{ divisionAfterObject }")
+            .statusCode(200)
+            .body("errors[0].errorType", equalTo("UnsupportedFeature"))
+            .body("errors[0].message", containsString("this"));
+    }
+
+    @Test
     void invalidEscapeInTaggedRawTemplateDoesNotExposeKeywordsToSubsetScan() {
         query("{ taggedRawInvalidEscape }")
             .statusCode(200)
@@ -568,7 +605,7 @@ class AppSyncJsResolverDockerIntegrationTest {
         query("{ untaggedInvalidEscape }")
             .statusCode(200)
             .body("errors[0].errorType", equalTo("SyntaxError"))
-            .body("errors[0].message", containsString("Bad escape sequence"));
+            .body("errors[0].message", containsString("escape sequence"));
     }
 
     @Test

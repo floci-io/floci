@@ -21,8 +21,6 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import { registerHooks } from 'node:module';
-// Acorn 8.15.0 (MIT); the vendored distribution and license travel with this script.
-import { parse } from './acorn.mjs';
 
 const PORT = Number(process.env.FLOCI_JS_RUNTIME_PORT || 4600);
 const ROOT = process.env.FLOCI_JS_RUNTIME_DIR || '/tmp/floci-appsync';
@@ -458,34 +456,193 @@ const BANNED_CONSTRUCTS = [
   [/(?<![.\w$])Promise(?![\w$])/, 'promises']
 ];
 
-const PARSE_FAILURE_BANS = [
-  ["'with' in strict mode", 'with', 'with statements'],
-  ["Cannot use keyword 'await' outside an async function", 'await', 'await'],
-  ["The keyword 'yield' is reserved", 'yield', 'generators']
-];
-
-// Acorn resolves slash as division or regex using full JavaScript syntax, including template
-// holes. Preserve offsets so the existing construct checks report the original line numbers.
+// Keep offsets while hiding text that is not executable JavaScript. Template holes are scanned
+// separately so braces and slashes in template text or regex character classes cannot close one.
 function blankLiterals(src) {
   const out = src.split('');
   let regexStart = -1;
+  const wordAt = /^[$_\p{ID_Start}][$\u200c\u200d\p{ID_Continue}]*/u;
+  const numberAt = /^(?:0[xX][\da-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|(?:\d[\d_]*(?:\.[\d_]*)?|\.[\d_]+)(?:[eE][+-]?[\d_]+)?)(?:n)?/;
+  const regexPrefixWords = new Set([
+    'return', 'throw', 'case', 'delete', 'void', 'typeof', 'instanceof', 'new',
+    'in', 'await', 'yield', 'else', 'do', 'var', 'let', 'const', 'export',
+    'default', 'import', 'function', 'extends'
+  ]);
+  const controlWords = new Set(['if', 'while', 'for', 'switch', 'catch', 'with']);
   const blank = (from, to) => {
     for (let i = from; i < to && i < out.length; i++) {
       if (out[i] !== '\n') out[i] = ' ';
     }
   };
-  parse(src, {
-    ecmaVersion: 'latest',
-    sourceType: 'module',
-    onComment: (_block, _text, start, end) => blank(start, end),
-    onToken: (token) => {
-      if (token.type.label === 'regexp' && regexStart === -1) regexStart = token.start;
-      if (token.type.label === 'string' || token.type.label === 'regexp'
-        || token.type.label === 'template' || token.type.label === 'invalidTemplate') {
-        blank(token.start, token.end);
+
+  function scanTemplate(start) {
+    let i = start + 1;
+    let textStart = start;
+    while (i < src.length) {
+      if (src[i] === '\\') { i += 2; continue; }
+      if (src[i] === '`') {
+        blank(textStart, i + 1);
+        return i + 1;
+      }
+      if (src[i] === '$' && src[i + 1] === '{') {
+        blank(textStart, i + 2);
+        i = scanCode(i + 2, true);
+        textStart = i;
+        continue;
+      }
+      i++;
+    }
+    blank(textStart, src.length);
+    return src.length;
+  }
+
+  function scanCode(start, inTemplateHole) {
+    let i = start;
+    let canEndExpression = false;
+    let lastToken = '';
+    let lastControlWord = '';
+    let memberName = false;
+    let pendingFunctionExpression = null;
+    let functionBodyExpression = null;
+    const parens = [];
+    const braces = [];
+    while (i < src.length) {
+      const c = src[i];
+      const next = src[i + 1];
+      if (/\s/.test(c)) { i++; continue; }
+      if (c === '/' && next === '/') {
+        const end = src.indexOf('\n', i);
+        const stop = end === -1 ? src.length : end;
+        blank(i, stop);
+        i = stop;
+        continue;
+      }
+      if (c === '/' && next === '*') {
+        const end = src.indexOf('*/', i + 2);
+        const stop = end === -1 ? src.length : end + 2;
+        blank(i, stop);
+        i = stop;
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        let j = i + 1;
+        while (j < src.length && src[j] !== c) {
+          if (src[j] === '\\') j++;
+          j++;
+        }
+        j = Math.min(j + 1, src.length);
+        blank(i, j);
+        i = j;
+        canEndExpression = true;
+        lastToken = 'value';
+      } else if (c === '`') {
+        i = scanTemplate(i);
+        canEndExpression = true;
+        lastToken = 'value';
+      } else if (c === '/' && !canEndExpression) {
+        let j = i + 1;
+        let inClass = false;
+        let closed = false;
+        while (j < src.length && src[j] !== '\n' && src[j] !== '\r') {
+          if (src[j] === '\\') { j += 2; continue; }
+          if (src[j] === '[') inClass = true;
+          else if (src[j] === ']') inClass = false;
+          else if (src[j] === '/' && !inClass) { j++; closed = true; break; }
+          j++;
+        }
+        if (closed) {
+          while (j < src.length && /[a-z]/i.test(src[j])) j++;
+          if (regexStart === -1) regexStart = i;
+        }
+        blank(i, j);
+        i = j;
+        canEndExpression = true;
+        lastToken = 'value';
+      } else if (c === '/') {
+        i += next === '=' ? 2 : 1;
+        canEndExpression = false;
+        lastToken = '/';
+      } else if (c === '}' && inTemplateHole && braces.length === 0) {
+        blank(i, i + 1);
+        return i + 1;
+      } else if (c === '(') {
+        parens.push(pendingFunctionExpression === null ? lastControlWord
+          : pendingFunctionExpression ? 'function-expression' : 'function-declaration');
+        pendingFunctionExpression = null;
+        i++;
+        canEndExpression = false;
+        lastToken = '(';
+      } else if (c === ')') {
+        const context = parens.pop();
+        if (context === 'function-expression' || context === 'function-declaration') {
+          functionBodyExpression = context === 'function-expression';
+        }
+        canEndExpression = context === '';
+        i++;
+        lastToken = ')';
+      } else if (c === '[') {
+        i++;
+        canEndExpression = false;
+        lastToken = '[';
+      } else if (c === ']') {
+        i++;
+        canEndExpression = true;
+        lastToken = ']';
+      } else if (c === '{') {
+        const afterOperator = ['=', '(', '[', ',', ':', 'return', '?', '&', '|',
+          '+', '-', '*', '/', '%', '!', '~', '^', '<', '>'].includes(lastToken);
+        braces.push(functionBodyExpression ?? afterOperator);
+        functionBodyExpression = null;
+        i++;
+        canEndExpression = false;
+        lastToken = '{';
+      } else if (c === '}') {
+        canEndExpression = braces.pop() ?? false;
+        i++;
+        lastToken = '}';
+      } else if (c === '.' || (c === '?' && next === '.')) {
+        i += c === '?' ? 2 : 1;
+        canEndExpression = false;
+        lastToken = '.';
+        memberName = true;
+      } else {
+        const word = wordAt.exec(src.slice(i));
+        const number = !word && numberAt.exec(src.slice(i));
+        if (word) {
+          const value = word[0];
+          if (value === 'function' && !memberName) {
+            pendingFunctionExpression = ['=', '(', '[', ',', ':', 'return', '?', '&', '|', '>']
+              .includes(lastToken);
+          }
+          const keyword = !memberName && regexPrefixWords.has(value);
+          const forOf = value === 'of' && parens.at(-1) === 'for';
+          canEndExpression = !keyword && !forOf;
+          lastControlWord = !memberName && controlWords.has(value) ? value : '';
+          lastToken = value;
+          i += value.length;
+        } else if (number) {
+          i += number[0].length;
+          canEndExpression = true;
+          lastToken = 'value';
+        } else if ((c === '+' && next === '+') || (c === '-' && next === '-')) {
+          i += 2;
+          lastToken = c + next;
+        } else {
+          i++;
+          canEndExpression = false;
+          lastToken = c;
+        }
+      }
+      if (lastToken !== '.') memberName = false;
+      if (lastToken !== 'if' && lastToken !== 'while' && lastToken !== 'for'
+        && lastToken !== 'switch' && lastToken !== 'catch' && lastToken !== 'with') {
+        lastControlWord = '';
       }
     }
-  });
+    return i;
+  }
+
+  scanCode(0, false);
   return { scanned: out.join(''), regexStart };
 }
 
@@ -499,17 +656,7 @@ function unsupportedConstruct(description, line) {
 }
 
 function validateAppSyncSubset(code) {
-  let literals;
-  try {
-    literals = blankLiterals(code);
-  } catch (error) {
-    // Acorn rejects these constructs before the subset scan can report them.
-    const banned = error instanceof SyntaxError && PARSE_FAILURE_BANS.find(
-      ([message, keyword]) => error.message.startsWith(message)
-        && code.slice(error.pos, error.pos + keyword.length) === keyword);
-    if (!banned) throw error;
-    return unsupportedConstruct(banned[2], error.loc.line);
-  }
+  const literals = blankLiterals(code);
   for (const [pattern, description] of BANNED_CONSTRUCTS) {
     const match = pattern.exec(literals.scanned);
     if (match) {
