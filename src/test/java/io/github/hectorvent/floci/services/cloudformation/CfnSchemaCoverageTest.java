@@ -1,7 +1,5 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudformation.provisioners.CfnResourceProvisioner;
 import io.github.hectorvent.floci.testing.MainSources;
 import org.junit.jupiter.api.Test;
@@ -17,7 +15,6 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -26,6 +23,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Pins the two halves of what the CloudFormation registry schemas declare and Floci does not
@@ -37,6 +37,11 @@ import java.util.stream.Stream;
  * receives that string as a value instead of failing. An ignored property is invisible the same
  * way: the template validates and the value goes nowhere. Recording the gaps makes each set a
  * ratchet: closing one deletes a row, and introducing one has to add a row where a reviewer sees it.
+ *
+ * <p>The schemas are read from {@code schema-surface.tsv}, the part of them this test uses, committed
+ * so the check runs on every pull request. {@code make cfn-schema-surface-sync} regenerates it from
+ * AWS's published archive and {@code make cfn-schema-surface-verify} compares it, weekly in
+ * {@code cfn-schema-drift.yml}.
  *
  * <p>Not a parity assertion. Several rows are attributes Floci cannot set because it does not
  * emulate the underlying behaviour, and each carries the reason. The property rows start as
@@ -55,7 +60,8 @@ class CfnSchemaCoverageTest {
             Path.of("src/test/resources/cloudformation/getatt-attribute-gaps.tsv");
     private static final Path PROPERTY_GAPS =
             Path.of("src/test/resources/cloudformation/writable-property-gaps.tsv");
-    private static final Path SCHEMA_DIR = Path.of("local/aws/cfn-resource-schemas/us-east-1");
+    private static final Path SCHEMA_SURFACE =
+            Path.of("src/test/resources/cloudformation/schema-surface.tsv");
     private static final Path PROVISIONERS = MainSources.packageDir(CfnResourceProvisioner.class);
 
     /**
@@ -133,30 +139,54 @@ class CfnSchemaCoverageTest {
             "toCamelCase(resolved,",
             "requestBody(props, ctx)");
     private static final String ALL_PROPERTIES = "*";
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /** What the registry schemas declare for one resource type, see {@link #schemaSurface}. */
+    private record SchemaSurface(Set<String> readOnly, Set<String> writable) { }
 
     /**
-     * The check needs the schema corpus, which lives under the gitignored {@code local/}. Absent in
-     * CI, so this is a local correctness aid; the checked-in gaps file is what CI reviews.
+     * The committed surface has a row for each inventory type with a schema and for nothing else, so a
+     * new type cannot slip past the ratchet for want of a row.
      */
-    private static boolean schemasAvailable() {
-        return Files.isDirectory(SCHEMA_DIR);
+    @Test
+    void schemaSurfaceCoversExactlyTheInventory() {
+        Set<String> rows = schemaSurface().keySet();
+        Set<String> expected = new TreeSet<>(inventory().keySet());
+        expected.removeAll(TYPES_WITHOUT_SCHEMA);
+        Set<String> missing = new TreeSet<>(expected);
+        missing.removeAll(rows);
+        Set<String> extra = new TreeSet<>(rows);
+        extra.removeAll(expected);
+
+        if (!missing.isEmpty() || !extra.isEmpty()) {
+            throw new AssertionError(SCHEMA_SURFACE + " does not match " + INVENTORY + ". No row for: "
+                    + missing + ". Row for a type that is not in the inventory or has no schema: " + extra
+                    + ". Run 'make cfn-schema-surface-sync' and commit the result; a type with no registry "
+                    + "schema is declared in TYPES_WITHOUT_SCHEMA.");
+        }
+    }
+
+    @Test
+    void aDuplicateTypeRowIsRefused() {
+        AssertionError e = assertThrows(AssertionError.class, () -> parseSchemaSurface(
+                List.of("AWS::SQS::Queue\tQueueUrl\tDelaySeconds", "AWS::SQS::Queue\t\t")));
+        assertTrue(e.getMessage().contains("AWS::SQS::Queue"), e.getMessage());
+    }
+
+    @Test
+    void anEmptyNameIsRefused() {
+        for (String row : List.of("AWS::SQS::Queue\ta,,b\t", "AWS::SQS::Queue\t\ta,", "AWS::SQS::Queue\t,a\t")) {
+            assertThrows(AssertionError.class, () -> parseSchemaSurface(List.of(row)), row);
+        }
     }
 
     @Test
     void recordedGapsMatchWhatTheProvisionersActuallySet() {
-        if (!schemasAvailable()) {
-            return;
-        }
         assertSameLines(render(recordedGaps()), render(actualGaps()));
     }
 
     /** A row that has been fixed, or was never real, must be deleted rather than left behind. */
     @Test
     void everyRecordedGapIsStillReal() {
-        if (!schemasAvailable()) {
-            return;
-        }
         Map<String, String> actual = actualGaps();
         List<String> stale = recordedGaps().keySet().stream()
                 .filter(key -> !actual.containsKey(key))
@@ -185,9 +215,6 @@ class CfnSchemaCoverageTest {
 
     @Test
     void recordedPropertyGapsMatchWhatTheProvisionersActuallyRead() {
-        if (!schemasAvailable()) {
-            return;
-        }
         assertSameLines(render(recordedPropertyGaps()), render(actualPropertyGaps()),
                 "The set of ignored writable schema properties changed.",
                 "(a provisioner stopped reading a declared property, or a new type arrived with one "
@@ -198,9 +225,6 @@ class CfnSchemaCoverageTest {
     /** A property a provisioner now reads must lose its row rather than keep claiming to be ignored. */
     @Test
     void everyRecordedPropertyGapIsStillReal() {
-        if (!schemasAvailable()) {
-            return;
-        }
         Map<String, String> actual = actualPropertyGaps();
         List<String> stale = recordedPropertyGaps().keySet().stream()
                 .filter(key -> !actual.containsKey(key))
@@ -625,36 +649,22 @@ class CfnSchemaCoverageTest {
         return source.substring(open);
     }
 
-    /** No schema file: fine for a declared schema-less type, a failure naming the type otherwise. */
-    private static Set<String> missingSchema(String resourceType) {
+    /** No schema row: fine for a declared schema-less type, a failure naming the type otherwise. */
+    private static SchemaSurface missingSchema(String resourceType) {
         if (!TYPES_WITHOUT_SCHEMA.contains(resourceType)) {
-            throw new AssertionError("No registry schema file for " + resourceType + " in " + SCHEMA_DIR
-                    + ", so its attributes and properties would go unchecked. Fix the type name, or "
-                    + "declare it in TYPES_WITHOUT_SCHEMA.");
+            throw new AssertionError("No registry schema row for " + resourceType + " in " + SCHEMA_SURFACE
+                    + ", so its attributes and properties would go unchecked. Run "
+                    + "'make cfn-schema-surface-sync', fix the type name, or declare it in TYPES_WITHOUT_SCHEMA.");
         }
-        return Set.of();
+        return new SchemaSurface(Set.of(), Set.of());
     }
 
-    /** Top-level read-only properties only: a nested pointer is not a GetAtt attribute name. */
+    /**
+     * Top-level read-only properties only: a nested pointer is not a GetAtt attribute name. They are
+     * the attributes the schema declares.
+     */
     private static Set<String> schemaReadOnlyAttributes(String resourceType) {
-        Path schema = SCHEMA_DIR.resolve(
-                resourceType.replace("::", "-").toLowerCase(Locale.ROOT) + ".json");
-        if (!Files.exists(schema)) {
-            return missingSchema(resourceType);
-        }
-        try {
-            JsonNode root = MAPPER.readTree(Files.readString(schema, StandardCharsets.UTF_8));
-            Set<String> attributes = new LinkedHashSet<>();
-            for (JsonNode pointer : root.path("readOnlyProperties")) {
-                String[] parts = pointer.asText().split("/");
-                if (parts.length == 3) {
-                    attributes.add(parts[2]);
-                }
-            }
-            return attributes;
-        } catch (IOException e) {
-            throw new UncheckedIOException("Cannot read " + schema, e);
-        }
+        return surfaceOf(resourceType).readOnly();
     }
 
     /**
@@ -663,30 +673,65 @@ class CfnSchemaCoverageTest {
      * as nested pointers are for the attributes.
      */
     private static Set<String> schemaWritableProperties(String resourceType) {
-        Path schema = SCHEMA_DIR.resolve(
-                resourceType.replace("::", "-").toLowerCase(Locale.ROOT) + ".json");
-        if (!Files.exists(schema)) {
-            return missingSchema(resourceType);
-        }
+        return surfaceOf(resourceType).writable();
+    }
+
+    private static SchemaSurface surfaceOf(String resourceType) {
+        SchemaSurface surface = schemaSurface().get(resourceType);
+        return surface != null ? surface : missingSchema(resourceType);
+    }
+
+    /**
+     * The committed part of the registry schemas this test compares against, one row per type:
+     * "type&lt;TAB&gt;read-only attributes&lt;TAB&gt;writable properties", the names comma separated.
+     * Generated by {@code make cfn-schema-surface-sync}; see {@code tools/aws/regen_cfn_schema_surface.py}.
+     */
+    private static Map<String, SchemaSurface> schemaSurface() {
         try {
-            JsonNode root = MAPPER.readTree(Files.readString(schema, StandardCharsets.UTF_8));
-            Set<String> excluded = new HashSet<>(schemaReadOnlyAttributes(resourceType));
-            for (JsonNode pointer : root.path("deprecatedProperties")) {
-                String[] parts = pointer.asText().split("/");
-                if (parts.length == 3) {
-                    excluded.add(parts[2]);
-                }
-            }
-            Set<String> writable = new TreeSet<>();
-            root.path("properties").fieldNames().forEachRemaining(name -> {
-                if (!excluded.contains(name)) {
-                    writable.add(name);
-                }
-            });
-            return writable;
+            return parseSchemaSurface(Files.readAllLines(SCHEMA_SURFACE, StandardCharsets.UTF_8));
         } catch (IOException e) {
-            throw new UncheckedIOException("Cannot read " + schema, e);
+            throw new UncheckedIOException("Cannot read " + SCHEMA_SURFACE, e);
         }
+    }
+
+    /**
+     * Parses the rows of the committed surface. A repeated type or an empty name is refused: a later row
+     * would silently replace an earlier one, emptying its checks, and an empty name matches nothing.
+     */
+    static Map<String, SchemaSurface> parseSchemaSurface(List<String> lines) {
+        Map<String, SchemaSurface> surface = new TreeMap<>();
+        for (String line : lines) {
+            if (line.isBlank()) {
+                continue;
+            }
+            String[] parts = line.split("\t", -1);
+            if (parts.length != 3) {
+                throw new AssertionError("Expected 'type<TAB>attributes<TAB>properties' in "
+                        + SCHEMA_SURFACE + " but found: " + line);
+            }
+            if (parts[0].isBlank()) {
+                throw new AssertionError("A row in " + SCHEMA_SURFACE + " has no type: " + line);
+            }
+            if (surface.put(parts[0], new SchemaSurface(names(parts[1], line), names(parts[2], line))) != null) {
+                throw new AssertionError("Two rows for " + parts[0] + " in " + SCHEMA_SURFACE
+                        + "; the later would replace the earlier. Run 'make cfn-schema-surface-sync'.");
+            }
+        }
+        return surface;
+    }
+
+    private static Set<String> names(String commaSeparated, String line) {
+        if (commaSeparated.isEmpty()) {
+            return Set.of();
+        }
+        Set<String> names = new TreeSet<>();
+        for (String name : commaSeparated.split(",", -1)) {
+            if (name.isBlank()) {
+                throw new AssertionError("An empty name in a row of " + SCHEMA_SURFACE + ": " + line);
+            }
+            names.add(name);
+        }
+        return names;
     }
 
     private static Map<String, String> inventory() {
