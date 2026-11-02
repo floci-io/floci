@@ -44,7 +44,7 @@ A request identifies its target cluster or serverless workgroup one of three way
 
 A statement run against a workgroup reports `WorkgroupName` and omits `ClusterIdentifier`, and the reverse holds for a cluster statement. `ListDatabases`, `ListSchemas`, `ListTables` and `DescribeTable` accept `WorkgroupName` the same way.
 
-Under IAM enforcement, `ExecuteStatement`, `BatchExecuteStatement`, `ListDatabases`, `ListSchemas`, `ListTables` and `DescribeTable` are checked on the cluster's ARN, or on the ARN of the workgroup `WorkgroupName` names, `workgroup/<id>`, whichever form it takes; a workgroup that does not exist is checked on `workgroup/*`, and a request naming only a `SessionId` on `*`.
+Under IAM enforcement, `ExecuteStatement`, `BatchExecuteStatement`, `ListDatabases`, `ListSchemas`, `ListTables` and `DescribeTable` are checked on the cluster's ARN, or on the ARN of the workgroup `WorkgroupName` names, `workgroup/<id>`, whichever form it takes; a workgroup that does not exist is checked on `workgroup/*`. `ExecuteStatement` and `BatchExecuteStatement` naming a `SessionId` are checked on the cluster or workgroup the caller's session runs on, so a grant or a deny on that target covers every statement in the session, and on `*` when the caller has no such session.
 
 ## Session reuse
 

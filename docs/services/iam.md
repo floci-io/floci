@@ -1676,8 +1676,10 @@ on `scalable-target/*` when there is none yet, as for a `RegisterScalableTarget`
 its tag operations name it by its ARN. A Redshift Data API request is checked on the cluster its
 `ClusterIdentifier` names, or on the ARN of the Redshift Serverless workgroup its `WorkgroupName`
 names by name or by ARN, which ends in the id Redshift Serverless gives it, `workgroup/<id>`, and on
-`workgroup/*` when there is no such workgroup; one naming only its session, by `SessionId`, is
-checked on `*`. EventBridge V2's API, which Floci does not serve, is not read. A
+`workgroup/*` when there is no such workgroup; one naming its session, by `SessionId`, on the
+cluster or workgroup the caller's session runs on, and on `*` when the caller has no such session.
+EventBridge V2's requests are read beside EventBridge's, each checked on the resources the API serving
+it names (an EventBridge V2 `PutEvents` on the bus its `EventBusArn` names). A
 state machine's version or alias
 (`stateMachine:<name>:<qualifier>`) is checked on the state machine's ARN, as Step Functions
 authorizes it, so a grant or a deny on `stateMachine:<name>` covers its versions and aliases, and

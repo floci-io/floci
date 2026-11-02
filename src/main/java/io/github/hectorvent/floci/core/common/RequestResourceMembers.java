@@ -49,6 +49,8 @@ final class RequestResourceMembers {
     private static final Pattern APPENDED_ID = Pattern.compile("[/:]\\$\\{\\w+}");
     /** The keys a resource found by members does not take: it is read no other way, in the caller's account. */
     private static final List<String> FOUND_ONLY = List.of("absent", "arnOf", "account", "fixed", "before");
+    /** The keys of a resource named through a member naming another of its service's own: it is read no other way. */
+    private static final Set<String> THROUGH_KEYS = Set.of("types", "through", "endpoint");
 
     /**
      * A top-level request member that holds a string, or a list of them when {@code list}, or, with a
@@ -131,17 +133,19 @@ final class RequestResourceMembers {
      * and read no other way, in the caller's account (a scalable target by its service namespace, resource id and
      * scalable dimension). A resource with an {@code endpoint} applies only to a request the service of that endpoint
      * prefix serves, where two APIs share the operation's name and nothing in a request tells them apart
-     * (EventBridge's {@code events} and EventBridge V2's {@code eventsv2}); null for every request.
+     * (EventBridge's {@code events} and EventBridge V2's {@code eventsv2}); null for every request. A resource of one
+     * of {@code types} may be named {@code through} a member of one value naming a resource of its service's own the
+     * table gives no type, which runs on it (a Data API session, by its {@code SessionId}), and read no other way.
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
                     Member account, String before, Map<String, String> fixed, boolean made, List<Member> find,
-                    String endpoint) {
+                    String endpoint, Member through) {
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                  Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
                  Member account, String before, Map<String, String> fixed, boolean made, String endpoint) {
-            this(types, arn, fill, when, unless, absent, arnOf, account, before, fixed, made, List.of(), endpoint);
+            this(types, arn, fill, when, unless, absent, arnOf, account, before, fixed, made, List.of(), endpoint, null);
         }
     }
 
@@ -260,6 +264,18 @@ final class RequestResourceMembers {
             throw new IllegalStateException(RESOURCE_NAME + " reads a member for " + operation
                     + " before " + before + ", no one character");
         }
+        if (resource.has("through")) {
+            List<String> types = resource.path("types").valueStream().map(JsonNode::asText).toList();
+            Member through = member(operation, resource.path("through").asText(""));
+            if (types.isEmpty() || !formats.keySet().containsAll(types) || through.list() || resource.properties()
+                    .stream().map(Map.Entry::getKey).anyMatch(key -> !THROUGH_KEYS.contains(key))) {
+                throw new IllegalStateException(RESOURCE_NAME + " names a resource of " + operation + " through "
+                        + resource.path("through") + ", no member of one value naming types with a format, or beside "
+                        + "members reading it otherwise");
+            }
+            return new Resource(types, null, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of(),
+                    false, List.of(), endpoint, through);
+        }
         if (resource.has("arn")) {
             List<String> types = resource.path("types").valueStream().map(JsonNode::asText).toList();
             if (types.isEmpty() || !formats.keySet().containsAll(types)) {
@@ -338,7 +354,7 @@ final class RequestResourceMembers {
                     + " from " + account.name() + ", no member of one account or a type of none");
         }
         return new Resource(List.of(type), null, Map.copyOf(fill), when, unless, Map.copyOf(absent), Map.copyOf(arnOf),
-                account, before, Map.copyOf(fixed), made, List.copyOf(find), endpoint);
+                account, before, Map.copyOf(fixed), made, List.copyOf(find), endpoint, null);
     }
 
     /** The values each member named in {@code when} or {@code unless} may have, an empty one for the member absent. */
