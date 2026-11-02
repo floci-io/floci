@@ -83,8 +83,8 @@ starts ContainerCaBundleDockerIntegrationTest && [ -n "$CORRETTO_8_IMAGE" ] && p
 # The Firelens test names the log router image itself rather than taking it from config.
 FLUENT_BIT_IMAGE="$(test_image FLUENT_BIT)"
 starts EcsContainerManagerFirelensDockerIntegrationTest && [ -n "$FLUENT_BIT_IMAGE" ] && pull "$FLUENT_BIT_IMAGE"
-# ECR Public images, in queue order: the Lambda runtimes by size. They are the only images left
-# on ECR Public; everything Docker Hub also carries is pulled from there (see TestImages).
+# ECR Public images, in queue order: the Lambda runtimes by size, then EMR's. They are the only images
+# left on ECR Public; everything Docker Hub also carries is pulled from there (see TestImages).
 # Lambda runtimes, measured from a full four-shard run by pairing each ImageCacheService
 # "Pulling image" / "Image already present locally" line with the class that logged it.
 # nodejs:20 is the runtime the API Gateway, ELBv2 and Lambda integration tests resolve and every
@@ -94,6 +94,9 @@ grep -qE '/apigateway/|/apigatewayv2/|/lambda/' "$SHARD_FILE" && ecr public.ecr.
 grep -qE '/lambdaweb/' "$SHARD_FILE" && ecr public.ecr.aws/lambda/nodejs:24
 starts SwfLambdaIntegrationTest && ecr public.ecr.aws/lambda/python:3.12
 starts ElbV2LambdaTargetDataPlaneIntegrationTest && ecr public.ecr.aws/lambda/python:3.14
+# EmrDockerRunnerDockerIntegrationTest runs EMR steps and EMR Serverless job runs in the emr-7.5.0 image the runner's
+# default template names (EmrServerlessSparkRunner), 3.5 GB, so it is queued last, behind the Lambda runtimes.
+starts EmrDockerRunnerDockerIntegrationTest && ecr public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest
 
 # package token in shard.txt -> images its tests are known to launch
 # (measured inline pulls; update alongside image-catalog changes)
