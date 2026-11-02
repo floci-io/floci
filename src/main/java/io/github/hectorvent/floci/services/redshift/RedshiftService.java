@@ -110,6 +110,7 @@ public class RedshiftService implements ManagedSecretRotator {
     private final RedshiftAuditLogPublisher auditLogPublisher;
     private final RedshiftEventService events;
     private final RedshiftIntegrationEventPublisher integrationEvents;
+    private final Ec2Service ec2Service;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<ResourceKey, ResourceLock> resourceLocks = new ConcurrentHashMap<>();
@@ -185,10 +186,6 @@ public class RedshiftService implements ManagedSecretRotator {
         }
     }
 
-    // Field-injected so the many hand-built test constructions need not supply EC2; null skips resolution.
-    @Inject
-    Ec2Service ec2Service;
-
     @Inject
     public RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
                             EmulatorConfig config, RegionResolver regionResolver,
@@ -196,7 +193,8 @@ public class RedshiftService implements ManagedSecretRotator {
                             RedshiftCredentialBroker credentialBroker,
                             SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
                             DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher,
-                            RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents) {
+                            RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents,
+                            Ec2Service ec2Service) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.snapshotCopies = storageFactory.create("redshift", "redshift-snapshot-copies.json", new TypeReference<Map<String, Snapshot>>() {});
@@ -219,6 +217,19 @@ public class RedshiftService implements ManagedSecretRotator {
         this.auditLogPublisher = auditLogPublisher;
         this.events = events;
         this.integrationEvents = integrationEvents;
+        this.ec2Service = ec2Service;
+    }
+
+    // Hand-built test constructions need not supply EC2; a null ec2Service skips subnet resolution.
+    RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
+                    EmulatorConfig config, RegionResolver regionResolver, RedshiftProxyManager proxyManager,
+                    DockerHostResolver dockerHostResolver, RedshiftCredentialBroker credentialBroker,
+                    SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
+                    DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher,
+                    RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents) {
+        this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
+                credentialBroker, secretsManagerService, objectMapper, streamReader, auditLogPublisher, events,
+                integrationEvents, null);
     }
 
     RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
