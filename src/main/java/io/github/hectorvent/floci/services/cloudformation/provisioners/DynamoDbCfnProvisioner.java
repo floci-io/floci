@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeType;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
@@ -124,7 +125,10 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         String tableName = ctx.stablePhysicalName(ctx.resolveOptional(props, "TableName"),
                 r.getLogicalId(), TABLE_NAME_MAX_LENGTH, false);
         JsonNode ttlSpec = props != null ? engine.resolveNode(props.get("TimeToLiveSpecification")) : null;
-        boolean ttlDeclared = ttlSpec != null && ttlSpec.isObject();
+        boolean ttlDeclared = ttlSpec != null && !ttlSpec.isNull();
+        if (ttlDeclared) {
+            CfnPropertyTypes.requireType("TimeToLiveSpecification", ttlSpec, JsonNodeType.OBJECT);
+        }
         // A stack that never declared TTL leaves it alone, as AWS does, so TTL set outside the stack
         // survives an update; removing a block the previous template declared turns TTL off.
         boolean ttlManaged = ttlDeclared || ctx.previouslyDeclared("TimeToLiveSpecification");
