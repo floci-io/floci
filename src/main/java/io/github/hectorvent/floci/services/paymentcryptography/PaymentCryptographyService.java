@@ -195,12 +195,13 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     /**
      * Removes a key and answers the key as the service does when a deletion is
      * scheduled: the key's own metadata, its state {@code DELETE_PENDING} and
-     * the moment it is deleted.
+     * the pending timestamp of that deletion.
      *
      * <p>The service deletes a key the moment it is asked to, so the waiting
      * period the service offers is not one: the key is gone when the answer
-     * goes out, and the answer says when it is deleted in both of its
-     * timestamps.
+     * goes out. The answer carries only the pending timestamp of that
+     * deletion; the delete timestamp stays unset, because the key is already
+     * gone when the answer goes out.
      *
      * <p>The lock is the same one the tagging operations take, so a key that
      * is being tagged cannot be written back after it was deleted.
