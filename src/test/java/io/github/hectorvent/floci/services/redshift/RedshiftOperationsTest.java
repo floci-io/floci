@@ -50,6 +50,9 @@ public class RedshiftOperationsTest {
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=test/20260822/us-east-1/redshift/aws4_request";
 
+    private static final String EC2_ACCOUNT = "000000000000";
+    private static final String EC2_REGION = "us-east-1";
+
     private static final String GRANT_NAMES_PATH = "DescribeSnapshotCopyGrantsResponse"
             + ".DescribeSnapshotCopyGrantsResult.SnapshotCopyGrants.SnapshotCopyGrant.SnapshotCopyGrantName";
     private static final String MARKER_PATH =
@@ -524,11 +527,7 @@ public class RedshiftOperationsTest {
             .body(containsString("<ClusterIdentifier>cluster-restored</ClusterIdentifier>"));
     }
 
-    private String ec2Id(String path, String action, String... params) {
-        RequestSpecification req = ec2(action, "000000000000", "us-east-1");
-        for (int i = 0; i < params.length; i += 2) {
-            req = req.formParam(params[i], params[i + 1]);
-        }
+    private String ec2Id(String path, RequestSpecification req) {
         return req.post("/").then().statusCode(200).extract().path(path);
     }
 
@@ -540,9 +539,11 @@ public class RedshiftOperationsTest {
     @Test
     @Order(4)
     void clusterSubnetGroupKeepsTagsVpcAndSubnetDetail() {
-        String vpc = ec2Id("CreateVpcResponse.vpc.vpcId", "CreateVpc", "CidrBlock", "10.77.0.0/16");
-        String subnet = ec2Id("CreateSubnetResponse.subnet.subnetId", "CreateSubnet", "VpcId", vpc,
-                "CidrBlock", "10.77.1.0/24", "AvailabilityZone", "us-east-1b");
+        String vpc = ec2Id("CreateVpcResponse.vpc.vpcId", ec2("CreateVpc", EC2_ACCOUNT, EC2_REGION)
+                .formParam("CidrBlock", "10.77.0.0/16"));
+        String subnet = ec2Id("CreateSubnetResponse.subnet.subnetId", ec2("CreateSubnet", EC2_ACCOUNT, EC2_REGION)
+                .formParam("VpcId", vpc).formParam("CidrBlock", "10.77.1.0/24")
+                .formParam("AvailabilityZone", "us-east-1b"));
 
         assertEquals(200, redshift("CreateClusterSubnetGroup", "ClusterSubnetGroupName", "sng-tagged",
                 "Description", "d", "SubnetIds.SubnetIdentifier.1", subnet,
@@ -564,9 +565,11 @@ public class RedshiftOperationsTest {
         assertEquals("dev", tagged.getString("TaggedResource.Tag.Value"));
 
         // Modify keeps tags and recomputes the VPC from the new subnet list.
-        String vpc2 = ec2Id("CreateVpcResponse.vpc.vpcId", "CreateVpc", "CidrBlock", "10.78.0.0/16");
-        String subnet2 = ec2Id("CreateSubnetResponse.subnet.subnetId", "CreateSubnet", "VpcId", vpc2,
-                "CidrBlock", "10.78.1.0/24", "AvailabilityZone", "us-east-1c");
+        String vpc2 = ec2Id("CreateVpcResponse.vpc.vpcId", ec2("CreateVpc", EC2_ACCOUNT, EC2_REGION)
+                .formParam("CidrBlock", "10.78.0.0/16"));
+        String subnet2 = ec2Id("CreateSubnetResponse.subnet.subnetId", ec2("CreateSubnet", EC2_ACCOUNT, EC2_REGION)
+                .formParam("VpcId", vpc2).formParam("CidrBlock", "10.78.1.0/24")
+                .formParam("AvailabilityZone", "us-east-1c"));
         assertEquals(200, redshift("ModifyClusterSubnetGroup", "ClusterSubnetGroupName", "sng-tagged",
                 "SubnetIds.SubnetIdentifier.1", subnet2).statusCode());
         group = describeSubnetGroup("sng-tagged");
