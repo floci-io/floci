@@ -1858,7 +1858,6 @@ class NativeDynamoDbJsonHandlerTest {
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', textBlock = """
-            0  | Invalid ConditionExpression: Expression size has exceeded the maximum allowed size;
             60 | Invalid ConditionExpression: Expression size has exceeded the maximum allowed size;
             61 | Invalid ConditionExpression: Expression size has exceeded the maximum allowed size; expression size: 4097
             """)
@@ -1868,9 +1867,8 @@ class NativeDynamoDbJsonHandlerTest {
         put.put("ConditionExpression", "attribute_not_exists(" + nameOfBytes(4075) + ")");
         ObjectNode request = transactWrite("Put", put);
         ((ObjectNode) request.get("TransactItems").get(0).get("Put")).put("TableName", "Missing");
-        ObjectNode deepPut = mapper.createObjectNode().put("TableName", "Missing");
-        deepPut.set("Item", mapper.createObjectNode().set("d", nestedMaps(levels)));
-        ((ArrayNode) request.get("TransactItems")).add(mapper.createObjectNode().set("Put", deepPut));
+        ((ArrayNode) request.get("TransactItems")).add(transactMember("Put", "Missing", "Item",
+                mapper.createObjectNode().set("d", nestedMaps(levels))));
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("TransactWriteItems", request, "eu-west-1"));

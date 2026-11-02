@@ -2427,13 +2427,11 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleTransactWriteItems(JsonNode request, String region) {
-        JsonNode transactItemsNode = requireValidTransactRequest(request, true);
+        TransactRequest checked = requireValidTransactRequest(request, true);
+        JsonNode transactItemsNode = checked.items();
 
-        boolean older = tooDeepForNewerValidator(transactItemsNode, TRANSACT_WRITE_OPS);
-        for (int i = 0; i < transactItemsNode.size(); i++) {
-            JsonNode txItem = transactItemsNode.get(i);
-            String type = TRANSACT_WRITE_OPS.stream().filter(txItem::hasNonNull).findFirst().orElseThrow();
-            requireValidTransactAction(new TransactAction(i, type, txItem.get(type)), older);
+        for (TransactAction action : checked.actions()) {
+            requireValidTransactAction(action, checked.older());
         }
 
         // Check 4MB total item size limit
@@ -2514,17 +2512,17 @@ public class NativeDynamoDbJsonHandler {
     // DynamoDB's newer validator gives up on a request nested this deep, and the older one answers.
     private static final int OLDER_VALIDATOR_DEPTH = 128;
 
-    private static final List<String> VALID_RETURN_VALUES_ON_CONDITION_CHECK_FAILURE = List.of("ALL_OLD", "NONE");
-
     private record TransactAction(int index, String type, JsonNode op) {
         String path(String member) {
             return "transactItems." + (index + 1) + ".member." + decapitalize(type) + "." + decapitalize(member);
         }
     }
 
+    private record TransactRequest(JsonNode items, List<TransactAction> actions, boolean older) {}
+
     // DynamoDB checks the lengths with its newer validator first. It skips that validator when a
     // required member is missing or the request is nested too deep, and the older one checks the rest.
-    private static JsonNode requireValidTransactRequest(JsonNode request, boolean write) {
+    private static TransactRequest requireValidTransactRequest(JsonNode request, boolean write) {
         String token = write ? request.path("ClientRequestToken").textValue() : null;
         List<String> memberErrors = new ArrayList<>();
         if (token != null) {
@@ -2572,7 +2570,7 @@ public class NativeDynamoDbJsonHandler {
                 }
             }
         }
-        boolean older = tooDeepForNewerValidator(transactItems, ops);
+        boolean older = transactDepth(transactItems, ops) >= OLDER_VALIDATOR_DEPTH;
         if (!missing && !older) {
             requireTransactLengths(transactItems.size(), actions, token);
         }
@@ -2614,7 +2612,7 @@ public class NativeDynamoDbJsonHandler {
             throw new AwsException("ValidationException",
                     "TransactItems can only contain one of Check, Put, Update or Delete", 400);
         }
-        return transactItems;
+        return new TransactRequest(transactItems, actions, older);
     }
 
     // The newer validator names a member by its 0-based position and leaves the value out.
@@ -2645,12 +2643,9 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Item"), false);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Key"), false);
         requireReadableValues(op.get("Put".equals(action.type()) ? "Item" : "Key"), "");
-        String onFailure = op.path("ReturnValuesOnConditionCheckFailure").textValue();
-        if (onFailure != null && !VALID_RETURN_VALUES_ON_CONDITION_CHECK_FAILURE.contains(onFailure)) {
-            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(onFailure,
-                    action.path("ReturnValuesOnConditionCheckFailure"),
-                    VALID_RETURN_VALUES_ON_CONDITION_CHECK_FAILURE));
-        }
+        List<String> onFailureErrors = new ArrayList<>();
+        addPartiQLReturnValuesError(op, action.path("ReturnValuesOnConditionCheckFailure"), onFailureErrors);
+        throwValidationErrors(onFailureErrors);
         // AWS checks the depth of every value, so even an unused or condition-only value fails the request.
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues, false);
         // An action without an expression ignores its ExpressionAttributeNames and ExpressionAttributeValues.
@@ -2687,10 +2682,6 @@ public class NativeDynamoDbJsonHandler {
             throw new AwsException("ValidationException",
                     "Invalid " + exprType + ": The expression can not be empty;", 400);
         }
-    }
-
-    private static boolean tooDeepForNewerValidator(JsonNode transactItems, List<String> ops) {
-        return transactDepth(transactItems, ops) >= OLDER_VALIDATOR_DEPTH;
     }
 
     // DynamoDB leaves unknown members out when it measures how deep a request nests.
@@ -2777,7 +2768,7 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleTransactGetItems(JsonNode request, String region) {
-        JsonNode transactItemsNode = requireValidTransactRequest(request, false);
+        JsonNode transactItemsNode = requireValidTransactRequest(request, false).items();
         transactItemsNode.forEach(txItem -> requireReadableValues(txItem.path("Get").path("Key"), ""));
 
         for (JsonNode txItem : transactItemsNode) {
