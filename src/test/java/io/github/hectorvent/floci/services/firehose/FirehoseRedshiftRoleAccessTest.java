@@ -145,4 +145,26 @@ class FirehoseRedshiftRoleAccessTest {
 
         assertTrue(e.getMessage().contains("belongs to another account"), e.getMessage());
     }
+
+    @Test
+    void aMissingStagingRoleIsRefused() {
+        RedshiftDestination destination = destination();
+        destination.getS3().setRoleArn(null);
+
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> delivery.requireStagingAccess(ACCOUNT_ID, STREAM_ARN, destination, "stage", "k"));
+
+        assertTrue(e.getMessage().contains("not a valid ARN"), e.getMessage());
+    }
+
+    @Test
+    void aBlankLoadRoleIsRefused() {
+        RedshiftDestination destination = destination();
+        destination.setRoleArn("   ");
+
+        IllegalStateException e = assertThrows(IllegalStateException.class,
+                () -> delivery.requireLoadAccess(ACCOUNT_ID, STREAM_ARN, destination, "stage", "k"));
+
+        assertTrue(e.getMessage().contains("not a valid ARN"), e.getMessage());
+    }
 }

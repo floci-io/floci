@@ -216,10 +216,11 @@ class FirehoseRedshiftDeliveryTest {
     }
 
     @Test
-    void stagingWithoutAnS3ConfigurationRoleChecksNothing() throws Exception {
+    void stagingWithoutAnS3ConfigurationRoleDelegatesToAuthorizer() throws Exception {
         delivery.requireStagingAccess("000000000000", STREAM_ARN, destination(), "stage", "k1");
 
-        verifyNoInteractions(roleAuthorizer);
+        verify(roleAuthorizer).refusal(eq(""), eq("000000000000"), eq("firehose.amazonaws.com"),
+                eq(STREAM_ARN), eq(List.of()));
     }
 
     @Test

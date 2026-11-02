@@ -30,6 +30,7 @@ import java.util.stream.Collectors;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyMap;
@@ -314,6 +315,17 @@ class FirehoseLambdaTransformerTest {
         assertEquals(1, outcome.droppedRecords());
         assertEquals(0, outcome.failedRecords());
         assertNull(outcome.errorKey());
+    }
+
+    @Test
+    void anErrorOutputGuardThatThrowsPreventsTheWrite() {
+        replyWith(ids -> records(outcome(ids.get(0), "ProcessingFailed")));
+
+        assertThrows(IllegalStateException.class, () -> transformer.transform(
+                stream(lambdaProcessor()), "b", List.of(record("a")), DELIVERY_TIME,
+                key -> { throw new IllegalStateException("permission denied: " + key); }));
+
+        verify(s3Service, never()).putObject(anyString(), anyString(), any(), anyString(), anyMap());
     }
 
     @Test

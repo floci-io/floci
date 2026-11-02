@@ -101,11 +101,11 @@ public class FirehoseRedshiftDelivery {
 
     private void requireAccess(String accountId, String streamArn, String roleArn, String action, String bucket,
                                String key, String step) {
-        if (roleArn == null || roleArn.isBlank()) {
-            return;
-        }
-        Optional<String> refusal = roleAuthorizer.refusal(roleArn, accountId, FIREHOSE_PRINCIPAL, streamArn,
-                List.of(new Permission(action, RedshiftRoleAccess.objectArn(roleArn, bucket, key))));
+        // A missing role is not exempt: the authorizer refuses it with enforcement on and ignores it with enforcement off.
+        String role = roleArn == null ? "" : roleArn;
+        List<Permission> permissions = role.isBlank()
+                ? List.of() : List.of(new Permission(action, RedshiftRoleAccess.objectArn(role, bucket, key)));
+        Optional<String> refusal = roleAuthorizer.refusal(role, accountId, FIREHOSE_PRINCIPAL, streamArn, permissions);
         if (refusal.isPresent()) {
             throw new IllegalStateException("Firehose cannot " + step + " s3://" + bucket + "/" + key + ": "
                     + refusal.get());

@@ -50,6 +50,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -1162,8 +1163,14 @@ public class FirehoseService implements ResourceProvider {
             List<byte[]> records = toFlush;
             if (s3 != null && stream.isProcessingEnabled()) {
                 ensureBucket(bucket, stream);
+                Consumer<String> errorGuard = isRedshiftStream(stream) && redshiftDelivery != null
+                        ? errorKey -> redshiftDelivery.requireStagingAccess(stream.getAccountId(),
+                                stream.getDeliveryStreamARN(),
+                                stream.getDestinations().get(0).getRedshiftDestinationDescription(),
+                                bucket, errorKey)
+                        : errorKey -> { };
                 FirehoseLambdaTransformer.Outcome transformed =
-                        lambdaTransformer.transform(stream, bucket, records, clock.instant());
+                        lambdaTransformer.transform(stream, bucket, records, clock.instant(), errorGuard);
                 LOG.infov("Transformed {0} records from stream {1} ({2} dropped, {3} failed)",
                         records.size(), streamName, transformed.droppedRecords(), transformed.failedRecords());
                 records = transformed.records();
