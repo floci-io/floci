@@ -144,7 +144,12 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
 
     @Override
     public boolean isEmpty() {
-        return delegate.isEmpty();
+        // A store nothing has written answers without the key copy below.
+        if (delegate.isEmpty()) {
+            return true;
+        }
+        String prefix = prefix() + "/";
+        return delegate.keys().stream().noneMatch(k -> k.startsWith(prefix));
     }
 
     @Override
