@@ -15,7 +15,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -25,6 +24,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Pattern;
 
 /**
@@ -44,7 +44,6 @@ public class OpenSearchVpcEndpointService {
     private static final Pattern ID = Pattern.compile(ID_PATTERN);
     private static final int ID_MIN = 5;
     private static final int ID_MAX = 256;
-    private static final SecureRandom RANDOM = new SecureRandom();
 
     private final AccountAwareStorageBackend<OpenSearchVpcEndpoint> endpoints;
     private final OpenSearchService domains;
@@ -252,10 +251,13 @@ public class OpenSearchVpcEndpointService {
         return id != null && id.length() >= ID_MIN && id.length() <= ID_MAX && ID.matcher(id).matches();
     }
 
-    /** Twelve hexadecimal digits, the form AWS endpoint ids take. */
+    /**
+     * Twelve hexadecimal digits, the form AWS endpoint ids take. An id is no secret, and a random
+     * held in a static field would be fixed into the native image at build time.
+     */
     private static String newIdSuffix() {
         byte[] bytes = new byte[6];
-        RANDOM.nextBytes(bytes);
+        ThreadLocalRandom.current().nextBytes(bytes);
         return HexFormat.of().formatHex(bytes);
     }
 
