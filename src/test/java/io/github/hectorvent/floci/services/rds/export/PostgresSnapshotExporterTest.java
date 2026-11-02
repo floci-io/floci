@@ -8,12 +8,12 @@ import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.ExportTask;
 import io.github.hectorvent.floci.services.s3.S3Service;
-import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
+import java.io.ByteArrayInputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
@@ -96,8 +96,8 @@ class PostgresSnapshotExporterTest {
                 argThat(sql -> sql.contains("pg_attribute"))))
                 .thenReturn("{\"schema\":\"public\",\"table\":\"items\",\"column\":\"id\",\"type\":\"int4\"}\n");
         when(s3Service.bucketExists(STAGING)).thenReturn(true);
-        when(s3Service.getObject(eq(STAGING), anyString()))
-                .thenReturn(new S3Object(STAGING, "data.gz.parquet", new byte[]{'P', 'A', 'R', '1'}, "application/octet-stream"));
+        when(s3Service.openObjectStream(eq(STAGING), anyString(), isNull()))
+                .thenAnswer(invocation -> new ByteArrayInputStream(new byte[]{'P', 'A', 'R', '1'}));
     }
 
     private ExportTask task() {
@@ -142,7 +142,9 @@ class PostgresSnapshotExporterTest {
         verify(s3Service, atLeastOnce()).putObject(eq("exports"), exportKeys.capture(), any(), anyString(), any());
         assertThat(exportKeys.getAllValues(), everyItem(startsWith("search/rds/appdb-export/")));
         assertThat(exportKeys.getAllValues(), everyItem(not(containsString("ndjson"))));
-        assertThat(exportKeys.getAllValues().get(0),
+        ArgumentCaptor<String> parquetKey = ArgumentCaptor.forClass(String.class);
+        verify(s3Service).putObjectFromStream(eq("exports"), parquetKey.capture(), any(), anyString(), any());
+        assertThat(parquetKey.getValue(),
                 matchesPattern("search/rds/appdb-export/appdb/public\\.items/1/part-00000-[0-9a-f-]{36}\\.gz\\.parquet"));
         verify(s3Service).deleteObject(STAGING, "rds-export/export-0123456789abcdef/1/part-0.ndjson");
         verify(s3Service).deleteObject(STAGING, "rds-export/export-0123456789abcdef/1/data.gz.parquet");
@@ -172,6 +174,7 @@ class PostgresSnapshotExporterTest {
         assertThrows(RuntimeException.class, () -> exporter.export(task(), source, progress));
 
         verify(s3Service, never()).putObject(eq("exports"), anyString(), any(), anyString(), any());
+        verify(s3Service, never()).putObjectFromStream(eq("exports"), anyString(), any(), anyString(), any());
         verify(s3Service).deleteObject(STAGING, "rds-export/export-0123456789abcdef/1/part-0.ndjson");
         verify(s3Service).deleteObject(STAGING, "rds-export/export-0123456789abcdef/1/data.gz.parquet");
         verify(containerManager).discardExport("export-0123456789abcdef");
@@ -204,6 +207,7 @@ class PostgresSnapshotExporterTest {
         exporter.export(task(), source, resetMidTable);
 
         verify(s3Service, never()).putObject(eq("exports"), anyString(), any(), anyString(), any());
+        verify(s3Service, never()).putObjectFromStream(eq("exports"), anyString(), any(), anyString(), any());
         verify(s3Service).deleteObject(STAGING, "rds-export/export-0123456789abcdef/1/data.gz.parquet");
     }
 
@@ -264,8 +268,7 @@ class PostgresSnapshotExporterTest {
         exporter.export(task(), source, progress);
 
         verify(duckClient, never()).execute(anyString(), anyString(), any(), anyString());
-        verify(s3Service, never()).putObject(eq("exports"),
-                argThat(key -> key.endsWith(".parquet")), any(), anyString(), any());
+        verify(s3Service, never()).putObjectFromStream(eq("exports"), anyString(), any(), anyString(), any());
     }
 
     @Test
@@ -277,8 +280,7 @@ class PostgresSnapshotExporterTest {
         SnapshotExporter.Outcome outcome = exporter.export(task(), source, progress);
 
         assertThat(outcome.warnings(), contains(containsString("appdb.sales/eu.items was skipped")));
-        verify(s3Service, never()).putObject(eq("exports"),
-                argThat(key -> key.endsWith(".parquet")), any(), anyString(), any());
+        verify(s3Service, never()).putObjectFromStream(eq("exports"), anyString(), any(), anyString(), any());
     }
 
     @Test
@@ -292,8 +294,7 @@ class PostgresSnapshotExporterTest {
 
         assertThat(outcome.warnings(), contains(containsString("appdb.public.items was skipped because two of its"
                 + " column names differ only in case")));
-        verify(s3Service, never()).putObject(eq("exports"),
-                argThat(key -> key.endsWith(".parquet")), any(), anyString(), any());
+        verify(s3Service, never()).putObjectFromStream(eq("exports"), anyString(), any(), anyString(), any());
     }
 
     @Test
@@ -321,8 +322,7 @@ class PostgresSnapshotExporterTest {
         SnapshotExporter.Outcome outcome = exporter.export(task(), source, progress);
 
         assertThat(outcome.warnings(), contains(containsString("app/db.public.items was skipped")));
-        verify(s3Service, never()).putObject(eq("exports"),
-                argThat(key -> key.endsWith(".parquet")), any(), anyString(), any());
+        verify(s3Service, never()).putObjectFromStream(eq("exports"), anyString(), any(), anyString(), any());
     }
 
     @Test

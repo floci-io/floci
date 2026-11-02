@@ -19,6 +19,7 @@ import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
@@ -240,12 +241,13 @@ public class PostgresSnapshotExporter implements SnapshotExporter {
                     + escapeLiteral("s3://" + stagingBucket + "/" + stagedParquet)
                     + "' (FORMAT PARQUET, COMPRESSION GZIP)";
             duckClient.execute("SELECT 1 AS ok", copy, null, task.getAccountId());
-            byte[] parquet = s3Service.getObject(stagingBucket, stagedParquet).getData();
             if (progress.abandonedByReset()) {
                 return size;
             }
-            s3Service.putObject(task.getS3Bucket(), layout.dataFileKey(table.database(), table.schema(), table.name()),
-                    parquet, PARQUET, Map.of());
+            try (InputStream parquet = s3Service.openObjectStream(stagingBucket, stagedParquet, null)) {
+                s3Service.putObjectFromStream(task.getS3Bucket(),
+                        layout.dataFileKey(table.database(), table.schema(), table.name()), parquet, PARQUET, Map.of());
+            }
             return size;
         } catch (IOException e) {
             throw new UncheckedIOException(e);
