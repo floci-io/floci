@@ -332,11 +332,11 @@ public final class S3CopySimulator {
             boolean noColumnList = spec.columns() == null || spec.columns().isEmpty();
             boolean discoverForJson = spec.jsonAuto() && noColumnList;
             boolean truncate = spec.transforms().truncateColumns();
-            boolean temporal = spec.transforms().temporal();
+            boolean columnTypes = spec.transforms().needsColumnTypes();
             List<String> discoveredColumns = null;
             List<Integer> columnMaxBytes = null;
             List<CopyRecordTransformer.ColumnKind> columnKinds = null;
-            if (discoverForJson || truncate || temporal) {
+            if (discoverForJson || truncate || columnTypes) {
                 List<ColumnInfo> catalog = discoverColumnInfo(client, backend, spec, txStatus, onStatusChange);
                 if (catalog == null) {
                     return true;
@@ -347,7 +347,7 @@ public final class S3CopySimulator {
                 if (truncate) {
                     columnMaxBytes = alignMaxBytes(spec, catalog);
                 }
-                if (temporal) {
+                if (columnTypes) {
                     columnKinds = alignKinds(spec, catalog);
                 }
             }
@@ -491,10 +491,10 @@ public final class S3CopySimulator {
                     "COPY ... TRUNCATECOLUMNS needs catalog column lengths, which are only available over "
                             + "the Simple Query protocol; connect with preferQueryMode=simple", null);
         }
-        if (spec.transforms().temporal() && columnKinds == null) {
+        if (spec.transforms().needsColumnTypes() && columnKinds == null) {
             throw new S3TransferException(SQLSTATE_INTERNAL,
-                    "COPY ... DATEFORMAT and TIMEFORMAT need catalog column types, which are only available over "
-                            + "the Simple Query protocol; connect with preferQueryMode=simple", null);
+                    "COPY ... DATEFORMAT, TIMEFORMAT and FILLRECORD need catalog column types, which are only "
+                            + "available over the Simple Query protocol; connect with preferQueryMode=simple", null);
         }
         byte[] buffer = new byte[CHUNK];
         for (int i = 0; i < keys.size(); i++) {
@@ -566,7 +566,7 @@ public final class S3CopySimulator {
                             "COPY object exceeds the " + COPY_TRANSFORM_MAX_OBJECT_BYTES
                                     + "-byte limit for the field-level options "
                                     + "(EMPTYASNULL, BLANKSASNULL, REMOVEQUOTES, ACCEPTINVCHARS, TRUNCATECOLUMNS, "
-                                    + "DATEFORMAT, TIMEFORMAT)", null);
+                                    + "DATEFORMAT, TIMEFORMAT, FILLRECORD)", null);
                 }
                 int wantedMib = (int) ((total * COPY_TRANSFORM_HEAP_FACTOR) / (1024 * 1024)) + 1;
                 while (heldMib < wantedMib) {
@@ -620,13 +620,19 @@ public final class S3CopySimulator {
         return aligned;
     }
 
-    /** 1082 = date, 1114 = timestamp. A timestamptz (1184) is read by PostgreSQL as it stands. */
-    private static CopyRecordTransformer.ColumnKind kindOf(String typeOid) {
+    /**
+     * 1082 = date, 1114 = timestamp, and 25 = text, 1042 = bpchar, 1043 = varchar for the character columns.
+     * A timestamptz (1184) is read by PostgreSQL as it stands.
+     */
+    static CopyRecordTransformer.ColumnKind kindOf(String typeOid) {
         if ("1082".equals(typeOid)) {
             return CopyRecordTransformer.ColumnKind.DATE;
         }
         if ("1114".equals(typeOid)) {
             return CopyRecordTransformer.ColumnKind.TIMESTAMP;
+        }
+        if ("25".equals(typeOid) || "1042".equals(typeOid) || "1043".equals(typeOid)) {
+            return CopyRecordTransformer.ColumnKind.TEXT;
         }
         return CopyRecordTransformer.ColumnKind.OTHER;
     }
@@ -656,7 +662,7 @@ public final class S3CopySimulator {
         String query = "SELECT a.attname, CASE WHEN a.atttypid IN (1042, 1043) AND a.atttypmod > 4 "
                 + "THEN a.atttypmod - 4 END, a.atttypid FROM pg_catalog.pg_attribute a "
                 + "WHERE a.attrelid = to_regclass('" + quoteLiteral(spec.targetTable()) + "') "
-                + "AND a.attnum > 0 AND NOT a.attisdropped "
+                + "AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '' "
                 + "ORDER BY a.attnum";
 
         OutputStream backendOut = backend.getOutputStream();

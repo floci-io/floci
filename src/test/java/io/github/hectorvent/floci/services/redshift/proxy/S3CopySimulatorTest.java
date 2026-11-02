@@ -1646,6 +1646,31 @@ class S3CopySimulatorTest {
     }
 
     @Test
+    void kindOf_mapsTheCatalogTypeOids() {
+        assertEquals(CopyRecordTransformer.ColumnKind.DATE, S3CopySimulator.kindOf("1082"));
+        assertEquals(CopyRecordTransformer.ColumnKind.TIMESTAMP, S3CopySimulator.kindOf("1114"));
+        assertEquals(CopyRecordTransformer.ColumnKind.TEXT, S3CopySimulator.kindOf("25"));
+        assertEquals(CopyRecordTransformer.ColumnKind.TEXT, S3CopySimulator.kindOf("1042"));
+        assertEquals(CopyRecordTransformer.ColumnKind.TEXT, S3CopySimulator.kindOf("1043"));
+        assertEquals(CopyRecordTransformer.ColumnKind.OTHER, S3CopySimulator.kindOf("1184"));
+        assertEquals(CopyRecordTransformer.ColumnKind.OTHER, S3CopySimulator.kindOf("23"));
+        assertEquals(CopyRecordTransformer.ColumnKind.OTHER, S3CopySimulator.kindOf(null));
+    }
+
+    @Test
+    void alignKinds_sizesTheResultToTheColumnListNotTheTable() {
+        List<S3CopySimulator.ColumnInfo> catalog = List.of(
+                new S3CopySimulator.ColumnInfo("id", null, CopyRecordTransformer.ColumnKind.OTHER),
+                new S3CopySimulator.ColumnInfo("name", 10, CopyRecordTransformer.ColumnKind.TEXT),
+                new S3CopySimulator.ColumnInfo("born", null, CopyRecordTransformer.ColumnKind.DATE));
+        CopyStatementParser.S3CopyFrom shortList = new CopyStatementParser.S3CopyFrom(
+                "t", List.of("id", "name"), "wh", "k", "|", 0, false, false, null, null);
+
+        assertEquals(List.of(CopyRecordTransformer.ColumnKind.OTHER, CopyRecordTransformer.ColumnKind.TEXT),
+                S3CopySimulator.alignKinds(shortList, catalog));
+    }
+
+    @Test
     void streamCopyInput_rewritesDatesWithTheColumnKindsOfTheCatalog() throws Exception {
         CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
                 false, false, false, false, null, CopyTemporalFormat.parse("MM/DD/YYYY", false), null, false);
@@ -1661,6 +1686,37 @@ class S3CopySimulatorTest {
                 List.of(CopyRecordTransformer.ColumnKind.OTHER, CopyRecordTransformer.ColumnKind.DATE), out);
 
         assertEquals("1|2003-03-31\n", copyDataPayload(out.toByteArray()));
+    }
+
+    @Test
+    void streamCopyInput_fillsShortRecordsWithTheColumnKindsOfTheCatalog() throws Exception {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, true);
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "people", List.of(), "wh", "p.txt", "|", 0, false, false, null, null,
+                false, false, false, transforms);
+        when(s3.getObject("wh", "p.txt")).thenReturn(new S3Object("wh", "p.txt",
+                "1\n2|b|7\n".getBytes(StandardCharsets.UTF_8), "text/plain"));
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("p.txt"), s3, null, null);
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+
+        S3CopySimulator.streamCopyInput(input, null, null, List.of(CopyRecordTransformer.ColumnKind.OTHER,
+                CopyRecordTransformer.ColumnKind.TEXT, CopyRecordTransformer.ColumnKind.OTHER), out);
+
+        assertEquals("1||\\N\n2|b|7\n", copyDataPayload(out.toByteArray()));
+    }
+
+    @Test
+    void streamCopyInput_withFillRecordAndNoCatalogFailsAndNamesSimpleQueryMode() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, true);
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "wh", "k", "|", 0, false, false, null, null, false, false, false, transforms);
+        S3CopySimulator.CopyInput input = new S3CopySimulator.CopyInput(spec, List.of("k"), s3, null, null);
+
+        S3CopySimulator.S3TransferException failure = assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> S3CopySimulator.streamCopyInput(input, new ByteArrayOutputStream()));
+        assertTrue(failure.getMessage().contains("preferQueryMode=simple"), failure.getMessage());
     }
 
     @Test

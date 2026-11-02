@@ -227,7 +227,7 @@ class CopyStatementParserTest {
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' JSON 's3://mybucket/jsonpaths.json'"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' FIXEDWIDTH 'a:1,b:2'"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' GZIP MAXERROR 10"));
-        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' FILLRECORD"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' TRIMBLANKS"));
     }
 
 
@@ -518,6 +518,19 @@ class CopyStatementParserTest {
         assertTrue(transforms.acceptAnyDate());
         assertEquals("YYYY-MM-DD[ HH:MI:SS]", transforms.dateFormat().spec());
         assertEquals("YYYY-MM-DD[ HH:MI:SS]", transforms.timeFormat().spec());
+    }
+
+    @Test
+    void copyParsesFillRecord() {
+        CopyStatementParser.CopyTransforms transforms =
+                copyFrom("COPY t FROM 's3://b/k' CSV FILLRECORD EMPTYASNULL").transforms();
+
+        assertTrue(transforms.fillRecord());
+        assertTrue(transforms.fieldLevel());
+        assertTrue(transforms.needsColumnTypes());
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' FILLRECORD FILLRECORD"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' FORMAT AS JSON 'auto' FILLRECORD"));
+        assertFalse(copyFrom("COPY t FROM 's3://b/k'").transforms().fillRecord());
     }
 
     @Test
