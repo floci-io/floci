@@ -78,6 +78,7 @@ public final class RequestConstraintCheck {
             case "structure", "map" -> value.isObject();
             case "list" -> value.isArray();
             case "string" -> value.isTextual();
+            case "boolean" -> value.isBoolean();
             case "integer", "long" -> value.isIntegralNumber() && value.canConvertToLong();
             default -> false;
         };

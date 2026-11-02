@@ -25,6 +25,9 @@
 # by tools/aws/regen_ecs_shapes.py.
 # src/main/resources/aws/ecr-request-shapes.json, the ECR request constraints, is generated
 # from botocore's ECR model by tools/aws/regen_ecr_shapes.py.
+# src/main/resources/aws/payment-cryptography-request-shapes.json, the Payment Cryptography
+# request constraints, is generated from botocore's model by
+# tools/aws/regen_payment_cryptography_shapes.py.
 # src/main/resources/aws/rds-ca-certificates.json, each Region's RDS certificate authorities, is
 # generated from the certificate bundles AWS publishes by tools/aws/regen_rds_ca_certificates.py.
 # src/main/resources/aws/iam-request-shapes.json, the IAM request constraints of the operations
@@ -257,6 +260,7 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_redshift_serverless_shapes.py
 	$(PYTHON) tools/aws/regen_resource_groups_shapes.py
 	$(PYTHON) tools/aws/regen_ecr_shapes.py
+	$(PYTHON) tools/aws/regen_payment_cryptography_shapes.py
 	$(PYTHON) tools/aws/regen_iam_shapes.py
 	$(PYTHON) tools/aws/regen_sts_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_types.py
@@ -332,6 +336,12 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 	@$(PYTHON) tools/aws/regen_ecr_shapes.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/ecr-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_payment_cryptography_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/payment-cryptography-request-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}
