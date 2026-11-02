@@ -311,4 +311,21 @@ class Ec2InstanceConnectEndpointServiceTest {
         assertEquals(id, service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null,
                 List.of(new Tag("Name", "kthw")), "token-81").getInstanceConnectEndpointId());
     }
+
+    @Test
+    void anUnknownFilterNameFailsWhenNoEndpointIsTestedAgainstIt() {
+        Ec2Service service = newService();
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class, () -> service
+                .describeInstanceConnectEndpoints(REGION, List.of(), Map.of("bogus", List.of("x"))))
+                .getErrorCode());
+
+        String vpcId = service.createVpc(REGION, "10.80.0.0/16", false).getVpcId();
+        String subnetId = service.createSubnet(REGION, vpcId, "10.80.1.0/24", "us-east-1a").getSubnetId();
+        service.createInstanceConnectEndpoint(REGION, subnetId, List.of(), null, null, List.of(), null);
+        // An earlier filter that excludes every endpoint does not hide the bad name after it.
+        List<Map.Entry<String, List<String>>> filters = List.of(
+                Map.entry("vpc-id", List.of("vpc-00000000000000000")), Map.entry("bogus", List.of("x")));
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class, () -> service
+                .describeInstanceConnectEndpoints(REGION, List.of(), filters)).getErrorCode());
+    }
 }

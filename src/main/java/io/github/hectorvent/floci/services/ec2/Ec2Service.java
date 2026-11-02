@@ -12563,6 +12563,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /** The public suffix every endpoint DNS name ends in; it resolves to 127.0.0.1 in public DNS. */
     static final String INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX = "localhost.floci.io";
     private static final Set<String> INSTANCE_CONNECT_ENDPOINT_IP_TYPES = Set.of("ipv4", "dualstack", "ipv6");
+    /** The names matchesInstanceConnectEndpointFilter implements; tag:&lt;key&gt; is admitted through tag-key. */
+    private static final Set<String> INSTANCE_CONNECT_ENDPOINT_FILTERS = Set.of("instance-connect-endpoint-id",
+            "state", "vpc-id", "subnet-id", "availability-zone", "owner-id", "tag-key");
     /**
      * Creates an endpoint in {@code subnetId}. Creation is immediate ({@code create-complete}); on
      * AWS it takes a few minutes. The DNS names live under {@link #INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX},
@@ -12690,6 +12693,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public List<InstanceConnectEndpoint> describeInstanceConnectEndpoints(String region, List<String> ids,
                                                                           List<Map.Entry<String, List<String>>> filters) {
+        // Checked before the scan, so a bad name fails even when no endpoint is there to test it on.
+        if (filters != null) {
+            requireSupportedFilters(filters.stream().map(Map.Entry::getKey).toList(),
+                    INSTANCE_CONNECT_ENDPOINT_FILTERS);
+        }
         for (String id : ids) {
             requireInstanceConnectEndpoint(region, id);
         }
