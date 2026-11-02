@@ -49,9 +49,7 @@ class InstanceConnectJsonHandlerTest {
     void setUp() {
         ec2 = mock(Ec2Service.class);
         keys = mock(InstanceConnectKeys.class);
-        RegionResolver regions = mock(RegionResolver.class);
-        when(regions.getAccountId()).thenReturn("000000000000");
-        handler = new InstanceConnectJsonHandler(ec2, keys, regions, mapper, Clock.fixed(NOW, ZoneOffset.UTC));
+        handler = handlerIn("us-east-1");
         instance = new Instance();
         instance.setInstanceId(INSTANCE);
         instance.setState(InstanceState.running());
@@ -69,6 +67,21 @@ class InstanceConnectJsonHandlerTest {
         assertEquals("admin", stored.getValue().osUser());
         assertEquals(NOW.plusSeconds(60), stored.getValue().expiresAt());
         assertEquals(((ObjectNode) response.getEntity()).get("RequestId").asText(), stored.getValue().requestId());
+        assertEquals("arn:aws:iam::000000000000:root", stored.getValue().caller());
+    }
+
+    @Test
+    void theCallerArnIsInTheDeploymentsPartition() {
+        handlerIn("us-gov-west-1").handle("SendSSHPublicKey", request(INSTANCE, "admin", ED25519), REGION);
+
+        ArgumentCaptor<InstanceConnectKeys.ActiveKey> stored = ArgumentCaptor.forClass(InstanceConnectKeys.ActiveKey.class);
+        verify(keys).add(stored.capture());
+        assertEquals("arn:aws-us-gov:iam::000000000000:root", stored.getValue().caller());
+    }
+
+    private InstanceConnectJsonHandler handlerIn(String defaultRegion) {
+        return new InstanceConnectJsonHandler(ec2, keys, new RegionResolver(defaultRegion, "000000000000"), mapper,
+                Clock.fixed(NOW, ZoneOffset.UTC));
     }
 
     @Test
