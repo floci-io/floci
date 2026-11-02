@@ -1078,7 +1078,7 @@ public class RedshiftService implements ManagedSecretRotator {
     // ClusterSnapshotAlreadyExists. Once the container teardown starts the snapshot may be the only copy.
     private void discardUnusedFinalSnapshot(String finalSnapshotIdentifier, RuntimeException deletionFailure) {
         try {
-            removeSnapshot(finalSnapshotIdentifier);
+            removeSnapshot(finalSnapshotIdentifier, null);
         } catch (RuntimeException cleanupFailure) {
             deletionFailure.addSuppressed(cleanupFailure);
         }
@@ -1833,7 +1833,8 @@ public class RedshiftService implements ManagedSecretRotator {
 
     public List<Snapshot> describeSnapshots(String snapshotIdentifier, String clusterIdentifier) {
         if (snapshotIdentifier != null && !snapshotIdentifier.isBlank()) {
-            Optional<Snapshot> snapshot = findSnapshot(snapshotIdentifier);
+            Optional<Snapshot> snapshot = findSnapshot(snapshotIdentifier)
+                    .filter(found -> takenFrom(found, clusterIdentifier));
             if (snapshot.isEmpty()) {
                 throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotIdentifier + " not found", 404);
             }
@@ -1874,14 +1875,31 @@ public class RedshiftService implements ManagedSecretRotator {
         return findSnapshot(snapshotIdentifier);
     }
 
-    public Snapshot deleteSnapshot(String snapshotIdentifier) {
-        return withResourceLock("snapshot", snapshotIdentifier, () -> mutate(() -> removeSnapshot(snapshotIdentifier)));
+    /**
+     * Whether the snapshot was taken from the cluster a request names, or the request names none. A request naming the
+     * cluster a snapshot was taken from is authorized on {@code snapshot:<cluster>/<name>}, so a snapshot of another
+     * cluster is not acted on, as if it did not exist.
+     */
+    private static boolean takenFrom(Snapshot snapshot, String clusterIdentifier) {
+        return clusterIdentifier == null || clusterIdentifier.isBlank()
+                || clusterIdentifier.equals(snapshot.getClusterIdentifier());
     }
 
-    private Snapshot removeSnapshot(String snapshotIdentifier) {
+    public Snapshot deleteSnapshot(String snapshotIdentifier) {
+        return deleteSnapshot(snapshotIdentifier, null);
+    }
+
+    /** Deletes the snapshot, which must have been taken from {@code snapshotClusterIdentifier} when one is given. */
+    public Snapshot deleteSnapshot(String snapshotIdentifier, String snapshotClusterIdentifier) {
+        return withResourceLock("snapshot", snapshotIdentifier,
+                () -> mutate(() -> removeSnapshot(snapshotIdentifier, snapshotClusterIdentifier)));
+    }
+
+    private Snapshot removeSnapshot(String snapshotIdentifier, String snapshotClusterIdentifier) {
         String copyKey = copyKey(regionResolver.getRegion(), snapshotIdentifier);
         Optional<Snapshot> copyOpt = snapshotCopies.get(copyKey);
-        Optional<Snapshot> snapshotOpt = copyOpt.or(() -> snapshots.get(snapshotIdentifier));
+        Optional<Snapshot> snapshotOpt = copyOpt.or(() -> snapshots.get(snapshotIdentifier))
+                .filter(found -> takenFrom(found, snapshotClusterIdentifier));
         if (snapshotOpt.isEmpty()) {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotIdentifier + " not found", 404);
         }
@@ -1915,10 +1933,16 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType) {
+        return restoreFromClusterSnapshot(clusterIdentifier, snapshotIdentifier, null, nodeType);
+    }
+
+    /** Restores the snapshot, which must have been taken from {@code snapshotClusterIdentifier} when one is given. */
+    public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier,
+                                              String snapshotClusterIdentifier, String nodeType) {
         return withResourceLock("cluster", clusterIdentifier, () -> {
             ensureNoManagedRotation(clusters.accountId(), clusterIdentifier);
-            return withResourceLock("snapshot", snapshotIdentifier,
-                    () -> mutate(() -> restoreSnapshot(clusterIdentifier, snapshotIdentifier, nodeType)));
+            return withResourceLock("snapshot", snapshotIdentifier, () -> mutate(
+                    () -> restoreSnapshot(clusterIdentifier, snapshotIdentifier, snapshotClusterIdentifier, nodeType)));
         });
     }
 
@@ -1931,7 +1955,7 @@ public class RedshiftService implements ManagedSecretRotator {
         return withResourceLock("cluster", clusterIdentifier, () -> withResourceLock("snapshot", snapshotIdentifier,
                 () -> {
                     ensureNoManagedRotation(clusters.accountId(), clusterIdentifier);
-                    Cluster cluster = restoreSnapshot(clusterIdentifier, snapshotIdentifier, nodeType);
+                    Cluster cluster = restoreSnapshot(clusterIdentifier, snapshotIdentifier, null, nodeType);
                     try {
                         cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
                         if (manageMasterPassword) {
@@ -1973,12 +1997,14 @@ public class RedshiftService implements ManagedSecretRotator {
         });
     }
 
-    private Cluster restoreSnapshot(String clusterIdentifier, String snapshotIdentifier, String nodeType) {
+    private Cluster restoreSnapshot(String clusterIdentifier, String snapshotIdentifier,
+                                    String snapshotClusterIdentifier, String nodeType) {
         if (clusters.get(clusterIdentifier).isPresent()) {
             throw new AwsException("ClusterAlreadyExists", "Cluster " + clusterIdentifier + " already exists", 400);
         }
 
-        Optional<Snapshot> snapshotOpt = findSnapshot(snapshotIdentifier);
+        Optional<Snapshot> snapshotOpt = findSnapshot(snapshotIdentifier)
+                .filter(found -> takenFrom(found, snapshotClusterIdentifier));
         if (snapshotOpt.isEmpty()) {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotIdentifier + " not found", 404);
         }

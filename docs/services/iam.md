@@ -1785,7 +1785,11 @@ endpoint group its `EndpointGroupArn` gives, whose ARN extends the accelerator's
 `GetClusterCredentials` is checked on the `dbuser` its `ClusterIdentifier` and `DbUser` name, and on the
 `dbname` only when its `DbName` names one, so a grant on the `dbuser` alone allows it.
 `RestoreFromClusterSnapshot` is checked on the new cluster its `ClusterIdentifier` names and on the snapshot
-of the cluster its `SnapshotClusterIdentifier` names, `snapshot:*/<name>` when it names none.
+of the cluster its `SnapshotClusterIdentifier` names, `snapshot:*/<name>` when it names none. A snapshot taken
+from another cluster than the one a request names is not found (`ClusterSnapshotNotFound`): the cluster
+`DeleteClusterSnapshot`'s and `RestoreFromClusterSnapshot`'s `SnapshotClusterIdentifier` names or a
+`SnapshotArn` holds, and the one `DescribeClusterSnapshots`' `ClusterIdentifier` names. So a request never acts
+on a snapshot other than the one it is checked on.
 Redshift's `CreateTags`, `DeleteTags` and `DescribeTags` are checked on the resource whose ARN their
 `ResourceName` gives. Redshift members that hold another kind of ARN, such as an IAM role's, an SNS
 topic's or an ACM certificate's, are not read as a Redshift resource. An EventBridge rule is on the event bus
