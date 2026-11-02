@@ -4725,8 +4725,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * Every address a stored resource holds in the subnet: {@link #privateIpsTaken}, plus what the
-     * instances, network interfaces and NAT gateways of every account hold there. Default subnet
-     * ids are the same in every account, so their Docker network, and its lease table, is shared.
+     * instances, network interfaces, NAT gateways and EC2 Instance Connect Endpoints of every
+     * account hold there. Default subnet ids are the same in every account, so their Docker
+     * network, and its lease table, is shared.
      */
     private Set<String> privateIpsHeldOnVpcNetwork(String region, String subnetId) {
         Set<String> held = privateIpsTaken(region, subnetId);
@@ -4747,7 +4748,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 400);
     }
 
-    /** Every private address a live instance, network interface or NAT gateway holds in the subnet. */
+    /**
+     * Every private address a live instance, network interface, NAT gateway or EC2 Instance Connect
+     * Endpoint holds in the subnet.
+     */
     private Set<String> privateIpsInUse(String region, String subnetId) {
         return new HashSet<>(privateIpsBySubnet(region).getOrDefault(subnetId, Set.of()));
     }
