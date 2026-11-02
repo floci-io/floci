@@ -73,6 +73,23 @@ class ControlTowerControllerIntegrationTest {
     }
 
     @Test
+    void getLandingZoneAcceptsLandingZoneIdLikeTheTerraformProvider() {
+        String authorization = auth("000000000250", EAST);
+        String arn = listLandingZonesArn(authorization);
+        String id = arn.substring(arn.lastIndexOf('/') + 1);
+
+        given()
+                .contentType("application/json")
+                .header("Authorization", authorization)
+                .body("{\"landingZoneIdentifier\":\"" + id + "\"}")
+                .when()
+                .post("/get-landingzone")
+                .then()
+                .statusCode(200)
+                .body("landingZone.arn", equalTo(arn));
+    }
+
+    @Test
     void getLandingZoneReturnsEveryFieldLzaNonNullAsserts() {
         String authorization = auth("000000000202", EAST);
         String arn = listLandingZonesArn(authorization);
