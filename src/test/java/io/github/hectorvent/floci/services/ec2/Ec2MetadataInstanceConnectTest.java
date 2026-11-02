@@ -51,6 +51,16 @@ class Ec2MetadataInstanceConnectTest {
     }
 
     @Test
+    void servicesDomainIsTheInstanceRegionsPartitionDomain() throws Exception {
+        try (Ec2MetadataTestFixture imds = new Ec2MetadataTestFixture()) {
+            imds.instance().setRegion("cn-north-1");
+            imds.start();
+            String token = imds.putToken("60").body();
+            assertEquals("amazonaws.com.cn", imds.get("/latest/meta-data/services/domain", token).body());
+        }
+    }
+
+    @Test
     void managedSshKeysAreAbsentWithoutInstanceConnect() throws Exception {
         try (Ec2MetadataTestFixture imds = new Ec2MetadataTestFixture()) {
             imds.start();

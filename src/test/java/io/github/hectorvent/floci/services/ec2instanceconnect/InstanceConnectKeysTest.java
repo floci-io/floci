@@ -70,6 +70,12 @@ class InstanceConnectKeysTest {
     }
 
     @Test
+    void theSignerNameUsesTheRegionsPartitionDomain() throws Exception {
+        assertEquals("CN=managed-ssh-signer.cn-north-1.amazonaws.com.cn",
+                parseChain(keys.signerCertificateChain("cn-north-1")).get(0).getSubjectX500Principal().getName());
+    }
+
+    @Test
     void eachNonRootCertificateHasAGoodStapleSignedByItsIssuer() throws Exception {
         List<X509Certificate> chain = parseChain(keys.signerCertificateChain(REGION));
         Map<String, String> staples = keys.ocspStaples(REGION);

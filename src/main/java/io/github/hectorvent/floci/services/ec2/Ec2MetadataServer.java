@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
@@ -60,9 +61,6 @@ public class Ec2MetadataServer {
     private final EmulatorConfig config;
     private final Ec2InstanceCredentials credentials;
     private final Clock clock;
-
-    /** What {@code services/domain} reports: the commercial partition's domain. */
-    static final String SERVICES_DOMAIN = "amazonaws.com";
 
     /** IMDSv2: token value → Instance */
     private final Map<String, SessionToken> tokens = new ConcurrentHashMap<>();
@@ -196,7 +194,7 @@ public class Ec2MetadataServer {
         router.get("/latest/meta-data/tags/instance").handler(ctx -> handleInstanceTagKeys(ctx));
         router.get("/latest/meta-data/tags/instance/").handler(ctx -> handleInstanceTagKeys(ctx));
         router.getWithRegex("/latest/meta-data/tags/instance/.+").handler(ctx -> handleInstanceTagValue(ctx));
-        router.get("/latest/meta-data/services/domain").handler(ctx -> handleText(ctx, inst -> SERVICES_DOMAIN));
+        router.get("/latest/meta-data/services/domain").handler(ctx -> handleText(ctx, inst -> AwsRegions.dnsSuffixFor(inst.getRegion())));
         // EC2 Instance Connect. The agent probes active-keys with HEAD before fetching it.
         router.route("/latest/meta-data/managed-ssh-keys/active-keys/:user").method(HttpMethod.GET)
                 .method(HttpMethod.HEAD).handler(this::handleManagedSshKeys);
