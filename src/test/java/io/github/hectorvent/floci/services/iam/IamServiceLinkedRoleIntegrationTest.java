@@ -155,7 +155,10 @@ class IamServiceLinkedRoleIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(
+                    "1 validation error detected: Value null at 'aWSServiceName' failed to satisfy constraint: "
+                            + "Member must not be null"));
     }
 
     @Test
@@ -355,6 +358,23 @@ class IamServiceLinkedRoleIntegrationTest {
 
     @Test
     @Order(15)
+    void anEmptyServiceNameUsesIamValidationError() {
+        given()
+            .formParam("Action", "CreateServiceLinkedRole")
+            .formParam("AWSServiceName", "")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(
+                    "1 validation error detected: Value at 'aWSServiceName' failed to satisfy constraint: "
+                            + "Member must have length greater than or equal to 1"));
+    }
+
+    @Test
+    @Order(15)
     void aServiceNameLongerThanTheDocumentedMaximumIsRejected() {
         given()
             .formParam("Action", "CreateServiceLinkedRole")
@@ -364,7 +384,10 @@ class IamServiceLinkedRoleIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("ErrorResponse.Error.Code", equalTo("InvalidInput"));
+            .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
+            .body("ErrorResponse.Error.Message", equalTo(
+                    "1 validation error detected: Value at 'aWSServiceName' failed to satisfy constraint: "
+                            + "Member must have length less than or equal to 128"));
     }
 
     /** The deletion task is account-scoped storage, so another account must not resolve it. */

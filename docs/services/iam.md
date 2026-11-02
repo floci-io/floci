@@ -291,10 +291,13 @@ the emulator rather than by a request, a seeded configuration or a role template
 in those same words.
 
 Some refusals stay as this service answers them, and the members behind them are left out of the
-vendored shapes so the walk cannot reword them. A service-linked role's principal and suffix answer
-`InvalidInput` rather than a validation error at all, and so does an empty `ServiceNamespaces` on
-`ListPoliciesGrantingServiceAccess`. An account alias carries AWS's own sentence about its own
-bounds, which is why neither alias operation is read at all. For `statusType` on the four credential
+vendored shapes so the walk cannot reword them. `CreateServiceLinkedRole` validates its required
+`AWSServiceName` through IAM's validation layer: missing, empty, overlong and pattern-invalid values
+answer `ValidationError` with the corresponding member constraint. The pattern error follows a
+captured AWS response; the other cases follow IAM's validation conventions. `CustomSuffix` remains
+`InvalidInput`, as does an empty `ServiceNamespaces` on `ListPoliciesGrantingServiceAccess`. An
+account alias carries AWS's own sentence about its own bounds, which is why neither alias operation
+is read at all. For `statusType` on the four credential
 updates, a missing `Status` answers `Member must not be null`; an invalid value answers `Member must
 satisfy enum value set: [Expired, Active, Inactive]` without echoing that value. These wordings
 follow the newer AWS capture. `Encoding` on `GetSSHPublicKey`
