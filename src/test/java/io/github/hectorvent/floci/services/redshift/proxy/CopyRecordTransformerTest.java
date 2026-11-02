@@ -33,13 +33,19 @@ class CopyRecordTransformerTest {
             CopyRecordTransformer.ColumnKind.TIMESTAMP);
 
     private static CopyStatementParser.CopyTransforms temporal(String dateFormat, String timeFormat, boolean any) {
-        return new CopyStatementParser.CopyTransforms(false, false, false, false, null,
-                dateFormat == null ? null : CopyTemporalFormat.parse(dateFormat, false),
-                timeFormat == null ? null : CopyTemporalFormat.parse(timeFormat, true), any);
+        CopyTemporalFormat date = dateFormat != null ? CopyTemporalFormat.parse(dateFormat, false)
+                : (any ? CopyTemporalFormat.defaultIso() : null);
+        CopyTemporalFormat time = timeFormat != null ? CopyTemporalFormat.parse(timeFormat, true)
+                : (any ? CopyTemporalFormat.defaultIso() : null);
+        return new CopyStatementParser.CopyTransforms(false, false, false, false, null, date, time, any);
     }
 
     private static String applyTemporal(boolean csv, CopyStatementParser.CopyTransforms transforms, String input) {
-        String delimiter = csv ? "," : "|";
+        return applyTemporal(csv ? "," : "|", csv, transforms, input);
+    }
+
+    private static String applyTemporal(String delimiter, boolean csv,
+                                        CopyStatementParser.CopyTransforms transforms, String input) {
         CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
                 "t", List.of(), "b", "k", delimiter, 0, false, csv, null, null, false, false, false, transforms);
         return new String(new CopyRecordTransformer(spec, null, KINDS).apply(input.getBytes(StandardCharsets.UTF_8)),
@@ -60,9 +66,53 @@ class CopyRecordTransformerTest {
     }
 
     @Test
-    void nullMarkersAndEmptyFieldsAreNotConverted() {
-        assertEquals("1|\\N|\n",
-                applyTemporal(false, temporal("MM/DD/YYYY", "MM/DD/YYYY", false), "1|\\N|\n"));
+    void nullMarkersAreNotConverted() {
+        assertEquals("1|\\N|\\N\n",
+                applyTemporal(false, temporal("MM/DD/YYYY", "MM/DD/YYYY", false), "1|\\N|\\N\n"));
+    }
+
+    @Test
+    void emptyTemporalFieldsWithoutAcceptAnyDateFailTheCopy() {
+        assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> applyTemporal(false, temporal("MM/DD/YYYY", "MM/DD/YYYY", false), "1|03/31/2003|\n"));
+        assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> applyTemporal(false, temporal("MM/DD/YYYY", "MM/DD/YYYY", false), "1||03/31/2003 12:00:00\n"));
+    }
+
+    @Test
+    void acceptAnyDateLoadsEmptyDateAndTimestampAsNull() {
+        assertEquals("1|\\N|\\N\n",
+                applyTemporal(false, temporal("MM/DD/YYYY", "MM/DD/YYYY", true), "1||\n"));
+        assertEquals("1,,\n",
+                applyTemporal(true, temporal("MM/DD/YYYY", "MM/DD/YYYY", true), "1,\"\",\n"));
+    }
+
+    @Test
+    void convertedDatesContainingTheDelimiterAreEscapedInTextMode() {
+        assertEquals("a-2020\\-01\\-02-c\n",
+                applyTemporal("-", false, temporal("YYYYMMDD", null, false), "a-20200102-c\n"));
+        assertEquals("a:b:2020-01-02 12\\:30\\:00\n",
+                applyTemporal(":", false, temporal(null, "YYYYMMDD HHMISS", false), "a:b:20200102 123000\n"));
+    }
+
+    @Test
+    void convertedDatesContainingTheDelimiterAreQuotedInCsvMode() {
+        assertEquals("a-\"2020-01-02\"-c\n",
+                applyTemporal("-", true, temporal("YYYYMMDD", null, false), "a-20200102-c\n"));
+        assertEquals("a:b:\"2020-01-02 12:30:00\"\n",
+                applyTemporal(":", true, temporal(null, "YYYYMMDD HHMISS", false), "a:b:20200102 123000\n"));
+    }
+
+    @Test
+    void yearZeroIsRejectedOrLoadedAsNullWithAcceptAnyDate() {
+        assertThrows(S3CopySimulator.S3TransferException.class,
+                () -> applyTemporal(false, temporal("YYYY-MM-DD", null, false), "a|0000-01-01|x\n"));
+        assertEquals("a|\\N|\\N\n",
+                applyTemporal(false, temporal("YYYY-MM-DD", "YYYY-MM-DD HH:MI:SS", true),
+                        "a|0000-01-01|0000-01-01 00:00:00\n"));
+        assertEquals("a|\\N|\\N\n",
+                applyTemporal(false, temporal(null, null, true),
+                        "a|0000-01-01|0000-01-01 00:00:00\n"));
     }
 
     @Test

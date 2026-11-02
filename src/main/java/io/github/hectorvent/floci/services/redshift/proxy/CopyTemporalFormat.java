@@ -243,7 +243,11 @@ final class CopyTemporalFormat {
             throw invalid(text);
         }
         try {
-            LocalDate date = LocalDate.of(Integer.parseInt(matcher.group(1)), Integer.parseInt(matcher.group(2)),
+            int year = Integer.parseInt(matcher.group(1));
+            if (year < 1 || year > MAX_YEAR) {
+                throw invalid(text);
+            }
+            LocalDate date = LocalDate.of(year, Integer.parseInt(matcher.group(2)),
                     Integer.parseInt(matcher.group(3)));
             int hour = matcher.group(4) == null ? 0 : Integer.parseInt(matcher.group(4));
             int minute = matcher.group(5) == null ? 0 : Integer.parseInt(matcher.group(5));
@@ -293,6 +297,9 @@ final class CopyTemporalFormat {
                     case "AM", "PM" -> meridian = captured.toUpperCase(Locale.ROOT);
                     default -> throw invalid(text);
                 }
+            }
+            if (year < 1 || year > MAX_YEAR) {
+                throw invalid(text);
             }
             hour = applyMeridian(hour, twelveHour, meridian, text);
             return LocalDateTime.of(LocalDate.of(year, month, day), LocalTime.of(hour, minute, second, nanos));

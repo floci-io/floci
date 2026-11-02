@@ -118,6 +118,17 @@ class CopyTemporalFormatTest {
     }
 
     @Test
+    void yearZeroIsRejectedInIsoAndPattern() {
+        assertThrows(IllegalArgumentException.class, () -> date("YYYY-MM-DD").toDate("0000-01-01"));
+        assertThrows(IllegalArgumentException.class, () -> date("YYYYMMDD").toDate("00000101"));
+        assertThrows(IllegalArgumentException.class, () -> CopyTemporalFormat.defaultIso().toDate("0000-01-01"));
+        assertThrows(IllegalArgumentException.class,
+                () -> CopyTemporalFormat.defaultIso().toTimestamp("0000-01-01 00:00:00"));
+        assertThrows(IllegalArgumentException.class,
+                () -> time("YYYY-MM-DD HH:MI:SS").toTimestamp("0000-01-01 12:00:00"));
+    }
+
+    @Test
     void theIsoFallbackReadsADateWithOrWithoutATimeOfDay() {
         CopyTemporalFormat iso = CopyTemporalFormat.defaultIso();
 

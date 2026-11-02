@@ -207,21 +207,36 @@ final class CopyRecordTransformer {
         }
         // A field that already is the NULL marker must not be cut or reformatted: that would turn NULL into data.
         boolean nullMarkerField = !field.quoted() && Arrays.equals(value, nullMarker);
+        boolean converted = false;
         if (!nullMarkerField) {
-            value = convertTemporal(value, column);
-            if (value == null) {
+            byte[] temporal = convertTemporal(value, column);
+            if (temporal == null) {
                 out.writeBytes(nullMarker);
                 return;
             }
+            if (temporal != value) {
+                converted = true;
+                value = temporal;
+            }
         }
         byte[] limited = nullMarkerField ? value : truncate(value, column);
-        if (!field.quoted()) {
+        boolean needsEscaping = field.quoted() || (converted && containsDelimiter(limited));
+        if (!needsEscaping) {
             out.writeBytes(limited);
         } else if (csv) {
             writeCsvQuoted(limited, out);
         } else {
             out.writeBytes(escapeTextField(limited));
         }
+    }
+
+    private boolean containsDelimiter(byte[] value) {
+        for (byte b : value) {
+            if (b == delimiter) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -231,7 +246,7 @@ final class CopyRecordTransformer {
      * default MAXERROR of 0.
      */
     private byte[] convertTemporal(byte[] value, int column) {
-        if (!transforms.temporal() || columnKinds == null || column >= columnKinds.size() || value.length == 0) {
+        if (!transforms.temporal() || columnKinds == null || column >= columnKinds.size()) {
             return value;
         }
         ColumnKind kind = columnKinds.get(column);
