@@ -5,6 +5,8 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgOptionalFields;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
+import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefresh;
+import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefreshReplacement;
 import io.github.hectorvent.floci.services.autoscaling.model.ScalingActivity;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -25,6 +27,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -132,6 +135,125 @@ class AutoScalingStandbyTest {
                     ec2States.put(id, InstanceState.running());
                     return reservation(List.of(instance(id, InstanceState.running())));
                 });
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void standbyPreservesSettledRefreshCompletion(boolean decrement) {
+        InstanceRefresh refresh = warmingRefresh(REGION, GROUP, "i-a");
+
+        assertEquals(200, enterStandby(decrement, "i-a").getStatus());
+
+        assertEquals("EnteringStandby", group().getInstances().getFirst().getLifecycleState());
+        assertEquals("Complete", refresh.getReplacements().getFirst().getPhase());
+        assertEquals("Successful", refresh.getStatus());
+        assertEquals(0, refresh.getInstancesToUpdate());
+        assertEquals(100, refresh.getPercentageComplete());
+        assertNotNull(refresh.getEndTime());
+        assertEquals(decrement ? 1 : 2, group().getDesiredCapacity());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void emptyStandbyDoesNotSettleRefresh(boolean decrement) {
+        InstanceRefresh refresh = warmingRefresh(REGION, GROUP, "i-a");
+
+        assertEquals(200, enterStandby(decrement).getStatus());
+
+        assertEquals("Warming", refresh.getReplacements().getFirst().getPhase());
+        assertEquals("InProgress", refresh.getStatus());
+        assertNull(refresh.getEndTime());
+        assertEquals(2, group().getDesiredCapacity());
+        assertEquals("InService", group().getInstances().getFirst().getLifecycleState());
+        assertTrue(service.describeScalingActivities(REGION, GROUP).isEmpty());
+    }
+
+    @Test
+    void rejectedLifecycleStandbyDoesNotSettleRefresh() {
+        InstanceRefresh refresh = warmingRefresh(REGION, GROUP, "i-b");
+        group().getInstances().getFirst().setLifecycleState("Standby");
+
+        assertEquals(400, enterStandby(true, "i-a").getStatus());
+
+        assertEquals("Warming", refresh.getReplacements().getFirst().getPhase());
+        assertEquals("InProgress", refresh.getStatus());
+        assertNull(refresh.getEndTime());
+        assertEquals("Standby", group().getInstances().getFirst().getLifecycleState());
+        assertEquals(2, group().getDesiredCapacity());
+        assertTrue(service.describeScalingActivities(REGION, GROUP).isEmpty());
+    }
+
+    @Test
+    void standbySettlesOnlyReadyRefreshMembers() {
+        InstanceRefresh refresh = warmingRefresh(REGION, GROUP, "i-a");
+        InstanceRefreshReplacement pending = new InstanceRefreshReplacement();
+        pending.setOriginalInstanceId("i-old-b");
+        pending.setReplacementInstanceId("i-b");
+        pending.setPhase("Warming");
+        refresh.setReplacements(List.of(refresh.getReplacements().getFirst(), pending));
+        group().getInstances().get(1).setLifecycleState("Pending");
+
+        assertEquals(200, enterStandby(true, "i-a").getStatus());
+
+        assertEquals("Complete", refresh.getReplacements().getFirst().getPhase());
+        assertEquals("Warming", pending.getPhase());
+        assertEquals("InProgress", refresh.getStatus());
+        assertEquals(1, refresh.getInstancesToUpdate());
+        assertNull(refresh.getEndTime());
+        assertEquals("Pending", group().getInstances().get(1).getLifecycleState());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void rejectedStandbyDoesNotSettleRefresh(boolean capacityFailure) {
+        InstanceRefresh refresh = warmingRefresh(REGION, GROUP, "i-a");
+        if (capacityFailure) {
+            group().setMinSize(2);
+        }
+
+        Response response = capacityFailure ? enterStandby(true, "i-a")
+                : enterStandby(true, "i-a", "i-foreign");
+
+        assertEquals(400, response.getStatus());
+        assertEquals("Warming", refresh.getReplacements().getFirst().getPhase());
+        assertEquals("InProgress", refresh.getStatus());
+        assertNull(refresh.getEndTime());
+        assertEquals("InService", group().getInstances().getFirst().getLifecycleState());
+        assertNull(group().getInstances().getFirst().getStandbyActivityId());
+        assertEquals(2, group().getDesiredCapacity());
+    }
+
+    @Test
+    void standbyDoesNotSettleOtherGroupOrRegionRefreshes() {
+        InstanceRefresh own = warmingRefresh(REGION, GROUP, "i-a");
+        InstanceRefresh foreignGroup = warmingRefresh(REGION, "other-group", "i-a");
+        InstanceRefresh foreignRegion = warmingRefresh("us-west-2", GROUP, "i-a");
+
+        assertEquals(200, enterStandby(true, "i-a").getStatus());
+
+        assertEquals("Successful", own.getStatus());
+        for (InstanceRefresh untouched : List.of(foreignGroup, foreignRegion)) {
+            assertEquals("InProgress", untouched.getStatus());
+            assertEquals("Warming", untouched.getReplacements().getFirst().getPhase());
+            assertNull(untouched.getEndTime());
+        }
+    }
+
+    private InstanceRefresh warmingRefresh(String region, String groupName, String replacementId) {
+        InstanceRefresh refresh = new InstanceRefresh();
+        refresh.setRegion(region);
+        refresh.setAutoScalingGroupName(groupName);
+        refresh.setInstanceRefreshId("refresh-" + region + "-" + groupName);
+        refresh.setStatus("InProgress");
+        refresh.setStartTime(Instant.now());
+        refresh.setInstancesToUpdate(1);
+        InstanceRefreshReplacement replacement = new InstanceRefreshReplacement();
+        replacement.setOriginalInstanceId("i-old");
+        replacement.setReplacementInstanceId(replacementId);
+        replacement.setPhase("Warming");
+        refresh.setReplacements(List.of(replacement));
+        service.saveInstanceRefresh(refresh);
+        return refresh;
     }
 
     @Test
