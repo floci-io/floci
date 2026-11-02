@@ -26,12 +26,26 @@ public final class CopyStatementParser {
             boolean emptyAsNull,
             boolean removeQuotes,
             boolean truncateColumns,
-            Character invalidCharReplacement) {
+            Character invalidCharReplacement,
+            CopyTemporalFormat dateFormat,
+            CopyTemporalFormat timeFormat,
+            boolean acceptAnyDate) {
 
         public static final CopyTransforms NONE = new CopyTransforms(false, false, false, false, null);
 
+        public CopyTransforms(boolean blanksAsNull, boolean emptyAsNull, boolean removeQuotes,
+                              boolean truncateColumns, Character invalidCharReplacement) {
+            this(blanksAsNull, emptyAsNull, removeQuotes, truncateColumns, invalidCharReplacement,
+                    null, null, false);
+        }
+
+        /** Whether date or timestamp fields are read with a format other than PostgreSQL's own. */
+        public boolean temporal() {
+            return (dateFormat != null && dateFormat.converts()) || (timeFormat != null && timeFormat.converts());
+        }
+
         public boolean fieldLevel() {
-            return blanksAsNull || emptyAsNull || removeQuotes || truncateColumns;
+            return blanksAsNull || emptyAsNull || removeQuotes || truncateColumns || temporal();
         }
 
         public boolean any() {
@@ -269,6 +283,9 @@ public final class CopyStatementParser {
     private static final Pattern TRUNCATECOLUMNS_PATTERN = Pattern.compile("(?i)\\bTRUNCATECOLUMNS\\b");
     private static final Pattern ACCEPTINVCHARS_PATTERN = Pattern.compile(
             "(?i)\\bACCEPTINVCHARS(?:\\s+(?:AS\\s+)?'([ -&(-~])')?");
+    private static final Pattern DATEFORMAT_PATTERN = Pattern.compile("(?i)\\bDATEFORMAT\\s+(?:AS\\s+)?'([^']*)'");
+    private static final Pattern TIMEFORMAT_PATTERN = Pattern.compile("(?i)\\bTIMEFORMAT\\s+(?:AS\\s+)?'([^']*)'");
+    private static final Pattern ACCEPTANYDATE_PATTERN = Pattern.compile("(?i)\\bACCEPTANYDATE\\b");
     private static final Pattern CREDENTIALS_PATTERN = Pattern.compile(
             "(?i)\\bCREDENTIALS\\s+(?:AS\\s+)?(?:'((?:[^']|'')*)'|\"([^\"]*)\")");
     private static final Pattern ACCESS_KEY_ID_PATTERN = Pattern.compile(
@@ -300,9 +317,9 @@ public final class CopyStatementParser {
      */
     private static final Pattern UNSUPPORTED_CLAUSE = Pattern.compile(
             "(?i)\\b(FIXEDWIDTH|PARQUET|AVRO|ORC|SHAPEFILE|BZIP2|LZOP|ZSTD|MAXERROR"
-                    + "|DATEFORMAT|TIMEFORMAT|ENCRYPTED|ENCODING"
+                    + "|ENCRYPTED|ENCODING"
                     + "|MASTER_SYMMETRIC_KEY|KMS_KEY_ID"
-                    + "|ACCEPTANYDATE|FILLRECORD|TRIMBLANKS"
+                    + "|FILLRECORD|TRIMBLANKS"
                     + "|IGNOREBLANKLINES|ESCAPE|EXPLICIT_IDS|COMPUPDATE"
                     + "|STATUPDATE|NOLOAD|ROUNDEC|QUOTE|SSH|READRATIO|COMPROWS|DIMENSION)\\b");
 
@@ -620,7 +637,12 @@ public final class CopyStatementParser {
         boolean removeQuotes = false;
         boolean truncateColumns = false;
         Character invalidChar = null;
+        CopyTemporalFormat dateFormat = null;
+        CopyTemporalFormat timeFormat = null;
+        boolean acceptAnyDate = false;
 
+        boolean seenDateFormat = false;
+        boolean seenTimeFormat = false;
         boolean seenTruncateColumns = false;
         boolean seenBlanksAsNull = false;
         boolean seenEmptyAsNull = false;
@@ -647,6 +669,9 @@ public final class CopyStatementParser {
         Matcher removeQuotesMatcher = REMOVEQUOTES_PATTERN.matcher(options);
         Matcher truncateColumnsMatcher = TRUNCATECOLUMNS_PATTERN.matcher(options);
         Matcher acceptInvCharsMatcher = ACCEPTINVCHARS_PATTERN.matcher(options);
+        Matcher dateFormatMatcher = DATEFORMAT_PATTERN.matcher(options);
+        Matcher timeFormatMatcher = TIMEFORMAT_PATTERN.matcher(options);
+        Matcher acceptAnyDateMatcher = ACCEPTANYDATE_PATTERN.matcher(options);
         AuthClauses auth = new AuthClauses(options, defaultIamRoleArn);
 
         int next;
@@ -754,6 +779,26 @@ public final class CopyStatementParser {
                         ? Character.valueOf(acceptInvCharsMatcher.group(1).charAt(0))
                         : Character.valueOf('?');
                 offset = acceptInvCharsMatcher.end();
+            } else if (matchClause(dateFormatMatcher, offset, len)) {
+                dateFormat = seenDateFormat ? null : CopyTemporalFormat.parse(dateFormatMatcher.group(1), false);
+                if (dateFormat == null) {
+                    return null;
+                }
+                seenDateFormat = true;
+                offset = dateFormatMatcher.end();
+            } else if (matchClause(timeFormatMatcher, offset, len)) {
+                timeFormat = seenTimeFormat ? null : CopyTemporalFormat.parse(timeFormatMatcher.group(1), true);
+                if (timeFormat == null) {
+                    return null;
+                }
+                seenTimeFormat = true;
+                offset = timeFormatMatcher.end();
+            } else if (matchClause(acceptAnyDateMatcher, offset, len)) {
+                if (acceptAnyDate) {
+                    return null;
+                }
+                acceptAnyDate = true;
+                offset = acceptAnyDateMatcher.end();
             } else if ((next = auth.consume(offset, len)) != AuthClauses.NO_MATCH) {
                 if (next == AuthClauses.REJECT) {
                     return null;
@@ -772,8 +817,17 @@ public final class CopyStatementParser {
             delimiter = csv ? "," : "|";
         }
 
+        // ACCEPTANYDATE turns a value that does not match its format into NULL, so it needs a format to
+        // judge by: without DATEFORMAT or TIMEFORMAT that is the ISO form PostgreSQL reads too.
+        if (acceptAnyDate && dateFormat == null) {
+            dateFormat = CopyTemporalFormat.defaultIso();
+        }
+        if (acceptAnyDate && timeFormat == null) {
+            timeFormat = CopyTemporalFormat.defaultIso();
+        }
         CopyTransforms transforms = new CopyTransforms(
-                blanksAsNull, emptyAsNull, removeQuotes, truncateColumns, invalidChar);
+                blanksAsNull, emptyAsNull, removeQuotes, truncateColumns, invalidChar,
+                dateFormat, timeFormat, acceptAnyDate);
         if (transforms.any() && jsonAuto) {
             return null;
         }

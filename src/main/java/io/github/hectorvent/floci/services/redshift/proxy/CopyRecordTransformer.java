@@ -19,6 +19,11 @@ final class CopyRecordTransformer {
     private static final byte DOUBLE_QUOTE = '"';
     private static final byte SINGLE_QUOTE = '\'';
 
+    /** What a COPY column holds, as far as the date and time formats are concerned. */
+    enum ColumnKind {
+        DATE, TIMESTAMP, OTHER
+    }
+
     private record Field(int tokenEnd, byte[] value, boolean quoted) {
     }
 
@@ -27,8 +32,15 @@ final class CopyRecordTransformer {
     private final byte delimiter;
     private final byte[] nullMarker;
     private final List<Integer> columnMaxBytes;
+    private final List<ColumnKind> columnKinds;
 
     CopyRecordTransformer(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes) {
+        this(spec, columnMaxBytes, null);
+    }
+
+    CopyRecordTransformer(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes,
+                          List<ColumnKind> columnKinds) {
+        this.columnKinds = columnKinds;
         this.transforms = spec.transforms();
         this.csv = spec.csv();
         String delimiterText = spec.delimiter() != null ? spec.delimiter() : (spec.csv() ? "," : "|");
@@ -193,14 +205,54 @@ final class CopyRecordTransformer {
             out.writeBytes(nullMarker);
             return;
         }
-        // A field that already is the NULL marker must not be cut: that would turn NULL into data.
-        byte[] limited = !field.quoted() && Arrays.equals(value, nullMarker) ? value : truncate(value, column);
+        // A field that already is the NULL marker must not be cut or reformatted: that would turn NULL into data.
+        boolean nullMarkerField = !field.quoted() && Arrays.equals(value, nullMarker);
+        if (!nullMarkerField) {
+            value = convertTemporal(value, column);
+            if (value == null) {
+                out.writeBytes(nullMarker);
+                return;
+            }
+        }
+        byte[] limited = nullMarkerField ? value : truncate(value, column);
         if (!field.quoted()) {
             out.writeBytes(limited);
         } else if (csv) {
             writeCsvQuoted(limited, out);
         } else {
             out.writeBytes(escapeTextField(limited));
+        }
+    }
+
+    /**
+     * Rewrites a DATE or TIMESTAMP field from the DATEFORMAT or TIMEFORMAT to the ISO text PostgreSQL reads.
+     * Returns the field as it is when no format applies to its column, and null when ACCEPTANYDATE turns a
+     * value that does not match into NULL; without it such a value fails the COPY, as it does with the
+     * default MAXERROR of 0.
+     */
+    private byte[] convertTemporal(byte[] value, int column) {
+        if (!transforms.temporal() || columnKinds == null || column >= columnKinds.size() || value.length == 0) {
+            return value;
+        }
+        ColumnKind kind = columnKinds.get(column);
+        CopyTemporalFormat format = switch (kind) {
+            case DATE -> transforms.dateFormat();
+            case TIMESTAMP -> transforms.timeFormat();
+            case OTHER -> null;
+        };
+        if (format == null || !format.converts()) {
+            return value;
+        }
+        String text = new String(value, StandardCharsets.UTF_8);
+        try {
+            String iso = kind == ColumnKind.DATE ? format.toDate(text) : format.toTimestamp(text);
+            return iso.getBytes(StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            if (transforms.acceptAnyDate()) {
+                return null;
+            }
+            throw malformed("invalid " + (kind == ColumnKind.DATE ? "date" : "timestamp") + " in column "
+                    + (column + 1) + ": " + e.getMessage());
         }
     }
 
