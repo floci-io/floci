@@ -2344,6 +2344,8 @@ class NativeDynamoDbJsonHandlerTest {
             TransactWriteItems | {"TransactItems":[{"Put":{"TableName":"Tbl","Item":{}},"Delete":{"TableName":"bad!name","Key":{}}}]} | TransactItems can only contain one of Check, Put, Update or Delete
             TransactGetItems   | {"TransactItems":[{"Get":{"TableName":"Tbl","Key":{}}},{"Get":{"TableName":"bad!name","Key":{}}}]} | 1 validation error detected: Value 'bad!name' at 'transactItems.2.member.get.tableName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
             TransactGetItems   | {"TransactItems":[{"Get":{"TableName":""}},{"Put":{}}],"ReturnConsumedCapacity":"BOGUS"} | 4 validation errors detected: Value null at 'transactItems.1.member.get.key' failed to satisfy constraint: Member must not be null; Value '' at 'transactItems.1.member.get.tableName' failed to satisfy constraint: Member must have length greater than or equal to 1; Value null at 'transactItems.2.member.get' failed to satisfy constraint: Member must not be null; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]
+            TransactWriteItems | {"TransactItems":null,"ClientRequestToken":"0123456789012345678901234567890123456","ReturnConsumedCapacity":"BOGUS","ReturnItemCollectionMetrics":"BOGUS2"} | 4 validation errors detected: Value null at 'transactItems' failed to satisfy constraint: Member must not be null; Value '0123456789012345678901234567890123456' at 'clientRequestToken' failed to satisfy constraint: Member must have length less than or equal to 36; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]; Value 'BOGUS2' at 'returnItemCollectionMetrics' failed to satisfy constraint: Member must satisfy enum value set: [SIZE, NONE]
+            TransactGetItems   | {"ReturnConsumedCapacity":"BOGUS"} | 2 validation errors detected: Value null at 'transactItems' failed to satisfy constraint: Member must not be null; Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]
             """)
     void aTransactionReportsItsMemberErrorsTogether(String operation, String request, String message) throws Exception {
         AwsException ex = assertThrows(AwsException.class,
@@ -2369,6 +2371,25 @@ class NativeDynamoDbJsonHandlerTest {
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("TransactWriteItems", body, "eu-west-1"));
+        assertEquals(message, ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            TransactWriteItems | {"TransactItems":[]}                                   | 1 validation error detected: Value at 'TransactItems' failed to satisfy constraint: Member must have length greater than or equal to 1
+            TransactGetItems   | {"TransactItems":[]}                                   | 1 validation error detected: Value at 'TransactItems' failed to satisfy constraint: Member must have length greater than or equal to 1
+            TransactWriteItems | {"TransactItems":[{"Put":{"TableName":"","Item":{}}}]} | 1 validation error detected: Value at 'TransactItems.0.member.Put.TableName' failed to satisfy constraint: Member must have length greater than or equal to 1
+            """)
+    void aTransactionNestedDeepInUnknownMembersIsCheckedByTheNewerValidator(String operation, String request,
+            String message) throws Exception {
+        ObjectNode body = (ObjectNode) mapper.readTree(request);
+        body.set("Foo", nestedMaps(63));
+        for (JsonNode action : body.get("TransactItems")) {
+            action.forEach(op -> ((ObjectNode) op).set("Foo", nestedMaps(63)));
+            ((ObjectNode) action).set("Foo", nestedMaps(63));
+        }
+
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle(operation, body, "eu-west-1"));
         assertEquals(message, ex.getMessage());
     }
 

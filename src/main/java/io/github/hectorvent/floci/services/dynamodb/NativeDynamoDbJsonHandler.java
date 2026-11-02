@@ -2549,15 +2549,24 @@ public class NativeDynamoDbJsonHandler {
     // DynamoDB checks the lengths with its newer validator first. It skips that validator when a
     // required member is missing or the request is nested too deep, and the older one checks the rest.
     private static JsonNode requireValidTransactRequest(JsonNode request, boolean write) {
+        String token = write ? request.path("ClientRequestToken").textValue() : null;
+        List<String> memberErrors = new ArrayList<>();
+        if (token != null) {
+            addIfPresent(memberErrors, SmithyValidationErrors.lengthOutOfRange("clientRequestToken", token, 1,
+                    MAX_CLIENT_REQUEST_TOKEN_LENGTH));
+        }
+        addReturnConsumedCapacityError(request, memberErrors);
+        if (write) {
+            addIfPresent(memberErrors, returnItemCollectionMetricsError(request));
+        }
         JsonNode transactItems = request.path("TransactItems");
         if (transactItems.isMissingNode() || transactItems.isNull() || !transactItems.isArray()) {
             List<String> validationErrors = new ArrayList<>();
-            validationErrors.add("Value null at 'transactItems' failed to satisfy constraint: "
-                    + "Member must have length greater than or equal to 1");
-            addReturnConsumedCapacityError(request, validationErrors);
+            validationErrors.add(SmithyValidationErrors.notNull("transactItems"));
+            validationErrors.addAll(memberErrors);
             throwValidationErrors(validationErrors);
         }
-        String token = write ? request.path("ClientRequestToken").textValue() : null;
+        List<String> ops = write ? TRANSACT_WRITE_OPS : List.of("Get");
         List<TransactAction> actions = new ArrayList<>();
         List<String> required = new ArrayList<>();
         boolean missing = false;
@@ -2565,8 +2574,7 @@ public class NativeDynamoDbJsonHandler {
         boolean manyOperations = false;
         for (int i = 0; i < transactItems.size(); i++) {
             JsonNode txItem = transactItems.get(i);
-            List<String> types = (write ? TRANSACT_WRITE_OPS : List.of("Get")).stream()
-                    .filter(txItem::hasNonNull).toList();
+            List<String> types = ops.stream().filter(txItem::hasNonNull).toList();
             noOperation |= types.isEmpty();
             manyOperations |= types.size() > 1;
             if (!write && types.isEmpty()) {
@@ -2588,7 +2596,7 @@ public class NativeDynamoDbJsonHandler {
                 }
             }
         }
-        boolean older = jsonDepth(request) >= OLDER_VALIDATOR_DEPTH;
+        boolean older = transactDepth(transactItems, ops) >= OLDER_VALIDATOR_DEPTH;
         if (!missing && !older) {
             requireTransactLengths(transactItems.size(), actions, token);
         }
@@ -2596,15 +2604,6 @@ public class NativeDynamoDbJsonHandler {
         if (transactItems.size() > MAX_TRANSACT_ITEMS) {
             required.addFirst("Value '" + transactItems + "' at 'transactItems' failed to satisfy constraint: "
                     + "Member must have length less than or equal to " + MAX_TRANSACT_ITEMS);
-        }
-        List<String> memberErrors = new ArrayList<>();
-        if (token != null) {
-            addIfPresent(memberErrors, SmithyValidationErrors.lengthOutOfRange("clientRequestToken", token, 1,
-                    MAX_CLIENT_REQUEST_TOKEN_LENGTH));
-        }
-        addReturnConsumedCapacityError(request, memberErrors);
-        if (write) {
-            addIfPresent(memberErrors, returnItemCollectionMetricsError(request));
         }
         // The older validator stops at a missing member, before the operation and name checks.
         if (!required.isEmpty()) {
@@ -2658,6 +2657,20 @@ public class NativeDynamoDbJsonHandler {
                     action.op().get("TableName").asText(), 1, 1024));
         }
         throwValidationErrors(validationErrors);
+    }
+
+    // DynamoDB leaves unknown members out when it measures how deep a request nests.
+    private static int transactDepth(JsonNode transactItems, List<String> ops) {
+        int deepest = 0;
+        for (JsonNode txItem : transactItems) {
+            for (String op : ops) {
+                for (String member : List.of("Item", "Key", "ExpressionAttributeValues")) {
+                    deepest = Math.max(deepest, jsonDepth(txItem.path(op).path(member)));
+                }
+            }
+        }
+        // The request, TransactItems, the action and the operation hold these members.
+        return deepest + 4;
     }
 
     private static int jsonDepth(JsonNode node) {
