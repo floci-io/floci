@@ -1,23 +1,19 @@
 package io.github.hectorvent.floci.services.ssm;
 
+import io.github.hectorvent.floci.testing.AwsTestClients;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.RestAssured;
 import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.ssm.model.Parameter;
 import software.amazon.awssdk.services.ssm.model.ParameterHistory;
 import software.amazon.awssdk.services.ssm.model.ParameterType;
 
-import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
@@ -41,12 +37,7 @@ class SsmSecureStringCiphertextIntegrationTest {
 
     @BeforeEach
     void createClient() {
-        ssm = SsmClient.builder()
-                .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
-                .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .build();
+        ssm = AwsTestClients.create(SsmClient.builder(), "test", Region.US_EAST_1);
     }
 
     @AfterEach

@@ -238,9 +238,12 @@ the plaintext is returned.
     the persisted state files.
 
     A `KeyId` that Floci's KMS cannot use, which AWS would refuse on `PutParameter`, is accepted,
-    and such a parameter is returned unencrypted. So is a value over KMS's 4096-byte limit (AWS
-    encrypts larger Advanced parameters with envelope encryption, which Floci does not), and a
+    and such a parameter is returned unencrypted. So is a value over KMS's 4096-byte limit, and a
     parameter version stored before Floci encrypted `SecureString` values.
+
+    AWS encrypts every Advanced `SecureString` with the AWS Encryption SDK, so its value is the
+    SDK's encrypted message. Floci encrypts an Advanced value up to 4096 bytes with a plain KMS
+    `Encrypt` instead, the same as a Standard one.
 
 ## Parameter Store Change events
 
