@@ -459,6 +459,11 @@ public final class S3CopySimulator {
         if (spec.nullAs() != null) {
             sql.append(", NULL '").append(quoteLiteral(spec.nullAs())).append("'");
         }
+        if (spec.transforms().toleratesErrors()) {
+            // MAXERROR fails the load at the error_count-th error; REJECT_LIMIT tolerates that many errors, not
+            // more. Both options need a PostgreSQL 18 backend, which an older one rejects as an unknown option.
+            sql.append(", ON_ERROR ignore, REJECT_LIMIT ").append(spec.transforms().maxError() - 1);
+        }
         sql.append(")");
         return sql.toString();
     }

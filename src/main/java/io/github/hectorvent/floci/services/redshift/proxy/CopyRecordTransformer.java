@@ -286,8 +286,8 @@ final class CopyRecordTransformer {
     /**
      * Rewrites a DATE or TIMESTAMP field from the DATEFORMAT or TIMEFORMAT to the ISO text PostgreSQL reads.
      * Returns the field as it is when no format applies to its column, and null when ACCEPTANYDATE turns a
-     * value that does not match into NULL; without it such a value fails the COPY, as it does with the
-     * default MAXERROR of 0.
+     * value that does not match into NULL; without it such a value fails the COPY, whatever MAXERROR says,
+     * because it never reaches the backend that skips records under MAXERROR.
      */
     private byte[] convertTemporal(byte[] value, int column) {
         if (!transforms.temporal() || columnKinds == null || column >= columnKinds.size()) {
