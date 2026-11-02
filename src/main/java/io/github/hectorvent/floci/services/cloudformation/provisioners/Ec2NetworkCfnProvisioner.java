@@ -184,6 +184,14 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
                 ec2Service.createTags(region, List.of(entityId), toTagList(priorTags));
             }
         }
+        if (prior.has("natSecondaries")) {
+            JsonNode before = prior.get("natSecondaries");
+            List<String> eips = new ArrayList<>();
+            List<String> ips = new ArrayList<>();
+            before.path("allocationIds").forEach(id -> eips.add(id.asText()));
+            before.path("privateIps").forEach(ip -> ips.add(ip.asText()));
+            ec2Service.updateNatGatewaySecondaryAddresses(region, entityId, eips, ips, null);
+        }
         if (prior.has("mapPublicIpOnLaunch")) {
             ec2Service.modifySubnetAttribute(region, entityId, "mapPublicIpOnLaunch", prior.get("mapPublicIpOnLaunch").asText());
         }
@@ -407,6 +415,23 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
             }
         }
         return true;
+    }
+
+    /**
+     * The gateway's secondary addresses as the request that sets them back: the Elastic IPs in
+     * order (they come first, see {@link Ec2Service#createNatGateway}) and every private address.
+     */
+    private static ObjectNode natSecondaries(NatGateway nat) {
+        ObjectNode node = MAPPER.createObjectNode();
+        ArrayNode eips = node.putArray("allocationIds");
+        ArrayNode ips = node.putArray("privateIps");
+        nat.getNatGatewayAddresses().stream().filter(a -> !a.isPrimary()).forEach(a -> {
+            if (a.getAllocationId() != null) {
+                eips.add(a.getAllocationId());
+            }
+            ips.add(a.getPrivateIp());
+        });
+        return node;
     }
 
     private ManagedPrefixList findPrefixList(String prefixListId, String region) {
@@ -645,16 +670,13 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         }
         // SubnetId, AllocationId, ConnectivityType and PrivateIpAddress are createOnly: the same
         // values keep the gateway, a change replaces it. With no PrivateIpAddress the gateway keeps
-        // the address it was given.
+        // the address it was given. The Secondary* properties are not createOnly: the gateway is
+        // kept and its secondary addresses are changed in place.
         NatGateway existing = ctx.isUpdate() ? findNatGateway(ctx.priorPhysicalId(), ctx.region()) : null;
         boolean reuse = existing != null && Objects.equals(subnetId, existing.getSubnetId())
                 && Objects.equals(allocationId, existing.getAllocationId())
                 && connectivityType.equalsIgnoreCase(existing.getConnectivityType() == null ? "public" : existing.getConnectivityType())
-                && (privateIpAddress == null || holdsPrivateIp(existing, privateIpAddress))
-                && holdsSecondaries(existing, secondaryAllocationIds, secondaryPrivateIps,
-                        Ec2Service.secondaryPrivateIpCount(secondaryCount, "private".equals(connectivityType)));
-        // ponytail: a changed secondary address replaces the gateway, where AWS updates it in place
-        // through AssociateNatGatewayAddress and its siblings, which Floci does not emulate.
+                && (privateIpAddress == null || holdsPrivateIp(existing, privateIpAddress));
         NatGateway nat = reuse ? existing
                 : ec2Service.createNatGateway(ctx.region(), subnetId, allocationId, connectivityType, privateIpAddress,
                         secondaryAllocationIds, secondaryPrivateIps, secondaryCount, tagList(props, ctx));
@@ -663,8 +685,21 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
             ec2Service.deleteNatGateway(ctx.region(), nat.getNatGatewayId());
             throw new AwsException(nat.getFailureCode(), nat.getFailureMessage(), 400);
         }
+        NatGateway[] current = {nat};
+        int secondaryCountValue = Ec2Service.secondaryPrivateIpCount(secondaryCount, "private".equals(connectivityType));
         if (reuse) {
-            CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r), () -> applyTags(r, true, nat.getNatGatewayId(), existing.getTags(), props, ctx));
+            CfnRollback.guarded(r, ctx, false, () -> { }, () -> undoInPlace(r), () -> {
+                if (!holdsSecondaries(existing, secondaryAllocationIds, secondaryPrivateIps, secondaryCountValue)) {
+                    ObjectNode prior = inPlacePrior(r, existing.getNatGatewayId(), ctx);
+                    if (!prior.has("natSecondaries")) {
+                        prior.set("natSecondaries", natSecondaries(existing));
+                        writeInPlacePrior(r, prior);
+                    }
+                    current[0] = ec2Service.updateNatGatewaySecondaryAddresses(ctx.region(), existing.getNatGatewayId(),
+                            secondaryAllocationIds, secondaryPrivateIps, secondaryCount);
+                }
+                applyTags(r, true, nat.getNatGatewayId(), existing.getTags(), props, ctx);
+            });
         }
         r.setPhysicalId(nat.getNatGatewayId());
         r.getAttributes().put("NatGatewayId", nat.getNatGatewayId());
@@ -681,7 +716,7 @@ public class Ec2NetworkCfnProvisioner implements CfnResourceProvisioner {
         }
         // Each secondary Elastic IP is held as the primary one is.
         r.getAttributes().keySet().removeIf(k -> k.startsWith(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp."));
-        List<String> secondaryPublicIps = nat.getNatGatewayAddresses().stream()
+        List<String> secondaryPublicIps = current[0].getNatGatewayAddresses().stream()
                 .filter(a -> !a.isPrimary() && a.getPublicIp() != null)
                 .map(NatGatewayAddress::getPublicIp)
                 .toList();

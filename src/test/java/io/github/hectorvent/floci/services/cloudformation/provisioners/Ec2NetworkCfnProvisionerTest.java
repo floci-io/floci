@@ -658,10 +658,10 @@ class Ec2NetworkCfnProvisionerTest {
 
     /**
      * The three secondary-address properties reach CreateNatGateway, each secondary Elastic IP is
-     * recorded as held, the same secondaries keep the gateway, and changed ones replace it.
+     * recorded as held, and the gateway is kept whether or not they change.
      */
     @Test
-    void aNatGatewayIsCreatedWithItsSecondaryAddressesAndChangedOnesReplaceIt() {
+    void aNatGatewayIsCreatedWithItsSecondaryAddressesAndChangedOnesUpdateItInPlace() {
         String secondaryAlloc = "eipalloc-0fedcba9876543210";
         NatGateway nat = natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50");
         nat.setSubnetId(SUBNET_ID);
@@ -692,13 +692,17 @@ class Ec2NetworkCfnProvisionerTest {
         provisioner.provision(kept, props, ctx(NAT_ID));
         assertEquals(NAT_ID, kept.getPhysicalId());
 
-        when(ec2.createNatGateway(REGION, SUBNET_ID, ALLOC_ID, "public", null, List.of(), List.of(), null, List.of()))
-                .thenReturn(natGateway("nat-replacement", "eni-0fedcba9876543210", "10.0.1.60"));
-        StackResource moved = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
-        provisioner.provision(moved, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID),
+        verify(ec2, never()).updateNatGatewaySecondaryAddresses(any(), any(), any(), any(), any());
+
+        when(ec2.updateNatGatewaySecondaryAddresses(REGION, NAT_ID, List.of(), List.of(), null))
+                .thenReturn(natGateway(NAT_ID, "eni-0123456789abcdef0", "10.0.1.50"));
+        StackResource changed = prior("AWS::EC2::NatGateway", "Nat", NAT_ID, Map.of("NatGatewayId", NAT_ID));
+        provisioner.provision(changed, mapper.createObjectNode().put("SubnetId", SUBNET_ID).put("AllocationId", ALLOC_ID),
                 ctx(NAT_ID));
-        assertEquals("nat-replacement", moved.getPhysicalId());
-        assertFalse(moved.getAttributes().containsKey(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp.0"));
+        verify(ec2).updateNatGatewaySecondaryAddresses(REGION, NAT_ID, List.of(), List.of(), null);
+        verify(ec2).createNatGateway(any(), any(), any(), any(), any(), any(), any(), any(), any());
+        assertEquals(NAT_ID, changed.getPhysicalId(), "changed secondaries keep the gateway");
+        assertFalse(changed.getAttributes().containsKey(CfnRollback.USES_ATTR_PREFIX + "SecondaryPublicIp.0"));
     }
 
     @Test

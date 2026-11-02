@@ -12440,10 +12440,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             eips.addAll(secondaryEips);
             Set<String> seen = new HashSet<>();
             for (String eipId : eips) {
-                Address held = getRequiredAddress(region, eipId);
-                // The gateway scan covers gateways persisted before the Address record was marked.
-                if (!seen.add(eipId) || isSet(held.getAssociationId()) || isSet(held.getInstanceId())
-                        || isHeldByNatGateway(region, eipId)) {
+                if (!seen.add(eipId) || isElasticIpTaken(region, eipId)) {
                     natGateway.setState("failed");
                     natGateway.setFailureCode("Resource.AlreadyAssociated");
                     natGateway.setFailureMessage("Elastic IP address " + eipId + " is already associated");
@@ -12453,20 +12450,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (!"failed".equals(natGateway.getState())) {
                 natGateway.getNatGatewayAddresses().addAll(natGatewayAddresses(region, natGateway.getNatGatewayId(),
                         subnetId, allocationId, requestedPrivateIp, secondaryEips, requestedSecondaryIps, secondaryCount));
-                // Each Elastic IP is now held by the gateway's interface, so DescribeAddresses has to
-                // say so: an allocation that looks free is one Terraform and the console would offer
-                // to reuse. No instanceId, a NAT gateway is not an instance.
-                for (NatGatewayAddress gatewayAddress : natGateway.getNatGatewayAddresses()) {
-                    if (!isSet(gatewayAddress.getAllocationId())) {
-                        continue;
-                    }
-                    addresses.get(key(region, gatewayAddress.getAllocationId())).ifPresent(eip -> {
-                        eip.setAssociationId(gatewayAddress.getAssociationId());
-                        eip.setNetworkInterfaceId(gatewayAddress.getNetworkInterfaceId());
-                        eip.setPrivateIpAddress(gatewayAddress.getPrivateIp());
-                        addresses.put(key(region, eip.getAllocationId()), eip);
-                    });
-                }
+                natGateway.getNatGatewayAddresses().forEach(a -> holdNatGatewayEip(region, a));
             }
             if (natGatewayTags != null && !natGatewayTags.isEmpty()) {
                 natGateway.setTags(new ArrayList<>(natGatewayTags));
@@ -12655,25 +12639,171 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // the lock createNatGateway takes, so a concurrent create cannot have its association wiped.
         synchronized (privateIpAllocationLock) {
             natGateway.setState("deleted");
-            for (NatGatewayAddress gatewayAddress : natGateway.getNatGatewayAddresses()) {
-                if (!isSet(gatewayAddress.getAllocationId())) {
-                    continue;
-                }
-                addresses.get(key(region, gatewayAddress.getAllocationId()))
-                        .filter(eip -> gatewayAddress.getAssociationId() != null
-                                && gatewayAddress.getAssociationId().equals(eip.getAssociationId()))
-                        .ifPresent(eip -> {
-                            eip.setAssociationId(null);
-                            eip.setNetworkInterfaceId(null);
-                            eip.setPrivateIpAddress(null);
-                            addresses.put(key(region, eip.getAllocationId()), eip);
-                        });
-            }
+            natGateway.getNatGatewayAddresses().forEach(a -> releaseNatGatewayEip(region, a));
             natGateways.delete(key(region, natGatewayId));
             removeTags(region, natGatewayId);
             natGateway.getNatGatewayAddresses().forEach(a -> removeTags(region, a.getNetworkInterfaceId()));
         }
         return natGateway;
+    }
+
+    /**
+     * Sets a gateway's secondary addresses to the ones given, as AssociateNatGatewayAddress,
+     * DisassociateNatGatewayAddress, AssignPrivateNatGatewayAddress and
+     * UnassignPrivateNatGatewayAddress together would, keeping the gateway and its id: a secondary
+     * the request still names is kept, one it no longer names is dropped and its Elastic IP handed
+     * back, and a new one is checked as {@link #createNatGateway} checks it. Every check runs before
+     * anything changes, so a refused request leaves the gateway as it was. The arguments mean what
+     * they mean to {@link #createNatGateway}.
+     */
+    public NatGateway updateNatGatewaySecondaryAddresses(String region, String natGatewayId,
+                                                         List<String> secondaryAllocationIds,
+                                                         List<String> secondaryPrivateIpAddresses,
+                                                         String secondaryPrivateIpAddressCount) {
+        ensureDefaultResources(region);
+        NatGateway natGateway = getRequiredNatGateway(region, natGatewayId);
+        String subnetId = natGateway.getSubnetId();
+        Subnet subnet = requireSubnet(region, subnetId);
+        boolean privateGateway = "private".equalsIgnoreCase(natGateway.getConnectivityType());
+        List<String> eips = nullToEmpty(secondaryAllocationIds);
+        if (privateGateway && !eips.isEmpty()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Elastic IP addresses cannot be associated with private NAT gateways.", 400);
+        }
+        int count = secondaryPrivateIpCount(secondaryPrivateIpAddressCount, privateGateway);
+        eips.forEach(id -> getRequiredAddress(region, id));
+        List<String> ips = nullToEmpty(secondaryPrivateIpAddresses).stream()
+                .map(ip -> validateRequestedPrivateIp(ip, subnet, null, 1))
+                .toList();
+        if (new HashSet<>(ips).size() != ips.size()) {
+            throw new AwsException("InvalidIPAddress.InUse", "A secondary address is listed twice.", 400);
+        }
+        int slots = Math.max(eips.size(), ips.size()) + count;
+        synchronized (privateIpAllocationLock) {
+            List<NatGatewayAddress> dropped = new ArrayList<>(natGateway.getNatGatewayAddresses().stream()
+                    .filter(a -> !a.isPrimary()).toList());
+            NatGatewayAddress[] result = new NatGatewayAddress[slots];
+            // A slot naming an Elastic IP or an address keeps the secondary that already matches it;
+            // a counted slot then keeps any other secondary with neither.
+            for (int i = 0; i < slots; i++) {
+                String eip = i < eips.size() ? eips.get(i) : null;
+                String ip = i < ips.size() ? ips.get(i) : null;
+                if (eip != null || ip != null) {
+                    result[i] = takeFirst(dropped, a -> Objects.equals(eip, a.getAllocationId())
+                            && (ip == null || ip.equals(a.getPrivateIp())));
+                }
+            }
+            for (int i = Math.max(eips.size(), ips.size()); i < slots; i++) {
+                result[i] = takeFirst(dropped, a -> a.getAllocationId() == null && !ips.contains(a.getPrivateIp()));
+            }
+            Set<String> droppedEips = new HashSet<>();
+            Set<String> droppedIps = new HashSet<>();
+            dropped.forEach(a -> {
+                addIfSet(droppedEips, a.getAllocationId());
+                addIfSet(droppedIps, a.getPrivateIp());
+            });
+            Set<String> seen = new HashSet<>();
+            for (int i = 0; i < slots; i++) {
+                if (result[i] != null) {
+                    continue;
+                }
+                String eip = i < eips.size() ? eips.get(i) : null;
+                if (eip != null && (!seen.add(eip) || !droppedEips.contains(eip) && isElasticIpTaken(region, eip))) {
+                    throw new AwsException("Resource.AlreadyAssociated",
+                            "Elastic IP address " + eip + " is already associated", 400);
+                }
+                String ip = i < ips.size() ? ips.get(i) : null;
+                if (ip != null && !droppedIps.contains(ip)) {
+                    requireRequestedPrivateIpFree(region, subnetId, ip);
+                }
+            }
+            List<String> assigned = new ArrayList<>();
+            try {
+                Set<String> pending = new HashSet<>(ips);
+                for (int i = 0; i < slots; i++) {
+                    if (result[i] != null) {
+                        continue;
+                    }
+                    String ip = i < ips.size() ? ips.get(i) : null;
+                    if (ip == null) {
+                        ip = assignPrivateIp(region, subnetId, pending);
+                        pending.add(ip);
+                        assigned.add(ip);
+                    }
+                    result[i] = natGatewayAddress(region, natGatewayId, i < eips.size() ? eips.get(i) : null, ip);
+                    result[i].setPrimary(false);
+                }
+            } catch (AwsException e) {
+                if (vpcNetworkManager != null) {
+                    assigned.forEach(ip -> vpcNetworkManager.releasePrivateIp(region, subnetId, ip));
+                }
+                throw e;
+            }
+            dropped.forEach(a -> releaseNatGatewayEip(region, a));
+            List<NatGatewayAddress> addresses = new ArrayList<>(natGateway.getNatGatewayAddresses().stream()
+                    .filter(NatGatewayAddress::isPrimary).toList());
+            addresses.addAll(List.of(result));
+            addresses.forEach(a -> holdNatGatewayEip(region, a));
+            natGateway.setNatGatewayAddresses(addresses);
+            natGateways.put(key(region, natGatewayId), natGateway);
+        }
+        return natGateway;
+    }
+
+    private static <T> T takeFirst(List<T> from, Predicate<T> matching) {
+        for (T item : from) {
+            if (matching.test(item)) {
+                from.remove(item);
+                return item;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Whether an instance or a NAT gateway already holds the Elastic IP. The gateway scan covers
+     * gateways persisted before the Address record was marked.
+     */
+    private boolean isElasticIpTaken(String region, String allocationId) {
+        Address held = getRequiredAddress(region, allocationId);
+        return isSet(held.getAssociationId()) || isSet(held.getInstanceId()) || isHeldByNatGateway(region, allocationId);
+    }
+
+    /**
+     * Marks the address's Elastic IP held by the gateway's interface, so DescribeAddresses says so:
+     * an allocation that looks free is one Terraform and the console would offer to reuse. No
+     * instanceId, a NAT gateway is not an instance. Callers must hold {@link #privateIpAllocationLock}.
+     */
+    private void holdNatGatewayEip(String region, NatGatewayAddress gatewayAddress) {
+        if (!isSet(gatewayAddress.getAllocationId())) {
+            return;
+        }
+        addresses.get(key(region, gatewayAddress.getAllocationId())).ifPresent(eip -> {
+            eip.setAssociationId(gatewayAddress.getAssociationId());
+            eip.setNetworkInterfaceId(gatewayAddress.getNetworkInterfaceId());
+            eip.setPrivateIpAddress(gatewayAddress.getPrivateIp());
+            addresses.put(key(region, eip.getAllocationId()), eip);
+        });
+    }
+
+    /**
+     * Hands the address's Elastic IP back, but only if the association is still the gateway's own.
+     * Callers must hold {@link #privateIpAllocationLock}, so a concurrent create cannot have its
+     * association wiped.
+     */
+    private void releaseNatGatewayEip(String region, NatGatewayAddress gatewayAddress) {
+        if (!isSet(gatewayAddress.getAllocationId())) {
+            return;
+        }
+        addresses.get(key(region, gatewayAddress.getAllocationId()))
+                .filter(eip -> gatewayAddress.getAssociationId() != null
+                        && gatewayAddress.getAssociationId().equals(eip.getAssociationId()))
+                .ifPresent(eip -> {
+                    eip.setAssociationId(null);
+                    eip.setNetworkInterfaceId(null);
+                    eip.setPrivateIpAddress(null);
+                    addresses.put(key(region, eip.getAllocationId()), eip);
+                });
     }
 
     private NatGateway getRequiredNatGateway(String region, String natGatewayId) {

@@ -779,8 +779,10 @@ back. A private gateway takes the listed `SecondaryPrivateIpAddresses` plus
 rules. `SecondaryPrivateIpAddressCount` on a public gateway, or a secondary Elastic IP on a private
 one, fails with `InvalidParameterCombination`, and a count outside 1 to 31 with
 `InvalidParameterValue`. `AssociateNatGatewayAddress`, `DisassociateNatGatewayAddress`,
-`AssignPrivateNatGatewayAddress` and `UnassignPrivateNatGatewayAddress` are not implemented, so an
-`AWS::EC2::NatGateway` whose secondary addresses change is replaced rather than updated in place.
+`AssignPrivateNatGatewayAddress` and `UnassignPrivateNatGatewayAddress` are not implemented. An
+`AWS::EC2::NatGateway` whose secondary addresses change is still updated in place, as on AWS: it
+keeps its id, a secondary the template still names keeps its address, a dropped Elastic IP is handed
+back, and a new address that is already held fails the update and leaves the gateway as it was.
 
 ### Capacity Reservations
 
