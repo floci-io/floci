@@ -84,7 +84,7 @@ class DynamoDbContributorInsightsIntegrationTest {
     }
 
     @Test
-    void switchingTheModeKeepsTheRulesAndReEnablingCreatesThemAgain() throws Exception {
+    void switchingTheModeKeepsTheRulesAndReEnablingCreatesThemAgain() {
         String table = "CiIT-mode";
         createTable(table, true, "");
         update(table, null, "ENABLE", null).statusCode(200);
@@ -102,7 +102,6 @@ class DynamoDbContributorInsightsIntegrationTest {
                 .body("ContributorInsightsMode", equalTo("THROTTLED_KEYS"));
 
         update(table, null, "DISABLE", null).statusCode(200);
-        Thread.sleep(5);
         update(table, null, "ENABLE", null)
                 .statusCode(200)
                 .body("ContributorInsightsMode", equalTo("ACCESSED_AND_THROTTLED_KEYS"));
