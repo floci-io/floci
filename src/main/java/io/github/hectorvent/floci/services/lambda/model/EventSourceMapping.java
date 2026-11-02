@@ -32,6 +32,7 @@ public class EventSourceMapping {
     private Boolean bisectBatchOnFunctionError;
     private Integer maximumRetryAttempts;
     private Integer maximumRecordAgeInSeconds;
+    private Integer parallelizationFactor;
     private DestinationConfig destinationConfig;
     private FilterCriteria filterCriteria;
     private Map<String, Object> selfManagedEventSource;
@@ -134,6 +135,15 @@ public class EventSourceMapping {
 
     public void setMaximumRecordAgeInSeconds(Integer maximumRecordAgeInSeconds) {
         this.maximumRecordAgeInSeconds = maximumRecordAgeInSeconds;
+    }
+
+    /** Batches processed concurrently per shard (Kinesis and DynamoDB Streams); {@code null} means the AWS default of 1. */
+    public Integer getParallelizationFactor() {
+        return parallelizationFactor;
+    }
+
+    public void setParallelizationFactor(Integer parallelizationFactor) {
+        this.parallelizationFactor = parallelizationFactor;
     }
 
     public DestinationConfig getDestinationConfig() {
