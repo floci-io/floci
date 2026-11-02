@@ -315,11 +315,13 @@ class CloudFormationElbV2ReplacementIntegrationTest {
         return m.group(1);
     }
 
-    /** DescribeListeners filters by ARN and answers an empty list for one that is gone. */
+    /** An explicit ARN for a deleted listener reports the modeled not-found error. */
     private static void assertListenerMissing(String listenerArn) {
         given().formParam("Action", "DescribeListeners").formParam("Version", "2015-12-01")
             .formParam("ListenerArns.member.1", listenerArn)
-        .when().post("/").then().statusCode(200).body(not(containsString(listenerArn)));
+        .when().post("/").then().statusCode(400)
+            .body(containsString("<Code>ListenerNotFound</Code>"))
+            .body(not(containsString("<ListenerArn>" + listenerArn + "</ListenerArn>")));
     }
 
     private static void assertListenerPresent(String listenerArn) {

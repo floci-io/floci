@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Test;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -67,6 +68,29 @@ class ProvisionContextTest {
         assertTrue(ctx.previouslyDeclared("Declared"), "declared, whatever it resolved to");
         assertFalse(ctx.previouslyDeclared("ExplicitNull"), "null is how a template omits a property");
         assertFalse(ctx.previouslyDeclared("Absent"));
+    }
+
+    @Test
+    void droppedPropertiesAreTheOnesThePreviousTemplateDeclaredAndThisOneLacks() {
+        ProvisionContext ctx = contextWithPriorProperties("""
+                {"Kept": "a", "Dropped": "b", "DroppedIf": {"Fn::If": ["C", "x", "y"]}, "ExplicitNull": null}
+                """);
+
+        assertEquals(Set.of("Dropped", "DroppedIf"),
+                ctx.droppedProperties(props("{\"Kept\": \"a\", \"NewOne\": \"c\"}")),
+                "a property the stack never declared, or declared as null, is not dropped");
+        assertEquals(Set.of("Kept", "Dropped", "DroppedIf"), ctx.droppedProperties(props("{}")));
+        assertEquals(Set.of("Kept", "Dropped", "DroppedIf"), ctx.droppedProperties(null));
+    }
+
+    @Test
+    void nothingIsDroppedOnACreateOrWithoutAPreviousTemplate() {
+        ProvisionContext create = new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", null,
+                event -> { }, props("{\"Declared\": \"value\"}"));
+
+        assertTrue(create.droppedProperties(props("{}")).isEmpty());
+        assertTrue(contextWithPriorProperties(null).droppedProperties(props("{}")).isEmpty());
+        assertTrue(context("prior-id").droppedProperties(props("{}")).isEmpty());
     }
 
     /** A resource the previous deployment never provisioned, such as one its Condition kept out, declared nothing. */

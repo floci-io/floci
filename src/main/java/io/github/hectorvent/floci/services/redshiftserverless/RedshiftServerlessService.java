@@ -10,7 +10,9 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.redshift.SnapshotDumpCopier;
 import io.github.hectorvent.floci.services.redshift.TempCredential;
+import io.github.hectorvent.floci.services.redshift.model.Endpoint;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessSnapshotCopyService.CopyRule;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
 import io.github.hectorvent.floci.services.redshiftserverless.model.Namespace;
@@ -31,7 +33,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -816,29 +817,8 @@ public class RedshiftServerlessService implements Resettable {
         if (stored == null || stored.isBlank()) {
             return null;
         }
-        Path sourceDirectory = dumpDir(rule.accountId(), rule.sourceRegion());
-        Path from = Paths.get(stored).toAbsolutePath().normalize();
-        if (!from.startsWith(sourceDirectory) || from.equals(sourceDirectory) || !Files.isRegularFile(from)) {
-            throw new IOException("Snapshot dump is missing or outside its account and Region directory: " + from);
-        }
-        Path destinationDirectory = dumpDir(rule.accountId(), rule.destinationRegion());
-        // Each copy gets its own file, so replacing an earlier copy never touches the dump it still points to.
-        // The name is left out: a 255-character snapshot name plus a suffix would exceed filesystem filename limits.
-        String copyFileName = UUID.randomUUID().toString();
-        Path to = destinationDirectory.resolve(copyFileName + ".sql").normalize();
-        Path staging = destinationDirectory.resolve(copyFileName + ".sql.copying").normalize();
-        if (!to.startsWith(destinationDirectory) || !staging.startsWith(destinationDirectory)) {
-            throw new IOException("Invalid snapshot name: " + source.getSnapshotName());
-        }
-        Files.createDirectories(destinationDirectory);
-        try {
-            Files.copy(from, staging, StandardCopyOption.REPLACE_EXISTING);
-            Files.move(staging, to, StandardCopyOption.ATOMIC_MOVE);
-        } catch (IOException e) {
-            deleteDumpQuietly(staging);
-            throw e;
-        }
-        return to;
+        return SnapshotDumpCopier.copy(Paths.get(stored), dumpDir(rule.accountId(), rule.sourceRegion()),
+                dumpDir(rule.accountId(), rule.destinationRegion()));
     }
 
     /** Records that the snapshot has been carried to the rule's Region, so a deleted or expired copy stays gone. */
@@ -1222,24 +1202,31 @@ public class RedshiftServerlessService implements Resettable {
         return new WorkgroupTarget(workgroup.getWorkgroupArn(), workgroup.getWorkgroupName(),
                 workgroup.getRuntimeHost(), workgroup.getRuntimePort(), namespace.getDbName(),
                 workgroup.getMasterUsername(), namespace.getAdminUserPassword(), adminUserOf(namespace),
-                namespace.getIamRoles(), namespace.getAdminPasswordSecretArn());
+                namespace.getIamRoles(), namespace.getAdminPasswordSecretArn(), workgroup.getEndpoint());
     }
 
     /** Connection details of a workgroup's backend; {@code adminUsername} is the name clients log in with. */
     public record WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
                                   String masterUsername, String masterPassword, String adminUsername,
-                                  List<String> iamRoleArns, String adminPasswordSecretArn) {
+                                  List<String> iamRoleArns, String adminPasswordSecretArn, Endpoint endpoint) {
+        public WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
+                               String masterUsername, String masterPassword, String adminUsername,
+                               List<String> iamRoleArns, String adminPasswordSecretArn) {
+            this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername,
+                    iamRoleArns, adminPasswordSecretArn, null);
+        }
+
         public WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
                                String masterUsername, String masterPassword, String adminUsername,
                                List<String> iamRoleArns) {
             this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername,
-                    iamRoleArns, null);
+                    iamRoleArns, null, null);
         }
 
         public WorkgroupTarget(String arn, String workgroupName, String host, int port, String database,
                                String masterUsername, String masterPassword, String adminUsername) {
             this(arn, workgroupName, host, port, database, masterUsername, masterPassword, adminUsername,
-                    List.of(), null);
+                    List.of(), null, null);
         }
 
         public WorkgroupTarget {
@@ -1247,14 +1234,20 @@ public class RedshiftServerlessService implements Resettable {
         }
     }
 
+    /** The workgroup a workgroup name or ARN names in the Region, as the Data API reads either; empty when none. */
+    public Optional<Workgroup> findWorkgroupByNameOrArn(String nameOrArn, String region) {
+        return AwsArnUtils.looksLikeArn(nameOrArn) ? workgroupByArn(nameOrArn, region)
+                : findWorkgroup(nameOrArn, region);
+    }
+
     private Workgroup resolveWorkgroup(String nameOrArn, String region) {
         if (nameOrArn == null || nameOrArn.isBlank()) {
             throw ServerlessSupport.validation("workgroupName is required.");
         }
         if (!AwsArnUtils.looksLikeArn(nameOrArn)) {
-            return getWorkgroup(nameOrArn, region);
+            validateWorkgroupName(nameOrArn);
         }
-        return workgroupByArn(nameOrArn, region).orElseThrow(() -> workgroupNotFound(nameOrArn));
+        return findWorkgroupByNameOrArn(nameOrArn, region).orElseThrow(() -> workgroupNotFound(nameOrArn));
     }
 
     /**

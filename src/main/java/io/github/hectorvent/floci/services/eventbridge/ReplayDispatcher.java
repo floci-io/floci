@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.eventbridge.model.ArchivedEvent;
 import io.github.hectorvent.floci.services.eventbridge.model.Replay;
 import io.github.hectorvent.floci.services.eventbridge.model.ReplayState;
@@ -111,7 +112,9 @@ public class ReplayDispatcher {
         if (arn == null) {
             return "default";
         }
-        int idx = arn.lastIndexOf("event-bus/");
-        return idx >= 0 ? arn.substring(idx + "event-bus/".length()) : arn;
+        return AwsArnUtils.resourceIfArnFor(arn, "events")
+                .filter(resource -> resource.startsWith("event-bus/"))
+                .map(resource -> resource.substring("event-bus/".length()))
+                .orElse(arn);
     }
 }

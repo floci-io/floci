@@ -17,6 +17,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -47,6 +48,40 @@ final class EmrServiceFixture {
 
     private record Wakeup(Instant due, Runnable task) {}
 
+    /**
+     * A cluster's storage as what the service asked of it, each removal refused while {@link #refuse} is set, and
+     * {@link #whileCreating} run as each is made.
+     */
+    static final class RecordingStorage implements ClusterStorage {
+        final List<String> created = new ArrayList<>();
+        final List<String> removed = new ArrayList<>();
+        final List<Set<String>> kept = new ArrayList<>();
+        boolean refuse;
+        Runnable whileCreating = () -> { };
+
+        @Override
+        public SparkJobRunner.Storage volumes(String clusterId) {
+            return new SparkJobRunner.Storage(clusterId + "-home", clusterId + "-mnt");
+        }
+
+        @Override
+        public void create(String clusterId, String accountId, String region) {
+            created.add(clusterId);
+            whileCreating.run();
+        }
+
+        @Override
+        public boolean remove(String clusterId) {
+            removed.add(clusterId);
+            return !refuse;
+        }
+
+        @Override
+        public void removeAllBut(Set<String> kept) {
+            this.kept.add(kept);
+        }
+    }
+
     final ObjectMapper objectMapper = new ObjectMapper();
     final List<JsonNode> published = new ArrayList<>();
     final MutableClock clock;
@@ -62,6 +97,8 @@ final class EmrServiceFixture {
     private final InMemoryStorageFactory storage;
     private final SparkJobRunner runner;
     private final BootstrapRunner bootstrap;
+    // The docker runner mode's; null in the immediate one.
+    final RecordingStorage clusterStorage;
     private final IamService iam;
     private final int[] durations;
 
@@ -71,7 +108,7 @@ final class EmrServiceFixture {
     }
 
     EmrServiceFixture(int startupDelaySeconds, int stepDurationSeconds, int terminationDelaySeconds) {
-        this(new InMemoryStorageFactory(ACCOUNT), new MutableClock(), null, null, null,
+        this(new InMemoryStorageFactory(ACCOUNT), new MutableClock(), null, null, null, null,
                 startupDelaySeconds, stepDurationSeconds, terminationDelaySeconds);
     }
 
@@ -82,16 +119,18 @@ final class EmrServiceFixture {
 
     /** As {@link #docker(SparkJobRunner, IamService)}, its clusters' bootstrap actions run by {@code bootstrap}. */
     static EmrServiceFixture docker(SparkJobRunner runner, BootstrapRunner bootstrap, IamService iam) {
-        return new EmrServiceFixture(new InMemoryStorageFactory(ACCOUNT), new MutableClock(), runner, bootstrap, iam,
-                0, 0, 0);
+        return new EmrServiceFixture(new InMemoryStorageFactory(ACCOUNT), new MutableClock(), runner, bootstrap,
+                new RecordingStorage(), iam, 0, 0, 0);
     }
 
     private EmrServiceFixture(InMemoryStorageFactory storage, MutableClock clock, SparkJobRunner runner,
-                              BootstrapRunner bootstrap, IamService iam, int... durations) {
+                              BootstrapRunner bootstrap, RecordingStorage clusterStorage, IamService iam,
+                              int... durations) {
         this.storage = storage;
         this.clock = clock;
         this.runner = runner;
         this.bootstrap = bootstrap;
+        this.clusterStorage = clusterStorage;
         this.iam = iam;
         this.durations = durations;
         EventBridgeService eventBridge = mock(EventBridgeService.class);
@@ -118,12 +157,12 @@ final class EmrServiceFixture {
             public void deliver(Runnable delivery) {
                 deliveries.add(delivery);
             }
-        }, runner, bootstrap, stepThreads::add, iam);
+        }, runner, bootstrap, clusterStorage, stepThreads::add, iam);
     }
 
     /** A new service on the same storage and clock, as after a restart of Floci with persistent storage. */
     EmrServiceFixture restart() {
-        return new EmrServiceFixture(storage, clock, runner, bootstrap, iam, durations);
+        return new EmrServiceFixture(storage, clock, runner, bootstrap, clusterStorage, iam, durations);
     }
 
     /**
@@ -132,7 +171,7 @@ final class EmrServiceFixture {
      */
     EmrService restartReconciling(SparkJobRunner runner, EmrService.Wakeups wakeups) {
         return new EmrService(storage, config(true), new RegionResolver(REGION, ACCOUNT), publisher, clock, wakeups,
-                runner, bootstrap, stepThreads::add, iam);
+                runner, bootstrap, clusterStorage, stepThreads::add, iam);
     }
 
     private EmulatorConfig config(boolean reconcile) {

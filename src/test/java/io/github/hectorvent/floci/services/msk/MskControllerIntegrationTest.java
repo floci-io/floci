@@ -228,8 +228,33 @@ class MskControllerIntegrationTest {
         .then()
             .statusCode(200)
             .body("clusterInfo.enhancedMonitoring", equalTo("DEFAULT"))
-            .body("clusterInfo.encryptionInfo.encryptionInTransit.clientBroker", equalTo("TLS_PLAINTEXT"))
+            .body("clusterInfo.encryptionInfo.encryptionInTransit.clientBroker", equalTo("TLS"))
             .body("clusterInfo.encryptionInfo.encryptionInTransit.inCluster", equalTo(true));
+    }
+
+    // An explicitly requested clientBroker is echoed as-is, including TLS_PLAINTEXT, which is
+    // now different from the default rather than the default itself.
+    @Test
+    void createClusterV1EchoesAnExplicitEncryptionInTransitClientBroker() {
+        String clusterArn = given()
+            .contentType("application/json")
+            .body("""
+                {"clusterName": "v1-explicit-client-broker-test", "kafkaVersion": "3.6.0",
+                 "numberOfBrokerNodes": 1,
+                 "encryptionInfo": {"encryptionInTransit": {"clientBroker": "TLS_PLAINTEXT"}}}
+                """)
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(200)
+            .extract().path("clusterArn");
+
+        given()
+        .when()
+            .get("/v1/clusters/{clusterArn}", clusterArn)
+        .then()
+            .statusCode(200)
+            .body("clusterInfo.encryptionInfo.encryptionInTransit.clientBroker", equalTo("TLS_PLAINTEXT"));
     }
 
     // The v2 ClusterInfo is not the flat v1 shape: everything provisioned-specific nests under
@@ -1345,7 +1370,7 @@ class MskControllerIntegrationTest {
                 .header("X-Amz-Target", "secretsmanager.CreateSecret")
                 .body(Map.of(
                     "Name", "AmazonMSK_" + UUID.randomUUID(),
-                    "KmsKeyId", createScramKey(), 
+                    "KmsKeyId", createScramKey(),
                     "SecretString", "{\"username\":\"alice\",\"password\":\"password\"}")
                 )
             .when()

@@ -391,7 +391,7 @@ class LeafCfnProvisionerTest {
             assertEquals(Boolean.TRUE, destination.getCloudWatchLoggingOptions().getEnabled());
             assertEquals("g", destination.getCloudWatchLoggingOptions().getLogGroupName());
             assertEquals("st", destination.getCloudWatchLoggingOptions().getLogStreamName());
-            assertTrue(destination.isProcessingEnabled());
+            assertEquals(Boolean.TRUE, destination.getProcessingConfiguration().getEnabled());
             assertEquals("arn:aws:lambda:us-east-1:000000000000:function:f", destination.getProcessingConfiguration()
                     .getProcessors().get(0).getParameters().get(0).getParameterValue());
         }

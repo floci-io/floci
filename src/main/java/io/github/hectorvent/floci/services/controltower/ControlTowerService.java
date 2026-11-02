@@ -159,11 +159,20 @@ public class ControlTowerService {
                 ? getOrSeedLandingZone(accountId, region)
                 : landingZoneStore.get(region).orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Landing zone not found: " + landingZoneIdentifier, 404));
-        if (!landingZone.getArn().equals(landingZoneIdentifier)) {
+        if (!matchesIdentifier(landingZone, landingZoneIdentifier)) {
             throw new AwsException("ResourceNotFoundException",
                     "Landing zone not found: " + landingZoneIdentifier, 404);
         }
         return landingZone;
+    }
+
+    /**
+     * Matches the full ARN or the landing zone id (the last ARN segment). The AWS Terraform
+     * provider stores the id and sends it as landingZoneIdentifier on read, update and delete.
+     */
+    private static boolean matchesIdentifier(LandingZone landingZone, String landingZoneIdentifier) {
+        String arn = landingZone.getArn();
+        return arn.equals(landingZoneIdentifier) || arn.endsWith("/" + landingZoneIdentifier);
     }
 
     public synchronized CreateLandingZoneResult createLandingZone(
@@ -227,7 +236,7 @@ public class ControlTowerService {
         LandingZone landingZone = landingZoneStore.get(region)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Landing zone not found: " + landingZoneIdentifier, 404));
-        if (!landingZone.getArn().equals(landingZoneIdentifier)) {
+        if (!matchesIdentifier(landingZone, landingZoneIdentifier)) {
             throw new AwsException("ResourceNotFoundException",
                     "Landing zone not found: " + landingZoneIdentifier, 404);
         }
@@ -244,7 +253,7 @@ public class ControlTowerService {
         LandingZone landingZone = landingZoneStore.get(region)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Landing zone not found: " + landingZoneIdentifier, 404));
-        if (!landingZone.getArn().equals(landingZoneIdentifier)) {
+        if (!matchesIdentifier(landingZone, landingZoneIdentifier)) {
             throw new AwsException("ResourceNotFoundException",
                     "Landing zone not found: " + landingZoneIdentifier, 404);
         }

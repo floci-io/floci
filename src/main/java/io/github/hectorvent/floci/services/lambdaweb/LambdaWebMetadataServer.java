@@ -20,10 +20,7 @@ import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -47,8 +44,6 @@ public class LambdaWebMetadataServer {
     private static final String UNAUTHORIZED = "\"Client.Unauthorized\"\n";
     private static final String NOT_FOUND = "404 page not found\n";
     private static final String NO_HOST = "Bad Request: missing required Host header";
-    private static final DateTimeFormatter HTTP_DATE =
-            DateTimeFormatter.ofPattern("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.ROOT).withZone(ZoneOffset.UTC);
     private static final Logger LOG = Logger.getLogger(LambdaWebMetadataServer.class);
 
     private final Vertx vertx;
@@ -170,7 +165,7 @@ public class LambdaWebMetadataServer {
         if (method == HttpMethod.GET || method == HttpMethod.HEAD) {
             response.putHeader("Content-Type", HTML);
         }
-        response.putHeader("Location", location).putHeader("Date", HTTP_DATE.format(Instant.now()));
+        response.putHeader("Location", location).putHeader("Date", LambdaWebErrorPages.platformDate(Instant.now()));
         if (method == HttpMethod.GET) {
             end(response, "<a href=\"" + htmlEscape(location) + "\">Temporary Redirect</a>.\n\n");
         } else if (method == HttpMethod.HEAD) {
@@ -182,7 +177,7 @@ public class LambdaWebMetadataServer {
 
     private static void answer(HttpServerRequest request, int status, String body) {
         HttpServerResponse response = request.response().setStatusCode(status)
-                .putHeader("Date", HTTP_DATE.format(Instant.now()));
+                .putHeader("Date", LambdaWebErrorPages.platformDate(Instant.now()));
         if (request.method() == HttpMethod.HEAD) {
             response.putHeader("Content-Length", String.valueOf(body.getBytes(StandardCharsets.UTF_8).length)).end();
         } else {

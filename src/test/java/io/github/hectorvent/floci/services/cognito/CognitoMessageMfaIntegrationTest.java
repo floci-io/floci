@@ -255,6 +255,102 @@ class CognitoMessageMfaIntegrationTest {
                 .body("$", not(hasKey("SmsMfaConfiguration")));
     }
 
+    @Test
+    void requiredMfaSkipsTheEmailThatIsThePrimaryRecoveryDestination() throws Exception {
+        String poolId = createPoolWithRecovery("ON", "verified_email", "verified_phone_number",
+                EMAIL_CONFIG + ",\"SoftwareTokenMfaConfiguration\":{\"Enabled\":true}");
+        String clientId = createClient(poolId);
+        User user = createUser(poolId);
+
+        // Email is where password-recovery codes go, so it cannot also be the MFA factor: the user sets up TOTP.
+        JsonNode challenge = passwordLogin(clientId, user);
+        assertEquals("MFA_SETUP", challenge.path("ChallengeName").asText());
+        assertEquals("[\"SOFTWARE_TOKEN_MFA\"]", challenge.path("ChallengeParameters").path("MFAS_CAN_SETUP").asText());
+    }
+
+    @Test
+    void requiredMfaUsesEmailWhenPhoneIsThePrimaryRecoveryDestination() throws Exception {
+        String poolId = createPoolWithRecovery("ON", "verified_phone_number", "verified_email",
+                EMAIL_CONFIG + ",\"SoftwareTokenMfaConfiguration\":{\"Enabled\":true}");
+        String clientId = createClient(poolId);
+        User user = createUser(poolId);
+
+        JsonNode challenge = passwordLogin(clientId, user);
+        assertEquals("EMAIL_OTP", challenge.path("ChallengeName").asText());
+        String code = CognitoCodes.sixDigitCode(latestEmail(user.email()).path("Body").path("text_part").asText());
+        JsonNode signedIn = cognitoJson("RespondToAuthChallenge", respond(clientId, "EMAIL_OTP", challenge, user,
+                "EMAIL_OTP_CODE", code));
+        assertFalse(signedIn.path("AuthenticationResult").path("AccessToken").asText().isEmpty());
+    }
+
+    @Test
+    void requiredMfaOffersOnlyTheFactorThatIsNotThePrimaryRecoveryDestination() throws Exception {
+        String poolId = createPoolWithRecovery("ON", "verified_email", "verified_phone_number",
+                SMS_CONFIG + "," + EMAIL_CONFIG);
+        String clientId = createClient(poolId);
+        User user = createUser(poolId);
+
+        // Both attributes are present and both factors are on, but email is the recovery destination: only SMS is left.
+        JsonNode challenge = passwordLogin(clientId, user);
+        assertEquals("SMS_MFA", challenge.path("ChallengeName").asText());
+    }
+
+    @Test
+    void requiredMfaStillAsksForTheRecoveryEmailWhenNothingElseIsLeft() throws Exception {
+        // No software-token MFA, so excluding the recovery email would leave no factor and issue tokens.
+        String poolId = createPoolWithRecovery("ON", "verified_email", "verified_phone_number", EMAIL_CONFIG);
+        String clientId = createClient(poolId);
+        User user = createUser(poolId);
+
+        JsonNode challenge = passwordLogin(clientId, user);
+        assertEquals("EMAIL_OTP", challenge.path("ChallengeName").asText());
+        assertTrue(challenge.path("AuthenticationResult").isMissingNode(), "no tokens before the code");
+        String code = CognitoCodes.sixDigitCode(latestEmail(user.email()).path("Body").path("text_part").asText());
+        JsonNode signedIn = cognitoJson("RespondToAuthChallenge", respond(clientId, "EMAIL_OTP", challenge, user,
+                "EMAIL_OTP_CODE", code));
+        assertFalse(signedIn.path("AuthenticationResult").path("AccessToken").asText().isEmpty());
+    }
+
+    @Test
+    void requiredMfaStillAsksForTheRecoveryPhoneWhenNothingElseIsLeft() throws Exception {
+        String poolId = createPoolWithRecovery("ON", "verified_phone_number", "verified_email", SMS_CONFIG);
+        String clientId = createClient(poolId);
+        User user = createUser(poolId);
+
+        JsonNode challenge = passwordLogin(clientId, user);
+        assertEquals("SMS_MFA", challenge.path("ChallengeName").asText());
+        assertTrue(challenge.path("AuthenticationResult").isMissingNode(), "no tokens before the code");
+    }
+
+    @Test
+    void optionalMfaStillAsksForAFactorTheUserTurnedOnEvenIfItIsTheRecoveryEmail() throws Exception {
+        String poolId = createPoolWithRecovery("OPTIONAL", "verified_email", "verified_phone_number", EMAIL_CONFIG);
+        String clientId = createClient(poolId);
+        User user = createUser(poolId);
+        assertTrue(passwordLogin(clientId, user).path("ChallengeName").isMissingNode(),
+                "MFA is optional and the user has not turned it on");
+        cognitoAction("AdminSetUserMFAPreference", """
+                {"UserPoolId":"%s","Username":"%s","EmailMfaSettings":{"Enabled":true}}
+                """.formatted(poolId, user.username())).then().statusCode(200);
+
+        JsonNode challenge = passwordLogin(clientId, user);
+        assertEquals("EMAIL_OTP", challenge.path("ChallengeName").asText());
+        assertTrue(challenge.path("AuthenticationResult").isMissingNode(), "no tokens before the code");
+    }
+
+    @Test
+    void requiredMfaHonoursARecoveryEmailTheUserTurnedOnOverSoftwareTokenSetup() throws Exception {
+        String poolId = createPoolWithRecovery("ON", "verified_email", "verified_phone_number",
+                EMAIL_CONFIG + ",\"SoftwareTokenMfaConfiguration\":{\"Enabled\":true}");
+        String clientId = createClient(poolId);
+        User user = createUser(poolId);
+        cognitoAction("AdminSetUserMFAPreference", """
+                {"UserPoolId":"%s","Username":"%s","EmailMfaSettings":{"Enabled":true,"PreferredMfa":true}}
+                """.formatted(poolId, user.username())).then().statusCode(200);
+
+        assertEquals("EMAIL_OTP", passwordLogin(clientId, user).path("ChallengeName").asText());
+    }
+
     private record User(String username, String phone, String email) {}
 
     private static User createUser(String poolId) throws Exception {
@@ -275,6 +371,18 @@ class CognitoMessageMfaIntegrationTest {
         String poolId = cognitoJson("CreateUserPool", """
                 {"PoolName":"MessageMfaPool"}
                 """).path("UserPool").path("Id").asText();
+        cognitoJson("SetUserPoolMfaConfig", """
+                {"UserPoolId":"%s","MfaConfiguration":"%s",%s}
+                """.formatted(poolId, mfaConfiguration, factorConfiguration));
+        return poolId;
+    }
+
+    private static String createPoolWithRecovery(String mfaConfiguration, String primary, String secondary,
+                                                 String factorConfiguration) throws Exception {
+        String poolId = cognitoJson("CreateUserPool", """
+                {"PoolName":"MessageMfaRecoveryPool","AccountRecoverySetting":{"RecoveryMechanisms":[
+                 {"Priority":1,"Name":"%s"},{"Priority":2,"Name":"%s"}]}}
+                """.formatted(primary, secondary)).path("UserPool").path("Id").asText();
         cognitoJson("SetUserPoolMfaConfig", """
                 {"UserPoolId":"%s","MfaConfiguration":"%s",%s}
                 """.formatted(poolId, mfaConfiguration, factorConfiguration));

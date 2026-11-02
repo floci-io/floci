@@ -18,6 +18,14 @@
 | `AssumeRoot` | Opens a privileged session on a member account of the organization |
 | `GetWebIdentityToken` | Returns a signed JWT representing the calling identity |
 
+## Account-root token lifetime
+
+`GetSessionToken` and `GetFederationToken` sessions issued to Floci's account-root
+credential default to one hour and are capped at one hour, including larger valid
+`DurationSeconds` requests. IAM users retain the requested duration and the
+12-hour default. Existing input validation and temporary-caller rejection run
+before credentials are registered.
+
 ## Request Constraints
 
 Every operation that models a constraint is held to the one its model declares rather than to a
@@ -38,11 +46,25 @@ names one, `audience.1.member` and `tags.1.member.key`, under the index the requ
 What that adds is on `GetSessionToken`, whose `SerialNumber`, `TokenCode` and
 `MinimumSessionTokenSize` were accepted and ignored: each is now held to its shape, so a serial
 number under 9 characters, a token code that is not six digits or a token size past 4096 answers
-400 where it used to answer credentials. The size is still only validated: the session token stays
-the length this emulator mints whatever the request asks for, which is a gap rather than a reading.
+400 where it used to answer credentials. The size asked for is the size issued, on every operation
+that models the member rather than on `AssumeRoot` alone: each mints its token through one writer,
+which holds it to the 200 characters this emulator mints when a request asks for less, since that
+is what a minimum asks for.
 `GetAccessKeyInfo` and `GetWebIdentityToken` answer the messages they already answered, from the
 same bounds and the same patterns, and what moves there is that an access key ID breaking both its
 length and its pattern is answered for both where the check it replaces stopped at the first.
+
+A pattern is read in the dialect the model writes it in rather than in Java's, which is one
+thing on one shape. `arnType`'s pattern ends in a five-digit escape, the U+10000 to U+10FFFF range,
+where Java reads a backslash-u escape as exactly four digits and takes the rest as literals:
+compiled as written, that range became the character U+1000, a literal zero, a hyphen, U+10FF and
+two literal Fs, so the class gained a range from `0` to U+10FF. It refused every supplementary
+character the model admits and admitted the C1 controls it excludes, U+0081 among them, on every
+member the shape resolves to: `RoleArn` on the three assume-role operations, `PrincipalArn` on the
+SAML one, each entry of `PolicyArns` on those three and on `GetFederationToken`, `TaskPolicyArn` on
+`AssumeRoot` and the provided-context ARN on `AssumeRole`. Each such escape is read as the code
+point it spells now, for every vendored pattern on both protocols, and `arnType` is the only shape
+in any vendored file that carries one.
 
 The model says nothing about what counts as a number, so a `DurationSeconds` or a
 `MinimumSessionTokenSize` that is no number at all stays `InvalidParameterValue`, answered before
@@ -73,6 +95,8 @@ length at all, so a request sending it empty is a request that carries it: it re
 and is answered `ExpiredTradeInTokenException`, the refusal any token that cannot be redeemed gets,
 where the check it replaces called it absent. Nothing published says what AWS answers an empty
 trade-in token, and the model is what is in hand, so the blank is read as the value it is.
+
+SAML role sessions reject `DurationSeconds` above the target role maximum. Accepted requests retain the shorter assertion expiration.
 
 ## Privileged Root Sessions
 
@@ -107,7 +131,9 @@ Four things are deviations rather than readings, since the operation models only
   region cannot tell the two apart, so there is nothing to refuse there.
 - `SessionTokenSize` is answered as the length of the token issued, and `MinimumSessionTokenSize`
   pads it to at least the size asked for, held to the 0 to 4096 the model declares, "The value must
-  not exceed 4,096 bytes", since the size asked for is the size materialized. Out of that range is
+  not exceed 4,096 bytes", since the size asked for is the size materialized. This was the first
+  operation to materialize it and is no longer the only one, the five others that model the member
+  reading it through the same writer. Out of that range is
   a `ValidationError` and a value that is no integer an `InvalidParameterValue`, the pair
   `DurationSeconds` already answers. `SessionTokenUtilization` is not answered: the model documents
   neither member, so only the one with an obvious meaning is filled.
@@ -248,6 +274,11 @@ as the account root, as the key itself does.
 `AssumeRole` and `AssumeRoleWithWebIdentity` require the target role to exist in IAM, returning `AccessDenied` (403)
 if it does not.
 
+`AssumeRole` rejects a `DurationSeconds` above the role's `MaxSessionDuration` with
+`ValidationError` (400), after trust validation and before registering credentials. The exact
+role limit is accepted; an omitted duration defaults to 3600 seconds. This role setting is
+checked even when IAM policy enforcement is disabled.
+
 When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, `AssumeRole` also evaluates the target role's trust policy
 (`AssumeRolePolicyDocument`) against the caller and returns `AccessDenied` if it is not permitted. AWS principal
 forms are matched: `"*"`, an account id, an account-root ARN (`arn:aws:iam::<acct>:root`), and exact principal ARNs;
@@ -323,3 +354,12 @@ When `FLOCI_AUTH_VALIDATE_SIGNATURES=true`, the shared signature verifier checks
 credentials for STS operations, including `GetCallerIdentity`, `GetSessionToken`, `GetFederationToken`
 and `AssumeRole`. It checks the request signature, credential scope, expiry and session token before
 execution. Nonblank Authorization headers retain priority. See [signature checks](../configuration/multi-account.md#signature-validation).
+
+AssumeRoleWithWebIdentity rejects a requested duration above the target role's
+`MaxSessionDuration` before issuing credentials. The default remains 3,600 seconds;
+existing token and trust-policy errors take precedence over this role-specific check.
+
+Role chaining limits `AssumeRole` to one hour, including when the target role permits a longer
+session. A live role credential must carry its matching session token. `GetSessionToken` user
+credentials are not role chaining. The cap is checked after trust and role-maximum validation,
+before registering the new session.

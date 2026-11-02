@@ -375,6 +375,9 @@ the registry and stubs what nothing serves; never add type-specific code to it.
 10. A schema `readOnlyProperties` entry you cannot set goes in
     `src/test/resources/cloudformation/getatt-attribute-gaps.tsv` with a reason;
     `CfnSchemaCoverageTest` requires every unset attribute to be fixed or recorded.
+    A new type also needs its row in `schema-surface.tsv` (same directory): run
+    `make cfn-schema-surface-sync`. A writable property the provisioner never reads goes in
+    `writable-property-gaps.tsv`.
 
 References: `SqsCfnProvisioner` (smallest), `Ec2LaunchTemplateCfnProvisioner`
 (update-in-place and replacement), `LogsCfnProvisioner` (reconcile-vs-replace update).

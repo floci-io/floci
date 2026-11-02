@@ -1,0 +1,14 @@
+{
+  "reflection": [
+    {
+      "condition": {
+        "typeReached": "com.github.dockerjava.transport.NamedPipeSocket$Kernel32"
+      },
+      "type": {
+        "proxy": [
+          "com.github.dockerjava.transport.NamedPipeSocket$Kernel32"
+        ]
+      }
+    }
+  ]
+}

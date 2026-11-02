@@ -1,6 +1,10 @@
 package io.github.hectorvent.floci.services.appsync.graphql.datasource;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appsync.model.DataSource;
 import io.github.hectorvent.floci.services.appsync.model.DataSourceType;
@@ -21,19 +25,22 @@ import java.util.Map;
  *
  * <p>The request is AppSync's {@code {operation: "Invoke", payload: …}}, or, for
  * {@code BatchInvoke}, a list payload the function answers with a list in the same order. A
- * function that returns a handled error (a Lambda {@code errorMessage}) fails the field rather than
- * resolving to the error object, which is what AppSync does with an unhandled function error.
+ * function error fails the field rather than resolving to the error object: its type is
+ * {@code Lambda:} and the invoke's {@code FunctionError}, and its message the {@code errorMessage}
+ * Lambda set, which is what AppSync reports for an unhandled function error.
  */
 @ApplicationScoped
 public class LambdaDataSourceInvoker implements AppSyncDataSourceInvoker {
 
     private final LambdaService lambdaService;
     private final ObjectMapper objectMapper;
+    private final ObjectReader strictPayloadReader;
 
     @Inject
     public LambdaDataSourceInvoker(LambdaService lambdaService, ObjectMapper objectMapper) {
         this.lambdaService = lambdaService;
         this.objectMapper = objectMapper;
+        this.strictPayloadReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     }
 
     @Override
@@ -79,8 +86,8 @@ public class LambdaDataSourceInvoker implements AppSyncDataSourceInvoker {
                 ? null
                 : new String(result.getPayload(), StandardCharsets.UTF_8);
         if (result.getFunctionError() != null && !result.getFunctionError().isBlank()) {
-            throw new AwsException("LambdaExecutionException",
-                    "The Lambda data source function failed: " + response, 400);
+            throw new AwsException("Lambda:" + result.getFunctionError(),
+                    functionErrorMessage(response), 400);
         }
         if (response == null || response.isBlank()) {
             return null;
@@ -90,6 +97,20 @@ public class LambdaDataSourceInvoker implements AppSyncDataSourceInvoker {
         } catch (Exception e) {
             // A function that answered something other than JSON: hand back the raw text rather
             // than failing, since a String-typed field is a legitimate shape.
+            return response;
+        }
+    }
+
+    /** The payload's {@code errorMessage}, or the raw payload when it does not carry a textual one. */
+    private String functionErrorMessage(String response) {
+        if (response == null) {
+            return "";
+        }
+        try {
+            JsonNode errorMessage = strictPayloadReader.readTree(response).path("errorMessage");
+            return errorMessage.isTextual() ? errorMessage.textValue() : response;
+        } catch (JsonProcessingException ignored) {
+            // A function that failed with something other than JSON: the text is all there is to report.
             return response;
         }
     }

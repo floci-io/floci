@@ -15,12 +15,12 @@
     <properties>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <quarkus.platform.version>3.40.1</quarkus.platform.version>
-        <jackson.version>2.22.3</jackson.version>
+        <quarkus.platform.version>3.40.1.1</quarkus.platform.version>
+        <jackson.version>2.22.4</jackson.version>
         <apicurio.version>2.6.13.Final</apicurio.version>
         <everit.json.schema.version>1.14.6</everit.json.schema.version>
-        <wire.version>7.0.1</wire.version>
-        <aws.sdk.version>2.55.14</aws.sdk.version>
+        <wire.version>7.1.2</wire.version>
+        <aws.sdk.version>2.57.7</aws.sdk.version>
     </properties>
 
     <dependencyManagement>
@@ -332,6 +332,24 @@
         <!-- Testing -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>acm</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sts</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>iam</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>apigatewayv2</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
@@ -357,6 +375,12 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>eventbridge</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>eventbridgev2</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
         </dependency>
@@ -506,7 +530,19 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>elasticloadbalancingv2</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>ec2</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sfn</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
         </dependency>
@@ -693,7 +729,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.6.0</version>
+                <version>3.6.1</version>
                 <configuration>
                     <!-- The suite's end-of-run live set exceeds the 4g default heap of
                          16g CI runners; a full GC near the end reclaims almost nothing. -->

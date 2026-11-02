@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.eventbridge;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -11,6 +10,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
+import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.core.common.SsrfProtection;
 import io.github.hectorvent.floci.services.batch.BatchService;
@@ -30,6 +30,8 @@ import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataService;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftDataTargetSubmitter;
+import io.github.hectorvent.floci.services.redshiftdata.RedshiftTargetAuthorizer;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
@@ -54,6 +56,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
@@ -66,6 +69,7 @@ public class EventBridgeInvoker {
     // AWS can't route an event from a sender bus on to a third bus; the second hop is dropped.
     private static final int MAX_BUS_TO_BUS_DEPTH = 1;
     private static final int MAX_IDLE_RATE_WINDOWS = 256;
+    private static final String EVENTS_PRINCIPAL = ServicePrincipals.of("events");
     private static final Pattern DYNAMIC_PARAMETER_PATH =
             Pattern.compile("\\$(?:\\.[\\w*/-]+|\\[\\d+\\])+");
     // Headers the JDK HttpClient manages itself; setting them by hand throws IllegalArgumentException.
@@ -83,6 +87,8 @@ public class EventBridgeInvoker {
     private final EcsJsonHandler ecsJsonHandler;
     private final StepFunctionsService stepFunctionsService;
     private final RedshiftDataService redshiftDataService;
+    private final RedshiftTargetAuthorizer redshiftTargetAuthorizer;
+    private final RedshiftDataTargetSubmitter redshiftSubmitter;
     private final ServiceRegistry serviceRegistry;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
@@ -101,13 +107,14 @@ public class EventBridgeInvoker {
                               EcsJsonHandler ecsJsonHandler,
                               StepFunctionsService stepFunctionsService,
                               RedshiftDataService redshiftDataService,
+                              RedshiftTargetAuthorizer redshiftTargetAuthorizer,
                               ServiceRegistry serviceRegistry,
                               RegionResolver regionResolver,
                               ObjectMapper objectMapper,
                               EmulatorConfig config) {
         this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
-                ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, serviceRegistry,
-                regionResolver, objectMapper, config,
+                ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
+                serviceRegistry, regionResolver, objectMapper, config,
                 HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build());
     }
 
@@ -121,6 +128,7 @@ public class EventBridgeInvoker {
                        EcsJsonHandler ecsJsonHandler,
                        StepFunctionsService stepFunctionsService,
                        RedshiftDataService redshiftDataService,
+                       RedshiftTargetAuthorizer redshiftTargetAuthorizer,
                        ServiceRegistry serviceRegistry,
                        RegionResolver regionResolver,
                        ObjectMapper objectMapper,
@@ -136,6 +144,8 @@ public class EventBridgeInvoker {
         this.ecsJsonHandler = ecsJsonHandler;
         this.stepFunctionsService = stepFunctionsService;
         this.redshiftDataService = redshiftDataService;
+        this.redshiftTargetAuthorizer = redshiftTargetAuthorizer;
+        this.redshiftSubmitter = new RedshiftDataTargetSubmitter(redshiftDataService, objectMapper);
         this.serviceRegistry = serviceRegistry;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
@@ -150,7 +160,8 @@ public class EventBridgeInvoker {
                        EmulatorConfig config) {
         this(lambdaService, sqsService, snsService,
                 null /* batch */, null /* firehose */, null /* eventBridge */, null /* ecs */,
-                null /* ecsJsonHandler */, null /* stepFunctions */, null /* redshiftData */, null /* registry */,
+                null /* ecsJsonHandler */, null /* stepFunctions */, null /* redshiftData */,
+                null /* redshiftTargetAuthorizer */, null /* registry */,
                 null /* regionResolver */,
                 objectMapper, config);
     }
@@ -164,12 +175,18 @@ public class EventBridgeInvoker {
                        EmulatorConfig config) {
         this(lambdaService, sqsService, snsService,
                 null /* batch */, null /* firehose */, null /* eventBridge */, null /* ecs */,
-                null /* ecsJsonHandler */, null /* stepFunctions */, redshiftDataService, serviceRegistry,
+                null /* ecsJsonHandler */, null /* stepFunctions */, redshiftDataService,
+                null /* redshiftTargetAuthorizer */, serviceRegistry,
                 null /* regionResolver */,
                 objectMapper, config);
     }
 
     public void invokeTarget(Target target, String eventJson, String region) {
+        invokeTarget(target, eventJson, region, null);
+    }
+
+    /** {@code ruleArn} is the rule that matched, which a role's trust policy may name in {@code aws:SourceArn}. */
+    public void invokeTarget(Target target, String eventJson, String region, String ruleArn) {
         String arn = target.getArn();
         String payload;
         if (target.getInput() != null) {
@@ -241,7 +258,7 @@ public class EventBridgeInvoker {
                 LOG.debugv("EventBridge delivered to Firehose: {0}", arn);
             } else if (AwsArnUtils.isArnFor(arn, "redshift")
                     || AwsArnUtils.isArnFor(arn, "redshift-serverless")) {
-                deliverToRedshiftData(target, arn, eventJson);
+                deliverToRedshiftData(target, arn, eventJson, ruleArn);
             } else if (isStateMachineArn(arn)) {
                 String targetRegion = extractRegionFromArn(arn, region);
                 String targetAccount = AwsArnUtils.parse(arn).accountId();
@@ -335,7 +352,7 @@ public class EventBridgeInvoker {
         }
     }
 
-    private void deliverToRedshiftData(Target target, String targetArn, String eventJson) {
+    private void deliverToRedshiftData(Target target, String targetArn, String eventJson, String ruleArn) {
         if (serviceRegistry != null && !serviceRegistry.isServiceEnabled("redshift-data")) {
             throw new AwsException("ServiceNotAvailableException", "Service redshift-data is not enabled.", 400);
         }
@@ -348,42 +365,18 @@ public class EventBridgeInvoker {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(targetArn);
         String fallbackRegion = regionResolver == null ? null : regionResolver.getRegion();
         String targetRegion = extractRegionFromArn(targetArn, fallbackRegion);
-        ObjectNode request = objectMapper.createObjectNode();
-        String resource = arn.resource();
-        if ("redshift".equals(arn.service()) && resource.startsWith("cluster:")) {
-            request.put("ClusterIdentifier", resource.substring("cluster:".length()));
-        } else if ("redshift-serverless".equals(arn.service()) && resource.startsWith("workgroup/")) {
-            request.put("WorkgroupName", targetArn);
-        } else {
-            LOG.warnv("EventBridge Redshift target has an unsupported resource ARN: {0}", targetArn);
-            return;
-        }
-        putIfPresent(request, "Database", resolveRedshiftParameter(parameters.getDatabase(), eventJson));
-        putIfPresent(request, "DbUser", resolveRedshiftParameter(parameters.getDbUser(), eventJson));
-        putIfPresent(request, "SecretArn", resolveRedshiftParameter(parameters.getSecretManagerArn(), eventJson));
-        putIfPresent(request, "Sql", resolveRedshiftParameter(parameters.getSql(), eventJson));
-        putIfPresent(request, "StatementName", resolveRedshiftParameter(parameters.getStatementName(), eventJson));
-        if (parameters.getSqls() != null) {
-            ArrayNode sqls = request.putArray("Sqls");
-            for (String sql : parameters.getSqls()) {
-                sqls.add(resolveRedshiftParameter(sql, eventJson));
-            }
-        }
-        if (parameters.getWithEvent() != null) {
-            request.put("WithEvent", parameters.getWithEvent());
-        }
-
         String ruleAccount = regionResolver != null && regionResolver.getAccountId() != null
                 ? regionResolver.getAccountId()
                 : arn.accountId();
-        if (parameters.getSqls() != null) {
-            RequestScopes.callAs(ruleAccount, targetRegion,
-                    () -> redshiftDataService.batchExecuteStatement(request, targetRegion, target.getRoleArn()));
-        } else {
-            RequestScopes.callAs(ruleAccount, targetRegion,
-                    () -> redshiftDataService.executeStatement(request, targetRegion, target.getRoleArn()));
-        }
-        LOG.debugv("EventBridge submitted SQL to Redshift Data API: {0}", targetArn);
+        RedshiftDataTargetSubmitter.Statement statement = new RedshiftDataTargetSubmitter.Statement(
+                parameters.getDatabase(), parameters.getDbUser(), parameters.getSecretManagerArn(),
+                parameters.getSql(), parameters.getSqls(), parameters.getStatementName(), parameters.getWithEvent());
+        // EventBridge assumes the target's role, so the role has to trust events.amazonaws.com.
+        redshiftSubmitter.submit(targetArn, statement, target.getRoleArn(), ruleAccount, targetRegion,
+                value -> resolveRedshiftParameter(value, eventJson),
+                permissions -> redshiftTargetAuthorizer == null ? Optional.empty()
+                        : redshiftTargetAuthorizer.refusal(EVENTS_PRINCIPAL, target.getRoleArn(), ruleAccount,
+                                ruleArn, permissions));
     }
 
     private String resolveRedshiftParameter(String value, String eventJson) {
@@ -398,12 +391,6 @@ public class EventBridgeInvoker {
             throw new AwsException("ValidationException", "Redshift target path resolved to null: " + value, 400);
         }
         return node.isTextual() ? node.asText() : node.toString();
-    }
-
-    private static void putIfPresent(ObjectNode request, String field, String value) {
-        if (value != null) {
-            request.put(field, value);
-        }
     }
 
     /**

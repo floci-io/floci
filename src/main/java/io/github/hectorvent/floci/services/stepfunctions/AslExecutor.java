@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.core.common.AwsPartition;
 import io.github.hectorvent.floci.core.common.AwsPartitions;
 import io.github.hectorvent.floci.core.common.CsvParser;
 import io.github.hectorvent.floci.core.common.CustomResourceLiveness;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
@@ -86,7 +87,9 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.RoundingMode;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -213,6 +216,7 @@ public class AslExecutor {
      */
     private static final DateTimeFormatter SDK_TIMESTAMP =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC);
+    private static final Set<String> REDSHIFT_DATA_TIMESTAMPS = Set.of("CreatedAt", "UpdatedAt", "SessionTtl");
 
     private static final Set<String> HTTP_ALLOWED_METHODS = Set.of(
             "GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD");
@@ -276,6 +280,7 @@ public class AslExecutor {
     private final ApiGatewayTaskInvoker apiGatewayTaskInvoker;
     private final EmrTaskInvoker emrTaskInvoker;
     private final EmrServerlessTaskInvoker emrServerlessTaskInvoker;
+    private final SdkManagementTaskInvoker sdkManagementTaskInvoker;
     private final EmulatorConfig config;
     private final NestedTaskCredentials nestedTaskCredentials;
     private final CustomResourceLiveness customResourceLiveness;
@@ -310,7 +315,8 @@ public class AslExecutor {
                        CustomResourceLiveness customResourceLiveness, RedshiftDataJsonHandler redshiftDataHandler,
                        ServiceRegistry serviceRegistry, NestedTaskCredentials nestedTaskCredentials,
                        LambdaTaskAuthorizer lambdaTaskAuthorizer, ApiGatewayTaskInvoker apiGatewayTaskInvoker,
-                       EmrTaskInvoker emrTaskInvoker, EmrServerlessTaskInvoker emrServerlessTaskInvoker) {
+                       EmrTaskInvoker emrTaskInvoker, EmrServerlessTaskInvoker emrServerlessTaskInvoker,
+                       SdkManagementTaskInvoker sdkManagementTaskInvoker) {
         this(lambdaExecutor, targetResolver, dynamoDb, dynamoDbJsonHandler,
                 sqsJsonHandler, snsJsonHandler, cloudFormationHandler,
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
@@ -318,7 +324,7 @@ public class AslExecutor {
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, redshiftDataHandler, serviceRegistry,
                 nestedTaskCredentials, lambdaTaskAuthorizer, null, null, apiGatewayTaskInvoker, emrTaskInvoker,
-                emrServerlessTaskInvoker, null);
+                emrServerlessTaskInvoker, sdkManagementTaskInvoker, null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaTargetResolver targetResolver,
@@ -337,10 +343,12 @@ public class AslExecutor {
                 NestedTaskCredentials nestedTaskCredentials, LambdaTaskAuthorizer lambdaTaskAuthorizer,
                 Duration expressMaxExecutionTimeOverride, LongSupplier nanoTimeOverride,
                 ApiGatewayTaskInvoker apiGatewayTaskInvoker, EmrTaskInvoker emrTaskInvoker,
-                EmrServerlessTaskInvoker emrServerlessTaskInvoker, NestedWaiter nestedWaiter) {
+                EmrServerlessTaskInvoker emrServerlessTaskInvoker, SdkManagementTaskInvoker sdkManagementTaskInvoker,
+                NestedWaiter nestedWaiter) {
         this.apiGatewayTaskInvoker = apiGatewayTaskInvoker;
         this.emrTaskInvoker = emrTaskInvoker;
         this.emrServerlessTaskInvoker = emrServerlessTaskInvoker;
+        this.sdkManagementTaskInvoker = sdkManagementTaskInvoker;
         this.nestedTaskCredentials = nestedTaskCredentials;
         this.serviceRegistry = serviceRegistry;
         this.lambdaTaskAuthorizer = lambdaTaskAuthorizer;
@@ -405,7 +413,7 @@ public class AslExecutor {
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
                 Clock.systemUTC(), TimeUnit.NANOSECONDS::sleep, null, null, null, null, null, null, null, null, null,
-                null, null);
+                null, null, null);
     }
 
     // Kept for tests that do not exercise the Redshift Data API integration.
@@ -426,7 +434,8 @@ public class AslExecutor {
                 ec2Service, s3Service, ecsService, ecsJsonHandler,
                 eventBridgeHandler, schedulerService, schedulerController, rdsDataService,
                 objectMapper, jsonataEvaluator, sfnService, config, vertx, customResourceLiveness,
-                clock, sleeper, maxWaitSecondsOverride, null, null, null, null, null, null, null, null, null, null);
+                clock, sleeper, maxWaitSecondsOverride, null, null, null, null, null, null, null, null, null, null,
+                null);
     }
 
     AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
@@ -560,7 +569,7 @@ public class AslExecutor {
             if (hasEnded(exec)) {
                 return;
             }
-            exec.setStopDate(System.currentTimeMillis() / 1000.0);
+            exec.setStopDate(EpochSeconds.fromMillis(System.currentTimeMillis()));
             exec.setStatus("TIMED_OUT");
         }
         onUpdate.accept(exec, history);
@@ -1459,6 +1468,10 @@ public class AslExecutor {
             return invokeS3PutObject(input);
         }
 
+        if (SdkManagementTaskInvoker.supports(integration)) {
+            return sdkManagementTaskInvoker.invoke(integration, input, extractRegionFromArn(sm.getStateMachineArn()));
+        }
+
         // ECS optimized integration: arn:<partition>:states:::ecs:runTask (request-response, .sync, .waitForTaskToken).
         // The .waitForTaskToken suffix is already stripped by executeTaskState, so a waitForTaskToken
         // variant arrives here as the bare runTask resource and simply launches the task while the token
@@ -1646,7 +1659,7 @@ public class AslExecutor {
         }
     }
 
-    private static String capitalizeFirst(String s) {
+    static String capitalizeFirst(String s) {
         return s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 
@@ -1674,7 +1687,7 @@ public class AslExecutor {
      * {@code Sfn.StateMachineDoesNotExistException}, while the StartExecution wire response names
      * that same error {@code StateMachineDoesNotExist}.
      */
-    private static String sdkExceptionName(String service, String errorCode) {
+    static String sdkExceptionName(String service, String errorCode) {
         return errorCode.endsWith("Exception")
                 ? service + "." + errorCode
                 : service + "." + errorCode + "Exception";
@@ -2464,6 +2477,16 @@ public class AslExecutor {
      *                   handed to the ECS handlers).
      */
     static JsonNode recaseKeys(ObjectMapper mapper, JsonNode node, boolean upperFirst) {
+        return recaseKeys(mapper, node, upperFirst, Set.of());
+    }
+
+    /**
+     * {@link #recaseKeys(ObjectMapper, JsonNode, boolean)} that copies the value of each member named in
+     * {@code verbatim} unchanged, for maps whose keys are user data rather than model members. The
+     * member's own key is still recased and is matched as it arrives, so list it in each casing it can
+     * arrive in.
+     */
+    static JsonNode recaseKeys(ObjectMapper mapper, JsonNode node, boolean upperFirst, Set<String> verbatim) {
         if (node == null) {
             return null;
         }
@@ -2472,14 +2495,15 @@ public class AslExecutor {
             Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
             while (fields.hasNext()) {
                 Map.Entry<String, JsonNode> e = fields.next();
-                out.set(recaseKey(e.getKey(), upperFirst), recaseKeys(mapper, e.getValue(), upperFirst));
+                out.set(recaseKey(e.getKey(), upperFirst), verbatim.contains(e.getKey())
+                        ? e.getValue().deepCopy() : recaseKeys(mapper, e.getValue(), upperFirst, verbatim));
             }
             return out;
         }
         if (node.isArray()) {
             ArrayNode out = mapper.createArrayNode();
             for (JsonNode item : node) {
-                out.add(recaseKeys(mapper, item, upperFirst));
+                out.add(recaseKeys(mapper, item, upperFirst, verbatim));
             }
             return out;
         }
@@ -2648,21 +2672,28 @@ public class AslExecutor {
             return objectMapper.createObjectNode();
         }
         JsonNode rendered = body.deepCopy();
-        renderRedshiftDataTimestamps(rendered);
+        renderSdkTimestamps(rendered, REDSHIFT_DATA_TIMESTAMPS, Set.of());
         return rendered;
     }
 
-    private static void renderRedshiftDataTimestamps(JsonNode node) {
+    /**
+     * Rewrites in place every numeric member named in {@code timestamps}, at any depth, as the SDK's
+     * ISO-8601 rendering. The walk does not descend into members named in {@code verbatim}, maps
+     * whose keys are user data rather than model members.
+     */
+    static void renderSdkTimestamps(JsonNode node, Set<String> timestamps, Set<String> verbatim) {
         if (node instanceof ObjectNode object) {
-            for (String field : List.of("CreatedAt", "UpdatedAt", "SessionTtl")) {
-                JsonNode value = object.get(field);
-                if (value != null && value.isNumber()) {
-                    object.put(field, sdkTimestamp(value.asDouble()));
+            Iterator<Map.Entry<String, JsonNode>> fields = object.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> field = fields.next();
+                if (timestamps.contains(field.getKey()) && field.getValue().isNumber()) {
+                    object.put(field.getKey(), sdkTimestamp(field.getValue().asDouble()));
+                } else if (!verbatim.contains(field.getKey())) {
+                    renderSdkTimestamps(field.getValue(), timestamps, verbatim);
                 }
             }
-            object.elements().forEachRemaining(AslExecutor::renderRedshiftDataTimestamps);
         } else if (node instanceof ArrayNode array) {
-            array.elements().forEachRemaining(AslExecutor::renderRedshiftDataTimestamps);
+            array.forEach(item -> renderSdkTimestamps(item, timestamps, verbatim));
         }
     }
 
@@ -3505,7 +3536,7 @@ public class AslExecutor {
         MapRun mapRun = new MapRun();
         mapRun.setMapRunArn(identity.arn());
         mapRun.setExecutionArn(context.path("Execution").path("Id").asText(null));
-        mapRun.setStartDate(System.currentTimeMillis() / 1000.0);
+        mapRun.setStartDate(EpochSeconds.fromMillis(System.currentTimeMillis()));
         mapRun.setItemCount(itemCount);
         mapRun.setExecutionCount(executionCount);
         // ASL spells an unbounded Map as MaxConcurrency 0, or by omitting it; DescribeMapRun
@@ -3518,7 +3549,7 @@ public class AslExecutor {
     /** Kept for every Distributed Map, so the mapRunArn in the history resolves through DescribeMapRun. */
     private void recordMapRun(MapRun mapRun, String status, int succeededItems, int failedItems,
                               int succeededExecutions, int failedExecutions) {
-        mapRun.setStopDate(System.currentTimeMillis() / 1000.0);
+        mapRun.setStopDate(EpochSeconds.fromMillis(System.currentTimeMillis()));
         mapRun.setStatus(status);
         mapRun.setSucceededCount(succeededItems);
         mapRun.setFailedCount(failedItems);
@@ -3644,12 +3675,14 @@ public class AslExecutor {
                 ? resolveToleranceField(stateDef, "ToleratedFailureCount", Integer.MAX_VALUE, mapInput,
                         jsonata, context, variables)
                 : 0;
-        int percentage = hasPercentage
-                ? resolveToleranceField(stateDef, "ToleratedFailurePercentage", 100, mapInput, jsonata,
-                        context, variables)
-                : 0;
+        BigDecimal percentage = hasPercentage
+                ? resolveTolerancePercentage(stateDef, mapInput, jsonata, context, variables)
+                : BigDecimal.ZERO;
 
-        int fromPercentage = (int) ((long) itemCount * percentage / 100);
+        // The run fails once the failed share exceeds the percentage, so the absorbed count is the
+        // floor of itemCount * percentage / 100. BigDecimal keeps a decimal percentage exact.
+        int fromPercentage = BigDecimal.valueOf(itemCount).multiply(percentage)
+                .divide(BigDecimal.valueOf(100), 0, RoundingMode.FLOOR).intValue();
         int threshold;
         if (hasCount && hasPercentage) {
             threshold = Math.min(count, fromPercentage);
@@ -3658,7 +3691,28 @@ public class AslExecutor {
         } else {
             threshold = fromPercentage;
         }
-        return new ToleratedFailures(true, count, percentage, threshold);
+        return new ToleratedFailures(true, count, percentage.doubleValue(), threshold);
+    }
+
+    /**
+     * The guide asks for "a value between zero and 100" when ToleratedFailurePercentage is a literal, and
+     * DescribeMapRun models it as a float, so a literal may be a decimal such as {@code 100.0} or
+     * {@code 12.5}. Its Path must resolve to an integer and its JSONata expression must evaluate to one, so
+     * those forms keep the integer check.
+     */
+    private BigDecimal resolveTolerancePercentage(JsonNode stateDef, JsonNode mapInput, boolean jsonata,
+                                                  JsonNode context, ObjectNode variables) {
+        String field = "ToleratedFailurePercentage";
+        JsonNode literal = stateDef.get(field);
+        if (stateDef.has(field + "Path") || literal == null || !literal.isNumber()) {
+            return BigDecimal.valueOf(resolveToleranceField(stateDef, field, 100, mapInput, jsonata, context,
+                    variables));
+        }
+        BigDecimal value = literal.decimalValue();
+        if (value.signum() < 0 || value.compareTo(BigDecimal.valueOf(100)) > 0) {
+            throw new FailStateException("States.Runtime", field + " must be a number between 0 and 100", field);
+        }
+        return value;
     }
 
     /** A tolerance is a percentage or a count, so it shares the Map integer resolver and adds a ceiling. */
@@ -6014,7 +6068,7 @@ public class AslExecutor {
             }
             exec.setError(error);
             exec.setCause(cause);
-            exec.setStopDate(System.currentTimeMillis() / 1000.0);
+            exec.setStopDate(EpochSeconds.fromMillis(System.currentTimeMillis()));
             exec.setStatus("FAILED");
         }
         chain.end("ExecutionFailed", failureDetails(error, cause));
@@ -6054,7 +6108,7 @@ public class AslExecutor {
                 if (hasEnded(exec)) {
                     return;
                 }
-                exec.setStopDate(System.currentTimeMillis() / 1000.0);
+                exec.setStopDate(EpochSeconds.fromMillis(System.currentTimeMillis()));
                 exec.setStatus("TIMED_OUT");
             }
         }
@@ -6074,7 +6128,7 @@ public class AslExecutor {
                 return;
             }
             exec.setOutput(output.toString());
-            exec.setStopDate(System.currentTimeMillis() / 1000.0);
+            exec.setStopDate(EpochSeconds.fromMillis(System.currentTimeMillis()));
             exec.setStatus("SUCCEEDED");
         }
         chain.end("ExecutionSucceeded",

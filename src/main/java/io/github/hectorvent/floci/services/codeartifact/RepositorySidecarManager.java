@@ -257,17 +257,14 @@ public interface RepositorySidecarManager {
         throw new UnsupportedOperationException(format() + " packages cannot be listed through this sidecar");
     }
 
+    /** Admits an id resolved while CodeArtifactService holds its repository deletion lock. */
+    default void registerRepository(String repositoryContainerId) {
+    }
+
     /**
-     * Marks that {@code repositoryContainerId} is about to be used for {@link
-     * #listPackageVersions}, called by {@code CodeArtifactService} right after it resolves that
-     * id and before it does anything else with it. Resolving the id and entering {@link
-     * #listPackageVersions} are two separate statements there, with a concurrent repository
-     * delete's cleanup able to run in between them; pairing this with {@link #endUse} in a
-     * {@code try}/{@code finally} around the whole {@link #listPackageVersions} call closes that
-     * window the same way {@code PypiserverSidecarClient} already closes the narrower one inside
-     * the call itself. Default is a no-op: only a sidecar whose own concurrency bookkeeping dies
-     * with the container (pypiserver) has anything here to protect; one with no such bookkeeping,
-     * or (Maven) a container that is never torn down, does not.
+     * Marks that a resolved sidecar id is about to be used before a concurrent repository delete
+     * can release it. Paired with {@link #endUse} around the whole sidecar call. The default is a
+     * no-op for formats whose containers need no per-request lease.
      */
     default void beginUse(String repositoryContainerId) {
     }

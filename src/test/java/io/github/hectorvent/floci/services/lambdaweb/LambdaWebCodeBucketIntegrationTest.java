@@ -89,6 +89,15 @@ class LambdaWebCodeBucketIntegrationTest {
     }
 
     @Test
+    void theNullDeleteMarkerOfASuspendedBucketIsRefusedBeforeTheBucketPolicy() {
+        s3Service.putBucketVersioning(bucket, "Suspended");
+        put(bucket);
+        s3Service.deleteObject(bucket, "app.zip");
+        refused(null, "The latest version of the S3 object is a delete marker. Upload a new object version or pass"
+                + " an explicit S3ObjectVersion.");
+    }
+
+    @Test
     void lambdaNeedsGetObjectVersionUnderTheConditionsItSends() {
         s3Service.putBucketVersioning(bucket, "Enabled");
         put(bucket);
@@ -125,6 +134,26 @@ class LambdaWebCodeBucketIntegrationTest {
         policy(allow("\"s3:GetObjectVersion\"", "{\"StringEquals\":{\"s3:VersionId\":\"" + older + "\"}}"));
         refused(null, lambdaRefusal());
         accepted(older);
+    }
+
+    @Test
+    void aRevisionFailsForGoodOnceLambdaCanNoLongerReadItsCode() {
+        s3Service.putBucketVersioning(bucket, "Enabled");
+        put(bucket);
+        LambdaWebCodeBuckets.allowLambda(s3Service, bucket);
+        String revisionId = createRevision(null).statusCode(202).extract().path("revisionId");
+        String revision = BASE + "/web-functions/" + functionName + "/revisions/" + revisionId;
+        given().header("Authorization", ROOT).when().get(revision)
+                .then().statusCode(200).body("state", equalTo("Active"));
+
+        s3Service.deleteBucketPolicy(bucket);
+        given().header("Authorization", ROOT).when().get(revision)
+                .then().statusCode(200)
+                .body("state", equalTo("Failed"))
+                .body("stateReason", equalTo(lambdaRefusal()));
+        LambdaWebCodeBuckets.allowLambda(s3Service, bucket);
+        given().header("Authorization", ROOT).when().get(revision)
+                .then().statusCode(200).body("state", equalTo("Failed"));
     }
 
     private String lambdaRefusal() {

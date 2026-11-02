@@ -9,8 +9,10 @@ import io.github.hectorvent.floci.services.appsync.model.DataSource;
 import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import io.github.hectorvent.floci.services.appsync.model.Resolver;
+import io.github.hectorvent.floci.services.appsync.model.ResolverKind;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
+import io.github.hectorvent.floci.services.cloudformation.CfnCreateOnlyProperties;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -80,6 +82,40 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
     private static final Set<String> OPAQUE_KEY_PROPERTIES = Set.of("EnvironmentVariables");
 
     /**
+     * Properties the provisioner fills itself, so a template that drops one still has it on the
+     * request: the identifiers, and the two the provisioner handles in its own call ({@code Tags}
+     * as a map, {@code EnvironmentVariables} as a second call).
+     */
+    private static final Set<String> NEVER_CLEARED =
+            Set.of("ApiId", "Name", "TypeName", "FieldName", "Tags", "EnvironmentVariables");
+
+    /**
+     * Required properties of a type, which a template cannot drop and the service cannot hold as
+     * null, {@code Expires}, whose update the service parses as a date (null is refused), and the
+     * GraphQLApi {@code ApiType} and {@code Visibility}, which UpdateGraphqlApi does not take
+     * (CreateGraphqlApi: visibility "cannot be changed once the API has been created"): the stored
+     * value stays. A resolver's {@code DataSourceName} stays here too and is cleared only for
+     * a pipeline resolver, in {@link #provisionResolver}.
+     */
+    private static final Map<String, Set<String>> KEPT_ON_DROP = Map.of(
+            GRAPHQL_API, Set.of("AuthenticationType", "ApiType", "Visibility"),
+            DATA_SOURCE, Set.of("Type"),
+            FUNCTION_CONFIGURATION, Set.of("DataSourceName"),
+            RESOLVER, Set.of("DataSourceName"),
+            API_KEY, Set.of("Expires"));
+
+    /**
+     * What a dropped property goes back to where the service's update does not take null as a
+     * clear: it ignores a null boolean or list, or the member has a default on create that a null
+     * would turn into an absent value.
+     */
+    private static final Map<String, Map<String, Object>> DEFAULT_ON_DROP = Map.of(
+            GRAPHQL_API, Map.of("XrayEnabled", false,
+                    "AdditionalAuthenticationProviders", List.of()),
+            FUNCTION_CONFIGURATION, Map.of("FunctionVersion", "2018-05-29"),
+            RESOLVER, Map.of("Kind", "UNIT"));
+
+    /**
      * How long a stack resource waits for a schema to compile. Generous: the wait is bounded only so
      * a wedged worker cannot hang a stack operation forever, and a schema that hits this is reported
      * as a resource failure rather than left in an unknown state.
@@ -132,6 +168,9 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
         }
         if (blank(str(req.get("name")))) {
             req.put("name", ctx.generatePhysicalName(r.getLogicalId(), 65, false));
+        }
+        if (ctx.isUpdate()) {
+            clearDropped(req, props, ctx, GRAPHQL_API);
         }
 
         GraphqlApi api = ctx.isUpdate()
@@ -244,7 +283,11 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
             req.put("name", name);
         }
 
-        DataSource ds = reusesEntity(r, ctx, apiId) && name.equals(attribute(r, "Name"))
+        boolean update = reusesEntity(r, ctx, apiId) && name.equals(attribute(r, "Name"));
+        if (update) {
+            clearDropped(req, props, ctx, DATA_SOURCE);
+        }
+        DataSource ds = update
                 ? appSyncService.updateDataSource(apiId, name, req)
                 : appSyncService.createDataSource(apiId, req, ctx.region());
 
@@ -266,7 +309,11 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
         }
 
         String priorFunctionId = attribute(r, "FunctionId");
-        FunctionConfiguration fn = reusesEntity(r, ctx, apiId) && !blank(priorFunctionId)
+        boolean update = reusesEntity(r, ctx, apiId) && !blank(priorFunctionId);
+        if (update) {
+            clearDropped(req, props, ctx, FUNCTION_CONFIGURATION);
+        }
+        FunctionConfiguration fn = update
                 ? appSyncService.updateFunction(apiId, priorFunctionId, req)
                 : appSyncService.createFunction(apiId, req, ctx.region());
 
@@ -295,7 +342,16 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
 
         boolean sameField = typeName.equals(attribute(r, "TypeName"))
                 && fieldName.equals(attribute(r, "FieldName"));
-        Resolver resolver = reusesEntity(r, ctx, apiId) && sameField
+        boolean update = reusesEntity(r, ctx, apiId) && sameField;
+        if (update) {
+            clearDropped(req, props, ctx, RESOLVER);
+            // A UNIT resolver needs its data source (createResolver refuses none): clear it only on a pipeline.
+            if (ctx.droppedProperties(props).contains("DataSourceName")
+                    && isPipeline(req, apiId, typeName, fieldName)) {
+                req.put("dataSourceName", null);
+            }
+        }
+        Resolver resolver = update
                 ? appSyncService.updateResolver(apiId, typeName, fieldName, req)
                 : appSyncService.createResolver(apiId, req, ctx.region());
 
@@ -312,7 +368,11 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
         Map<String, Object> req = camelisedProperties(props, ctx);
         String apiId = requiredApiId(req, API_KEY);
 
-        ApiKey key = reusesEntity(r, ctx, apiId)
+        boolean update = reusesEntity(r, ctx, apiId);
+        if (update) {
+            clearDropped(req, props, ctx, API_KEY);
+        }
+        ApiKey key = update
                 ? appSyncService.updateApiKey(apiId, ctx.priorPhysicalId(), req)
                 : appSyncService.createApiKey(apiId, req);
 
@@ -385,6 +445,38 @@ public class AppSyncCfnProvisioner implements CfnResourceProvisioner {
      */
     private boolean reusesEntity(StackResource r, ProvisionContext ctx, String apiId) {
         return ctx.isUpdate() && apiId.equals(attribute(r, "ApiId"));
+    }
+
+    /**
+     * Puts each property the previous template declared and this one drops on an update request as
+     * its API member with a null value, which the service's update reads as a clear (it applies a
+     * member by {@code containsKey}), so the entity stops carrying what the template no longer
+     * names. A property the stack never declared is not on the request and keeps whatever was set
+     * outside it. Left out: what the provisioner fills or handles itself, a create-only property
+     * (dropping one is a replacement question), and the few {@link #KEPT_ON_DROP} properties the
+     * service cannot hold as null; a few {@link #DEFAULT_ON_DROP} go back to their create default.
+     */
+    private void clearDropped(Map<String, Object> req, JsonNode props, ProvisionContext ctx,
+                              String resourceType) {
+        Set<String> kept = KEPT_ON_DROP.getOrDefault(resourceType, Set.of());
+        Map<String, Object> defaults = DEFAULT_ON_DROP.getOrDefault(resourceType, Map.of());
+        for (String name : ctx.droppedProperties(props)) {
+            if (NEVER_CLEARED.contains(name) || kept.contains(name)
+                    || CfnCreateOnlyProperties.isCreateOnly(resourceType, name)) {
+                continue;
+            }
+            req.put(apiMemberName(name), defaults.get(name));
+        }
+    }
+
+    private boolean isPipeline(Map<String, Object> req, String apiId, String typeName,
+                               String fieldName) {
+        Object kind = req.get("kind");
+        if (kind == null) {
+            Resolver stored = appSyncService.getResolver(apiId, typeName, fieldName);
+            return stored != null && stored.getKind() == ResolverKind.PIPELINE;
+        }
+        return "PIPELINE".equals(kind.toString());
     }
 
     private void rejectS3Code(Map<String, Object> req, String resourceType) {

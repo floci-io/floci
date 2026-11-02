@@ -202,7 +202,10 @@ class ElbV2CertificatePublicationServiceTest {
             }
             ExecutionException refused = assertThrows(ExecutionException.class, () -> creation.get(5, TimeUnit.SECONDS));
             assertEquals("LoadBalancerNotFound", ((AwsException) refused.getCause()).getErrorCode());
-            assertTrue(service.describeListeners(REGION, lb.getLoadBalancerArn(), List.of()).isEmpty());
+            AwsException missing = assertThrows(AwsException.class,
+                    () -> service.describeListeners(REGION, lb.getLoadBalancerArn(), List.of()));
+            assertEquals("LoadBalancerNotFound", missing.getErrorCode());
+            assertTrue(service.describeListeners(REGION, null, List.of()).isEmpty());
             assertTrue(service.describeRules(REGION, null, List.of()).isEmpty());
         } finally {
             worker.shutdownNow();

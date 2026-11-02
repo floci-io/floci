@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.stepfunctions.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
@@ -19,7 +20,7 @@ public class StateMachineAlias {
     private double updateDate;
 
     public StateMachineAlias() {
-        creationDate = System.currentTimeMillis() / 1000.0;
+        creationDate = EpochSeconds.fromMillis(System.currentTimeMillis());
         updateDate = creationDate;
     }
 

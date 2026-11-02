@@ -1226,6 +1226,46 @@ class KmsIntegrationTest {
                 .then().statusCode(200);
     }
 
+    @Test
+    void anotherAccountsKeyOrAliasArnIsNotFound() {
+        String owner = "AWS4-HMAC-SHA256 Credential=000000000103/20260215/us-east-1/kms/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        String caller = "AWS4-HMAC-SHA256 Credential=000000000104/20260215/us-east-1/kms/aws4_request, "
+                + "SignedHeaders=host, Signature=abc";
+        String alias = "alias/shared-" + UUID.randomUUID();
+        String ownerKeyArn = kmsAs(owner, "CreateKey", "{}").then().statusCode(200)
+                .extract().path("KeyMetadata.Arn");
+        String callerKeyArn = kmsAs(caller, "CreateKey", "{}").then().statusCode(200)
+                .extract().path("KeyMetadata.Arn");
+        kmsAs(owner, "CreateAlias", "{\"AliasName\":\"%s\",\"TargetKeyId\":\"%s\"}".formatted(alias, ownerKeyArn))
+                .then().statusCode(200);
+        kmsAs(caller, "CreateAlias", "{\"AliasName\":\"%s\",\"TargetKeyId\":\"%s\"}".formatted(alias, callerKeyArn))
+                .then().statusCode(200);
+        String ownerAliasArn = "arn:aws:kms:us-east-1:000000000103:" + alias;
+        String callerAliasArn = "arn:aws:kms:us-east-1:000000000104:" + alias;
+
+        kmsAs(caller, "DescribeKey", "{\"KeyId\":\"%s\"}".formatted(ownerAliasArn)).then()
+                .statusCode(400)
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("Alias " + ownerAliasArn + " is not found."));
+        kmsAs(caller, "DescribeKey", "{\"KeyId\":\"%s\"}".formatted(ownerKeyArn)).then()
+                .statusCode(400)
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("Key '" + ownerKeyArn + "' does not exist"));
+        kmsAs(caller, "DescribeKey", "{\"KeyId\":\"%s\"}".formatted(callerAliasArn)).then()
+                .statusCode(200)
+                .body("KeyMetadata.Arn", equalTo(callerKeyArn));
+        kmsAs(owner, "DescribeKey", "{\"KeyId\":\"%s\"}".formatted(ownerAliasArn)).then()
+                .statusCode(200)
+                .body("KeyMetadata.Arn", equalTo(ownerKeyArn));
+
+        for (String[] created : new String[][] {{owner, ownerKeyArn}, {caller, callerKeyArn}}) {
+            kmsAs(created[0], "DeleteAlias", "{\"AliasName\":\"%s\"}".formatted(alias)).then().statusCode(200);
+            kmsAs(created[0], "ScheduleKeyDeletion", "{\"KeyId\":\"%s\",\"PendingWindowInDays\":7}"
+                    .formatted(created[1])).then().statusCode(200);
+        }
+    }
+
     @ParameterizedTest
     @CsvSource({"ListKeys", "ListAliases"})
     void listKeysAndAliasesRejectBadMarker(String action) {
@@ -3270,6 +3310,15 @@ class KmsIntegrationTest {
 
     private static Response callKms(String operation, String body) {
         return given()
+                .header("X-Amz-Target", "TrentService." + operation)
+                .contentType(KMS_CONTENT_TYPE)
+                .body(body)
+                .when().post("/");
+    }
+
+    private static Response kmsAs(String authorization, String operation, String body) {
+        return given()
+                .header("Authorization", authorization)
                 .header("X-Amz-Target", "TrentService." + operation)
                 .contentType(KMS_CONTENT_TYPE)
                 .body(body)

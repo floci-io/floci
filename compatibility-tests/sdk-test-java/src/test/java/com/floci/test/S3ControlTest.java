@@ -1,6 +1,7 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.parallel.Isolated;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.BucketAlreadyOwnedByYouException;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
@@ -40,6 +41,7 @@ import static org.assertj.core.api.Assertions.*;
  */
 @DisplayName("S3 Control API — ListTagsForResource / TagResource / UntagResource (#341)")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@Isolated
 class S3ControlTest {
 
     private static S3Client s3;

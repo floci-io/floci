@@ -40,6 +40,17 @@ class DynamoDbConditionKeysTest {
         assertEquals("SPECIFIC_ATTRIBUTES", result.select());
     }
 
+    @Test
+    void partiqlAttributesTakeAParameterMemberSetToNullAsAbsent() {
+        JsonNode body = mapper.createObjectNode().put("Statement", "SELECT payload FROM FgacTable WHERE PK = ?")
+                .set("Parameters", json("[{\"S\":\"one\",\"N\":null}]"));
+
+        DynamoDbConditionKeys.Result result = DynamoDbConditionKeys.extract("dynamodb:PartiQLSelect", body, table);
+
+        assertEquals(List.of("payload", "PK"), result.attributes());
+        assertTrue(body.at("/Parameters/0").has("N"));
+    }
+
     @ParameterizedTest
     @CsvSource(delimiter = '|', value = {
             "GetItem | {} | ALL_ATTRIBUTES",

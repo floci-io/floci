@@ -24,7 +24,7 @@ final class RedshiftDestinationValidator {
     private static final String ROLE_ARN_REGEX = "arn:.*:iam::\\d{12}:role/[a-zA-Z_0-9+=,.@\\-_/]+";
     private static final Pattern ROLE_ARN = Pattern.compile(ROLE_ARN_REGEX);
     private static final String SECRET_ARN_REGEX =
-            "arn:.*:secretsmanager:[a-zA-Z0-9\\-]+:\\d{12}:secret:[a-zA-Z0-9\\-/_+=.@]+";
+            "arn:.*:secretsmanager:[a-zA-Z0-9\\-]+:\\d{12}:secret:[a-zA-Z0-9\\-/_+=.@!]+";
     private static final Pattern SECRET_ARN = Pattern.compile(SECRET_ARN_REGEX);
     private static final Pattern UNREADABLE_KEY_CHARS = Pattern.compile("[\\s'\"]");
     private static final Set<String> BACKUP_MODES = Set.of("Disabled", "Enabled");
@@ -161,6 +161,9 @@ final class RedshiftDestinationValidator {
                         "secretsManagerConfiguration.secretARN", violations);
             }
         }
+        collectS3RoleViolations(dest.getS3(), shape, "s3Configuration", violations);
+        collectS3RoleViolations(dest.getS3Backup(), shape, "s3BackupConfiguration", violations);
+        S3DestinationValidator.collectProcessingViolations(dest.getProcessingConfiguration(), shape, violations);
         S3Destination s3 = dest.getS3();
         if (s3 != null && s3.getPrefix() != null && UNREADABLE_KEY_CHARS.matcher(s3.getPrefix()).find()) {
             violations.add(violation(shape, "s3Configuration.prefix",
@@ -171,6 +174,19 @@ final class RedshiftDestinationValidator {
             violations.add(violation(shape, "s3Configuration.compressionFormat",
                     "Member must not be SNAPPY or ZIP: the Amazon Redshift COPY command cannot read these formats"));
         }
+    }
+
+    /**
+     * The role Firehose assumes for an S3 location has the same length and pattern as the destination's own, so a blank
+     * one is refused here rather than reaching a delivery that would skip the role checks.
+     */
+    private static void collectS3RoleViolations(S3Destination s3, String shape, String member,
+                                                List<String> violations) {
+        if (s3 == null || s3.getRoleArn() == null) {
+            return;
+        }
+        checkLength(s3.getRoleArn(), 1, 512, shape, member + ".roleARN", violations);
+        checkPattern(s3.getRoleArn(), ROLE_ARN, ROLE_ARN_REGEX, shape, member + ".roleARN", violations);
     }
 
     /** The bucket and role an S3 configuration cannot do without: with no bucket, staging falls back to a shared one. */

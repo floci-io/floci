@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.pipes;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.ContainerTeardown;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -22,6 +23,7 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -35,7 +37,7 @@ import java.util.stream.Collectors;
  * (multiple Pipes reading the same cluster share one Karapace instance).
  */
 @ApplicationScoped
-class KarapaceManager {
+class KarapaceManager implements ContainerTeardown {
 
     private static final Logger LOG = Logger.getLogger(KarapaceManager.class);
     private static final int REST_PORT = 8082;
@@ -49,7 +51,14 @@ class KarapaceManager {
     private final DockerHostResolver dockerHostResolver;
     private final Duration readyTimeout;
     private final Map<String, URI> restBaseUriByTarget = new ConcurrentHashMap<>();
-    private final Map<String, String> containerIdByTarget = new ConcurrentHashMap<>();
+    private final Map<String, ManagedContainer> containersByTarget = new ConcurrentHashMap<>();
+    private final Object lifecycleLock = new Object();
+    private int activeStarts;
+    private CompletableFuture<Void> startsDrained = CompletableFuture.completedFuture(null);
+    private CompletableFuture<Void> teardown;
+
+    private record ManagedContainer(String id, int hostPort) {
+    }
 
     @Inject
     KarapaceManager(ContainerBuilder containerBuilder,
@@ -80,10 +89,34 @@ class KarapaceManager {
     }
 
     URI ensureStarted(String bootstrapServers) {
-        return restBaseUriByTarget.computeIfAbsent(bootstrapServers, this::startContainer);
+        synchronized (lifecycleLock) {
+            if (teardown != null) {
+                throw new IllegalStateException("Karapace containers are being stopped");
+            }
+            if (activeStarts++ == 0) {
+                startsDrained = new CompletableFuture<>();
+            }
+        }
+        try {
+            return restBaseUriByTarget.computeIfAbsent(bootstrapServers, this::startContainer);
+        } finally {
+            CompletableFuture<Void> drained = null;
+            synchronized (lifecycleLock) {
+                if (--activeStarts == 0) {
+                    drained = startsDrained;
+                }
+            }
+            if (drained != null) {
+                drained.complete(null);
+            }
+        }
     }
 
     private URI startContainer(String bootstrapServers) {
+        ManagedContainer pending = containersByTarget.get(bootstrapServers);
+        if (pending != null) {
+            stopContainer(bootstrapServers, pending);
+        }
         EmulatorConfig.KafkaRestBridgeConfig bridgeConfig = config.services().pipes().kafkaRestBridge();
         String targetKey = targetKey(bootstrapServers);
         String containerName = ContainerStorageHelper.resourceName(config, "pipes-kafka-rest", targetKey, targetKey);
@@ -121,29 +154,32 @@ class KarapaceManager {
             specBuilder.withExposedPort(REST_PORT);
         }
 
-        ContainerSpec spec = specBuilder.build();
         ContainerInfo info;
         try {
+            ContainerSpec spec = specBuilder.build();
             info = lifecycleManager.createAndStart(spec);
         } catch (RuntimeException e) {
-            if (!containerDetector.isRunningInContainer()) {
+            if (hostPort != 0) {
                 portAllocator.release(hostPort);
             }
             throw e;
         }
 
+        ManagedContainer managed = new ManagedContainer(info.containerId(), hostPort);
+        containersByTarget.put(bootstrapServers, managed);
         try {
-            containerIdByTarget.put(bootstrapServers, info.containerId());
             EndpointInfo endpoint = info.getEndpoint(REST_PORT);
             URI restBaseUri = URI.create("http://" + endpoint.host() + ":" + endpoint.port() + "/");
             waitUntilReady(restBaseUri);
             LOG.infov("Karapace REST Proxy {0} started for bootstrap {1}", info.containerId(), bootstrapServers);
             return restBaseUri;
         } catch (RuntimeException e) {
-            containerIdByTarget.remove(bootstrapServers);
-            lifecycleManager.stopAndRemove(info.containerId(), null);
-            if (!containerDetector.isRunningInContainer()) {
-                portAllocator.release(hostPort);
+            try {
+                stopContainer(bootstrapServers, managed);
+            } catch (RuntimeException cleanupFailure) {
+                if (cleanupFailure != e) {
+                    e.addSuppressed(cleanupFailure);
+                }
             }
             throw e;
         }
@@ -207,16 +243,53 @@ class KarapaceManager {
         return Digests.sha256Hex(bootstrapServers).substring(0, 16);
     }
 
+    @Override
+    public void stopManagedContainers() {
+        CompletableFuture<Void> drained;
+        CompletableFuture<Void> finished;
+        synchronized (lifecycleLock) {
+            if (teardown != null) {
+                finished = teardown;
+                drained = null;
+            } else {
+                finished = new CompletableFuture<>();
+                teardown = finished;
+                drained = startsDrained;
+            }
+        }
+        if (drained == null) {
+            finished.join();
+            return;
+        }
+        try {
+            // Admission stays closed while existing starts finish and cleanup performs Docker I/O.
+            drained.join();
+            restBaseUriByTarget.clear();
+            containersByTarget.forEach((target, managed) -> {
+                try {
+                    stopContainer(target, managed);
+                } catch (RuntimeException e) {
+                    LOG.warnv(e, "Failed to stop Karapace container {0}", managed.id());
+                }
+            });
+        } finally {
+            synchronized (lifecycleLock) {
+                teardown = null;
+            }
+            finished.complete(null);
+        }
+    }
+
+    private void stopContainer(String target, ManagedContainer managed) {
+        lifecycleManager.stopAndRemoveStrict(managed.id(), null);
+        if (managed.hostPort() != 0) {
+            portAllocator.release(managed.hostPort());
+        }
+        containersByTarget.remove(target, managed);
+    }
+
     @PreDestroy
     void shutdown() {
-        containerIdByTarget.values().forEach(containerId -> {
-            try {
-                lifecycleManager.stopAndRemove(containerId, null);
-            } catch (RuntimeException e) {
-                LOG.warnv("Failed to stop Karapace container {0}: {1}", containerId, e.getMessage());
-            }
-        });
-        containerIdByTarget.clear();
-        restBaseUriByTarget.clear();
+        stopManagedContainers();
     }
 }

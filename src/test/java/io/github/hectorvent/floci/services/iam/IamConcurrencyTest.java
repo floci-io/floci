@@ -110,6 +110,41 @@ class IamConcurrencyTest {
                     return i -> iam.attachGroupPolicy("g", arns[i]);
                 }, iam -> iam.listAttachedGroupPolicies("g", null).size()),
 
+                // One policy across many principals: every attach/detach updates the
+                // policy's AttachmentCount, so a lost update leaves DeletePolicy refusing.
+                new Scenario("policy.attachmentCount.attachGroup", iam -> {
+                    String arn = iam.createPolicy("pol", "/", null, "{}", null).getArn();
+                    for (int i = 0; i < N; i++) iam.createGroup("g" + i, "/");
+                    return i -> iam.attachGroupPolicy("g" + i, arn);
+                }, iam -> iam.getPolicy(onlyPolicyArn(iam)).getAttachmentCount()),
+
+                new Scenario("policy.attachmentCount.detachGroup", iam -> {
+                    String arn = iam.createPolicy("pol", "/", null, "{}", null).getArn();
+                    for (int i = 0; i < N; i++) {
+                        iam.createGroup("g" + i, "/");
+                        iam.attachGroupPolicy("g" + i, arn);
+                    }
+                    return i -> iam.detachGroupPolicy("g" + i, arn);
+                }, IamConcurrencyTest::detachedThenDeleted),
+
+                new Scenario("policy.attachmentCount.detachUser", iam -> {
+                    String arn = iam.createPolicy("pol", "/", null, "{}", null).getArn();
+                    for (int i = 0; i < N; i++) {
+                        iam.createUser("u" + i, "/");
+                        iam.attachUserPolicy("u" + i, arn);
+                    }
+                    return i -> iam.detachUserPolicy("u" + i, arn);
+                }, IamConcurrencyTest::detachedThenDeleted),
+
+                new Scenario("policy.attachmentCount.detachRole", iam -> {
+                    String arn = iam.createPolicy("pol", "/", null, "{}", null).getArn();
+                    for (int i = 0; i < N; i++) {
+                        iam.createRole("r" + i, "/", "{}", null, 3600, null);
+                        iam.attachRolePolicy("r" + i, arn);
+                    }
+                    return i -> iam.detachRolePolicy("r" + i, arn);
+                }, IamConcurrencyTest::detachedThenDeleted),
+
                 new Scenario("policy.tags", iam -> {
                     IamPolicy p = iam.createPolicy("pol", "/", null, "{}", null);
                     return i -> iam.tagPolicy(p.getArn(), Map.of("k" + i, "v" + i));
@@ -576,6 +611,16 @@ class IamConcurrencyTest {
             arns[i] = iam.createPolicy(prefix + "-" + i, "/", null, "{}", null).getArn();
         }
         return arns;
+    }
+
+    /** N when every detach landed: the count read back is zero and DeletePolicy succeeds. */
+    private static int detachedThenDeleted(IamService iam) {
+        String arn = onlyPolicyArn(iam);
+        int remaining = iam.getPolicy(arn).getAttachmentCount();
+        if (remaining == 0) {
+            iam.deletePolicy(arn);
+        }
+        return N - remaining;
     }
 
     private static String onlyPolicyArn(IamService iam) {

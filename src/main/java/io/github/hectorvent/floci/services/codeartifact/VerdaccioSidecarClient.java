@@ -73,6 +73,21 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
         manager.release(repositoryContainerId);
     }
 
+    @Override
+    public void registerRepository(String repositoryContainerId) {
+        manager.registerRepository(repositoryContainerId);
+    }
+
+    @Override
+    public void beginUse(String repositoryContainerId) {
+        manager.beginUse(repositoryContainerId);
+    }
+
+    @Override
+    public void endUse(String repositoryContainerId) {
+        manager.endUse(repositoryContainerId);
+    }
+
     /** The public URL a Verdaccio sidecar is told to advertise for one npm repository. */
     public String publicUrl(String domain, String repository) {
         return config.effectiveBaseUrl() + "/codeartifact/npm/" + domain + "/" + repository + "/";
@@ -449,6 +464,28 @@ public class VerdaccioSidecarClient implements RepositorySidecarManager {
                 .orElse(null);
         storeVersion(repositoryContainerId, domain, repository, namespace, packageName, version, assetName, content,
                 sourceVersionDoc);
+    }
+
+    /**
+     * {@code CodeArtifactNpmExternalConnectionImporter}'s own destination write for a version
+     * retained through a {@code public:npmjs} external connection, the same reuse-the-source-
+     * document treatment {@link #copyPackageVersionAsset} already gives a version copied from
+     * another repository here, just sourced from the real public registry's own fetched packument
+     * instead of another Verdaccio-backed repository (found by Greptile's review of npm's own
+     * external-connection work: a plain {@link #storePackageVersionAsset} call builds a minimal
+     * document with no {@code dependencies}/{@code engines}/{@code scripts}, which a real {@code
+     * npm install} of this exact version needs). {@code externalVersionDoc} is {@code null} when
+     * the caller could not resolve the real registry's own version entry (should not normally
+     * happen once {@link CodeArtifactNpmExternalConnectionImporter#mergedPackument} has already
+     * merged this exact version in, but defended the same way {@link #copyPackageVersionAsset}
+     * already is): falls back to the same minimal document {@link #storePackageVersionAsset}
+     * would have built.
+     */
+    public void storeRetainedVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName, byte[] content,
+            JsonNode externalVersionDoc) {
+        storeVersion(repositoryContainerId, domain, repository, namespace, packageName, version, assetName, content,
+                externalVersionDoc);
     }
 
     private void storeVersion(String repositoryContainerId, String domain, String repository, String namespace,

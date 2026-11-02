@@ -90,6 +90,16 @@ class IamActionRegistryTest {
     }
 
     @Test
+    void inspector2DisableRouteResolvesItsAction() {
+        ContainerRequestContext ctx = mockCtx("POST", "/disable",
+                new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}");
+
+        assertEquals("inspector2:Disable", registry.resolveRoute("inspector2", ctx));
+        assertNull(registry.resolveRoute("inspector2", mockCtx("GET", "/disable",
+                new MultivaluedHashMap<>(), null, "")));
+    }
+
+    @Test
     void cloudWatchGetUsesQueryActionAndOperationPrecedence() {
         MultivaluedMap<String, String> query = new MultivaluedHashMap<>();
         query.add("Action", "GetMetricStatistics");
@@ -365,6 +375,21 @@ class IamActionRegistryTest {
         assertEquals("lambda:PutResourcePolicy", lambdaAction("PUT", "/2025-03-07/resource-policy/" + arn));
         assertEquals("lambda:GetResourcePolicy", lambdaAction("GET", "/2025-03-07/resource-policy/" + arn));
         assertEquals("lambda:DeleteResourcePolicy", lambdaAction("DELETE", "/2025-03-07/resource-policy/" + arn));
+    }
+
+    @Test
+    void bedrockResourcePolicyRoutesResolveToTheirActions() {
+        String arn = "arn%3Aaws%3Abedrock%3Aus-east-1%3A000000000000%3Aguardrail%2Fabc123def456";
+        assertEquals("bedrock:PutResourcePolicy", bedrockAction("POST", "/resource-policy"));
+        assertEquals("bedrock:GetResourcePolicy", bedrockAction("GET", "/resource-policy/" + arn));
+        assertEquals("bedrock:DeleteResourcePolicy", bedrockAction("DELETE", "/resource-policy/" + arn));
+        assertNull(bedrockAction("GET", "/resource-policy"));
+        assertNull(bedrockAction("POST", "/resource-policy/" + arn));
+    }
+
+    private String bedrockAction(String method, String path) {
+        return registry.resolveRoute("bedrock",
+                mockCtx(method, path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}"));
     }
 
     private String lambdaAction(String method, String path) {

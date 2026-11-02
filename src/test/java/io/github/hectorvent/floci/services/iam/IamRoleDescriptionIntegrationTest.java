@@ -147,7 +147,7 @@ class IamRoleDescriptionIntegrationTest {
         update(Map.of("RoleName", roleName)).statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
                 .body("ErrorResponse.Error.Message",
-                        equalTo("1 validation error detected: Value null at 'description' failed "
+                        equalTo("1 validation error detected: Value at 'description' failed "
                                 + "to satisfy constraint: Member must not be null"));
 
         admin("GetRole", Map.of("RoleName", roleName)).statusCode(200)

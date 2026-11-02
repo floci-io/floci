@@ -80,6 +80,17 @@ class OrganizationsServiceTest {
         assertTrue(status.getAccountId().matches("\\d{12}"), status.getAccountId());
     }
 
+    @Test
+    void createAccountStoresTheRequestedTags() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        CreateAccountStatus status = service.createAccount(MANAGEMENT_ACCOUNT, "tagged@example.com", "Tagged",
+                Map.of("team", "platform"), false);
+
+        assertEquals(Map.of("team", "platform"),
+                service.listTagsForResource(MANAGEMENT_ACCOUNT, status.getAccountId()));
+    }
+
     /** The (member account, role name, management account) triples a provisioner received. */
     private static final class RecordedProvisions implements AccountAccessRoleProvisioner {
         final List<String> calls = new ArrayList<>();

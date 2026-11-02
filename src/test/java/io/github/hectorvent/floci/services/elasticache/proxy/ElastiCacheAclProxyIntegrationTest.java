@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.testutil.SigV4TokenTestHelper;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -187,6 +188,25 @@ class ElastiCacheAclProxyIntegrationTest {
         access.set("on ~* &* -@all +ping");
         try (Socket hello = connect(port, trust)) {
             assertTrue(command(hello, "HELLO", "2", "AUTH", "subscriber", credential).startsWith("*"));
+        }
+    }
+
+    @Test
+    void changedPermissionsApplyToAnAlreadyOpenSession() throws Exception {
+        memberMode.set(AuthMode.PASSWORD);
+        access.set("on ~allowed:* &* -@all +get +ping");
+        try (Socket open = connect(proxy.localPort(), trust)) {
+            assertEquals("+OK", command(open, "AUTH", "subscriber", "synthetic-password"));
+            assertEquals("+PONG", command(open, "PING"));
+            assertTrue(command(open, "SET", "allowed:key", "value").startsWith("-NOPERM"));
+
+            access.set("on ~allowed:* &* -@all +get +set +ping");
+            proxy.refreshUser("subscriber");
+            assertEquals("+OK", command(open, "SET", "allowed:key", "value"));
+
+            access.set("on ~allowed:* &* -@all +get +ping");
+            proxy.refreshUser("subscriber");
+            assertTrue(command(open, "SET", "allowed:key", "value").startsWith("-NOPERM"));
         }
     }
 

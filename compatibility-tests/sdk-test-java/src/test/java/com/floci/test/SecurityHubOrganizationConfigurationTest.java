@@ -3,6 +3,7 @@ package com.floci.test;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
 import software.amazon.awssdk.services.organizations.model.AlreadyInOrganizationException;
 import software.amazon.awssdk.services.organizations.model.CreateAccountResponse;
@@ -23,6 +24,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("Security Hub organization configuration")
+@ResourceLock("organizations")
 class SecurityHubOrganizationConfigurationTest {
     private static final Logger LOG = Logger.getLogger(SecurityHubOrganizationConfigurationTest.class);
     private static final String MANAGEMENT_ACCOUNT = "test";

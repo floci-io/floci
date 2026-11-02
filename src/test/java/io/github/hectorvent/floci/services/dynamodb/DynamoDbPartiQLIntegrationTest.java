@@ -8,6 +8,9 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
@@ -574,6 +577,161 @@ class DynamoDbPartiQLIntegrationTest {
             .statusCode(200)
             .body("Responses[0].Error.Code", equalTo("ValidationError"))
             .body("Responses[0].Error.Message", equalTo("Unsupported operation: IsType"));
+    }
+
+    @Test
+    @Order(28)
+    void aStatementTheLexerCannotReadIsRefusedWithNothingAfterTheColon() {
+        String notWellFormed = "Statement wasn't well formed, can't be processed: ";
+
+        statement("SELECT * FROM \"" + TABLE + "\" WHERE pk = 'x' # note")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(notWellFormed));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"UPDATE \\"%1$s\\" SET a = 1 WHERE pk = 'x'"},
+                 {"Statement":"UPDATE \\"%1$s\\" SET a = 1 WHERE pk = 'y"}]}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[1]: " + notWellFormed));
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":"SELECT * FROM \\"%s\\" WHERE pk = 'x' ~"}]}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(notWellFormed));
+    }
+
+    @ParameterizedTest
+    @Order(29)
+    @ValueSource(strings = {
+            "SELECT * FROM \"%s\" WHERE pk = 'x'",
+            "SELECT * FROM \"%s\".\"gsi\" WHERE pk = 'x'",
+            "INSERT INTO \"%s\" VALUE {'pk': 'x'}",
+            "UPDATE \"%s\" SET a = 1 WHERE pk = 'x'",
+            "DELETE FROM \"%s\" WHERE pk = 'x'",
+            "FROM \"%s\" WHERE pk = 'x' SET c = 1"})
+    void aStatementOnAMissingTableIsRefusedWithoutTheTableName(String statement) {
+        String partiql = statement.formatted(TABLE + "-never-created");
+
+        statement(partiql)
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"))
+            .body("message", equalTo("Requested resource not found"));
+        request("DynamoDB_20120810.BatchExecuteStatement",
+                "{\"Statements\":[{\"Statement\":\"" + partiql.replace("\"", "\\\"") + "\"}]}")
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ResourceNotFound"))
+            .body("Responses[0].Error.Message", equalTo("Requested resource not found"));
+    }
+
+    @ParameterizedTest
+    @Order(30)
+    @CsvSource(delimiter = '|', textBlock = """
+            [{"N":"abc"}]                                     | The parameter cannot be converted to a numeric value: abc
+            [{"N":""}]                                        | The parameter cannot be converted to a numeric value
+            [{"N":"1e2147483648"}]                            | The parameter cannot be converted to a numeric value: 1e2147483648
+            [{"N":"0.1e2147483648"}]                          | The parameter cannot be converted to a numeric value: 0.1e2147483648
+            [{"N":"1e-2147483648"}]                           | The parameter cannot be converted to a numeric value: 1e-2147483648
+            [{"N":"1e2147483645"}]                            | Number overflow. Attempting to store a number with magnitude larger than supported range
+            [{"N":"1e2147483647"}]                            | Number underflow. Attempting to store a number with magnitude smaller than supported range
+            [{"N":"0e-131"}]                                  | Number underflow. Attempting to store a number with magnitude smaller than supported range
+            [{"N":"1.23456789012345678901234567890123456789"}] | Attempting to store more than 38 significant digits in a Number
+            [{"NS":["1","1.0"]}]                              | Input collection contains duplicates
+            [{"N":"abc"},%1$s]                                | The parameter cannot be converted to a numeric value: abc
+            [%1$s,{"N":"abc"}]                                | Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit
+            [{"M":{"a":{"N":"abc"},"z":%1$s}}]                | The parameter cannot be converted to a numeric value: abc
+            [{"M":{"a":{"N":"abc"},"d":%1$s}}]                | Nesting Levels have exceeded supported limits: Attributes in the item have nested levels beyond supported limit
+            [{"L":[{"N":"1e126"},{"N":"abc"}]}]               | Number overflow. Attempting to store a number with magnitude larger than supported range
+            [{"NS":["1","1"]},{"N":"abc"}]                    | Input collection contains duplicates
+            [{},{"N":"abc"}]                                  | Supplied AttributeValue is empty, must contain exactly one of the supported datatypes
+            [{"S":"a","N":"1"},{"N":"abc"}]                   | Supplied AttributeValue has more than one datatypes set, must contain exactly one of the supported datatypes
+            [{"S":"a","N":"abc"}]                             | The parameter cannot be converted to a numeric value: abc
+            [{"N":null},{"N":"abc"}]                          | Supplied AttributeValue is empty, must contain exactly one of the supported datatypes
+            [{"S":"a","N":null},{"N":"abc"}]                  | The parameter cannot be converted to a numeric value: abc
+            """)
+    void aParameterIsRefusedAtTheFirstValueThatCannotBeRead(String parameters, String message) {
+        String deep = "{\"M\":{\"n\":".repeat(40) + "{\"S\":\"leaf\"}" + "}}".repeat(40);
+
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = 'x' AND x = ? AND y = ?","Parameters":%s}
+                """.formatted(TABLE, parameters.formatted(deep)))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(message));
+    }
+
+    @Test
+    @Order(31)
+    void aParameterIsReadBeforeTheStatementIsParsed() {
+        String unconvertible = "The parameter cannot be converted to a numeric value: abc";
+
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = ? #","Parameters":[{"N":"abc"}]}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(unconvertible));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"UPDATE \\"%1$s\\" SET n = ? WHERE pk = 'x'","Parameters":[{"N":"abc"}]},
+                 {"Statement":"UPDATE \\"%1$s\\" SET n = 1 WHERE pk = 'y' #"}]}
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("message", equalTo(unconvertible));
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":"SELECT * FROM \\"%s\\" WHERE pk = ? #","Parameters":[{"N":"abc"}]}]}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(unconvertible));
+    }
+
+    @Test
+    @Order(32)
+    void aBinaryParameterIsDecodedBeforeAnythingElse() {
+        String update = "UPDATE \\\"" + TABLE + "\\\" SET n = ? WHERE pk = 'x'";
+
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"","Parameters":[{"N":"abc"},{"B":"AQI"}]}
+                """)
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"))
+            .body("message", equalTo("Base64 encoded length is expected a multiple of 4 bytes but found: 3"));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"%1$s","Parameters":[{"N":"abc"}]},
+                 {"Statement":"%1$s","Parameters":[{"B":"AQI"}]}]}
+                """.formatted(update))
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":""},{"Statement":"%s","Parameters":[{"B":"AQI"}]}]}
+                """.formatted(update))
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
+    @Order(33)
+    void aParameterMemberSetToNullIsAbsent() {
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":"SELECT * FROM \\"%s\\" WHERE pk = ?","Parameters":[{"N":null}]}]}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message",
+                    equalTo("Supplied AttributeValue is empty, must contain exactly one of the supported datatypes"));
+        request("DynamoDB_20120810.ExecuteStatement", """
+                {"Statement":"INSERT INTO \\"%s\\" VALUE {'pk': 'null-member', 'v': ?}",
+                 "Parameters":[{"M":{"x":{"S":"a"}},"N":null}]}
+                """.formatted(TABLE))
+            .statusCode(200);
+
+        request("DynamoDB_20120810.GetItem", """
+                {"TableName":"%s","Key":{"pk":{"S":"null-member"}}}
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Item.v.M.x.S", equalTo("a"))
+            .body("Item.v.containsKey('N')", equalTo(false));
     }
 
     private static void putItem(String pk, String attributes) {

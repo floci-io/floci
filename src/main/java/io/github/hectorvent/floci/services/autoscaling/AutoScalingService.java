@@ -1016,7 +1016,7 @@ public class AutoScalingService implements PassedRoleLookup {
             releaseRefreshOwnership(asg, detached);
             asg.getInstances().removeIf(i -> instanceIds.contains(i.getInstanceId()));
             if (decrementDesiredCapacity) {
-                int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - instanceIds.size());
+                int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - detached.size());
                 asg.setDesiredCapacity(newDesired);
             }
             groups.put(key, asg);

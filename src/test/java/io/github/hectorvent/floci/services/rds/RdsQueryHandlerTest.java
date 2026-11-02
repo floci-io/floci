@@ -1425,6 +1425,102 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void describeDbParameters_wrapsEachRowInParameterAndFiltersBySource() {
+        DbParameterGroup group = new DbParameterGroup("pg1", "postgres16", "test group");
+        group.getParameters().put("max_connections", "250");
+        group.getParameters().put("work_mem", "64MB");
+        group.getApplyMethods().put("max_connections", "pending-reboot");
+        when(service.getDbParameterGroup("pg1", null)).thenReturn(group);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBParameterGroupName", "pg1");
+        String body = (String) handler.handle("DescribeDBParameters", p).getEntity();
+
+        assertTrue(body.contains("<Parameter>"), "Each row must be wrapped in <Parameter>");
+        assertFalse(body.contains("<member>"), "Must not use <member> wrapper");
+        assertTrue(body.contains("<ParameterName>max_connections</ParameterName>"));
+        assertTrue(body.contains("<ParameterValue>250</ParameterValue>"));
+        assertTrue(body.contains("<Source>user</Source>"));
+        assertTrue(body.contains("<ApplyMethod>pending-reboot</ApplyMethod>"));
+        assertTrue(body.contains("<ParameterName>work_mem</ParameterName>"));
+    }
+
+    @Test
+    void describeDbParameters_filtersBySource() {
+        DbParameterGroup group = new DbParameterGroup("pg1", "postgres16", "test group");
+        group.getParameters().put("max_connections", "250");
+        when(service.getDbParameterGroup("pg1", null)).thenReturn(group);
+
+        MultivaluedMap<String, String> pUser = params();
+        pUser.add("DBParameterGroupName", "pg1");
+        pUser.add("Source", "user");
+        String bodyUser = (String) handler.handle("DescribeDBParameters", pUser).getEntity();
+        assertTrue(bodyUser.contains("<ParameterName>max_connections</ParameterName>"),
+                "Source=user must return user rows");
+
+        MultivaluedMap<String, String> pSystem = params();
+        pSystem.add("DBParameterGroupName", "pg1");
+        pSystem.add("Source", "system");
+        String bodySystem = (String) handler.handle("DescribeDBParameters", pSystem).getEntity();
+        assertFalse(bodySystem.contains("<Parameter>"),
+                "Source=system must filter out all rows (unmodelled)");
+
+        MultivaluedMap<String, String> pEngineDefault = params();
+        pEngineDefault.add("DBParameterGroupName", "pg1");
+        pEngineDefault.add("Source", "engine-default");
+        String bodyEngineDefault = (String) handler.handle("DescribeDBParameters", pEngineDefault).getEntity();
+        assertFalse(bodyEngineDefault.contains("<Parameter>"),
+                "Source=engine-default must filter out all rows (unmodelled)");
+    }
+
+    @Test
+    void describeDbClusterParameters_wrapsEachRowInParameterAndFiltersBySource() {
+        DbClusterParameterGroup group = new DbClusterParameterGroup("cpg1", "aurora-postgresql16", "test group");
+        group.getParameters().put("log_statement", "all");
+        group.getApplyMethods().put("log_statement", "immediate");
+        when(service.getDbClusterParameterGroup("cpg1", null)).thenReturn(group);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterParameterGroupName", "cpg1");
+        String body = (String) handler.handle("DescribeDBClusterParameters", p).getEntity();
+
+        assertTrue(body.contains("<Parameter>"), "Each row must be wrapped in <Parameter>");
+        assertFalse(body.contains("<member>"), "Must not use <member> wrapper");
+        assertTrue(body.contains("<ParameterName>log_statement</ParameterName>"));
+        assertTrue(body.contains("<ParameterValue>all</ParameterValue>"));
+        assertTrue(body.contains("<Source>user</Source>"));
+        assertTrue(body.contains("<ApplyMethod>immediate</ApplyMethod>"));
+    }
+
+    @Test
+    void describeDbClusterParameters_filtersBySource() {
+        DbClusterParameterGroup group = new DbClusterParameterGroup("cpg1", "aurora-postgresql16", "test group");
+        group.getParameters().put("log_statement", "all");
+        when(service.getDbClusterParameterGroup("cpg1", null)).thenReturn(group);
+
+        MultivaluedMap<String, String> pUser = params();
+        pUser.add("DBClusterParameterGroupName", "cpg1");
+        pUser.add("Source", "user");
+        String bodyUser = (String) handler.handle("DescribeDBClusterParameters", pUser).getEntity();
+        assertTrue(bodyUser.contains("<ParameterName>log_statement</ParameterName>"),
+                "Source=user must return user rows");
+
+        MultivaluedMap<String, String> pSystem = params();
+        pSystem.add("DBClusterParameterGroupName", "cpg1");
+        pSystem.add("Source", "system");
+        String bodySystem = (String) handler.handle("DescribeDBClusterParameters", pSystem).getEntity();
+        assertFalse(bodySystem.contains("<Parameter>"),
+                "Source=system must filter out all rows (unmodelled)");
+
+        MultivaluedMap<String, String> pEngineDefault = params();
+        pEngineDefault.add("DBClusterParameterGroupName", "cpg1");
+        pEngineDefault.add("Source", "engine-default");
+        String bodyEngineDefault = (String) handler.handle("DescribeDBClusterParameters", pEngineDefault).getEntity();
+        assertFalse(bodyEngineDefault.contains("<Parameter>"),
+                "Source=engine-default must filter out all rows (unmodelled)");
+    }
+
+    @Test
     void unsupportedOperationReturnsQueryError() {
         Response response = handler.handle("NoSuchAction", params());
 

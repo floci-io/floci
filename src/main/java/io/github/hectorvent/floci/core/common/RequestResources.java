@@ -23,7 +23,9 @@ import java.util.regex.Pattern;
  * resource type the action acts on, or by members filling the variables of a type's format, the others open as
  * {@code *} (a resource a request creates has the id its service mints). A type whose service follows the name a
  * request gives with an id it mints ({@code connection/<name>/<id>}) is the resource its service stores under that
- * name, or else has that id open. An ARN with a qualifier its service drops
+ * name, or else has that id open, and so is a type whose ARN is all an id its service mints, which a request names
+ * by members its ARN does not hold (a scalable target, {@code scalable-target/<id>}, by its service namespace,
+ * resource id and scalable dimension), under those members' values. An ARN with a qualifier its service drops
  * to check it is checked without one (a state machine's version or alias, on the state machine). An ARN naming
  * another account or Region than the request's is checked as given and as each resource of that name a handler may
  * act on instead, in the ARN's account or the caller's and in the ARN's Region or the request's, and the request is
@@ -61,13 +63,15 @@ public final class RequestResources {
 
     /**
      * As {@link #of(String, ContainerRequestContext, String, String, String)}, a resource of a type whose service
-     * mints an id after its name being the one {@code stored} finds for the caller under the name the request gives,
-     * or else its ARN with that id open, as it is with no {@code stored}.
+     * mints an id after its name, or as all of its ARN, being the one {@code stored} finds for the caller under the
+     * name or the members the request gives, or else its ARN with that id open, as it is with no {@code stored}; and
+     * one a request names through another of its service's own, the one {@code stored} gives, or none.
      */
     public static List<String> of(String operation, ContainerRequestContext ctx, String partition, String region,
                                   String accountId, StoredResourceArns stored) {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
-        List<RequestResourceMembers.Resource> resources = operation == null ? null : table.operations().get(operation);
+        List<RequestResourceMembers.Resource> resources = operation == null ? null
+                : served(table.operations().get(operation), ctx);
         if (resources == null || resources.isEmpty()) {
             return List.of();
         }
@@ -93,6 +97,10 @@ public final class RequestResources {
                             .findFirst().ifPresent(format -> addNamed(arns, format.checked(named), partition, region,
                                     accountId));
                 }
+            } else if (resource.through() != null) {
+                through(arns, resource, formats, form, body, region, stored);
+            } else if (!resource.find().isEmpty()) {
+                found(arns, resource, formats, form, body, partition, region, accountId, stored);
             } else {
                 fill(arns, resource, formats, form, body, partition, region, accountId, stored);
             }
@@ -113,7 +121,7 @@ public final class RequestResources {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         List<RequestResourceMembers.Created> creates = operation == null ? null : table.creates().get(operation);
         List<RequestResourceMembers.Resource> made = operation == null || creates != null ? List.of()
-                : table.operations().getOrDefault(operation, List.of()).stream()
+                : served(table.operations().getOrDefault(operation, List.of()), ctx).stream()
                         .filter(RequestResourceMembers.Resource::made).toList();
         if (creates == null && made.isEmpty()) {
             return List.of();
@@ -143,6 +151,23 @@ public final class RequestResources {
             }
         }
         return List.copyOf(arns);
+    }
+
+    /**
+     * The resources that apply to a request of the service serving it: one with an {@code endpoint} applies only to
+     * a request the service of that endpoint prefix serves, read from the claim of the service whose handler runs it
+     * and never from the request's members, which a caller could add to a request of the other API. A request no
+     * service is known to serve keeps them all, which can only check it on more.
+     */
+    private static List<RequestResourceMembers.Resource> served(List<RequestResourceMembers.Resource> resources,
+                                                                ContainerRequestContext ctx) {
+        String endpoint = ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
+                && claim.service() != null ? claim.service().externalKey() : null;
+        if (resources == null || endpoint == null) {
+            return resources;
+        }
+        return resources.stream().filter(resource -> resource.endpoint() == null
+                || resource.endpoint().equals(endpoint)).toList();
     }
 
     /** The value up to {@code separator}, which its handler drops the rest after; the whole value without one. */
@@ -323,28 +348,70 @@ public final class RequestResources {
         }
     }
 
+    /**
+     * The resource of a type whose ARN is all an id its service mints, named by the members the table gives it
+     * ({@code find}), when the request gives each one value: the caller's resource {@code stored} finds under those
+     * values in the Region, or else its ARN with that id open, as for a create; none when it leaves one out or gives
+     * it a JSON null, which its handler reads as none.
+     */
+    private static void found(Set<String> arns, RequestResourceMembers.Resource resource,
+                              Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
+                              JsonNode body, String partition, String region, String accountId,
+                              StoredResourceArns stored) {
+        List<String> names = new ArrayList<>();
+        for (RequestResourceMembers.Member member : resource.find()) {
+            List<String> values = values(form, body, member);
+            if (isNull(body, member) || values.size() != 1) {
+                return;
+            }
+            names.add(values.getFirst());
+        }
+        String type = resource.types().getFirst();
+        Optional<String> found = stored == null ? Optional.empty() : stored.find(type, names, region);
+        arns.add(found.orElseGet(() -> render(formats.get(type).format(), Map.of(), partition, region, accountId)));
+    }
+
+    /**
+     * The resource of one of the types a request names through a member naming another of its service's own, which
+     * runs on it ({@code through}), when the request gives it one value: the ARN {@code stored} gives for the caller's
+     * resource of that name; none when there is no such resource, which its handler refuses.
+     */
+    private static void through(Set<String> arns, RequestResourceMembers.Resource resource,
+                                Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
+                                JsonNode body, String region, StoredResourceArns stored) {
+        List<String> values = values(form, body, resource.through());
+        if (stored == null || isNull(body, resource.through()) || values.size() != 1) {
+            return;
+        }
+        stored.through(resource.through().name(), values.getFirst(), region)
+                .filter(arn -> resource.types().stream().map(formats::get)
+                        .anyMatch(format -> format.pattern().matcher(arn).matches()))
+                .ifPresent(arns::add);
+    }
+
     /** Whether a member that may give an ARN of a type instead of its name gives one. */
     private static boolean isArnOf(RequestResourceMembers.ArnFormat named, String value) {
         return named != null && named.pattern().matcher(value).matches();
     }
 
     /**
-     * The ARN of a resource of a type whose service follows its name with an id it mints: the one {@code stored}
-     * finds the caller's resource of that name under in the Region, or else the ARN with that id open; any other
-     * type's as rendered.
+     * The ARN of a resource the namespace's service stores under the name the request gives: the one {@code stored}
+     * finds the caller's resource of that name under in the Region.
+     *
+     * <p>The service is asked for every type of the namespace, not only for the ones whose ARN carries an id it
+     * mints, so a service may answer for a type whose ARN it does not mint: a key an alias names is the key the
+     * alias points at. A type whose service follows its name with an id it mints has that id open when the service
+     * stores none, and any other type's is as rendered.
      */
     private static String withId(String arn, RequestResourceMembers.ArnFormat format, String type,
                                  Map<String, String> filling, StoredResourceArns stored, String region) {
-        if (!format.minted()) {
-            return arn;
-        }
         if (stored != null && filling.size() == 1) {
-            Optional<String> found = stored.find(type, filling.values().iterator().next(), region);
+            Optional<String> found = stored.find(type, List.of(filling.values().iterator().next()), region);
             if (found.isPresent()) {
                 return found.get();
             }
         }
-        return arn + "/*";
+        return format.minted() ? arn + "/*" : arn;
     }
 
     /**

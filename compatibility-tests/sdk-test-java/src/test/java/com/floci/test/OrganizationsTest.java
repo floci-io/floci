@@ -1,6 +1,7 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
 import software.amazon.awssdk.services.organizations.model.AccessDeniedException;
 import software.amazon.awssdk.services.organizations.model.Account;
@@ -36,6 +37,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * <p>The test tears the organization down at the end so it can be re-run against the same
  * Floci instance.
  */
+@ResourceLock("organizations")
 public class OrganizationsTest {
 
     private static final String SCP_CONTENT =

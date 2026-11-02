@@ -397,12 +397,26 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     public void modifyLoadBalancerAttributes(String region, String arn, Map<String, String> newAttrs) {
         LoadBalancer lb = requireLoadBalancer(region, arn);
+        requireValidAttributeValue(newAttrs, ElbV2ForwardedHeaders.XFF_MODE_ATTRIBUTE, ElbV2ForwardedHeaders.XFF_MODES);
+        requireValidAttributeValue(newAttrs, ElbV2ForwardedHeaders.XFF_CLIENT_PORT_ATTRIBUTE, Set.of("true", "false"));
         lb.getAttributes().putAll(newAttrs);
         persistRegion(loadBalancers, region);
     }
 
+    private static void requireValidAttributeValue(Map<String, String> attributes, String key, Set<String> allowed) {
+        String value = attributes.get(key);
+        if (value != null && !allowed.contains(value)) {
+            throw new AwsException("InvalidConfigurationRequest",
+                    "Load balancer attribute '" + key + "' cannot have the value '" + value + "'", 400);
+        }
+    }
+
     LoadBalancer getLoadBalancer(String region, String arn) {
         return loadBalancers.getOrDefault(region, Map.of()).get(arn);
+    }
+
+    Listener getListener(String region, String arn) {
+        return listeners.getOrDefault(region, Map.of()).get(arn);
     }
 
     /** Capacity reservation status for a load balancer. All fields are {@code null} when no
@@ -684,12 +698,16 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
         List<Listener> result = new ArrayList<>(regionListeners.values());
 
         if (lbArn != null && !lbArn.isEmpty()) {
+            requireLoadBalancer(region, lbArn);
             result = result.stream()
                     .filter(l -> l.getLoadBalancerArn().equals(lbArn))
                     .collect(Collectors.toList());
         }
         if (listenerArns != null && !listenerArns.isEmpty()) {
             Set<String> arnSet = new HashSet<>(listenerArns);
+            for (String arn : arnSet) {
+                requireListener(region, arn);
+            }
             result = result.stream().filter(l -> arnSet.contains(l.getListenerArn())).collect(Collectors.toList());
         }
         return result;
@@ -702,8 +720,31 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     public void modifyListenerAttributes(String region, String arn, Map<String, String> newAttrs) {
         Listener listener = requireListener(region, arn);
+        validateListenerAttributes(newAttrs);
         listener.getAttributes().putAll(newAttrs);
         persistRegion(listeners, region);
+    }
+
+    private void validateListenerAttributes(Map<String, String> newAttrs) {
+        if (newAttrs == null) {
+            return;
+        }
+        for (Map.Entry<String, String> entry : newAttrs.entrySet()) {
+            if (ElbV2DataPlane.TCP_IDLE_TIMEOUT_ATTRIBUTE.equals(entry.getKey())) {
+                String value = entry.getValue();
+                long seconds = -1;
+                try {
+                    seconds = Long.parseLong(value != null ? value.trim() : "");
+                } catch (NumberFormatException ignored) {
+                    // Handled by range check below
+                }
+                if (seconds < ElbV2DataPlane.MIN_TCP_IDLE_TIMEOUT_SECONDS
+                        || seconds > ElbV2DataPlane.MAX_TCP_IDLE_TIMEOUT_SECONDS) {
+                    throw new AwsException("InvalidConfigurationRequest",
+                            "The attribute 'tcp.idle_timeout.seconds' must be between 60 and 6000", 400);
+                }
+            }
+        }
     }
 
     public void deleteListener(String region, String listenerArn) {

@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.appsync.model.DataSource;
 import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import io.github.hectorvent.floci.services.appsync.model.Resolver;
+import io.github.hectorvent.floci.services.appsync.model.ResolverKind;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationTemplateEngine;
@@ -63,6 +64,13 @@ class AppSyncCfnProvisionerTest {
         ProvisionContext create = ctx();
         return new ProvisionContext(create.engine(), create.region(), create.accountId(),
                 create.stackName(), priorPhysicalId);
+    }
+
+    /** The update path, with the properties the previous template declared (as the stack hands them over). */
+    private ProvisionContext updateCtx(String priorPhysicalId, String priorProperties) throws Exception {
+        ProvisionContext create = ctx();
+        return new ProvisionContext(create.engine(), create.region(), create.accountId(),
+                create.stackName(), priorPhysicalId, event -> { }, mapper.readTree(priorProperties));
     }
 
     private StackResource resource(String type, String logicalId) {
@@ -604,6 +612,365 @@ class AppSyncCfnProvisionerTest {
         assertEquals("da2-abcdefghijklmnopqrstuvwxyz", r.getAttributes().get("ApiKeyId"));
         assertEquals("arn:aws:appsync:eu-west-1:000000000000:apis/" + API_ID
                 + "/apikeys/da2-abcdefghijklmnopqrstuvwxyz", r.getAttributes().get("Arn"));
+    }
+
+    // ── A property the new template drops ────────────────────────────────────
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> updateRequest(ArgumentCaptor<Map<String, Object>> captor) {
+        return captor.getValue();
+    }
+
+    @Test
+    void graphqlApiUpdateClearsAPropertyTheNewTemplateDrops() throws Exception {
+        when(appSync.updateGraphqlApi(eq(API_ID), any(), eq("eu-west-1"))).thenReturn(api());
+        StackResource r = resource("AWS::AppSync::GraphQLApi", "GraphQlApi");
+
+        provisioner.provision(r, mapper.readTree(
+                "{\"Name\":\"account-api\",\"AuthenticationType\":\"API_KEY\"}"),
+                updateCtx(API_ID, "{\"Name\":\"account-api\",\"AuthenticationType\":\"API_KEY\","
+                        + "\"OwnerContact\":\"team\",\"UserPoolConfig\":{\"AwsRegion\":\"eu-west-1\"}}"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateGraphqlApi(eq(API_ID), captor.capture(), eq("eu-west-1"));
+        Map<String, Object> req = updateRequest(captor);
+        // A null value on a present key is how the service's update clears a member.
+        assertTrue(req.containsKey("ownerContact"));
+        assertNull(req.get("ownerContact"));
+        assertTrue(req.containsKey("userPoolConfig"));
+        assertNull(req.get("userPoolConfig"));
+    }
+
+    @Test
+    void graphqlApiUpdateLeavesAPropertyTheStackNeverDeclaredAlone() throws Exception {
+        when(appSync.updateGraphqlApi(eq(API_ID), any(), eq("eu-west-1"))).thenReturn(api());
+        StackResource r = resource("AWS::AppSync::GraphQLApi", "GraphQlApi");
+
+        provisioner.provision(r, mapper.readTree(
+                "{\"Name\":\"account-api\",\"AuthenticationType\":\"API_KEY\"}"),
+                updateCtx(API_ID, "{\"Name\":\"account-api\",\"AuthenticationType\":\"API_KEY\"}"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateGraphqlApi(eq(API_ID), captor.capture(), eq("eu-west-1"));
+        // Only what the template names, and the tags the provisioner always drives: ownerContact set
+        // outside the stack is not on the request, so the service does not touch it.
+        assertEquals(Set.of("name", "authenticationType", "tags"), updateRequest(captor).keySet());
+    }
+
+    @Test
+    void graphqlApiUpdateTreatsAPreviousNoValueAsNotDeclared() throws Exception {
+        when(appSync.updateGraphqlApi(eq(API_ID), any(), eq("eu-west-1"))).thenReturn(api());
+        StackResource r = resource("AWS::AppSync::GraphQLApi", "GraphQlApi");
+
+        // The stack hands over the previous template's properties with every top-level Fn::If that
+        // chose AWS::NoValue already taken out, so OwnerContact is simply not among them.
+        provisioner.provision(r, mapper.readTree(
+                "{\"Name\":\"account-api\",\"AuthenticationType\":\"API_KEY\"}"),
+                updateCtx(API_ID, "{\"Name\":\"account-api\",\"AuthenticationType\":\"API_KEY\"}"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateGraphqlApi(eq(API_ID), captor.capture(), eq("eu-west-1"));
+        assertFalse(updateRequest(captor).containsKey("ownerContact"));
+    }
+
+    @Test
+    void graphqlApiUpdateSendsTheCreateDefaultWhereNullIsNotAClear() throws Exception {
+        when(appSync.updateGraphqlApi(eq(API_ID), any(), eq("eu-west-1"))).thenReturn(api());
+        StackResource r = resource("AWS::AppSync::GraphQLApi", "GraphQlApi");
+
+        provisioner.provision(r, mapper.readTree(
+                "{\"Name\":\"account-api\",\"AuthenticationType\":\"API_KEY\"}"),
+                updateCtx(API_ID, "{\"Name\":\"account-api\",\"AuthenticationType\":\"API_KEY\","
+                        + "\"XrayEnabled\":true,\"Visibility\":\"PRIVATE\",\"ApiType\":\"MERGED\","
+                        + "\"AdditionalAuthenticationProviders\":[{\"AuthenticationType\":\"AWS_IAM\"}]}"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateGraphqlApi(eq(API_ID), captor.capture(), eq("eu-west-1"));
+        Map<String, Object> req = updateRequest(captor);
+        // The service reads a null boolean or list as "not given", so these carry what a create gives.
+        assertEquals(false, req.get("xrayEnabled"));
+        // UpdateGraphqlApi takes no visibility and a created value cannot change: the dropped one stays.
+        assertFalse(req.containsKey("visibility"));
+        assertFalse(req.containsKey("apiType"));
+        assertEquals(List.of(), req.get("additionalAuthenticationProviders"));
+    }
+
+    @Test
+    void graphqlApiUpdateKeepsWhatAnEmptyTemplateCannotDrop() throws Exception {
+        when(appSync.updateGraphqlApi(eq(API_ID), any(), eq("eu-west-1"))).thenReturn(api());
+        StackResource r = resource("AWS::AppSync::GraphQLApi", "GraphQlApi");
+
+        provisioner.provision(r, mapper.readTree("{}"),
+                updateCtx(API_ID, "{\"Name\":\"account-api\",\"AuthenticationType\":\"API_KEY\","
+                        + "\"Tags\":[{\"Key\":\"a\",\"Value\":\"b\"}],"
+                        + "\"EnvironmentVariables\":{\"A\":\"b\"}}"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateGraphqlApi(eq(API_ID), captor.capture(), eq("eu-west-1"));
+        Map<String, Object> req = updateRequest(captor);
+        // Required and handled-elsewhere names never become a null: the generated name stays a name,
+        // the authentication type stays, tags are the empty map and the variables their own call.
+        assertEquals(Set.of("name", "tags"), req.keySet());
+        verify(appSync).putEnvironmentVariables(API_ID, Map.of());
+    }
+
+    @Test
+    void dataSourceUpdateClearsAPropertyTheNewTemplateDrops() throws Exception {
+        DataSource ds = new DataSource();
+        ds.setName("accountDB");
+        ds.setDataSourceArn("arn:ds");
+        when(appSync.updateDataSource(eq(API_ID), eq("accountDB"), any())).thenReturn(ds);
+        StackResource r = resource("AWS::AppSync::DataSource", "GraphQlDsAccountDb");
+        r.getAttributes().put("ApiId", API_ID);
+        r.getAttributes().put("Name", "accountDB");
+
+        provisioner.provision(r, mapper.readTree(
+                "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"accountDB\",\"Type\":\"AMAZON_DYNAMODB\"}"),
+                updateCtx("arn:ds", "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"accountDB\","
+                        + "\"Type\":\"AMAZON_DYNAMODB\",\"Description\":\"old\","
+                        + "\"DynamoDBConfig\":{\"TableName\":\"t\"}}"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateDataSource(eq(API_ID), eq("accountDB"), captor.capture());
+        Map<String, Object> req = updateRequest(captor);
+        assertTrue(req.containsKey("description"));
+        assertNull(req.get("description"));
+        // The AWS spelling of the one member that does not lower-camelise.
+        assertTrue(req.containsKey("dynamodbConfig"));
+        assertNull(req.get("dynamodbConfig"));
+        assertEquals("AMAZON_DYNAMODB", req.get("type"));
+    }
+
+    @Test
+    void dataSourceUpdateLeavesAPropertyTheStackNeverDeclaredAlone() throws Exception {
+        DataSource ds = new DataSource();
+        ds.setName("accountDB");
+        ds.setDataSourceArn("arn:ds");
+        when(appSync.updateDataSource(eq(API_ID), eq("accountDB"), any())).thenReturn(ds);
+        StackResource r = resource("AWS::AppSync::DataSource", "GraphQlDsAccountDb");
+        r.getAttributes().put("ApiId", API_ID);
+        r.getAttributes().put("Name", "accountDB");
+        String declared = "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"accountDB\",\"Type\":\"AMAZON_DYNAMODB\"}";
+
+        // The previous template has no NoValue-chosen Description either: it was filtered out.
+        provisioner.provision(r, mapper.readTree(declared), updateCtx("arn:ds", declared));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateDataSource(eq(API_ID), eq("accountDB"), captor.capture());
+        assertFalse(updateRequest(captor).containsKey("description"));
+        assertFalse(updateRequest(captor).containsKey("serviceRoleArn"));
+    }
+
+    @Test
+    void dataSourceCreateAfterAMoveClearsNothing() throws Exception {
+        DataSource ds = new DataSource();
+        ds.setName("accountDB");
+        ds.setDataSourceArn("arn:ds");
+        when(appSync.createDataSource(anyString(), any(), anyString())).thenReturn(ds);
+        StackResource r = resource("AWS::AppSync::DataSource", "GraphQlDsAccountDb");
+        r.getAttributes().put("ApiId", "otherApi");
+        r.getAttributes().put("Name", "accountDB");
+
+        provisioner.provision(r, mapper.readTree(
+                "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"accountDB\",\"Type\":\"AMAZON_DYNAMODB\"}"),
+                updateCtx("arn:ds", "{\"ApiId\":\"otherApi\",\"Name\":\"accountDB\","
+                        + "\"Type\":\"AMAZON_DYNAMODB\",\"Description\":\"old\"}"));
+
+        // A replacement builds a new entity from the template: there is nothing to clear on it.
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).createDataSource(eq(API_ID), captor.capture(), eq("eu-west-1"));
+        assertFalse(updateRequest(captor).containsKey("description"));
+    }
+
+    @Test
+    void functionUpdateClearsAPropertyTheNewTemplateDrops() throws Exception {
+        FunctionConfiguration fn = new FunctionConfiguration();
+        fn.setFunctionId("fn123");
+        fn.setName("fn");
+        fn.setFunctionArn("arn:fn");
+        when(appSync.updateFunction(eq(API_ID), eq("fn123"), any())).thenReturn(fn);
+        StackResource r = resource("AWS::AppSync::FunctionConfiguration", "GraphQlFn");
+        r.getAttributes().put("ApiId", API_ID);
+        r.getAttributes().put("FunctionId", "fn123");
+        String now = "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"fn\",\"DataSourceName\":\"accountDB\"}";
+
+        provisioner.provision(r, mapper.readTree(now), updateCtx("arn:fn",
+                "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"fn\",\"DataSourceName\":\"accountDB\","
+                        + "\"Description\":\"old\",\"FunctionVersion\":\"2018-05-29\","
+                        + "\"MaxBatchSize\":5}"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateFunction(eq(API_ID), eq("fn123"), captor.capture());
+        Map<String, Object> req = updateRequest(captor);
+        assertTrue(req.containsKey("description"));
+        assertNull(req.get("description"));
+        assertTrue(req.containsKey("maxBatchSize"));
+        assertNull(req.get("maxBatchSize"));
+        assertEquals("2018-05-29", req.get("functionVersion"));
+        assertEquals("accountDB", req.get("dataSourceName"));
+    }
+
+    @Test
+    void functionUpdateLeavesAPropertyTheStackNeverDeclaredAlone() throws Exception {
+        FunctionConfiguration fn = new FunctionConfiguration();
+        fn.setFunctionId("fn123");
+        fn.setName("fn");
+        fn.setFunctionArn("arn:fn");
+        when(appSync.updateFunction(eq(API_ID), eq("fn123"), any())).thenReturn(fn);
+        StackResource r = resource("AWS::AppSync::FunctionConfiguration", "GraphQlFn");
+        r.getAttributes().put("ApiId", API_ID);
+        r.getAttributes().put("FunctionId", "fn123");
+        String declared = "{\"ApiId\":\"" + API_ID + "\",\"Name\":\"fn\",\"DataSourceName\":\"accountDB\"}";
+
+        provisioner.provision(r, mapper.readTree(declared), updateCtx("arn:fn", declared));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateFunction(eq(API_ID), eq("fn123"), captor.capture());
+        assertEquals(Set.of("name", "dataSourceName"), updateRequest(captor).keySet());
+    }
+
+    @Test
+    void resolverUpdateClearsAPropertyTheNewTemplateDrops() throws Exception {
+        Resolver resolver = new Resolver();
+        resolver.setResolverArn("arn:resolver");
+        when(appSync.updateResolver(eq(API_ID), eq("Query"), eq("getMessages"), any())).thenReturn(resolver);
+        StackResource r = resource("AWS::AppSync::Resolver", "GraphQlResolver");
+        r.getAttributes().put("ApiId", API_ID);
+        r.getAttributes().put("TypeName", "Query");
+        r.getAttributes().put("FieldName", "getMessages");
+        String head = "\"ApiId\":\"" + API_ID + "\",\"TypeName\":\"Query\",\"FieldName\":\"getMessages\"";
+
+        provisioner.provision(r, mapper.readTree("{" + head + ",\"DataSourceName\":\"accountDB\"}"),
+                updateCtx("arn:resolver", "{" + head + ",\"DataSourceName\":\"accountDB\","
+                        + "\"ResponseMappingTemplate\":\"old\",\"Kind\":\"PIPELINE\","
+                        + "\"CachingConfig\":{\"Ttl\":60}}"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateResolver(eq(API_ID), eq("Query"), eq("getMessages"), captor.capture());
+        Map<String, Object> req = updateRequest(captor);
+        assertTrue(req.containsKey("responseMappingTemplate"));
+        assertNull(req.get("responseMappingTemplate"));
+        assertTrue(req.containsKey("cachingConfig"));
+        assertNull(req.get("cachingConfig"));
+        // A null kind would leave a resolver of no kind; the create default is UNIT.
+        assertEquals("UNIT", req.get("kind"));
+        assertEquals("Query", req.get("typeName"));
+        assertEquals("getMessages", req.get("fieldName"));
+    }
+
+    @Test
+    void resolverUpdateKeepsTheDataSourceOfAUnitResolverThatDropsIt() throws Exception {
+        Resolver resolver = new Resolver();
+        resolver.setResolverArn("arn:resolver");
+        when(appSync.updateResolver(eq(API_ID), eq("Query"), eq("getMessages"), any())).thenReturn(resolver);
+        Resolver stored = new Resolver();
+        stored.setKind(ResolverKind.UNIT);
+        when(appSync.getResolver(API_ID, "Query", "getMessages")).thenReturn(stored);
+        StackResource r = resource("AWS::AppSync::Resolver", "GraphQlResolver");
+        r.getAttributes().put("ApiId", API_ID);
+        r.getAttributes().put("TypeName", "Query");
+        r.getAttributes().put("FieldName", "getMessages");
+        String head = "\"ApiId\":\"" + API_ID + "\",\"TypeName\":\"Query\",\"FieldName\":\"getMessages\"";
+
+        provisioner.provision(r, mapper.readTree("{" + head + "}"),
+                updateCtx("arn:resolver", "{" + head + ",\"DataSourceName\":\"accountDB\"}"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateResolver(eq(API_ID), eq("Query"), eq("getMessages"), captor.capture());
+        assertFalse(updateRequest(captor).containsKey("dataSourceName"));
+    }
+
+    @Test
+    void resolverUpdateClearsTheDataSourceOfAResolverThatBecomesPipeline() throws Exception {
+        Resolver resolver = new Resolver();
+        resolver.setResolverArn("arn:resolver");
+        when(appSync.updateResolver(eq(API_ID), eq("Query"), eq("getMessages"), any())).thenReturn(resolver);
+        StackResource r = resource("AWS::AppSync::Resolver", "GraphQlResolver");
+        r.getAttributes().put("ApiId", API_ID);
+        r.getAttributes().put("TypeName", "Query");
+        r.getAttributes().put("FieldName", "getMessages");
+        String head = "\"ApiId\":\"" + API_ID + "\",\"TypeName\":\"Query\",\"FieldName\":\"getMessages\"";
+
+        provisioner.provision(r, mapper.readTree("{" + head + ",\"Kind\":\"PIPELINE\"}"),
+                updateCtx("arn:resolver", "{" + head + ",\"DataSourceName\":\"accountDB\"}"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateResolver(eq(API_ID), eq("Query"), eq("getMessages"), captor.capture());
+        Map<String, Object> req = updateRequest(captor);
+        assertTrue(req.containsKey("dataSourceName"));
+        assertNull(req.get("dataSourceName"));
+    }
+
+    @Test
+    void resolverUpdateLeavesAPropertyTheStackNeverDeclaredAlone() throws Exception {
+        Resolver resolver = new Resolver();
+        resolver.setResolverArn("arn:resolver");
+        when(appSync.updateResolver(eq(API_ID), eq("Query"), eq("getMessages"), any())).thenReturn(resolver);
+        StackResource r = resource("AWS::AppSync::Resolver", "GraphQlResolver");
+        r.getAttributes().put("ApiId", API_ID);
+        r.getAttributes().put("TypeName", "Query");
+        r.getAttributes().put("FieldName", "getMessages");
+        String declared = "{\"ApiId\":\"" + API_ID + "\",\"TypeName\":\"Query\","
+                + "\"FieldName\":\"getMessages\",\"DataSourceName\":\"accountDB\"}";
+
+        provisioner.provision(r, mapper.readTree(declared), updateCtx("arn:resolver", declared));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateResolver(eq(API_ID), eq("Query"), eq("getMessages"), captor.capture());
+        assertEquals(Set.of("typeName", "fieldName", "dataSourceName"), updateRequest(captor).keySet());
+    }
+
+    @Test
+    void apiKeyUpdateClearsADroppedDescriptionButKeepsItsExpiry() throws Exception {
+        ApiKey key = new ApiKey();
+        key.setId("da2-key");
+        when(appSync.updateApiKey(eq(API_ID), eq("da2-key"), any())).thenReturn(key);
+        StackResource r = resource("AWS::AppSync::ApiKey", "GraphQlApiKey");
+        r.getAttributes().put("ApiId", API_ID);
+
+        provisioner.provision(r, mapper.readTree("{\"ApiId\":\"" + API_ID + "\"}"),
+                updateCtx("da2-key", "{\"ApiId\":\"" + API_ID + "\",\"Description\":\"old\","
+                        + "\"Expires\":1900000000}"));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateApiKey(eq(API_ID), eq("da2-key"), captor.capture());
+        Map<String, Object> req = updateRequest(captor);
+        assertTrue(req.containsKey("description"));
+        assertNull(req.get("description"));
+        // The service parses a given expiry as a date and refuses null, so a dropped one keeps its value.
+        assertFalse(req.containsKey("expires"));
+    }
+
+    @Test
+    void apiKeyUpdateLeavesAPropertyTheStackNeverDeclaredAlone() throws Exception {
+        ApiKey key = new ApiKey();
+        key.setId("da2-key");
+        when(appSync.updateApiKey(eq(API_ID), eq("da2-key"), any())).thenReturn(key);
+        StackResource r = resource("AWS::AppSync::ApiKey", "GraphQlApiKey");
+        r.getAttributes().put("ApiId", API_ID);
+        String declared = "{\"ApiId\":\"" + API_ID + "\"}";
+
+        provisioner.provision(r, mapper.readTree(declared), updateCtx("da2-key", declared));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Map<String, Object>> captor = ArgumentCaptor.forClass(Map.class);
+        verify(appSync).updateApiKey(eq(API_ID), eq("da2-key"), captor.capture());
+        assertTrue(updateRequest(captor).isEmpty());
     }
 
     // ── Deletes ──────────────────────────────────────────────────────────────

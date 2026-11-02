@@ -36,6 +36,8 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 `ListDataCatalogs` accepts `MaxResults` from 2 to 50. Floci uses 50 when it is
 omitted, since the API reference does not document a default. The built-in
 `AwsDataCatalog` stays first, followed by registered catalogs in name order.
+`GetDataCatalog`, `ListDatabases`, `ListTableMetadata` and `GetTableMetadata`
+read `AwsDataCatalog` when the request names no catalog or a JSON null.
 Pass the opaque `NextToken` to continue; final pages omit it. Tokens are scoped
 to the action, caller account, and request region and remain resumable after a
 cursor catalog is deleted. Malformed tokens, tokens outside the 1-to-1024

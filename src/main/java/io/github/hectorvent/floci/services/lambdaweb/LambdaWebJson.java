@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.JsonNumberCoercion;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -53,14 +54,8 @@ final class LambdaWebJson {
         if (value == null) {
             return null;
         }
-        if (value.isIntegralNumber()) {
-            if (value.canConvertToInt()) {
-                return value.intValue();
-            }
-            return value.bigIntegerValue().signum() > 0 ? Integer.MAX_VALUE : Integer.MIN_VALUE;
-        }
-        if (value.isFloatingPointNumber()) {
-            return (int) value.doubleValue();
+        if (value.isNumber()) {
+            return JsonNumberCoercion.truncateAndClampToInt(value);
         }
         throw serialization(scalarToken(value) + " can not be converted to an Integer");
     }

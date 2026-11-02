@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServicePrincipals;
 import io.github.hectorvent.floci.core.common.SignedMarkers;
+import io.github.hectorvent.floci.core.common.StoredResourceArns;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.applicationautoscaling.model.Alarm;
@@ -46,7 +47,7 @@ import java.util.UUID;
  * @see <a href="https://docs.aws.amazon.com/autoscaling/application/APIReference/Welcome.html">Application Auto Scaling API Reference</a>
  */
 @ApplicationScoped
-public class ApplicationAutoScalingService {
+public class ApplicationAutoScalingService implements StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(ApplicationAutoScalingService.class);
     private static final int MAX_TARGET_PAGE_SIZE = 50;
@@ -702,6 +703,23 @@ public class ApplicationAutoScalingService {
     Optional<ScalableTarget> findTarget(String region, String serviceNamespace, String resourceId,
                                         String scalableDimension) {
         return targets.get(targetKey(region, serviceNamespace, resourceId, scalableDimension));
+    }
+
+    @Override
+    public String namespace() {
+        return "application-autoscaling";
+    }
+
+    /**
+     * The ARN of the caller's scalable target in the Region named by its service namespace, resource id and scalable
+     * dimension, in that order, which ends in the id it was registered with, as its handlers look it up.
+     */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        if (!"ScalableTarget".equals(type) || names.size() != 3) {
+            return Optional.empty();
+        }
+        return findTarget(region, names.get(0), names.get(1), names.get(2)).map(ScalableTarget::getScalableTargetArn);
     }
 
     /**

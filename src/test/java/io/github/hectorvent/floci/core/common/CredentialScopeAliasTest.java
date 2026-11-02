@@ -46,6 +46,13 @@ class CredentialScopeAliasTest {
 
 
     @Test
+    void eventBridgeV2NormalisesToEvents() {
+        // EventBridge V2 signs as events and its actions are events:CreateSubscriber and peers, but it
+        // cannot claim the events scope, which routes to EventBridge, so its catalog key is aliased.
+        assertEquals("events", catalog.canonicalCredentialScope("eventsv2"));
+    }
+
+    @Test
     void ssoPortalAliasNormalisesToSso() {
         assertEquals("sso", catalog.canonicalCredentialScope("awsssoportal"));
     }

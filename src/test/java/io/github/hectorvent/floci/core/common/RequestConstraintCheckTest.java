@@ -20,8 +20,9 @@ class RequestConstraintCheckTest {
              "shapes": {
                "PutInput": {"type": "structure", "required": ["name"],
                             "members": {"name": "Name", "items": "Items", "count": "Count", "labels": "Labels",
-                                        "kind": "Kind"}},
+                                        "kind": "Kind", "quoted": "Quoted"}},
                "Name": {"type": "string", "min": 2, "max": 5, "pattern": "[a-z]+"},
+               "Quoted": {"type": "string", "pattern": "[a-z]+", "quotedPattern": "[a-z]*"},
                "Items": {"type": "list", "max": 2, "member": "Item"},
                "Item": {"type": "structure", "required": ["id"], "members": {"id": "Name"}},
                "Count": {"type": "integer", "min": 1, "max": 10},
@@ -82,6 +83,8 @@ class RequestConstraintCheckTest {
         assertEquals("bounds Put.name string 2..5 1", violation("{\"name\":\"a\"}"));
         assertEquals("bounds Put.name string 2..5 6", violation("{\"name\":\"abcdef\"}"));
         assertEquals("pattern Put.name [a-z]+", violation("{\"name\":\"AB\"}"));
+        // A shape recording the pattern AWS quotes for its member hands that text over instead.
+        assertEquals("pattern Put.quoted [a-z]*", violation("{\"name\":\"ab\",\"quoted\":\"AB\"}"));
         assertEquals("bounds Put.count integer 1..10 11", violation("{\"name\":\"ab\",\"count\":11}"));
         assertEquals("type Put.count integer", violation("{\"name\":\"ab\",\"count\":1.5}"));
         assertEquals("enum Put.kind [A, B]", violation("{\"name\":\"ab\",\"kind\":\"C\"}"));

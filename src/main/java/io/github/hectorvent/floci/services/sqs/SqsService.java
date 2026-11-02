@@ -1570,31 +1570,29 @@ public class SqsService implements Resettable, ResourceProvider {
         RedrivePolicy rp = getOrParseRedrivePolicy(queue, storageKey);
         int maxReceiveCount = rp != null ? rp.maxReceiveCount() : -1;
         String deadLetterTargetArn = rp != null ? rp.deadLetterTargetArn() : null;
+        String dlqUrl = deadLetterTargetArn != null ? queueUrlFromArn(deadLetterTargetArn, region) : null;
 
+        // The claim takes dead-letter candidates out of the source, so only name a target that resolves
         GuardedMessageQueue guardedQueue = unexpiredMessages(storageKey, queue);
         GuardedMessageQueue.ClaimResult claimResult = guardedQueue.claimVisibleMessages(
-                maxMessages, effectiveTimeout, queue.isFifo(), maxReceiveCount, deadLetterTargetArn);
+                maxMessages, effectiveTimeout, queue.isFifo(), maxReceiveCount,
+                dlqUrl != null ? deadLetterTargetArn : null);
 
-        // Route DLQ candidates to the dead-letter queue only if the destination resolves
-        if (!claimResult.dlqCandidates().isEmpty() && deadLetterTargetArn != null) {
-            String dlqUrl = queueUrlFromArn(deadLetterTargetArn, region);
-            if (dlqUrl != null) {
-                List<Message> dlqCandidates = claimResult.dlqCandidates();
-                guardedQueue.removeMessages(dlqCandidates);
-                for (Message msg : dlqCandidates) {
-                    msg.setVisibleAt(null);
-                    msg.setReceiptHandle(null);
-                    // Remember where the message came from so StartMessageMoveTask
-                    // with no DestinationArn can put it back.
-                    msg.setOriginalSourceQueueUrl(queue.getQueueUrl());
-                    if (queue.isFifo()) {
-                        msg.setRetentionStartTimestamp(Instant.now());
-                    }
+        List<Message> dlqCandidates = claimResult.dlqCandidates();
+        if (!dlqCandidates.isEmpty()) {
+            for (Message msg : dlqCandidates) {
+                msg.setVisibleAt(null);
+                msg.setReceiptHandle(null);
+                // Remember where the message came from so StartMessageMoveTask
+                // with no DestinationArn can put it back.
+                msg.setOriginalSourceQueueUrl(queue.getQueueUrl());
+                if (queue.isFifo()) {
+                    msg.setRetentionStartTimestamp(Instant.now());
                 }
-                String dlqStorageKey = regionKey(region, dlqUrl);
-                getOrCreateQueue(dlqStorageKey).addAll(dlqCandidates);
-                LOG.infov("Moved {0} messages to DLQ {1}", dlqCandidates.size(), dlqUrl);
             }
+            String dlqStorageKey = regionKey(region, dlqUrl);
+            getOrCreateQueue(dlqStorageKey).addAll(dlqCandidates);
+            LOG.infov("Moved {0} messages to DLQ {1}", dlqCandidates.size(), dlqUrl);
         }
 
         return claimResult.claimed();

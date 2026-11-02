@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.pipes;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.MissingNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -35,6 +36,9 @@ public class PipesService implements TagHandler, ResourceProvider {
 
     private static final int MIN_PARALLELIZATION_FACTOR = 1;
     private static final int MAX_PARALLELIZATION_FACTOR = 10;
+    private static final int MIN_REDSHIFT_SQLS = 1;
+    private static final int MAX_REDSHIFT_SQLS = 40;
+    private static final int MAX_REDSHIFT_SQL_LENGTH = 100_000;
 
     private final StorageBackend<String, Pipe> storage;
     private final RegionResolver regionResolver;
@@ -82,6 +86,7 @@ public class PipesService implements TagHandler, ResourceProvider {
         }
 
         validateSourceConfiguration(source, sourceParameters);
+        validateTargetConfiguration(target, targetParameters);
 
         String key = region + "::" + name;
         if (storage.get(key).isPresent()) {
@@ -178,6 +183,8 @@ public class PipesService implements TagHandler, ResourceProvider {
         if (!clearUnsetProperties) {
             validateSourceConfiguration(pipe.getSource(),
                     sourceParameters != null ? sourceParameters : pipe.getSourceParameters());
+            validateTargetConfiguration(target != null ? target : pipe.getTarget(),
+                    targetParameters != null ? targetParameters : pipe.getTargetParameters());
         }
 
         writeProperty(target, clearUnsetProperties, pipe::setTarget);
@@ -328,6 +335,36 @@ public class PipesService implements TagHandler, ResourceProvider {
                 .findFirst()
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Resource " + arn + " does not exist.", 404));
+    }
+
+    /**
+     * A Redshift target runs its {@code Sqls} as one BatchExecuteStatement, which the PipeTargetRedshiftDataParameters
+     * reference makes required together with {@code Database}, with 1 to 40 statements of at most 100,000
+     * characters each.
+     */
+    private void validateTargetConfiguration(String target, JsonNode targetParameters) {
+        if (!PipesTargetInvoker.isRedshiftTarget(target)) {
+            return;
+        }
+        JsonNode parameters = targetParameters == null
+                ? MissingNode.getInstance() : targetParameters.path("RedshiftDataParameters");
+        if (!parameters.path("Database").isTextual() || parameters.path("Database").asText().isBlank()) {
+            throw new AwsException("ValidationException",
+                    "TargetParameters.RedshiftDataParameters.Database is required for a Redshift target.", 400);
+        }
+        JsonNode sqls = parameters.path("Sqls");
+        if (!sqls.isArray() || sqls.size() < MIN_REDSHIFT_SQLS || sqls.size() > MAX_REDSHIFT_SQLS) {
+            throw new AwsException("ValidationException",
+                    "TargetParameters.RedshiftDataParameters.Sqls must hold between " + MIN_REDSHIFT_SQLS
+                            + " and " + MAX_REDSHIFT_SQLS + " statements for a Redshift target.", 400);
+        }
+        for (JsonNode sql : sqls) {
+            if (!sql.isTextual() || sql.asText().length() > MAX_REDSHIFT_SQL_LENGTH) {
+                throw new AwsException("ValidationException",
+                        "Each entry of TargetParameters.RedshiftDataParameters.Sqls must be a string of at most "
+                                + MAX_REDSHIFT_SQL_LENGTH + " characters.", 400);
+            }
+        }
     }
 
     private void validateSourceConfiguration(String source, JsonNode sourceParameters) {

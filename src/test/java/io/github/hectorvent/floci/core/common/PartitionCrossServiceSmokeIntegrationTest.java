@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.github.hectorvent.floci.testing.PartitionCleanup;
 import io.github.hectorvent.floci.testing.PartitionMatrix;
 import io.github.hectorvent.floci.testing.PartitionMatrix.PartitionCase;
@@ -16,6 +18,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.Map;
 import java.util.Set;
 
 import static io.restassured.RestAssured.given;
@@ -43,9 +46,10 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "cloudfront", "cloudmap", "cloudwatch", "codebuild", "codedeploy", "codepipeline", "cognito",
             "configservice", "connect", "controlcatalog", "controltower", "datasync", "dlm", "dms", "dsql", "dynamodb", "ec2",
             "ecr", "ecs", "efs", "eks", "elasticache", "elasticbeanstalk", "elb", "elbv2", "emr", "emrserverless",
-            "eventbridge", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "lambda",
+            "eventbridge", "eventbridgev2", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "lambda",
             "lambdamicrovms", "lambdaweb", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
-            "pipes", "ram", "rds", "redshift", "redshiftserverless", "resourceexplorer2", "resourcegroups", "route53resolver",
+            "paymentcryptography", "pipes", "ram", "rds", "redshift", "redshiftserverless",
+            "resourceexplorer2", "resourcegroups", "route53resolver",
             "s3tables", "s3vectors", "sagemaker", "scheduler", "secretsmanager", "servicequotas", "ses", "sns", "sqs",
             "stepfunctions", "timestreaminfluxdb", "transfer", "verifiedpermissions", "wafv2");
 
@@ -74,6 +78,28 @@ class PartitionCrossServiceSmokeIntegrationTest {
                 .when().post("/groups").then().statusCode(200).extract().path("Group.GroupArn");
         cleanup.register(() -> signed(region, "resource-groups").contentType(JSON)
                 .body("{\"Group\":\"" + arn + "\"}").when().post("/delete-group"));
+        PartitionMatrix.assertArnIn(partitionCase, arn);
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void paymentCryptographyKeyArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "payment-cryptography");
+        String arn = signed(region, "payment-cryptography")
+            .header("X-Amz-Target", "PaymentCryptographyControlPlane.CreateKey")
+            .contentType("application/x-amz-json-1.0")
+            .body("{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}},"
+                + "\"Exportable\":true}")
+        .when().post("/").then().statusCode(200)
+            .extract().path("Key.KeyArn");
+        cleanup.register(() -> signed(region, "payment-cryptography")
+            .header("X-Amz-Target", "PaymentCryptographyControlPlane.DeleteKey")
+            .contentType("application/x-amz-json-1.0")
+            .body("{\"KeyIdentifier\":\"" + arn + "\"}")
+        .when().post("/"));
         PartitionMatrix.assertArnIn(partitionCase, arn);
     }
 
@@ -1025,6 +1051,21 @@ class PartitionCrossServiceSmokeIntegrationTest {
         .when().post("/").then().statusCode(200)
             .extract().jsonPath().getString("Namespace.Arn");
         PartitionMatrix.assertArnIn(partitionCase, arn);
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void eventBridgeV2EventBusArn(PartitionCase partitionCase) throws Exception {
+        String region = offered(partitionCase, "events");
+        ObjectMapper cbor = new ObjectMapper(new CBORFactory());
+        byte[] body = signed(region, "events")
+            .header("smithy-protocol", "rpc-v2-cbor")
+            .contentType("application/cbor")
+            .accept("application/cbor")
+            .body(cbor.writeValueAsBytes(Map.of("Name", unique("smoke-busv2", partitionCase))))
+        .when().post("/service/AWSEventsV2/operation/CreateEventBus").then().statusCode(200)
+            .extract().asByteArray();
+        PartitionMatrix.assertArnIn(partitionCase, cbor.readTree(body).path("EventBusArn").asText());
     }
 
     @ParameterizedTest

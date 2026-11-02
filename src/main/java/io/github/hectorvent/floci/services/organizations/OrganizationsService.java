@@ -637,6 +637,9 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
 
         String newAccountId = allocateAccountId(organization);
         OrganizationAccount account = newMemberAccount(organization, newAccountId, email, accountName, "CREATED");
+        if (tags != null) {
+            account.getTags().putAll(tags);
+        }
         accounts.putForAccount(organization.getMasterAccountId(), newAccountId, account);
         attachFullAwsAccess(organization, newAccountId);
         accountAccessRoleProvisioner.provision(newAccountId,

@@ -78,6 +78,9 @@ public class ResourceArnBuilder {
     /** The segment a tagging route names before the ARN it tags, which it captures whole, slashes included. */
     private static final String API_GATEWAY_TAGS_SEGMENT = "tags";
 
+    /** The route of Bedrock's resource-policy actions, which the ARN of the resource they act on may follow. */
+    private static final String BEDROCK_RESOURCE_POLICY_ROUTE = "/resource-policy";
+
     /** The SSM actions whose {@code ResourceArn} names the parameter they act on, in place of {@code Name}. */
     private static final Set<String> SSM_RESOURCE_POLICY_ACTIONS =
             Set.of("PutResourcePolicy", "GetResourcePolicies", "DeleteResourcePolicy");
@@ -98,7 +101,7 @@ public class ResourceArnBuilder {
     private final Instance<KmsService> kmsService;
     /**
      * Looked up lazily for the same reason, to read the ARN a resource the request-resources table names by a name
-     * its service follows with a minted id is stored under.
+     * its service follows with a minted id, or by members its minted ARN does not hold, is stored under.
      */
     private final Instance<StoredResourceArns> storedResourceArns;
 
@@ -187,7 +190,8 @@ public class ResourceArnBuilder {
         if (credentialScope == null) {
             return List.of("*");
         }
-        String path = ctx.getUriInfo().getPath();
+        String path = "s3".equals(credentialScope) ? ctx.getUriInfo().getPath()
+                : IamActionRegistry.decodedPath(ctx);
         return switch (credentialScope) {
             case "s3"             -> buildS3Resources(operation, path, region);
             case "lambda"         -> List.of(buildLambdaArn(path, ctx, region, accountId));
@@ -207,6 +211,7 @@ public class ResourceArnBuilder {
                     || "route53:DeleteReusableDelegationSet".equals(operation)
                     ? List.of(buildRoute53DelegationSetArn(ctx, partition))
                     : namedResources(credentialScope, operation, ctx, region, accountId, partition);
+            case "bedrock"        -> List.of(buildBedrockArn(path, ctx));
             default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
         };
     }
@@ -214,8 +219,8 @@ public class ResourceArnBuilder {
     /**
      * The resources a request of a namespace this builder has no branch for names, from the vendored table of
      * request resources (see {@link RequestResources}); {@code *} when it names none, or the operation is not one
-     * of the namespace. A resource whose service mints an id after its name is the one the namespace's
-     * {@link StoredResourceArns} finds under that name.
+     * of the namespace. A resource whose service mints an id after its name, or as all of its ARN, is the one the
+     * namespace's {@link StoredResourceArns} finds under that name or the members naming it.
      */
     private List<String> namedResources(String credentialScope, String operation, ContainerRequestContext ctx,
                                         String region, String accountId, String partition) {
@@ -253,7 +258,7 @@ public class ResourceArnBuilder {
         if (body == null) {
             return "*";
         }
-        String path = ctx.getUriInfo().getPath();
+        String path = IamActionRegistry.decodedPath(ctx);
         boolean create = path.endsWith("/groups") || path.endsWith("/groups/");
         String group = create ? body.path("Name").asText()
                 : body.path("Group").asText(body.path("GroupName").asText());
@@ -1019,7 +1024,7 @@ public class ResourceArnBuilder {
         if (!path.startsWith(layers)) {
             return null;
         }
-        String raw = IamActionRegistry.rawPath(ctx.getUriInfo());
+        String raw = IamActionRegistry.rawPath(ctx);
         if (!raw.startsWith(layers)) {
             return "*";
         }
@@ -1129,22 +1134,18 @@ public class ResourceArnBuilder {
      * The resource a Lambda tag route acts on, from the ARN it names. Tagging looks a function up by the
      * ARN's Region and name, and a MicroVM image or network connector by the ARN's Region and trailing
      * name, in the caller's own account whatever account the ARN names, so that resource is the one
-     * checked. The MicroVM tag handler takes any target holding {@code :microvm-image:} or
-     * {@code :network-connector:}, an {@code arn:} prefix or not, so the target is read as it reads it.
+     * checked. The MicroVM tag handler takes only a Lambda ARN naming an image or a connector with no
+     * version, so the target is read through {@link LambdaMicrovmsService#taggedResource}, as it reads it.
      * Any other ARN, an event source mapping's included, has to name its resource exactly or is
      * refused, so it is checked as written.
      */
     private static String lambdaTaggedArn(String tagged, String accountId) {
-        if (LambdaMicrovmsService.ownsArn(tagged)) {
-            // Read as LambdaTagController and LambdaMicrovmsService read it: the Region is the fourth field,
-            // the name what follows the last colon.
-            String[] fields = tagged.split(":");
-            String region = fields.length > 3 ? fields[3] : "";
-            String type = tagged.contains(":microvm-image:") ? "microvm-image:"
-                    : tagged.contains(":network-connector:") ? "network-connector:" : null;
-            if (type != null && !region.isBlank()) {
-                return AwsArnUtils.Arn.of("lambda", region, accountId,
-                        type + tagged.substring(tagged.lastIndexOf(':') + 1)).toString();
+        // The image or connector LambdaMicrovmsService tags: the caller's own, in the ARN's Region.
+        Optional<String> microvmResource = LambdaMicrovmsService.taggedResource(tagged);
+        if (microvmResource.isPresent()) {
+            String region = AwsArnUtils.parse(tagged).region();
+            if (!region.isBlank()) {
+                return AwsArnUtils.Arn.of("lambda", region, accountId, microvmResource.get()).toString();
             }
         }
         if (!AwsArnUtils.looksLikeArn(tagged)) {
@@ -1238,7 +1239,7 @@ public class ResourceArnBuilder {
      * stays escaped, so a segment cannot pass for more than one.
      */
     private static String buildApiGatewayArn(ContainerRequestContext ctx, String region, String partition) {
-        String[] raw = IamActionRegistry.routedPath(ctx.getUriInfo()).split("/", -1);
+        String[] raw = IamActionRegistry.routedPath(ctx).split("/", -1);
         List<String> segments = new ArrayList<>();
         for (int i = 1; i < raw.length; i++) {
             String segment = pathSegment(raw[i]);
@@ -1290,7 +1291,7 @@ public class ResourceArnBuilder {
             return slash < 0 || slash == tagged.length() - 1 ? "*"
                     : eksClusterArn(tagged.substring(slash + 1), region, accountId);
         }
-        String[] segments = IamActionRegistry.routedPath(ctx.getUriInfo()).substring(1).split("/", -1);
+        String[] segments = IamActionRegistry.routedPath(ctx).substring(1).split("/", -1);
         if (segments.length == 1) {
             JsonNode body = "clusters".equals(segments[0]) && "POST".equalsIgnoreCase(ctx.getMethod())
                     ? readJsonBody(ctx) : null;
@@ -1384,7 +1385,7 @@ public class ResourceArnBuilder {
      * names none.
      */
     public String taggedArn(ContainerRequestContext ctx) {
-        String path = ctx.getUriInfo().getPath();
+        String path = IamActionRegistry.decodedPath(ctx);
         for (String route : List.of("/tags", "/v1/tags")) {
             if (path.startsWith(route + "/")) {
                 return path.substring(route.length() + 1);
@@ -1498,6 +1499,24 @@ public class ResourceArnBuilder {
         return DurableTokens.callbackExecutionArn(path.substring(callbacks + prefix.length(), action))
                 .filter(arn -> LambdaArnUtils.DURABLE_EXECUTION_ARN.matcher(arn).matches())
                 .orElse(null);
+    }
+
+    // ── Bedrock ──────────────────────────────────────────────────────────────────
+
+    /**
+     * The resource of a Bedrock route. The resource-policy actions act on the resource whose ARN they carry,
+     * in the path, or in the body's {@code resourceArn} for {@code PutResourcePolicy}, as the Service
+     * Authorization Reference gives them; every other route, and a value that is not an ARN, is {@code *}.
+     */
+    private String buildBedrockArn(String path, ContainerRequestContext ctx) {
+        String resourceArn = null;
+        if (path.startsWith(BEDROCK_RESOURCE_POLICY_ROUTE + "/")) {
+            resourceArn = path.substring(BEDROCK_RESOURCE_POLICY_ROUTE.length() + 1);
+        } else if (BEDROCK_RESOURCE_POLICY_ROUTE.equals(path) && "POST".equalsIgnoreCase(ctx.getMethod())) {
+            JsonNode body = readJsonBody(ctx);
+            resourceArn = body == null ? null : body.path("resourceArn").asText(null);
+        }
+        return AwsArnUtils.isArn(resourceArn) ? resourceArn : "*";
     }
 
     // ── SQS ─────────────────────────────────────────────────────────────────────

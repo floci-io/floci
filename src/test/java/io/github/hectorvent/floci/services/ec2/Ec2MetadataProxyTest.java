@@ -24,6 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class Ec2MetadataProxyTest {
 
@@ -53,7 +54,8 @@ class Ec2MetadataProxyTest {
         // Attaches address if missing
         assertTrue(script.contains("ip addr show dev lo | grep -q '169.254.169.254/32' || ip addr add 169.254.169.254/32 dev lo"));
         // Idempotent when pid file exists and process is alive
-        assertTrue(script.contains("if [ -f /tmp/floci-imds-proxy.pid ] && kill -0 \"$(cat /tmp/floci-imds-proxy.pid)\" 2>/dev/null; then\n  exit 0\nfi"));
+        assertTrue(script.contains("if [ -f /tmp/floci-imds-proxy.pid ] && pid=\"$(cat /tmp/floci-imds-proxy.pid)\" && [ \"$(cat \"/proc/$pid/comm\" 2>/dev/null)\" = socat ]"
+                + " && tr '\\0' ' ' 2>/dev/null <\"/proc/$pid/cmdline\" | grep -q 'TCP-LISTEN:80,bind=169.254.169.254,'; then\n  exit 0\nfi"));
         // Targets configured Floci host and IMDS port
         assertTrue(script.contains("nohup socat TCP-LISTEN:80,bind=169.254.169.254,fork,reuseaddr TCP:10.0.0.1:9169 >/tmp/floci-imds-proxy.log 2>&1 &"));
         // Verifies through an IMDSv2 token even when tokenless access is refused.
@@ -71,7 +73,8 @@ class Ec2MetadataProxyTest {
 
         String script = command[2];
         assertTrue(script.contains("ip addr show dev lo | grep -q '169.254.170.23/32' || ip addr add 169.254.170.23/32 dev lo"));
-        assertTrue(script.contains("if [ -f /tmp/floci-pod-identity-proxy.pid ] && kill -0 \"$(cat /tmp/floci-pod-identity-proxy.pid)\" 2>/dev/null; then\n  exit 0\nfi"));
+        assertTrue(script.contains("if [ -f /tmp/floci-pod-identity-proxy.pid ] && pid=\"$(cat /tmp/floci-pod-identity-proxy.pid)\" && [ \"$(cat \"/proc/$pid/comm\" 2>/dev/null)\" = socat ]"
+                + " && tr '\\0' ' ' 2>/dev/null <\"/proc/$pid/cmdline\" | grep -q 'TCP-LISTEN:80,bind=169.254.170.23,'; then\n  exit 0\nfi"));
         assertTrue(script.contains("nohup socat TCP-LISTEN:80,bind=169.254.170.23,fork,reuseaddr TCP:10.0.0.1:4566 >/tmp/floci-pod-identity-proxy.log 2>&1 &"));
         assertTrue(script.contains("http://169.254.170.23/v1/credentials"));
     }
@@ -265,6 +268,64 @@ class Ec2MetadataProxyTest {
                     HelperShellFixture.output(directory));
         } finally {
             server.stop(0);
+            deleteProxyFiles(name);
+        }
+    }
+
+    /**
+     * A stop and start keeps the container's writable layer, pid file included, but not its PID
+     * namespace: the recorded pid can belong to an unrelated process by then, and the proxy must
+     * still start.
+     */
+    @Test
+    void startScriptStartsTheProxyWhenThePidFileNamesAnUnrelatedLiveProcess(@TempDir Path directory)
+            throws Exception {
+        Path bin = Files.createDirectory(directory.resolve("bin"));
+        Path proxyStarted = directory.resolve("proxy-started");
+        HelperShellFixture.writeTool(bin, "ip", "printf '127.0.0.1/32\\n'\n");
+        HelperShellFixture.writeTool(bin, "socat", ": > '" + proxyStarted + "'\n");
+        String name = "unit-" + UUID.randomUUID();
+        try {
+            // This JVM is alive, and it is not the proxy.
+            Files.writeString(Path.of("/tmp/floci-" + name + "-proxy.pid"), ProcessHandle.current().pid() + "\n");
+            String[] command = Ec2MetadataProxy.startCommand(name, "127.0.0.1", 80, "127.0.0.1", 9169,
+                    "[ -f '" + proxyStarted + "' ] && exit 0");
+
+            int result = HelperShellFixture.run(command, directory, Map.of("PATH", bin + ":" + System.getenv("PATH")));
+
+            assertEquals(0, result, HelperShellFixture.output(directory));
+            assertTrue(Files.exists(proxyStarted), "socat was never started: " + HelperShellFixture.output(directory));
+        } finally {
+            deleteProxyFiles(name);
+        }
+    }
+
+    /**
+     * After a restart the recorded pid can be the shell running this very script, whose command
+     * line holds the listener string the check looks for. That shell is not the proxy. Needs a
+     * Linux {@code /proc}; elsewhere no pid is ever taken for the proxy.
+     */
+    @Test
+    void startScriptStartsTheProxyWhenThePidFileNamesTheStartShellItself(@TempDir Path directory)
+            throws Exception {
+        assumeTrue(Files.isDirectory(Path.of("/proc/self")), "needs a Linux /proc");
+        Path bin = Files.createDirectory(directory.resolve("bin"));
+        Path proxyStarted = directory.resolve("proxy-started");
+        HelperShellFixture.writeTool(bin, "ip", "printf '127.0.0.1/32\\n'\n");
+        HelperShellFixture.writeTool(bin, "socat", ": > '" + proxyStarted + "'\n");
+        String name = "unit-" + UUID.randomUUID();
+        String pidFile = "/tmp/floci-" + name + "-proxy.pid";
+        try {
+            String[] command = Ec2MetadataProxy.startCommand(name, "127.0.0.1", 80, "127.0.0.1", 9169,
+                    "[ -f '" + proxyStarted + "' ] && exit 0");
+            // The script's own shell takes the recorded pid, as a reused pid would after a restart.
+            command[2] = command[2].replaceFirst("set -eu\n", "set -eu\necho \\$\\$ > " + pidFile + "\n");
+
+            int result = HelperShellFixture.run(command, directory, Map.of("PATH", bin + ":" + System.getenv("PATH")));
+
+            assertEquals(0, result, HelperShellFixture.output(directory));
+            assertTrue(Files.exists(proxyStarted), "socat was never started: " + HelperShellFixture.output(directory));
+        } finally {
             deleteProxyFiles(name);
         }
     }

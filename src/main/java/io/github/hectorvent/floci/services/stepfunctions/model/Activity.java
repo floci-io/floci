@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.stepfunctions.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.HashMap;
@@ -15,7 +16,7 @@ public class Activity {
     private Map<String, String> tags = new HashMap<>();
 
     public Activity() {
-        this.creationDate = System.currentTimeMillis() / 1000.0;
+        this.creationDate = EpochSeconds.fromMillis(System.currentTimeMillis());
     }
 
     public String getActivityArn() { return activityArn; }

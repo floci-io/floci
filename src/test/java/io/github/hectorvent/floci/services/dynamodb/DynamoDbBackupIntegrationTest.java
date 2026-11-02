@@ -77,6 +77,8 @@ class DynamoDbBackupIntegrationTest {
                         equalTo("gsi1"))
                 .body("BackupDescription.SourceTableFeatureDetails.GlobalSecondaryIndexes[0]",
                         not(hasKey("IndexStatus")))
+                .body("BackupDescription.SourceTableFeatureDetails.GlobalSecondaryIndexes[0]",
+                        not(hasKey("WarmThroughput")))
                 .body("BackupDescription.SourceTableFeatureDetails.LocalSecondaryIndexes[0].IndexName",
                         equalTo("lsi1"))
                 .body("BackupDescription.SourceTableFeatureDetails.LocalSecondaryIndexes[0]",
