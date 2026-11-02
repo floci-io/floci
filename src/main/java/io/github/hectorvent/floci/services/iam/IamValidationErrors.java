@@ -10,9 +10,9 @@ import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
  * where the older ones quoted the value, and STS still quotes it, so this names IAM's side of that
  * split in one place. {@code docs/services/iam.md} records the reading and the captures behind it.
  *
- * <p>A message AWS itself writes with the value is not forced through here: a list checked as a
- * whole carries the list, and a required member the request leaves out reads
- * {@code Value null at '<member>'}, which no capture here covers either way.
+ * <p>A list checked as a whole can carry the list and is not forced through here. Required-member
+ * omissions use operation-specific wording: the captured missing {@code Status} on credential
+ * updates reads {@code Value at 'status'} without {@code null}.
  */
 final class IamValidationErrors {
 

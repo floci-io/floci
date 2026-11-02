@@ -81,7 +81,7 @@ public final class QueryConstraintCheck {
         this.messages = messages;
         for (Map.Entry<String, JsonNode> shape : shapes.properties()) {
             if (shape.getValue().has("pattern")) {
-                patterns.put(shape.getKey(), Pattern.compile(shape.getValue().get("pattern").asText()));
+                patterns.put(shape.getKey(), VendoredPatterns.compile(shape.getValue().get("pattern").asText()));
             }
         }
         for (Map.Entry<String, JsonNode> operation : operations.properties()) {
@@ -381,7 +381,9 @@ public final class QueryConstraintCheck {
         }
         Pattern pattern = patterns.get(shapeName);
         if (pattern != null && !pattern.matcher(value).matches()) {
-            violations.add(messages.pattern(path, value, pattern.pattern()));
+            // Quoted as the model declares it, which is what AWS answers and what the service docs
+            // carry, rather than as it was compiled: a wide escape is rewritten to match on.
+            violations.add(messages.pattern(path, value, shape.path("pattern").asText()));
         }
         violations.addAll(single(enumViolation(shape, value, path)));
         return violations;

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.servicecatalog;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
@@ -9,9 +10,13 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Wire-level tests for {@code DescribeProvisionedProduct},
@@ -38,6 +43,9 @@ class ServiceCatalogProvisionedProductLifecycleConsumerTest {
 
     @Inject
     ObjectMapper objectMapper;
+
+    @Inject
+    MutableClock clock;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -121,6 +129,75 @@ class ServiceCatalogProvisionedProductLifecycleConsumerTest {
     }
 
     @Test
+    void updateProvisionedProduct_returnsTheDescribedRecordDetail() throws Exception {
+        String productId = createProduct("ab-update-record-detail-product");
+        String artifactId = firstArtifactId(productId);
+        String provisionedId = importProvisionedProduct(productId, artifactId, "ab-update-record-detail-pp");
+
+        Response updated = call("UpdateProvisionedProduct", "{\"ProvisionedProductId\":\"" + provisionedId
+                + "\",\"UpdateToken\":\"tok-update-record-detail\"}")
+                .then().statusCode(200).extract().response();
+        JsonNode updateRecord = objectMapper.readTree(updated.asString()).path("RecordDetail");
+        String recordId = updateRecord.path("RecordId").asText();
+        Response described = call("DescribeRecord", "{\"Id\":\"" + recordId + "\"}")
+                .then().statusCode(200).extract().response();
+        JsonNode describedRecord = objectMapper.readTree(described.asString()).path("RecordDetail");
+
+        assertEquals(describedRecord.path("CreatedTime"), updateRecord.path("CreatedTime"));
+        assertEquals("UPDATE_PROVISIONED_PRODUCT", updateRecord.path("RecordType").asText());
+        assertFalse(describedRecord.has("Type"));
+        assertEquals(describedRecord, updateRecord);
+    }
+
+    @Test
+    void provisionAndImportReturnTheirDescribedRecordDetails() throws Exception {
+        String productId = createProduct("ab-record-response-product");
+        String artifactId = firstArtifactId(productId);
+
+        Response provisioned = call("ProvisionProduct", "{\"ProductId\":\"" + productId
+                + "\",\"ProvisioningArtifactId\":\"" + artifactId
+                + "\",\"ProvisionedProductName\":\"ab-record-response-provisioned\"}")
+                .then().statusCode(200).extract().response();
+        assertMatchesDescribeRecord(provisioned);
+
+        Response imported = call("ImportAsProvisionedProduct", "{\"ProductId\":\"" + productId
+                + "\",\"ProvisioningArtifactId\":\"" + artifactId
+                + "\",\"ProvisionedProductName\":\"ab-record-response-imported\","
+                + "\"PhysicalId\":\"phys-ab-record-response-imported\","
+                + "\"IdempotencyToken\":\"tok-record-response-imported\"}")
+                .then().statusCode(200).extract().response();
+        assertMatchesDescribeRecord(imported);
+    }
+
+    @Test
+    void serviceActionAndTerminateReturnTheirDescribedRecordDetails() throws Exception {
+        String productId = createProduct("ab-record-action-product");
+        String artifactId = firstArtifactId(productId);
+        String provisionedId = importProvisionedProduct(productId, artifactId, "ab-record-action-pp");
+
+        Response action = call("ExecuteProvisionedProductServiceAction", "{\"ProvisionedProductId\":\""
+                + provisionedId + "\",\"ServiceActionId\":\"sa-anything\","
+                + "\"ExecuteToken\":\"tok-record-action\"}")
+                .then().statusCode(200).extract().response();
+        assertMatchesDescribeRecord(action);
+
+        Response terminated = call("TerminateProvisionedProduct", "{\"ProvisionedProductId\":\""
+                + provisionedId + "\",\"TerminateToken\":\"tok-record-termination\"}")
+                .then().statusCode(200).extract().response();
+        assertMatchesDescribeRecord(terminated);
+    }
+
+    private void assertMatchesDescribeRecord(Response response) throws Exception {
+        JsonNode record = objectMapper.readTree(response.asString()).path("RecordDetail");
+        String recordId = record.path("RecordId").asText();
+        Response described = call("DescribeRecord", "{\"Id\":\"" + recordId + "\"}")
+                .then().statusCode(200).extract().response();
+        JsonNode describedRecord = objectMapper.readTree(described.asString()).path("RecordDetail");
+        assertFalse(describedRecord.has("Type"));
+        assertEquals(describedRecord, record);
+    }
+
+    @Test
     void updateProvisionedProduct_unknownProduct_returnsResourceNotFound() {
         call("UpdateProvisionedProduct", "{\"ProvisionedProductId\":\"pp-doesnotexist\","
                 + "\"UpdateToken\":\"tok-update-unknown\"}")
@@ -171,7 +248,8 @@ class ServiceCatalogProvisionedProductLifecycleConsumerTest {
         double originalCreatedTime = objectMapper.readTree(originalProduct.asString())
                 .path("ProvisionedProductDetail").path("CreatedTime").asDouble();
 
-        Thread.sleep(25);
+        clock.advance(Duration.ofSeconds(1));
+        double beforeTermination = clock.instant().toEpochMilli() / 1000.0;
         Response terminated = call("TerminateProvisionedProduct", "{\"ProvisionedProductId\":\""
                 + provisionedId + "\",\"TerminateToken\":\"tok-terminate-pp\"}")
         .then()
@@ -180,6 +258,7 @@ class ServiceCatalogProvisionedProductLifecycleConsumerTest {
             .body("RecordDetail.Status", equalTo("SUCCEEDED"))
             .body("RecordDetail.RecordType", equalTo("TERMINATE_PROVISIONED_PRODUCT"))
             .extract().response();
+        double afterTermination = clock.instant().toEpochMilli() / 1000.0;
         JsonNode terminationRecord = objectMapper.readTree(terminated.asString()).path("RecordDetail");
         String recordId = terminationRecord.path("RecordId").asText();
 
@@ -190,6 +269,11 @@ class ServiceCatalogProvisionedProductLifecycleConsumerTest {
             .extract().response();
         assertEquals(originalCreatedTime, objectMapper.readTree(terminatedProduct.asString())
                 .path("ProvisionedProductDetail").path("CreatedTime").asDouble());
+        double updatedTime = objectMapper.readTree(terminatedProduct.asString())
+                .path("ProvisionedProductDetail").path("UpdatedTime").asDouble();
+        assertTrue(updatedTime > originalCreatedTime);
+        assertTrue(updatedTime >= beforeTermination && updatedTime <= afterTermination);
+        assertEquals(updatedTime, terminationRecord.path("CreatedTime").asDouble());
 
         Response described = call("DescribeRecord", "{\"Id\":\"" + recordId + "\"}")
         .then()

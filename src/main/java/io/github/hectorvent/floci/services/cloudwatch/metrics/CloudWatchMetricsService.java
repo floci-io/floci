@@ -12,6 +12,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -75,6 +76,7 @@ public class CloudWatchMetricsService {
             .ofPattern("EEEE dd MMMM, yyyy HH:mm:ss 'UTC'", Locale.ENGLISH).withZone(ZoneOffset.UTC);
     /** The most StateReasonData can hold, in Unicode code points as SetAlarmState's length check counts them. */
     private static final int MAX_STATE_REASON_DATA = 4000;
+    private static final int LIST_METRICS_PAGE_SIZE = 500;
     private static final ObjectMapper MAPPER = new ObjectMapper()
             .setSerializationInclusion(JsonInclude.Include.NON_NULL)
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
@@ -241,6 +243,35 @@ public class CloudWatchMetricsService {
             deduped.putIfAbsent(identity, new MetricIdentity(d.getNamespace(), d.getMetricName(), d.getDimensions()));
         }
         return new ArrayList<>(deduped.values());
+    }
+
+    public PaginatedResult<MetricIdentity> listMetricsPage(String namespace, String metricName,
+                                                            List<Dimension> dimensions, String nextToken,
+                                                            String region) {
+        String accountId = metricStore instanceof AccountAwareStorageBackend<?> aware
+                ? aware.accountId() : regionResolver.getAccountId();
+        ArrayNode scope = MAPPER.createArrayNode();
+        scope.add(accountId).add(region).add(namespace).add(metricName);
+        appendMetricDimensions(scope, dimensions);
+        return Pagination.paginate(listMetrics(namespace, metricName, dimensions, region),
+                CloudWatchMetricsService::metricCursor, LIST_METRICS_PAGE_SIZE, nextToken,
+                "cloudwatch-list-metrics-" + Digests.sha256Hex(scope.toString()),
+                token -> CloudWatchMetricsException.invalidParameterValue("Invalid NextToken."));
+    }
+
+    static String metricCursor(MetricIdentity metric) {
+        String identity = metric.namespace() + "::" + metric.metricName() + "::" + buildDimKey(metric.dimensions());
+        return Digests.sha256Hex(identity);
+    }
+
+    private static void appendMetricDimensions(ArrayNode key, List<Dimension> dimensions) {
+        if (dimensions == null) {
+            return;
+        }
+        dimensions.stream().sorted(Comparator.comparing(Dimension::name,
+                        Comparator.nullsFirst(String::compareTo))
+                .thenComparing(Dimension::value, Comparator.nullsFirst(String::compareTo)))
+                .forEach(dimension -> key.addArray().add(dimension.name()).add(dimension.value()));
     }
 
     public record Datapoint(Instant timestamp, double sampleCount, double sum,

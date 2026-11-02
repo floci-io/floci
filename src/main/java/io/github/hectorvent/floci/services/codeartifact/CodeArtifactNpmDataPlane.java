@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.codeartifact;
 import com.fasterxml.jackson.core.exc.StreamConstraintsException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
@@ -71,6 +72,7 @@ public class CodeArtifactNpmDataPlane {
 
     private final CodeArtifactService service;
     private final VerdaccioSidecarClient verdaccioClient;
+    private final CodeArtifactNpmExternalConnectionImporter externalConnectionImporter;
     private final ServiceConfigAccess serviceConfigAccess;
     private final Vertx vertx;
     private final HttpClient proxyClient;
@@ -80,9 +82,11 @@ public class CodeArtifactNpmDataPlane {
 
     @Inject
     public CodeArtifactNpmDataPlane(CodeArtifactService service, VerdaccioSidecarClient verdaccioClient,
+                                     CodeArtifactNpmExternalConnectionImporter externalConnectionImporter,
                                      ServiceConfigAccess serviceConfigAccess, Vertx vertx, ObjectMapper mapper) {
         this.service = service;
         this.verdaccioClient = verdaccioClient;
+        this.externalConnectionImporter = externalConnectionImporter;
         this.serviceConfigAccess = serviceConfigAccess;
         this.vertx = vertx;
         this.proxyClient = vertx.createHttpClient(new HttpClientOptions()
@@ -149,12 +153,45 @@ public class CodeArtifactNpmDataPlane {
         context.request().pause();
         String repoId = npmRepositoryId;
         AuthorizationTokenScope tokenScope = scope.get();
+
+        Optional<PackageIdentity> packumentTarget = nativePackumentRequestTarget(context.request().method(),
+                npmRequest.rest());
+        if (packumentTarget.isPresent()) {
+            PackageIdentity identity = packumentTarget.get();
+            boolean fullMetadata = !acceptsCorgi(context.request().getHeader("Accept"));
+            vertx.<ObjectNode>executeBlocking(promise -> promise.complete(externalConnectionImporter.mergedPackument(
+                    tokenScope.region(), npmRequest.domain(), tokenScope.owner(), npmRequest.repository(), repoId,
+                    identity.namespace(), identity.packageName(), fullMetadata).orElse(null)), false).onComplete(
+                    mergeResult -> {
+                        if (mergeResult.succeeded() && mergeResult.result() != null) {
+                            context.request().resume();
+                            respondWithMergedPackument(context, mergeResult.result());
+                            return;
+                        }
+                        proceedToProxy(context, npmRequest, repoId, tokenScope);
+                    });
+            return;
+        }
+        proceedToProxy(context, npmRequest, repoId, tokenScope);
+    }
+
+    /**
+     * {@code packumentTarget}'s own fallback, and the only path for every request that isn't a
+     * bare packument GET to begin with: proxies straight to Verdaccio, importing a missing
+     * tarball from this repository's own npm external connection first (see {@link
+     * #tryImportMissingTarball}) when the requested download is one.
+     */
+    private void proceedToProxy(RoutingContext context, NpmRequest npmRequest, String repoId,
+            AuthorizationTokenScope tokenScope) {
         Optional<TarballDownloadRequest> tarballTarget = nativeTarballDownloadTarget(context.request().method(),
                 npmRequest.rest());
         Optional<PackageIdentity> unpublishTarget = nativeUnpublishTarget(context.request().method(),
                 npmRequest.rest());
         vertx.<String>executeBlocking(promise -> {
-            tarballTarget.ifPresent(target -> blockIfArchived(tokenScope, npmRequest, repoId, target));
+            tarballTarget.ifPresent(target -> {
+                tryImportMissingTarball(tokenScope, npmRequest, repoId, target);
+                blockIfArchived(tokenScope, npmRequest, repoId, target);
+            });
             promise.complete(ensureBackendReady(repoId, npmRequest));
         }).onComplete(result -> {
             if (result.failed()) {
@@ -171,6 +208,94 @@ public class CodeArtifactNpmDataPlane {
                         }
                     }));
         });
+    }
+
+    /**
+     * Serves {@code merged} directly as this request's own response: the content {@link
+     * CodeArtifactNpmExternalConnectionImporter#mergedPackument} computed is never written to
+     * Verdaccio (it only promises versions whose real tarball has not been fetched yet, which
+     * Verdaccio's own publish protocol has no way to record without that tarball's real bytes in
+     * the same call), so it has to be answered from here rather than by proxying to the sidecar
+     * the way every other request already is.
+     */
+    private void respondWithMergedPackument(RoutingContext context, ObjectNode merged) {
+        if (context.response().ended() || context.response().closed()) {
+            return;
+        }
+        byte[] body;
+        try {
+            body = mapper.writeValueAsBytes(merged);
+        } catch (Exception e) {
+            context.response().setStatusCode(500).end();
+            return;
+        }
+        context.response().putHeader("Content-Type", "application/json").setStatusCode(200).end(Buffer.buffer(body));
+    }
+
+    /**
+     * {@code target}'s own filename is checked against the {@code <bareName>-<version>.tgz} shape
+     * {@link CodeArtifactNpmExternalConnectionImporter#mergedPackument} always synthesizes for a
+     * version it has not yet fetched the real asset for: unlike {@link #blockIfArchived}'s own
+     * {@link VerdaccioSidecarClient#versionForTarballFilename}, which resolves a filename against
+     * whatever Verdaccio's own packument already has (and must never assume this shape for a real
+     * client's own arbitrarily-named publish), there is nothing stored locally to resolve against
+     * yet on a genuine miss, so the version has to be read back out of the one filename shape this
+     * importer itself ever hands out. A filename that doesn't fit (a real local publish's own,
+     * differently-named tarball that happens to 404 for an unrelated reason) is left alone: {@link
+     * VerdaccioSidecarClient#packageVersionExists} already found nothing to import, and {@link
+     * #proxy} below still answers with whatever Verdaccio itself says.
+     */
+    private void tryImportMissingTarball(AuthorizationTokenScope tokenScope, NpmRequest npmRequest, String repoId,
+            TarballDownloadRequest target) {
+        String bareName = target.identity().packageName();
+        String filename = target.filename();
+        String prefix = bareName + "-";
+        String suffix = ".tgz";
+        if (!filename.startsWith(prefix) || !filename.endsWith(suffix)
+                || filename.length() <= prefix.length() + suffix.length()) {
+            return;
+        }
+        String version = filename.substring(prefix.length(), filename.length() - suffix.length());
+        if (verdaccioClient.packageVersionExists(repoId, npmRequest.domain(), npmRequest.repository(),
+                target.identity().namespace(), bareName, version)) {
+            return;
+        }
+        externalConnectionImporter.tryImportAsset(tokenScope.region(), npmRequest.domain(), tokenScope.owner(),
+                npmRequest.repository(), repoId, target.identity().namespace(), bareName, version, filename);
+    }
+
+    /**
+     * A real npm packument read, bare ({@code GET /<name>}) only: unlike {@link #isPublish}'s own
+     * one-segment PUT shape, this excludes the registry's reserved {@code -}-prefixed meta routes
+     * ({@code /-/all}, {@code /-/package/...}), which npm package names can never collide with
+     * (the registry reserves that prefix outright). The documented single-version read ({@code
+     * GET /<name>/<version>}) is deliberately not matched here: real {@code npm install}, even
+     * for one pinned version, never sends it (confirmed against {@code pacote}'s own source,
+     * {@code RegistryFetcher#packumentUrl}, always the bare package path), so nothing exercises it
+     * on this emulator's own critical path either.
+     */
+    private static Optional<PackageIdentity> nativePackumentRequestTarget(HttpMethod method, String rest) {
+        if (method != HttpMethod.GET || rest.length() <= 1 || rest.startsWith("/-") || rest.indexOf('/', 1) >= 0) {
+            return Optional.empty();
+        }
+        return Optional.of(packageIdentityFromPath(rest));
+    }
+
+    /**
+     * Whether {@code accept} is {@code pacote}'s own corgi-preferring value ({@code
+     * application/vnd.npm.install-v1+json}, confirmed against its own source as what a real
+     * {@code npm install} sends) rather than a plain {@code application/json} ({@code npm view
+     * <pkg> <field>}-style commands, confirmed the same way): decides whether {@link
+     * CodeArtifactNpmExternalConnectionImporter#mergedPackument} fetches the real registry's
+     * cheaper abbreviated form or its full one (found by Greptile's review: the abbreviated form
+     * never carries a package's {@code readme}, so always using it regardless of what was asked
+     * silently dropped that field even for a request that explicitly wanted it). {@code null} (no
+     * header at all) is treated as wanting the full form, confirmed live against the real
+     * registry: with no {@code Accept} header at all (what a bare {@code curl} sends), it answers
+     * with the full document, corgi being a deliberately-requested trim, never the default.
+     */
+    private static boolean acceptsCorgi(String accept) {
+        return accept != null && accept.contains("vnd.npm.install-v1+json");
     }
 
     /**

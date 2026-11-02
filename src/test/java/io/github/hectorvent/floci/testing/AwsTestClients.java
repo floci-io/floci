@@ -25,7 +25,18 @@ public final class AwsTestClients {
     /** Selects a transport explicitly for operations requiring methods such as PATCH. */
     public static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
             B builder, String account, Region region, SdkHttpClient.Builder<?> httpClientBuilder) {
-        return builder.endpointOverride(URI.create("http://localhost:" + RestAssured.port))
+        return create(builder, account, region, httpClientBuilder, URI.create("http://localhost:" + RestAssured.port));
+    }
+
+    /** Explicit endpoint for class fixtures created before RestAssured's per-test port is installed. */
+    public static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
+            B builder, String account, Region region, URI endpoint) {
+        return create(builder, account, region, UrlConnectionHttpClient.builder(), endpoint);
+    }
+
+    private static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
+            B builder, String account, Region region, SdkHttpClient.Builder<?> httpClientBuilder, URI endpoint) {
+        return builder.endpointOverride(endpoint)
                 .httpClientBuilder(httpClientBuilder).region(region)
                 .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(account, "test")))
                 .build();

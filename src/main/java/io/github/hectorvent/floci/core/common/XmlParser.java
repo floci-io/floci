@@ -497,14 +497,19 @@ public final class XmlParser {
                     || event == XMLStreamConstants.CDATA) {
                 text.append(r.getText());
             } else if (event == XMLStreamConstants.END_ELEMENT) {
-                return new XmlElement(name, text.toString().trim(), List.copyOf(children));
+                String raw = text.toString();
+                return new XmlElement(name, raw.trim(), List.copyOf(children), raw);
             }
         }
         throw new XMLStreamException("Unexpected end of XML while reading " + name);
     }
 
-    /** A namespace-agnostic XML element used by {@link #extractElementTree(String, String)}. */
-    public record XmlElement(String name, String text, List<XmlElement> children) {
+    /**
+     * A namespace-agnostic XML element used by {@link #extractElementTree(String, String)}.
+     * {@code text} is trimmed for enum and number fields; {@code rawText} keeps a free-form
+     * value such as a name or comment exactly as the client sent it.
+     */
+    public record XmlElement(String name, String text, List<XmlElement> children, String rawText) {
         public XmlElement child(String childName) {
             return children.stream()
                     .filter(child -> childName.equals(child.name()))

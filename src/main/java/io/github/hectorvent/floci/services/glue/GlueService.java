@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Base64Url;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -1930,7 +1931,7 @@ public class GlueService {
 
         Map<String, Object> details = new LinkedHashMap<>(classifier.selectedDetails());
         validateClassifierDetails(classifier.selectedKind(), details);
-        double now = Instant.now().toEpochMilli() / 1000.0d;
+        double now = EpochSeconds.fromInstant(Instant.now());
         details.put("CreationTime", now);
         details.put("LastUpdated", now);
         details.put("Version", 1L);
@@ -1969,7 +1970,7 @@ public class GlueService {
         validateClassifierDetails(existing.selectedKind(), details);
         Number version = (Number) existing.selectedDetails().get("Version");
         details.put("CreationTime", existing.selectedDetails().get("CreationTime"));
-        details.put("LastUpdated", Instant.now().toEpochMilli() / 1000.0d);
+        details.put("LastUpdated", EpochSeconds.fromInstant(Instant.now()));
         details.put("Version", (version == null ? 1L : version.longValue()) + 1L);
         classifierStore.put(name, existing.copyWithDetails(details));
         LOG.infov("Updated Glue Classifier: {0}", name);

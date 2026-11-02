@@ -20,6 +20,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.emptyOrNullString;
@@ -2211,6 +2212,109 @@ class SamTransformIntegrationTest {
             .statusCode(200)
             .body("definition", containsString("my-orders-table"))
             .body("definition", not(containsString("${TableName}")));
+    }
+
+    @Test
+    void samLayerVersionPublishesPackagedCodeAndReturnsItsArn() {
+        String stack = "sam-layer-stack";
+        String bucket = "sam-layer-code";
+        stacksToDelete.add(stack);
+        given().when().put("/" + bucket).then().statusCode(200);
+        given().contentType("application/zip").body(buildHandlerZip())
+                .when().put("/" + bucket + "/layer.zip").then().statusCode(200);
+        String template = """
+                Transform: AWS::Serverless-2016-10-31
+                Parameters:
+                  Bucket: {Type: String}
+                  Runtimes: {Type: CommaDelimitedList, Default: 'nodejs22.x,python3.14'}
+                  Architectures: {Type: CommaDelimitedList, Default: arm64}
+                Globals:
+                  Function:
+                    Runtime: nodejs22.x
+                    Architectures: [arm64]
+                    Handler: index.handler
+                    Layers: [!Ref Layer]
+                Resources:
+                  Layer:
+                    Type: AWS::Serverless::LayerVersion
+                    Properties:
+                      LayerName: sam-shared-layer
+                      ContentUri:
+                        Bucket: !Ref Bucket
+                        Key: layer.zip
+                      CompatibleRuntimes: !Ref Runtimes
+                      CompatibleArchitectures: !Ref Architectures
+                      LicenseInfo: MIT
+                      RetentionPolicy: Delete
+                  Function:
+                    Type: AWS::Serverless::Function
+                    Properties:
+                      FunctionName: sam-layer-consumer
+                      InlineCode: 'exports.handler=async()=>({})'
+                      Environment:
+                        Variables:
+                          DependsOn: Layer
+                Outputs:
+                  LayerArn:
+                    Value: !Ref Layer
+                  LayerSub:
+                    Value: !Sub '${Layer}'
+                """;
+        try {
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "CreateStack").formParam("StackName", stack)
+                    .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+                    .formParam("TemplateBody", template)
+                    .formParam("Parameters.member.1.ParameterKey", "Bucket")
+                    .formParam("Parameters.member.1.ParameterValue", bucket)
+                    .when().post("/").then().statusCode(200);
+            waitForStackStatus(stack, "CREATE_COMPLETE");
+            String description = given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "DescribeStacks").formParam("StackName", stack)
+                    .when().post("/").then().statusCode(200).extract().asString();
+            String arn = stackOutputValue(description, "LayerArn");
+            assertThat(arn, containsString(":layer:sam-shared-layer:1"));
+            assertThat(stackOutputValue(description, "LayerSub"), equalTo(arn));
+            given().when().get("/2018-10-31/layers/sam-shared-layer/versions/1")
+                    .then().statusCode(200).body("LayerVersionArn", equalTo(arn))
+                    .body("CompatibleRuntimes", hasItems("nodejs22.x", "python3.14"))
+                    .body("CompatibleArchitectures", hasItem("arm64"))
+                    .body("LicenseInfo", equalTo("MIT"))
+                    .body("Content.CodeSize", equalTo(buildHandlerZip().length));
+            given().when().get("/2015-03-31/functions/sam-layer-consumer")
+                    .then().statusCode(200).body("Configuration.Layers[0].Arn", equalTo(arn))
+                    .body("Configuration.Environment.Variables.DependsOn", equalTo("Layer"));
+            given().contentType("application/zip").body(buildHandlerZip())
+                    .when().put("/" + bucket + "/updated.zip").then().statusCode(200);
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "UpdateStack").formParam("StackName", stack)
+                    .formParam("Capabilities.member.1", "CAPABILITY_IAM")
+                    .formParam("TemplateBody", template.replace("Key: layer.zip", "Key: updated.zip"))
+                    .formParam("Parameters.member.1.ParameterKey", "Bucket")
+                    .formParam("Parameters.member.1.ParameterValue", bucket)
+                    .when().post("/").then().statusCode(200);
+            waitForStackStatus(stack, "UPDATE_COMPLETE");
+            String updated = given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "DescribeStacks").formParam("StackName", stack)
+                    .when().post("/").then().statusCode(200).extract().asString();
+            assertThat(stackOutputValue(updated, "LayerArn"), containsString(":layer:sam-shared-layer:2"));
+            given().when().get("/2015-03-31/functions/sam-layer-consumer")
+                    .then().statusCode(200)
+                    .body("Configuration.Layers[0].Arn", equalTo(stackOutputValue(updated, "LayerArn")))
+                    .body("Configuration.Environment.Variables.DependsOn", equalTo("Layer"));
+            given().when().get("/2018-10-31/layers/sam-shared-layer/versions/1")
+                    .then().statusCode(404);
+            given().contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "DeleteStack").formParam("StackName", stack)
+                    .when().post("/").then().statusCode(200);
+            await().atMost(Duration.ofSeconds(5)).untilAsserted(() ->
+                    given().when().get("/2018-10-31/layers/sam-shared-layer/versions/2")
+                            .then().statusCode(404));
+        } finally {
+            given().when().delete("/" + bucket + "/updated.zip");
+            given().when().delete("/" + bucket + "/layer.zip");
+            given().when().delete("/" + bucket);
+        }
     }
 
     private static String stackOutputValue(String describeStacksXml, String outputKey) {

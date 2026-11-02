@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.dsql;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.dsql.model.DsqlCluster;
 import jakarta.inject.Inject;
@@ -220,7 +221,7 @@ public class DsqlController {
     }
 
     private static double epochSeconds(DsqlCluster cluster) {
-        return cluster.getCreationTime().toEpochMilli() / 1000.0;
+        return EpochSeconds.fromInstant(cluster.getCreationTime());
     }
 
     private static String string(Object value) {

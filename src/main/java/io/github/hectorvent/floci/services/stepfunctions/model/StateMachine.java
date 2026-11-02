@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.stepfunctions.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.ArrayList;
@@ -32,7 +33,7 @@ public class StateMachine {
     private List<StateMachineVersion> versions = new ArrayList<>();
 
     public StateMachine() {
-        this.creationDate = System.currentTimeMillis() / 1000.0;
+        this.creationDate = EpochSeconds.fromMillis(System.currentTimeMillis());
     }
 
     public String getStateMachineArn() { return stateMachineArn; }

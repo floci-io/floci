@@ -561,4 +561,43 @@ class BedrockServiceTest {
                 () -> service.getGuardrail(created.getGuardrailId(), null, "eu-west-1"));
         assertTrue(service.listGuardrails(null, null, null, "eu-west-1").items().isEmpty());
     }
+
+    private static String rootPolicy(String resourceArn, String action) {
+        return """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                "Principal":{"AWS":"arn:aws:iam::%s:root"},"Action":"%s","Resource":"%s"}]}
+                """.formatted(ACCOUNT, action, resourceArn);
+    }
+
+    @Test
+    void guardrailResourcePolicyLivesOnTheDraftAndNotOnItsVersions() {
+        Guardrail created = create("with-policy");
+        String policy = rootPolicy(created.getGuardrailArn(), "bedrock:ApplyGuardrail");
+
+        assertNull(service.getResourcePolicy(created.getGuardrailArn(), REGION));
+        service.putResourcePolicy(created.getGuardrailArn(), policy, REGION);
+        Guardrail version = service.createGuardrailVersion(created.getGuardrailId(), null, REGION);
+
+        assertEquals(policy, service.getResourcePolicy(created.getGuardrailArn(), REGION));
+        assertNull(version.getResourcePolicy());
+        service.deleteResourcePolicy(created.getGuardrailArn(), REGION);
+        assertNull(service.getResourcePolicy(created.getGuardrailArn(), REGION));
+    }
+
+    @Test
+    void guardrailResourcePolicyIsFoundByItsExactArnOnly() {
+        Guardrail created = create("exact-arn");
+        String policy = rootPolicy(created.getGuardrailArn(), "bedrock:ApplyGuardrail");
+
+        for (String other : List.of(created.getGuardrailId(),
+                created.getGuardrailArn().replace(ACCOUNT, "111122223333"),
+                created.getGuardrailArn().replace(":guardrail/", ":custom-model/"),
+                "arn:aws:bedrock:" + REGION + ":" + ACCOUNT + ":guardrail-profile/us.guardrail.v1:0")) {
+            AwsException e = assertThrows(AwsException.class, () -> service.getResourcePolicy(other, REGION));
+            assertEquals("ResourceNotFoundException", e.getErrorCode(), other);
+        }
+        AwsException otherRegion = assertThrows(AwsException.class,
+                () -> service.putResourcePolicy(created.getGuardrailArn(), policy, "eu-west-1"));
+        assertEquals("ResourceNotFoundException", otherRegion.getErrorCode());
+    }
 }

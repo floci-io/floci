@@ -67,6 +67,7 @@ class ResourcePolicyPrincipalTypeEnforcementIntegrationTest {
     }
 
     private static void putBucketPolicy(String bucket, String policy) {
+        given().filter(OWNER).when().delete("/" + bucket + "?publicAccessBlock").then().statusCode(204);
         given().filter(OWNER).contentType("application/json").body(policy)
                 .when().put("/" + bucket + "?policy").then().statusCode(200);
     }

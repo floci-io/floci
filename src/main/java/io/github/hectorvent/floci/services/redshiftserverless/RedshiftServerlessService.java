@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.redshift.SnapshotDumpCopier;
 import io.github.hectorvent.floci.services.redshift.TempCredential;
 import io.github.hectorvent.floci.services.redshiftserverless.RedshiftServerlessSnapshotCopyService.CopyRule;
 import io.github.hectorvent.floci.services.redshiftserverless.model.ConfigParameter;
@@ -31,7 +32,6 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.nio.file.StandardCopyOption;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
@@ -816,29 +816,8 @@ public class RedshiftServerlessService implements Resettable {
         if (stored == null || stored.isBlank()) {
             return null;
         }
-        Path sourceDirectory = dumpDir(rule.accountId(), rule.sourceRegion());
-        Path from = Paths.get(stored).toAbsolutePath().normalize();
-        if (!from.startsWith(sourceDirectory) || from.equals(sourceDirectory) || !Files.isRegularFile(from)) {
-            throw new IOException("Snapshot dump is missing or outside its account and Region directory: " + from);
-        }
-        Path destinationDirectory = dumpDir(rule.accountId(), rule.destinationRegion());
-        // Each copy gets its own file, so replacing an earlier copy never touches the dump it still points to.
-        // The name is left out: a 255-character snapshot name plus a suffix would exceed filesystem filename limits.
-        String copyFileName = UUID.randomUUID().toString();
-        Path to = destinationDirectory.resolve(copyFileName + ".sql").normalize();
-        Path staging = destinationDirectory.resolve(copyFileName + ".sql.copying").normalize();
-        if (!to.startsWith(destinationDirectory) || !staging.startsWith(destinationDirectory)) {
-            throw new IOException("Invalid snapshot name: " + source.getSnapshotName());
-        }
-        Files.createDirectories(destinationDirectory);
-        try {
-            Files.copy(from, staging, StandardCopyOption.REPLACE_EXISTING);
-            Files.move(staging, to, StandardCopyOption.ATOMIC_MOVE);
-        } catch (IOException e) {
-            deleteDumpQuietly(staging);
-            throw e;
-        }
-        return to;
+        return SnapshotDumpCopier.copy(Paths.get(stored), dumpDir(rule.accountId(), rule.sourceRegion()),
+                dumpDir(rule.accountId(), rule.destinationRegion()));
     }
 
     /** Records that the snapshot has been carried to the rule's Region, so a deleted or expired copy stays gone. */

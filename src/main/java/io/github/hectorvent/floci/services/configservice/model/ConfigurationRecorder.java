@@ -11,5 +11,6 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 public record ConfigurationRecorder(
         @JsonProperty("name") String name,
         @JsonProperty("roleARN") String roleARN,
-        @JsonProperty("recordingGroup") RecordingGroup recordingGroup) {
+        @JsonProperty("recordingGroup") RecordingGroup recordingGroup,
+        @JsonProperty("recordingMode") RecordingMode recordingMode) {
 }

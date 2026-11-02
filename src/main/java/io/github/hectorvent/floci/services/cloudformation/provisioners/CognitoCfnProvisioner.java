@@ -15,6 +15,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -228,10 +229,16 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
             req.put("UserPoolTags", tags);
         }
 
+        boolean enabledMfasManaged = declaresEnabledMfas(props, ctx) || ctx.previouslyDeclared("EnabledMfas");
         UserPool pool;
         if (ctx.isUpdate()) {
             req.put("UserPoolId", ctx.priorPhysicalId());
             snapshot(r, cognitoService.userPoolSettings(ctx.priorPhysicalId()));
+            if (enabledMfasManaged) {
+                // The MFA mode goes out together with its factors in applyEnabledMfas, so the pool
+                // never pairs the new mode with the old factors.
+                req.remove("MfaConfiguration");
+            }
             pool = cognitoService.updateUserPool(req, ctx.region());
         } else {
             pool = cognitoService.createUserPool(req, ctx.region());
@@ -245,6 +252,59 @@ public class CognitoCfnProvisioner implements CfnResourceProvisioner {
         // mints tokens with, so a template wiring it into a JWT authorizer validates locally.
         r.getAttributes().put("ProviderName", AwsEndpoints.host("cognito-idp", ctx.region()) + "/" + pool.getId());
         r.getAttributes().put("ProviderURL", cognitoService.getIssuer(pool.getId()));
+        if (enabledMfasManaged) {
+            // The pool is already created or updated here, so a refused MFA configuration has to
+            // undo that: a new pool is deleted, an updated one gets its snapshot back.
+            String poolId = pool.getId();
+            CfnRollback.guarded(r, ctx, !ctx.isUpdate(),
+                    () -> delete(USER_POOL, poolId, ctx.region()),
+                    () -> rollbackUpdate(r),
+                    () -> applyEnabledMfas(poolId, props, ctx));
+        }
+    }
+
+    private static boolean declaresEnabledMfas(JsonNode props, ProvisionContext ctx) {
+        JsonNode enabledMfas = props != null ? ctx.engine().resolveNode(props).path("EnabledMfas") : null;
+        return enabledMfas != null && enabledMfas.isArray() && !enabledMfas.isEmpty();
+    }
+
+    /**
+     * EnabledMfas only exists in CloudFormation: CreateUserPool and UpdateUserPool have no such
+     * member, so CloudFormation turns it into SetUserPoolMfaConfig. The pool ends up with exactly
+     * the listed factors, together with the template's MfaConfiguration. SMS_MFA takes the pool's
+     * SmsAuthenticationMessage and SmsConfiguration, EMAIL_OTP its EmailAuthenticationMessage and
+     * EmailAuthenticationSubject.
+     */
+    private void applyEnabledMfas(String poolId, JsonNode props, ProvisionContext ctx) {
+        JsonNode resolved = props != null ? ctx.engine().resolveNode(props) : MAPPER.createObjectNode();
+        Set<String> factors = new HashSet<>();
+        resolved.path("EnabledMfas").forEach(factor -> factors.add(factor.asText()));
+
+        Boolean softwareTokenEnabled = factors.contains("SOFTWARE_TOKEN_MFA") ? Boolean.TRUE : null;
+        Map<String, Object> smsMfaConfiguration = null;
+        if (factors.contains("SMS_MFA")) {
+            smsMfaConfiguration = new LinkedHashMap<>();
+            putIfText(smsMfaConfiguration, "SmsAuthenticationMessage", resolved.path("SmsAuthenticationMessage"));
+            if (resolved.path("SmsConfiguration").isObject()) {
+                smsMfaConfiguration.put("SmsConfiguration", jsonObjectToMap(resolved.path("SmsConfiguration")));
+            }
+        }
+        Map<String, Object> emailMfaConfiguration = null;
+        if (factors.contains("EMAIL_OTP")) {
+            emailMfaConfiguration = new LinkedHashMap<>();
+            putIfText(emailMfaConfiguration, "Message", resolved.path("EmailAuthenticationMessage"));
+            putIfText(emailMfaConfiguration, "Subject", resolved.path("EmailAuthenticationSubject"));
+        }
+        String mfaConfiguration = resolved.path("MfaConfiguration").isTextual()
+                ? resolved.path("MfaConfiguration").asText() : null;
+        cognitoService.replaceUserPoolMfaConfig(poolId, mfaConfiguration, softwareTokenEnabled,
+                smsMfaConfiguration, emailMfaConfiguration);
+    }
+
+    private static void putIfText(Map<String, Object> target, String key, JsonNode value) {
+        if (value.isTextual()) {
+            target.put(key, value.asText());
+        }
     }
 
     private void provisionUserPoolClient(StackResource r, JsonNode props, ProvisionContext ctx) {

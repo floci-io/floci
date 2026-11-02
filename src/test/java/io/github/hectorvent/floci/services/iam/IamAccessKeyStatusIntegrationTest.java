@@ -25,9 +25,8 @@ import static org.hamcrest.Matchers.equalTo;
  * implicitly based on the AWS access key ID used to sign the request", the sentence this operation
  * shares with DeleteAccessKey and ListAccessKeys.
  *
- * <p>The refusal is the rendering {@code IamService.requireStatusFromEnum} already answers for the
- * other three operations that take this shape, which names neither the offending value nor the
- * permitted set, as AWS's own recording of one of them does not.
+ * <p>The four operations share {@code IamService.requireStatusFromEnum}; the latest AWS captures
+ * distinguish an absent status from a present value outside the enum.
  */
 @QuarkusTest
 class IamAccessKeyStatusIntegrationTest {
@@ -61,19 +60,22 @@ class IamAccessKeyStatusIntegrationTest {
                 .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
                 .body("ErrorResponse.Error.Message",
                         equalTo("1 validation error detected: Value at 'status' failed to satisfy "
-                                + "constraint: Member must satisfy enum value set"));
+                                + "constraint: Member must satisfy enum value set: "
+                                + "[Expired, Active, Inactive]"));
 
         assertStatusStillActive(userName);
     }
 
     @Test
-    void anAbsentStatusIsAnsweredTheSameWay() {
+    void anAbsentStatusNamesTheMissingMember() {
         String userName = user("absent-status");
         String accessKeyId = accessKeyFor(userName);
 
         update(ACCOUNT, Map.of("UserName", userName, "AccessKeyId", accessKeyId)).statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("ValidationError"))
-                .body("ErrorResponse.Error.Message", containsString("at 'status'"));
+                .body("ErrorResponse.Error.Message",
+                        equalTo("1 validation error detected: Value at 'status' failed to satisfy "
+                                + "constraint: Member must not be null"));
 
         assertStatusStillActive(userName);
     }

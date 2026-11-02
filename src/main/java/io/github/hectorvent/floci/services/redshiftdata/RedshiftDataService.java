@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.common.SqlParameterParser.ParsedSql;
@@ -703,7 +704,7 @@ public class RedshiftDataService implements Resettable {
         } else if (stored.workgroupName == null) {
             response.putNull("ClusterIdentifier");
         }
-        response.put("CreatedAt", epochSeconds(stored.createdAt));
+        response.put("CreatedAt", EpochSeconds.fromInstant(stored.createdAt));
         response.put("Database", stored.database);
         if (stored.dbUser != null) {
             response.put("DbUser", stored.dbUser);
@@ -729,8 +730,8 @@ public class RedshiftDataService implements Resettable {
         }
         response.put("Id", stored.id);
         response.put("Status", stored.status.name());
-        response.put("CreatedAt", epochSeconds(stored.createdAt));
-        response.put("UpdatedAt", epochSeconds(stored.updatedAt));
+        response.put("CreatedAt", EpochSeconds.fromInstant(stored.createdAt));
+        response.put("UpdatedAt", EpochSeconds.fromInstant(stored.updatedAt));
         response.put("Duration", stored.durationNanos);
         if (stored.error != null) {
             response.put("Error", stored.error);
@@ -1073,8 +1074,8 @@ public class RedshiftDataService implements Resettable {
                 queryStrings.add(sql);
             }
             node.put("Status", s.status.name());
-            node.put("CreatedAt", epochSeconds(s.createdAt));
-            node.put("UpdatedAt", epochSeconds(s.updatedAt));
+            node.put("CreatedAt", EpochSeconds.fromInstant(s.createdAt));
+            node.put("UpdatedAt", EpochSeconds.fromInstant(s.updatedAt));
             if (s.statementName != null) {
                 node.put("StatementName", s.statementName);
             }
@@ -1341,10 +1342,6 @@ public class RedshiftDataService implements Resettable {
             throw new AwsException("ValidationException", "NextToken is not valid.", 400);
         }
         return offset;
-    }
-
-    static double epochSeconds(Instant instant) {
-        return instant.toEpochMilli() / 1000.0;
     }
 
     private String clusterIdentifierOrNull(JsonNode request) {

@@ -1,15 +1,12 @@
 package io.github.hectorvent.floci.services.configservice;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRule;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRuleSource;
+import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import io.github.hectorvent.floci.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -230,17 +227,7 @@ class AwsConfigServiceTaggingTest {
 
     private static AwsConfigService serviceWithTagStore(StorageBackend<String, Map<String, String>> tagStore) {
         AwsConfigService service = new AwsConfigService(new RegionResolver(REGION, ACCOUNT),
-                new StorageFactory(null, null) {
-                    @Override
-                    @SuppressWarnings("unchecked")
-                    public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
-                            TypeReference<Map<String, V>> typeReference, WriteProfile profile) {
-                        return fileName.equals("config-tags.json")
-                                ? new AccountAwareStorageBackend<>((StorageBackend<String, V>) (Object) tagStore,
-                                        null, ACCOUNT)
-                                : AccountAwareStorageBackend.inMemory(ACCOUNT);
-                    }
-                });
+                new InMemoryStorageFactory(ACCOUNT).withStore("config-tags.json", tagStore));
         service.initializeStorage();
         return service;
     }

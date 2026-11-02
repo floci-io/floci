@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.redshift.spectrum;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
@@ -37,6 +39,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Predicate;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -46,6 +49,8 @@ public class ExternalTableMaterializer {
     public static final String SCRATCH_BUCKET = S3Service.REDSHIFT_SPECTRUM_SCRATCH_BUCKET;
     private static final String SQLSTATE_LOAD_FAILED = "58030";
     private static final String SQLSTATE_INSUFFICIENT_PRIVILEGE = "42501";
+    private static final Pattern DUCKDB_HTTP_403 = Pattern.compile(
+            "\\bHTTP(?:/[0-9.]+)?\\s+(?:Error:\\s+)?(?:HTTP(?:/[0-9.]+)?\\s+)?403\\b|\\b403\\s*\\(Forbidden\\)|\\b403\\s+Forbidden\\b");
     private static final long LOCK_TIMEOUT_SECONDS = 30;
     private static final String SCRATCH_KEY_PREFIX = "spectrum-";
     private static final Duration STALE_SCRATCH_AGE = Duration.ofHours(1);
@@ -168,7 +173,7 @@ public class ExternalTableMaterializer {
                 }
                 String previousSignature = local == null ? schemaSignatures.get(cacheKey) : local.definitions();
                 latestLoads.remove(cacheKey);
-                String definitions = load(backend, session, binding, table, sources, previousSignature);
+                String definitions = load(backend, session, binding, roleSession, table, sources, previousSignature);
                 if (!backend.permitsCachePublication()) {
                     fingerprints.remove(cacheKey);
                     PendingLoad loaded = new PendingLoad(fingerprint, definitions);
@@ -200,6 +205,10 @@ public class ExternalTableMaterializer {
         } catch (SpectrumSqlException | SpectrumReadException exception) {
             throw exception;
         } catch (RuntimeException exception) {
+            if (isAccessDenied(exception)) {
+                throw new SpectrumReadException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                        "Access denied for external table \"" + label + "\"", exception);
+            }
             // the cause can carry DuckDB request text, so it goes to the log and not to the client
             LOG.warnv(exception, "Unable to load external table {0}", label);
             throw new SpectrumReadException(SQLSTATE_LOAD_FAILED, "Unable to load external table \"" + label + "\"", exception);
@@ -287,7 +296,7 @@ public class ExternalTableMaterializer {
     private RedshiftRoleAccess.RoleSession openRoleSession(ExternalSchemaBinding binding, SpectrumSession session) {
         try {
             return RedshiftRoleAccess.resolveRoleSession(binding.iamRoleArn(), iamService, session.accountId(),
-                    session.iamRoleArns());
+                    session.iamRoleArns(), RedshiftRoleAccess.STREAMING_ROLE_SESSION_TTL);
         } catch (S3CopySimulator.S3TransferException exception) {
             throw new SpectrumSqlException(exception.sqlState(), exception.getMessage());
         }
@@ -368,7 +377,7 @@ public class ExternalTableMaterializer {
                     + "\" has no supported metadata_location");
         }
         String sql = ICEBERG_DATA_FILES.formatted(sqlPathLiteral(metadata));
-        List<Map<String, Object>> rows = duckClient.query(sql, ICEBERG_SETUP, accountId);
+        List<Map<String, Object>> rows = duckQuery(accountId, roleSession, sql);
         for (Map<String, Object> row : rows) {
             Object value = row.get("file_path");
             if (!(value instanceof String filePath) || filePath.isBlank()) {
@@ -431,8 +440,8 @@ public class ExternalTableMaterializer {
         S3Location manifestList = icebergFileLocation(manifestListPath, location);
         authorizeIcebergObject(accountId, binding, roleSession, manifestList);
         String manifestListUri = "s3://" + manifestList.bucket() + "/" + manifestList.key();
-        List<Map<String, Object>> manifests = duckClient.query(
-                ICEBERG_MANIFESTS.formatted(sqlPathLiteral(manifestListUri)), ICEBERG_SETUP, accountId);
+        List<Map<String, Object>> manifests = duckQuery(accountId, roleSession,
+                ICEBERG_MANIFESTS.formatted(sqlPathLiteral(manifestListUri)));
         for (Map<String, Object> manifest : manifests) {
             Object manifestValue = manifest.get("manifest_path");
             if (!(manifestValue instanceof String manifestPath) || manifestPath.isBlank()) {
@@ -623,7 +632,8 @@ public class ExternalTableMaterializer {
      * match {@code loadedDefinitions} the target table is refilled in place, so views and grants that
      * depend on it survive; a schema change replaces the table instead.
      */
-    private String load(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding, Table table,
+    private String load(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
+                        RedshiftRoleAccess.RoleSession roleSession, Table table,
                         List<ReadSource> sources, String loadedDefinitions) {
         GlueTableResolver.ReadPlan plan = GlueTableResolver.readPlan(table);
         if (plan.columns().isEmpty()) {
@@ -644,7 +654,13 @@ public class ExternalTableMaterializer {
                 // before a key exists: a scratch bucket that is not ours must see no write and no delete
                 prepareScratchBucket(session.accountId());
                 scratchKey = SCRATCH_KEY_PREFIX + UUID.randomUUID() + ".csv";
-                readWithDuckDb(session.accountId(), table, sources,
+                if (roleSession != null && roleSession.accessKeyId() != null) {
+                    String partition = AwsRegions.partitionFor(config.defaultRegion());
+                    String scratchArn = AwsArnUtils.Arn.global(partition, "s3", "",
+                            SCRATCH_BUCKET + "/" + scratchKey).toString();
+                    iamService.registerSpectrumScratchResource(roleSession.accessKeyId(), scratchArn);
+                }
+                readWithDuckDb(session.accountId(), roleSession, table, sources,
                         config.services().redshift().spectrumMaxRows(), scratchKey);
                 long rows;
                 String resultKey = scratchKey;
@@ -678,6 +694,9 @@ public class ExternalTableMaterializer {
             }
             throw exception;
         } finally {
+            if (roleSession != null && roleSession.accessKeyId() != null) {
+                iamService.clearSpectrumScratchResource(roleSession.accessKeyId());
+            }
             if (scratchKey != null) {
                 String cleanupKey = scratchKey;
                 try {
@@ -698,7 +717,8 @@ public class ExternalTableMaterializer {
         });
     }
 
-    private void readWithDuckDb(String accountId, Table table, List<ReadSource> sources, long maxRows,
+    private void readWithDuckDb(String accountId, RedshiftRoleAccess.RoleSession roleSession,
+                                Table table, List<ReadSource> sources, long maxRows,
                                 String scratchKey) {
         List<String> selects = sources.stream().filter(source -> source.partition() == null || !source.objects().isEmpty())
                 .map(this::readSelect).toList();
@@ -709,8 +729,70 @@ public class ExternalTableMaterializer {
         String query = selects.size() == 1 ? selects.getFirst()
                 : "SELECT * FROM (" + String.join(" UNION ALL ", selects) + ") AS spectrum_partitions";
         String setup = GlueTableResolver.isIcebergTable(table) ? ICEBERG_SETUP : null;
-        duckClient.execute(query + " LIMIT " + (maxRows + 1), setup,
-                "s3://" + SCRATCH_BUCKET + "/" + scratchKey, accountId);
+        String outputPath = "s3://" + SCRATCH_BUCKET + "/" + scratchKey;
+        try {
+            if (s3Service.isAuthEnforced()) {
+                requireSignedSession(roleSession);
+                duckClient.execute(query + " LIMIT " + (maxRows + 1), setup, outputPath,
+                        roleSession.accessKeyId(), roleSession.secretAccessKey(), roleSession.sessionToken());
+            } else {
+                duckClient.execute(query + " LIMIT " + (maxRows + 1), setup, outputPath, accountId);
+            }
+        } catch (RuntimeException exception) {
+            if (isAccessDenied(exception)) {
+                throw new SpectrumReadException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                        "Access denied during external table transfer for \"" + table.getName() + "\"", exception);
+            }
+            throw exception;
+        }
+    }
+
+    private List<Map<String, Object>> duckQuery(String accountId, RedshiftRoleAccess.RoleSession roleSession,
+                                                String sql) {
+        try {
+            if (!s3Service.isAuthEnforced()) {
+                return duckClient.query(sql, ICEBERG_SETUP, accountId);
+            }
+            requireSignedSession(roleSession);
+            return duckClient.query(sql, ICEBERG_SETUP,
+                    roleSession.accessKeyId(), roleSession.secretAccessKey(), roleSession.sessionToken());
+        } catch (RuntimeException exception) {
+            if (isAccessDenied(exception)) {
+                throw new SpectrumReadException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
+                        "Access denied during Iceberg metadata scan", exception);
+            }
+            throw exception;
+        }
+    }
+
+    /**
+     * Whether an exception represents an S3 or IAM access denial (e.g. HTTP 403 from S3/IAM,
+     * DuckDB's HTTP 403 error, or an AccessDenied error response).
+     */
+    private static boolean isAccessDenied(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current instanceof AwsException aws && (aws.getHttpStatus() == 403
+                    || "AccessDenied".equalsIgnoreCase(aws.getErrorCode()))) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null && (DUCKDB_HTTP_403.matcher(message).find()
+                    || message.contains("AccessDenied")
+                    || message.contains("Access Denied"))) {
+                return true;
+            }
+            current = current.getCause();
+        }
+        return false;
+    }
+
+    /** Under S3 auth enforcement a transfer never falls back to the account-scoped development credentials. */
+    private static void requireSignedSession(RedshiftRoleAccess.RoleSession roleSession) {
+        if (roleSession == null || roleSession.accessKeyId() == null || roleSession.secretAccessKey() == null) {
+            throw new SpectrumReadException(SQLSTATE_LOAD_FAILED,
+                    "Unable to load external table: no signed role session for the S3 transfer");
+        }
     }
 
     /**

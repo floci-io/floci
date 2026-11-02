@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -243,5 +244,114 @@ class Ec2TransitGatewayVpcAttachmentIntegrationTest {
         .when().post("/")
         .then().statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("InvalidTransitGatewayConnectID.NotFound"));
+    }
+
+    private String createGateway(String propagation) {
+        RequestSpecification request = given()
+            .formParam("Action", "CreateTransitGateway")
+            .header("Authorization", AUTH_HEADER);
+        if (propagation != null) {
+            request = request.formParam("Options.DefaultRouteTablePropagation", propagation);
+        }
+        return request.when().post("/").then().statusCode(200)
+            .extract().path("CreateTransitGatewayResponse.transitGateway.transitGatewayId");
+    }
+
+    private String propagationTableOf(String gatewayId) {
+        return given()
+            .formParam("Action", "DescribeTransitGateways")
+            .formParam("TransitGatewayIds.1", gatewayId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("DescribeTransitGatewaysResponse.transitGatewaySet.item.options"
+                    + ".propagationDefaultRouteTableId");
+    }
+
+    private String attach(String gatewayId) {
+        String vpc = given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", "10.81.0.0/16")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateVpcResponse.vpc.vpcId");
+        String subnet = given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpc)
+            .formParam("CidrBlock", "10.81.1.0/24")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateSubnetResponse.subnet.subnetId");
+        return given()
+            .formParam("Action", "CreateTransitGatewayVpcAttachment")
+            .formParam("TransitGatewayId", gatewayId)
+            .formParam("VpcId", vpc)
+            .formParam("SubnetIds.1", subnet)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateTransitGatewayVpcAttachmentResponse.transitGatewayVpcAttachment"
+                    + ".transitGatewayAttachmentId");
+    }
+
+    private String propagationsOf(String tableId) {
+        return given()
+            .formParam("Action", "GetTransitGatewayRouteTablePropagations")
+            .formParam("TransitGatewayRouteTableId", tableId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().asString();
+    }
+
+    @Test
+    @Order(9)
+    void attachmentPropagatesIntoTheDefaultTableAndLeavesItOnDelete() {
+        String gateway = createGateway(null);
+        String table = propagationTableOf(gateway);
+        String attachment = attach(gateway);
+
+        String body = propagationsOf(table);
+        assertThat(body, containsString("<transitGatewayAttachmentId>" + attachment + "</transitGatewayAttachmentId>"));
+        assertThat(body, containsString("<resourceType>vpc</resourceType>"));
+        assertThat(body, containsString("<state>enabled</state>"));
+
+        String attachedVpc = given()
+            .formParam("Action", "DescribeTransitGatewayVpcAttachments")
+            .formParam("TransitGatewayAttachmentIds.1", attachment)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("DescribeTransitGatewayVpcAttachmentsResponse.transitGatewayVpcAttachments.item.vpcId");
+        assertThat(body, containsString("<resourceId>" + attachedVpc + "</resourceId>"));
+
+        given()
+            .formParam("Action", "DeleteTransitGatewayVpcAttachment")
+            .formParam("TransitGatewayAttachmentId", attachment)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+
+        assertThat(propagationsOf(table), not(containsString(attachment)));
+    }
+
+    @Test
+    @Order(10)
+    void attachmentDoesNotPropagateWhenGatewayDisablesDefaultPropagation() {
+        String gateway = createGateway("disable");
+        String attachment = attach(gateway);
+        String associationTable = given()
+            .formParam("Action", "DescribeTransitGateways")
+            .formParam("TransitGatewayIds.1", gateway)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("DescribeTransitGatewaysResponse.transitGatewaySet.item.options"
+                    + ".associationDefaultRouteTableId");
+
+        // Regression guard for the enable check: the default association table must not gain a propagation.
+        assertThat(propagationsOf(associationTable), not(containsString(attachment)));
     }
 }

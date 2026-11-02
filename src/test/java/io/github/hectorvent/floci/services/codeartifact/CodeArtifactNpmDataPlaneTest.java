@@ -42,6 +42,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
@@ -1056,6 +1057,241 @@ class CodeArtifactNpmDataPlaneTest {
                 any(), any(), any());
     }
 
+    /**
+     * {@link CodeArtifactNpmExternalConnectionImporter#mergedPackument} is only ever reached for
+     * the exact bare-packument shape {@link #aPlainPackageMetadataGetNeverConsultsTheDownloadGuard}
+     * already exercises against the download guard; here it actually has something to merge, and
+     * the merged document is served directly, never reaching Verdaccio at all.
+     */
+    @Test
+    void aBarePackumentGetServesTheExternalConnectionImportersMergedDocumentWithoutProxying() throws Exception {
+        AtomicReference<Boolean> upstreamReceivedRequest = new AtomicReference<>(false);
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> {
+                    upstreamReceivedRequest.set(true);
+                    request.response().setStatusCode(200).end("{}");
+                })
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        CodeArtifactNpmExternalConnectionImporter externalConnectionImporter =
+                mock(CodeArtifactNpmExternalConnectionImporter.class);
+        ObjectNode merged = JSON.createObjectNode().put("name", "my-pkg");
+        when(externalConnectionImporter.mergedPackument("us-east-1", DOMAIN, "000000000000", REPOSITORY,
+                NPM_REPOSITORY_ID, null, "my-pkg", true)).thenReturn(Optional.of(merged));
+        startDataPlane(service, verdaccioClient, externalConnectionImporter, true);
+
+        HttpResponse response = get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token");
+
+        assertEquals(200, response.statusCode());
+        assertEquals("application/json", response.headers().get("content-type"));
+        assertEquals(merged, JSON.readTree(response.body()));
+        assertEquals(false, upstreamReceivedRequest.get());
+    }
+
+    /**
+     * Raised by Greptile's review: a real {@code npm install} sends {@code pacote}'s own corgi-
+     * preferring {@code Accept}, confirmed against its source, and must keep resolving the real
+     * registry's cheaper abbreviated form; a bare GET with no {@code Accept} header at all (what
+     * the sibling test above sends, and what a bare {@code curl} sends) is treated as wanting the
+     * full form instead, confirmed live against the real registry's own default.
+     */
+    @Test
+    void aBarePackumentGetWithACorgiAcceptHeaderAsksForTheAbbreviatedForm() throws Exception {
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> request.response().setStatusCode(200).end("{}"))
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        CodeArtifactNpmExternalConnectionImporter externalConnectionImporter =
+                mock(CodeArtifactNpmExternalConnectionImporter.class);
+        startDataPlane(service, verdaccioClient, externalConnectionImporter, true);
+
+        getWithAccept("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg", "good-token",
+                "application/vnd.npm.install-v1+json; q=1.0, application/json; q=0.8, */*");
+
+        verify(externalConnectionImporter).mergedPackument("us-east-1", DOMAIN, "000000000000", REPOSITORY,
+                NPM_REPOSITORY_ID, null, "my-pkg", false);
+    }
+
+    /**
+     * The same bare-packument shape, scoped: the namespace has to reach {@code mergedPackument}
+     * decoded, the same {@code %2F}/{@code %2f} handling every other native route here already
+     * applies before calling into {@code CodeArtifactService}.
+     */
+    @Test
+    void aBarePackumentGetOfAScopedPackageDecodesTheNamespaceBeforeMerging() throws Exception {
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> request.response().setStatusCode(200).end("{}"))
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        CodeArtifactNpmExternalConnectionImporter externalConnectionImporter =
+                mock(CodeArtifactNpmExternalConnectionImporter.class);
+        startDataPlane(service, verdaccioClient, externalConnectionImporter, true);
+
+        HttpResponse response = get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/@myscope%2fmy-pkg",
+                "good-token");
+
+        assertEquals(200, response.statusCode());
+        verify(externalConnectionImporter).mergedPackument("us-east-1", DOMAIN, "000000000000", REPOSITORY,
+                NPM_REPOSITORY_ID, "myscope", "my-pkg", true);
+    }
+
+    /**
+     * A registry meta route ({@code /-/all}, a dist-tags update, and so on) must never be mistaken
+     * for a one-segment package name: the registry itself reserves the whole {@code -} prefix, so
+     * nothing here ever merges or imports for it.
+     */
+    @Test
+    void aRegistryMetaRouteIsNeverTreatedAsABarePackumentGet() throws Exception {
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> request.response().setStatusCode(200).end("[]"))
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        CodeArtifactNpmExternalConnectionImporter externalConnectionImporter =
+                mock(CodeArtifactNpmExternalConnectionImporter.class);
+        startDataPlane(service, verdaccioClient, externalConnectionImporter, true);
+
+        HttpResponse response = get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/-/all", "good-token");
+
+        assertEquals(200, response.statusCode());
+        verify(externalConnectionImporter, never()).mergedPackument(any(), any(), any(), any(), any(), any(), any(),
+                anyBoolean());
+    }
+
+    /**
+     * A tarball download missing from Verdaccio attempts an external-connection import first, the
+     * same cache-miss trigger {@code CodeArtifactNuGetController} already uses, before proxying:
+     * the version is read back out of the one {@code <bareName>-<version>.tgz} shape {@link
+     * CodeArtifactNpmExternalConnectionImporter#mergedPackument} itself always synthesizes.
+     */
+    @Test
+    void aTarballDownloadMissingLocallyAttemptsAnExternalConnectionImportBeforeProxying() throws Exception {
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> request.response().setStatusCode(200).end("tarball bytes"))
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        when(verdaccioClient.packageVersionExists(NPM_REPOSITORY_ID, DOMAIN, REPOSITORY, null, "my-pkg", "1.0.0"))
+                .thenReturn(false);
+        CodeArtifactNpmExternalConnectionImporter externalConnectionImporter =
+                mock(CodeArtifactNpmExternalConnectionImporter.class);
+        startDataPlane(service, verdaccioClient, externalConnectionImporter, true);
+
+        HttpResponse response = get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg/-/my-pkg-1.0.0.tgz",
+                "good-token");
+
+        assertEquals(200, response.statusCode());
+        verify(externalConnectionImporter).tryImportAsset("us-east-1", DOMAIN, "000000000000", REPOSITORY,
+                NPM_REPOSITORY_ID, null, "my-pkg", "1.0.0", "my-pkg-1.0.0.tgz");
+    }
+
+    @Test
+    void aTarballDownloadAlreadyPresentLocallyNeverAttemptsAnExternalConnectionImport() throws Exception {
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> request.response().setStatusCode(200).end("tarball bytes"))
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        when(verdaccioClient.packageVersionExists(NPM_REPOSITORY_ID, DOMAIN, REPOSITORY, null, "my-pkg", "1.0.0"))
+                .thenReturn(true);
+        CodeArtifactNpmExternalConnectionImporter externalConnectionImporter =
+                mock(CodeArtifactNpmExternalConnectionImporter.class);
+        startDataPlane(service, verdaccioClient, externalConnectionImporter, true);
+
+        HttpResponse response = get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg/-/my-pkg-1.0.0.tgz",
+                "good-token");
+
+        assertEquals(200, response.statusCode());
+        verify(externalConnectionImporter, never()).tryImportAsset(any(), any(), any(), any(), any(), any(), any(),
+                any(), any());
+    }
+
+    /**
+     * A tarball filename that does not fit the {@code <bareName>-<version>.tgz} shape this
+     * importer itself always synthesizes (a real local publish's own, differently-named tarball)
+     * is left alone entirely: there is no version to read back out of it for an import attempt,
+     * the same reasoning {@link CodeArtifactNpmExternalConnectionImporter}'s own javadoc gives for
+     * never guessing one.
+     */
+    @Test
+    void aTarballFilenameNotMatchingTheSynthesizedShapeNeverAttemptsAnExternalConnectionImport() throws Exception {
+        upstream = vertx.createHttpServer()
+                .requestHandler(request -> request.response().setStatusCode(200).end("tarball bytes"))
+                .listen(0, "127.0.0.1")
+                .toCompletionStage().toCompletableFuture().get(2, TimeUnit.SECONDS);
+
+        CodeArtifactService service = mock(CodeArtifactService.class);
+        when(service.resolveAuthorizationToken("good-token", DOMAIN))
+                .thenReturn(Optional.of(new AuthorizationTokenScope("000000000000", "us-east-1")));
+        when(service.ensureFormatContainerId("npm", "us-east-1", DOMAIN, "000000000000", REPOSITORY))
+                .thenReturn(NPM_REPOSITORY_ID);
+        VerdaccioSidecarClient verdaccioClient = mock(VerdaccioSidecarClient.class);
+        when(verdaccioClient.ensureReady(eq(NPM_REPOSITORY_ID), anyString()))
+                .thenReturn("http://127.0.0.1:" + upstream.actualPort());
+        CodeArtifactNpmExternalConnectionImporter externalConnectionImporter =
+                mock(CodeArtifactNpmExternalConnectionImporter.class);
+        startDataPlane(service, verdaccioClient, externalConnectionImporter, true);
+
+        HttpResponse response = get("/codeartifact/npm/" + DOMAIN + "/" + REPOSITORY + "/my-pkg/-/bundle.tgz",
+                "good-token");
+
+        assertEquals(200, response.statusCode());
+        verify(externalConnectionImporter, never()).tryImportAsset(any(), any(), any(), any(), any(), any(), any(),
+                any(), any());
+        verify(verdaccioClient, never()).packageVersionExists(any(), any(), any(), any(), any(), any());
+    }
+
     private void startDataPlane(CodeArtifactService service, VerdaccioSidecarClient verdaccioClient)
             throws Exception {
         startDataPlane(service, verdaccioClient, true);
@@ -1063,12 +1299,25 @@ class CodeArtifactNpmDataPlaneTest {
 
     private void startDataPlane(CodeArtifactService service, VerdaccioSidecarClient verdaccioClient,
                                  boolean codeArtifactEnabled) throws Exception {
+        // A fresh, unstubbed mock: Mockito's own default answer for an unstubbed Optional-returning
+        // method is Optional.empty(), which every test here that never configures it relies on to
+        // mean "nothing to merge, proceed with the ordinary proxy" exactly as if this importer did
+        // not exist.
+        CodeArtifactNpmExternalConnectionImporter externalConnectionImporter =
+                mock(CodeArtifactNpmExternalConnectionImporter.class);
+        startDataPlane(service, verdaccioClient, externalConnectionImporter, codeArtifactEnabled);
+    }
+
+    private void startDataPlane(CodeArtifactService service, VerdaccioSidecarClient verdaccioClient,
+                                 CodeArtifactNpmExternalConnectionImporter externalConnectionImporter,
+                                 boolean codeArtifactEnabled) throws Exception {
         when(verdaccioClient.publicUrl(DOMAIN, REPOSITORY)).thenReturn("http://localhost:4566/codeartifact/npm/"
                 + DOMAIN + "/" + REPOSITORY + "/");
         ServiceConfigAccess serviceConfigAccess = mock(ServiceConfigAccess.class);
         when(serviceConfigAccess.isEnabled("codeartifact")).thenReturn(codeArtifactEnabled);
         Router router = Router.router(vertx);
-        new CodeArtifactNpmDataPlane(service, verdaccioClient, serviceConfigAccess, vertx, new ObjectMapper())
+        new CodeArtifactNpmDataPlane(service, verdaccioClient, externalConnectionImporter, serviceConfigAccess,
+                vertx, new ObjectMapper())
                 .register(router);
         dataPlane = vertx.createHttpServer().requestHandler(router)
                 .listen(0, "127.0.0.1")
@@ -1077,6 +1326,10 @@ class CodeArtifactNpmDataPlaneTest {
 
     private HttpResponse get(String path, String bearerToken) throws Exception {
         return request(HttpMethod.GET, path, bearerToken, null);
+    }
+
+    private HttpResponse getWithAccept(String path, String bearerToken, String accept) throws Exception {
+        return request(HttpMethod.GET, path, bearerToken, null, accept);
     }
 
     private HttpResponse put(String path, String bearerToken, String body) throws Exception {
@@ -1095,6 +1348,11 @@ class CodeArtifactNpmDataPlaneTest {
      * leaves exactly one blocking {@code .get()} at the very end.
      */
     private HttpResponse request(HttpMethod method, String path, String bearerToken, String body) throws Exception {
+        return request(method, path, bearerToken, body, null);
+    }
+
+    private HttpResponse request(HttpMethod method, String path, String bearerToken, String body, String accept)
+            throws Exception {
         RequestOptions options = new RequestOptions()
                 .setHost("127.0.0.1")
                 .setPort(dataPlane.actualPort())
@@ -1104,6 +1362,9 @@ class CodeArtifactNpmDataPlaneTest {
                 .compose(req -> {
                     if (bearerToken != null) {
                         req.putHeader("Authorization", "Bearer " + bearerToken);
+                    }
+                    if (accept != null) {
+                        req.putHeader("Accept", accept);
                     }
                     return body != null ? req.send(body) : req.send();
                 })

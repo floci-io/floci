@@ -1176,6 +1176,7 @@ class IamConditionContextResolverTest {
 
         assertEquals(Map.of(
                 "aws:PrincipalIsAWSService", List.of("true"),
+                "aws:ViaAWSService", List.of("false"),
                 "aws:PrincipalServiceName", List.of("ses.amazonaws.com"),
                 "aws:PrincipalServiceNamesList", List.of("ses.amazonaws.com"),
                 "aws:SourceArn", List.of("arn:aws:ses:eu-west-2:444455556666:configuration-set/my-set"),

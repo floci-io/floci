@@ -35,6 +35,12 @@ class S3AclIntegrationTest {
             .put("/" + BUCKET + "?ownershipControls")
         .then()
             .statusCode(200);
+
+        given()
+        .when()
+            .delete("/" + BUCKET + "?publicAccessBlock")
+        .then()
+            .statusCode(204);
     }
 
     @Test

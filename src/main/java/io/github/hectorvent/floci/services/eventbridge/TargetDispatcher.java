@@ -93,9 +93,14 @@ public class TargetDispatcher implements Resettable {
     public void dispatch(String ruleArn, Target target, String eventJson, String region,
                          Supplier<List<Target>> currentTargets) {
         Instant now = clock.instant();
+        Delivery delivery = new Delivery(ruleArn, target.getId(), eventJson, region, currentTargets,
+                generation.get(), now, 0, null, null, now);
         try {
-            attempt(new Delivery(ruleArn, target.getId(), eventJson, region, currentTargets, generation.get(), now, 0,
-                    null, null, now), target, now);
+            if (AwsArnUtils.isArn(ruleArn)) {
+                RequestScopes.runAs(AwsArnUtils.parse(ruleArn).accountId(), () -> attempt(delivery, target, now));
+            } else {
+                attempt(delivery, target, now);
+            }
         } catch (RuntimeException e) {
             LOG.warnv("EventBridge rule {0} could not dispatch to target {1}: {2}",
                     ruleArn, target.getId(), e.getMessage());
@@ -114,7 +119,11 @@ public class TargetDispatcher implements Resettable {
                 return;
             }
             try {
-                RequestScopes.runAs(AwsArnUtils.parse(delivery.ruleArn()).accountId(), () -> retry(delivery, now));
+                if (AwsArnUtils.isArn(delivery.ruleArn())) {
+                    RequestScopes.runAs(AwsArnUtils.parse(delivery.ruleArn()).accountId(), () -> retry(delivery, now));
+                } else {
+                    retry(delivery, now);
+                }
             } catch (RuntimeException e) {
                 LOG.warnv("EventBridge retry for rule {0} target {1} failed: {2}",
                         delivery.ruleArn(), delivery.targetId(), e.getMessage());
@@ -148,7 +157,7 @@ public class TargetDispatcher implements Resettable {
 
     private void attempt(Delivery delivery, Target target, Instant now) {
         try {
-            invoker.invokeTarget(target, delivery.eventJson(), delivery.region());
+            invoker.invokeTarget(target, delivery.eventJson(), delivery.region(), delivery.ruleArn());
         } catch (Exception e) {
             if (delivery.generation() != generation.get()) {
                 return;
@@ -179,7 +188,10 @@ public class TargetDispatcher implements Resettable {
             return "INTERNAL_ERROR";
         }
         String code = aws.getErrorCode() != null ? aws.getErrorCode() : "";
-        if (aws.getHttpStatus() == 429 || code.contains("Throttl") || code.contains("TooManyRequests")) {
+        if (aws.getHttpStatus() == 429
+                || code.contains("Throttl")
+                || code.contains("TooManyRequests")
+                || "ActiveStatementsExceededException".equals(code)) {
             return "THROTTLING";
         }
         if (aws.getHttpStatus() >= 500) {

@@ -168,9 +168,9 @@ public final class SmithyValidationErrors {
      * what {@code docs/services/iam.md} records as the reading. Choosing a form here rather than at
      * each message means a later capture changes one object instead of a package.
      *
-     * <p>Only the violations that carry a value differ. A required member the request leaves out
-     * ({@link #notNull}), a list held to its member count ({@link #sizeOutOfRange}) and a list
-     * checked as a whole ({@link #notAllInEnum}) read the same either way.
+     * <p>This form applies only to violations that carry a value. Required-member omissions use
+     * {@link #notNull} or {@link #notNullWithoutValue}, depending on the operation. List size and
+     * whole-list checks use {@link #sizeOutOfRange} and {@link #notAllInEnum} separately.
      */
     public static final class Violations {
 

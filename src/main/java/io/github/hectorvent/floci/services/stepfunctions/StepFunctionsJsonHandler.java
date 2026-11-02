@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.SignedMarkers;
@@ -518,7 +519,7 @@ public class StepFunctionsJsonHandler {
                 request.path("error").asText(null)
         );
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("stopDate", System.currentTimeMillis() / 1000.0);
+        response.put("stopDate", EpochSeconds.fromMillis(System.currentTimeMillis()));
         return Response.ok(response).build();
     }
 

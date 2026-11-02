@@ -1,12 +1,16 @@
 # Route53
 
-Route53 emulation supporting hosted zones, resource record sets, health checks, change tracking, and tagging. Private hosted zones provide embedded DNS resolution for cluster containers such as EKS and workloads wired to Floci's embedded DNS server.
+Route53 emulation supporting hosted zones, reusable delegation sets, resource record sets, health checks, change tracking, and tagging. Private hosted zones provide embedded DNS resolution for cluster containers such as EKS and workloads wired to Floci's embedded DNS server.
 
 ## Supported Operations
 
 <!-- floci:actions:start -->
 | Action | Description |
 | --- | --- |
+| `CreateReusableDelegationSet` | `POST /2013-04-01/delegationset`. Optionally promotes an existing public zone with `HostedZoneId`. |
+| `GetReusableDelegationSet` | `GET /2013-04-01/delegationset/{Id}` |
+| `DeleteReusableDelegationSet` | `DELETE /2013-04-01/delegationset/{Id}`. Refuses to delete a set in use by a zone. |
+| `ListReusableDelegationSets` | `GET /2013-04-01/delegationset`. Paginates with `marker` / `maxitems`. |
 | `CreateHostedZone` | `POST /2013-04-01/hostedzone`. A `<VPC>` element in the request creates a private zone and records the first VPC association. |
 | `GetHostedZone` | `GET /2013-04-01/hostedzone/{Id}`. Private zones include their `<VPCs>` list. |
 | `UpdateHostedZoneComment` | `POST /2013-04-01/hostedzone/{Id}` |
@@ -79,7 +83,7 @@ Public address routing, aliases, CNAME chasing, health-based or weighted record 
 
 ## Default Nameservers
 
-New zones use these nameservers (configurable via `floci.services.route53.*`):
+New zones without a reusable delegation set use these nameservers (configurable via `floci.services.route53.*`):
 
 ```
 ns-1.awsdns-01.org
@@ -90,7 +94,30 @@ ns-4.awsdns-04.co.uk
 
 A configured name can be written with or without the final dot. The delegation set lists it without the dot, as Route 53 does. A new zone's apex NS records, and the primary server named in its SOA record (the first nameserver), use the fully qualified form with the dot.
 
-The apex NS and SOA records are written when a zone is created, while the delegation set that `CreateHostedZone` and `GetHostedZone` return always reflects the current settings. A zone kept in persistent storage therefore keeps its original NS and SOA records after these settings change; update them with an `UPSERT` change.
+For zones without a reusable delegation set, the apex NS and SOA records are written when a zone is created, while the delegation set that `CreateHostedZone` and `GetHostedZone` return reflects the current settings. A zone kept in persistent storage therefore keeps its original NS and SOA records after these settings change; update them with an `UPSERT` change.
+
+## Reusable Delegation Sets
+
+`CreateReusableDelegationSet`, `GetReusableDelegationSet`, `ListReusableDelegationSets`, and `DeleteReusableDelegationSet` implement the APIs used by the `aws_route53_delegation_set` Terraform resource. Sets are owned by the calling account and shared across regions. A duplicate live `CallerReference` returns `DelegationSetAlreadyCreated`. Listing uses `marker` / `maxitems`, returns at most 100 sets, and identifies the first set of the next page with `NextMarker`.
+
+The four delegation-set operations honor IAM policies when enforcement is enabled. Get and delete authorize the selected set's global ARN; create and list require wildcard resources.
+
+Pass `delegationsetid` to `ListHostedZones` to filter by a reusable set before pagination. An unknown set, including one owned by another account, returns `NoSuchDelegationSet`.
+
+Pass `DelegationSetId` to `CreateHostedZone` to reuse a set. The create/get responses include its ID, caller reference, and name servers; the new zone's apex NS records and SOA primary server use those same servers. Passing `HostedZoneId` to `CreateReusableDelegationSet` marks an existing public zone's delegation set as reusable. Private zones cannot use reusable sets. Deleting a set associated with any hosted zone returns `DelegationSetInUse`; delete its zones first. The default quotas are 100 sets per account and 100 hosted zones per set.
+
+A new standalone set snapshots the four configured local nameservers. Promotion reuses the zone's original assignment, even after configuration or apex NS changes. Older stored zones without a separate assignment recover it from their four apex NS entries, falling back to current settings when those entries are unavailable. Its servers and zone associations persist through the configured Route53 storage backend and remain stable after configuration changes. Floci does not allocate distinct AWS nameservers for each set, so different sets may contain the same servers. Requests selecting a reusable set reject equal, parent, or child public-zone names that share a nameserver with an existing public zone (`ConflictingDomainExists`). Sibling domains can share a set. This feature manages delegation metadata and apex records; public DNS delegation referrals remain unsupported.
+
+```bash
+set_id=$(aws route53 create-reusable-delegation-set \
+  --caller-reference local-delegation --query DelegationSet.Id --output text)
+aws route53 create-hosted-zone \
+  --name first.example.com --caller-reference first-zone \
+  --delegation-set-id "$set_id"
+aws route53 create-hosted-zone \
+  --name second.example.com --caller-reference second-zone \
+  --delegation-set-id "$set_id"
+```
 
 ## Configuration
 
@@ -178,7 +205,6 @@ the record. DELETE still requires matching record values and routing properties.
 
 ## Not Supported (Phase 2)
 
-- Reusable delegation sets
 - Traffic policies and traffic policy instances
 - Query logging configs
 - DNSSEC (key signing keys, enabling/disabling)

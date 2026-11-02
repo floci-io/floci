@@ -1226,7 +1226,11 @@ public class RedshiftQueryHandler {
             .elem("ManualSnapshotRetentionPeriod", snapshot.getManualSnapshotRetentionPeriod().toString())
             .elem("Status", snapshot.getStatus())
             .elem("Port", String.valueOf(snapshot.getPort()))
-            .elem("MasterUsername", snapshot.getMasterUsername());
+            .elem("MasterUsername", snapshot.getMasterUsername())
+            .elem("SourceRegion", snapshot.getSourceRegion());
+        if (snapshot.getKmsKeyId() != null) {
+            builder.elem("Encrypted", "true").elem("KmsKeyId", snapshot.getKmsKeyId());
+        }
 
         return builder.end("Snapshot").build();
     }

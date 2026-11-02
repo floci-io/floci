@@ -220,13 +220,8 @@ AWS::EC2::Instance	Tenancy	accepted and ignored
 AWS::EC2::Instance	Volumes	accepted and ignored
 AWS::EC2::LaunchTemplate	TagSpecifications	accepted and ignored
 AWS::EC2::LaunchTemplate	VersionDescription	accepted and ignored
-AWS::EC2::NatGateway	AvailabilityMode	accepted and ignored
 AWS::EC2::NatGateway	AvailabilityZoneAddresses	accepted and ignored
 AWS::EC2::NatGateway	MaxDrainDurationSeconds	accepted and ignored
-AWS::EC2::NatGateway	PrivateIpAddress	accepted and ignored
-AWS::EC2::NatGateway	SecondaryAllocationIds	accepted and ignored
-AWS::EC2::NatGateway	SecondaryPrivateIpAddressCount	accepted and ignored
-AWS::EC2::NatGateway	SecondaryPrivateIpAddresses	accepted and ignored
 AWS::EC2::NatGateway	VpcId	accepted and ignored
 AWS::EC2::NetworkAcl	Tags	accepted and ignored
 AWS::EC2::Route	CarrierGatewayId	accepted and ignored

@@ -21,6 +21,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -42,6 +45,7 @@ public class AppConfigService {
     private final StorageBackend<String, HostedConfigurationVersion> versionStore;
     private final StorageBackend<String, Deployment> deploymentStore;
     private final StorageBackend<String, String> activeConfigStore; // envId::profileId -> versionNumber
+    private final Clock clock;
     private final Map<String, DeploymentPageToken> deploymentPageTokens = new ConcurrentHashMap<>();
     private static final int MAX_DEPLOYMENT_PAGE_TOKENS = 1000;
     private static final int MAX_MONITORS = 5;
@@ -51,6 +55,11 @@ public class AppConfigService {
 
     @Inject
     public AppConfigService(StorageFactory storageFactory, EmulatorConfig config) {
+        this(storageFactory, config, Clock.systemUTC());
+    }
+
+    AppConfigService(StorageFactory storageFactory, EmulatorConfig config, Clock clock) {
+        this.clock = clock;
         this.applicationStore = storageFactory.create("appconfig", "appconfig-applications.json", new TypeReference<>() {});
         this.environmentStore = storageFactory.create("appconfig", "appconfig-environments.json", new TypeReference<>() {});
         this.profileStore = storageFactory.create("appconfig", "appconfig-profiles.json", new TypeReference<>() {});
@@ -252,7 +261,8 @@ public class AppConfigService {
         profile.setName((String) request.get("Name"));
         profile.setDescription((String) request.get("Description"));
         profile.setLocationUri((String) request.get("LocationUri"));
-        profile.setType((String) request.get("Type"));
+        String type = (String) request.get("Type");
+        profile.setType(type == null && "hosted".equals(profile.getLocationUri()) ? "AWS.Freeform" : type);
         profileStore.put(profile.getId(), profile);
         return profile;
     }
@@ -406,7 +416,7 @@ public class AppConfigService {
                 .toList();
     }
 
-    public void deleteHostedConfigurationVersion(String applicationIdentifier,
+    public synchronized void deleteHostedConfigurationVersion(String applicationIdentifier,
                                                   String profileIdentifier,
                                                   int versionNumber) {
         String appId = resolveApplication(applicationIdentifier).getId();
@@ -551,7 +561,13 @@ public class AppConfigService {
                 .max()
                 .orElse(0) + 1;
         deployment.setDeploymentNumber(nextDeploymentNumber);
-        deployment.setState("COMPLETE"); // Synchronous immediate deployment
+        Instant started = clock.instant();
+        deployment.setStartedAt(started.toString());
+        deployment.setPercentageComplete(100.0f);
+        deployment.setState(strategy.getFinalBakeTimeInMinutes() > 0 ? "BAKING" : "COMPLETE");
+        if ("COMPLETE".equals(deployment.getState())) {
+            deployment.setCompletedAt(started.toString());
+        }
         deployment.setDescription((String) request.get("Description"));
 
         deploymentStore.put(appId + "::" + envId + "::" + deployment.getDeploymentNumber(), deployment);
@@ -559,20 +575,101 @@ public class AppConfigService {
         // Update active configuration
         activeConfigStore.put(envId + "::" + profileId, version);
 
-        LOG.infov("Started deployment for app {0}, env {1}, profile {2}, version {3}. State: COMPLETE", appId, envId, profileId, version);
+        LOG.infov("Started deployment for app {0}, env {1}, profile {2}, version {3}. State: {4}",
+                appId, envId, profileId, version, deployment.getState());
         return deployment;
     }
 
-    public Deployment getDeployment(String applicationIdentifier,
+    public synchronized Deployment getDeployment(String applicationIdentifier,
                                     String environmentIdentifier,
                                     int deploymentNumber) {
         String appId = resolveApplication(applicationIdentifier).getId();
         String envId = resolveEnvironment(appId, environmentIdentifier).getId();
-        return deploymentStore.get(appId + "::" + envId + "::" + deploymentNumber)
+        Deployment deployment = deploymentStore.get(appId + "::" + envId + "::" + deploymentNumber)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Deployment not found", 404));
+        return refreshDeployment(deployment);
     }
 
-    public DeploymentPage listDeployments(String applicationIdentifier,
+    public synchronized Deployment stopDeployment(String applicationIdentifier, String environmentIdentifier,
+                                                   int deploymentNumber, boolean allowRevert) {
+        Deployment deployment = copy(getDeployment(applicationIdentifier, environmentIdentifier, deploymentNumber));
+        String state = deployment.getState();
+        boolean completed = "COMPLETE".equals(state);
+        if (!"DEPLOYING".equals(state) && !(allowRevert && ("BAKING".equals(state) || completed))) {
+            throw new AwsException("BadRequestException", "The deployment cannot be stopped in its current state.", 400);
+        }
+        if (completed && (deployment.getCompletedAt() == null
+                || clock.instant().isAfter(Instant.parse(deployment.getCompletedAt()).plus(Duration.ofHours(72))))) {
+            throw new AwsException("BadRequestException",
+                    "A completed deployment can only be reverted within 72 hours of its recorded completion.", 400);
+        }
+        List<Deployment> available = deploymentStore.scan(k -> true).stream()
+                .filter(row -> deployment.getApplicationId().equals(row.getApplicationId()))
+                .filter(row -> deployment.getEnvironmentId().equals(row.getEnvironmentId()))
+                .filter(row -> deployment.getConfigurationProfileId().equals(row.getConfigurationProfileId()))
+                .filter(row -> List.of("BAKING", "COMPLETE", "DEPLOYING").contains(row.getState()))
+                .sorted(Comparator.comparingInt(Deployment::getDeploymentNumber).reversed())
+                .toList();
+        if (available.isEmpty() || available.getFirst().getDeploymentNumber() != deploymentNumber) {
+            throw new AwsException("BadRequestException", "A newer deployment is active for this configuration.", 400);
+        }
+        Deployment previous = available.stream()
+                .filter(row -> row.getDeploymentNumber() < deploymentNumber)
+                .filter(row -> !"DEPLOYING".equals(row.getState()))
+                .findFirst().orElse(null);
+        if (previous != null) {
+            ConfigurationProfile profile = resolveConfigurationProfile(
+                    deployment.getApplicationId(), deployment.getConfigurationProfileId());
+            String location = previous.getConfigurationLocationUri() != null
+                    ? previous.getConfigurationLocationUri() : profile.getLocationUri();
+            if ("hosted".equals(location) && !hasHostedConfigurationVersion(previous)) {
+                throw new AwsException("BadRequestException",
+                        "The previous hosted configuration version is no longer available.", 400);
+            }
+        }
+        String activeKey = deployment.getEnvironmentId() + "::" + deployment.getConfigurationProfileId();
+        if (previous == null) {
+            activeConfigStore.delete(activeKey);
+        } else {
+            activeConfigStore.put(activeKey, previous.getConfigurationVersion());
+        }
+        deployment.setState(completed ? "REVERTED" : "ROLLED_BACK");
+        deployment.setPercentageComplete(0.0f);
+        deployment.setCompletedAt(clock.instant().toString());
+        deploymentStore.put(deployment.getApplicationId() + "::" + deployment.getEnvironmentId()
+                + "::" + deploymentNumber, deployment);
+        return deployment;
+    }
+
+    private boolean hasHostedConfigurationVersion(Deployment deployment) {
+        int versionNumber;
+        try {
+            versionNumber = Integer.parseInt(deployment.getConfigurationVersion());
+        } catch (NumberFormatException ignored) {
+            // Non-numeric deployed versions cannot identify content in the hosted version store.
+            return false;
+        }
+        return versionStore.get(deployment.getApplicationId() + "::" + deployment.getConfigurationProfileId()
+                + "::" + versionNumber).isPresent();
+    }
+
+    private Deployment refreshDeployment(Deployment deployment) {
+        if ("BAKING".equals(deployment.getState()) && deployment.getStartedAt() != null
+                && deployment.getFinalBakeTimeInMinutes() != null) {
+            Instant completed = Instant.parse(deployment.getStartedAt())
+                    .plus(Duration.ofMinutes(deployment.getFinalBakeTimeInMinutes()));
+            if (!clock.instant().isBefore(completed)) {
+                deployment = copy(deployment);
+                deployment.setState("COMPLETE");
+                deployment.setCompletedAt(completed.toString());
+                deploymentStore.put(deployment.getApplicationId() + "::" + deployment.getEnvironmentId()
+                        + "::" + deployment.getDeploymentNumber(), deployment);
+            }
+        }
+        return deployment;
+    }
+
+    public synchronized DeploymentPage listDeployments(String applicationIdentifier,
                                           String environmentIdentifier,
                                           Integer maxResults,
                                           String nextToken) {
@@ -628,6 +725,7 @@ public class AppConfigService {
      * is read from the profile.
      */
     private DeploymentSummary toDeploymentSummary(Deployment deployment) {
+        deployment = refreshDeployment(deployment);
         DeploymentSummary summary = new DeploymentSummary();
         summary.setConfigurationProfileId(deployment.getConfigurationProfileId());
         summary.setConfigurationVersion(deployment.getConfigurationVersion());
@@ -654,7 +752,11 @@ public class AppConfigService {
                 summary.setGrowthType(strategy.getGrowthType());
             });
         }
-        summary.setPercentageComplete("COMPLETE".equals(deployment.getState()) ? 100.0f : 0.0f);
+        summary.setPercentageComplete(deployment.getPercentageComplete() != null
+                ? deployment.getPercentageComplete() : "COMPLETE".equals(deployment.getState()) ? 100.0f : 0.0f);
+        summary.setStartedAt(deployment.getStartedAt());
+        summary.setCompletedAt(deployment.getCompletedAt());
+
         return summary;
     }
 
@@ -673,7 +775,7 @@ public class AppConfigService {
     public record DeploymentPage(List<DeploymentSummary> items, String nextToken) {
     }
 
-    public String getActiveVersion(String envId, String profileId) {
+    public synchronized String getActiveVersion(String envId, String profileId) {
         return activeConfigStore.get(envId + "::" + profileId).orElse(null);
     }
 

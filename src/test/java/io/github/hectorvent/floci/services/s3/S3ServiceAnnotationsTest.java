@@ -234,7 +234,7 @@ class S3ServiceAnnotationsTest {
         putAnnotation("version-bound", "payload");
         String versionId = s3Service.getObject(BUCKET, "docs/readme.txt", null).getVersionId();
         s3Service.deleteObject(BUCKET, "docs/readme.txt", versionId);
-        assertThrowsAws("NoSuchKey", () ->
+        assertThrowsAws("NoSuchVersion", () ->
                 s3Service.getObjectAnnotation(BUCKET, "docs/readme.txt", "version-bound", versionId));
     }
 

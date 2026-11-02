@@ -8,6 +8,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
@@ -895,9 +896,9 @@ public class CloudMapService {
         if (resourceArn == null) {
             throw new AwsException("InvalidInput", "ResourceARN is required.", 400);
         }
-        int slash = resourceArn.lastIndexOf('/');
-        int colon = resourceArn.lastIndexOf(':');
-        String id = resourceArn.substring(Math.max(slash, colon) + 1);
+        String id = AwsArnUtils.resourceIfArnFor(resourceArn, "servicediscovery")
+                .map(resource -> resource.substring(resource.lastIndexOf('/') + 1))
+                .orElse(resourceArn);
         Optional<Namespace> ns = namespaceStore.get(id);
         if (ns.isPresent()) {
             return ns.get();

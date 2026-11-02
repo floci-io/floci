@@ -8,9 +8,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsArnShapes;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.AwsRegions;
 import io.github.hectorvent.floci.core.common.Base64Url;
 import io.github.hectorvent.floci.core.common.Digests;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.PaginatedResult;
 import io.github.hectorvent.floci.core.common.Pagination;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -486,7 +486,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         }
 
         updated.setRevisionId(UUID.randomUUID().toString());
-        updated.setUpdateDate(System.currentTimeMillis() / 1000.0);
+        updated.setUpdateDate(EpochSeconds.fromMillis(System.currentTimeMillis()));
         StateMachineVersion version = request.publish()
                 ? addVersion(updated, request.versionDescription())
                 : null;
@@ -539,11 +539,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
      * account under account isolation.
      */
     private static boolean isInRegion(String key, String region) {
-        if (!AwsArnUtils.isArnFor(key, "states")) {
-            return false;
-        }
-        AwsArnUtils.Arn arn = AwsArnUtils.parse(key);
-        return arn.partition().equals(AwsRegions.partitionFor(region)) && arn.region().equals(region);
+        return AwsArnUtils.parseIfArnIn(key, "states", region).isPresent();
     }
 
     public List<StateMachine> listStateMachines(String region) {
@@ -734,7 +730,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         if (routingConfiguration != null) {
             updated.setRoutingConfiguration(copyRoutingConfiguration(routingConfiguration));
         }
-        updated.setUpdateDate(System.currentTimeMillis() / 1000.0);
+        updated.setUpdateDate(EpochSeconds.fromMillis(System.currentTimeMillis()));
         stateMachineAliasStore.put(aliasArn, updated);
         return copyAlias(updated);
     }
@@ -1140,7 +1136,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
             }
             exec.setError(error);
             exec.setCause(cause);
-            exec.setStopDate(System.currentTimeMillis() / 1000.0);
+            exec.setStopDate(EpochSeconds.fromMillis(System.currentTimeMillis()));
             exec.setStatus("ABORTED");
         }
 
@@ -1520,7 +1516,7 @@ public class StepFunctionsService implements Resettable, ResourceProvider {
         StateMachineVersion version = new StateMachineVersion(
                 stateMachine.getStateMachineArn() + ":" + next,
                 next,
-                System.currentTimeMillis() / 1000.0);
+                EpochSeconds.fromMillis(System.currentTimeMillis()));
         version.setDescription(description);
         version.setName(stateMachine.getName());
         version.setDefinition(stateMachine.getDefinition());

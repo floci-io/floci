@@ -8,6 +8,7 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.parallel.Isolated;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.core.retry.backoff.FixedDelayBackoffStrategy;
 import software.amazon.awssdk.core.waiters.WaiterResponse;
@@ -29,6 +30,7 @@ import static org.assertj.core.api.Assertions.*;
 
 @DisplayName("ACM Certificate Manager")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@Isolated
 class AcmTest {
 
     private static AcmClient acm;

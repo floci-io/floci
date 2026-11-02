@@ -33,8 +33,6 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.util.HashSet;
 import java.util.Locale;
 import java.util.Map;
@@ -67,7 +65,6 @@ public class LambdaWebDataPlane {
     private static final Logger LOG = Logger.getLogger(LambdaWebDataPlane.class);
     private static final String BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     private static final int REQUEST_ID_LENGTH = 26;
-    private static final DateTimeFormatter HTTP_DATE = DateTimeFormatter.RFC_1123_DATE_TIME.withZone(ZoneOffset.UTC);
     /** Floci sees an exit some tens of milliseconds after it. A process that keeps running is not waited for longer. */
     private static final Duration EXIT_WAIT = Duration.ofSeconds(1);
     /** The edge counts the request line, the header lines and the blank line, as the client sent them. */
@@ -242,6 +239,9 @@ public class LambdaWebDataPlane {
         vertx.<Environment>executeBlocking(() -> {
             if (dead != null) {
                 environments.discard(dead);
+            }
+            if (!service.isRevisionActive(target, revision.revisionId)) {
+                throw new StartFailure(LambdaWebErrorPages.REVISION_NOT_ACTIVE);
             }
             Integer maxEnvironments = target.endpoint().scalingConfig == null
                     ? null : target.endpoint().scalingConfig.maxEnvironments;
@@ -634,7 +634,7 @@ public class LambdaWebDataPlane {
         if (page.errorType() != null) {
             response.headers().set("lambda-web-error-type", page.errorType());
         }
-        response.headers().set("date", HTTP_DATE.format(Instant.now()));
+        response.headers().set("date", LambdaWebErrorPages.platformDate(Instant.now()));
         String html = LambdaWebErrorPages.html(page, requestId);
         // A HEAD request gets the length of the page it does not get, as on AWS.
         response.headers().set("content-length", String.valueOf(html.getBytes(StandardCharsets.UTF_8).length));
@@ -669,7 +669,7 @@ public class LambdaWebDataPlane {
         response.setStatusCode(414).setStatusMessage("URI Too Long");
         response.headers().set("connection", "close");
         response.headers().set("content-length", "0");
-        response.headers().set("date", HTTP_DATE.format(Instant.now()));
+        response.headers().set("date", LambdaWebErrorPages.platformDate(Instant.now()));
         response.end().onComplete(ignored -> response.close());
     }
 

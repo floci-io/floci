@@ -1357,6 +1357,16 @@ public class RdsQueryHandler {
                             manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
                             requestedPort);
             }
+            Map<String, String> tags = parseTags(params);
+            String kmsKeyId = params.getFirst("KmsKeyId");
+            if (!tags.isEmpty()) {
+                service.addTagsToResource(cluster.getDbClusterArn(), tags, region);
+            }
+            if (kmsKeyId != null && !kmsKeyId.isBlank()) {
+                cluster = service.setNewDbClusterKmsKeyId(region, id, kmsKeyId);
+            } else if (!tags.isEmpty()) {
+                cluster = service.getDbCluster(id, region);
+            }
             if (!associatedRoles.isEmpty()) {
                 try {
                     cluster = service.addRolesToNewDbCluster(region, id, associatedRoles);
@@ -1668,6 +1678,32 @@ public class RdsQueryHandler {
         return names;
     }
 
+    /** Floci models no system parameters: a describe of those sources lists nothing. */
+    private static boolean requestsUnmodeledSource(String source) {
+        return "system".equals(source) || "engine-default".equals(source);
+    }
+
+    /**
+     * Writes parameter rows to the XML builder, applying the Source filter.
+     */
+    private static void writeParameterRows(XmlBuilder xml, Map<String, String> parameters,
+                                           Map<String, String> applyMethods, String sourceFilter) {
+        if (requestsUnmodeledSource(sourceFilter)) {
+            return;
+        }
+        for (Map.Entry<String, String> entry : parameters.entrySet()) {
+            xml.start("Parameter")
+               .elem("ParameterName", entry.getKey())
+               .elem("ParameterValue", entry.getValue())
+               .elem("Source", "user")
+               .elem("IsModifiable", true)
+               .elem("ApplyMethod", applyMethods.getOrDefault(entry.getKey(), "immediate"))
+               .end("Parameter");
+        }
+    }
+
+
+
     private Response handleDescribeDbParameters(
             MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBParameterGroupName");
@@ -1677,15 +1713,7 @@ public class RdsQueryHandler {
         try {
             DbParameterGroup group = service.getDbParameterGroup(name, region);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
-            for (Map.Entry<String, String> entry : group.getParameters().entrySet()) {
-                xml.start("member")
-                   .elem("ParameterName", entry.getKey())
-                   .elem("ParameterValue", entry.getValue())
-                   .elem("Source", "user")
-                   .elem("ApplyMethod", group.getApplyMethods().getOrDefault(entry.getKey(), "immediate"))
-                   .elem("IsModifiable", true)
-                   .end("member");
-            }
+            writeParameterRows(xml, group.getParameters(), group.getApplyMethods(), params.getFirst("Source"));
             xml.end("Parameters").start("Marker").end("Marker");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBParameters", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
@@ -1819,15 +1847,7 @@ public class RdsQueryHandler {
         try {
             DbClusterParameterGroup group = service.getDbClusterParameterGroup(name, region);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
-            for (Map.Entry<String, String> entry : group.getParameters().entrySet()) {
-                xml.start("member")
-                   .elem("ParameterName", entry.getKey())
-                   .elem("ParameterValue", entry.getValue())
-                   .elem("Source", "user")
-                   .elem("ApplyMethod", group.getApplyMethods().getOrDefault(entry.getKey(), "immediate"))
-                   .elem("IsModifiable", true)
-                   .end("member");
-            }
+            writeParameterRows(xml, group.getParameters(), group.getApplyMethods(), params.getFirst("Source"));
             xml.end("Parameters").start("Marker").end("Marker");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterParameters", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
@@ -3464,6 +3484,7 @@ public class RdsQueryHandler {
            .elem("HttpEndpointEnabled", c.isHttpEndpointEnabled())
            .elem("MultiAZ", c.isMultiAz())
            .elem("StorageEncrypted", c.isStorageEncrypted())
+           .elem("KmsKeyId", c.getKmsKeyId())
            .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
            .elem("PreferredBackupWindow", "04:00-06:00")
@@ -3517,6 +3538,9 @@ public class RdsQueryHandler {
         }
         xml.end("DBClusterMembers");
         writeAssociatedRoles(xml, c.getAssociatedRoles(), "DBClusterRole");
+        xml.start("TagList");
+        writeTags(xml, c.getTags());
+        xml.end("TagList");
         return xml.build();
     }
 

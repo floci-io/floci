@@ -108,6 +108,26 @@ class AppConfigServiceTest {
     }
 
     @Test
+    void onlyHostedProfilesReceiveTheOmittedTypeDefault() {
+        assertEquals("AWS.Freeform", service.createConfigurationProfile("app",
+                Map.of("Name", "hosted", "LocationUri", "hosted")).getType());
+        assertNull(service.createConfigurationProfile("app",
+                Map.of("Name", "external", "LocationUri", "ssm-parameter://configuration")).getType());
+    }
+
+    @Test
+    void nonHostedProfilesRetainAnExplicitType() {
+        assertEquals("AWS.Freeform", service.createConfigurationProfile("app",
+                Map.of("Name", "explicit", "LocationUri", "ssm-parameter://configuration",
+                        "Type", "AWS.Freeform")).getType());
+    }
+
+    @Test
+    void readingLegacyProfilesDoesNotBackfillType() {
+        assertNull(service.getConfigurationProfile("app", "profile").getType());
+    }
+
+    @Test
     void listDeploymentsReturnsDescendingPages() {
         deploymentStore.put("app::env::1", deployment("app", "env", 1));
         deploymentStore.put("app::env::2", deployment("app", "env", 2));

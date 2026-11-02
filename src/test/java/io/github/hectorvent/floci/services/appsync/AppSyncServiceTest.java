@@ -1,13 +1,11 @@
 package io.github.hectorvent.floci.services.appsync;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
-import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaCreationWorker;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaRegistry;
 import io.github.hectorvent.floci.services.appsync.graphql.auth.LambdaAuthorizerCache;
@@ -18,6 +16,7 @@ import io.github.hectorvent.floci.services.appsync.model.DomainName;
 import io.github.hectorvent.floci.services.appsync.model.FunctionConfiguration;
 import io.github.hectorvent.floci.services.appsync.model.GraphqlApi;
 import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
+import io.github.hectorvent.floci.testing.InMemoryStorageFactory;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -412,19 +411,11 @@ class AppSyncServiceTest {
     @SuppressWarnings("unchecked")
     private AppSyncService newService(Clock clock, String baseUrl,
             AccountAwareStorageBackend<GraphqlApi> apiStore) {
-        StorageFactory storageFactory = new StorageFactory(null, null) {
-            @Override
-            public <V> AccountAwareStorageBackend<V> create(String serviceName, String fileName,
-                    TypeReference<Map<String, V>> typeReference) {
-                if ("appsync-apis.json".equals(fileName)) {
-                    return (AccountAwareStorageBackend<V>) apiStore;
-                }
-                if ("appsync-apikeys.json".equals(fileName) && apiKeyStoreOverride != null) {
-                    return (AccountAwareStorageBackend<V>) apiKeyStoreOverride;
-                }
-                return AccountAwareStorageBackend.inMemory("000000000000");
-            }
-        };
+        InMemoryStorageFactory storageFactory = new InMemoryStorageFactory("000000000000")
+                .withStore("appsync-apis.json", apiStore);
+        if (apiKeyStoreOverride != null) {
+            storageFactory.withStore("appsync-apikeys.json", apiKeyStoreOverride);
+        }
         Instance<RequestContext> requestContext = mock(Instance.class);
         schemaRegistry = mock(SchemaRegistry.class);
         lambdaAuthorizerCache = new LambdaAuthorizerCache();

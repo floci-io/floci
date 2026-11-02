@@ -763,6 +763,7 @@ public interface EmulatorConfig {
         RedshiftDataServiceConfig redshiftData();
         RedshiftServerlessServiceConfig redshiftServerless();
         EventBridgeServiceConfig eventbridge();
+        EventBridgeV2ServiceConfig eventbridgev2();
         CloudMapServiceConfig cloudmap();
         EmrServiceConfig emr();
         WafV2ServiceConfig wafv2();
@@ -1736,6 +1737,16 @@ public interface EmulatorConfig {
         boolean cloudwatchMetricsEnabled();
         @WithDefault("60")
         long snapshotSweepIntervalSeconds();
+
+        /**
+         * Copy snapshots of clusters with snapshot copy enabled into the destination Region.
+         * Env: FLOCI_SERVICES_REDSHIFT_SNAPSHOT_COPY_ENABLED
+         */
+        @WithDefault("true")
+        boolean snapshotCopyEnabled();
+
+        @WithDefault("60")
+        long snapshotCopySweepIntervalSeconds();
         @WithDefault("true")
         boolean enabled();
         @WithDefault("5439")
@@ -1975,6 +1986,11 @@ public interface EmulatorConfig {
     }
 
     interface EventBridgeServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface EventBridgeV2ServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJsonTimestamp;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.services.glue.model.*;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.glue.schemaregistry.model.Registry;
@@ -1171,15 +1172,11 @@ public class GlueJsonHandler {
         Map<String, Object> item = new LinkedHashMap<>();
         item.put("Name", ruleset.getName());
         putIfNotNull(item, "Description", ruleset.getDescription());
-        item.put("CreatedOn", epochSeconds(ruleset.getCreatedOn()));
-        item.put("LastModifiedOn", epochSeconds(ruleset.getLastModifiedOn()));
+        item.put("CreatedOn", EpochSeconds.fromInstant(ruleset.getCreatedOn()));
+        item.put("LastModifiedOn", EpochSeconds.fromInstant(ruleset.getLastModifiedOn()));
         putIfNotNull(item, "TargetTable", ruleset.getTargetTable());
         putIfNotNull(item, "RuleCount", GlueService.dataQualityRuleCount(ruleset.getRuleset()));
         return item;
-    }
-
-    private static double epochSeconds(Instant instant) {
-        return instant.toEpochMilli() / 1000.0;
     }
 
     private static String iso(Instant instant) {

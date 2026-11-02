@@ -237,6 +237,10 @@ services:
     doc: docs/services/eventbridge.md
     sources:
       - { path: services/eventbridge/EventBridgeHandler.java, mode: switch }
+  - service: eventbridgev2
+    doc: docs/services/eventbridgev2.md
+    sources:
+      - { path: services/eventbridgev2/EventBridgeV2Handler.java, mode: switch }
   - service: firehose
     doc: docs/services/firehose.md
     sources:

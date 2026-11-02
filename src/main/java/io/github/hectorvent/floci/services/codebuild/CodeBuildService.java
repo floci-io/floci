@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
@@ -159,7 +160,7 @@ public class CodeBuildService {
             throw new AwsException("InvalidInputException", "artifacts.type is required", 400);
         }
 
-        double now = Instant.now().toEpochMilli() / 1000.0;
+        double now = EpochSeconds.fromInstant(Instant.now());
         Project project = new Project();
         project.setName(name);
         project.setArn(AwsArnUtils.Arn.of("codebuild", region, account, "project/" + name).toString());
@@ -221,7 +222,7 @@ public class CodeBuildService {
         if (logsConfig != null) { project.setLogsConfig(logsConfig); }
         if (vpcConfig != null) { project.setVpcConfig(vpcConfig); }
         if (concurrentBuildLimit != null) { project.setConcurrentBuildLimit(concurrentBuildLimit); }
-        project.setLastModified(Instant.now().toEpochMilli() / 1000.0);
+        project.setLastModified(EpochSeconds.fromInstant(Instant.now()));
 
         persistRegion(projects, region);
         return project;
@@ -308,7 +309,7 @@ public class CodeBuildService {
             throw new AwsException("InvalidInputException", "type is required", 400);
         }
 
-        double now = Instant.now().toEpochMilli() / 1000.0;
+        double now = EpochSeconds.fromInstant(Instant.now());
         ReportGroup rg = new ReportGroup();
         rg.setArn(arn);
         rg.setName(name);
@@ -334,7 +335,7 @@ public class CodeBuildService {
         }
         if (exportConfig != null) { rg.setExportConfig(exportConfig); }
         if (tags != null) { rg.setTags(tags); }
-        rg.setLastModified(Instant.now().toEpochMilli() / 1000.0);
+        rg.setLastModified(EpochSeconds.fromInstant(Instant.now()));
         persistRegion(reportGroups, region);
         return rg;
     }
@@ -579,7 +580,7 @@ public class CodeBuildService {
         build.setCurrentPhase("SUBMITTED");
         build.setProjectName(projectName);
         build.setInitiator("user");
-        build.setStartTime(Instant.now().toEpochMilli() / 1000.0);
+        build.setStartTime(EpochSeconds.fromInstant(Instant.now()));
         build.setSource(project.getSource());
         build.setArtifacts(artifactsOverride != null ? artifactsOverride : project.getArtifacts());
         build.setTimeoutInMinutes(timeoutOverride != null ? timeoutOverride : project.getTimeoutInMinutes());

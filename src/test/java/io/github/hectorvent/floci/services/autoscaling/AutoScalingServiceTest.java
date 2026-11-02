@@ -228,15 +228,20 @@ class AutoScalingServiceTest {
         assertEquals(decrementDesiredCapacity ? 1 : 2, group.getDesiredCapacity());
     }
 
-    @Test
-    void detachingAnInstanceTheGroupDoesNotHoldChangesNoTags() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void detachingAnInstanceTheGroupDoesNotHoldChangesNoTags(boolean decrementDesiredCapacity) {
         service.ec2Service = mock(Ec2Service.class);
         service.attachInstances(REGION, "test-asg", List.of("i-member"));
+        int desiredCapacity = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst()
+                .getDesiredCapacity();
         clearInvocations(service.ec2Service);
 
-        service.detachInstances(REGION, "test-asg", List.of("i-stranger"), false);
+        service.detachInstances(REGION, "test-asg", List.of("i-stranger"), decrementDesiredCapacity);
 
         verify(service.ec2Service, never()).deleteSystemTag(anyString(), anyList(), anyString(), anyString());
+        assertEquals(desiredCapacity, service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst()
+                .getDesiredCapacity());
         assertEquals(List.of("i-member"), service.describeAutoScalingGroups(REGION, List.of("test-asg"))
                 .getFirst().getInstances().stream().map(AsgInstance::getInstanceId).toList());
     }

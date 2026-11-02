@@ -7,6 +7,7 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.BatchGetMetricDataQuery;
 import software.amazon.awssdk.services.sesv2.model.BatchGetMetricDataRequest;
@@ -48,6 +49,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @DisplayName("SES v2 BatchGetMetricData")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@ResourceLock("ses-account")
 class SesBatchGetMetricDataTest {
 
     private static final String SENDER = "compat-metrics@example.com";

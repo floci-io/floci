@@ -17,6 +17,9 @@ that shares the same signing name: see [Bedrock Runtime](bedrock-runtime.md).
 | `CreateGuardrailVersion` | Snapshot the `DRAFT` under the next numerical version |
 | `DeleteGuardrail` | Delete one numerical version, or the guardrail and all its versions |
 | `ListGuardrails` | List every guardrail's `DRAFT`, or every version of one guardrail |
+| `PutResourcePolicy` | Attach a resource-based policy to a guardrail (`POST /resource-policy`) |
+| `GetResourcePolicy` | Read a guardrail's resource-based policy |
+| `DeleteResourcePolicy` | Remove a guardrail's resource-based policy |
 | `TagResource` | Tag a guardrail (`POST /tagResource`) |
 | `UntagResource` | Remove tags from a guardrail (`POST /untagResource`) |
 | `ListTagsForResource` | List a guardrail's tags (`POST /listTagsForResource`) |
@@ -67,6 +70,26 @@ request, so `CreateGuardrail` and `TagResource` both raise `TooManyTagsException
 the resulting total would pass 50. Replacing the value of a tag key the guardrail
 already carries does not add to that total.
 
+A resource-based policy is attached to a guardrail by its full ARN. The policy is held to the restricted language the
+[Bedrock user guide](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails-resource-based-policies.html)
+documents, and anything else is rejected with `ValidationException`: it is one JSON object
+of 1 to 20480 characters with nothing after it, every statement is an `Allow` on the ARN the policy is attached to,
+its actions are `bedrock:ApplyGuardrail` and `bedrock:GetGuardrail`, and its principal is either the
+account root (`{"AWS": "arn:aws:iam::<account>:root"}` and no other principal) or `*` under a `StringEquals` condition on
+`aws:PrincipalOrgID`. The only conditions accepted are that one and
+`ForAnyValue:StringLike` on `aws:PrincipalOrgPaths`, each with a string or an array of strings. The policy is stored as given; it is
+not evaluated against callers.
+
+A guardrail's policy lives on the guardrail. `GetResourcePolicy` on a guardrail with no
+policy returns a response without `resourcePolicy`, and deleting the guardrail deletes
+its policy. An ARN that names no guardrail of the caller's account and Region, including
+a guardrail profile ARN or another Bedrock resource, returns `ResourceNotFoundException`.
+
+With IAM enforcement on, `PutResourcePolicy`, `GetResourcePolicy` and
+`DeleteResourcePolicy` are authorized as `bedrock:PutResourcePolicy`,
+`bedrock:GetResourcePolicy` and `bedrock:DeleteResourcePolicy` on the ARN the request
+names.
+
 Guardrails are listed by the Resource Groups Tagging API (resource type `bedrock:guardrail`)
 and Resource Explorer with their own tags, and `TagResources` / `UntagResources` there change
 those tags, as `TagResource` and `UntagResource` do.
@@ -112,6 +135,13 @@ aws bedrock list-guardrails
 aws bedrock tag-resource \
   --resource-arn arn:aws:bedrock:us-east-1:000000000000:guardrail/abc123def456 \
   --tags key=team,value=ai
+
+aws bedrock put-resource-policy \
+  --resource-arn arn:aws:bedrock:us-east-1:000000000000:guardrail/abc123def456 \
+  --resource-policy '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"arn:aws:iam::000000000000:root"},"Action":["bedrock:ApplyGuardrail","bedrock:GetGuardrail"],"Resource":"arn:aws:bedrock:us-east-1:000000000000:guardrail/abc123def456"}]}'
+
+aws bedrock get-resource-policy \
+  --resource-arn arn:aws:bedrock:us-east-1:000000000000:guardrail/abc123def456
 
 aws bedrock delete-guardrail --guardrail-identifier abc123def456
 ```

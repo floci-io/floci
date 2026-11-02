@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.EpochSeconds;
 import io.github.hectorvent.floci.core.common.SmithyValidationErrors;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableErrorObject;
 import io.github.hectorvent.floci.services.lambda.durable.model.DurableExecution;
@@ -373,7 +374,7 @@ public final class DurableWire {
         if (asMillis) {
             node.put(member, millis);
         } else {
-            node.put(member, millis / 1000.0);
+            node.put(member, EpochSeconds.fromMillis(millis));
         }
     }
 

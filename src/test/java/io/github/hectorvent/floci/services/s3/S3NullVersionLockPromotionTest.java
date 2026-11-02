@@ -46,8 +46,11 @@ class S3NullVersionLockPromotionTest {
             case "legal-hold" -> service.putObjectLegalHold("bucket", "key", "null", "ON");
             case "retention" -> service.putObjectRetention("bucket", "key", "null", "COMPLIANCE",
                     Instant.now().plusSeconds(3600), false);
-            case "acl" -> service.putObjectAcl("bucket", "key", "null", "", "public-read",
-                    null, null, null, null, null);
+            case "acl" -> {
+                service.deletePublicAccessBlock("bucket");
+                service.putObjectAcl("bucket", "key", "null", "", "public-read",
+                        null, null, null, null, null);
+            }
             default -> throw new IllegalArgumentException(operation);
         }
         objects.promotion.get(5, TimeUnit.SECONDS);

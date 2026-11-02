@@ -18,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
@@ -47,6 +48,7 @@ class IamRequestResourceEnforcementIntegrationTest {
     private static final String REGION = "us-east-1";
     private static final String ELB = "arn:aws:elasticloadbalancing:" + REGION + ":" + ACCOUNT + ":";
     private static final String EVENTS = "arn:aws:events:" + REGION + ":" + ACCOUNT + ":";
+    private static final String TARGETS = "arn:aws:application-autoscaling:" + REGION + ":" + ACCOUNT + ":scalable-target/";
     /** The AWS Load Balancer Controller's create, tag-on-create and listener statements (its policy v2.14.0). */
     private static final String CONTROLLER_CREATE = "{\"Effect\":\"Allow\",\"Action\":[\"elasticloadbalancing:CreateLoadBalancer\","
             + "\"elasticloadbalancing:CreateTargetGroup\"],\"Resource\":\"*\","
@@ -408,6 +410,80 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + "\"Resource\":\"" + EVENTS + "event-bus/" + bus + "\"}");
         refusedJson(putEvents(user, "", "", byArn), "events:PutEvents");
         putEvents(user, "", ",\"EventBusName\":null").statusCode(200).body("FailedEntryCount", equalTo(0));
+    }
+
+    /**
+     * EventBridge V2 is authorized as the same {@code events} actions, on the bus or subscriber its request's ARN
+     * names: a grant on one V2 bus publishes to it and to no other, the default bus never standing in for it, a deny
+     * on it holds, a subscriber is checked on its own ARN rather than {@code *}, and a new bus on its name.
+     */
+    @Test
+    void anEventBridgeV2RequestIsCheckedOnTheBusOrSubscriberItsArnNames() throws IOException {
+        String bus = createEventBusV2("res-v2-" + suffix());
+        String other = createEventBusV2("res-v2-other-" + suffix());
+        User user = user("res-v2");
+
+        user.policy(allowOn("events:PutEvents", bus));
+        eventsV2(user, "PutEvents", putEventsV2(bus)).statusCode(200).body(not(containsString("ErrorCode")));
+        refusedCbor(eventsV2(user, "PutEvents", putEventsV2(other)), "events:PutEvents");
+        user.policy(allowOn("events:PutEvents", EVENTS + "event-bus/default"));
+        refusedCbor(eventsV2(user, "PutEvents", putEventsV2(bus)), "events:PutEvents");
+        user.policy(allowOn("events:PutEvents", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"events:PutEvents\","
+                + "\"Resource\":\"" + bus + "\"}");
+        refusedCbor(eventsV2(user, "PutEvents", putEventsV2(bus)), "events:PutEvents");
+        eventsV2(user, "PutEvents", putEventsV2(other)).statusCode(200);
+
+        String subscriber = EVENTS + "subscriber/res-v2-sub/" + suffix();
+        user.policy(allowOn("events:DescribeSubscriber", subscriber));
+        eventsV2(user, "DescribeSubscriber", Map.of("SubscriberArn", subscriber)).statusCode(404)
+                .body(containsString("ResourceNotFoundException"));
+        refusedCbor(eventsV2(user, "DescribeSubscriber", Map.of("SubscriberArn", subscriber + "0")),
+                "events:DescribeSubscriber");
+
+        String created = "res-v2-new-" + suffix();
+        user.policy(allowOn("events:CreateEventBus", EVENTS + "event-busv2/" + created + "/*"));
+        refusedCbor(eventsV2(user, "CreateEventBus", Map.of("Name", created + "-other", "ClientToken", suffix())),
+                "events:CreateEventBus");
+        String createdArn = CBOR_MAPPER.readTree(eventsV2(user, "CreateEventBus",
+                Map.of("Name", created, "ClientToken", suffix())).statusCode(200).extract().asByteArray())
+                .path("EventBusArn").asText();
+        cleanup.register(() -> deleteEventBusV2(createdArn));
+        assertTrue(createdArn.startsWith(EVENTS + "event-busv2/" + created + "/"), createdArn);
+
+        // A subscriber's tags are checked on the subscriber it makes, not on the bus it names.
+        String tagged = "res-v2-tagged-" + suffix();
+        String role = "arn:aws:iam::" + ACCOUNT + ":role/res-v2-delivery";
+        user.policy(allowOn("iam:PassRole", role) + "," + allowOn("events:CreateSubscriber", bus) + ","
+                + allowOn("events:CreateSubscriber", EVENTS + "subscriber/" + tagged + "/*") + ","
+                + allowOn("events:TagResource", EVENTS + "subscriber/*"));
+        Map<String, Object> subscriberRequest = Map.of("Name", tagged, "EventBusArn", bus,
+                "InvokeConfiguration", Map.of("TargetArn", "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":res-v2-queue",
+                        "RoleArn", role),
+                "Tags", Map.of("team", "orders"));
+        String subscriberArn = CBOR_MAPPER.readTree(eventsV2(user, "CreateSubscriber", subscriberRequest)
+                .statusCode(200).extract().asByteArray()).path("SubscriberArn").asText();
+        cleanup.register(() -> deleteSubscriberV2(subscriberArn));
+        user.policy(allowOn("iam:PassRole", role) + "," + allowOn("events:CreateSubscriber", bus) + ","
+                + allowOn("events:CreateSubscriber", EVENTS + "subscriber/*") + ","
+                + allowOn("events:TagResource", bus));
+        refusedCbor(eventsV2(user, "CreateSubscriber", Map.of("Name", tagged + "-other", "EventBusArn", bus,
+                "InvokeConfiguration", subscriberRequest.get("InvokeConfiguration"), "Tags", Map.of("team", "orders"))),
+                "events:TagResource");
+
+        // An EventBridge request adding the ARN of a V2 bus the caller may delete is still checked on its own bus.
+        String locked = "res-v1-locked-" + suffix();
+        admin("events").header("X-Amz-Target", "AWSEvents.CreateEventBus").contentType("application/x-amz-json-1.1")
+                .body("{\"Name\":\"" + locked + "\"}").post("/").then().statusCode(200);
+        cleanup.register(() -> admin("events").header("X-Amz-Target", "AWSEvents.DeleteEventBus")
+                .contentType("application/x-amz-json-1.1").body("{\"Name\":\"" + locked + "\"}").post("/"));
+        user.policy(allowOn("events:DeleteEventBus", bus) + "," + allowOn("events:DescribeEventBus", bus));
+        for (String operation : List.of("DeleteEventBus", "DescribeEventBus")) {
+            refusedJson(user.json("events", "AWSEvents." + operation, "1.1")
+                    .body("{\"Name\":\"" + locked + "\",\"EventBusArn\":\"" + bus + "\"}").post("/").then(),
+                    "events:" + operation);
+        }
+        admin("events").header("X-Amz-Target", "AWSEvents.DescribeEventBus").contentType("application/x-amz-json-1.1")
+                .body("{\"Name\":\"" + locked + "\"}").post("/").then().statusCode(200);
     }
 
     @Test
@@ -819,6 +895,28 @@ class IamRequestResourceEnforcementIntegrationTest {
     }
 
     /**
+     * An Athena catalog request naming no catalog, or a JSON null, is checked on {@code AwsDataCatalog}, the one
+     * {@code GetDataCatalog} answers and the catalog reads read, so a grant on it reaches them and a deny on it applies.
+     */
+    @Test
+    void aCatalogRequestNamingNoCatalogIsCheckedOnTheGlueOne() {
+        String glue = "arn:aws:athena:" + REGION + ":" + ACCOUNT + ":datacatalog/AwsDataCatalog";
+        User user = user("res-glue-catalog");
+        user.policy(allowOn("athena:GetDataCatalog", glue) + "," + allowOn("athena:ListDatabases", glue));
+        send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{}").statusCode(200)
+                .body("DataCatalog.Name", equalTo("AwsDataCatalog"));
+        send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":null}").statusCode(200)
+                .body("DataCatalog.Name", equalTo("AwsDataCatalog"));
+        send(user, "athena", "AmazonAthena.ListDatabases", "1.1", "{\"CatalogName\":null}").statusCode(200);
+        refusedJson(send(user, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{\"Name\":\"res-other\"}"),
+                "athena:GetDataCatalog");
+        User denied = user("res-glue-denied");
+        denied.policy(allowOn("athena:GetDataCatalog", "*") + ",{\"Effect\":\"Deny\",\"Action\":"
+                + "\"athena:GetDataCatalog\",\"Resource\":\"" + glue + "\"}");
+        refusedJson(send(denied, "athena", "AmazonAthena.GetDataCatalog", "1.1", "{}"), "athena:GetDataCatalog");
+    }
+
+    /**
      * A Data Exports export is checked on its ARN, and a create not on the ARN its {@code Export.ExportArn} gives,
      * which is the new export's own, so a table's there checks nothing.
      */
@@ -1106,6 +1204,72 @@ class IamRequestResourceEnforcementIntegrationTest {
                 + "-other\"]}"), "translate:TranslateDocument");
     }
 
+    /**
+     * A scalable target, named by its service namespace, resource id and scalable dimension, is checked on the ARN
+     * Application Auto Scaling registered it under, which ends in the id it assigned, so a grant on that ARN allows
+     * it, one on another target's does not, and a deny on it holds; registering a new one is checked with its id
+     * open, and its tags by its ARN. Before, these were checked on {@code *}.
+     */
+    @Test
+    void aScalableTargetIsCheckedOnTheArnItWasRegisteredUnder() {
+        String target = scalableTarget("service/res-" + suffix() + "/web");
+        String arn = registerScalableTarget(target);
+        assertTrue(arn.startsWith(TARGETS), arn);
+
+        User user = user("res-target");
+        user.policy(allowOn("application-autoscaling:RegisterScalableTarget", arn));
+        scaling(user, "RegisterScalableTarget", target + ",\"MaxCapacity\":3}").statusCode(200);
+        user.policy(allowOn("application-autoscaling:RegisterScalableTarget", TARGETS + "other"));
+        refusedJson(scaling(user, "RegisterScalableTarget", target + ",\"MaxCapacity\":3}"),
+                "application-autoscaling:RegisterScalableTarget");
+        // Its tags on an update are checked on the target too.
+        user.policy(allowOn("application-autoscaling:RegisterScalableTarget", arn) + ","
+                + allowOn("application-autoscaling:TagResource", TARGETS + "other"));
+        refusedJson(scaling(user, "RegisterScalableTarget", target + ",\"Tags\":{\"team\":\"a\"}}"),
+                "application-autoscaling:TagResource");
+        user.policy(allowOn("application-autoscaling:RegisterScalableTarget", arn) + ","
+                + allowOn("application-autoscaling:TagResource", arn));
+        scaling(user, "RegisterScalableTarget", target + ",\"Tags\":{\"team\":\"a\"}}").statusCode(200);
+        // A new target has no id yet, so it is checked on scalable-target/*, which a grant on another does not cover.
+        String other = scalableTarget("service/res-" + suffix() + "/api");
+        refusedJson(scaling(user, "RegisterScalableTarget", other + ",\"MinCapacity\":1,\"MaxCapacity\":2}"),
+                "application-autoscaling:RegisterScalableTarget");
+        user.policy(allowOn("application-autoscaling:RegisterScalableTarget", TARGETS + "*"));
+        cleanup.register(() -> adminJson("application-autoscaling", "AnyScaleFrontendService.DeregisterScalableTarget")
+                .body(other + "}").post("/"));
+        scaling(user, "RegisterScalableTarget", other + ",\"MinCapacity\":1,\"MaxCapacity\":2}").statusCode(200);
+        // A deny on the target holds, on a policy put on it and on its tags read by its ARN, and on no other target.
+        user.policy(allowOn("application-autoscaling:*", "*") + ",{\"Effect\":\"Deny\",\"Action\":["
+                + "\"application-autoscaling:PutScalingPolicy\",\"application-autoscaling:ListTagsForResource\"],"
+                + "\"Resource\":\"" + arn + "\"}");
+        refusedJson(scaling(user, "PutScalingPolicy", target.replace("{", "{\"PolicyName\":\"p\","
+                + "\"PolicyType\":\"StepScaling\",") + "}"), "application-autoscaling:PutScalingPolicy");
+        refusedJson(scaling(user, "ListTagsForResource", "{\"ResourceARN\":\"" + arn + "\"}"),
+                "application-autoscaling:ListTagsForResource");
+        scaling(user, "DeregisterScalableTarget", other + "}").statusCode(200);
+    }
+
+    /** The members naming an ECS service's desired count as a scalable target, an open JSON object. */
+    private static String scalableTarget(String resourceId) {
+        return "{\"ServiceNamespace\":\"ecs\",\"ResourceId\":\"" + resourceId + "\","
+                + "\"ScalableDimension\":\"ecs:service:DesiredCount\"";
+    }
+
+    /** Registers the scalable target as the admin and gives its ARN. */
+    private String registerScalableTarget(String target) {
+        String arn = adminJson("application-autoscaling", "AnyScaleFrontendService.RegisterScalableTarget")
+                .body(target + ",\"MinCapacity\":1,\"MaxCapacity\":2}").post("/").then().statusCode(200)
+                .extract().path("ScalableTargetARN");
+        cleanup.register(() -> adminJson("application-autoscaling", "AnyScaleFrontendService.DeregisterScalableTarget")
+                .body(target + "}").post("/"));
+        return arn;
+    }
+
+    private static ValidatableResponse scaling(User user, String operation, String body) {
+        return user.json("application-autoscaling", "AnyScaleFrontendService." + operation, "1.1").body(body).post("/")
+                .then();
+    }
+
     /** A monthly cost budget of the name, with a billing view ARN when one is given. */
     private static String budget(String name, String billingViewArn) {
         return "{\"BudgetName\":\"" + name + "\",\"BudgetType\":\"COST\",\"TimeUnit\":\"MONTHLY\",\"BudgetLimit\":"
@@ -1278,6 +1442,54 @@ class IamRequestResourceEnforcementIntegrationTest {
         }
         return user.json("events", "AWSEvents.PutEvents", "1.1").body("{\"Entries\":[" + entries + "]}")
                 .post("/").then();
+    }
+
+    private String createEventBusV2(String name) throws IOException {
+        String arn = CBOR_MAPPER.readTree(admin("events").header("smithy-protocol", "rpc-v2-cbor")
+                .contentType("application/cbor").accept("application/cbor")
+                .body(CBOR_MAPPER.writeValueAsBytes(Map.of("Name", name)))
+                .post("/service/AWSEventsV2/operation/CreateEventBus").then().statusCode(200).extract().asByteArray())
+                .path("EventBusArn").asText();
+        cleanup.register(() -> deleteEventBusV2(arn));
+        return arn;
+    }
+
+    private static void deleteEventBusV2(String arn) {
+        try {
+            admin("events").header("smithy-protocol", "rpc-v2-cbor").contentType("application/cbor")
+                    .accept("application/cbor").body(CBOR_MAPPER.writeValueAsBytes(Map.of("EventBusArn", arn)))
+                    .post("/service/AWSEventsV2/operation/DeleteEventBus");
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    private static void deleteSubscriberV2(String arn) {
+        try {
+            admin("events").header("smithy-protocol", "rpc-v2-cbor").contentType("application/cbor")
+                    .accept("application/cbor").body(CBOR_MAPPER.writeValueAsBytes(Map.of("SubscriberArn", arn)))
+                    .post("/service/AWSEventsV2/operation/DeleteSubscriber");
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /** One event published to the EventBridge V2 bus. */
+    private static Map<String, Object> putEventsV2(String bus) {
+        return Map.of("EventBusArn", bus, "Entries", List.of(Map.of("Source", "res.test", "DetailType", "t",
+                "Detail", "{}")));
+    }
+
+    private static ValidatableResponse eventsV2(User user, String operation, Map<String, ?> body) throws IOException {
+        return user.cbor("events").body(CBOR_MAPPER.writeValueAsBytes(body))
+                .post("/service/AWSEventsV2/operation/" + operation).then();
+    }
+
+    /** An RPC v2 CBOR service refuses with {@code AccessDeniedException}, a 403, naming the missing permission. */
+    private static void refusedCbor(ValidatableResponse response, String action) throws IOException {
+        JsonNode error = CBOR_MAPPER.readTree(response.statusCode(403).extract().asByteArray());
+        assertEquals("AccessDeniedException", error.path("__type").asText());
+        assertTrue(error.path("message").asText().contains(action), error.toString());
     }
 
     private static String publishVersion(String arn) {

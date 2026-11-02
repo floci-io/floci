@@ -205,12 +205,7 @@ public class ServiceCatalogJsonHandler {
 
     private Response provisionProduct(JsonNode request, String region, String accountId) {
         ObjectNode detail = service.provisionProduct(request, region, accountId);
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("RecordId", detail.path("RecordId").asText());
-        record.put("ProvisionedProductId", detail.path("Id").asText());
-        record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", detail.path("CreatedTime").asDouble());
-        return Response.ok(objectMapper.createObjectNode().set("RecordDetail", record)).build();
+        return recordResponse(detail);
     }
 
     private Response searchProvisionedProducts(JsonNode request) {
@@ -520,6 +515,11 @@ public class ServiceCatalogJsonHandler {
         return Response.ok(response).build();
     }
 
+    private Response recordResponse(ObjectNode result) {
+        ObjectNode record = service.describeRecord(result.path("RecordId").asText());
+        return Response.ok(objectMapper.createObjectNode().set("RecordDetail", record)).build();
+    }
+
     private Response describeServiceActionExecutionParameters(JsonNode request) {
         service.describeServiceActionExecutionParameters(
                 text(request, "ProvisionedProductId"), text(request, "ServiceActionId"));
@@ -535,17 +535,7 @@ public class ServiceCatalogJsonHandler {
 
     private Response executeProvisionedProductServiceAction(JsonNode request, String region, String accountId) {
         ObjectNode product = service.executeProvisionedProductServiceAction(request, region, accountId);
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("RecordId", product.path("RecordId").asText());
-        record.put("ProvisionedProductId", product.path("Id").asText());
-        record.put("ProvisionedProductName", product.path("Name").asText());
-        record.put("ProvisionedProductType", product.path("Type").asText());
-        record.put("ProductId", product.path("ProductId").asText());
-        record.put("ProvisioningArtifactId", product.path("ProvisioningArtifactId").asText());
-        record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", System.currentTimeMillis() / 1000.0);
-        record.put("UpdatedTime", System.currentTimeMillis() / 1000.0);
-        return Response.ok(objectMapper.createObjectNode().set("RecordDetail", record)).build();
+        return recordResponse(product);
     }
 
     private Response getAWSOrganizationsAccessStatus() {
@@ -563,16 +553,7 @@ public class ServiceCatalogJsonHandler {
 
     private Response importAsProvisionedProduct(JsonNode request, String region, String accountId) {
         ObjectNode detail = service.importAsProvisionedProduct(request, region, accountId);
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("RecordId", detail.path("RecordId").asText());
-        record.put("ProvisionedProductId", detail.path("Id").asText());
-        record.put("ProvisionedProductName", detail.path("Name").asText());
-        record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", System.currentTimeMillis() / 1000.0);
-        record.put("ProductId", detail.path("ProductId").asText());
-        record.put("ProvisioningArtifactId", detail.path("ProvisioningArtifactId").asText());
-        record.put("RecordType", "IMPORT");
-        return Response.ok(objectMapper.createObjectNode().set("RecordDetail", record)).build();
+        return recordResponse(detail);
     }
 
     private Response listBudgetsForResource(String resourceId) {
@@ -826,16 +807,7 @@ public class ServiceCatalogJsonHandler {
 
     private Response updateProvisionedProduct(JsonNode request, String region, String accountId) {
         ObjectNode product = service.updateProvisionedProduct(request, region, accountId);
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("RecordId", product.path("RecordId").asText());
-        record.put("ProvisionedProductId", product.path("Id").asText());
-        record.put("ProvisionedProductName", product.path("Name").asText());
-        record.put("ProductId", product.path("ProductId").asText());
-        record.put("ProvisioningArtifactId", product.path("ProvisioningArtifactId").asText());
-        record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", product.path("CreatedTime").asDouble());
-        record.put("UpdatedTime", System.currentTimeMillis() / 1000.0);
-        return Response.ok(objectMapper.createObjectNode().set("RecordDetail", record)).build();
+        return recordResponse(product);
     }
 
     private Response updateProvisionedProductProperties(JsonNode request) {
@@ -889,17 +861,7 @@ public class ServiceCatalogJsonHandler {
 
     private Response terminateProvisionedProduct(JsonNode request, String region, String accountId) {
         ObjectNode product = service.terminateProvisionedProduct(request, region, accountId);
-        ObjectNode record = objectMapper.createObjectNode();
-        record.put("RecordId", product.path("RecordId").asText());
-        record.put("ProvisionedProductId", product.path("Id").asText());
-        record.put("ProvisionedProductName", product.path("Name").asText());
-        record.put("ProductId", product.path("ProductId").asText());
-        record.put("ProvisioningArtifactId", product.path("ProvisioningArtifactId").asText());
-        record.put("Status", "SUCCEEDED");
-        record.put("CreatedTime", product.path("UpdatedTime").asDouble(0.0));
-        record.put("UpdatedTime", product.path("UpdatedTime").asDouble(0.0));
-        record.put("RecordType", "TERMINATE_PROVISIONED_PRODUCT");
-        return Response.ok(objectMapper.createObjectNode().set("RecordDetail", record)).build();
+        return recordResponse(product);
     }
 
     private Response updateProvisioningArtifact(JsonNode request) {

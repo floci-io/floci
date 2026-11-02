@@ -1,7 +1,7 @@
 {
   "_source": {
     "generator": "tools/aws/regen_iam_paginators.py",
-    "botocore": "botocore 1.43.113 (installed package)"
+    "botocore": "botocore 1.43.118 (local/aws/botocore)"
   },
   "operations": {
     "GetAccountAuthorizationDetails": {

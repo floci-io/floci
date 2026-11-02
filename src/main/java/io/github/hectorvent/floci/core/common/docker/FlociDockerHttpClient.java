@@ -166,7 +166,7 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
                         return UnixDomainSocket.connect(path);
                     }
                     if ("npipe".equalsIgnoreCase(scheme)) {
-                        return new NamedPipeSocket(path);
+                        return new FailFastNamedPipeSocket(path);
                     }
                     return socksProxy == null ? new Socket() : new Socket(socksProxy);
                 },
@@ -214,6 +214,14 @@ public final class FlociDockerHttpClient implements DockerHttpClient {
             return new FlociResponse(httpRequest, response, ttyExec && response.getCode() == 200);
         } catch (IOException e) {
             throw new RuntimeException(e);
+        } catch (LinkageError e) {
+            // docker-java's named-pipe socket loads JNA when the pipe will not open. A JNA that
+            // cannot load (no native dispatch library for this platform) throws an Error, which
+            // the callers' catch (Exception) blocks would not stop, and one thrown during startup
+            // took down the whole emulator. As an exception it fails this one Docker call, the
+            // same way an unreachable daemon does.
+            throw new IllegalStateException("Docker's " + host.getSchemeName()
+                    + " transport could not load its native library: " + e, e);
         }
     }
 

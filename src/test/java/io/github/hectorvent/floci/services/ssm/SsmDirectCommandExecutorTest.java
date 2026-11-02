@@ -13,6 +13,8 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -83,7 +85,7 @@ class SsmDirectCommandExecutorTest {
         verify(execCreate).withCmd(
                 eq("sh"),
                 eq("-c"),
-                argThat(command -> command.contains("timeout --kill-after=1s '30s' sh -c")
+                argThat(command -> command.contains("setsid sh -c")
                         && !command.contains("floci_ssm_redact")
                         && command.contains("echo stdout")));
     }
@@ -113,7 +115,7 @@ class SsmDirectCommandExecutorTest {
     void timeoutAppliesOnlyToUserScriptBeforeDiagnosticsRun() {
         String command = SsmDirectCommandExecutor.timeoutWrappedScript("sleep 100", 30);
 
-        assertTrue(command.contains("timeout --kill-after=1s '30s' sh -c 'sleep 100'"));
+        assertTrue(command.contains("setsid sh -c 'sleep 100'"));
         assertFalse(command.contains("floci_ssm_redact"));
     }
 
@@ -269,8 +271,9 @@ class SsmDirectCommandExecutorTest {
         verify(callback).close();
     }
 
-    @Test
-    void timeoutExitCodeMapsToTimedOutResult() throws Exception {
+    @ParameterizedTest
+    @ValueSource(longs = {124, 137, 143})
+    void ordinaryReservedExitCodeMapsToFailedResult(long exitCode) throws Exception {
         DockerClient dockerClient = mock(DockerClient.class);
         Ec2Service ec2Service = mock(Ec2Service.class);
         Instance instance = instance("i-container", "container-1");
@@ -295,7 +298,7 @@ class SsmDirectCommandExecutorTest {
 
         InspectExecCmd inspectExec = mock(InspectExecCmd.class);
         InspectExecResponse inspectExecResponse = mock(InspectExecResponse.class);
-        when(inspectExecResponse.getExitCodeLong()).thenReturn(124L);
+        when(inspectExecResponse.getExitCodeLong()).thenReturn(exitCode);
         when(inspectExec.exec()).thenReturn(inspectExecResponse);
         when(dockerClient.inspectExecCmd("exec-1")).thenReturn(inspectExec);
 
@@ -307,8 +310,8 @@ class SsmDirectCommandExecutorTest {
                 1);
 
         assertTrue(result.isPresent());
-        assertEquals("TimedOut", result.get().status());
-        assertEquals(-1, result.get().responseCode());
+        assertEquals("Failed", result.get().status());
+        assertEquals(exitCode, result.get().responseCode());
         assertEquals("terminated\n", result.get().standardError());
     }
 

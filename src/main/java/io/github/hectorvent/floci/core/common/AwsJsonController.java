@@ -36,10 +36,14 @@ import org.jboss.logging.Logger;
  * - DynamoDB (DynamoDB_20120810.*)
  * - SQS (AmazonSQS.*)
  * <p>
+ * A gzip-encoded CloudWatch {@code PutMetricData} body arrives here decompressed, by
+ * {@link CloudWatchGzipReaderInterceptor}.
+ * <p>
  * Requests run on virtual threads: SQS ReceiveMessage and Step Functions GetActivityTask wait up
  * to 20 and 60 seconds for work, and that wait must not hold one of the shared request workers.
  */
 @Path("/")
+@CloudWatchGzipBody
 public class AwsJsonController {
 
     public static final String CONTENT_TYPE_AWS_JSON_1_0 = "application/x-amz-json-1.0";

@@ -530,7 +530,7 @@ Deviations from AWS: Floci keeps no recommendation history, so every recommendat
 
 ### Request member types
 
-The operations whose body nests a structure in a structure, or holds a list of structures, check the request body against the SES v2 service model before anything else is validated, as AWS's restJson1 deserializer does: the send operations (`SendEmail`, `SendBulkEmail`, `SendCustomVerificationEmail`), `CreateConfigurationSet`, `UpdateConfigurationSet`, `PutConfigurationSetSuppressionOptions`, `PutConfigurationSetVdmOptions`, `CreateConfigurationSetEventDestination`, `UpdateConfigurationSetEventDestination`, `CreateContactList`, `UpdateContactList`, `CreateContact`, `UpdateContact`, `ListContacts`, `PutAccountSuppressionAttributes`, `PutAccountVdmAttributes`, `BatchGetMetricData`, `CreateImportJob` and `CreateExportJob`. `ListReputationEntities`, `UpdateReputationEntityPolicy`, `UpdateReputationEntityCustomerManagedStatus`, `GetEmailAddressInsights` and `ListRecommendations` run the same check although their bodies are flat. In those operations, the first body member of the wrong JSON type, in body order, is a `SerializationException` with AWS's deserializer message:
+The operations whose body has a structure member holding another structure, or holds a list of structures, check the request body against the SES v2 service model before anything else is validated, as AWS's restJson1 deserializer does: the send operations (`SendEmail`, `SendBulkEmail`, `SendCustomVerificationEmail`), `CreateConfigurationSet`, `UpdateConfigurationSet`, `PutConfigurationSetSuppressionOptions`, `PutConfigurationSetVdmOptions`, `CreateConfigurationSetEventDestination`, `UpdateConfigurationSetEventDestination`, `CreateContactList`, `UpdateContactList`, `CreateContact`, `UpdateContact`, `ListContacts`, `PutAccountSuppressionAttributes`, `PutAccountVdmAttributes`, `BatchGetMetricData`, `CreateImportJob` and `CreateExportJob`. `ListReputationEntities`, `UpdateReputationEntityPolicy`, `UpdateReputationEntityCustomerManagedStatus`, `GetEmailAddressInsights`, `ListRecommendations` and `PutEmailIdentityDkimSigningAttributes` run the same check although their bodies are flat (`SigningAttributes` holds only scalars). In those operations, the first body member of the wrong JSON type, in body order, is a `SerializationException` with AWS's deserializer message:
 
 | Member type | Value sent | Message |
 |---|---|---|
@@ -554,7 +554,11 @@ The body shapes are vendored in `src/main/resources/aws/sesv2-request-shapes.jso
 through the SES API first. `Ref` and `Fn::GetAtt RuleName` return the stored rule's name. A missing
 `Rule.Name` gets a generated name that remains stable across updates.
 
-Rule contents and `After` update in place. Changing the rule name or `RuleSetName` creates a
+Rule contents and `After` update in place. Content-only updates preserve the rule's position;
+changing the resolved `After` value repositions it, and removing `After` moves it to the front.
+Rules stored before resolved ordering metadata was recorded reapply the current `After` value
+once on their next update. Subsequent content-only updates preserve their position.
+Changing the rule name or `RuleSetName` creates a
 replacement; the old rule is deleted after the stack update commits unless `UpdateReplacePolicy`
 is `Retain`. Failed updates restore the previous contents and ordering, and stack deletion removes
 the managed rule. Actions use the same local-target validation as the SES API.

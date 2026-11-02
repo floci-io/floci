@@ -134,6 +134,27 @@ AWS runtime for Apache Spark releases, `emr-spark-8.0.0` on), and runs
   two are merged by property instead, the run's winning. `s3://` and `s3a://` paths reach Floci's S3 through S3A, on releases before 7.10.0
   too, where `s3://` would otherwise be EMRFS; the entry point and its files can be read from there.
   The Glue Data Catalog client is pointed at Floci's Glue.
+* **Driver environment and archives**: a `spark.emr-serverless.driverEnv.<KEY>` property, from the
+  `spark-defaults` above or a `--conf` in `sparkSubmitParameters`, which wins, is an environment variable
+  of the container, replacing one of Floci's own of that name, such as the user guide's `JAVA_HOME` for
+  Java 17. Each archive of `spark.archives` (which `spark-submit`'s `--archives` sets, winning over a
+  `--conf`) that is in Floci's S3 is unpacked into the container's working directory, `/home/hadoop` in the
+  release's image, before the driver starts, under the name that follows its `#`, or else its file's
+  name: a `.jar` or `.zip` is unzipped, a `.tar.gz`, `.tgz` or `.tar` untarred, and any other file copied,
+  as Spark unpacks one. So the user guide's Python virtual environment runs as it is written there:
+
+  ```
+  --conf spark.archives=s3://amzn-s3-demo-bucket/EXAMPLE-PREFIX/pyspark_venv.tar.gz#environment
+  --conf spark.emr-serverless.driverEnv.PYSPARK_DRIVER_PYTHON=./environment/bin/python
+  --conf spark.emr-serverless.driverEnv.PYSPARK_PYTHON=./environment/bin/python
+  --conf spark.executorEnv.PYSPARK_PYTHON=./environment/bin/python
+  ```
+
+  Floci reads each archive as the run's account. One it cannot read fails the run before its driver
+  starts, with "Job run could not start" naming it, and one that does not unpack fails the run as a
+  driver's failure does. Spark also unpacks every archive itself, into its own files folder, where
+  `SparkFiles.get` finds it. A `spark.executorEnv.<KEY>` needs nothing more from Floci: local mode's
+  executors run in the driver's JVM, and Spark gives these variables to the Python workers it starts.
 * **Credentials**: the container gets a session for the run's execution role when IAM knows the role,
   otherwise the account's placeholder credentials, and `AWS_ENDPOINT_URL` pointing at Floci, so the
   job's own SDK clients reach Floci too.
@@ -179,6 +200,9 @@ AWS runtime for Apache Spark releases, `emr-spark-8.0.0` on), and runs
 
 * **Jobs do not execute by default**: in the `immediate` runner mode `StartJobRun` records a job run and moves it through its states, but nothing runs. In the `docker` mode a Spark run executes in local mode in one container, so worker counts and sizes, initial and maximum capacity are not applied; a Hive run is `FAILED` without running, in Floci's own wording, as is a driver's failure. Of the monitoring configuration, the S3 log destination gets the driver's `stdout.gz` and `stderr.gz` once a run ends (no event logs, rotated files or uploads while it runs), and CloudWatch Logs the driver's output while it runs (there are no executor logs, local mode having no executors, and `encryptionKeyArn` is ignored).
 * **Unsourced errors**: AWS documents neither the error for a run submitted to an application whose auto-start is off nor the one for a run on a terminated application; Floci answers both with `ValidationException`. The same holds for a `BATCH` timeout outside 1 to 10080 minutes on `emr-7.11.0` or later (`ValidationException`) and for `GetJobRun` naming an attempt a run never made (`ResourceNotFoundException`), both in Floci's own wording. A run needs a `jobDriver`, as every `JobRun` carries one, and `jobDriver` is a union, so a run without a driver, or with one that sets both `sparkSubmit` and `hive` or neither, is refused with `ValidationException` too, in Floci's own wording.
+* **Archives**: only the archives of `spark.archives` that are in S3 are unpacked into the driver's working
+  directory; Spark alone unpacks the others, into its own files folder. Floci reads an archive itself,
+  whatever the execution role may read, though Spark's own read of it uses the role's credentials.
 * **Custom images**: Floci does not check an `imageUri` against the model's pattern, which would refuse the repository URIs Floci's own ECR hands out, nor that the image was built from its release's base image (AWS refuses one that was not from `emr-7.14.0` and `emr-spark-8.1.0` on), nor the image's size. An image that cannot be pulled fails the run, not the request that names it. Every run resolves its image again, as releases from 7.14 do and earlier ones with `applicationLevelDigestResolution` false: Floci keeps no digest from the application's start, and reports no `resolvedImageDigest`, on the application or on a job run.
 * **StopApplication with running jobs**: AWS requires running jobs to finish or be cancelled before an application stops. Floci does not enforce it; with the default duration of `0` no `BATCH` run is ever running.
 * **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, queuing (`QUEUED`), `totalResourceUtilization` and `billedResourceUtilization`, and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).

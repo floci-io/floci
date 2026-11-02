@@ -17,6 +17,7 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -140,6 +141,19 @@ class RedshiftRoleAccessTest {
     }
 
     @Test
+    void resolveRoleSessionIncludesSecretAccessKeyMatchingIamSession() {
+        IamService iamService = iamServiceWithRole(TRUST_POLICY);
+
+        RedshiftRoleAccess.RoleSession session = RedshiftRoleAccess.resolveRoleSession(
+                ROLE_ARN, iamService, ACCOUNT, List.of(ROLE_ARN));
+
+        assertNotNull(session.secretAccessKey());
+        assertThat(session.secretAccessKey().length(), equalTo(40));
+        verify(iamService).registerSessionForAccount(eq(ACCOUNT), eq(session.accessKeyId()),
+                eq(session.secretAccessKey()), eq(session.sessionToken()), eq(ROLE_ARN), any(), isNull());
+    }
+
+    @Test
     void authorizeRoleActionAllowsWhatTheIdentityPolicyGrants() {
         S3Service s3 = mock(S3Service.class);
         when(s3.isAuthEnforced()).thenReturn(true);
@@ -158,7 +172,7 @@ class RedshiftRoleAccessTest {
         when(iamService.resolvePrincipalContext(ROLE_ARN)).thenReturn(CallerContext.of(List.of("""
                 {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:ListBucket",
                  "Resource":"arn:aws:s3:::bucket","Condition":{"StringLike":{"s3:prefix":["events/*"]}}}]}""")));
-        RedshiftRoleAccess.RoleSession session = new RedshiftRoleAccess.RoleSession("ASIAX", "token");
+        RedshiftRoleAccess.RoleSession session = new RedshiftRoleAccess.RoleSession("ASIAX", "secret", "token");
 
         RedshiftRoleAccess.authorizeRoleList(s3, iamService, session, ROLE_ARN, "bucket", "events/");
         S3CopySimulator.S3TransferException denied = assertThrows(S3CopySimulator.S3TransferException.class,
@@ -172,7 +186,7 @@ class RedshiftRoleAccessTest {
         S3Service s3 = mock(S3Service.class);
         when(s3.isAuthEnforced()).thenReturn(false);
         IamService iamService = mock(IamService.class);
-        RedshiftRoleAccess.RoleSession session = new RedshiftRoleAccess.RoleSession("ASIAX", "token");
+        RedshiftRoleAccess.RoleSession session = new RedshiftRoleAccess.RoleSession("ASIAX", "secret", "token");
         doThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist", 404)).when(s3)
                 .authorizeSignedListBucket("ASIAX", "token", "bucket");
 
@@ -188,7 +202,7 @@ class RedshiftRoleAccessTest {
         S3Service s3 = mock(S3Service.class);
         when(s3.isAuthEnforced()).thenReturn(false);
         IamService iamService = mock(IamService.class);
-        RedshiftRoleAccess.RoleSession session = new RedshiftRoleAccess.RoleSession("ASIAX", "token");
+        RedshiftRoleAccess.RoleSession session = new RedshiftRoleAccess.RoleSession("ASIAX", "secret", "token");
         doThrow(new AwsException("AccessDenied", "Access Denied", 403)).when(s3)
                 .authorizeSignedListBucket("ASIAX", "token", "bucket");
         doThrow(new AwsException("AccessDenied", "Access Denied", 403)).when(s3)

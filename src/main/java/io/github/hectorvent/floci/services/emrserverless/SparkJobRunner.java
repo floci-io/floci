@@ -60,13 +60,30 @@ public interface SparkJobRunner {
      * gets Floci's settings and the {@code spark-defaults} as defaults (its {@code application} is then
      * empty); how long it may run
      * ({@link Duration#ZERO} for no limit); the S3 folder its driver's {@code stdout.gz} and
-     * {@code stderr.gz} go to once it ends, ending in a slash (null for none); and where in CloudWatch Logs
-     * its driver's output goes while it runs (null for nowhere but Floci's log).
+     * {@code stderr.gz} go to once it ends, ending in a slash (null for none); where in CloudWatch Logs
+     * its driver's output goes while it runs (null for nowhere but Floci's log); the environment variables
+     * its container gets besides Floci's own, which they replace where a name is the same (empty for none);
+     * its {@code spark.archives}, each a path with, after a {@code #}, the directory it is unpacked to, of
+     * which those in S3 are unpacked into the container's working directory before the driver starts (empty
+     * for none); the storage of the cluster it runs on (null for none, as for an EMR Serverless run); the
+     * {@code core-site.xml} properties its {@code hadoop} command gets, on a cluster, after those of the
+     * cluster's storage, which they replace where a name is the same (empty for none); and the
+     * {@code log4j2.properties} lines its Spark gets after those of its configuration, which they replace where
+     * a key is the same (empty for none).
      */
     record Job(String service, String runId, String accountId, String region, String releaseLabel,
                String imageTemplate, String customImage, String dockerNetwork, String executionRole,
                Map<String, String> sparkDefaults, List<String> application, List<String> command, Duration timeout,
-               String logFolder, CloudWatchLogs cloudWatchLogs) {
+               String logFolder, CloudWatchLogs cloudWatchLogs, Map<String, String> environment,
+               List<String> archives, Storage storage, Map<String, String> coreSite,
+               Map<String, String> sparkLog4j2) {
+    }
+
+    /**
+     * The Docker volumes holding an EMR cluster's storage, which every one of its steps' containers mounts:
+     * {@code home} at {@code /home/hadoop}, and {@code mnt} at {@code /mnt}, where its HDFS is.
+     */
+    record Storage(String home, String mnt) {
     }
 
     /**

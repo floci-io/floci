@@ -212,7 +212,9 @@ use source `aws.redshift-data` and detail type `Redshift Data Statement Status C
 `redshiftQueryId`, `state`, `rows` and `expireAt` in epoch seconds. Query ids match
 `DescribeStatement`; Floci derives them from statement ids rather than backend query ids.
 `resources` contains the cluster ARN, or the workgroup ARN for Floci's Serverless support.
-EventBridge rules can route these events to SQS, Lambda or other supported targets.
+EventBridge rules can route these events to SQS, Lambda or other supported targets. Rules can also
+submit SQL to a Redshift cluster or Serverless workgroup through native Redshift Data API targets;
+see [EventBridge Redshift Data API targets](eventbridge.md#redshift-data-api-targets).
 
 ## Spectrum relational queries
 

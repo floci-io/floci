@@ -156,6 +156,7 @@ class S3ObjectOperationsBucketPolicyIntegrationTest {
         String bucket = bucket(false);
         owner().body("<OwnershipControls><Rule><ObjectOwnership>ObjectWriter</ObjectOwnership></Rule></OwnershipControls>")
                 .when().put(bucket + "?ownershipControls").then().statusCode(200);
+        owner().when().delete(bucket + "?publicAccessBlock").then().statusCode(204);
         owner().header("x-amz-acl", "public-read-write").when().put(bucket + "?acl").then().statusCode(200);
 
         given().header("x-amz-acl", "bucket-owner-full-control").body("acl").when().put(bucket + "/acl")

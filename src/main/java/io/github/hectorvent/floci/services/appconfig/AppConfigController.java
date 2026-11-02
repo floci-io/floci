@@ -275,6 +275,14 @@ public class AppConfigController {
         return Response.ok(service.getDeployment(appId, envId, deploymentNumber)).build();
     }
 
+    @DELETE
+    @Path("/applications/{appId}/environments/{envId}/deployments/{deploymentNumber}")
+    public Response stopDeployment(@PathParam("appId") String appId, @PathParam("envId") String envId,
+                                   @PathParam("deploymentNumber") int deploymentNumber,
+                                   @HeaderParam("Allow-Revert") boolean allowRevert) {
+        return Response.status(202).entity(service.stopDeployment(appId, envId, deploymentNumber, allowRevert)).build();
+    }
+
     // ──────────────────────────── Configuration ────────────────────────────
 
     // The deprecated GetConfiguration: superseded by AppConfigData, but still an AppConfig operation.

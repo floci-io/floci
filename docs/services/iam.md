@@ -294,9 +294,10 @@ Some refusals stay as this service answers them, and the members behind them are
 vendored shapes so the walk cannot reword them. A service-linked role's principal and suffix answer
 `InvalidInput` rather than a validation error at all, and so does an empty `ServiceNamespaces` on
 `ListPoliciesGrantingServiceAccess`. An account alias carries AWS's own sentence about its own
-bounds, which is why neither alias operation is read at all. `statusType`, on all four operations
-that take it, is answered without the offending value and without the permitted set, which is what
-the recorded refusal carries and what the walk would spell out. `Encoding` on `GetSSHPublicKey`
+bounds, which is why neither alias operation is read at all. For `statusType` on the four credential
+updates, a missing `Status` answers `Member must not be null`; an invalid value answers `Member must
+satisfy enum value set: [Expired, Active, Inactive]` without echoing that value. These wordings
+follow the newer AWS capture. `Encoding` on `GetSSHPublicKey`
 answers the modelled `UnrecognizedPublicKeyEncoding` rather than a constraint violation. And
 `TagKeys` on the eight untag operations is answered against the list as a whole, `Value at
 'tagKeys' failed to satisfy constraint: Member must satisfy constraint: [...]`, where the walk
@@ -321,10 +322,11 @@ was already this service's choice for a list over its limit, and it is now what 
 whatever it breaks. Other services do quote a list, Lambda's `Value '[x86_64, arm64]' at
 'architectures'` being a captured one, which is why this is IAM's reading and not a rule.
 
-The one message that still carries a word where the value would go is the required member a request
-leaves out, `Value null at '<member>'`, which no capture covers in either form. The form is chosen
-in one place, so a direct capture that ever shows IAM carrying its values again moves it back in one
-edit rather than across the service.
+A captured missing `Status` on the four credential updates reads `Value at 'status' failed to satisfy
+constraint: Member must not be null`, without `null` after `Value`. Other omitted required members
+may still use `Value null at '<member>'`; this capture does not settle their wording. IAM's form for
+violations with a supplied value is chosen in one place, so a future capture that shows IAM carrying
+those values again moves it back in one edit rather than across the service.
 
 ### Permission Boundaries
 
@@ -1560,6 +1562,11 @@ Setting `enforcement-enabled: true` activates the policy evaluator as a JAX-RS r
 
 The startup banner reports the effective state (`IAM: policy enforcement enabled` / `disabled`). If requests you expect to be denied keep succeeding, check that line first: the flag is only read under the name below, and any other spelling (for example `FLOCI_IAM_STRICT_VALIDATION`, which does not exist) is silently ignored, leaving the permissive default in place.
 
+Direct calls include `aws:ViaAWSService=false` in the shared authorization context,
+including calls made with service-role credentials or directly by service principals.
+This makes Boolean conditions distinguish direct access from forward access sessions.
+Forward access session propagation is not implemented by this context default.
+
 ### Enable enforcement
 
 **Environment variable:**
@@ -1595,7 +1602,7 @@ SQS, SNS, DynamoDB, Kinesis, SSM, KMS, IAM, Resource Groups, EventBridge Schedul
 Pipes, Aurora DSQL, EKS, API Gateway, CloudWatch Logs, Secrets Manager and STS. For Elastic Load Balancing, ECR,
 Step Functions, EventBridge, Amazon Cognito user pools and identity pools, Amazon Data Firehose, Cloud
 Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kinesis Data Analytics v2),
-AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
+Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
 AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator and Amazon
 Timestream for InfluxDB they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
@@ -1636,7 +1643,8 @@ naming no workgroup is checked on `workgroup/primary`, where `StartQueryExecutio
 `ListQueryExecutions` and `ListNamedQueries` list, and `GetWorkGroup` answers. Athena's
 `ListDatabases`, `ListTableMetadata` and `GetTableMetadata` are checked on the catalog their
 `CatalogName` names and on `datacatalog/AwsDataCatalog`, the Glue Data Catalog Floci reads whichever
-catalog they name. Cost Explorer's cost and usage reads are checked on `*`, not on the billing view
+catalog they name, and a `GetDataCatalog` naming no catalog on `datacatalog/AwsDataCatalog`, the one it
+answers. Cost Explorer's cost and usage reads are checked on `*`, not on the billing view
 their `BillingViewArn` gives: Floci serves no billing views and answers the account's costs whichever
 one is named. Data Exports' `CreateExport` is not checked on the
 ARN its `Export.ExportArn` gives, which is the new export's own. CloudTrail's `StartLogging`,
@@ -1658,7 +1666,11 @@ so one entry for a bus the caller may not publish to refuses the whole request, 
 User Guide gives it for every entry. A connection or an API destination, whose ARN
 EventBridge follows with an id it mints after the name, `connection/<name>/<id>`, is checked on
 the ARN it is stored under when the request names it, and on `connection/<name>/*` when there is
-none yet, as for its create. EventBridge V2's API, which Floci does not serve, is not read. A
+none yet, as for its create. An Application Auto Scaling scalable target, whose ARN ends in the id
+Application Auto Scaling assigns it, `scalable-target/<id>`, while its requests name it by
+`ServiceNamespace`, `ResourceId` and `ScalableDimension`, is checked on the ARN it is stored under, and
+on `scalable-target/*` when there is none yet, as for a `RegisterScalableTarget` registering a new one;
+its tag operations name it by its ARN. EventBridge V2's API, which Floci does not serve, is not read. A
 state machine's version or alias
 (`stateMachine:<name>:<qualifier>`) is checked on the state machine's ARN, as Step Functions
 authorizes it, so a grant or a deny on `stateMachine:<name>` covers its versions and aliases, and

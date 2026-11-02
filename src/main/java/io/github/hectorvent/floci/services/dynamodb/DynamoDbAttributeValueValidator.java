@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.util.Base64;
@@ -55,8 +56,8 @@ final class DynamoDbAttributeValueValidator {
 
     static final String NESTING_EXCEEDED = "Nesting Levels have exceeded supported limits";
 
-    static void requireParameterNestingWithinLimit(JsonNode value) {
-        if (depthOf(value) > MAX_NESTING_LEVELS + 1) {
+    static void requireParameterLevelWithinLimit(int level) {
+        if (MAX_NESTING_LEVELS + 1 < level) {
             throw validationEx(NESTING_EXCEEDED + ": Attributes in the item have nested levels beyond supported limit");
         }
     }
@@ -100,7 +101,17 @@ final class DynamoDbAttributeValueValidator {
         }
     }
 
-    private static void requireBase64(JsonNode value) {
+    // A PartiQL parameter takes a member set to null as absent.
+    static JsonNode dropNullMembers(JsonNode value) {
+        if (value instanceof ObjectNode object) {
+            object.properties().removeIf(member -> member.getValue().isNull());
+            object.path("M").forEach(DynamoDbAttributeValueValidator::dropNullMembers);
+            object.path("L").forEach(DynamoDbAttributeValueValidator::dropNullMembers);
+        }
+        return value;
+    }
+
+    static void requireBase64(JsonNode value) {
         if (!value.isObject()) {
             return;
         }

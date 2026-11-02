@@ -376,7 +376,8 @@ class AppConfigIntegrationTest {
                 .when().post("/applications/" + appId + "/environments/" + envId + "/deployments")
                 .then()
                 .statusCode(201)
-                .body("State", equalTo("COMPLETE"))
+                .body("State", equalTo("BAKING"))
+                .body("PercentageComplete", equalTo(100.0f))
                 .body("DeploymentStrategyId", equalTo("AppConfig.AllAtOnce"));
     }
 
@@ -391,7 +392,8 @@ class AppConfigIntegrationTest {
                 .body("Items[0].DeploymentNumber", equalTo(3))
                 .body("Items[0].ConfigurationProfileId", equalTo(profileId))
                 .body("Items[0].ConfigurationVersion", equalTo("1"))
-                .body("Items[0].State", equalTo("COMPLETE"))
+                .body("Items[0].State", equalTo("BAKING"))
+                .body("Items[0].PercentageComplete", equalTo(100.0f))
                 .body("Items[0].ConfigurationName", equalTo("test-profile"))
                 .body("Items[0].Type", equalTo("AWS.Freeform"))
                 .extract().path("NextToken");

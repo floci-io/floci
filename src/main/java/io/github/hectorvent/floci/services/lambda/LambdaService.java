@@ -1875,28 +1875,39 @@ public class LambdaService implements ResourceProvider {
     /** Operators AWS documents that the matcher does not implement, rejected with a clearer message. */
     private static final Set<String> UNIMPLEMENTED_FILTER_OPERATORS = Set.of("cidr", "wildcard");
 
-    /** Comparisons {@code matchesNumericFilter} understands. Anything else evaluates false for every record. */
+    /** Comparisons {@code PipesFilterMatcher} understands. It treats a pattern with any other as matching nothing. */
     private static final Set<String> NUMERIC_COMPARISONS = Set.of("=", ">", ">=", "<", "<=");
 
     /**
      * Validates the recursive shape of an EventBridge filter pattern: every field value must be either a
-     * non-empty match array (a leaf) or a nested object (recursed into). A scalar or empty-array value is a
+     * non-empty match array (a leaf) or a nested object (recursed into), and {@code $or} a non-empty list of
+     * patterns, each validated the same way. A scalar or empty-array value is a
      * pattern the matcher can never satisfy, so, with enforcement active, it would silently drop every
      * record; reject it at create/update instead.
      *
      * <p>Match-array elements are validated against the operator set the matcher implements. This does couple
      * the validator to {@code PipesFilterMatcher}, which is deliberate: now that the pollers enforce filters,
-     * a pattern the matcher cannot satisfy is destructive rather than inert. A bad operand silently corrupts
-     * delivery instead of erroring, and the failure direction is not even consistent. {@code
-     * {"numeric":[">","abc"]}} coerces its operand to zero and matches every positive value, {@code
-     * {"numeric":[">"]}} matches every record because the comparison loop never runs, and an unknown operator
-     * matches nothing, so every record is checkpointed past or deleted. Failing at create/update is the only
+     * a pattern the matcher cannot evaluate is destructive rather than inert. The matcher refuses an unknown
+     * operator or a bad operand such as {@code {"numeric":[">","abc"]}}, and the pollers treat a refused pattern
+     * as matching nothing, so every record is checkpointed past or deleted. Failing at create/update is the only
      * point where the caller can still act on it.
      */
     private static void validatePatternStructure(JsonNode node) {
         for (Map.Entry<String, JsonNode> entry : node.properties()) {
             JsonNode value = entry.getValue();
-            if (value.isArray()) {
+            if ("$or".equals(entry.getKey())) {
+                if (!value.isArray() || value.isEmpty()) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "Filter Pattern field '$or' must be a non-empty list of patterns", 400);
+                }
+                for (JsonNode branch : value) {
+                    if (!branch.isObject()) {
+                        throw new AwsException("InvalidParameterValueException",
+                                "Filter Pattern field '$or' must be a non-empty list of patterns", 400);
+                    }
+                    validatePatternStructure(branch);
+                }
+            } else if (value.isArray()) {
                 if (value.isEmpty()) {
                     throw new AwsException("InvalidParameterValueException",
                             "Filter Pattern field '" + entry.getKey() + "' must have a non-empty match array", 400);
@@ -1914,17 +1925,17 @@ public class LambdaService implements ResourceProvider {
     }
 
     /**
-     * A match-array element is either a literal the matcher compares directly (string, number, or null for
-     * "absent") or a single-operator object. Two operators in one object is rejected because the matcher
+     * A match-array element is either a literal the matcher compares directly (string, number, boolean, or
+     * null) or a single-operator object. Two operators in one object is rejected because the matcher
      * tests them in a fixed order and silently honours only the first.
      */
     private static void validateMatchElement(String field, JsonNode element) {
-        if (element.isTextual() || element.isNumber() || element.isNull()) {
+        if (element.isTextual() || element.isNumber() || element.isBoolean() || element.isNull()) {
             return;
         }
         if (!element.isObject()) {
             throw new AwsException("InvalidParameterValueException", "Filter Pattern field '" + field
-                    + "' has an invalid match value: expected a string, number, null, or an operator object", 400);
+                    + "' has an invalid match value: expected a string, number, boolean, null, or an operator object", 400);
         }
         List<String> operators = new ArrayList<>();
         element.fieldNames().forEachRemaining(operators::add);

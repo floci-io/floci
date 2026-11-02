@@ -49,33 +49,37 @@ class EcsCapacityProviderServiceTest {
     void capacityProviderServiceReachesDesiredCountAndScalesOut(
             List<CapacityProviderStrategyItem> strategy, Map<String, Long> initial, Map<String, Long> scaled) {
         String name = "sdk-capacity-service-" + UUID.randomUUID().toString().substring(0, 8);
-        try (EcsClient ecs = TestFixtures.ecsClient(); Ec2Client ec2 = TestFixtures.ec2Client()) {
-            String subnet = ec2.describeSubnets().subnets().get(0).subnetId();
+        try (EcsClient ecs = TestFixtures.ecsClient(); Ec2Client ec2 = TestFixtures.ec2Client();
+             Ec2TestNetwork ownedNetwork = Ec2TestNetwork.create(ec2)) {
+            String subnet = ownedNetwork.subnetId();
             ecs.createCluster(request -> request.clusterName(name)
                     .capacityProviders(strategy.stream().map(CapacityProviderStrategyItem::capacityProvider).toList()));
-            TaskDefinition definition = ecs.registerTaskDefinition(request -> request.family(name)
-                    .networkMode(NetworkMode.AWSVPC).requiresCompatibilities(Compatibility.FARGATE)
-                    .cpu("256").memory("512")
-                    .containerDefinitions(ContainerDefinition.builder()
-                            .name("app").image("alpine:3").memory(128)
-                            // PID 1 gets no default SIGTERM handler, so a bare "sleep 3600" sits out
-                            // the whole stopTimeout grace period for each task deleteService stops.
-                            .command("sh", "-c", "trap 'exit 0' TERM; sleep 3600 & wait")
-                            .essential(true).build())).taskDefinition();
             try {
-                ecs.createService(request -> request.cluster(name).serviceName(name)
-                        .taskDefinition(definition.taskDefinitionArn()).desiredCount(2)
-                        .networkConfiguration(network -> network.awsvpcConfiguration(vpc -> vpc.subnets(subnet)))
-                        .capacityProviderStrategy(strategy));
+                TaskDefinition definition = ecs.registerTaskDefinition(request -> request.family(name)
+                        .networkMode(NetworkMode.AWSVPC).requiresCompatibilities(Compatibility.FARGATE)
+                        .cpu("256").memory("512")
+                        .containerDefinitions(ContainerDefinition.builder()
+                                .name("app").image("alpine:3").memory(128)
+                                // PID 1 gets no default SIGTERM handler, so a bare "sleep 3600" sits out
+                                // the whole stopTimeout grace period for each task deleteService stops.
+                                .command("sh", "-c", "trap 'exit 0' TERM; sleep 3600 & wait")
+                                .essential(true).build())).taskDefinition();
                 try {
-                    assertStableProviderCounts(ecs, name, strategy, initial);
-                    ecs.updateService(request -> request.cluster(name).service(name).desiredCount(4));
-                    assertStableProviderCounts(ecs, name, strategy, scaled);
+                    ecs.createService(request -> request.cluster(name).serviceName(name)
+                            .taskDefinition(definition.taskDefinitionArn()).desiredCount(2)
+                            .networkConfiguration(network -> network.awsvpcConfiguration(vpc -> vpc.subnets(subnet)))
+                            .capacityProviderStrategy(strategy));
+                    try {
+                        assertStableProviderCounts(ecs, name, strategy, initial);
+                        ecs.updateService(request -> request.cluster(name).service(name).desiredCount(4));
+                        assertStableProviderCounts(ecs, name, strategy, scaled);
+                    } finally {
+                        ecs.deleteService(request -> request.cluster(name).service(name).force(true));
+                    }
                 } finally {
-                    ecs.deleteService(request -> request.cluster(name).service(name).force(true));
+                    ecs.deregisterTaskDefinition(request -> request.taskDefinition(definition.taskDefinitionArn()));
                 }
             } finally {
-                ecs.deregisterTaskDefinition(request -> request.taskDefinition(definition.taskDefinitionArn()));
                 ecs.deleteCluster(request -> request.cluster(name));
             }
         }

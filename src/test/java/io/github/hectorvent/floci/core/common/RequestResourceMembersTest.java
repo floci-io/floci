@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -80,6 +81,35 @@ class RequestResourceMembersTest {
     }
 
     @Test
+    void aScalableTargetIsFoundByTheMembersItsServiceReadsNotFilledByItsResourceId() {
+        List<Member> triple = List.of(new Member("ServiceNamespace", false), new Member("ResourceId", false),
+                new Member("ScalableDimension", false));
+        for (String operation : List.of("RegisterScalableTarget", "DeregisterScalableTarget", "PutScalingPolicy",
+                "DeleteScalingPolicy", "PutScheduledAction", "DeleteScheduledAction")) {
+            Resource target = RequestResourceMembers.table().operations().get("application-autoscaling:" + operation)
+                    .stream().filter(resource -> resource.arn() == null).findFirst().orElseThrow();
+            assertEquals(triple, target.find(), operation);
+            assertTrue(target.fill().isEmpty(), operation);
+        }
+        String formats = "\"arnFormats\":{\"a\":{\"target\":\"arn:${Partition}:a:${Region}:${Account}:target/${Id}\"}}";
+        assertEquals(List.of(new Member("Namespace", false), new Member("Dimension", false)), parseUnchecked(document(
+                formats, "{\"type\":\"target\",\"fill\":{},\"find\":[\"Namespace\",\"Dimension\"]}"))
+                .operations().get("a:Op").getFirst().find());
+        // No members, a list, members beside one filling it, no list of them, or beside members reading it otherwise.
+        for (String bad : List.of("\"fill\":{},\"find\":[]", "\"fill\":{},\"find\":[\"Ids[]\"]",
+                "\"fill\":{\"Id\":\"Id\"},\"find\":[\"Namespace\"]", "\"fill\":{},\"find\":\"Namespace\"",
+                "\"fill\":{},\"find\":{\"a\":\"Namespace\"}",
+                "\"fill\":{},\"find\":[\"Namespace\"],\"account\":\"registryId\"",
+                "\"fill\":{},\"find\":[\"Namespace\"],\"absent\":{\"Namespace\":\"ecs\"}")) {
+            assertThrows(IllegalStateException.class,
+                    () -> parse(document(formats, "{\"type\":\"target\"," + bad + "}")), bad);
+        }
+        // Nor beside an ARN member, which names the resource itself.
+        assertThrows(IllegalStateException.class, () -> parse(document(formats,
+                "{\"types\":[\"target\"],\"arn\":\"TargetArn\",\"find\":[\"Namespace\"]}")));
+    }
+
+    @Test
     void aMalformedTableFailsToLoad() {
         assertThrows(IllegalStateException.class, () -> parse("{\"operations\":{}}"));
         // An operation of a namespace the file does not read.
@@ -110,7 +140,7 @@ class RequestResourceMembersTest {
         // only a member filling a variable is.
         Member each = new Member("A", true, new Member("Name", false));
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", each), Map.of(), Map.of(),
-                Map.of("A[].Name", "default"), Map.of("A[].Name", "thing"), null, null, Map.of(), false)),
+                Map.of("A[].Name", "default"), Map.of("A[].Name", "thing"), null, null, Map.of(), false, null)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A[].Name\"},"
                         + "\"absent\":{\"A[].Name\":\"default\"},\"arnOf\":{\"A[].Name\":\"thing\"}}"))
                         .operations().get("a:Op"));
@@ -122,7 +152,7 @@ class RequestResourceMembersTest {
         // A field of a structure fills a variable, as one value.
         Member field = new Member("A", false, new Member("Name", false));
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", field), Map.of(), Map.of(),
-                Map.of("A.Name", "default"), Map.of(), null, null, Map.of(), false)),
+                Map.of("A.Name", "default"), Map.of(), null, null, Map.of(), false, null)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"A.Name\"},"
                         + "\"absent\":{\"A.Name\":\"default\"}}")).operations().get("a:Op"));
         assertEquals("A.Name", field.path());
@@ -130,7 +160,7 @@ class RequestResourceMembersTest {
         // or to no value.
         String owned = "\"arnFormats\":{\"a\":{\"thing\":\"arn:${Partition}:a:${Region}:${Account}:thing/${Owner}/${ThingName}\"}}";
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Name", false)), Map.of(),
-                Map.of(), Map.of(), Map.of(), null, null, Map.of("Owner", "Custom"), false)),
+                Map.of(), Map.of(), Map.of(), null, null, Map.of("Owner", "Custom"), false, null)),
                 parseUnchecked(document(owned, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},"
                         + "\"fixed\":{\"Owner\":\"Custom\"}}")).operations().get("a:Op"));
         for (String bad : List.of("{\"Other\":\"Custom\"}", "{\"ThingName\":\"Custom\"}", "{\"Owner\":\"\"}",
@@ -148,7 +178,7 @@ class RequestResourceMembersTest {
                     "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},\"made\":" + bad + "}")), bad);
         }
         assertEquals(List.of(new Resource(List.of("thing"), new Member("A", true, new Member("ThingArns", true)), Map.of(),
-                Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of(), false)), parseUnchecked(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].ThingArns[]\"}"))
+                Map.of(), Map.of(), Map.of(), Map.of(), null, null, Map.of(), false, null)), parseUnchecked(document(formats, "{\"types\":[\"thing\"],\"arn\":\"A[].ThingArns[]\"}"))
                 .operations().get("a:Op"));
         // A member read before more than one character, holding an ARN or filling a variable.
         assertThrows(IllegalStateException.class, () -> parse(document(formats,
@@ -188,12 +218,12 @@ class RequestResourceMembersTest {
         }
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Name", false)),
                 Map.of(), Map.of("Bus", List.of("default")), Map.of("Bus", "default"), Map.of("Bus", "thing"), null, null,
-                Map.of(), false)),
+                Map.of(), false, null)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Name\"},"
                         + "\"unless\":{\"Bus\":[\"default\"]},\"absent\":{\"Bus\":\"default\"},"
                         + "\"arnOf\":{\"Bus\":\"thing\"}}")).operations().get("a:Op"));
         assertEquals(List.of(new Resource(List.of("thing"), null, Map.of("ThingName", new Member("Names", true)), Map.of(),
-                        Map.of(), Map.of(), Map.of(), new Member("registryId", false), null, Map.of(), false)),
+                        Map.of(), Map.of(), Map.of(), new Member("registryId", false), null, Map.of(), false, null)),
                 parseUnchecked(document(formats, "{\"type\":\"thing\",\"fill\":{\"ThingName\":\"Names[]\"},"
                         + "\"account\":\"registryId\"}")).operations().get("a:Op"));
     }
@@ -218,7 +248,8 @@ class RequestResourceMembersTest {
                     ObjectNode body = MAPPER.createObjectNode();
                     StringBuilder form = new StringBuilder("Action=" + name);
                     Map<Member, String> values = resource.arn() != null ? Map.of(resource.arn(), arn)
-                            : resource.fill().values().stream().distinct().collect(Collectors.toMap(m -> m, m -> "x"));
+                            : Stream.concat(resource.fill().values().stream(), resource.find().stream()).distinct()
+                                    .collect(Collectors.toMap(m -> m, m -> "x"));
                     Map<Member, String> given = new LinkedHashMap<>(values);
                     if (resource.account() != null) {
                         given.put(resource.account(), account);
@@ -233,15 +264,18 @@ class RequestResourceMembersTest {
                         form.append('&').append(parameter(member)).append('=').append(encoded(value));
                     });
                     List<String> named = operation.getValue().stream()
-                            .filter(other -> other == resource || named(other))
+                            .filter(other -> other == resource || named(other) && (other.endpoint() == null
+                                    || resource.endpoint() == null || other.endpoint().equals(resource.endpoint())))
                             .map(other -> other == resource ? expected : expected(
                                     table.formats().get(namespace).get(other.types().getFirst()).format(), other,
                                     "000000000000"))
                             .distinct().toList();
-                    assertEquals(named, RequestResources.of(operation.getKey(), json(body.toString()),
-                            "aws", "us-east-1", "000000000000"), body.toString());
-                    assertEquals(named, RequestResources.of(operation.getKey(), form(form.toString()),
-                            "aws", "us-east-1", "000000000000"), form.toString());
+                    assertEquals(named, RequestResources.of(operation.getKey(),
+                            servedBy(json(body.toString()), resource.endpoint()), "aws", "us-east-1", "000000000000"),
+                            body.toString());
+                    assertEquals(named, RequestResources.of(operation.getKey(),
+                            servedBy(form(form.toString()), resource.endpoint()), "aws", "us-east-1", "000000000000"),
+                            form.toString());
                 })));
     }
 
@@ -273,8 +307,8 @@ class RequestResourceMembersTest {
 
     /** Whether every request of its operation names the resource: no member names it and no member's value selects it. */
     private static boolean named(Resource resource) {
-        return resource.arn() == null && resource.fill().isEmpty() && resource.when().isEmpty()
-                && resource.unless().isEmpty();
+        return resource.arn() == null && resource.fill().isEmpty() && resource.find().isEmpty()
+                && resource.when().isEmpty() && resource.unless().isEmpty();
     }
 
     /** The value at the member's path in a body: in its list's first element, and in its field's structure. */
@@ -337,6 +371,18 @@ class RequestResourceMembersTest {
 
     private static String encoded(String value) {
         return URLEncoder.encode(value, StandardCharsets.UTF_8);
+    }
+
+    /** The request as the service of the endpoint prefix serves it; as no known service when there is none. */
+    static ContainerRequestContext servedBy(ContainerRequestContext request, String endpoint) {
+        if (endpoint != null) {
+            ServiceDescriptor service = new ServiceDescriptor(endpoint, endpoint, true, true, null, null, 0L, null,
+                    ServiceProtocol.JSON, Set.of(ServiceProtocol.JSON), Set.of(), Set.of(), Set.of(), Set.of(),
+                    Set.of());
+            when(request.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY))
+                    .thenReturn(new ProtocolClaim(WireProtocol.AWS_JSON_1_1, service, null, null));
+        }
+        return request;
     }
 
     private static ContainerRequestContext json(String body) {

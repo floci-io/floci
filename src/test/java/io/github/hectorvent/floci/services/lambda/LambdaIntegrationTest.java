@@ -481,6 +481,41 @@ class LambdaIntegrationTest {
             .statusCode(204);
     }
 
+    @Test
+    @Order(24)
+    void imageConfigResponseOnlyWhenImageConfigSet() {
+        String create = """
+            {
+                "FunctionName": "%s",
+                "PackageType": "Image",
+                "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                "Code": {
+                    "ImageUri": "123456789012.dkr.ecr.us-east-1.amazonaws.com/my-repo:latest"
+                }%s
+            }
+            """;
+        given().contentType("application/json")
+            .body(create.formatted("image-no-config-fn", ""))
+            .when().post(BASE_PATH + "/functions")
+            .then().statusCode(201);
+        given().contentType("application/json")
+            .body(create.formatted("image-cmd-fn", ", \"ImageConfig\": {\"Command\": [\"app.handler\"]}"))
+            .when().post(BASE_PATH + "/functions")
+            .then().statusCode(201);
+
+        given().when().get(BASE_PATH + "/functions/image-no-config-fn/configuration")
+            .then().statusCode(200)
+            .body("PackageType", equalTo("Image"))
+            .body("$", not(hasKey("ImageConfigResponse")));
+        given().when().get(BASE_PATH + "/functions/image-cmd-fn/configuration")
+            .then().statusCode(200)
+            .body("ImageConfigResponse.ImageConfig.Command", contains("app.handler"))
+            .body("ImageConfigResponse.ImageConfig", not(hasKey("EntryPoint")));
+
+        given().delete(BASE_PATH + "/functions/image-no-config-fn");
+        given().delete(BASE_PATH + "/functions/image-cmd-fn");
+    }
+
     // ──────────────────────────── Invoke payload size limits ────────────────────────────
 
     @Test

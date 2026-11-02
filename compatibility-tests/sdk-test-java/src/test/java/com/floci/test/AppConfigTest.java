@@ -667,9 +667,10 @@ class AppConfigTest {
             assertThat(deployment.configurationName()).isEqualTo("service-settings");
             assertThat(deployment.configurationLocationUri()).isEqualTo("ssm-parameter://service-settings");
 
-            // AWS documents no default Type: a profile created without one reports none.
+            // A hosted profile without an explicit Type defaults to freeform.
             assertThat(appConfig.createConfigurationProfile(CreateConfigurationProfileRequest.builder()
-                    .applicationId(monitoredAppId).name("untyped").locationUri("hosted").build()).type()).isNull();
+                    .applicationId(monitoredAppId).name("untyped").locationUri("hosted").build()).type())
+                    .isEqualTo("AWS.Freeform");
         } finally {
             try {
                 appConfig.deleteApplication(DeleteApplicationRequest.builder().applicationId(monitoredAppId).build());
@@ -747,4 +748,21 @@ class AppConfigTest {
             }
         }
     }
+    @Test
+    @DisplayName("A non-hosted profile without a type stays untyped")
+    void nonHostedProfileWithoutTypeStaysUntyped() {
+        String applicationId = appConfig.createApplication(CreateApplicationRequest.builder()
+                .name(TestFixtures.uniqueName("external-profile")).build()).id();
+        try {
+            CreateConfigurationProfileResponse profile = appConfig.createConfigurationProfile(
+                    CreateConfigurationProfileRequest.builder().applicationId(applicationId)
+                            .name("external").locationUri("ssm-parameter://configuration").build());
+            assertThat(profile.type()).isNull();
+            assertThat(appConfig.getConfigurationProfile(GetConfigurationProfileRequest.builder()
+                    .applicationId(applicationId).configurationProfileId(profile.id()).build()).type()).isNull();
+        } finally {
+            appConfig.deleteApplication(DeleteApplicationRequest.builder().applicationId(applicationId).build());
+        }
+    }
+
 }

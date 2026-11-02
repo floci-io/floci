@@ -218,9 +218,7 @@ class SshPublicKeyIntegrationTest {
     }
 
     /**
-     * And nothing outside the enum. {@code statusType} is one shape across the three operations
-     * that take it, so this is the same answer AWS gives on UpdateServiceSpecificCredential, where
-     * it was recorded: the offending value and the permitted set are both absent.
+     * And nothing outside the enum. AWS lists the permitted set without echoing the value.
      */
     @Test
     void theStatusTakesNothingOutsideTheEnum() {
@@ -235,8 +233,8 @@ class SshPublicKeyIntegrationTest {
             .when().post("/").then().statusCode(400)
                 .body(containsString("ValidationError"))
                 .body(containsString("1 validation error detected"))
-                .body(containsString("Member must satisfy enum value set"))
-                .body(not(containsString("enum value set:")))
+                .body(containsString("Member must satisfy enum value set: "
+                        + "[Expired, Active, Inactive]"))
                 .body(not(containsString("Revoked")));
         }
     }
