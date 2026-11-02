@@ -812,7 +812,7 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   PostgreSQL whatever the format, since AWS requires `'auto'` for a format other than its default there; a
   two-digit `YY` year below 70 means 20YY and otherwise 19YY, which AWS does not document.
 - `FILLRECORD` loads a text or CSV record that stops short of the last columns: the missing columns of a
-  `CHAR`, `VARCHAR` or `TEXT` type get a zero-length string, as in AWS, and every other missing column gets
+  `VARCHAR` or `TEXT` type get a zero-length string, as in AWS, and every other missing column gets
   `NULL`. With `EMPTYASNULL`, or `NULL AS ''`, which behaves the same, the missing character columns get `NULL`
   too. A column that does not allow `NULL` fails the COPY as it would without `FILLRECORD`, and a record with
   too many fields still fails. The number and types of the columns come from the catalog (generated columns
